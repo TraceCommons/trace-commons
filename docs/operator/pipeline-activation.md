@@ -1443,11 +1443,13 @@ Choosing a value for a 4-vCPU host:
 - **The classifier is the binding limit.** Each Review in flight can hold
   one privacy-pass classifier call, and those calls share one API key. The
   hosted NEAR AI classifier has refused overlapping requests on one key
-  before: in an August 2026 measurement 2 concurrent requests passed, 4
-  concurrent requests all failed at once, and the failure briefly disturbed
-  serial traffic on the same key afterwards. A refused call is
-  `privacy_classification_failed`, a charged retry. Anything else on the
-  same key (the legacy PII backstop driver) adds to the overlap.
+  before: measured 2026-08-28, before the endpoint's September changes, 2
+  concurrent requests passed, 4 concurrent requests all failed at once, and
+  the failure briefly disturbed serial traffic on the same key afterwards.
+  The limit is per key, not per process: the legacy PII backstop driver, or
+  any other process on the same key, adds to the overlap. A refused call is
+  `privacy_classification_failed`, a charged retry. Re-measure with a key
+  that production does not use before raising the value.
 - Score evaluations are already capped at 4 per process; the local embedder
   and scorer share the host's 4 vCPUs with ingest's HTTP routes.
 - Each unit in flight holds a database connection while it writes, and a

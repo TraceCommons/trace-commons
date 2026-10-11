@@ -343,10 +343,11 @@ async fn the_supervisor_drains_other_tenants_while_one_is_stuck() {
         .unwrap()
         .retain(|tenant| tenant != "tenant-c");
     eventually("the worker reports ready", || ready.load(Ordering::SeqCst)).await;
-    assert!(
-        stats.tenant_count.load(Ordering::Relaxed) == 2,
-        "the tick's tenant count"
-    );
+    // The tick stores `ready` before it records its figures.
+    eventually("the tick's tenant count is 2", || {
+        stats.tenant_count.load(Ordering::Relaxed) == 2
+    })
+    .await;
     eventually("the stuck drain's age shows in the duration", || {
         stats.duration_ms.load(Ordering::Relaxed) >= 500
     })
