@@ -24,7 +24,49 @@ public sealed partial class InsightsView : UserControl, IDisposable
         DataContext = ViewModel;
         Unloaded += (_, _) => { _episodeMemberDraft.Clear(); ViewModel.Cancel(); };
     }
-    public Task ActivateAsync() => ViewModel.LoadAsync();
+    public async Task ActivateAsync()
+    {
+        await ViewModel.LoadAsync();
+        _activated = true;
+        await ViewModel.SelectTabAsync(Tabs.SelectedIndex);
+    }
+    // Set once the core's words are loaded. The Pivot selects its first tab
+    // while the control is built, before then, and that read would present
+    // with no words; ActivateAsync reads the tab on screen instead.
+    private bool _activated;
+    // The tabs read their figures when shown; Analyze reads nothing new.
+    private async void OnTabChanged(object sender, SelectionChangedEventArgs args)
+    {
+        if (!_closed && _activated && Tabs.SelectedIndex >= 0) await ViewModel.SelectTabAsync(Tabs.SelectedIndex);
+    }
+    // A week picker's own index follows the model; only a choice the model
+    // is not already showing reads again.
+    private async void OnOverviewWeek(object sender, SelectionChangedEventArgs args)
+    {
+        int index = OverviewWeek.SelectedIndex;
+        if (!_closed && index >= 0 && index != ViewModel.Overview.SelectedWeekIndex)
+            await ViewModel.Overview.SelectWeekAsync(index);
+    }
+    private async void OnPatternsWeek(object sender, SelectionChangedEventArgs args)
+    {
+        int index = PatternsWeek.SelectedIndex;
+        if (!_closed && index >= 0 && index != ViewModel.Patterns.SelectedWeekIndex)
+            await ViewModel.Patterns.SelectWeekAsync(index);
+    }
+    private async void OnSessionChoice(object sender, SelectionChangedEventArgs args)
+    {
+        int index = SessionChoice.SelectedIndex;
+        if (!_closed && index >= 0 && index != ViewModel.Sessions.SelectedIndex)
+            await ViewModel.Sessions.SelectAsync(index);
+    }
+    private async void OnOverviewCard(object sender, RoutedEventArgs args)
+    {
+        if (sender is Button { Tag: string card }) await ViewModel.Overview.ToggleInputsAsync(card);
+    }
+    private async void OnPatternSessions(object sender, RoutedEventArgs args)
+    {
+        if (sender is FrameworkElement { Tag: string pattern }) await ViewModel.Patterns.ToggleSessionsAsync(pattern);
+    }
     public void Deactivate() { _episodeMemberDraft.Clear(); ViewModel.Cancel(); }
     private async void OnChoose(object sender, RoutedEventArgs args)
     {

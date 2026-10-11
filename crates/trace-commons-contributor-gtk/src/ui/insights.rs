@@ -24,6 +24,8 @@ use trace_commons_contributor::insights::{
 };
 use trace_commons_protocol::insights_cards::{InsightCardResult, InsightQuestionId};
 
+#[path = "insights_analytics.rs"]
+mod analytics;
 #[path = "insights_evidence.rs"]
 mod evidence;
 
@@ -180,6 +182,7 @@ pub struct InsightsView {
     card_state: Cell<CardPanelState>,
     flight: RefCell<Flight>,
     store_dir: Option<PathBuf>,
+    analytics: Rc<analytics::AnalyticsTabs>,
 }
 
 fn label(text: &str) -> gtk::Label {
@@ -199,20 +202,20 @@ impl InsightsView {
     }
 
     fn with_store(window: &adw::ApplicationWindow, store_dir: Option<PathBuf>) -> Rc<Self> {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        let analyze = gtk::Box::new(gtk::Orientation::Vertical, 12);
         for setter in [
             gtk::prelude::WidgetExt::set_margin_top,
             gtk::prelude::WidgetExt::set_margin_bottom,
             gtk::prelude::WidgetExt::set_margin_start,
             gtk::prelude::WidgetExt::set_margin_end,
         ] {
-            setter(&root, 20);
+            setter(&analyze, 20);
         }
         let title = label(copy("title"));
         title.add_css_class("title-1");
-        root.append(&title);
-        root.append(&label(copy("intro")));
-        root.append(&label(copy("snapshot_notice")));
+        analyze.append(&title);
+        analyze.append(&label(copy("intro")));
+        analyze.append(&label(copy("snapshot_notice")));
         let controls = gtk::Box::new(gtk::Orientation::Vertical, 8);
         let source =
             gtk::DropDown::from_strings(&[copy("codex"), copy("claude_code"), copy("trajectory")]);
@@ -229,17 +232,17 @@ impl InsightsView {
         controls.append(&choose);
         controls.append(&save);
         controls.append(&refresh);
-        root.append(&controls);
-        root.append(&label(copy("save_notice")));
+        analyze.append(&controls);
+        analyze.append(&label(copy("save_notice")));
         let selected_label = label(copy("no_file"));
-        root.append(&selected_label);
+        analyze.append(&selected_label);
         let cancel = gtk::Button::with_label(copy("cancel"));
-        root.append(&cancel);
-        root.append(&label(copy("cancellation_notice")));
+        analyze.append(&cancel);
+        analyze.append(&label(copy("cancellation_notice")));
         let status = label(copy("empty"));
-        root.append(&status);
+        analyze.append(&status);
         let mutation_notice = label("");
-        root.append(&mutation_notice);
+        analyze.append(&mutation_notice);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
         let summary_body = gtk::Box::new(gtk::Orientation::Vertical, 8);
         let summary = label("");
@@ -400,7 +403,54 @@ impl InsightsView {
             .child(&content)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
-        root.append(&scroller);
+        analyze.append(&scroller);
+        // The tabs: Overview, Patterns and Sessions over the saved
+        // snapshots, then Analyze, which is the whole screen above. Spend
+        // is not a tab: it is shown disabled beside them with its Later
+        // chip, with no content and no figures.
+        let analytics = analytics::AnalyticsTabs::new(store_dir.clone());
+        let tabs = gtk::Stack::new();
+        tabs.set_vexpand(true);
+        for tab in analytics::Tab::ALL {
+            let page: gtk::Widget = match tab {
+                analytics::Tab::Overview => analytics.overview.clone().upcast(),
+                analytics::Tab::Patterns => analytics.patterns.clone().upcast(),
+                analytics::Tab::Sessions => analytics.sessions.clone().upcast(),
+                analytics::Tab::Analyze => analyze.clone().upcast(),
+            };
+            tabs.add_titled(&page, Some(tab.name()), copy(tab.title_key()));
+        }
+        tabs.set_visible_child_name(analytics::Tab::Overview.name());
+        let switcher = gtk::StackSwitcher::new();
+        switcher.set_stack(Some(&tabs));
+        let tab_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        tab_row.append(&switcher);
+        let spend = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        spend.append(&gtk::Label::new(Some(copy("analytics_tab_spend"))));
+        let later = gtk::Label::new(Some(copy("analytics_later")));
+        later.add_css_class("dim-label");
+        spend.append(&later);
+        spend.set_sensitive(false);
+        tab_row.append(&spend);
+        for setter in [
+            gtk::prelude::WidgetExt::set_margin_top,
+            gtk::prelude::WidgetExt::set_margin_start,
+            gtk::prelude::WidgetExt::set_margin_end,
+        ] {
+            setter(&tab_row, 12);
+        }
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        root.append(&tab_row);
+        root.append(&tabs);
+        let weak = Rc::downgrade(&analytics);
+        tabs.connect_visible_child_name_notify(move |tabs| {
+            if let (Some(analytics), Some(name)) = (weak.upgrade(), tabs.visible_child_name()) {
+                analytics.show(&name);
+            }
+        });
+        // Overview is on screen first; read it now rather than wait for the
+        // saved list, so a failed list read still leaves the dash.
+        analytics.show(analytics::Tab::Overview.name());
         let view = Rc::new(Self {
             root,
             controls,
@@ -450,6 +500,7 @@ impl InsightsView {
             card_state: Cell::new(CardPanelState::Empty),
             flight: RefCell::new(Flight::default()),
             store_dir,
+            analytics,
         });
         view.rebuild_episode_choices(&[], &view.episode_choices_box);
         view.rebuild_card_snapshot_choices(&[]);
@@ -1774,6 +1825,7 @@ impl InsightsView {
         self.rebuild_episode_choices(&ids, &self.episode_choices_box);
         self.rebuild_card_snapshot_choices(&ids);
         self.render_saved(summary.snapshots.iter());
+        self.analytics.sync(saved_sessions(&summary.snapshots));
         for category in &summary.user_reported.categories {
             self.evidence_button(
                 &format!(
@@ -2029,6 +2081,30 @@ fn metric_label(id: trace_commons_protocol::insights::MetricId) -> &'static str 
         MetricId::ToolFailures => "metric_tool_failures",
         MetricId::KnownOutcomes => "metric_known_outcomes",
     })
+}
+
+/// The saved snapshots for the Sessions tab's picker, newest first, each
+/// labelled as the saved list labels it.
+fn saved_sessions(snapshots: &[SnapshotEvidence]) -> Vec<(String, String)> {
+    let mut sorted: Vec<&SnapshotEvidence> = snapshots.iter().collect();
+    sorted.sort_by(|a, b| {
+        b.analyzed_at
+            .cmp(&a.analyzed_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    sorted
+        .into_iter()
+        .map(|snapshot| {
+            (
+                snapshot.id.clone(),
+                format!(
+                    "{} · {}",
+                    source_label(snapshot.source_format),
+                    local_date(&snapshot.analyzed_at)
+                ),
+            )
+        })
+        .collect()
 }
 
 fn render_summary_text(summary: &SavedInsightsSummary) -> String {
@@ -2304,6 +2380,25 @@ mod tests {
         window.close();
     }
     #[test]
+    fn the_sessions_picker_lists_saved_snapshots_newest_first() {
+        let at = |seconds| chrono::DateTime::from_timestamp(seconds, 0).unwrap();
+        let snapshot = |id: &str, seconds| SnapshotEvidence {
+            id: id.into(),
+            source_format: SourceFormat::ClaudeCode,
+            analyzed_at: at(seconds),
+            evidence: Vec::new(),
+        };
+        let listed = saved_sessions(&[
+            snapshot("older", 1_000),
+            snapshot("newer", 2_000),
+            snapshot("also-newer", 2_000),
+        ]);
+        let ids: Vec<&str> = listed.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["also-newer", "newer", "older"]);
+        assert!(listed[0].1.starts_with(copy("claude_code")));
+    }
+
+    #[test]
     fn episode_cleanup_notice_only_describes_reported_removed_groups() {
         use trace_commons_contributor::insights::MutationEffects;
         assert!(render_mutation_notice(&MutationEffects::default()).is_empty());
@@ -2428,6 +2523,8 @@ mod tests {
         let insight = LocalInsight {
             task_attribution: None,
             claude_task_attribution: None,
+            turn_series: None,
+            session_identity: None,
             id: "fixture".into(),
             source_format: SourceFormat::Codex,
             boundary: trace_commons_contributor::insights::EpisodeBoundary::SessionProxy,

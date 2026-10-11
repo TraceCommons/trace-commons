@@ -429,9 +429,28 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("summary_limitation_analysis_dates_are_not_activity_time", "Dates show when snapshots were analyzed, not when the work happened."),
         ("summary_limitation_source_formats_are_not_model_identity", "Source formats identify the imported file format, not which model performed the work."),
         ("summary_limitation_no_model_rankings_time_savings_or_cost", "These observations do not establish model rankings, time saved, or cost."),
+        // The feed line: which counter rows the window's week figures come
+        // from. DRAFT, NEEDS APPROVAL (owner decision D17, open).
+        ("insights_feed_saved", "Only sessions you analyzed are counted."),
+        ("insights_feed_counter_pass", "Sessions in your watched folders."),
+        ("insights_feed_counter_pass_unavailable", "Watched-folder counting is unavailable right now."),
     ].into_iter().map(|(key, value)| (key.to_owned(), value.to_owned()))
-    .chain(super::card_presentation::ui_copy()).collect()
+    .chain(super::card_presentation::ui_copy())
+    // Token analytics, DRAFT, NEEDS APPROVAL (owner decision D17, open).
+    .chain(super::analytics_copy::ANALYTICS_COPY.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())))
+    .collect()
 }
+
+/// The feed-line keys in [`ui_copy`]: saved imports (feed S), the daemon's
+/// counter pass (feed T), and the notice that the counter pass could not be
+/// read, shown with the saved-imports line. A shell names the feed it shows
+/// with these and authors no sentence of its own. Their wording is DRAFT,
+/// NEEDS APPROVAL (owner decision D17, open).
+pub const INSIGHTS_FEED_LINE_KEYS: &[&str] = &[
+    "insights_feed_saved",
+    "insights_feed_counter_pass",
+    "insights_feed_counter_pass_unavailable",
+];
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -569,7 +588,114 @@ pub enum LocalInsightsOperation {
         source: UsageSource,
         file: PathBuf,
     },
+    /// Feed S "This week": the saved snapshots dated in one local ISO week.
+    /// `week_start` is any date in the week (absent: the current week);
+    /// `tz` is the shell's UTC offset in seconds east. A read: an absent
+    /// store is not created.
+    WeekOverview {
+        #[serde(default)]
+        week_start: Option<chrono::NaiveDate>,
+        tz: i32,
+    },
+    /// The drill-down behind one Overview card: what makes up the number.
+    CardInputs {
+        card: super::week_glance::OverviewCard,
+        #[serde(default)]
+        week_start: Option<chrono::NaiveDate>,
+        tz: i32,
+    },
+    /// Feed S "Where tokens went": the four Patterns cards, each with up to
+    /// `weeks` weekly bars (default and most: six), and the re-read table.
+    /// A read: an absent store is not created.
+    Patterns {
+        #[serde(default)]
+        week_start: Option<chrono::NaiveDate>,
+        #[serde(default)]
+        weeks: Option<usize>,
+        tz: i32,
+    },
+    /// The saved sessions behind one Patterns card in one week.
+    PatternSessions {
+        pattern: super::patterns::PatternKind,
+        #[serde(default)]
+        week_start: Option<chrono::NaiveDate>,
+        tz: i32,
+    },
+    /// Sessions (drill-in): one saved snapshot turn by turn, with its
+    /// lettered markers. `tz` dates the header. A read: an absent store is
+    /// not created, and an unknown snapshot is `insights_not_found`.
+    SessionDrill {
+        snapshot_id: String,
+        tz: i32,
+    },
+    /// Feed T comparisons: each goal with its six weekly marks, the lever of
+    /// the week and the weekly summary card. `counter_weeks` is the daemon's
+    /// `insights_week` `history`, passed through unchanged, and absent under
+    /// feed S; `recap_card_enabled` is the daemon's
+    /// `insights_recap_card_enabled`, passed through. Goals and the lever's
+    /// feedback live here and the counter rows in the daemon, so neither side
+    /// can compare alone. Measured figures only; no rate, path or assumption.
+    /// A read: an absent store is not created.
+    Comparisons {
+        #[serde(default)]
+        counter_weeks: Option<Vec<super::goals::WeekFigures>>,
+        #[serde(default)]
+        week_start: Option<chrono::NaiveDate>,
+        tz: i32,
+        #[serde(default)]
+        recap_card_enabled: bool,
+    },
+    /// Add a goal, or replace the one with `id`.
+    GoalSet {
+        #[serde(default)]
+        id: Option<String>,
+        goal: super::goals::Goal,
+    },
+    GoalDelete {
+        id: String,
+    },
+    /// "Not useful" on the lever's kind in the week shown (its Monday), or,
+    /// with `action: reenable`, the kind turned back on. Stored as the kind
+    /// and the week only.
+    LeverFeedback {
+        kind: super::patterns::PatternKind,
+        week_start: chrono::NaiveDate,
+        #[serde(default = "lever_not_useful")]
+        action: super::goal_store::LeverFeedbackAction,
+    },
+    /// "Open recap": the summary card for this closed week (its Monday) was
+    /// opened and does not appear again.
+    RecapOpened {
+        week_start: chrono::NaiveDate,
+    },
 }
+
+fn lever_not_useful() -> super::goal_store::LeverFeedbackAction {
+    super::goal_store::LeverFeedbackAction::NotUseful
+}
+
+/// Fixed labels for a malformed analytics read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalyticsRequestError {
+    /// `tz` is not a UTC offset within 18 hours.
+    TzInvalid,
+    /// `weeks` is zero or more than the bars a card draws.
+    WeeksInvalid,
+    /// `counter_weeks` are not Mondays in order, or too many.
+    CounterWeeksInvalid,
+}
+
+impl std::fmt::Display for AnalyticsRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TzInvalid => "insights_tz_invalid",
+            Self::WeeksInvalid => "insights_weeks_invalid",
+            Self::CounterWeeksInvalid => "insights_counter_weeks_invalid",
+        })
+    }
+}
+
+impl std::error::Error for AnalyticsRequestError {}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -683,6 +809,36 @@ pub enum LocalInsightsResponse {
     Usage {
         usage: UsageSummary,
     },
+    WeekOverview {
+        overview: Box<super::week_glance::WeekOverview>,
+    },
+    CardInputs {
+        inputs: Box<super::week_glance::CardInputs>,
+    },
+    Patterns {
+        patterns: Box<super::week_patterns::WeekPatterns>,
+    },
+    PatternSessions {
+        pattern_sessions: Box<super::week_patterns::PatternSessions>,
+    },
+    SessionDrill {
+        session: Box<super::session_drill::SessionDrill>,
+    },
+    Comparisons {
+        comparisons: Box<super::recap::WeekComparisons>,
+    },
+    GoalSet {
+        state: Box<super::goal_store::GoalState>,
+    },
+    GoalDelete {
+        state: Box<super::goal_store::GoalState>,
+    },
+    LeverFeedback {
+        state: Box<super::goal_store::GoalState>,
+    },
+    RecapOpened {
+        state: Box<super::goal_store::GoalState>,
+    },
 }
 
 /// Resolve only local Insights storage; never resolve enrollment configuration.
@@ -715,6 +871,52 @@ fn existing_store(store_dir: Option<&std::path::Path>) -> Result<Option<LocalIns
         Err(_) => bail!("insights-local-directory-unavailable"),
         Ok(_) => LocalInsightStore::open(&path).map(Some),
     }
+}
+
+/// The feed S week for a request. An absent store is read as empty and is
+/// not created.
+fn saved_week(
+    store_dir: Option<&std::path::Path>,
+    week_start: Option<chrono::NaiveDate>,
+    tz: i32,
+) -> Result<super::week_glance::WeekGlance> {
+    use super::week_glance::{compute, request_tz, week_glance};
+    let tz = request_tz(tz).ok_or(AnalyticsRequestError::TzInvalid)?;
+    let week_start =
+        week_start.unwrap_or_else(|| chrono::Utc::now().with_timezone(&tz).date_naive());
+    match existing_store(store_dir)? {
+        Some(store) => week_glance(&store, week_start, tz),
+        None => Ok(compute(&[], week_start, tz)),
+    }
+}
+
+/// The saved snapshots and the request's week and offset, for the Patterns
+/// reads. An absent store is read as empty and is not created.
+fn saved_reports(
+    store_dir: Option<&std::path::Path>,
+    week_start: Option<chrono::NaiveDate>,
+    tz: i32,
+) -> Result<(
+    Vec<super::LocalInsight>,
+    chrono::NaiveDate,
+    chrono::FixedOffset,
+)> {
+    let tz = super::week_glance::request_tz(tz).ok_or(AnalyticsRequestError::TzInvalid)?;
+    let week_start =
+        week_start.unwrap_or_else(|| chrono::Utc::now().with_timezone(&tz).date_naive());
+    let reports = match existing_store(store_dir)? {
+        Some(store) => store.list()?,
+        None => Vec::new(),
+    };
+    Ok((reports, week_start, tz))
+}
+
+/// Recompute the store's cached weeks after a snapshot mutation, before the
+/// mutation returns. The mutation has already committed, so a failure here
+/// is not reported as its failure: the stale entry's generation no longer
+/// matches, and the next read recomputes it.
+fn refresh_saved_weeks(store: &LocalInsightStore) {
+    let _ = super::week_glance::refresh_after_mutation(store);
 }
 
 /// Synchronous local IO. Native callers must schedule this off the UI thread.
@@ -993,7 +1195,9 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
         },
         LocalInsightsOperation::Analyze { source, file, save } => {
             let (insight, mutation_effects) = if save {
-                let result = store()?.import_with_effects(source, &file)?;
+                let store = store()?;
+                let result = store.import_with_effects(source, &file)?;
+                refresh_saved_weeks(&store);
                 (result.value, result.mutation_effects)
             } else {
                 (analyze_file(source, &file)?, MutationEffects::default())
@@ -1014,9 +1218,14 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
             }
         }
         // A repair is a write, so it resolves the store the way writes do.
-        LocalInsightsOperation::Repair {} => LocalInsightsResponse::Repair {
-            repaired: Box::new(store()?.repair()?),
-        },
+        LocalInsightsOperation::Repair {} => {
+            let store = store()?;
+            let repaired = store.repair()?;
+            refresh_saved_weeks(&store);
+            LocalInsightsResponse::Repair {
+                repaired: Box::new(repaired),
+            }
+        }
         LocalInsightsOperation::Summary {} => LocalInsightsResponse::Summary {
             summary: Box::new(super::summary::read_saved(request.store_dir.as_deref())?),
         },
@@ -1031,7 +1240,9 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
             ),
         },
         LocalInsightsOperation::Delete { id } => {
-            let result = store()?.delete_with_effects(&id)?;
+            let store = store()?;
+            let result = store.delete_with_effects(&id)?;
+            refresh_saved_weeks(&store);
             LocalInsightsResponse::Delete {
                 deleted: result.value,
                 mutation_effects: result.mutation_effects,
@@ -1083,6 +1294,121 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
         LocalInsightsOperation::Usage { source, file } => LocalInsightsResponse::Usage {
             usage: extract_usage(source, &super::bounded_read(&file)?)?,
         },
+        LocalInsightsOperation::WeekOverview { week_start, tz } => {
+            let glance = saved_week(request.store_dir.as_deref(), week_start, tz)?;
+            LocalInsightsResponse::WeekOverview {
+                overview: Box::new(super::week_glance::overview(&glance)),
+            }
+        }
+        LocalInsightsOperation::CardInputs {
+            card,
+            week_start,
+            tz,
+        } => {
+            let glance = saved_week(request.store_dir.as_deref(), week_start, tz)?;
+            LocalInsightsResponse::CardInputs {
+                inputs: Box::new(super::week_glance::card_inputs(&glance, card)),
+            }
+        }
+        LocalInsightsOperation::Patterns {
+            week_start,
+            weeks,
+            tz,
+        } => {
+            use super::analytics_constants::PATTERN_BAR_WEEKS;
+            let weeks = weeks.unwrap_or(PATTERN_BAR_WEEKS);
+            if weeks == 0 || weeks > PATTERN_BAR_WEEKS {
+                return Err(AnalyticsRequestError::WeeksInvalid.into());
+            }
+            let (reports, week_start, tz) =
+                saved_reports(request.store_dir.as_deref(), week_start, tz)?;
+            LocalInsightsResponse::Patterns {
+                patterns: Box::new(super::week_patterns::saved_patterns(
+                    &reports, week_start, tz, weeks,
+                )),
+            }
+        }
+        LocalInsightsOperation::PatternSessions {
+            pattern,
+            week_start,
+            tz,
+        } => {
+            let (reports, week_start, tz) =
+                saved_reports(request.store_dir.as_deref(), week_start, tz)?;
+            LocalInsightsResponse::PatternSessions {
+                pattern_sessions: Box::new(super::week_patterns::saved_pattern_sessions(
+                    &reports, pattern, week_start, tz,
+                )),
+            }
+        }
+        LocalInsightsOperation::Comparisons {
+            counter_weeks,
+            week_start,
+            tz,
+            recap_card_enabled,
+        } => {
+            use super::recap::{ComparisonsRequest, counter_weeks_valid, week_comparisons};
+            use super::week_rollup::local_week_start;
+            let tz = super::week_glance::request_tz(tz).ok_or(AnalyticsRequestError::TzInvalid)?;
+            if counter_weeks
+                .as_deref()
+                .is_some_and(|weeks| !counter_weeks_valid(weeks))
+            {
+                return Err(AnalyticsRequestError::CounterWeeksInvalid.into());
+            }
+            let now = chrono::Utc::now();
+            let current_week = local_week_start(&now, &tz);
+            let week_start = week_start.map_or(current_week, |day| {
+                use chrono::Datelike;
+                day - chrono::Duration::days(i64::from(day.weekday().num_days_from_monday()))
+            });
+            let state = match existing_store(request.store_dir.as_deref())? {
+                Some(store) => store.goal_state()?,
+                None => super::goal_store::GoalState::default(),
+            };
+            LocalInsightsResponse::Comparisons {
+                comparisons: Box::new(week_comparisons(
+                    counter_weeks.as_deref(),
+                    ComparisonsRequest {
+                        week_start,
+                        current_week,
+                        recap_card_enabled,
+                    },
+                    &state,
+                )),
+            }
+        }
+        LocalInsightsOperation::GoalSet { id, goal } => LocalInsightsResponse::GoalSet {
+            state: Box::new(store()?.goal_set(id.as_deref(), goal)?),
+        },
+        LocalInsightsOperation::GoalDelete { id } => {
+            let state = match existing_store(request.store_dir.as_deref())? {
+                Some(store) => store.goal_delete(&id)?,
+                None => return Err(super::goal_store::GoalStoreError::NotFound.into()),
+            };
+            LocalInsightsResponse::GoalDelete {
+                state: Box::new(state),
+            }
+        }
+        LocalInsightsOperation::LeverFeedback {
+            kind,
+            week_start,
+            action,
+        } => LocalInsightsResponse::LeverFeedback {
+            state: Box::new(store()?.lever_feedback(kind, week_start, action)?),
+        },
+        LocalInsightsOperation::RecapOpened { week_start } => LocalInsightsResponse::RecapOpened {
+            state: Box::new(store()?.recap_opened(week_start)?),
+        },
+        LocalInsightsOperation::SessionDrill { snapshot_id, tz } => {
+            let tz = super::week_glance::request_tz(tz).ok_or(AnalyticsRequestError::TzInvalid)?;
+            let insight = existing_store(request.store_dir.as_deref())?
+                .ok_or_else(|| anyhow!(InsightsStoreError::NotFound))?
+                .explain(&snapshot_id)?;
+            LocalInsightsResponse::SessionDrill {
+                session: Box::new(super::session_drill::saved_session_drill(&insight, tz)),
+            }
+        }
     })
 }
 
@@ -1138,6 +1464,12 @@ fn public_error(error: anyhow::Error) -> anyhow::Error {
     if let Some(error) = error.downcast_ref::<ComparisonSpecificationError>() {
         return anyhow!(error.to_string());
     }
+    if let Some(error) = error.downcast_ref::<AnalyticsRequestError>() {
+        return anyhow!(error.to_string());
+    }
+    if let Some(error) = error.downcast_ref::<super::goal_store::GoalStoreError>() {
+        return anyhow!(error.to_string());
+    }
     if error.downcast_ref::<ResponseTooLarge>().is_some() {
         return anyhow!(ResponseTooLarge);
     }
@@ -1183,6 +1515,29 @@ mod tests {
     /// the two: renaming or adding a variant leaves a shell indexing a
     /// missing key. Iterate every variant and require its key to exist.
     #[test]
+    fn the_insights_feed_lines_are_core_copy_and_marked_draft() {
+        let copy = ui_copy();
+        for key in INSIGHTS_FEED_LINE_KEYS {
+            assert!(
+                copy.get(*key).is_some_and(|line| !line.is_empty()),
+                "missing ui_copy key {key}"
+            );
+        }
+        assert_eq!(
+            copy["insights_feed_saved"],
+            "Only sessions you analyzed are counted."
+        );
+        assert_eq!(
+            copy["insights_feed_counter_pass"],
+            "Sessions in your watched folders."
+        );
+        assert_eq!(
+            copy["insights_feed_counter_pass_unavailable"],
+            "Watched-folder counting is unavailable right now."
+        );
+    }
+
+    #[test]
     fn ui_copy_has_a_key_for_every_summary_and_model_variant() {
         use super::super::models::{DeclarationKind, RecordCoordinates};
         use super::super::summary::{CoverageUnit, SummaryLimitation};
@@ -1208,6 +1563,456 @@ mod tests {
             let key = format!("model_coordinates_{}", wire.as_str().unwrap());
             assert!(copy.contains_key(&key), "missing ui_copy key {key}");
         }
+    }
+
+    #[test]
+    fn ui_copy_carries_the_analytics_words_and_none_of_the_held_ones() {
+        use super::super::analytics_copy::{ANALYTICS_COPY, ANALYTICS_PLACEHOLDERS};
+        use super::super::week_rollup::CoverageReason;
+        let copy = ui_copy();
+        let mut keys = std::collections::BTreeSet::new();
+        for (key, value) in ANALYTICS_COPY {
+            assert!(keys.insert(*key), "duplicate {key}");
+            assert_eq!(copy.get(*key).map(String::as_str), Some(*value), "{key}");
+        }
+        for (key, words) in [
+            ("analytics_tab_overview", "Overview"),
+            ("analytics_tab_analyze", "Analyze"),
+            ("analytics_later", "Later"),
+            ("analytics_unavailable", "\u{2014}"),
+            (
+                "analytics_feed_saved",
+                "Only sessions you analyzed are counted.",
+            ),
+            (
+                "analytics_feed_comparisons_need_counter_pass",
+                "Week-to-week comparisons need watched-folder counting.",
+            ),
+            (
+                "analytics_by_project_unavailable",
+                "Not available for analyzed files",
+            ),
+            (
+                "analytics_coverage_line",
+                "Usage known for {k} of {n} sessions \u{b7} {p} partial \u{b7} {u} unknown, not counted as zero",
+            ),
+            ("analytics_glance_tokens_only", "{tokens} tokens"),
+            // A saved session's picker and drill-down label, never its id.
+            (
+                "analytics_session_label",
+                "{date} {time} \u{b7} {harness} \u{b7} {t} tokens",
+            ),
+            (
+                "analytics_session_label_undated",
+                "Undated \u{b7} {harness} \u{b7} {t} tokens",
+            ),
+            (
+                "analytics_setting_ledger_feed",
+                "Count tokens in routed calls",
+            ),
+            // Where a feed T session's calls went (design part B). Only
+            // proof reads "verified"; no proxy record never reads as "not
+            // private".
+            ("analytics_drill_private", "Private AI"),
+            ("analytics_route_unobserved", "No proxy record"),
+            (
+                "analytics_route_unrecorded",
+                "Proxy didn't record where calls went",
+            ),
+            ("analytics_route_outside", "Not through Private AI"),
+            ("analytics_route_mixed", "Partly through Private AI"),
+            ("analytics_route_verified", "Private AI, verified"),
+            (
+                "analytics_route_unverified",
+                "Through Private AI, not verified",
+            ),
+            (
+                "analytics_route_check_failed",
+                "Through Private AI, check failed",
+            ),
+            (
+                "analytics_route_split",
+                "{v} verified \u{b7} {u} not verified \u{b7} {o} outside \u{b7} {n} unrecorded proxy tokens",
+            ),
+            (
+                "analytics_route_measure_note",
+                "Proxy tokens count each call and can differ from the transcript's count.",
+            ),
+            (
+                "analytics_route_feed_off",
+                "Where calls went shows only while counting tokens in routed calls is on.",
+            ),
+            (
+                "analytics_reason_some_calls_unrecorded",
+                "Some calls have no proxy record of where they went",
+            ),
+        ] {
+            assert_eq!(copy[key], words, "{key}");
+        }
+        // Each route category's word: only verified proof says "verified"
+        // without a "not", and no proxy record never says "not private" or
+        // "not through".
+        for key in ["analytics_route_unobserved", "analytics_route_unrecorded"] {
+            let lower = copy[key].to_lowercase();
+            assert!(!lower.contains("not private"), "{key}");
+            assert!(!lower.contains("not through"), "{key}");
+            assert!(!lower.contains("verified"), "{key}");
+        }
+        for (key, words) in &copy {
+            if key.starts_with("analytics_route_") && key != "analytics_route_verified" {
+                assert!(
+                    !words.contains("Private AI, verified"),
+                    "{key} claims proof"
+                );
+            }
+        }
+        // Owner decision D2, open: no advice, what-if or tip sentence.
+        let held = [
+            "Naming these files in project memory",
+            "Starting fresh with a summary",
+            "Past 200K every turn costs more",
+            "Start a fresh session",
+            "fewer input tokens",
+            "Assumes the next turns start",
+            "already in context",
+            "files that had not changed",
+            "Cache expired",
+            "Correction loops",
+            "After compaction",
+        ];
+        // Owner decision D1, open: no run of weeks, no ring.
+        let banned = ["in a row", "streak", "$", "USD"];
+        for (key, value) in ANALYTICS_COPY {
+            assert!(key.starts_with("analytics_"), "{key}");
+            for phrase in held.iter().chain(&banned) {
+                assert!(
+                    !value.to_lowercase().contains(&phrase.to_lowercase()),
+                    "{key} holds {phrase}"
+                );
+            }
+            // Every hole is a declared placeholder.
+            let mut rest = *value;
+            while let Some(open) = rest.find('{') {
+                let close = rest[open..].find('}').expect("closed hole") + open;
+                let name = &rest[open + 1..close];
+                assert!(ANALYTICS_PLACEHOLDERS.contains(&name), "{key}: {{{name}}}");
+                rest = &rest[close + 1..];
+            }
+        }
+        // Every coverage reason and state has its words, so a shell never
+        // shows a wire label.
+        let reason_key = |reason: CoverageReason| {
+            let wire = serde_json::to_value(reason).unwrap();
+            format!("analytics_reason_{}", wire.as_str().unwrap())
+        };
+        for reason in [
+            CoverageReason::CodexBaselineExcluded,
+            CoverageReason::Truncated,
+            CoverageReason::SomeTurnsUnknown,
+            CoverageReason::SpansWeeks,
+            CoverageReason::NoUsageCounters,
+            CoverageReason::SourceUnsupported,
+            CoverageReason::Undated,
+            CoverageReason::ReimportOverlap,
+            CoverageReason::NotRouted,
+            CoverageReason::Stale,
+        ] {
+            // Exhaustive: a new reason fails to compile here until it is
+            // listed above and given words.
+            match reason {
+                CoverageReason::CodexBaselineExcluded
+                | CoverageReason::Truncated
+                | CoverageReason::SomeTurnsUnknown
+                | CoverageReason::SpansWeeks
+                | CoverageReason::NoUsageCounters
+                | CoverageReason::SourceUnsupported
+                | CoverageReason::Undated
+                | CoverageReason::ReimportOverlap
+                | CoverageReason::NotRouted
+                | CoverageReason::Stale => {}
+            }
+            assert!(copy.contains_key(&reason_key(reason)), "{reason:?}");
+        }
+        for state in ["known", "partial", "unknown"] {
+            assert!(copy.contains_key(&format!("analytics_state_{state}")));
+        }
+    }
+
+    #[test]
+    fn pattern_reads_on_an_absent_store_are_typed_unknown_and_create_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("never-created");
+        let call = |operation: serde_json::Value| {
+            dispatch_json(
+                serde_json::json!({"store_dir": directory, "operation": operation})
+                    .to_string()
+                    .as_bytes(),
+            )
+        };
+        let patterns: serde_json::Value = serde_json::from_str(
+            &call(serde_json::json!({
+                "type": "patterns", "week_start": "2026-10-08", "tz": 3600
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(patterns["type"], "patterns");
+        let patterns = &patterns["patterns"];
+        assert_eq!(patterns["feed"], "saved");
+        assert_eq!(patterns["week_start"], "2026-10-05");
+        assert_eq!(patterns["claude_sessions"], 0);
+        assert_eq!(patterns["reread_files"], serde_json::json!([]));
+        let kinds: Vec<&str> = patterns["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|card| card["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "repeated_reads",
+                "retried_calls",
+                "edit_fail_edit",
+                "long_context"
+            ]
+        );
+        for card in patterns["cards"].as_array().unwrap() {
+            // No Claude session: unknown, never zero.
+            assert!(card["tokens"].is_null(), "{card}");
+            assert_eq!(card["change_unavailable"], "needs_counter_pass");
+            assert_eq!(card["weeks"].as_array().unwrap().len(), 6);
+        }
+        let sessions: serde_json::Value = serde_json::from_str(
+            &call(serde_json::json!({
+                "type": "pattern_sessions", "pattern": "retried_calls", "tz": 0
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sessions["type"], "pattern_sessions");
+        assert_eq!(sessions["pattern_sessions"]["pattern"], "retried_calls");
+        assert_eq!(
+            sessions["pattern_sessions"]["sessions"],
+            serde_json::json!([])
+        );
+        assert!(!directory.exists());
+
+        for (bad, error) in [
+            (
+                serde_json::json!({"type": "patterns", "tz": 0, "weeks": 7}),
+                "insights_weeks_invalid",
+            ),
+            (
+                serde_json::json!({"type": "patterns", "tz": 0, "weeks": 0}),
+                "insights_weeks_invalid",
+            ),
+            (
+                serde_json::json!({"type": "patterns", "tz": 19 * 3600}),
+                "insights_tz_invalid",
+            ),
+            (
+                serde_json::json!({"type": "pattern_sessions", "pattern": "spend", "tz": 0}),
+                "insights-request-invalid",
+            ),
+            (
+                serde_json::json!({"type": "patterns", "tz": 0, "file": "/tmp/x"}),
+                "insights-request-invalid",
+            ),
+        ] {
+            assert_eq!(call(bad).unwrap_err().to_string(), error);
+        }
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn patterns_read_a_saved_claude_session_by_its_own_dates_and_leak_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("store");
+        let file = root.path().join("claude.jsonl");
+        std::fs::write(
+            &file,
+            include_bytes!("../../fixtures/insights/claude-turn-series/session.jsonl"),
+        )
+        .unwrap();
+        let call = |operation: serde_json::Value| -> serde_json::Value {
+            serde_json::from_str(
+                &dispatch_json(
+                    serde_json::json!({"store_dir": store, "operation": operation})
+                        .to_string()
+                        .as_bytes(),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let saved = call(serde_json::json!({
+            "type": "analyze", "source": "claude_code", "file": file, "save": true
+        }));
+        let id = saved["insight"]["id"].clone();
+        let read = call(serde_json::json!({
+            "type": "patterns", "week_start": "2026-09-16", "tz": 0, "weeks": 3
+        }));
+        let patterns = &read["patterns"];
+        assert_eq!(patterns["week_start"], "2026-09-14");
+        assert_eq!(patterns["claude_sessions"], 1);
+        assert_eq!(patterns["claude_only"], false);
+        assert_eq!(patterns["long_context_threshold"], 200_000);
+        assert_eq!(patterns["weeks"], serde_json::json!(["2026-09-14"]));
+        assert_ne!(patterns["generation"], 0);
+        for card in patterns["cards"].as_array().unwrap() {
+            // Counted: a figure, possibly zero, never unknown.
+            assert!(card["count"].is_u64(), "{card}");
+            assert_eq!(card["weeks"].as_array().unwrap().len(), 3);
+        }
+        let wire = read.to_string();
+        for private in ["PRIVATE", "msg_", "toolu_", "/Users", "path_key"] {
+            assert!(!wire.contains(private), "{private}");
+        }
+        let sessions = call(serde_json::json!({
+            "type": "pattern_sessions", "pattern": "long_context",
+            "week_start": "2026-09-14", "tz": 0
+        }));
+        let sessions = &sessions["pattern_sessions"];
+        assert_eq!(sessions["generation"], patterns["generation"]);
+        for row in sessions["sessions"].as_array().unwrap() {
+            assert_eq!(row["session_ref"], id);
+        }
+        // A week with no saved session is unknown, not zero.
+        let empty = call(serde_json::json!({
+            "type": "patterns", "week_start": "2026-10-05", "tz": 0
+        }));
+        assert!(empty["patterns"]["cards"][0]["tokens"].is_null());
+    }
+
+    #[test]
+    fn session_drill_reads_one_saved_session_and_leaks_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("store");
+        let call = |operation: serde_json::Value| {
+            dispatch_json(
+                serde_json::json!({"store_dir": store, "operation": operation})
+                    .to_string()
+                    .as_bytes(),
+            )
+        };
+        // An absent store: not found, and nothing is created.
+        let missing = call(serde_json::json!({
+            "type": "session_drill", "snapshot_id": "nope", "tz": 0
+        }))
+        .unwrap_err();
+        assert_eq!(missing.to_string(), "insights_not_found");
+        assert!(!store.exists());
+
+        let file = root.path().join("claude.jsonl");
+        std::fs::write(
+            &file,
+            include_bytes!("../../fixtures/insights/claude-turn-series/session.jsonl"),
+        )
+        .unwrap();
+        let saved: serde_json::Value = serde_json::from_str(
+            &call(serde_json::json!({
+                "type": "analyze", "source": "claude_code", "file": file, "save": true
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let id = saved["insight"]["id"].as_str().unwrap().to_string();
+        let read: serde_json::Value = serde_json::from_str(
+            &call(serde_json::json!({"type": "session_drill", "snapshot_id": id, "tz": 0}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read["type"], "session_drill");
+        let drill = &read["session"];
+        assert_eq!(drill["session_ref"], id.as_str());
+        assert_eq!(drill["feed"], "saved");
+        assert_eq!(drill["source"], "claude_code");
+        assert_eq!(drill["long_context_threshold"], 200_000);
+        assert!(drill["date"].is_string(), "{drill}");
+        assert!(drill["span_secs"].is_u64(), "{drill}");
+        let series = drill["series"].as_array().unwrap();
+        assert_eq!(drill["turns"], series.len());
+        assert!(!series.is_empty());
+        assert!(drill["series_unavailable"].is_null());
+        assert!(drill.get("what_if").is_none());
+        assert!(drill.get("project").is_none());
+        let wire = read.to_string();
+        for private in [
+            "PRIVATE", "msg_", "toolu_", "/Users", "path_key", "args_key",
+        ] {
+            assert!(!wire.contains(private), "{private}");
+        }
+        // An unknown snapshot in an existing store is not found.
+        assert_eq!(
+            call(serde_json::json!({"type": "session_drill", "snapshot_id": "nope", "tz": 0}))
+                .unwrap_err()
+                .to_string(),
+            "insights_not_found"
+        );
+        for refused in [
+            serde_json::json!({"type": "session_drill", "snapshot_id": id, "tz": 19 * 3600}),
+            serde_json::json!({"type": "session_drill", "snapshot_id": id, "tz": 0, "file": "/tmp/x"}),
+            serde_json::json!({"type": "session_drill", "tz": 0}),
+        ] {
+            assert!(call(refused).is_err());
+        }
+    }
+
+    #[test]
+    fn week_reads_on_an_absent_store_are_empty_typed_and_create_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("never-created");
+        let call = |operation: serde_json::Value| {
+            dispatch_json(
+                serde_json::json!({"store_dir": directory, "operation": operation})
+                    .to_string()
+                    .as_bytes(),
+            )
+        };
+        let overview: serde_json::Value = serde_json::from_str(
+            &call(serde_json::json!({
+                "type": "week_overview", "week_start": "2026-10-08", "tz": 3600
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(overview["type"], "week_overview");
+        let overview = &overview["overview"];
+        assert_eq!(overview["feed"], "saved");
+        assert_eq!(overview["week_start"], "2026-10-05");
+        assert_eq!(overview["week_end"], "2026-10-11");
+        assert_eq!(overview["tz"], 3600);
+        assert_eq!(overview["sessions"], 0);
+        assert_eq!(overview["sources"], serde_json::json!([]));
+        assert!(overview["by_day"].is_null());
+        assert_eq!(overview["by_project"], "not_available_for_analyzed_files");
+        let inputs: serde_json::Value = serde_json::from_str(
+            &call(serde_json::json!({
+                "type": "card_inputs", "card": "cache_share", "tz": 0
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inputs["inputs"]["card"], "cache_share");
+        assert_eq!(inputs["inputs"]["sessions"], serde_json::json!([]));
+        assert!(!directory.exists());
+
+        let refused =
+            call(serde_json::json!({"type": "week_overview", "tz": 19 * 3600})).unwrap_err();
+        assert_eq!(refused.to_string(), "insights_tz_invalid");
+        // A rate, an assumption or a path is not a field of these reads.
+        for extra in [
+            serde_json::json!({"type": "week_overview", "tz": 0, "file": "/tmp/x"}),
+            serde_json::json!({"type": "card_inputs", "card": "tokens", "tz": 0, "rate": 1}),
+            serde_json::json!({"type": "card_inputs", "card": "spend", "tz": 0}),
+        ] {
+            assert_eq!(
+                call(extra).unwrap_err().to_string(),
+                "insights-request-invalid"
+            );
+        }
+        assert!(!directory.exists());
     }
 
     #[test]
@@ -1553,7 +2358,9 @@ mod tests {
                 "type":"assistant", "message":{
                     "id":"message-1", "model":"fixture", "content":"PRIVATE_BODY",
                     "usage":{"input_tokens":12,"cache_read_input_tokens":3,
-                        "cache_creation_input_tokens":4,"output_tokens":5}
+                        "cache_creation_input_tokens":4,"output_tokens":5,
+                        "cache_creation":{"ephemeral_5m_input_tokens":4,
+                            "ephemeral_1h_input_tokens":0}}
                 }
             })
             .to_string(),
@@ -1711,5 +2518,172 @@ mod tests {
                 .to_string(),
             "insights-comparison-result-stale"
         );
+    }
+
+    fn analytics_call(
+        directory: &std::path::Path,
+        operation: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        dispatch_json(
+            serde_json::json!({"store_dir": directory, "operation": operation})
+                .to_string()
+                .as_bytes(),
+        )
+        .map(|text| serde_json::from_str(&text).unwrap())
+    }
+
+    /// The daemon's `history` for the 13 weeks ending at the current UTC
+    /// week, each comparable with the given Claude tokens.
+    fn counter_weeks(tokens: impl Fn(i64) -> u64) -> serde_json::Value {
+        let now = chrono::Utc::now();
+        let current = super::super::week_rollup::local_week_start(&now, &chrono::Utc);
+        serde_json::Value::Array(
+            (0..13)
+                .rev()
+                .map(|back| {
+                    serde_json::json!({
+                        "week_start": (current - chrono::Duration::weeks(back)).to_string(),
+                        "comparable": true,
+                        "tokens": {"claude_code": tokens(back)},
+                        "cache_share_permille": {"claude_code": 300},
+                        "patterns": {"repeated_reads": 100_000},
+                        "sessions": 6,
+                        "pattern_counts": {"repeated_reads": 3},
+                        "reread_files": 2,
+                        "past_threshold": null
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn comparisons_on_an_absent_store_are_feed_s_and_create_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("never-created");
+        let found = analytics_call(
+            &directory,
+            serde_json::json!({"type": "comparisons", "tz": 0}),
+        )
+        .unwrap();
+        assert_eq!(found["type"], "comparisons");
+        let found = &found["comparisons"];
+        assert_eq!(found["feed"], "saved");
+        assert_eq!(found["goals"], serde_json::json!([]));
+        assert_eq!(found["lever"]["unavailable"], "needs_counter_pass");
+        assert_eq!(found["recap"], serde_json::Value::Null);
+        // Feed T figures over an absent store: compared, nothing created.
+        let found = analytics_call(
+            &directory,
+            serde_json::json!({
+                "type": "comparisons", "tz": 0, "recap_card_enabled": true,
+                "counter_weeks": counter_weeks(|_| 1_000_000)
+            }),
+        )
+        .unwrap();
+        assert_eq!(found["comparisons"]["feed"], "counter_pass");
+        assert!(found["comparisons"]["recap"].is_object());
+        assert!(!directory.exists());
+
+        let mut tuesday = counter_weeks(|_| 1);
+        tuesday[0]["week_start"] = serde_json::json!("2026-09-01");
+        for (bad, error) in [
+            (
+                serde_json::json!({"type": "comparisons", "tz": 19 * 3600}),
+                "insights_tz_invalid",
+            ),
+            (
+                serde_json::json!({"type": "comparisons", "tz": 0, "counter_weeks": tuesday}),
+                "insights_counter_weeks_invalid",
+            ),
+            (
+                serde_json::json!({"type": "comparisons", "tz": 0, "rate": 3}),
+                "insights-request-invalid",
+            ),
+            (
+                serde_json::json!({"type": "goal_delete", "id": "goal-1"}),
+                "insights_goal_not_found",
+            ),
+        ] {
+            assert_eq!(
+                analytics_call(&directory, bad).unwrap_err().to_string(),
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn goal_and_lever_writes_feed_the_comparisons() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("store");
+        let set = analytics_call(
+            &directory,
+            serde_json::json!({"type": "goal_set", "goal": {
+                "kind": "weekly_tokens_under", "source": "claude_code", "tokens": 900_000
+            }}),
+        )
+        .unwrap();
+        assert_eq!(set["type"], "goal_set");
+        let id = set["state"]["goals"][0]["id"].as_str().unwrap().to_string();
+        let compared = analytics_call(
+            &directory,
+            serde_json::json!({
+                "type": "comparisons", "tz": 0, "recap_card_enabled": true,
+                "counter_weeks": counter_weeks(|back| if back == 0 { 800_000 } else { 1_000_000 })
+            }),
+        )
+        .unwrap();
+        let goal = &compared["comparisons"]["goals"][0];
+        assert_eq!(goal["id"], id.as_str());
+        assert_eq!(goal["figure"], 800_000);
+        assert_eq!(
+            goal["marks"]["marks"],
+            serde_json::json!(["not_met", "not_met", "not_met", "not_met", "not_met", "met"])
+        );
+        assert_eq!(
+            goal["marks"]["change"],
+            serde_json::json!({"direction": "down", "from": 1_000_000})
+        );
+        let recap = &compared["comparisons"]["recap"];
+        let closed = recap["week_start"].as_str().unwrap().to_string();
+
+        for bad in [
+            serde_json::json!({"type": "goal_set", "goal": {"kind": "long_context_under", "tokens": 0}}),
+            serde_json::json!({"type": "lever_feedback", "kind": "repeated_reads", "week_start": "2026-10-06"}),
+            serde_json::json!({"type": "recap_opened", "week_start": "2026-10-06"}),
+        ] {
+            assert!(analytics_call(&directory, bad).is_err());
+        }
+        let feedback = analytics_call(
+            &directory,
+            serde_json::json!({"type": "lever_feedback", "kind": "repeated_reads", "week_start": closed}),
+        )
+        .unwrap();
+        assert_eq!(feedback["type"], "lever_feedback");
+        assert_eq!(
+            feedback["state"]["lever_dismissals"][0]["kind"],
+            "repeated_reads"
+        );
+        let opened = analytics_call(
+            &directory,
+            serde_json::json!({"type": "recap_opened", "week_start": closed}),
+        )
+        .unwrap();
+        assert_eq!(opened["state"]["recap_opened_week"], closed.as_str());
+        let after = analytics_call(
+            &directory,
+            serde_json::json!({
+                "type": "comparisons", "tz": 0, "recap_card_enabled": true,
+                "counter_weeks": counter_weeks(|_| 1_000_000)
+            }),
+        )
+        .unwrap();
+        assert_eq!(after["comparisons"]["recap"], serde_json::Value::Null);
+        let deleted = analytics_call(
+            &directory,
+            serde_json::json!({"type": "goal_delete", "id": id}),
+        )
+        .unwrap();
+        assert_eq!(deleted["state"]["goals"], serde_json::json!([]));
     }
 }

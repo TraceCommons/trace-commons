@@ -30,6 +30,34 @@ pub extern "C" fn tc_insights_copy_json() -> *mut c_char {
 /// "recorded_activity","episode_outcomes","observed_models","estimated_cost"],
 /// "snapshot_ids":[],"episode_ids":[]}`. This read returns typed `result`
 /// cards plus shared rendered `text`; empty selections create no absent store.
+/// Token week over saved snapshots (feed S): `{"type":"week_overview",
+/// "week_start":"2026-10-05","tz":3600}` and `{"type":"card_inputs","card":
+/// "tokens|cache_share|sessions","week_start":"2026-10-05","tz":3600}`.
+/// `week_start` is any date in the local ISO week (absent: the current week);
+/// `tz` is the UTC offset in seconds east, refused as `insights_tz_invalid`
+/// beyond 18 hours. Sessions are dated by their own records, never the import
+/// time; nothing is compared with another week. Reads create no absent store.
+/// Patterns over saved snapshots (feed S): `{"type":"patterns","week_start":
+/// "2026-10-05","weeks":6,"tz":3600}` returns the four cards (token figure,
+/// count, weekly bars where an absent week is `null`, never 0) and the
+/// re-read table as letters and extensions; `weeks` is 1 to 6 (default 6),
+/// refused as `insights_weeks_invalid`. `{"type":"pattern_sessions","pattern":
+/// "repeated_reads|retried_calls|edit_fail_edit|long_context","week_start":
+/// "2026-10-05","tz":3600}` lists the sessions behind one card. Neither
+/// compares weeks under feed S, and neither returns a path or a digest.
+/// One saved session, turn by turn (feed S): `{"type":"session_drill",
+/// "snapshot_id":"...","tz":3600}` returns its header figures, per-turn
+/// counters (an unknown turn is `null`, never 0) and lettered markers. A Codex
+/// session's series is `null` with `series_unavailable: "not_recorded"`. An
+/// unknown snapshot is `insights_not_found`. No path, digest or what-if.
+/// Feed T comparisons: `{"type":"comparisons","counter_weeks":[...],
+/// "week_start":"2026-10-05","tz":3600,"recap_card_enabled":true}` marks each
+/// goal over the daemon's `insights_week` `history`, passed through
+/// unchanged, and returns the lever of the week and the weekly summary card;
+/// without `counter_weeks` nothing is compared. `goal_set` (`goal`, optional
+/// `id`), `goal_delete` (`id`), `lever_feedback` (`kind`, `week_start`,
+/// optional `action`: `not_useful` or `reenable`) and `recap_opened`
+/// (`week_start`) store rule IDs and Monday dates only.
 /// Whole-snapshot episodes: `{"type":"episode_create","snapshot_ids":["..."]}`;
 /// `episode_list`, and `episode_explain` with an episode UUID `id`.
 /// Edits require `id` and `expected_revision`: `episode_replace_members` also
@@ -296,6 +324,241 @@ mod tests {
         Ok(value)
     }
 
+    /// A Codex rollout, which needs no digest key: a saved Claude snapshot
+    /// would reach the OS keychain from this test binary.
+    fn codex_rollout(path: &std::path::Path, final_input: u64) {
+        let token = |time: &str, input: u64, cached: u64, output: u64| {
+            serde_json::json!({
+                "type":"event_msg", "timestamp":time,
+                "payload":{"type":"token_count","info":{"total_token_usage":{
+                    "input_tokens":input,"cached_input_tokens":cached,"output_tokens":output,
+                    "reasoning_output_tokens":0,"total_tokens":input + output
+                }}}
+            })
+        };
+        let rows = [
+            serde_json::json!({"type":"session_meta","timestamp":"2026-09-11T00:00:00Z","payload":{"id":"PRIVATE_SESSION_ID","model_provider":"openai"}}),
+            serde_json::json!({"type":"turn_context","timestamp":"2026-09-11T00:00:00Z","payload":{"model":"fixture-model"}}),
+            token("2026-09-11T00:00:01Z", 100, 20, 20),
+            token("2026-09-11T00:00:03Z", final_input, 40, 30),
+        ];
+        std::fs::write(
+            path,
+            rows.iter()
+                .map(|row| row.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn week_overview_and_card_inputs_cross_the_abi_and_follow_mutations() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let week = || serde_json::json!({"type":"week_overview","week_start":"2026-09-09","tz":0});
+        let empty = json_call(&store, week()).unwrap();
+        assert_eq!(empty["type"], "week_overview");
+        assert_eq!(empty["overview"]["sessions"], 0);
+        assert!(!store.exists());
+
+        let source = temp.path().join("rollout.jsonl");
+        codex_rollout(&source, 150);
+        let analyze = serde_json::json!({
+            "type":"analyze","source":"codex","file":source,"save":true
+        });
+        let saved = json_call(&store, analyze.clone()).unwrap();
+        let first = json_call(&store, week()).unwrap();
+        let overview = &first["overview"];
+        assert_eq!(overview["feed"], "saved");
+        assert_eq!(overview["week_start"], "2026-09-07");
+        assert_eq!(overview["sources"][0]["tokens"], 60);
+        assert_eq!(overview["sources"][0]["cache_share"]["permille"], 400);
+        assert_eq!(overview["sources"][0]["change"], "needs_counter_pass");
+        assert_eq!(overview["sources"][0]["best_week"], "needs_counter_pass");
+        assert_eq!(overview["by_project"], "not_available_for_analyzed_files");
+        assert_eq!(overview["weeks"], serde_json::json!(["2026-09-07"]));
+        assert!(!first.to_string().contains("PRIVATE_SESSION_ID"));
+
+        let inputs = json_call(
+            &store,
+            serde_json::json!({"type":"card_inputs","card":"sessions","week_start":"2026-09-09","tz":0}),
+        )
+        .unwrap();
+        assert_eq!(inputs["type"], "card_inputs");
+        assert_eq!(
+            inputs["inputs"]["sessions"][0]["session_ref"],
+            saved["insight"]["id"]
+        );
+
+        // Replace: new bytes at the same path.
+        codex_rollout(&source, 250);
+        json_call(&store, analyze).unwrap();
+        let replaced = json_call(&store, week()).unwrap();
+        assert_ne!(
+            replaced["overview"]["generation"],
+            first["overview"]["generation"]
+        );
+        assert_eq!(replaced["overview"]["sources"][0]["tokens"], 160);
+        assert_eq!(replaced["overview"]["sessions"], 1);
+
+        // Delete.
+        let id =
+            json_call(&store, serde_json::json!({"type":"list"})).unwrap()["insights"][0]["id"]
+                .clone();
+        json_call(&store, serde_json::json!({"type":"delete","id":id})).unwrap();
+        let deleted = json_call(&store, week()).unwrap();
+        assert_eq!(deleted["overview"]["sessions"], 0);
+        assert_eq!(deleted["overview"]["sources"], serde_json::json!([]));
+
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"week_overview","tz":-65_000})
+            )
+            .unwrap_err(),
+            "insights_tz_invalid"
+        );
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"card_inputs","card":"spend","tz":0})
+            )
+            .unwrap_err(),
+            "insights-request-invalid"
+        );
+    }
+
+    #[test]
+    fn patterns_cross_the_abi_typed_and_codex_only_weeks_are_unknown() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let patterns = || serde_json::json!({"type":"patterns","week_start":"2026-09-09","tz":0});
+        let empty = json_call(&store, patterns()).unwrap();
+        assert_eq!(empty["type"], "patterns");
+        assert_eq!(empty["patterns"]["cards"].as_array().unwrap().len(), 4);
+        assert!(!store.exists());
+
+        let source = temp.path().join("rollout.jsonl");
+        codex_rollout(&source, 150);
+        json_call(
+            &store,
+            serde_json::json!({"type":"analyze","source":"codex","file":source,"save":true}),
+        )
+        .unwrap();
+        let read = json_call(&store, patterns()).unwrap();
+        let read = &read["patterns"];
+        assert_eq!(read["sessions"], 1);
+        assert_eq!(read["claude_sessions"], 0);
+        assert_eq!(read["claude_only"], true);
+        // Codex records no tool calls: unknown, never zero.
+        for card in read["cards"].as_array().unwrap() {
+            assert!(card["tokens"].is_null(), "{card}");
+            assert_eq!(card["change_unavailable"], "needs_counter_pass");
+        }
+        assert!(!read.to_string().contains("PRIVATE_SESSION_ID"));
+
+        let sessions = json_call(
+            &store,
+            serde_json::json!({"type":"pattern_sessions","pattern":"repeated_reads","week_start":"2026-09-09","tz":0}),
+        )
+        .unwrap();
+        assert_eq!(
+            sessions["pattern_sessions"]["sessions"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"patterns","weeks":9,"tz":0})
+            )
+            .unwrap_err(),
+            "insights_weeks_invalid"
+        );
+    }
+
+    #[test]
+    fn a_codex_session_drill_crosses_the_abi_as_not_recorded() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"session_drill","snapshot_id":"nope","tz":0}),
+            )
+            .unwrap_err(),
+            "insights_not_found"
+        );
+        assert!(!store.exists());
+        let source = temp.path().join("rollout.jsonl");
+        codex_rollout(&source, 150);
+        let saved = json_call(
+            &store,
+            serde_json::json!({"type":"analyze","source":"codex","file":source,"save":true}),
+        )
+        .unwrap();
+        let id = saved["insight"]["id"].clone();
+        let read = json_call(
+            &store,
+            serde_json::json!({"type":"session_drill","snapshot_id":id,"tz":0}),
+        )
+        .unwrap();
+        assert_eq!(read["type"], "session_drill");
+        let drill = &read["session"];
+        assert_eq!(drill["source"], "codex");
+        assert!(drill["series"].is_null());
+        assert!(drill["turns"].is_null());
+        assert_eq!(drill["series_unavailable"], "not_recorded");
+        assert_eq!(drill["markers"], serde_json::json!([]));
+        assert!(!read.to_string().contains("PRIVATE_SESSION_ID"));
+    }
+
+    #[test]
+    fn goals_and_comparisons_cross_the_abi() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let compared = json_call(&store, serde_json::json!({"type":"comparisons","tz":0})).unwrap();
+        assert_eq!(compared["type"], "comparisons");
+        assert_eq!(compared["comparisons"]["feed"], "saved");
+        assert!(!store.exists());
+        let set = json_call(
+            &store,
+            serde_json::json!({"type":"goal_set","goal":{"kind":"repeated_reads_under","tokens":50000}}),
+        )
+        .unwrap();
+        let id = set["state"]["goals"][0]["id"].clone();
+        let compared = json_call(&store, serde_json::json!({"type":"comparisons","tz":0})).unwrap();
+        assert_eq!(compared["comparisons"]["goals"][0]["id"], id);
+        assert_eq!(
+            compared["comparisons"]["goals"][0]["unavailable"],
+            "needs_counter_pass"
+        );
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"lever_feedback","kind":"repeated_reads","week_start":"2026-10-07"}),
+            )
+            .unwrap_err(),
+            "insights_week_invalid"
+        );
+        let deleted = json_call(&store, serde_json::json!({"type":"goal_delete","id":id})).unwrap();
+        assert_eq!(deleted["state"]["goals"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn the_analytics_words_cross_the_abi_marked_by_key() {
+        let result = tc_insights_copy_json();
+        let copy: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        unsafe { tc_string_free(result) };
+        assert_eq!(copy["analytics_tab_analyze"], "Analyze");
+        assert_eq!(copy["analytics_later"], "Later");
+        assert_eq!(
+            copy["analytics_feed_saved"],
+            "Only sessions you analyzed are counted."
+        );
+    }
+
     #[test]
     fn episode_abi_preserves_fixed_errors_no_state_and_revision_conflicts() {
         let temp = tempfile::tempdir().unwrap();
@@ -387,7 +650,17 @@ mod tests {
             analyzed["insight"]["model_observations"]["source_format"],
             "claude_code"
         );
-        assert!(analyzed["insight"]["usage_evidence"].is_null());
+        // Claude usage evidence is saved, and unknown here: the source has
+        // no assistant record. It is never a zero.
+        assert_eq!(
+            analyzed["insight"]["usage_evidence"]["source"],
+            "claude_code"
+        );
+        assert_eq!(
+            analyzed["insight"]["usage_evidence"]["aggregate_unavailable_reason"],
+            "no_usage"
+        );
+        assert!(analyzed["insight"]["usage_evidence"]["aggregate_counts"].is_null());
         assert!(analyzed["insight"]["task_attribution"].is_null());
         let listed = json_call(&store, serde_json::json!({"type":"list"})).unwrap();
         assert_eq!(listed["insights"][0]["source_format"], "claude_code");

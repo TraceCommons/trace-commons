@@ -2,6 +2,9 @@
 //!
 //! No discovery, enrollment, network, or contribution path is invoked. A file
 //! is a provisional session boundary, never an inferred completed task.
+pub mod analytics_constants;
+pub mod analytics_copy;
+pub mod cache_share;
 pub mod card_presentation;
 pub mod card_store;
 pub mod cards;
@@ -15,16 +18,30 @@ pub mod comparison_task_store;
 pub mod comparison_tasks;
 pub mod episode_store;
 pub mod episodes;
+pub mod goal_store;
+pub mod goals;
+pub mod ledger_series;
+pub mod lever;
+pub mod markers;
 pub mod models;
 pub mod outcomes;
+pub mod patterns;
 pub mod pricing_catalog;
 pub mod provider;
+pub mod recap;
 pub mod service;
+pub mod session_drill;
+pub mod session_identity;
 pub mod summary;
 pub mod task_attribution;
 pub mod time_evidence;
+pub mod turn_series;
 pub mod usage;
 pub mod usage_evidence;
+pub mod week_glance;
+pub mod week_patterns;
+pub mod week_rollup;
+pub mod what_if;
 #[cfg(windows)]
 mod win_store_acl;
 
@@ -40,6 +57,7 @@ use sha2::{Digest, Sha256};
 use trace_commons_protocol::insights::{
     Coverage, EvidenceRef, InsightReport, MetricId, ProviderManifest,
 };
+use trace_commons_protocol::insights_usage_series::DigestKeyStore;
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 // Advanced to 11 for model-observation schemas 2 and 3. A nested schema bump
@@ -48,7 +66,16 @@ const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 // Advanced again to 12 for the per-address file identity an alias now records,
 // which is what lets a rename drop the superseded snapshot instead of keeping
 // it alive under a name the user no longer has.
-const STORE_VERSION: u32 = 12;
+// Advanced to 13 for Claude Code usage evidence (usage schema 2, with the
+// 5m/1h cache-write split), Claude time evidence, and the per-turn series. A
+// Claude snapshot saved before 13 keeps none of them and stays unknown until
+// it is reimported. Version 13 also brings the keyed session identity of a
+// saved Claude Code or Codex snapshot.
+const STORE_VERSION: u32 = 13;
+/// Store version at which a Claude snapshot may carry usage evidence, time
+/// evidence, or a per-turn series, and a Claude or Codex snapshot a session
+/// identity.
+const CLAUDE_USAGE_STORE_VERSION: u32 = 13;
 const MAX_OUTCOME_LINKS: usize = 128;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -205,6 +232,18 @@ pub struct LocalInsight {
     /// task, human prompt, outcome, independence, or asynchronous completion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_task_attribution: Option<claude_task_attribution::ClaudeTaskAttributionEvidence>,
+    /// Claude Code per-turn counters and tool-call digests, made only for a
+    /// saved snapshot under the store's digest key. `None` for other formats,
+    /// for unsaved analysis, when no key is available, and for snapshots saved
+    /// before store version 13 until they are reimported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_series: Option<turn_series::ClaudeTurnSeriesEvidence>,
+    /// Keyed digest of the session ID the harness recorded, made only for a
+    /// saved Claude Code or Codex snapshot under the store's digest key.
+    /// `None` for unsaved analysis, without a key, for a file recording no
+    /// single session ID, and before store version 13 until reimported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_identity: Option<session_identity::SavedSessionIdentity>,
     /// Import snapshot time; source freshness requires explicit reimport.
     pub analyzed_at: chrono::DateTime<chrono::Utc>,
 }
@@ -274,6 +313,16 @@ fn bounded_read(path: &Path) -> Result<Vec<u8>> {
 /// fail closed; native adapter normalization can retain unknown records as
 /// opaque events, so classified activity is reported with partial coverage.
 pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
+    analyze_file_with_digest_keys(format, path, None)
+}
+
+/// [`analyze_file`], plus the Claude Code per-turn series when a digest key
+/// store is given. Only a saved import passes one.
+fn analyze_file_with_digest_keys(
+    format: SourceFormat,
+    path: &Path,
+    digest_keys: Option<&dyn DigestKeyStore>,
+) -> Result<LocalInsight> {
     let bytes = bounded_read(path)?;
     let source_digest = digest(&bytes);
     let events = match format {
@@ -315,16 +364,20 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         id: id.clone(),
         source_digest,
     };
-    let time_evidence = match format {
-        SourceFormat::ClaudeCode => None,
-        SourceFormat::Codex | SourceFormat::Trajectory => Some(
-            time_evidence::extract_recorded_time_evidence(format, &bytes)?,
-        ),
-    };
+    let time_evidence = Some(time_evidence::extract_recorded_time_evidence(
+        format, &bytes,
+    )?);
     let usage_evidence = match format {
         SourceFormat::Codex => Some(usage_evidence::extract_codex_usage_evidence(&bytes)?),
-        SourceFormat::ClaudeCode | SourceFormat::Trajectory => None,
+        SourceFormat::ClaudeCode => Some(usage_evidence::extract_claude_usage_evidence(&bytes)?),
+        SourceFormat::Trajectory => None,
     };
+    let turn_series = match (format, digest_keys) {
+        (SourceFormat::ClaudeCode, Some(keys)) => turn_series::saved_turn_series(&bytes, keys),
+        _ => None,
+    };
+    let session_identity =
+        digest_keys.and_then(|keys| session_identity::saved_session_identity(format, &bytes, keys));
     let task_attribution = match format {
         SourceFormat::Codex => Some(
             task_attribution::classify_codex_task_attribution_for_import(
@@ -361,6 +414,8 @@ pub fn analyze_file(format: SourceFormat, path: &Path) -> Result<LocalInsight> {
         usage_evidence,
         task_attribution,
         claude_task_attribution,
+        turn_series,
+        session_identity,
         analyzed_at: chrono::Utc::now(),
     })
 }
@@ -683,6 +738,9 @@ impl Index {
 /// The lock remains on a stable file while the JSON index is atomically replaced.
 pub struct LocalInsightStore {
     dir: PathBuf,
+    /// Custody of the key behind the per-turn series' digests (owner
+    /// decision D16, open). Never consulted except by a saved Claude import.
+    digest_keys: Box<dyn DigestKeyStore + Send + Sync>,
     #[cfg(test)]
     fail_writes: std::sync::atomic::AtomicBool,
 }
@@ -700,7 +758,7 @@ pub struct LocalInsightStore {
 /// -- surface as a busy store. The bound keeps a genuinely stuck holder (a
 /// hung process, another window mid-import) from blocking the caller for
 /// long, and `Busy` still means what it meant: retry later.
-const STORE_LOCK_WAIT: Duration = Duration::from_secs(2);
+pub(crate) const STORE_LOCK_WAIT: Duration = Duration::from_secs(2);
 const STORE_LOCK_FIRST_BACKOFF: Duration = Duration::from_millis(1);
 const STORE_LOCK_MAX_BACKOFF: Duration = Duration::from_millis(50);
 
@@ -717,7 +775,7 @@ const STORE_LOCK_MAX_BACKOFF: Duration = Duration::from_millis(50);
 /// Insights store. `std::fs::File` has no timed lock, so this polls
 /// `try_lock` with a capped exponential backoff rather than calling the
 /// unbounded blocking `lock`.
-fn lock_within(file: &File, bound: Duration) -> Result<()> {
+pub(crate) fn lock_within(file: &File, bound: Duration) -> Result<()> {
     let deadline = Instant::now() + bound;
     let mut backoff = STORE_LOCK_FIRST_BACKOFF;
     loop {
@@ -748,6 +806,23 @@ impl Drop for StoreLock {
 
 impl LocalInsightStore {
     pub fn open(dir: &Path) -> Result<Self> {
+        Self::open_with(dir, None)
+    }
+
+    /// [`LocalInsightStore::open`] with an explicit digest key store, for a
+    /// host that keeps the key elsewhere and for tests, which must never
+    /// reach a real keychain.
+    pub fn open_with_digest_keys(
+        dir: &Path,
+        digest_keys: Box<dyn DigestKeyStore + Send + Sync>,
+    ) -> Result<Self> {
+        Self::open_with(dir, Some(digest_keys))
+    }
+
+    fn open_with(
+        dir: &Path,
+        digest_keys: Option<Box<dyn DigestKeyStore + Send + Sync>>,
+    ) -> Result<Self> {
         // The caller selects the directory, so resolve its ancestor aliases
         // (notably macOS /tmp and /var). Never follow the store leaf itself.
         reject_leaf_symlink(dir)?;
@@ -784,8 +859,11 @@ impl LocalInsightStore {
             .canonicalize()
             .map_err(|_| anyhow!(InsightsStoreError::Unavailable))?;
         reject_symlinks(&dir)?;
+        let digest_keys =
+            digest_keys.unwrap_or_else(|| turn_series::default_digest_key_store(dir.clone()));
         Ok(Self {
             dir,
+            digest_keys,
             #[cfg(test)]
             fail_writes: std::sync::atomic::AtomicBool::new(false),
         })
@@ -929,7 +1007,8 @@ impl LocalInsightStore {
             }
         }
         comparison_spec_store::validate_index_comparison_qualification(&index)?;
-        // Legacy snapshots remain readable; the next mutation persists v12.
+        // Legacy snapshots remain readable; the next mutation persists the
+        // current version.
         index.version = STORE_VERSION;
         Ok((lock, index))
     }
@@ -960,7 +1039,8 @@ impl LocalInsightStore {
     ) -> Result<SnapshotMutation<LocalInsight>> {
         // Analyze the selected leaf through the same no-follow reader used by
         // unsaved analysis. Canonicalization is only for deduplication identity.
-        let mut insight = analyze_file(format, path)?;
+        let mut insight =
+            analyze_file_with_digest_keys(format, path, Some(self.digest_keys.as_ref()))?;
         let canonical = path
             .canonicalize()
             .map_err(|_| anyhow!("insights_source_unreadable"))?;
@@ -1234,6 +1314,26 @@ fn validate_stored_report(version: u32, id: &str, insight: &LocalInsight) -> Res
     if version < 10 && insight.claude_task_attribution.is_some() {
         bail!(InsightsStoreError::Invalid);
     }
+    if version < CLAUDE_USAGE_STORE_VERSION
+        && (insight.turn_series.is_some()
+            || (insight.source_format == SourceFormat::ClaudeCode
+                && (insight.usage_evidence.is_some() || insight.time_evidence.is_some())))
+    {
+        bail!(InsightsStoreError::Invalid);
+    }
+    if let Some(identity) = &insight.session_identity {
+        if version < CLAUDE_USAGE_STORE_VERSION || insight.source_format == SourceFormat::Trajectory
+        {
+            bail!(InsightsStoreError::Invalid);
+        }
+        identity.validate()?;
+    }
+    if let Some(series) = &insight.turn_series {
+        if insight.source_format != SourceFormat::ClaudeCode {
+            bail!(InsightsStoreError::Invalid);
+        }
+        series.validate_binding(&reference.source_digest)?;
+    }
     if version < models::MODEL_OBSERVATIONS_STORE_VERSION_FLOOR
         && insight
             .model_observations
@@ -1354,7 +1454,7 @@ fn reject_leaf_symlink(path: &Path) -> Result<()> {
     }
 }
 
-fn reject_symlinks(path: &Path) -> Result<()> {
+pub(crate) fn reject_symlinks(path: &Path) -> Result<()> {
     for ancestor in path.ancestors() {
         match fs::symlink_metadata(ancestor) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -2094,8 +2194,19 @@ mod tests {
         assert_eq!(models.candidate_records, 2);
         assert_eq!(models.valid_declarations, 2);
         assert_eq!(models.declared_models, ["fixture-model"]);
-        assert!(analyzed.usage_evidence.is_none());
-        assert!(analyzed.time_evidence.is_none());
+        // Assistant records with no usage object: usage is unknown, never
+        // zero. Every user and assistant record is timestamped.
+        let usage = analyzed.usage_evidence.as_ref().unwrap();
+        assert_eq!(usage.candidate_records, 2);
+        assert_eq!(usage.complete_records, 0);
+        assert!(usage.aggregate_counts.is_none());
+        let time = analyzed.time_evidence.as_ref().unwrap();
+        assert_eq!(time.total_eligible_records, 4);
+        assert_eq!(time.valid_timestamps, 4);
+        assert!(
+            analyzed.turn_series.is_none(),
+            "unsaved analysis has no series"
+        );
         assert!(analyzed.task_attribution.is_none());
         assert!(matches!(
             analyzed.claude_task_attribution.unwrap().state,

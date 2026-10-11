@@ -502,3 +502,193 @@ fn unenroll_answers_only_on_the_async_dispatcher() {
     assert_eq!(error.message, "unenroll-requires-async");
     assert!(crate::daemon::uploader::enrollment_is_live(&s.store));
 }
+
+/// Store a counter row for Insights feed T, as a watcher pass would.
+fn counted(s: &DaemonShared) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    std::fs::write(
+        &path,
+        std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/insights/claude-turn-series/session.jsonl"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let written = Utc::now() - chrono::Duration::hours(2);
+    let candidate = crate::daemon::insights_week::CounterCandidate {
+        origin: 0,
+        source: crate::source::SOURCE_CLAUDE_CODE,
+        size_bytes: std::fs::metadata(&path).unwrap().len(),
+        path,
+        modified_at: written,
+        started_at: Some(written),
+        group_member_count: 0,
+    };
+    let summary = s
+        .insights_counter
+        .run_pass(&[candidate], &[], Utc::now(), 60, &mut |_| {
+            ("/proj".to_string(), false)
+        })
+        .unwrap();
+    assert_eq!(summary.read, 1);
+    assert!(rows_file(s).exists());
+}
+
+fn rows_file(s: &DaemonShared) -> std::path::PathBuf {
+    s.store
+        .daemon_path(crate::daemon::insights_week::COUNTER_ROWS_FILE)
+}
+
+fn stored(s: &DaemonShared) -> serde_json::Value {
+    s.insights_counter.week_value(
+        true,
+        None,
+        chrono::FixedOffset::east_opt(0).unwrap(),
+        Utc::now(),
+        &[],
+        crate::daemon::insights_week::WeekOptions::default(),
+    )["sessions_stored"]
+        .clone()
+}
+
+/// Owner decision D4, open: the counter store is cleared on unenroll, and
+/// its key forgotten, whether or not an enrollment was on disk.
+#[tokio::test]
+async fn unenroll_clears_the_insights_counter_store() {
+    let s = shared();
+    enroll_fixture(&s);
+    counted(&s);
+    assert_eq!(stored(&s), 1);
+    assert!(call(&s).await.error.is_none());
+    assert!(!rows_file(&s).exists());
+    assert_eq!(stored(&s), 0);
+    assert!(s.insights_counter.key_is_absent_for_test());
+
+    let s = shared();
+    counted(&s);
+    let v = call(&s).await.result.unwrap();
+    assert_eq!(v["removed"], false);
+    assert!(!rows_file(&s).exists());
+    assert!(s.insights_counter.key_is_absent_for_test());
+}
+
+/// Owner question Q3, default taken: the route tallies live in the counter
+/// store and go with it on unenroll, and a fold after it, with the ledger
+/// feed still on, does not write them back.
+#[tokio::test]
+async fn unenroll_clears_the_route_tallies_and_no_fold_writes_them_back() {
+    let s = shared();
+    enroll_fixture(&s);
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.insights_counter_pass = true;
+        settings.insights_ledger_feed = true;
+    }
+    counted(&s);
+    let call_at = |id: i64| crate::routing::RoutedExchange {
+        id: Some(id),
+        started_at: Utc::now() - chrono::Duration::minutes(5),
+        client_session_id: Some("SESSION-SECRET".to_string()),
+        facade: "anthropic".to_string(),
+        path: Some("/v1/messages".to_string()),
+        proof: Some(crate::routing::ProofStatus::Verified),
+        ..Default::default()
+    };
+    let ledger = crate::routing::FixedLedger::new(vec![call_at(1)]);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &ledger);
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
+
+    assert!(call(&s).await.error.is_none());
+    assert!(!rows_file(&s).exists());
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 0);
+    assert!(s.settings.lock().unwrap().insights_ledger_feed);
+
+    let later = crate::routing::FixedLedger::new(vec![call_at(1), call_at(2)]);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &later);
+    assert!(!rows_file(&s).exists());
+    assert!(s.insights_counter.key_is_absent_for_test());
+}
+
+/// The fold is gated on the counter pass as well as the ledger feed: with
+/// the pass off and the feed on, the store and key still there, nothing is
+/// folded.
+#[test]
+fn no_fold_while_the_counter_pass_is_off_even_with_the_feed_on() {
+    let s = shared();
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.insights_counter_pass = true;
+        settings.insights_ledger_feed = true;
+    }
+    counted(&s);
+    let call_at = |id: i64| crate::routing::RoutedExchange {
+        id: Some(id),
+        started_at: Utc::now() - chrono::Duration::minutes(5),
+        client_session_id: Some(format!("SESSION-SECRET-{id}")),
+        facade: "anthropic".to_string(),
+        path: Some("/v1/messages".to_string()),
+        proof: Some(crate::routing::ProofStatus::Verified),
+        ..Default::default()
+    };
+    let first = crate::routing::FixedLedger::new(vec![call_at(1)]);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &first);
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
+    let before = std::fs::read(rows_file(&s)).unwrap();
+
+    s.settings.lock().unwrap().insights_counter_pass = false;
+    let second = crate::routing::FixedLedger::new(vec![call_at(1), call_at(2)]);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &second);
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
+    assert_eq!(std::fs::read(rows_file(&s)).unwrap(), before);
+
+    // And on again, the call made meanwhile is folded once.
+    s.settings.lock().unwrap().insights_counter_pass = true;
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &second);
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 2);
+}
+
+/// Owner decision D3: with the ledger feed turned off nothing reads the
+/// ledger for Insights, so with the counter pass on, its store and key
+/// there, the daemon's fold reads no ledger row and writes nothing.
+#[test]
+fn no_fold_while_the_ledger_feed_is_off_even_with_the_pass_on() {
+    let s = shared();
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.insights_counter_pass = true;
+        settings.insights_ledger_feed = false;
+    }
+    counted(&s);
+    let before = std::fs::read(rows_file(&s)).unwrap();
+    struct Unread;
+    impl crate::routing::RoutingLedger for Unread {
+        fn exchanges_since(&self, _: chrono::DateTime<Utc>) -> Vec<crate::routing::RoutedExchange> {
+            panic!("the ledger is not read while the feed is off");
+        }
+    }
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &Unread);
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 0);
+    assert_eq!(std::fs::read(rows_file(&s)).unwrap(), before);
+}
+
+/// Owner decision on #1287: unenroll also turns the counter pass off, in
+/// memory and on disk, so the next watcher tick does not rebuild the store
+/// it just cleared under a new key.
+#[tokio::test]
+async fn unenroll_turns_the_insights_counter_pass_off() {
+    let s = shared();
+    enroll_fixture(&s);
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.insights_counter_pass = true;
+        settings.save(&s.store).unwrap();
+    }
+    counted(&s);
+    assert!(call(&s).await.error.is_none());
+    assert!(!s.settings.lock().unwrap().insights_counter_pass);
+    let persisted = crate::daemon::settings::DaemonSettings::load(&s.store).unwrap();
+    assert!(!persisted.insights_counter_pass);
+    assert!(!rows_file(&s).exists());
+}

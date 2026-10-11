@@ -736,6 +736,11 @@ struct DaemonSettingsView: Decodable, Equatable {
     var privateInferenceAnswered: Bool { privateInferenceOfferSeen == true }
     /// What the listener is actually doing.
     var privateInferenceState: PrivateInferenceStateView? = nil
+    /// Whether Insights may read the proxy ledger's token counters
+    /// (`insights_ledger_feed`). On by default; Settings' Tools section is
+    /// the one place that turns it off. Absent from a daemon that predates
+    /// the key, which draws no switch rather than an "off" nobody set.
+    var insightsLedgerFeed: Bool? = nil
 
     /// The four source modes as the routing surface takes them. Absent
     /// means `unset`, which watches the conventional location and is
@@ -773,6 +778,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case privateInference = "private_inference"
         case privateInferenceOfferSeen = "private_inference_offer_seen"
         case privateInferenceState = "private_inference_state"
+        case insightsLedgerFeed = "insights_ledger_feed"
     }
 }
 

@@ -105,6 +105,19 @@ enum InsightsCommand {
     Repair,
     /// Summarize current saved session snapshots and separate user-reported assessments
     Summary,
+    /// Token counts for one local week from saved snapshots, by their own
+    /// recorded dates; nothing is compared with another week. Always JSON
+    Week {
+        /// Any date in the week; defaults to the current week
+        #[arg(long)]
+        week_start: Option<chrono::NaiveDate>,
+        /// UTC offset in seconds east; defaults to this machine's
+        #[arg(long, allow_hyphen_values = true)]
+        tz: Option<i32>,
+        /// Show what makes up one card's figure instead of the week
+        #[arg(long, value_parser = ["tokens", "cache_share", "sessions"])]
+        card: Option<String>,
+    },
     /// Show the measurements and evidence references for a saved insight
     Explain { id: String },
     /// Delete a saved insight and its source references; leave the original file intact
@@ -572,6 +585,37 @@ pub(super) fn run(args: &InsightsArgs, json: bool) -> Result<()> {
                     println!("  removed episode {id} because a member snapshot went with it");
                 }
             }
+        }
+        InsightsCommand::Week {
+            week_start,
+            tz,
+            card,
+        } => {
+            let tz = tz.unwrap_or_else(|| chrono::Local::now().offset().local_minus_utc());
+            let operation = match card {
+                Some(card) => LocalInsightsOperation::CardInputs {
+                    card: serde_json::from_value(serde_json::Value::String(card.clone()))?,
+                    week_start: *week_start,
+                    tz,
+                },
+                None => LocalInsightsOperation::WeekOverview {
+                    week_start: *week_start,
+                    tz,
+                },
+            };
+            let rendered = match execute(LocalInsightsRequest {
+                store_dir: args.store_dir.clone(),
+                operation,
+            })? {
+                LocalInsightsResponse::WeekOverview { overview } => {
+                    serde_json::to_string_pretty(&overview)?
+                }
+                LocalInsightsResponse::CardInputs { inputs } => {
+                    serde_json::to_string_pretty(&inputs)?
+                }
+                _ => anyhow::bail!("insights-week-response-invalid"),
+            };
+            println!("{rendered}");
         }
         InsightsCommand::Summary => {
             let summary = crate::insights::summary::read_saved(args.store_dir.as_deref())?;

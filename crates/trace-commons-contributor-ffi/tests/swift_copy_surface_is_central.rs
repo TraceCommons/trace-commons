@@ -360,6 +360,7 @@ fn placeholders() -> impl Iterator<Item = &'static &'static str> {
         .iter()
         .chain(trace_commons_contributor::preview_copy::MONITOR_PLACEHOLDERS)
         .chain(trace_commons_contributor::shell_words_copy::SHELL_WORDS_PLACEHOLDERS)
+        .chain(trace_commons_contributor::insights::analytics_copy::ANALYTICS_PLACEHOLDERS)
 }
 
 /// The core sentences no Swift literal may hold, by where they come from.
@@ -488,6 +489,15 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
                 .collect(),
         );
     }
+    // The Insights token analytics words (spec section 8, DRAFT): tabs,
+    // Overview, Patterns, Sessions, the glance, the weekly summary card.
+    add(
+        "insights::analytics_copy::ANALYTICS_COPY",
+        trace_commons_contributor::insights::analytics_copy::ANALYTICS_COPY
+            .iter()
+            .map(|(_, words)| holed((*words).to_owned()))
+            .collect(),
+    );
     // The menu-bar Contribution mode pill, its override confirmations and
     // their refusal lines (#1173).
     add(
@@ -1032,6 +1042,107 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCCoreCopy.automaticContributionCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_automatic_contribution_copy_json",
+    ),
+    // Insights: the tab container and the Analyze tab read the core's
+    // vocabulary; the Overview tab fills the core's analytics words with the
+    // core's figures (`InsightsOverviewWords`), read through the model's
+    // `tc_insights_call`.
+    (
+        "Insights tabs and the Analyze tab",
+        "TraceCommonsApp/Views/InsightsView.swift",
+        "TCInsights.copy()",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_copy_json",
+    ),
+    // The menu-bar glance fills the core's analytics words with the
+    // daemon's `insights_glance` figures.
+    (
+        "Insights glance card words",
+        "TraceCommonsApp/Views/Monitor/InsightsGlanceCard.swift",
+        "TCInsights.copy()",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_copy_json",
+    ),
+    // The Inference tab labels each call's ledger counters in the core's
+    // analytics words.
+    (
+        "Inference call token words",
+        "TraceCommonsApp/Views/Monitor/InferenceViews.swift",
+        "TCInsights.copy()",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_copy_json",
+    ),
+    // Settings' Tools section labels the ledger feed's off switch (on by
+    // default) and its feed line in the core's analytics words.
+    (
+        "Insights ledger feed switch words",
+        "TraceCommonsApp/Views/Settings/ToolsSection.swift",
+        "TCInsights.copy()",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_copy_json",
+    ),
+    (
+        "Insights week overview and drill-down reads",
+        "TraceCommonsApp/InsightsModel.swift",
+        "TCInsights.call(",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
+    (
+        "Insights Overview words",
+        "TraceCommonsApp/Views/InsightsOverviewTab.swift",
+        "InsightsOverviewWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
+    // Feed T's Sessions drill-down words where each counted session's calls
+    // went (`InsightsRouteWords`) with the daemon's route figures; the words
+    // are the core's analytics copy, read through the model's
+    // `tc_insights_call`.
+    (
+        "Insights session route words",
+        "TraceCommonsApp/Views/InsightsOverviewTab.swift",
+        "InsightsRouteWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
+    // The Patterns tab fills the core's analytics words with the core's
+    // pattern figures (`InsightsPatternsWords`), read through the model's
+    // `tc_insights_call`.
+    (
+        "Insights Patterns words",
+        "TraceCommonsApp/Views/InsightsPatternsTab.swift",
+        "InsightsPatternsWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
+    // The Sessions tab fills the core's analytics words with one saved
+    // session's figures (`InsightsSessionsWords`), read through the model's
+    // `tc_insights_call`.
+    (
+        "Insights Sessions words",
+        "TraceCommonsApp/Views/InsightsSessionsTab.swift",
+        "InsightsSessionsWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
+    // Feed T: the lever of the week and the weekly summary card on the
+    // Overview, and "Your goals" on Patterns, fill the core's words with the
+    // core's `comparisons` (`InsightsComparisonsWords`), read through the
+    // model's `tc_insights_call`.
+    (
+        "Insights lever and weekly summary words",
+        "TraceCommonsApp/Views/InsightsOverviewTab.swift",
+        "InsightsComparisonsWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
+    (
+        "Insights goals words",
+        "TraceCommonsApp/Views/InsightsPatternsTab.swift",
+        "InsightsComparisonsWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
     ),
 ];
 

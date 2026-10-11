@@ -84,3 +84,17 @@ their pending responses. Commit text is captured before opening the directory
 chooser. An external replacement of the original saved snapshot fails the link
 instead of applying it to the replacement. The display lifecycle regression
 covers report link/unlink, refresh, stale choosers, and external replacement.
+
+### Tabs
+
+The Insights page has tabs: **Overview**, **Patterns**, **Sessions** and
+**Analyze**, as on macOS; Analyze is the whole screen described above, and
+**Spend** sits beside the tabs, disabled, with its "Later" chip. Overview,
+Patterns and Sessions read `week_overview`/`card_inputs`, `patterns`/
+`pattern_sessions` and `session_drill` in process, over the saved snapshots
+only (feed S), and say so with the core's feed lines. Every word is the core's
+`ui_copy()` analytics table (DRAFT, pending approval); nothing is added to
+`copy.rs`. An unknown figure is the core's dash and an absent week or turn is
+a gap; bars are level bars. The code is `src/ui/insights_analytics.rs`. The
+indicator menu is a dbusmenu of text rows with no room for a glance card, so
+this shell gets the news mark and tip through the nudge slice G1 only.

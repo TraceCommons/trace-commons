@@ -8,19 +8,37 @@ struct InsightsView: View {
     @State private var model: InsightsModel
     @State private var comparisonModel: ComparisonTasksModel
     @State private var specificationModel: ComparisonSpecificationsModel
+    @State private var overviewModel: InsightsOverviewModel
+    @State private var patternsModel: InsightsPatternsModel
+    @State private var sessionsModel: InsightsSessionsModel
+    @State private var comparisonsModel: InsightsComparisonsModel
+    @State private var tab: InsightsTab
+    /// "Turn off" on the weekly summary card: the daemon's setting, its only
+    /// switch. `nil` without a daemon.
+    private let turnOffRecapCard: (@Sendable () async throws -> Void)?
     private let storeSelection: InsightsStoreSelection
     private let storeCopy: [String: String]
     @State private var choosingFile = false
     @State private var source = "codex"
 
+    /// `daemon` is the app's live client, for the week from the daemon's
+    /// counter pass (feed T); without one the window shows saved imports.
     @MainActor init(storeSelection: InsightsStoreSelection = .standard,
-                    storeCopy: [String: String]? = TCInsights.copy()) {
+                    storeCopy: [String: String]? = TCInsights.copy(),
+                    daemon: (any DaemonDataClient)? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
         let service: InsightsModel.Service = { request in try await router.call(request) }
+        let weekReader: InsightsModel.WeekReader? = daemon.map { client in
+            { isoWeek in try await client.insightsWeek(isoWeek: isoWeek) }
+        }
+        let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
+            { _ = try await client.setInsightsRecapCard(false) }
+        }
         self.init(storeSelection: storeSelection, storeCopy: storeCopy,
-                  model: InsightsModel(service: service),
+                  model: InsightsModel(service: service, weekReader: weekReader),
                   comparisonModel: ComparisonTasksModel(service: service),
-                  specificationModel: ComparisonSpecificationsModel(service: service))
+                  specificationModel: ComparisonSpecificationsModel(service: service),
+                  turnOffRecapCard: turnOff)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -30,12 +48,21 @@ struct InsightsView: View {
                     storeCopy: [String: String]?,
                     model: InsightsModel,
                     comparisonModel: ComparisonTasksModel,
-                    specificationModel: ComparisonSpecificationsModel) {
+                    specificationModel: ComparisonSpecificationsModel,
+                    overviewModel: InsightsOverviewModel? = nil,
+                    initialTab: InsightsTab = .overview,
+                    turnOffRecapCard: (@Sendable () async throws -> Void)? = nil) {
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
         _model = State(initialValue: model)
         _comparisonModel = State(initialValue: comparisonModel)
         _specificationModel = State(initialValue: specificationModel)
+        _overviewModel = State(initialValue: overviewModel ?? InsightsOverviewModel(service: model.service))
+        _patternsModel = State(initialValue: InsightsPatternsModel(service: model.service))
+        _sessionsModel = State(initialValue: InsightsSessionsModel(service: model.service))
+        _comparisonsModel = State(initialValue: InsightsComparisonsModel(service: model.service))
+        _tab = State(initialValue: initialTab)
+        self.turnOffRecapCard = turnOffRecapCard
     }
 
     /// The line naming a custom store, exactly as the view renders it; `nil`
@@ -55,10 +82,98 @@ struct InsightsView: View {
             .padding(24)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         } else {
-            content
+            tabs
         }
     }
 
+    /// The tab container. Spend is shown disabled with its Later chip.
+    /// The models open and close with the container, not with a tab.
+    private var tabs: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: GlassTokens.Space.s6) {
+                GlassSegmentedTabs(model.text("title"), selection: $tab, segments: [
+                    GlassSegment(model.text("analytics_tab_overview"), value: InsightsTab.overview),
+                    GlassSegment(model.text("analytics_tab_patterns"), value: InsightsTab.patterns),
+                    GlassSegment(model.text("analytics_tab_sessions"), value: InsightsTab.sessions),
+                    GlassSegment(model.text("analytics_tab_analyze"), value: InsightsTab.analyze),
+                ])
+                .frame(maxWidth: 480)
+                HStack(spacing: GlassTokens.Space.s3) {
+                    Text(model.text("analytics_tab_spend")).foregroundStyle(GlassColor.textTertiary)
+                    GlassChip(glass: model.text("analytics_later"), muted: true)
+                }
+                .accessibilityElement(children: .combine)
+                Spacer()
+            }
+            .padding(.horizontal, 24).padding(.top, 16)
+            switch tab {
+            case .overview:
+                InsightsOverviewTab(
+                    model: overviewModel, comparisons: comparisonsModel, copy: model.copy,
+                    snapshots: model.snapshots,
+                    notice: model.counterPassNoticeKey.map(model.text),
+                    selectWeek: selectWeek,
+                    openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
+                    turnOffRecap: turnOffRecapCard.map { turnOff in
+                        { Task { try? await turnOff(); await model.loadWeek() } }
+                    },
+                    showReads: { tab = .patterns })
+            case .patterns:
+                InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
+                                    selectWeek: selectWeek)
+            case .sessions:
+                InsightsSessionsTab(model: sessionsModel, snapshots: model.snapshots, copy: model.copy)
+            case .analyze: content
+            }
+        }
+        .onAppear { model.open() }
+        .onAppear { comparisonModel.open() }
+        .onAppear { specificationModel.open() }
+        .onAppear { overviewModel.open() }
+        .onAppear { patternsModel.open() }
+        .onAppear { sessionsModel.open(); sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id)) }
+        .onChange(of: comparisonTaskVersions) { _, _ in
+            specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)
+        }
+        .onChange(of: model.snapshots.map(\.id)) { _, _ in
+            updateSpecificationSources()
+            overviewModel.reload()
+            patternsModel.reload()
+            sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id))
+        }
+        .onChange(of: model.counterWeek) { _, week in showCounterWeek(week) }
+        .onChange(of: model.comparisonInvalidationGeneration) { _, _ in
+            comparisonModel.upstreamEvidenceChanged()
+            specificationModel.upstreamEvidenceChanged()
+        }
+        .onDisappear {
+            model.close(); comparisonModel.close(); specificationModel.close(); overviewModel.close()
+            patternsModel.close(); sessionsModel.close(); comparisonsModel.clear()
+        }
+    }
+
+    /// Put a week on screen in the feed showing: the daemon's for feed T,
+    /// the saved snapshots' for feed S. Never both.
+    private func selectWeek(_ weekStart: String) {
+        if model.weekFeed == .counterPass, let iso = InsightsOverviewWords.isoWeek(weekStart) {
+            Task { await model.loadWeek(isoWeek: iso) }
+        } else {
+            overviewModel.selectWeek(weekStart); patternsModel.selectWeek(weekStart)
+        }
+    }
+
+    /// Feed T's week replaces the saved week in both tabs, its counted
+    /// sessions back the Sessions card's drill-down, and its weekly figures
+    /// go to the core for goals, the lever and the summary card; `nil`
+    /// (feed S) takes all of it away.
+    private func showCounterWeek(_ week: DaemonData.InsightsWeek?) {
+        overviewModel.showCounter(week?.coreOverview, sessions: week.flatMap(InsightsCounterSessions.init(week:)))
+        patternsModel.showCounter(week?.corePatterns)
+        comparisonsModel.load(counterWeeks: week?.coreHistory, weekStart: week?.weekStart,
+                              recapCardEnabled: week?.recapCardEnabled ?? false)
+    }
+
+    /// The Analyze tab: the whole screen as it was before the tabs.
     private var content: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -164,18 +279,6 @@ struct InsightsView: View {
         .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.data]) { result in
             if case .success(let file) = result { model.analyze(file: file, source: source) }
         }
-        .onAppear { model.open() }
-        .onAppear { comparisonModel.open() }
-        .onAppear { specificationModel.open() }
-        .onChange(of: comparisonTaskVersions) { _, _ in
-            specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)
-        }
-        .onChange(of: model.snapshots.map(\.id)) { _, _ in updateSpecificationSources() }
-        .onChange(of: model.comparisonInvalidationGeneration) { _, _ in
-            comparisonModel.upstreamEvidenceChanged()
-            specificationModel.upstreamEvidenceChanged()
-        }
-        .onDisappear { model.close(); comparisonModel.close(); specificationModel.close() }
     }
     private func refusalMessage(_ refusal: InsightsStoreSelection.Refusal) -> String {
         switch refusal {
@@ -254,6 +357,9 @@ struct InsightDetail: View {
         }.textSelection(.enabled)
     }
 }
+
+/// The Insights window's tabs that have landed.
+enum InsightsTab: Hashable { case overview, patterns, sessions, analyze }
 
 /// The assessment choices, by their wire values; their words are the
 /// copy table's `category_` and `outcome_` entries.

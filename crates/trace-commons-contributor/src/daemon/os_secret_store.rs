@@ -30,8 +30,30 @@ pub(crate) struct OsSecretBackend {
     service: &'static str,
 }
 
+// The Insights digest key: one fixed entry per OS user, so every process that
+// reads the same Insights store derives the same keyed digests. The account is
+// a constant label, never a path, account name or identifier.
+const INSIGHTS_DIGEST_KEY_SERVICE: &str = "trace-commons.insights.digest-key";
+const INSIGHTS_DIGEST_KEY_ACCOUNT: &str = "insights-digest-key-v1";
+// The daemon's own key for the Insights counter pass (feed T). A separate
+// entry from the in-process store's key: the daemon's digests never leave
+// it, and clearing its store on unenroll forgets only this key.
+const INSIGHTS_COUNTER_KEY_ACCOUNT: &str = "insights-counter-key-v1";
+
 impl OsSecretBackend {
     pub(crate) fn new() -> Result<Self, CredentialError> {
+        Self::protected(SERVICE)
+    }
+
+    /// The store holding the Insights digest key (owner decision D16, open:
+    /// OS keychain custody). On macOS this is the same data-protection store
+    /// and access group as the Cloud credential, so an unentitled process
+    /// (the CLI, a test runner) is refused rather than prompted.
+    pub(crate) fn insights_digest_key() -> Result<Self, CredentialError> {
+        Self::protected(INSIGHTS_DIGEST_KEY_SERVICE)
+    }
+
+    fn protected(service: &'static str) -> Result<Self, CredentialError> {
         refuse_under_test_credential_store()?;
         #[cfg(target_os = "macos")]
         let store: Arc<NativeStore> = {
@@ -52,13 +74,11 @@ impl OsSecretBackend {
 
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
-            Ok(Self {
-                store,
-                service: SERVICE,
-            })
+            Ok(Self { store, service })
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
+            let _ = service;
             Err(CredentialError::Unavailable)
         }
     }
@@ -117,7 +137,61 @@ impl OsSecretBackend {
     }
 
     fn entry(&self, reference: &CredentialReference) -> Result<Entry, CredentialError> {
-        let storage_key = reference.storage_key()?;
+        self.entry_named(&reference.storage_key()?)
+    }
+
+    /// Read the Insights digest key entry. Only meaningful on the store from
+    /// [`OsSecretBackend::insights_digest_key`].
+    pub(crate) fn read_insights_digest_key(&self) -> Result<Vec<u8>, CredentialError> {
+        self.read_fixed(INSIGHTS_DIGEST_KEY_ACCOUNT)
+    }
+
+    pub(crate) fn write_insights_digest_key(&self, bytes: &[u8]) -> Result<(), CredentialError> {
+        self.write_fixed(INSIGHTS_DIGEST_KEY_ACCOUNT, bytes)
+    }
+
+    pub(crate) fn delete_insights_digest_key(&self) -> Result<(), CredentialError> {
+        self.delete_fixed(INSIGHTS_DIGEST_KEY_ACCOUNT)
+    }
+
+    /// Read the daemon's Insights counter key entry (owner decision D16,
+    /// open). Only meaningful on the store from
+    /// [`OsSecretBackend::insights_digest_key`].
+    pub(crate) fn read_insights_counter_key(&self) -> Result<Vec<u8>, CredentialError> {
+        self.read_fixed(INSIGHTS_COUNTER_KEY_ACCOUNT)
+    }
+
+    pub(crate) fn write_insights_counter_key(&self, bytes: &[u8]) -> Result<(), CredentialError> {
+        self.write_fixed(INSIGHTS_COUNTER_KEY_ACCOUNT, bytes)
+    }
+
+    pub(crate) fn delete_insights_counter_key(&self) -> Result<(), CredentialError> {
+        self.delete_fixed(INSIGHTS_COUNTER_KEY_ACCOUNT)
+    }
+
+    fn read_fixed(&self, account: &str) -> Result<Vec<u8>, CredentialError> {
+        let bytes = self
+            .entry_named(account)?
+            .get_secret()
+            .map_err(storage_error)?;
+        validate_bytes(&bytes)?;
+        Ok(bytes)
+    }
+
+    fn write_fixed(&self, account: &str, bytes: &[u8]) -> Result<(), CredentialError> {
+        validate_bytes(bytes)?;
+        self.entry_named(account)?
+            .set_secret(bytes)
+            .map_err(storage_error)
+    }
+
+    fn delete_fixed(&self, account: &str) -> Result<(), CredentialError> {
+        self.entry_named(account)?
+            .delete_credential()
+            .map_err(storage_error)
+    }
+
+    fn entry_named(&self, storage_key: &str) -> Result<Entry, CredentialError> {
         // The Windows provider otherwise defaults to Enterprise persistence,
         // which permits roaming this device credential to other machines.
         #[cfg(target_os = "windows")]
@@ -127,7 +201,7 @@ impl OsSecretBackend {
         #[cfg(not(target_os = "windows"))]
         let modifiers = None;
         self.store
-            .build(self.service, &storage_key, modifiers)
+            .build(self.service, storage_key, modifiers)
             .map_err(storage_error)
     }
 }

@@ -168,7 +168,7 @@ final class MonitorNavigationTests: XCTestCase {
 
     func test_theInferenceStoreDropsAReadTheOldClientAnswersAfterAttach() async {
         // Four of its five reads reach the daemon (harnesses, calls,
-        // destinations and the Private AI switch, a live `get_settings`
+        // destinations, and the Private AI switch, a live `get_settings`
         // read); the summary is provisional.
         let entered = expectation(description: "every read reached the old daemon")
         entered.expectedFulfillmentCount = 4

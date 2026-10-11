@@ -1,0 +1,191 @@
+{
+  "type": "patterns",
+  "patterns": {
+    "feed": "saved",
+    "generation": 4783315849904727193,
+    "week_start": "2026-09-14",
+    "week_end": "2026-09-20",
+    "tz": 0,
+    "coverage": {
+      "known": 1,
+      "partial": 1,
+      "unknown": 0,
+      "reasons": {
+        "some_turns_unknown": 1
+      }
+    },
+    "sessions": 2,
+    "claude_sessions": 1,
+    "claude_only": true,
+    "long_context_threshold": 200000,
+    "cards": [
+      {
+        "kind": "repeated_reads",
+        "tokens": 0,
+        "count": 0,
+        "files": 0,
+        "sessions": 0,
+        "basis": "estimate_from_result_size",
+        "inferred": false,
+        "weeks": [
+          {
+            "week_start": "2026-08-10",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-17",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-24",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-31",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-07",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-14",
+            "tokens": 0
+          }
+        ],
+        "change": null,
+        "change_unavailable": "needs_counter_pass"
+      },
+      {
+        "kind": "retried_calls",
+        "tokens": 0,
+        "count": 0,
+        "files": null,
+        "sessions": 0,
+        "basis": "estimate_from_result_size",
+        "inferred": false,
+        "weeks": [
+          {
+            "week_start": "2026-08-10",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-17",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-24",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-31",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-07",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-14",
+            "tokens": 0
+          }
+        ],
+        "change": null,
+        "change_unavailable": "needs_counter_pass"
+      },
+      {
+        "kind": "edit_fail_edit",
+        "tokens": 0,
+        "count": 0,
+        "files": null,
+        "sessions": 0,
+        "basis": "estimate_from_result_size",
+        "inferred": true,
+        "weeks": [
+          {
+            "week_start": "2026-08-10",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-17",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-24",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-31",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-07",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-14",
+            "tokens": 0
+          }
+        ],
+        "change": null,
+        "change_unavailable": "needs_counter_pass"
+      },
+      {
+        "kind": "long_context",
+        "tokens": null,
+        "count": 0,
+        "files": null,
+        "sessions": 0,
+        "basis": "from_counters",
+        "inferred": false,
+        "weeks": [
+          {
+            "week_start": "2026-08-10",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-17",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-24",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-31",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-07",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-14",
+            "tokens": null
+          }
+        ],
+        "change": null,
+        "change_unavailable": "needs_counter_pass"
+      }
+    ],
+    "reread_files": [
+      {
+        "letter": "A",
+        "ext": ".rs",
+        "reads": 4,
+        "after_shrink": 1,
+        "tokens": 5200
+      },
+      {
+        "letter": "B",
+        "ext": null,
+        "reads": 2,
+        "after_shrink": 0,
+        "tokens": null
+      }
+    ],
+    "weeks": [
+      "2026-09-14"
+    ]
+  }
+}

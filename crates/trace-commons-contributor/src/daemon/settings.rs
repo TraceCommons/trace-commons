@@ -633,6 +633,40 @@ pub struct DaemonSettings {
     #[serde(default)]
     pub scrub_check_defaulted_on_upgrade: bool,
 
+    /// Whether Insights may read the proxy ledger's token counters (feed L):
+    /// `insights_glance`, the `tokens` on `inference_calls`, and the
+    /// `usage_changed` event. Off, nothing reads the ledger for Insights.
+    /// Starts as `insights::analytics_constants::LEDGER_FEED_DEFAULT_ON`:
+    /// on (owner decision D3, settled 2026-10-09). A settings file without
+    /// the key loads it on; a saved `false` stays off.
+    #[serde(default = "default_insights_ledger_feed")]
+    pub insights_ledger_feed: bool,
+
+    /// The context, in tokens, the user chose for the context tip. **No
+    /// default**: unset until the user sets it, so the tip reports a counter
+    /// against the user's own limit and never one this daemon picked. The tip
+    /// itself is held by owner decision D2, open. Serialized as `null` when
+    /// unset, so a shell can tell "unset" from an older daemon.
+    #[serde(default)]
+    pub insights_context_threshold: Option<u32>,
+
+    /// Whether the watcher runs the Insights counter pass (feed T) over the
+    /// sessions it finds, after quiescence, and `insights_week` answers from
+    /// its store. Off, the pass never runs and nothing is read for Insights.
+    /// Starts as `insights::analytics_constants::COUNTER_PASS_DEFAULT_ON`,
+    /// owner decision D4, open.
+    #[serde(default = "default_insights_counter_pass")]
+    pub insights_counter_pass: bool,
+
+    /// Whether the Insights window shows the weekly summary card on the first
+    /// open after a week closes. The card's only on/off: there is no switch
+    /// for it in the Insights store. It needs feed T, so it shows nothing
+    /// while `insights_counter_pass` is off. Starts as
+    /// `insights::analytics_constants::RECAP_CARD_DEFAULT_ON`, owner
+    /// decisions D1 and D4, open.
+    #[serde(default = "default_insights_recap_card_enabled")]
+    pub insights_recap_card_enabled: bool,
+
     /// Nudge: whether the app may show in-app suggestions -- the cards on
     /// Traces and History and the menu-bar panel row (`status.nudge`).
     /// Defaults to [`DEFAULT_SUGGESTIONS_ENABLED`]; a settings file written
@@ -1200,6 +1234,23 @@ pub fn attested_bodies_dir_for(
     Some(token.parent()?.join(IRONWIRE_BODIES_SUBDIR))
 }
 
+fn default_insights_ledger_feed() -> bool {
+    crate::insights::analytics_constants::LEDGER_FEED_DEFAULT_ON
+}
+
+fn default_insights_counter_pass() -> bool {
+    crate::insights::analytics_constants::COUNTER_PASS_DEFAULT_ON
+}
+
+fn default_insights_recap_card_enabled() -> bool {
+    crate::insights::analytics_constants::RECAP_CARD_DEFAULT_ON
+}
+
+/// The smallest context threshold the tip accepts.
+pub const INSIGHTS_CONTEXT_THRESHOLD_MIN: u32 = 1_000;
+/// The largest context threshold the tip accepts.
+pub const INSIGHTS_CONTEXT_THRESHOLD_MAX: u32 = 10_000_000;
+
 fn default_suggestions_enabled() -> bool {
     DEFAULT_SUGGESTIONS_ENABLED
 }
@@ -1250,6 +1301,10 @@ impl Default for DaemonSettings {
             token_capture_enabled: None,
             private_inference: false,
             private_inference_offer_seen: false,
+            insights_ledger_feed: default_insights_ledger_feed(),
+            insights_context_threshold: None,
+            insights_counter_pass: default_insights_counter_pass(),
+            insights_recap_card_enabled: default_insights_recap_card_enabled(),
             scrub_check: ScrubCheck::Automatic,
             scrub_check_defaulted_on_upgrade: false,
             suggestions_enabled: DEFAULT_SUGGESTIONS_ENABLED,
@@ -1936,6 +1991,37 @@ pub fn apply_settings_object(
                     .as_str()
                     .and_then(ScrubCheck::parse)
                     .ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // Insights feed L (owner decision D3, settled 2026-10-09). On by
+            // default; this is how a contributor turns it off.
+            "insights_ledger_feed" => {
+                settings.insights_ledger_feed =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // Insights feed T (owner decision D4, open). Off by default.
+            "insights_counter_pass" => {
+                settings.insights_counter_pass =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // The weekly summary card's only switch (owner decisions D1
+            // and D4, open). On by default; it needs feed T to show anything.
+            "insights_recap_card_enabled" => {
+                settings.insights_recap_card_enabled =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // The context tip's threshold: a number in range, or `null` to
+            // unset it. There is no default to fall back to.
+            "insights_context_threshold" => {
+                settings.insights_context_threshold = match value {
+                    serde_json::Value::Null => None,
+                    _ => Some(parse_ranged_u64(
+                        value,
+                        SettingRange::new(
+                            u64::from(INSIGHTS_CONTEXT_THRESHOLD_MIN),
+                            u64::from(INSIGHTS_CONTEXT_THRESHOLD_MAX),
+                        ),
+                    )? as u32),
+                };
             }
             _ => return Err(ERR_SETTINGS_UNKNOWN_FIELD),
         }
@@ -3015,6 +3101,163 @@ mod tests {
             !s.private_inference,
             "recording that the offer was answered must never start anything"
         );
+    }
+
+    /// The Insights ledger feed (owner decision D3, settled 2026-10-09)
+    /// starts on, a settings file without the key (one written by any build
+    /// before this one) loads it on, an explicit `false` stays off, and it
+    /// takes a boolean only.
+    #[test]
+    fn the_insights_ledger_feed_starts_on_and_takes_a_boolean() {
+        assert!(DaemonSettings::default().insights_ledger_feed);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("insights_ledger_feed");
+        let settings: DaemonSettings = serde_json::from_value(v.clone()).expect("settings load");
+        assert!(settings.insights_ledger_feed, "absent reads as the default");
+        v.as_object_mut()
+            .unwrap()
+            .insert("insights_ledger_feed".into(), serde_json::json!(false));
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(!settings.insights_ledger_feed, "a saved off stays off");
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"insights_ledger_feed": false})),
+            Ok(true)
+        );
+        assert!(!s.insights_ledger_feed);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"insights_ledger_feed": "on"})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(!s.insights_ledger_feed);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"insights_ledger_feed": true})),
+            Ok(true)
+        );
+        assert!(s.insights_ledger_feed);
+    }
+
+    /// The Insights counter pass (feed T, owner decision D4, open) starts
+    /// off, an older settings file loads it off, and it takes a boolean only.
+    #[test]
+    fn the_insights_counter_pass_starts_off_and_takes_a_boolean() {
+        assert!(!DaemonSettings::default().insights_counter_pass);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(
+            v.get("insights_counter_pass"),
+            Some(&serde_json::json!(false))
+        );
+        v.as_object_mut().unwrap().remove("insights_counter_pass");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(!settings.insights_counter_pass);
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"insights_counter_pass": true})),
+            Ok(true)
+        );
+        assert!(s.insights_counter_pass);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"insights_counter_pass": 1})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(s.insights_counter_pass);
+    }
+
+    /// The weekly summary card starts as its constant says (owner decisions
+    /// D1 and D4, open), an older settings file loads it the same way, and it
+    /// takes a boolean only.
+    #[test]
+    fn the_insights_recap_card_follows_its_default_and_takes_a_boolean() {
+        use crate::insights::analytics_constants::RECAP_CARD_DEFAULT_ON;
+        assert_eq!(
+            DaemonSettings::default().insights_recap_card_enabled,
+            RECAP_CARD_DEFAULT_ON
+        );
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(
+            v.get("insights_recap_card_enabled"),
+            Some(&serde_json::json!(RECAP_CARD_DEFAULT_ON))
+        );
+        v.as_object_mut()
+            .unwrap()
+            .remove("insights_recap_card_enabled");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert_eq!(settings.insights_recap_card_enabled, RECAP_CARD_DEFAULT_ON);
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"insights_recap_card_enabled": false})
+            ),
+            Ok(true)
+        );
+        assert!(!s.insights_recap_card_enabled);
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"insights_recap_card_enabled": "on"})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(!s.insights_recap_card_enabled);
+    }
+
+    /// The context threshold has no default; it is a number in range or
+    /// `null`, and `get_settings` reports it either way.
+    #[test]
+    fn the_insights_context_threshold_has_no_default() {
+        let defaults = DaemonSettings::default();
+        assert_eq!(defaults.insights_context_threshold, None);
+        let v = serde_json::to_value(&defaults).unwrap();
+        assert_eq!(
+            v.get("insights_context_threshold"),
+            Some(&serde_json::Value::Null),
+            "unset is reported as null, not left out"
+        );
+        let mut older = v.clone();
+        older
+            .as_object_mut()
+            .unwrap()
+            .remove("insights_context_threshold");
+        let settings: DaemonSettings = serde_json::from_value(older).expect("settings load");
+        assert_eq!(settings.insights_context_threshold, None);
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"insights_context_threshold": 200_000})
+            ),
+            Ok(true)
+        );
+        assert_eq!(s.insights_context_threshold, Some(200_000));
+        for bad in [
+            serde_json::json!(0),
+            serde_json::json!(INSIGHTS_CONTEXT_THRESHOLD_MIN - 1),
+            serde_json::json!(u64::from(INSIGHTS_CONTEXT_THRESHOLD_MAX) + 1),
+            serde_json::json!("200000"),
+            serde_json::json!(-5),
+        ] {
+            assert_eq!(
+                apply_settings_object(
+                    &mut s,
+                    &serde_json::json!({"insights_context_threshold": bad})
+                ),
+                Err(ERR_SETTINGS_INVALID_VALUE)
+            );
+            assert_eq!(s.insights_context_threshold, Some(200_000));
+        }
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"insights_context_threshold": null})
+            ),
+            Ok(true)
+        );
+        assert_eq!(s.insights_context_threshold, None);
     }
 
     /// The marker is a boolean and nothing else, refused by the same label

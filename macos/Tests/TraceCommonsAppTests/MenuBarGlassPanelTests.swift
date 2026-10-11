@@ -279,6 +279,7 @@ final class MenuBarGlassPanelTests: XCTestCase {
         // No credit figure of any kind: no projected or pending credit.
         for forbidden in ["setProjectMode", "approve(", "applyPrivateInference(true)", "setPrivateAI(",
                           "setContributionOverride(", "clearContributionOverride(", ".disabled(true)",
+                          "setInsightsLedgerFeed(",
                           "creditPoints", "creditPending", "creditFinal", "creditRange", "commonsCreditSummary"] {
             XCTAssertFalse(source.contains(forbidden), "the popover contains \(forbidden)")
         }

@@ -35,6 +35,7 @@ final class LiveDaemonClientTests: XCTestCase {
              { _ = try await client.setDigestSchedule(.evening(hour: 18)) }),
             ("set_settings", #"{"digest_schedule":{"mode":"interval"}}"#,
              { _ = try await client.setDigestSchedule(.interval) }),
+            ("set_settings", #"{"insights_ledger_feed":true}"#, { _ = try await client.setInsightsLedgerFeed(true) }),
             ("list_history", #"{"limit":50}"#, { _ = try await client.listHistory(limit: 50) }),
             ("history_rollup", "{}", { _ = try await client.historyRollup() }),
             ("commons_credit_summary", "{}", { _ = try await client.commonsCreditSummary() }),
@@ -55,6 +56,20 @@ final class LiveDaemonClientTests: XCTestCase {
             XCTAssertEqual(sent.first?.method, method)
             XCTAssertEqual(sent.first?.params, params, method)
         }
+    }
+
+    /// `insights_glance` carries the caller's UTC offset as `tz`, the only
+    /// parameter the daemon reads (`insights_glance::parse_tz`). The offset
+    /// is an argument so this does not depend on the machine's time zone.
+    /// Its own test: the sample transport has no recorded glance to answer.
+    func testInsightsGlanceSendsItsOffset() async throws {
+        let transport = ScriptedTransport { method, _ in
+            method == "insights_glance" ? #"{"id":0,"result":{"enabled":false,"feed":"ledger"}}"# : nil
+        }
+        let glance = try await LiveDaemonClient(transport: transport).insightsGlance(tzSeconds: 3600)
+        XCTAssertFalse(glance.enabled)
+        XCTAssertEqual(transport.calls.map(\.method), ["insights_glance"])
+        XCTAssertEqual(transport.calls.map(\.params), [#"{"tz":3600}"#])
     }
 
     /// The nudge requests: the Traces filter and order, the card actions,

@@ -11,6 +11,10 @@
 //! `status.logged_in` is false and the daemon can be enrolled again, under
 //! any account, or left watching only.
 //!
+//! The Insights counter store (feed T) and its key go too, on every call,
+//! enrolled or not (owner decision D4, open). The in-process Insights store
+//! of files the contributor analyzed is not the daemon's and stays.
+//!
 //! What stays: receipts, history and the audit log (the local record of what
 //! this device did -- the audit log also records this call), settings, folder
 //! rules, the queue, the NEAR AI notice marker, and the remembered passkeys,
@@ -132,6 +136,9 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
         return Err((ERR_BUSY, ERR_UPLOAD_IN_FLIGHT));
     }
     if !holds_enrollment(&shared.store) {
+        // Every call, enrolled or not, so a call that removed the
+        // enrollment and then failed here is finished by the next one.
+        clear_insights_counter(shared)?;
         return Ok(Unenrolled {
             removed: false,
             approvals_returned: 0,
@@ -164,6 +171,7 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
         shared.store.remove_enrollment_files()
     })
     .map_err(|_| (ERR_UNAVAILABLE, ERR_UNENROLL_FAILED))?;
+    clear_insights_counter(shared)?;
     for id in &approved {
         queue.revoke_approval(*id, super::preview::REASON_INPUTS_CHANGED);
     }
@@ -205,6 +213,51 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
         removed: true,
         approvals_returned: approved.len(),
     })
+}
+
+/// Remove the Insights counter store (feed T) and forget its key: owner
+/// decision D4, open, clears it on unenroll. Under the pass lock the caller
+/// holds, so no watcher pass writes it again meanwhile.
+fn clear_insights_counter(shared: &DaemonShared) -> Result<(), (&'static str, &'static str)> {
+    // The setting goes off first, so the next watcher tick does not rebuild
+    // under a new key the store this clears.
+    turn_off_insights_counter_pass(shared);
+    shared
+        .insights_counter
+        .clear()
+        .map_err(|_| (ERR_UNAVAILABLE, ERR_UNENROLL_FAILED))
+}
+
+/// Off in memory always; on disk when the settings file can be read, since
+/// a file that cannot be read is not written over, as in `set_settings`. A
+/// setting that could not be persisted does not fail the unenroll: the
+/// removal matters more than the switch. Commit lock, then settings, in the
+/// order `set_settings` takes them.
+fn turn_off_insights_counter_pass(shared: &DaemonShared) {
+    let persisted = (|| -> anyhow::Result<()> {
+        let locks = super::nearai_credential::session::coordination(shared.store.dir())?;
+        let _commit = locks
+            .commit
+            .lock()
+            .map_err(|_| anyhow::anyhow!("settings commit lock"))?;
+        let mut settings = shared.settings.lock().expect("settings lock");
+        settings.insights_counter_pass = false;
+        let mut persisted = super::settings::DaemonSettings::load(&shared.store)?;
+        if persisted.insights_counter_pass {
+            persisted.insights_counter_pass = false;
+            persisted.save_locked(&shared.store)?;
+        }
+        Ok(())
+    })();
+    if persisted.is_err() {
+        shared
+            .settings
+            .lock()
+            .expect("settings lock")
+            .insights_counter_pass = false;
+        // A fixed label only.
+        tracing::warn!("insights counter pass could not be turned off on disk");
+    }
 }
 
 /// The socket entry point. Async-only: it waits on the pass lock, which a

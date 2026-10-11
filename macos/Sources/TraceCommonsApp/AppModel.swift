@@ -2096,6 +2096,45 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// A ledger-feed write is in flight; the switch takes no other.
+    @Published private(set) var insightsLedgerFeedBusy = false
+    /// The core's words for a ledger-feed write the daemon refused or did
+    /// not confirm (`MonitorScreensCopy.requestFailed`); cleared by the next
+    /// confirmed write.
+    @Published private(set) var insightsLedgerFeedRefusal: String?
+
+    /// Turns the Insights ledger feed on or off (`insights_ledger_feed`).
+    /// Nothing is applied optimistically: the switch reads
+    /// `daemonSettings`, and only a reply that echoes what was asked counts
+    /// as confirmed. A reply carrying another value is where the daemon
+    /// stands, kept and refused; a failed write reads the settings back and
+    /// never claims the asked value.
+    func setInsightsLedgerFeed(_ on: Bool) async {
+        guard !insightsLedgerFeedBusy else { return }
+        guard let client else {
+            insightsLedgerFeedRefusal = MonitorWords.table?.requestFailed
+            return
+        }
+        insightsLedgerFeedBusy = true
+        defer { insightsLedgerFeedBusy = false }
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.setSettings(["insights_ledger_feed": on]) }
+        }.value
+        switch result {
+        case .success(let settings) where settings.insightsLedgerFeed == on:
+            daemonSettings = settings
+            insightsLedgerFeedRefusal = nil
+        case .success(let settings):
+            if settings.insightsLedgerFeed != nil { daemonSettings = settings }
+            insightsLedgerFeedRefusal = MonitorWords.table?.requestFailed
+        case .failure:
+            if let confirmed = await Task.detached(operation: { try? client.settings() }).value {
+                daemonSettings = confirmed
+            }
+            insightsLedgerFeedRefusal = MonitorWords.table?.requestFailed
+        }
+    }
+
     @Published private(set) var tokenContributionBusy = false
     @Published private(set) var tokenContributionSaveFailed = false
 

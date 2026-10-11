@@ -200,6 +200,13 @@ public protocol DaemonDataClient: Sendable {
     func setScrubCheck(_ mode: DaemonData.ScrubCheckMode) async throws -> DaemonData.Settings
     /// `set_settings` with `local_notifications`.
     func setLocalNotifications(_ on: Bool) async throws -> DaemonData.Settings
+    /// `set_settings { insights_recap_card_enabled }`: the Insights weekly
+    /// summary card's only switch (its "Turn off").
+    func setInsightsRecapCard(_ on: Bool) async throws -> DaemonData.Settings
+    /// `set_settings { insights_ledger_feed }`: whether Insights may read
+    /// the proxy ledger for the glance and per-call tokens (owner decision D3, settled
+    /// 2026-10-09: on by default, this turns it off). Draw only the confirmed value from the reply.
+    func setInsightsLedgerFeed(_ on: Bool) async throws -> DaemonData.Settings
     /// `set_settings` with `digest_schedule`.
     func setDigestSchedule(_ schedule: DaemonData.DigestSchedule) async throws -> DaemonData.Settings
 
@@ -219,6 +226,21 @@ public protocol DaemonDataClient: Sendable {
     func toolDestinations() async throws -> DaemonData.ToolDestinations
     /// `inference_calls`. `limit` 1-200; `cursor` is the previous page's `nextCursor`.
     func inferenceCalls(limit: Int, cursor: String?) async throws -> DaemonData.InferenceCallPage
+
+    // MARK: Insights
+
+    /// `insights_week`: one local ISO week (`YYYY-Www`; `nil` is the current
+    /// week) from the daemon's counter pass, Insights feed T (owner decision
+    /// D4, open). Answers `enabled: false` while the setting is off; an older
+    /// daemon refuses it as `unknown_method`. Either way, and on any failed
+    /// read, the window shows the saved-imports feed instead, never both.
+    func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek
+    /// `insights_glance`: today's routed calls per tool from the proxy
+    /// ledger (on by default; owner decision D3, settled 2026-10-09). `tzSeconds` is the local UTC offset
+    /// (`TimeZone.current.secondsFromGMT()`). `enabled: false`, an older
+    /// daemon's `unknown_method` and any failed read all mean no glance,
+    /// never a zero and never a failed popover.
+    func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance
 
     // MARK: Network methods (C3, #1187)
 
@@ -328,6 +350,10 @@ public enum DaemonDataEvent: Equatable, Sendable {
     /// `inference_call_added`, so the map pulses per real call.
     // PROVISIONAL: event not on main yet; shape follows #1203's `call_added`.
     case inferenceCallAdded(DaemonData.InferenceCallAdded)
+    /// `usage_changed`: the ledger read added a call this tick, while the
+    /// Insights ledger feed is on. A pulse with no payload: re-read
+    /// `insights_glance`.
+    case usageChanged
     case unknown(String)
 }
 
@@ -376,6 +402,7 @@ public enum DaemonDataEventParser {
                 return .unknown(name)
             }
             return .inferenceCallAdded(call)
+        case "usage_changed": return .usageChanged
         default: return .unknown(name)
         }
     }

@@ -173,7 +173,7 @@ final class DaemonDataContractTests: XCTestCase {
     /// store can run, so `normalDay`'s recording is hand-written --
     /// `k2_sample_recorder.rs`'s `apply_hand_written_overrides`, marked
     /// `"_sample":"no live IronWire in a temp store"` and excluded from the
-    /// drift test -- shaped exactly like the real reply `calls_page` builds
+    /// drift test -- shaped exactly like the real reply `calls_page_with` builds
     /// (`daemon/inference_map.rs` and its own tests), not invented.
     func testOnlyVerifiedIsProof() async throws {
         let sampleCalls = try await SampleDaemonClient(.normalDay).inferenceCalls(limit: 50, cursor: nil).calls

@@ -1,0 +1,122 @@
+{
+  "type": "week_overview",
+  "overview": {
+    "feed": "saved",
+    "generation": 4783315849904727193,
+    "week_start": "2026-09-14",
+    "week_end": "2026-09-20",
+    "tz": 0,
+    "coverage": {
+      "known": 1,
+      "partial": 1,
+      "unknown": 0,
+      "reasons": {
+        "some_turns_unknown": 1
+      }
+    },
+    "undated_sessions": 0,
+    "sessions": 2,
+    "sources": [
+      {
+        "source": "claude_code",
+        "sessions": 1,
+        "tokens": 37235,
+        "cache_share": {
+          "numerator": 24500,
+          "denominator": 37115,
+          "permille": 660
+        },
+        "largest_session": {
+          "session_ref": "f2f7dee53b071ed4bc01ed45e065eccd8f494c23ca6fe06852b2036071258d01",
+          "tokens": 37235
+        },
+        "change": "needs_counter_pass",
+        "best_week": "needs_counter_pass"
+      },
+      {
+        "source": "codex",
+        "sessions": 1,
+        "tokens": 0,
+        "cache_share": null,
+        "largest_session": {
+          "session_ref": "7eaa545c58cb9081a266131b5d3b46b8e5c7c0b6f08f30b0f29dd622cbd66199",
+          "tokens": 0
+        },
+        "change": "needs_counter_pass",
+        "best_week": "needs_counter_pass"
+      }
+    ],
+    "by_day": [
+      {
+        "date": "2026-09-14",
+        "uncached": 15,
+        "cache_read": 24500,
+        "cache_write": 12600,
+        "output": 120
+      },
+      {
+        "date": "2026-09-15",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      },
+      {
+        "date": "2026-09-16",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      },
+      {
+        "date": "2026-09-17",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      },
+      {
+        "date": "2026-09-18",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      },
+      {
+        "date": "2026-09-19",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      },
+      {
+        "date": "2026-09-20",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      }
+    ],
+    "codex_interval_tokens": 0,
+    "by_model": [
+      {
+        "label": "claude-fixture-model",
+        "tokens": 37235
+      }
+    ],
+    "by_tool": [
+      {
+        "source": "claude_code",
+        "tokens": 37235
+      },
+      {
+        "source": "codex",
+        "tokens": 0
+      }
+    ],
+    "by_project": "not_available_for_analyzed_files",
+    "weeks": [
+      "2026-09-14"
+    ]
+  }
+}
