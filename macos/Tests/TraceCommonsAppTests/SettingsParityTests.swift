@@ -307,8 +307,11 @@ final class SettingsParityTests: XCTestCase {
                      "struct RouteDisclosureUnreadableGlassLine: View"] {
             XCTAssertEqual(source.components(separatedBy: name).count - 1, 1, "\(name) is not declared exactly once")
         }
-        XCTAssertTrue(source.contains("Button(copy.destination)"))
-        XCTAssertTrue(source.contains(".buttonStyle(GlassButtonStyle(.link))"))
+        // The whole card is the pointer, with a chevron and no Open button;
+        // VoiceOver hears the destination's own name as the hint.
+        XCTAssertTrue(source.contains("GlassEyebrowCard(copy.settingsTitle, action: openDestination, chevron: true)"))
+        XCTAssertTrue(source.contains(".accessibilityHint(copy.destination)"))
+        XCTAssertFalse(source.contains("Button(copy.destination)"))
         for arm in ["case .shown(let disclosure):", "case .loading:", "case .unreadable:"] {
             XCTAssertEqual(source.components(separatedBy: arm).count - 1, 1, "\(arm) is not drawn exactly once")
         }

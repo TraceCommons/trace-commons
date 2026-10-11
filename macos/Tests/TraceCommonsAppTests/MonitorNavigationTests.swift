@@ -614,7 +614,7 @@ final class MonitorNavigationTests: XCTestCase {
         let pointer = try Self.text("Views/Settings/PrivateAISection.swift")
         // Outside the Settings modal (which closes itself and opens the
         // Inference tab, `SettingsModalTests`), the pointer opens the Monitor.
-        XCTAssertTrue(pointer.contains("} else {\n                                OpenMonitor.request(.inference)\n"))
+        XCTAssertTrue(pointer.contains("} else {\n            OpenMonitor.request(.inference)\n"))
         // The Monitor consumes the destination on an always-present
         // container, initially too, per request rather than per value, and
         // lands Inference on its inspector.

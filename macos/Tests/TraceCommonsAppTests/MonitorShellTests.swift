@@ -304,7 +304,7 @@ final class MonitorShellTests: XCTestCase {
         for needle in ["Button(action: openTraces)", "HomeStatTile(label: MonitorWords.waiting,",
                        "HomeStatTile(label: MonitorWords.contributed,", "HomeStatTile(label: HomeFormat.creditPendingWord,",
                        // Ron's Missions card: his Drafts tag over the drafts.
-                       "GlassEyebrowCard(MonitorWords.missions, action: openMissionDrafts)",
+                       "GlassEyebrowCard(MonitorWords.missions, action: openMissionDrafts, chevron: true)",
                        "GlassTag(words.draftsTag, tone: .ask)", "Text(words.noMissionDrafts)",
                        "Text(words.sources(draft.source_count))"] {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")

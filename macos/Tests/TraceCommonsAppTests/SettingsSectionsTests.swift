@@ -124,7 +124,7 @@ final class SettingsSectionsTests: XCTestCase {
             .publicProfile: ("PublicProfileSection", "GlassEyebrowCard(PublicProfileCopy.heading)"),
             .watchedFolders: ("WatchedFoldersSection", "GlassEyebrowCard(copy.heading)"),
             .tools: ("ToolsSection", "GlassEyebrowCard(copy.toolsHeading)"),
-            .privateAI: ("PrivateAISection", "GlassEyebrowCard(copy.settingsTitle)"),
+            .privateAI: ("PrivateAISection", "GlassEyebrowCard(copy.settingsTitle, action: openDestination, chevron: true)"),
             .witness: ("WitnessSection", "GlassEyebrowCard(copy.heading)"),
             .projects: ("ProjectsSection", "GlassEyebrowCard(SettingsWords.projects)"),
             .changes: ("ChangesSection", "GlassEyebrowCard(SettingsLegacyWords.auditHeading)"),

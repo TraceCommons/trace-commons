@@ -18,26 +18,18 @@ struct PrivateAISection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             if let copy = model.privateInferenceCopy {
-                GlassEyebrowCard(copy.settingsTitle) {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                        Text(copy.settingsMoved)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        // The label is the destination's own, so the tab
-                        // and this pointer can never name it differently.
-                        // It lands on the Inference inspector, where the
-                        // switch is.
-                        Button(copy.destination) {
-                            if let onPointer {
-                                onPointer()
-                            } else {
-                                OpenMonitor.request(.inference)
-                            }
-                        }
-                        .buttonStyle(GlassButtonStyle(.link))
-                    }
+                // The whole card is the pointer, a chevron at its end, as
+                // Home's cards are (owner, 2026-10-10: no Open button). It
+                // lands on the Inference inspector, where the switch is; the
+                // hint is the destination's own name, so the tab and this
+                // pointer can never name it differently.
+                GlassEyebrowCard(copy.settingsTitle, action: openDestination, chevron: true) {
+                    Text(copy.settingsMoved)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                .accessibilityHint(copy.destination)
             }
             switch model.routeDisclosureState {
             case .shown(let disclosure):
@@ -57,6 +49,14 @@ struct PrivateAISection: View {
             }
         }
         .onAppear { model.refreshRouteDisclosure() }
+    }
+
+    private func openDestination() {
+        if let onPointer {
+            onPointer()
+        } else {
+            OpenMonitor.request(.inference)
+        }
     }
 }
 
