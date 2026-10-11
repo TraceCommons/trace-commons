@@ -714,7 +714,7 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                         case .awaiting, .open:
                             EmptyView()
                         }
-                        GlassSegmentedTabs(
+                        GlassRuleTabs(
                             MonitorWords.table?.shell.tabsLabel ?? "",
                             selection: Binding(
                                 get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
@@ -726,7 +726,8 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                                     dot: item == .inference ? inferenceDot : item == .traces ? tracesDot : nil,
                                     accessibilityValue: item == .inference
                                         ? inferenceDescription : item == .traces ? tracesDescription : nil)
-                            })
+                            },
+                            bleed: GlassRuleTabs<MonitorWindowView.Tab>.toPaneEdge)
                     }
                 }
                 .padding(.horizontal, MonitorWindowView.mainInset)
@@ -809,8 +810,7 @@ private struct MonitorMapPane: View {
         // glass on glass; R14).
         // #1146's map field and map edge, its view tabs 14pt in.
         GlassPane(padding: 0, isContent: true, edge: GlassTokens.Shadow.mapEdge) {
-            ZStack(alignment: .topTrailing) {
-                GlassMapField()
+            GlassMapStage(alignment: .topTrailing) {
                 map
                 GlassFloatingGroup {
                     GlassSegmentedTabs(MonitorWords.table?.shell.mapViewsLabel ?? "", selection: $mapTab, segments: segments, floating: true)

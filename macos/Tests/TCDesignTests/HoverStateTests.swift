@@ -112,7 +112,7 @@ final class HoverStateTests: XCTestCase {
     func test_hoverIsWiredWhereTheDesignAsksForIt() throws {
         let sources = Dictionary(uniqueKeysWithValues: try DesignSources.components())
         let navigation = try XCTUnwrap(sources["Navigation.swift"])
-        for name in ["struct GlassSegmentedTabs", "struct GlassBreadcrumb"] {
+        for name in ["struct GlassSegmentedTabs", "struct GlassRuleTabs", "struct GlassBreadcrumb"] {
             let body = try XCTUnwrap(navigation.range(of: name).map { String(navigation[$0.lowerBound...].prefix(5000)) })
             XCTAssertTrue(body.contains(".onHover"), "\(name) has no hover")
         }

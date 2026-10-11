@@ -119,26 +119,20 @@ private struct HomeOverview: View {
                 watching
                 stats
                 // Ron's Missions card: the local drafts, under his Drafts tag.
-                GlassEyebrowCard(MonitorWords.missions, action: openMissionDrafts) {
-                    HStack(spacing: GlassTokens.Space.s3) {
-                        if let words { GlassTag(words.draftsTag, tone: .ask).fixedSize() }
-                        HomeChevron()
-                    }
+                GlassEyebrowCard(MonitorWords.missions, action: openMissionDrafts, chevron: true) {
+                    if let words { GlassTag(words.draftsTag, tone: .ask).fixedSize() }
                 } content: {
                     drafts
                 }
-                GlassEyebrowCard(MonitorWords.history, action: openHistory) {
-                    HStack(spacing: GlassTokens.Space.s3) {
-                        // Ron's "X credit pending", under D6: only beside
-                        // the commons' statement of what it waits on.
-                        if let pending = HomeFormat.creditPendingAccessory(
-                            freshRollup?.creditPending, condition: HomeFormat.pendingCondition(freshCredit)) {
-                            Text(pending)
-                                .glassType(GlassTokens.TypeScale.caption)
-                                .foregroundStyle(GlassColor.textSecondary)
-                                .fixedSize()
-                        }
-                        HomeChevron()
+                GlassEyebrowCard(MonitorWords.history, action: openHistory, chevron: true) {
+                    // Ron's "X credit pending", under D6: only beside the
+                    // commons' statement of what it waits on.
+                    if let pending = HomeFormat.creditPendingAccessory(
+                        freshRollup?.creditPending, condition: HomeFormat.pendingCondition(freshCredit)) {
+                        Text(pending)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize()
                     }
                 } content: {
                     recent
@@ -160,9 +154,7 @@ private struct HomeOverview: View {
     /// A way into a screen #1146 has no place for: its heading and a
     /// chevron, and nothing else (the screen holds its own words).
     private func hostedCard(_ heading: String, action: @escaping () -> Void) -> some View {
-        GlassEyebrowCard(heading, action: action) {
-            HomeChevron()
-        } content: {
+        GlassEyebrowCard(heading, action: action, chevron: true) {
             EmptyView()
         }
     }
@@ -230,7 +222,7 @@ private struct HomeOverview: View {
                         }
                     }
                     Spacer(minLength: 0)
-                    HomeChevron()
+                    GlassChevron()
                 }
                 .foregroundStyle(GlassColor.textPrimary)
             }
@@ -343,16 +335,6 @@ private struct HomeOverview: View {
                 }
             }
         }
-    }
-}
-
-/// A Home card's chevron accessory.
-private struct HomeChevron: View {
-    var body: some View {
-        Image(systemName: "chevron.right")
-            .glassGlyph(10, weight: .semibold)
-            .foregroundStyle(GlassColor.textTertiary)
-            .accessibilityHidden(true)
     }
 }
 

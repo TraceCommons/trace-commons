@@ -300,40 +300,54 @@ public struct GlassEyebrowCard<Accessory: View, Content: View>: View {
     private let accessory: Accessory
     private let content: Content
     private let action: (() -> Void)?
+    private let chevron: Bool
 
+    /// `chevron` draws a chevron at the card's trailing edge, centred on the
+    /// whole card rather than on its heading (owner, 2026-10-10), for a card
+    /// that is a way into somewhere; `accessory` stays beside the heading.
     public init(
         _ eyebrow: String,
         title: String? = nil,
         action: (() -> Void)? = nil,
+        chevron: Bool = false,
         @ViewBuilder accessory: () -> Accessory = { EmptyView() },
         @ViewBuilder content: () -> Content
     ) {
         self.eyebrow = eyebrow
         self.title = title
         self.action = action
+        self.chevron = chevron
         self.accessory = accessory()
         self.content = content()
     }
 
     private var card: some View {
         GlassCard(interactive: action != nil) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                HStack(alignment: title == nil ? .center : .top, spacing: GlassTokens.Space.s6) {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                        Text(eyebrow).glassType(GlassTokens.TypeScale.eyebrow).foregroundStyle(GlassColor.textTertiary)
-                        if let title {
-                            Text(title)
-                                .glassType(GlassTokens.TypeScale.title)
-                                .foregroundStyle(GlassColor.textPrimary)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .accessibilityAddTraits(.isHeader)
-                        }
-                    }
-                    Spacer(minLength: GlassTokens.Space.s4)
-                    accessory
-                }
-                content
+            HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
+                stack
+                if chevron { GlassChevron() }
             }
+        }
+    }
+
+    /// The heading, its accessory, and the content under them.
+    private var stack: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            HStack(alignment: title == nil ? .center : .top, spacing: GlassTokens.Space.s6) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    Text(eyebrow).glassType(GlassTokens.TypeScale.eyebrow).foregroundStyle(GlassColor.textTertiary)
+                    if let title {
+                        Text(title)
+                            .glassType(GlassTokens.TypeScale.title)
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityAddTraits(.isHeader)
+                    }
+                }
+                Spacer(minLength: GlassTokens.Space.s4)
+                accessory
+            }
+            content
         }
     }
 
@@ -344,6 +358,19 @@ public struct GlassEyebrowCard<Accessory: View, Content: View>: View {
         } else {
             card
         }
+    }
+}
+
+/// The chevron on a card that is a way into somewhere. Decorative: the
+/// card says where it goes.
+public struct GlassChevron: View {
+    public init() {}
+
+    public var body: some View {
+        Image(systemName: "chevron.right")
+            .glassGlyph(10, weight: .semibold)
+            .foregroundStyle(GlassColor.textTertiary)
+            .accessibilityHidden(true)
     }
 }
 
