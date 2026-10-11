@@ -1791,6 +1791,15 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "pipeline_failed_run_submission_rejection",
         include_str!("../../../../migrations/V123__pipeline_failed_run_submission_rejection.sql"),
     ),
+    // V124 (spec 2026-10-10, pipeline default routing): the two cross-tenant
+    // reads default routing makes, tenant ids only, through SECURITY DEFINER
+    // functions owned by a NOLOGIN, NOBYPASSRLS guard (the V85 pattern), with
+    // EXECUTE granted to trace_ingest_runtime. V123 is #1346's.
+    (
+        124,
+        "pipeline_default_routing",
+        include_str!("../../../../migrations/V124__pipeline_default_routing.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus

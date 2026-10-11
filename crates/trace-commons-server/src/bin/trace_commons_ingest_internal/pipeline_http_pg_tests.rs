@@ -577,7 +577,9 @@ pub(super) async fn wait_for_pipeline_ready(client: &reqwest::Client, base: &str
             .expect("readiness request");
         if response.status() == reqwest::StatusCode::OK {
             let body: serde_json::Value = response.json().await.expect("readiness body");
-            if body == serde_json::json!({"status": "ready", "drain_tenant_count": 0}) {
+            // The worker's last-pass counters move with every pass; the
+            // readiness itself is the status and the drain count.
+            if body["status"] == "ready" && body["drain_tenant_count"] == 0 {
                 return;
             }
         }

@@ -1203,12 +1203,13 @@ fn observed_admission_decision(observed: &FixtureObservation) -> &'static str {
 /// The privacy state Admission acted on, from its decision and reason
 /// label: the minimal and compatibility Admission policies admit only a
 /// Low-risk receipt, quarantine a Medium one as `privacy_review_required`,
-/// and reject a High one as `privacy_risk_rejected`.
+/// and quarantine a High one as `privacy_risk_high_review_required` (owner
+/// decision PC-D27, 2026-10-11: held for a human, never rejected).
 fn observed_privacy_state(decision: &str, admission_reason: Option<&str>) -> &'static str {
     match (decision, admission_reason) {
         ("admit", _) => "low",
         (_, Some("privacy_review_required")) => "medium",
-        (_, Some("privacy_risk_rejected")) => "high",
+        (_, Some("privacy_risk_high_review_required")) => "high",
         _ => "unknown",
     }
 }
@@ -2879,10 +2880,10 @@ fn fixture_expectations_default_from_the_outcome_count() {
         }
     );
     assert_eq!(
-        fixture("privacy_risk_rejected").expectations(&credited),
+        fixture("privacy_high_risk_review_rejected").expectations(&credited),
         FixtureExpectations {
-            admission_decision: "reject".into(),
-            outcome_count: 1,
+            admission_decision: "quarantine".into(),
+            outcome_count: 2,
             consent_state: "allowed".into(),
             privacy_state: "high".into(),
             scoring_state: "missing".into(),
