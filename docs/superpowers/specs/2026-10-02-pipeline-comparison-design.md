@@ -35,7 +35,7 @@ The tool does not depend on PR 5. It depends on PR 4
 | D7 | Approach: one app, two tenants, full HTTP. |
 | D8 | Envelope: multi-event, built from the translator's session events. |
 | D9 | Sample: 10,000 traces, word filter 200 to 20,000. |
-| D10 | The two admission differences that the code already shows (section 8.3) get no rule now. The owner makes a ruling after the 100-trace run. Update of 2026-10-09: the owner ruled for row 3 (PC-D22, section 10.3). Update of 2026-10-11: the owner ruled for row 4 (PC-D27, section 10.3). |
+| D10 | The two admission differences that the code already shows (section 8.3) get no rule now. The owner makes a ruling after the 100-trace run. Update of 2026-10-09: the owner ruled for row 3 (PC-D22, section 10.3). Update of 2026-10-11: the owner ruled for row 4 that the pipeline holds the trace, as `main` does (PC-D27, section 8.3), so row 4 has no rule. |
 | D11 | The command has no `--bundle` option now. A later version compares two bundles (section 18). |
 
 ## 3. Current state
@@ -305,7 +305,7 @@ A receipt that one side refuses is a difference in the field
 | Low | accepted | admit |
 | Medium, the basis is the consent flag only | accepted | admit |
 | Medium, a different basis | accepted | quarantine |
-| High | quarantined | reject |
+| High | quarantined | quarantine (PC-D27) |
 
 No written ruling existed for the last two rows when the tool was built.
 The 100-trace run gave their counts on real traces. The owner then decides
@@ -316,19 +316,20 @@ medium risk has a cause other than the consent flag alone is intended. The
 tool permits this difference under the rule `medium_risk_privacy_review`
 (section 10.3).
 
-Ruling of 2026-10-11 (PC-D27) for row 4: the reject of a trace whose risk is
-High at the receipt is intended. The old path quarantines such a trace
+Ruling of 2026-10-11 (PC-D27) for row 4: a trace that is High at the receipt
+is held for review, not rejected. The old path quarantines such a trace
 (`status_for_risk` gives `Quarantined`) and a reviewer then decides. The
-pipeline rejects it at Admission (reason `privacy_risk_rejected`) and runs no
-Review. The source of the intent is the merged design
-`docs/superpowers/specs/2026-10-09-pipeline-async-privacy-rescrub-design.md`,
-which says twice: "A receipt-time High is still rejected by Admission." The
-full run of 2026-10-09 (10,000 traces) had one pair of row 4, at position
-8298. The tool permits this difference under the rule
-`high_risk_admission_reject` (section 10.3). With this rule, a trace whose
-risk is High at the receipt gets no reviewer in the pipeline, and on `main` a
-reviewer can approve it. Any other pair that does not meet the exact
-condition of a rule stays `unexplained`.
+Review-start privacy pass holds a High that it finds in the same way. The
+owner of the decision ruled that the pipeline holds a High trace at Admission
+too. The Admission policy changed in PR #1353: it gives the decision
+`Quarantine` with the reason `privacy_risk_high_review_required`. The pair is
+equal, so no rule exists for row 4. History: the full run of 2026-10-09
+(10,000 traces) failed on one pair of row 4, at position 8298. A rule
+`high_risk_admission_reject` permitted the difference from commit `fd78e934`.
+The ruling of 2026-10-11 replaced it, and the rule is removed. A pipeline that
+rejects a High trace again gives an `unexplained` pair in the field
+`admission`. Any other pair that does not meet the exact condition of a rule
+stays `unexplained`.
 
 The condition on the basis is "not exactly `["consent_content_flag"]`", so
 an empty basis also meets it. A declared risk has no basis label, and the
@@ -424,7 +425,6 @@ Permitted differences:
 | Rule | Field | Condition | Source |
 |---|---|---|---|
 | `medium_risk_privacy_review` | `admission` | The privacy risk is `medium` on the two records. The privacy basis is equal on the two records and is not exactly `consent_content_flag` (an empty basis meets this, section 8.3). The baseline admission is `admit` and the candidate admission is `quarantine`. | ruling PC-D22 (2026-10-09) |
-| `high_risk_admission_reject` | `admission` | The privacy risk is `high` on the two records. The privacy basis is equal on the two records (its content does not matter). The baseline admission is `quarantine` and the candidate admission is `reject`. | ruling PC-D27 (2026-10-11) |
 
 A rule permits no other field. If another compared field also differs,
 the pair is `unexplained` with that field only. `permitted_rules` lists the
@@ -500,7 +500,7 @@ Fields:
 - `excluded_rules` and `permitted_rules`: each rule with its `rule`,
   `source`, and `fields`. A report holds exactly the closed list of
   excluded rules (PC-D26) and exactly the closed list of permitted rules
-  (`medium_risk_privacy_review`, then `high_risk_admission_reject`).
+  (`medium_risk_privacy_review`).
 - `distribution` for each side: admission decisions, gate passes and
   failures, membership, and capped traces. The admission counts of a side
   add up to `compared_count`, each pair of gate counts adds up to `scored`,
@@ -538,9 +538,10 @@ a child command's output.
 - The fixtures also give one medium-risk trace and one high-risk trace. If
   session text cannot give these risks after the local redaction, the local
   pin declares the risk for those two sessions. Only a local pin accepts
-  that field. With PC-D22 and PC-D27 the two risk traces are two permitted
-  pairs: the risk pin passes with `permitted_total` 2, and `--self-test`
-  expects that result. Its negative proof is the scenario with the skewed
+  that field. With PC-D22 the medium trace is one permitted pair. With PC-D27
+  the high trace is held on the two sides and compares equal. The risk pin
+  passes with `permitted_total` 1, and `--self-test` expects that result and
+  the `quarantine` counts (1 on the baseline, 2 on the candidate). Its negative proof is the scenario with the skewed
   floor.
 - A trace above the chunk cap is too large for a fixture. A unit test
   covers it.
