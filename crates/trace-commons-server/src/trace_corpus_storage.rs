@@ -1034,7 +1034,16 @@ const ALLOWLISTED_STATUS_REASONS: &[&str] = &[
     // the contributor's receipt reports. It is NOT a claim that the trace is
     // clean, and nothing may read it as one.
     WITNESS_ADMITTED_STATUS_REASON,
+    // #1346: the submission's pipeline run ended `failed` before Review
+    // decided it, so the trace was never scored.
+    PIPELINE_PROCESSING_FAILED_STATUS_REASON,
 ];
+
+/// Status reason recorded when a pipeline run ended `failed` while its
+/// submission was still `received` (#1346): the same transaction moves the
+/// submission to `rejected` under this label. It says the trace was not
+/// processed, not that anything was found in it.
+pub const PIPELINE_PROCESSING_FAILED_STATUS_REASON: &str = "pipeline_processing_failed";
 
 /// Status reason recorded when an attested redaction witness admitted a
 /// submission in place of the server's queued PII-backstop re-check.

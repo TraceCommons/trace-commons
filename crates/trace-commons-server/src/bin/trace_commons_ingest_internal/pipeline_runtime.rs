@@ -1362,7 +1362,11 @@ pub(crate) async fn append_pipeline_credit_audit_events(
 /// `privacy_classification_failed`) are `lifecycle_status_change` events with
 /// the status `quarantined`; their ids derive from the run, with the labels
 /// `pipeline-privacy-pass-hold-audit` and
-/// `pipeline-privacy-classification-failed-audit`. The assessment event's id
+/// `pipeline-privacy-classification-failed-audit`. A run that ended `failed`
+/// before Review decided it, and moved its `received` submission to
+/// `rejected` (#1346), has one `lifecycle_status_change` event with the
+/// status `rejected` and the reason `pipeline_processing_failed`, its id
+/// derived with the label `pipeline-processing-failed-audit`. The assessment event's id
 /// is the assessment's, so the route's own append and this repair of a missed
 /// one are the same event; the automatic Review's event takes the id of the
 /// Review `phase_outcomes` row. Each event is read by id
@@ -1579,6 +1583,25 @@ async fn append_pipeline_review_audit_item(
             TraceCorpusStatus::Quarantined,
             trace_commons_server::versioned_pipeline_authority::PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
             "pipeline privacy classification audit event",
+        )
+        .await?;
+    }
+    if item.submission_rejected {
+        // #1346: the run failed before Review decided it, and its
+        // transaction moved the `received` submission to `rejected`.
+        append_pipeline_lifecycle_audit_event(
+            state,
+            db,
+            tenant_id,
+            item.submission_id,
+            deterministic_trace_uuid_for(
+                "pipeline-processing-failed-audit",
+                tenant_id,
+                item.run_id,
+            ),
+            TraceCorpusStatus::Rejected,
+            trace_commons_server::trace_corpus_storage::PIPELINE_PROCESSING_FAILED_STATUS_REASON,
+            "pipeline processing failure audit event",
         )
         .await?;
     }

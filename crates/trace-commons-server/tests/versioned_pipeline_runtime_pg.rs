@@ -5507,6 +5507,152 @@ async fn claim_refuses_a_run_that_already_failed_at_review() {
     );
 }
 
+/// What #1346's move leaves on a failed run's submission and run rows: the
+/// stored status, its reason, whether pending credit is zero, and whether
+/// the run records the move (`submission_rejected_at`) and carries the
+/// review audit marker. Read as the owner, so RLS and the runtime role's
+/// column grants do not shape what the test sees.
+async fn failed_run_submission_rows(
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> (String, Option<String>, bool, bool, bool) {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let row = tx
+        .query_one(
+            "SELECT s.status, s.last_status_reason,
+                    s.credit_points_pending IS NOT DISTINCT FROM 0,
+                    p.submission_rejected_at IS NOT NULL,
+                    p.review_audit_pending_at IS NOT NULL
+               FROM pipeline_runs p
+               JOIN trace_submissions s
+                 ON s.tenant_id = p.tenant_id AND s.submission_id = p.submission_id
+              WHERE p.tenant_id = $1 AND p.run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("read the failed run's submission");
+    let rows = (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4));
+    tx.commit()
+        .await
+        .expect("commit failed_run_submission_rows");
+    rows
+}
+
+/// #1346, the `mark_failed` call site: an admitted (`received`) run at
+/// Review whose bound bundle no longer validates fails through
+/// `process_claimed_run` -> `fail_run` -> `mark_failed`, never through
+/// `mark_retry` or the `claim_next` sweep. The same transaction moves its
+/// submission to `rejected` under `pipeline_processing_failed`, zeroes its
+/// pending credit, and records the move and the audit marker on the run.
+#[tokio::test]
+async fn a_run_failed_by_its_bundle_at_review_rejects_its_received_submission() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("failed-bundle-received-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    assert_eq!(created.admission_decision, "admit");
+    assert_eq!(created.state, PipelineRunState::Pending);
+    assert_eq!(created.next_phase, Some(Phase::Review));
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "received"
+    );
+
+    tamper_stored_bundle_package(&tenant, &created.bundle_id).await;
+    let failed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run fails on its tampered package");
+    assert_eq!(failed.state, PipelineRunState::Failed);
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some("bundle_package_invalid")
+    );
+    assert_eq!(
+        failed.attempt_count, 1,
+        "failed on its first claim, not by exhausting retries"
+    );
+
+    assert_eq!(
+        failed_run_submission_rows(&tenant, created.run_id).await,
+        (
+            "rejected".to_string(),
+            Some("pipeline_processing_failed".to_string()),
+            true,
+            true,
+            true,
+        ),
+        "status, reason, pending credit zero, move recorded, audit marker"
+    );
+}
+
+/// #1346 scope guard: an Admission-quarantined submission is stored
+/// `quarantined` at receipt, not `received`, so when its run fails through
+/// `mark_failed` the move leaves it as it is -- no status change, no
+/// `submission_rejected_at`, no audit marker. Whether such a row should
+/// move is open for the owner (PR #1351, decision 3); this pins what the
+/// code does today, so a change to it is a deliberate one.
+#[tokio::test]
+async fn a_run_failed_by_its_bundle_keeps_an_admission_quarantined_submission() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("failed-bundle-quarantined-{}", uuid::Uuid::new_v4());
+    let pending = quarantined_and_pending(&service, &tenant).await;
+    assert_eq!(
+        submission_status(&backend, &tenant, pending.submission_id).await,
+        "quarantined",
+        "Admission quarantine is stored `quarantined` at receipt"
+    );
+
+    tamper_stored_bundle_package(&tenant, &pending.bundle_id).await;
+    let failed = service
+        .process_run(&tenant, pending.run_id)
+        .await
+        .unwrap()
+        .expect("the run fails on its tampered package");
+    assert_eq!(failed.state, PipelineRunState::Failed);
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some("bundle_package_invalid")
+    );
+
+    let (status, reason, _, moved, marked) =
+        failed_run_submission_rows(&tenant, pending.run_id).await;
+    assert_eq!(status, "quarantined");
+    assert_ne!(reason.as_deref(), Some("pipeline_processing_failed"));
+    assert!(!moved, "no submission_rejected_at for an unmoved row");
+    assert!(!marked, "no review audit marker for an unmoved row");
+}
+
 /// Without an assessment-exists predicate, a reviewer could re-claim a run
 /// that already has one (Finding I1), and a second assessment attempt would
 /// then hit `pipeline_review_assessments`'s `UNIQUE (tenant_id, run_id)`

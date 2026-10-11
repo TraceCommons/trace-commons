@@ -43,10 +43,11 @@ use crate::trace_artifact_store::{
     EncryptedTraceArtifactReceipt, TraceArtifactKind, TraceArtifactStore,
 };
 use crate::trace_corpus_storage::{
-    TraceCorpusStatus, TraceCorpusStore, TraceCreditAccountSettlementLineItem,
-    TraceCreditEventType, TraceCreditSettlementBatchStatus, TraceCreditSettlementBatchWrite,
-    TraceCreditSettlementNearStatus, TraceObjectArtifactKind, TraceObjectRefWrite,
-    TraceSubmissionWrite, TraceWitnessProvenanceClass, safe_residual_risk_basis_labels,
+    PIPELINE_PROCESSING_FAILED_STATUS_REASON, TraceCorpusStatus, TraceCorpusStore,
+    TraceCreditAccountSettlementLineItem, TraceCreditEventType, TraceCreditSettlementBatchStatus,
+    TraceCreditSettlementBatchWrite, TraceCreditSettlementNearStatus, TraceObjectArtifactKind,
+    TraceObjectRefWrite, TraceSubmissionWrite, TraceWitnessProvenanceClass,
+    safe_residual_risk_basis_labels,
 };
 use crate::versioned_pipeline_activation::RoutingState;
 use crate::versioned_pipeline_authority::{
@@ -1506,6 +1507,10 @@ pub struct PipelineReviewAuditItem {
     pub privacy_pass_escalated: bool,
     /// The run ended `failed` under `privacy_classification_failed`.
     pub privacy_classification_failed: bool,
+    /// The run ended `failed` while its submission was `received`, and the
+    /// same transaction moved the submission to `rejected` under
+    /// `pipeline_processing_failed` (#1346, V123 `submission_rejected_at`).
+    pub submission_rejected: bool,
 }
 
 /// The result of `PipelineService::settle_internal_credit`: the Trace Credit
@@ -2384,7 +2389,9 @@ impl PgPipelineStore {
     /// `attempts_exhausted`. In the same transaction, every open
     /// leg of a swept Settle run is resolved without an adapter call
     /// (`resolve_open_settlement_legs_on_tx`) -- there is no worker to make
-    /// one.
+    /// one -- and the `received` submission of a swept run that Review never
+    /// decided moves to `rejected`
+    /// (`reject_received_submissions_of_failed_runs_on_tx`, #1346).
     pub async fn claim_next(
         &self,
         tenant_id: &str,
@@ -2423,6 +2430,11 @@ impl PgPipelineStore {
             .collect::<Vec<_>>();
         resolve_open_settlement_legs_on_tx(&tx, tenant_id, &swept_settle_runs).await?;
         invalidate_index_writes_of_failed_runs_on_tx(&tx, tenant_id, &swept_settle_runs).await?;
+        let swept_runs = swept
+            .iter()
+            .map(|row| row.get::<_, Uuid>("run_id"))
+            .collect::<Vec<_>>();
+        reject_received_submissions_of_failed_runs_on_tx(&tx, tenant_id, &swept_runs).await?;
         let lease_token = Uuid::new_v4();
         let review_milliseconds = lease_config.review().num_milliseconds();
         let score_milliseconds = lease_config.score().num_milliseconds();
@@ -4174,7 +4186,8 @@ impl PgPipelineStore {
                         p.privacy_pass_outcome IS NOT DISTINCT FROM 'escalated'
                             AS privacy_pass_escalated,
                         (p.state = 'failed' AND p.last_error_label IS NOT DISTINCT FROM $3)
-                            AS privacy_classification_failed
+                            AS privacy_classification_failed,
+                        p.submission_rejected_at IS NOT NULL AS submission_rejected
                    FROM pipeline_runs p
                    LEFT JOIN phase_outcomes o
                      ON o.tenant_id = p.tenant_id AND o.run_id = p.run_id
@@ -4242,6 +4255,7 @@ impl PgPipelineStore {
                     assessment,
                     privacy_pass_escalated: row.get("privacy_pass_escalated"),
                     privacy_classification_failed: row.get("privacy_classification_failed"),
+                    submission_rejected: row.get("submission_rejected"),
                 })
             })
             .collect()
@@ -6076,6 +6090,9 @@ impl PgPipelineStore {
     /// transaction (`resolve_open_settlement_legs_on_tx`). A worker calls
     /// this through `PipelineService::fail_run`, which reconciles the
     /// dispatched external legs first, so here they are already resolved.
+    /// A run whose submission is still `received` moves it to `rejected` in
+    /// the same transaction (`reject_received_submissions_of_failed_runs_on_tx`,
+    /// #1346).
     pub async fn mark_failed(
         &self,
         run: &PipelineRunRecord,
@@ -6101,6 +6118,8 @@ impl PgPipelineStore {
             invalidate_index_writes_of_failed_runs_on_tx(&tx, &run.tenant_id, &[run.run_id])
                 .await?;
         }
+        reject_received_submissions_of_failed_runs_on_tx(&tx, &run.tenant_id, &[run.run_id])
+            .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -6133,6 +6152,11 @@ impl PgPipelineStore {
     /// (`quarantined`, Q1). A worker that crashes mid-pass is not recorded
     /// here: the `claim_next` sweep fails such a run as
     /// `attempts_exhausted`, a crash rather than a classifier verdict.
+    ///
+    /// #1346: a retry that fails the run moves its still-`received`
+    /// submission to `rejected` in the same transaction
+    /// (`reject_received_submissions_of_failed_runs_on_tx`); one failed
+    /// under `privacy_classification_failed` keeps its submission as it is.
     pub async fn mark_retry(
         &self,
         run: &PipelineRunRecord,
@@ -6199,6 +6223,10 @@ impl PgPipelineStore {
         if updated.state == PipelineRunState::Failed && updated.next_phase == Some(Phase::Settle) {
             resolve_open_settlement_legs_on_tx(&tx, &run.tenant_id, &[run.run_id]).await?;
             invalidate_index_writes_of_failed_runs_on_tx(&tx, &run.tenant_id, &[run.run_id])
+                .await?;
+        }
+        if updated.state == PipelineRunState::Failed {
+            reject_received_submissions_of_failed_runs_on_tx(&tx, &run.tenant_id, &[run.run_id])
                 .await?;
         }
         tx.commit().await?;
@@ -7214,6 +7242,70 @@ async fn receipt_is_tombstoned(
         )
         .await?
         .get(0))
+}
+
+/// #1346: for each run of `run_ids` that this transaction ended `failed`
+/// while its submission is still `received` -- Review never decided it, so
+/// nothing else would ever tell the contributor -- moves the submission to
+/// `rejected`, with the status reason `pipeline_processing_failed` and no
+/// pending credit, records the move on the run (V123,
+/// `submission_rejected_at`) and sets the run's review audit marker, so the
+/// worker's review audit pass appends `main`'s `lifecycle_status_change`
+/// event for it. Runs in the caller's transaction, after the run UPDATE.
+///
+/// Only a live `received` row moves (`live_submission_sql!`): a submission
+/// that is revoked, purged, withdrawn or expired, or that is stored
+/// `accepted`, `rejected` or `quarantined`, is left as it is, and its run
+/// gets no marker. `quarantined` includes a submission Admission quarantined
+/// (stored `quarantined` at receipt, before Review ran) as well as one the
+/// Review-start privacy pass escalated; neither moves (PR #1351, owner
+/// decision 3). A run failed under `privacy_classification_failed`
+/// does not move either: its content was never classified, which owner
+/// decision Q1 reports as held content (`quarantined`), not as a processing
+/// failure. Idempotent.
+async fn reject_received_submissions_of_failed_runs_on_tx(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    run_ids: &[Uuid],
+) -> Result<u64, DatabaseError> {
+    if run_ids.is_empty() {
+        return Ok(0);
+    }
+    let marked = tx
+        .execute(
+            concat!(
+                "WITH failed AS MATERIALIZED (
+                    SELECT p.run_id, p.submission_id FROM pipeline_runs p
+                     WHERE p.tenant_id = $1 AND p.run_id = ANY($2)
+                       AND p.state = 'failed'
+                       AND p.last_error_label IS DISTINCT FROM $3
+                 ),
+                 moved AS (
+                    UPDATE trace_submissions s
+                       SET status = 'rejected', last_status_reason = $4,
+                           credit_points_pending = 0, updated_at = NOW()
+                      FROM failed f
+                     WHERE s.tenant_id = $1 AND s.submission_id = f.submission_id
+                       AND s.status = 'received' AND ",
+                live_submission_sql!(),
+                "
+                    RETURNING s.submission_id
+                 )
+                 UPDATE pipeline_runs r
+                    SET submission_rejected_at = clock_timestamp(),
+                        review_audit_pending_at = clock_timestamp()
+                   FROM failed f JOIN moved m ON m.submission_id = f.submission_id
+                  WHERE r.tenant_id = $1 AND r.run_id = f.run_id"
+            ),
+            &[
+                &tenant_id,
+                &run_ids,
+                &PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
+                &PIPELINE_PROCESSING_FAILED_STATUS_REASON,
+            ],
+        )
+        .await?;
+    Ok(marked)
 }
 
 /// Resolves every open leg of the
