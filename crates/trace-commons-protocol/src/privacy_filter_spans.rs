@@ -503,10 +503,13 @@ fn split_pack_spans(
 ///
 /// - A blank text returns `None` without a request, as `redact_text` does.
 /// - Identical texts are classified once and share the result.
-/// - A text whose token cost exceeds `max_tokens` is windowed on its own with
-///   [`chunk_token_ranges`], as before; it never shares a request.
+/// - A text whose token cost exceeds `max_tokens`, or whose JSON-escaped size
+///   exceeds `max_input_json_bytes`, is windowed on its own
+///   ([`window_ranges`]: [`chunk_token_ranges`] as before, cut further where
+///   a window's body would be too large); it never shares a request.
 /// - Smaller texts are packed whole, in order, separated by
-///   [`BATCH_ITEM_SEPARATOR`], into requests of at most `max_tokens`.
+///   [`BATCH_ITEM_SEPARATOR`], into requests of at most `max_tokens` tokens
+///   and `max_input_json_bytes` escaped input bytes.
 ///
 /// Spans come back in the packed request's CODEPOINT coordinates and are
 /// mapped to texts by offset ([`split_pack_spans`]). The redacted request is

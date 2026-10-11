@@ -203,9 +203,10 @@ impl PrivacyFilterAdapter for SelfHostedPrivacyFilterAdapter {
     /// budget -- which here bounds a request's DURATION, so a pack takes no
     /// longer than one window of a large field did. Blank texts are not
     /// sent, a text over `max_input_bytes` fails the call with the same
-    /// error `redact_text` returns (before any request), and a text over the
-    /// budget is windowed alone as `redact_text` windows it. Requests share
-    /// the field windows' concurrency limit.
+    /// error `redact_text` returns (after the texts before it), and a text
+    /// over the budget is windowed alone as `redact_text` windows it. No body
+    /// cap: the loopback shim has no request-size limit. Requests share the
+    /// field windows' concurrency limit.
     async fn redact_texts(
         &self,
         texts: &[&str],

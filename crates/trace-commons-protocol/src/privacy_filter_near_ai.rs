@@ -473,8 +473,11 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
     ///
     /// Each text keeps the limits `redact_text` applies to it: a blank text
     /// is not sent, a text over `max_input_bytes` fails the call with the
-    /// same error (checked before any request goes out), and a text over the
-    /// token budget is windowed alone exactly as `redact_text` windows it.
+    /// same error (after the texts before it, never sending those after it),
+    /// and a text over the token budget is windowed alone as `redact_text`
+    /// windows it. Packs and windows are also held under
+    /// [`MAX_CLASSIFY_REQUEST_BODY_BYTES`] of serialized body, which the
+    /// token budget alone does not guarantee.
     ///
     /// Requests stay sequential (`MAX_CONCURRENT_CLASSIFY_WINDOWS`), for the
     /// reasons given there. Packing is not the #463 batching that was
