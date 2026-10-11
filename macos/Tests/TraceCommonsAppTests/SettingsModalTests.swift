@@ -175,6 +175,6 @@ final class SettingsModalTests: XCTestCase {
         let content = try Self.text("Views/Settings/GlassSettingsContent.swift")
         XCTAssertTrue(content.contains("case .privateAI: PrivateAISection(onPointer: onPrivateAI)"))
         let section = try Self.text("Views/Settings/PrivateAISection.swift")
-        XCTAssertTrue(section.contains("if let onPointer {\n            onPointer()"))
+        XCTAssertTrue(section.contains("if let onPointer {\n                                onPointer()"))
     }
 }
