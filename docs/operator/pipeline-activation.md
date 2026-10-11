@@ -1389,6 +1389,76 @@ unauthenticated `GET /v1/pipeline/readiness`: with default routing the tenant
 count rises as each new signup is routed, and anyone who can reach the probe
 could watch it.
 
+A slow run holds the whole sequential worker: one 3-minute Review-start
+privacy pass delays every other run of every tenant by 3 minutes. Set
+`TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY` (below) to run several at once.
+
+## Worker concurrency
+
+| Variable | Values | Default |
+|---|---|---|
+| `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY` | 1 to 16 | 1 (unset or empty is 1) |
+
+Any other value (`0`, `17`, a word, a negative or fractional number) refuses
+the start with `pipeline_worker_concurrency_invalid`. The setting is per
+process: two replicas at 4 run up to 8 units of work between them.
+
+At 1 the worker is the sequential pass described above: one run at a time,
+tenants one after another.
+
+Above 1, the process runs up to that many units of pipeline work at once. A
+unit is one phase of one run (`process_one`), or one tenant's follow-up steps
+(invalidations, payouts, audits, sweeps). They share one pool of permits,
+handed out first come, first served:
+
+- Each routed or drained tenant has at most one drain in flight. A drain
+  claims that tenant's runs on several lanes at once, at most 32 runs per
+  drain, and gives its permit back after each run, so a tenant with a
+  backlog queues behind other tenants for its next run rather than holding
+  the pool.
+- There is no pass barrier. Every 200 ms the worker starts a drain for each
+  tenant that has none in flight, so a new upload of another tenant waits
+  for the next free permit, not for the slow run to finish.
+- Runs of one tenant are claimed with the same `FOR UPDATE SKIP LOCKED`
+  claim, leases and fences that two replicas use, so N lanes in one process
+  behave like N replicas for runs. Score keeps its per-tenant advisory lock:
+  two Scores of one tenant never run at once, and a lane that finds the lock
+  busy stops for that drain without charging the run. The process-wide limit
+  of 4 Score evaluations on the blocking pool still applies.
+- A tenant's follow-up steps run once per drain, after its runs, as in the
+  sequential pass.
+- Readiness keeps its meaning: not ready while the probe fails, or while a
+  tenant's last drain panicked (until a later drain of that tenant finishes).
+- At shutdown no new drain starts and each lane stops before its next claim;
+  the runs in flight get the shutdown grace period, as before, and are then
+  aborted.
+
+`GET /v1/admin/config-status` reports `pipeline_worker_concurrency`. Above
+1, `pipeline_worker_last_pass_duration_ms` is the longer of the worker's
+last 200 ms tick and the age of its oldest drain still in flight, so a
+stuck drain shows there.
+
+Choosing a value for a 4-vCPU host:
+
+- **The classifier is the binding limit.** Each Review in flight can hold
+  one privacy-pass classifier call, and those calls share one API key. The
+  hosted NEAR AI classifier has refused overlapping requests on one key
+  before: in an August 2026 measurement 2 concurrent requests passed, 4
+  concurrent requests all failed at once, and the failure briefly disturbed
+  serial traffic on the same key afterwards. A refused call is
+  `privacy_classification_failed`, a charged retry. Anything else on the
+  same key (the legacy PII backstop driver) adds to the overlap.
+- Score evaluations are already capped at 4 per process; the local embedder
+  and scorer share the host's 4 vCPUs with ingest's HTTP routes.
+- Each unit in flight holds a database connection while it writes, and a
+  long phase renews its lease on another. Keep `DATABASE_POOL_SIZE` at
+  least twice the concurrency plus a few for HTTP; a pool that is too small
+  makes work wait, it does not fail it.
+
+Start at 2, watch `privacy_classification_failed` and the classifier's
+error rate for a day, and go to 3 only if both stay flat. Do not go above 4
+on one key.
+
 ## Suspend a policy
 
 An operator suspends one policy of one bundle of the tenant, and resumes it

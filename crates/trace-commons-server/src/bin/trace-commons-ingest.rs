@@ -645,6 +645,11 @@ const TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS: &str =
 /// tenant being rolled back off `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`
 /// (Zaki review 1, item 7). The worker drains the union of the two lists.
 const TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS: &str = "TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS";
+/// How many units of pipeline work -- a run's phase, or a tenant's
+/// follow-up steps -- the worker runs at once: a whole number from 1 (the
+/// default: the sequential pass, one run at a time) to 16. Per process.
+/// Documented in `docs/operator/pipeline-activation.md`.
+const TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY: &str = "TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY";
 /// Fails ingest startup closed when no pipeline runtime was injected (or an
 /// injected one is not production-qualified) rather than booting without one.
 /// See `assemble_ingest_pipeline_runtime`.
@@ -1768,6 +1773,11 @@ struct AppState {
     /// The tenant count and the duration of the worker's last pass, reported
     /// by `GET /v1/pipeline/readiness`.
     pipeline_worker_pass_stats: Arc<pipeline_default_routing::PipelineWorkerPassStats>,
+    /// `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY`: how many units of
+    /// pipeline work the worker runs at once, 1 (the default, the sequential
+    /// pass) to `pipeline_runtime::PIPELINE_WORKER_MAX_CONCURRENCY`
+    /// (`pipeline_runtime::spawn_pipeline_worker`).
+    pipeline_worker_concurrency: usize,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -4022,6 +4032,7 @@ impl AppState {
         let pipeline_lease_config = parse_pipeline_lease_config_from_env()?;
         let pipeline_drain_tenant_ids =
             parse_trace_rollout_tenant_ids_from_env(TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS)?;
+        let pipeline_worker_concurrency = parse_pipeline_worker_concurrency_from_env()?;
         // Spec 2026-10-10: pipeline default routing. Off unless the mode is
         // `all`; a bad variable refuses the start with its label.
         let pipeline_default_routing_config =
@@ -4742,6 +4753,7 @@ impl AppState {
             pipeline_index_rebuilds: Arc::default(),
             pipeline_default_routing,
             pipeline_worker_pass_stats: Arc::default(),
+            pipeline_worker_concurrency,
             db_contributor_reads,
             db_reviewer_reads,
             db_reviewer_require_object_refs,
@@ -10097,6 +10109,17 @@ fn parse_pipeline_lease_config_from_env() -> anyhow::Result<PipelineLeaseConfig>
     PipelineLeaseConfig::new(review, score, settle)
 }
 
+/// `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY`
+/// (`pipeline_runtime::parse_pipeline_worker_concurrency`): a value that is
+/// not a whole number from 1 to 16, or is not valid UTF-8, refuses startup
+/// with `pipeline_worker_concurrency_invalid`.
+fn parse_pipeline_worker_concurrency_from_env() -> anyhow::Result<usize> {
+    let raw = optional_trimmed_env(TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY).map_err(|_| {
+        anyhow::anyhow!(pipeline_runtime::PIPELINE_WORKER_CONCURRENCY_INVALID_LABEL)
+    })?;
+    pipeline_runtime::parse_pipeline_worker_concurrency(raw.as_deref())
+}
+
 fn parse_pipeline_lease_seconds_env(
     var: &'static str,
     default: chrono::Duration,
@@ -13006,6 +13029,12 @@ struct TraceCommonsConfigStatusResponse {
     /// default routing the count rises as each new signup is routed.
     pipeline_worker_last_pass_tenant_count: u64,
     pipeline_worker_last_pass_duration_ms: u64,
+    /// `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY`: how many units of
+    /// pipeline work this process's worker runs at once (1 is the sequential
+    /// pass). Above 1 there is no pass barrier, and the duration above is
+    /// the longer of the worker's last tick and the age of its oldest tenant
+    /// drain still in flight.
+    pipeline_worker_concurrency: usize,
     signed_token_auth_enabled: bool,
     signed_token_key_count: usize,
     signed_token_eddsa_key_count: usize,
@@ -13296,6 +13325,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .pipeline_worker_pass_stats
             .duration_ms
             .load(std::sync::atomic::Ordering::Relaxed),
+        pipeline_worker_concurrency: state.pipeline_worker_concurrency,
         signed_token_auth_enabled: state.signed_token_verifier.is_some(),
         signed_token_key_count: signed_token_verifier
             .as_ref()
