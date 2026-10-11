@@ -245,7 +245,8 @@ fn tick_over(
 /// are missing or stale, within a per-poll budget. It is not tied to
 /// eligibility: a session already offered, uploaded, kept or declined still
 /// counts for the contributor's own Insights, which never leave this machine.
-/// A folder whose own rule is Never is the exception; see `insights_week`.
+/// A folder that is Never is the exception, by its own rule or a global
+/// Never override (owner decision D4); see `insights_week`.
 fn counter_pass(
     shared: &DaemonShared,
     now: DateTime<Utc>,
@@ -295,18 +296,11 @@ fn counter_pass(
             ));
         }
     }
-    let never_keys: Vec<String> = {
-        let policy = shared.policy.lock().expect("policy lock");
-        policy
-            .projects
-            .keys()
-            .filter(|key| policy.folder_mode(key) == ProjectMode::Ignore)
-            .cloned()
-            .collect()
-    };
-    // Asked only for a session about to be read. The folder's own rule, not
-    // the contribution override: Never there is about sending, and these
-    // rows never leave this machine.
+    let never_keys =
+        super::insights_week::never_folders(&shared.policy.lock().expect("policy lock"));
+    // Asked only for a session about to be read. The folder's resolved
+    // rule, the contribution override included (owner decision D4): a
+    // global Never leaves every folder out, as it does from sending.
     let mut project_of = |candidate: &super::insights_week::CounterCandidate| {
         let (source, session_ref, obs) = &origins[candidate.origin];
         let cwd = resolve_cwd(shared, *source, session_ref, obs);
@@ -315,7 +309,7 @@ fn counter_pass(
             .policy
             .lock()
             .expect("policy lock")
-            .folder_mode(&project_key)
+            .resolve(&project_key)
             == ProjectMode::Ignore;
         (project_key, never)
     };
@@ -2672,7 +2666,7 @@ mod tests {
                 None,
                 chrono::FixedOffset::east_opt(0).unwrap(),
                 later,
-                &[],
+                &crate::daemon::insights_week::NeverFolders::NONE,
                 crate::daemon::insights_week::WeekOptions::default(),
             )["sessions_stored"]
                 .clone()
@@ -2697,6 +2691,53 @@ mod tests {
         assert_eq!(stored(&f), 1);
     }
 
+    /// A global Never override leaves every folder out of the counter pass
+    /// (owner decision D4): one whose own rule is Ask, and one with no rule
+    /// at all. Their stored rows drop, and clearing the override reads them
+    /// again.
+    #[tokio::test]
+    async fn a_global_never_override_leaves_every_folder_out_of_the_counter_pass() {
+        let f = WatcherFixture::new();
+        f.write_session("ask", "11111111-1111-1111-1111-111111111111", 0);
+        f.write_session("unruled", "22222222-2222-2222-2222-222222222222", 0);
+        f.set_mode("ask", ProjectMode::NotifyOnly);
+        let later = Utc::now() + chrono::Duration::hours(2);
+        let stored = |f: &WatcherFixture| {
+            f.shared.insights_counter.week_value(
+                true,
+                None,
+                chrono::FixedOffset::east_opt(0).unwrap(),
+                later,
+                &crate::daemon::insights_week::NeverFolders::NONE,
+                crate::daemon::insights_week::WeekOptions::default(),
+            )["sessions_stored"]
+                .clone()
+        };
+        f.settle(later).await;
+        f.shared.settings.lock().unwrap().insights_counter_pass = true;
+        tick(&f.shared, later).await.unwrap();
+        assert_eq!(stored(&f), 2);
+
+        f.shared
+            .policy
+            .lock()
+            .unwrap()
+            .set_contribution_override(ProjectMode::Ignore, later, None)
+            .unwrap();
+        tick(&f.shared, later).await.unwrap();
+        assert_eq!(stored(&f), 0, "every folder is Never under the override");
+
+        assert!(
+            f.shared
+                .policy
+                .lock()
+                .unwrap()
+                .clear_contribution_override()
+        );
+        tick(&f.shared, later).await.unwrap();
+        assert_eq!(stored(&f), 2, "read again once the override is cleared");
+    }
+
     /// A session still being written is not read by the counter pass.
     #[tokio::test]
     async fn the_counter_pass_waits_for_quiescence() {
@@ -2709,7 +2750,7 @@ mod tests {
             None,
             chrono::FixedOffset::east_opt(0).unwrap(),
             Utc::now(),
-            &[],
+            &crate::daemon::insights_week::NeverFolders::NONE,
             crate::daemon::insights_week::WeekOptions::default(),
         );
         assert_eq!(value["sessions_stored"], 0);

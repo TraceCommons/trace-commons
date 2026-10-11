@@ -528,9 +528,13 @@ fn counted(s: &DaemonShared) {
     };
     let summary = s
         .insights_counter
-        .run_pass(&[candidate], &[], Utc::now(), 60, &mut |_| {
-            ("/proj".to_string(), false)
-        })
+        .run_pass(
+            &[candidate],
+            &crate::daemon::insights_week::NeverFolders::NONE,
+            Utc::now(),
+            60,
+            &mut |_| ("/proj".to_string(), false),
+        )
         .unwrap();
     assert_eq!(summary.read, 1);
     assert!(rows_file(s).exists());
@@ -547,7 +551,7 @@ fn stored(s: &DaemonShared) -> serde_json::Value {
         None,
         chrono::FixedOffset::east_opt(0).unwrap(),
         Utc::now(),
-        &[],
+        &crate::daemon::insights_week::NeverFolders::NONE,
         crate::daemon::insights_week::WeekOptions::default(),
     )["sessions_stored"]
         .clone()

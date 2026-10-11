@@ -12,9 +12,9 @@
 //! Claude Code and Codex sessions the watcher already finds and stores their
 //! counter rows: Claude per-turn rows with the extractor saved analysis uses
 //! (`insights::turn_series`), and Codex's first-to-last observed change only
-//! (owner decision D11, open). Sessions in a folder whose own rule is Never
-//! are not read, and rows already stored for one are dropped (owner decision
-//! D4, open). A Claude session's delegated transcripts are not read; a
+//! (owner decision D11, open). Sessions in a folder that is Never, by its
+//! own rule or a global Never override, are not read, and rows already
+//! stored for one are dropped (owner decision D4). A Claude session's delegated transcripts are not read; a
 //! session that has any is marked truncated, so it counts as partial
 //! coverage and never as complete.
 //!
@@ -370,13 +370,14 @@ impl CounterPass {
     }
 
     /// Run one pass. `project_of` resolves a candidate's project key and
-    /// whether its folder's own rule is Never; it is asked only for a
-    /// session about to be read. `never_project_keys` are every folder whose
-    /// rule is Never, so rows for sessions no longer on disk drop too.
+    /// whether its folder is Never, the contribution override included; it
+    /// is asked only for a session about to be read. `never_folders` are
+    /// every folder that is Never, so rows for sessions no longer on disk
+    /// drop too.
     pub(crate) fn run_pass(
         &self,
         candidates: &[CounterCandidate],
-        never_project_keys: &[String],
+        never_project_keys: &NeverFolders,
         now: DateTime<Utc>,
         quiescence_secs: u64,
         project_of: &mut dyn FnMut(&CounterCandidate) -> (String, bool),
@@ -410,7 +411,7 @@ impl CounterPass {
     fn pass_inner(
         &self,
         candidates: &[CounterCandidate],
-        never_project_keys: &[String],
+        never_project_keys: &NeverFolders,
         now: DateTime<Utc>,
         quiescence_secs: u64,
         project_of: &mut dyn FnMut(&CounterCandidate) -> (String, bool),
@@ -540,7 +541,7 @@ impl CounterPass {
         week: Option<NaiveDate>,
         tz: FixedOffset,
         now: DateTime<Utc>,
-        never_project_keys: &[String],
+        never_project_keys: &NeverFolders,
         options: WeekOptions,
     ) -> serde_json::Value {
         if !enabled {
@@ -922,14 +923,50 @@ fn source_format(source: AnalyticsSource) -> SourceFormat {
     }
 }
 
-fn never_digests(key: &DigestKey, never_project_keys: &[String]) -> BTreeSet<KeyedDigest> {
-    if !COUNTER_PASS_EXCLUDES_NEVER_FOLDERS {
-        return BTreeSet::new();
+/// The folders whose rule is Never, the contribution override included
+/// (owner decision D4): sessions in them are not read, and their rows are
+/// dropped and never shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NeverFolders {
+    /// A global Never override is in force: every folder, including ones
+    /// with no rule of their own, whose keys no list holds.
+    Every,
+    /// These folders, by project key.
+    These(Vec<String>),
+}
+
+impl NeverFolders {
+    /// No folder is Never.
+    pub(crate) const NONE: NeverFolders = NeverFolders::These(Vec::new());
+}
+
+/// [`NeverFolders`] under the counter key, as the rows store them.
+enum NeverDigests {
+    Every,
+    These(BTreeSet<KeyedDigest>),
+}
+
+impl NeverDigests {
+    fn contains(&self, project: &KeyedDigest) -> bool {
+        match self {
+            Self::Every => true,
+            Self::These(digests) => digests.contains(project),
+        }
     }
-    never_project_keys
-        .iter()
-        .map(|project_key| project_digest(key, project_key))
-        .collect()
+}
+
+fn never_digests(key: &DigestKey, never: &NeverFolders) -> NeverDigests {
+    if !COUNTER_PASS_EXCLUDES_NEVER_FOLDERS {
+        return NeverDigests::These(BTreeSet::new());
+    }
+    match never {
+        NeverFolders::Every => NeverDigests::Every,
+        NeverFolders::These(keys) => NeverDigests::These(
+            keys.iter()
+                .map(|project_key| project_digest(key, project_key))
+                .collect(),
+        ),
+    }
 }
 
 /// One session's counters, or unknown when they cannot be read. Never zero
@@ -1245,16 +1282,25 @@ fn rollup_value(
     value
 }
 
-/// Every folder whose own rule is Never.
+/// Every folder that is Never, the contribution override included (owner
+/// decision D4): under a global Never override, every folder.
 /// `None` when the folder rules cannot be read: the Never folders are then
 /// unknown, and an unknown is never read as "none".
-fn never_project_keys(shared: &DaemonShared) -> Option<Vec<String>> {
+pub(crate) fn never_project_keys(shared: &DaemonShared) -> Option<NeverFolders> {
     let policy = shared.policy.lock().ok()?;
-    Some(
+    Some(never_folders(&policy))
+}
+
+/// The Never folders under `policy`, by each folder's resolved rule.
+pub(crate) fn never_folders(policy: &super::policy::ProjectPolicy) -> NeverFolders {
+    if policy.holds_every_send() {
+        return NeverFolders::Every;
+    }
+    NeverFolders::These(
         policy
             .projects
             .keys()
-            .filter(|key| policy.folder_mode(key) == super::policy::ProjectMode::Ignore)
+            .filter(|key| policy.resolve(key) == super::policy::ProjectMode::Ignore)
             .cloned()
             .collect(),
     )
@@ -1314,7 +1360,7 @@ pub fn handle_week(shared: &DaemonShared, req: &Request) -> Response {
             }
         }
     } else {
-        Vec::new()
+        NeverFolders::NONE
     };
     Response::ok(
         req.id,
@@ -1454,8 +1500,14 @@ mod tests {
             never: &[String],
             options: WeekOptions,
         ) -> serde_json::Value {
-            self.pass
-                .week_value(true, week, utc(), now(), never, options)
+            self.pass.week_value(
+                true,
+                week,
+                utc(),
+                now(),
+                &NeverFolders::These(never.to_vec()),
+                options,
+            )
         }
 
         /// The week with the ledger feed on and a proxy ledger declared.
@@ -1482,7 +1534,8 @@ mod tests {
         never_keys: &[String],
         never: bool,
     ) -> PassSummary {
-        pass.run_pass(candidates, never_keys, now(), QUIET, &mut |_| {
+        let never_keys = NeverFolders::These(never_keys.to_vec());
+        pass.run_pass(candidates, &never_keys, now(), QUIET, &mut |_| {
             (PROJECT.to_string(), never)
         })
         .unwrap()
@@ -1603,6 +1656,68 @@ mod tests {
         let summary = run_with(&f.pass, &[], &never, false);
         assert_eq!(summary.dropped, 1);
         assert_eq!(f.week(&[])["sessions_stored"], 0);
+    }
+
+    /// Under a global Never override every folder is Never, including ones
+    /// with no rule of their own, whose keys no list holds: hidden from the
+    /// next read at once, and dropped by the next pass even when the
+    /// session is no longer on disk.
+    #[test]
+    fn every_folder_never_hides_and_drops_every_row() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        assert_eq!(f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]).read, 1);
+        let hidden = f.pass.week_value(
+            true,
+            Some(monday()),
+            utc(),
+            now(),
+            &NeverFolders::Every,
+            WeekOptions::default(),
+        );
+        assert_eq!(hidden["sessions_stored"], 0);
+        assert_eq!(hidden["rollup"]["coverage"]["known"], 0);
+
+        let summary = f
+            .pass
+            .run_pass(&[], &NeverFolders::Every, now(), QUIET, &mut |_| {
+                (PROJECT.to_string(), false)
+            })
+            .unwrap();
+        assert_eq!(summary.dropped, 1);
+        assert_eq!(f.week(&[])["sessions_stored"], 0);
+    }
+
+    /// The Never folders are those whose resolved rule is Never: a global
+    /// Never override makes it every folder, whatever its own rule.
+    #[test]
+    fn never_project_keys_follow_the_contribution_override() {
+        let (_dir, s) = shared();
+        let at = Utc::now();
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode("/p/ask", super::super::policy::ProjectMode::NotifyOnly, at)
+                .unwrap();
+            policy
+                .set_mode("/p/never", super::super::policy::ProjectMode::Ignore, at)
+                .unwrap();
+        }
+        assert_eq!(
+            never_project_keys(&s),
+            Some(NeverFolders::These(vec!["/p/never".to_string()]))
+        );
+        s.policy
+            .lock()
+            .unwrap()
+            .set_contribution_override(super::super::policy::ProjectMode::Ignore, at, None)
+            .unwrap();
+        assert_eq!(never_project_keys(&s), Some(NeverFolders::Every));
+        s.policy.lock().unwrap().clear_contribution_override();
+        assert_eq!(
+            never_project_keys(&s),
+            Some(NeverFolders::These(vec!["/p/never".to_string()]))
+        );
     }
 
     #[test]
@@ -1776,7 +1891,7 @@ mod tests {
         let later = now() + Duration::weeks(COUNTER_STORE_KEEP_WEEKS + 1);
         let summary = f
             .pass
-            .run_pass(&[], &[], later, QUIET, &mut |_| {
+            .run_pass(&[], &NeverFolders::NONE, later, QUIET, &mut |_| {
                 (PROJECT.to_string(), false)
             })
             .unwrap();
@@ -1903,7 +2018,7 @@ mod tests {
             Some(monday()),
             utc(),
             now(),
-            &[],
+            &NeverFolders::NONE,
             WeekOptions::default(),
         );
         assert_eq!(value["readable"], true, "a v1 store is readable");
@@ -2006,7 +2121,7 @@ mod tests {
             Some(monday()),
             utc(),
             now(),
-            &[],
+            &NeverFolders::NONE,
             WeekOptions::default(),
         );
         assert_eq!(value["reason"], "store_unreadable");
@@ -2024,7 +2139,7 @@ mod tests {
             Some(monday()),
             utc(),
             now(),
-            &[],
+            &NeverFolders::NONE,
             WeekOptions::default(),
         );
         assert_eq!(value["sessions_stored"], 0);
@@ -2038,7 +2153,7 @@ mod tests {
                 Some(monday()),
                 utc(),
                 now(),
-                &[],
+                &NeverFolders::NONE,
                 WeekOptions::default()
             )["sessions_stored"],
             1
@@ -2086,9 +2201,14 @@ mod tests {
     #[test]
     fn with_the_setting_off_nothing_is_read_or_created() {
         let f = Fixture::new();
-        let value = f
-            .pass
-            .week_value(false, None, utc(), now(), &[], WeekOptions::default());
+        let value = f.pass.week_value(
+            false,
+            None,
+            utc(),
+            now(),
+            &NeverFolders::NONE,
+            WeekOptions::default(),
+        );
         assert_eq!(
             value,
             serde_json::json!({"enabled": false, "feed": "counter_pass"})

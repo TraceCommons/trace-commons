@@ -4447,9 +4447,10 @@ session only once it has been quiet for `quiescence_secs`, only when its size
 or last write changed since its row was made, and at most 16 files and 64 MB
 per poll, newest first, so a first pass over a large corpus catches up across
 polls. It is not tied to whether a session was offered, sent, kept or
-declined. A session in a folder whose own rule is Never is not read, and rows
-already stored for one are dropped by the next pass and left out of every
-answer at once. Claude Code rows are per turn; Codex rows are the change
+declined. A session in a folder that is Never, by its own rule or a global
+Never contribution override (every folder while one is in force), is not
+read, and rows already stored for one are dropped by the next pass and left
+out of every answer at once. Claude Code rows are per turn; Codex rows are the change
 between the first and last counter only (owner decision D11, open). A Claude
 Code session with delegated transcripts is counted from its main file and
 marked `truncated` (partial coverage), never as complete. A file over 16 MB,
