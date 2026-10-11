@@ -24,7 +24,7 @@ struct InsightsOverviewTab: View {
     var selectWeek: (String) -> Void = { _ in }
     /// "Open recap": the window puts the closed week on screen.
     var openRecap: () -> Void = {}
-    /// "Turn off": the daemon's `insights_recap_card_enabled`.
+    /// "Hide": the daemon's `insights_recap_card_enabled`.
     var turnOffRecap: (() -> Void)?
     /// "Show the reads": the Patterns tab.
     var showReads: () -> Void = {}
@@ -122,9 +122,10 @@ struct InsightsOverviewTab: View {
             HStack(spacing: GlassTokens.Space.s4) {
                 Button(text("analytics_recap_open")) { openRecap() }
                     .buttonStyle(GlassButtonStyle(.primary, small: true))
+                // The decline is a link, after the action (Ron's #1287 review).
                 if let turnOffRecap {
                     Button(text("analytics_recap_turn_off")) { turnOffRecap() }
-                    .buttonStyle(GlassButtonStyle(.glass, small: true))
+                        .buttonStyle(GlassButtonStyle(.link))
                 }
             }
         }
@@ -144,10 +145,11 @@ struct InsightsOverviewTab: View {
                 HStack(spacing: GlassTokens.Space.s4) {
                     if pick.kind == "repeated_reads" {
                         Button(text("analytics_lever_show_reads")) { showReads() }
-                    .buttonStyle(GlassButtonStyle(.glass, small: true))
+                            .buttonStyle(GlassButtonStyle(.glass, small: true))
                     }
+                    // The decline is a link, after the action (Ron's #1287 review).
                     Button(text("analytics_lever_not_useful")) { comparisons.notUseful() }
-                    .buttonStyle(GlassButtonStyle(.glass, small: true))
+                        .buttonStyle(GlassButtonStyle(.link))
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

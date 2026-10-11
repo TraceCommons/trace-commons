@@ -51,6 +51,24 @@ final class InsightsGlassConventionsTests: XCTestCase {
         }
     }
 
+    /// Decline buttons are links, after the card's primary or glass button
+    /// (Ron's #1287 review: action first).
+    func test_declineButtonsAreLinksAfterTheAction() throws {
+        let source = try Self.text("Views/InsightsOverviewTab.swift")
+        let recap = try XCTUnwrap(source.range(of: #"Button(text("analytics_recap_open")) { openRecap() }"#))
+        let recapStyle = try XCTUnwrap(source.range(of: ".buttonStyle(GlassButtonStyle(.primary, small: true))",
+                                                    range: recap.upperBound ..< source.endIndex))
+        let hide = try XCTUnwrap(source.range(of: #"Button(text("analytics_recap_turn_off")) { turnOffRecap() }"#
+                                                + "\n                        .buttonStyle(GlassButtonStyle(.link))"))
+        XCTAssertLessThan(recapStyle.lowerBound, hide.lowerBound, "Hide comes after View week")
+
+        let reads = try XCTUnwrap(source.range(of: #"Button(text("analytics_lever_show_reads")) { showReads() }"#
+                                                 + "\n                            .buttonStyle(GlassButtonStyle(.glass, small: true))"))
+        let notUseful = try XCTUnwrap(source.range(of: #"Button(text("analytics_lever_not_useful")) { comparisons.notUseful() }"#
+                                                     + "\n                        .buttonStyle(GlassButtonStyle(.link))"))
+        XCTAssertLessThan(reads.lowerBound, notUseful.lowerBound, "Not useful comes after Show reads")
+    }
+
     func test_noLiteralWhiteOrBlackInk() throws {
         for file in Self.files {
             let source = try Self.text(file)
