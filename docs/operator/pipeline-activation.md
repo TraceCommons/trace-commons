@@ -1203,7 +1203,10 @@ From 24 hours before expiry, each pass logs
 - `pipeline_default_routing_expires_in_seconds`;
 - `pipeline_default_routing_last_pass`: `activated`, `refused`, `skipped`,
   `requalified`, and `duration_ms` of the last loop pass;
-- `pipeline_default_routing_routed_tenant_count`.
+- `pipeline_default_routing_routed_tenant_count`;
+- `pipeline_worker_last_pass_tenant_count` and
+  `pipeline_worker_last_pass_duration_ms`: the tenants the pipeline worker's
+  last pass drained, and how long it took (see Throughput below).
 
 It never shows a path, a tenant id, or a key id.
 
@@ -1263,9 +1266,20 @@ A tenant whose bundle check fails stays out of the cache, with a WARN
 `pipeline_default_routing_tenant_bundle_check_failed`, and its uploads are
 refused with `503 pipeline_tenant_not_served`.
 
-A tenant deactivated to `legacy` leaves the cache. Its runs still in flight
-are drained only if it is on `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`, as
-today.
+A tenant deactivated to `legacy` leaves the cache on the next refresh. Its
+new uploads take the legacy path. A retry of an upload the pipeline already
+took still replays its pipeline receipt, and its pipeline submissions stay in
+the contributor's status: with the mode configured, a process answers both
+from the run that owns the submission, whatever the routing row says now.
+
+The worker is different. A tenant that default routing routed was never on
+an env list, so once it leaves the cache the worker stops draining it: its
+runs still in flight wait until an operator adds it to
+`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` and restarts. This is not like a
+tenant an operator activated by hand, which stays on the receipts list after
+a deactivate (so the worker keeps draining it) until the operator moves it to
+the drain list. Before deactivating a default-routed tenant with runs in
+flight, add it to the drain list.
 
 ### After a deploy
 
@@ -1276,12 +1290,36 @@ answer `503 pipeline_bundle_not_qualified`.
 
 Re-arm by running the qualification and the promote cycle on the new
 revision (`pipeline.py qualify`, then `pipeline.py promote` up to
-`assemble`) and replacing the directory's contents in one step (write a sibling directory, then rename it
-over the old one). No restart is needed. On the next pass the process arms
-and re-qualifies, on the new revision, each tenant whose routing row default
-routing wrote (actor and reason code above) and whose active bundle is the
-armed bundle. Re-qualification does not change the routing row: a tenant
-stays as it is.
+`assemble`) and replacing the directory's contents. `promote assemble`
+refuses an existing output, so assemble into a sibling directory (same
+owner, mode 0700), then swap it in. A directory cannot be renamed over a
+non-empty one (`rename(2)` fails with `ENOTEMPTY`, and `mv new results`
+nests `new` inside `results`, where the loop never looks, since it reads
+only the top level). Either:
+
+- move the old set aside, then move the new one in:
+  `mv results results.prev && mv results.new results`. A pass that runs
+  between the two moves reports `pipeline_default_routing_results_missing`
+  and arms nothing, which fails closed; the next pass arms. Or
+- point `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_RESULTS_DIR` at a symlink
+  and replace the symlink in one step:
+  `ln -s results.<revision> results.tmp && mv -T results.tmp results`
+  (GNU `mv`). The loop follows the symlink.
+
+No restart is needed. Once the process arms, the loop re-qualifies, on the
+new revision, each tenant whose routing row default routing wrote (actor and
+reason code above) and whose active bundle is the armed bundle.
+Re-qualification does not change the routing row: a tenant stays as it is.
+
+It is not all at once. Each pass reads one page of
+`TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_BATCH` routed tenants (`pipeline`
+or `contained`, whoever routed them) and re-qualifies the ones on that page
+that default routing wrote; the next pass reads the next page. With N routed
+tenants in all, the last of them is re-qualified about `ceil(N / BATCH)`
+intervals after arming: with the defaults (`BATCH` 50, interval 60 s) and
+500 routed tenants, about 10 minutes. Until then, uploads of a tenant not
+yet reached answer `503 pipeline_bundle_not_qualified`; the upload path does
+not re-qualify. To shorten the window, raise the batch for the deploy.
 
 A tenant an operator activated by hand, or whose row an operator changed
 since (for example a `contain`), is not re-qualified by the loop. Qualify it
@@ -1325,8 +1363,12 @@ these numbers as an order of magnitude and measure on the host.
 
 Queue depth and age per tenant are in
 `GET /v1/admin/pipeline/operational-summary` (`work[].count` and
-`work[].oldest_age_seconds`). `GET /v1/pipeline/readiness` reports
-`worker_last_pass_tenant_count` and `worker_last_pass_duration_ms`.
+`work[].oldest_age_seconds`). `GET /v1/admin/config-status` reports
+`pipeline_worker_last_pass_tenant_count` and
+`pipeline_worker_last_pass_duration_ms`. They are not on the
+unauthenticated `GET /v1/pipeline/readiness`: with default routing the tenant
+count rises as each new signup is routed, and anyone who can reach the probe
+could watch it.
 
 ## Suspend a policy
 

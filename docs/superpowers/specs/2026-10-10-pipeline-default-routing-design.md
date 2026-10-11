@@ -229,15 +229,32 @@ Each pass, every `INTERVAL` seconds:
    fail-closed answer.
 
 The worker builds its tenant list on every pass: env receipts ∪ env drain ∪
-`RoutedTenantCache`. Legacy rows are not in the cache, so a tenant deactivated
-to legacy drains only through the env drain list, as today.
+`RoutedTenantCache`. Legacy rows are not in the cache, so a default-routed
+tenant deactivated to legacy drains only through the env drain list. That is
+not "as today": a tenant activated by hand stays on the env receipts list
+after a deactivate, so the worker keeps draining it until the operator moves
+it. A default-routed tenant was never on a list, so its runs in flight wait
+until an operator adds it to the drain list and restarts (review of #1352;
+open as an owner decision).
+
+The cache does not decide retries or the contributor's status. With the mode
+configured, a retry of a submission id a pipeline run owns replays the run's
+receipt on any process, cached or not, routed or deactivated
+(`pipeline_runtime_for_owned_retry`), and the status read includes the
+pipeline's view for every tenant. A retry on a process that has not cached a
+`pipeline` or `contained` tenant admits it first.
+
+The refresh updates the cache in place: each tenant that passes its check is
+added as it passes, and only a tenant cached before the read and absent from
+it is removed, so a tenant admitted while the refresh runs is kept.
 
 **Startup.** Tenants on the env lists keep today's refusing checks. Tenants
 routed in the database get no boot-time check. The first loop pass, which runs
 before the listener opens, fills the cache under the same 5 s deadline as
 `warn_pipeline_tenants_not_qualified_within` (`PIPELINE_START_CHECK_TIMEOUT`).
-Tenants it does not reach are added on later passes. One bad tenant never
-blocks the start.
+The tenants it checked before the deadline stay cached; tenants it does not
+reach are added on later passes, or by their first upload or retry. One bad
+tenant never blocks the start.
 
 ## Cross-tenant enumeration (V124)
 
@@ -285,8 +302,12 @@ open PRs). V124 has no dependency beyond V110.
 - Queue depth and age per tenant already exist:
   `PipelineOperationalSummary.work[].count` and `.oldest_age_seconds`
   (versioned_pipeline_product.rs:331-342), on `GET /v1/admin/pipeline/operational-summary`.
-  New: `GET /v1/pipeline/readiness` reports `worker_last_pass_tenant_count` and
-  `worker_last_pass_duration_ms`.
+  New: `GET /v1/admin/config-status` reports
+  `pipeline_worker_last_pass_tenant_count` and
+  `pipeline_worker_last_pass_duration_ms`. This spec first put them on
+  `GET /v1/pipeline/readiness`; review of #1352 moved them behind admin auth,
+  because the readiness probe is unauthenticated and, with default routing,
+  the tenant count rises as each new signup is routed.
 - The implementation PR reports a measurement: idle per-tenant drain ms and
   pass ms with 1, 100, and 500 routed tenants against local PostgreSQL. The
   operator docs state that number.
@@ -329,9 +350,12 @@ login that is a member of `trace_ingest_runtime`.
 - **Re-arm after a deploy:** the new binary starts `Disarmed` with
   `revision_mismatch`. New tenants then stay legacy, and routed tenants answer
   `503 pipeline_bundle_not_qualified` until re-armed. To re-arm, run a promote
-  cycle on the new revision and replace the directory's contents atomically
-  (write a sibling directory, then rename). No restart is needed. The next pass
-  arms and re-qualifies. Re-arm before the set expires, as well.
+  cycle on the new revision, write it to a sibling directory, and swap it in:
+  move the old directory aside and the new one in, or replace a symlink. A
+  rename over a non-empty directory fails (`ENOTEMPTY`). No restart is needed.
+  Once armed, the loop re-qualifies one page of BATCH routed tenants per pass,
+  so the last of N is reached about `ceil(N / BATCH)` intervals later. Re-arm
+  before the set expires, as well.
 - **Disarm:** remove the set and the next pass disarms. Or set the mode to
   `off` and restart. Tenants routed before stay on the pipeline. Disarming does
   not deactivate anyone.

@@ -403,9 +403,14 @@ the pipeline from their first upload. The details are in "Default routing" in
 starts unarmed with `pipeline_default_routing_revision_mismatch`. Until it is
 re-armed, new signups stay on the legacy path and routed tenants answer
 `503 pipeline_bundle_not_qualified`. Run the qualification and the promote
-cycle on the new revision, write the new set to a sibling directory, and
-rename it over the results directory. No restart: the next pass arms and
-re-qualifies the tenants default routing activated. A tenant activated by
+cycle on the new revision, write the new set to a sibling directory, then
+move the old directory aside and the new one in
+(`mv results results.prev && mv results.new results`), or swap a symlink;
+a plain rename over a non-empty directory fails, and `mv` nests it instead
+(pipeline-activation.md, "After a deploy"). No restart: once armed, the loop
+re-qualifies the tenants default routing activated, one page of
+`TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_BATCH` routed tenants per pass, so
+the last of N is reached about `ceil(N / BATCH)` intervals later. A tenant activated by
 hand needs its own `POST qualifications`, as before. From 24 hours before
 expiry each pass logs `pipeline_default_routing_results_expiring`.
 
@@ -421,6 +426,6 @@ tenants.
 
 **Throughput.** Each routed tenant adds its drain queries to every worker
 pass, and a pooled tenant advances at most 32 runs per pass. Watch
-`GET /v1/pipeline/readiness` (`worker_last_pass_tenant_count`,
-`worker_last_pass_duration_ms`) and the per-tenant queue age in the
+`GET /v1/admin/config-status` (`pipeline_worker_last_pass_tenant_count`,
+`pipeline_worker_last_pass_duration_ms`) and the per-tenant queue age in the
 operational summary.
