@@ -725,7 +725,7 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                                     accessibilityValue: item == .inference
                                         ? inferenceDescription : item == .traces ? tracesDescription : nil)
                             },
-                            bleed: GlassTokens.Space.panePadding)
+                            bleed: GlassRuleTabs<MonitorWindowView.Tab>.toPaneEdge)
                     }
                 }
                 .padding([.horizontal, .top], GlassTokens.Space.panePadding)

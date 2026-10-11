@@ -145,7 +145,8 @@ public struct GlassRuleTabs<Value: Hashable>: View {
     private let segments: [GlassSegment<Value>]
     @Binding private var selection: Value
     /// How far the rule runs past the tabs on each side, so it reaches the
-    /// pane's edges from inside its padding.
+    /// pane's edges from inside its padding. `toPaneEdge` outruns any pane
+    /// inset; the pane clips the rule, and the ember, at its own edge.
     private let bleed: CGFloat
     @State private var hovered: Value?
     @Namespace private var ember
@@ -157,6 +158,11 @@ public struct GlassRuleTabs<Value: Hashable>: View {
         self.segments = segments
         self.bleed = bleed
     }
+
+    /// A bleed past any pane inset, for tabs inside a pane that clips its
+    /// content (`glassTier`), so the rule meets the pane's edges whatever
+    /// the inset is.
+    public static var toPaneEdge: CGFloat { 48 }
 
     /// How far the ember line reaches past its tab, as a share of the
     /// tab's width, each side.
