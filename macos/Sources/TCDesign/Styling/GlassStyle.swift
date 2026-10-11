@@ -55,7 +55,9 @@ public enum GlassStatus: Sendable, Equatable {
         }
     }
 
-    public var textColor: Color { textRGBA.color }
+    /// Off is the adaptive textSecondary, so a Paused chip deepens under
+    /// Increase Contrast as a chip with no status does.
+    public var textColor: Color { self == .off ? GlassColor.textSecondary : textRGBA.color }
 }
 
 // MARK: - Type
