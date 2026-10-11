@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use futures::stream::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
-use crate::privacy_filter_spans::{ClassifySpan, apply_windowed_spans, chunk_token_ranges};
+use crate::privacy_filter_spans::{
+    ClassifySpan, WindowClassifier, apply_windowed_spans, chunk_token_ranges, redact_items_batched,
+};
 use crate::trace_contribution::{
     PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES, PrivacyFilterAdapter, PrivacyFilterConfigError,
     SafePrivacyFilterRedaction, TraceContributionError,
@@ -444,6 +446,79 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
 
         apply_windowed_spans("near-ai", text, &windows)
     }
+
+    /// Packs many texts into each request, up to the same token budget a
+    /// single field's windows use, instead of one round trip per text.
+    ///
+    /// Each text keeps the limits `redact_text` applies to it: a blank text
+    /// is not sent, a text over `max_input_bytes` fails the call with the
+    /// same error (checked before any request goes out), and a text over the
+    /// token budget is windowed alone exactly as `redact_text` windows it.
+    ///
+    /// Requests stay sequential (`MAX_CONCURRENT_CLASSIFY_WINDOWS`), for the
+    /// reasons given there. Packing is not the #463 batching that was
+    /// reverted: that sent several full-budget windows in one request and
+    /// summed past the endpoint's limit; a pack is held to one window's
+    /// budget.
+    ///
+    /// The window cache still applies per text: a text this adapter has
+    /// already classified is not sent again, and every text a packed request
+    /// classifies is remembered under the same key a single-window
+    /// `redact_text` of it would use.
+    async fn redact_texts(
+        &self,
+        texts: &[&str],
+    ) -> Result<Vec<Option<SafePrivacyFilterRedaction>>, TraceContributionError> {
+        for text in texts {
+            if !text.trim().is_empty() && text.len() > self.max_input_bytes {
+                return Err(TraceContributionError::RedactionFailed {
+                    reason: format!(
+                        "near-ai privacy classifier input exceeded limit: input_len={} max_input_bytes={}",
+                        text.len(),
+                        self.max_input_bytes
+                    ),
+                });
+            }
+        }
+        redact_items_batched(
+            "near-ai",
+            self,
+            texts,
+            self.max_input_tokens,
+            MAX_CONCURRENT_CLASSIFY_WINDOWS,
+        )
+        .await
+    }
+}
+
+/// The window cache's key: SHA-256 of the exact text classified.
+fn window_cache_key(text: &str) -> [u8; 32] {
+    <sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()).into()
+}
+
+#[async_trait]
+impl WindowClassifier for NearAiPrivacyFilterAdapter {
+    async fn classify_window(
+        &self,
+        window: &str,
+    ) -> Result<Vec<ClassifySpan>, TraceContributionError> {
+        NearAiPrivacyFilterAdapter::classify_window(self, window).await
+    }
+
+    /// A pack's text never recurs -- its members are looked up and
+    /// remembered individually -- so it skips the window cache rather than
+    /// counting a certain miss against the hit rate.
+    async fn classify_pack(&self, pack: &str) -> Result<Vec<ClassifySpan>, TraceContributionError> {
+        self.post_classify(pack).await
+    }
+
+    fn cached_item_spans(&self, item: &str) -> Option<Vec<ClassifySpan>> {
+        self.cached_window(&window_cache_key(item))
+    }
+
+    fn remember_item_spans(&self, item: &str, spans: &[ClassifySpan]) {
+        self.remember_window(window_cache_key(item), spans);
+    }
 }
 
 impl NearAiPrivacyFilterAdapter {
@@ -521,11 +596,19 @@ impl NearAiPrivacyFilterAdapter {
         // Memoize on the window's content hash. The lock is taken only around
         // the map access and released before any await, so it never spans a
         // network round trip.
-        let key: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()).into();
+        let key = window_cache_key(text);
         if let Some(hit) = self.cached_window(&key) {
             return Ok(hit);
         }
+        let spans = self.post_classify(text).await?;
+        self.remember_window(key, &spans);
+        Ok(spans)
+    }
 
+    /// POST one request to the classifier, uncached, and return its raw
+    /// spans in the request text's codepoint coordinates. Retries transient
+    /// failures; fail-closed on everything else.
+    async fn post_classify(&self, text: &str) -> Result<Vec<ClassifySpan>, TraceContributionError> {
         let endpoint = format!("{}/privacy/classify", self.base_url.trim_end_matches('/'));
         let request_body = ClassifyRequest {
             model: &self.model,
@@ -630,7 +713,6 @@ impl NearAiPrivacyFilterAdapter {
                     .ok_or(TraceContributionError::RedactionFailed {
                         reason: "near-ai privacy classifier returned empty data array".to_string(),
                     })?;
-            self.remember_window(key, &entry.spans);
             return Ok(entry.spans);
         }
     }

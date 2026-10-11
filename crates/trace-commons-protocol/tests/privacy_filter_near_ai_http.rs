@@ -660,3 +660,110 @@ async fn different_windows_get_their_own_classification() {
         "a distinct window must not inherit another window's spans"
     );
 }
+
+/// Responder that spans every occurrence of "Zoë" in the request input, at
+/// CODEPOINT offsets, as the endpoint reports them.
+fn name_spans_at_codepoints(req: &wiremock::Request) -> ResponseTemplate {
+    const NAME: &str = "Zoë";
+    let body: serde_json::Value = serde_json::from_slice(&req.body).expect("request body is JSON");
+    let input = body
+        .get("input")
+        .and_then(|v| v.as_str())
+        .expect("input must be a string");
+    let spans: Vec<serde_json::Value> = input
+        .match_indices(NAME)
+        .map(|(byte_start, _)| {
+            let start = input[..byte_start].chars().count();
+            json!({
+                "category": "private_person",
+                "start": start,
+                "end": start + NAME.chars().count(),
+                "score": 0.9,
+            })
+        })
+        .collect();
+    ResponseTemplate::new(200).set_body_json(json!({ "data": [{ "spans": spans }] }))
+}
+
+/// Many short texts go up in a handful of requests, not one each, and every
+/// span lands on the text it was found in -- including behind multibyte
+/// characters in earlier texts of the same request.
+#[tokio::test]
+async fn many_short_texts_are_packed_into_few_requests() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(name_spans_at_codepoints)
+        .mount(&server)
+        .await;
+
+    let adapter = adapter(server.uri());
+    let owned: Vec<String> = (0..500)
+        .map(|i| match i % 3 {
+            0 => format!("事件 {i} 😀: Zoë reviewed it"),
+            1 => format!("event {i}: nothing to report"),
+            _ => format!("event {i}: asked Zoë"),
+        })
+        .collect();
+    let texts: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let results = adapter.redact_texts(&texts).await.expect("call succeeds");
+
+    let requests = server.received_requests().await.expect("recording on");
+    assert!(
+        requests.len() <= 2,
+        "500 short texts took {} requests",
+        requests.len()
+    );
+    assert_eq!(results.len(), 500);
+    for (i, result) in results.iter().enumerate() {
+        let redacted = &result.as_ref().expect("non-blank text").redacted_text;
+        let expected = match i % 3 {
+            0 => format!("事件 {i} 😀: [REDACTED:private_person] reviewed it"),
+            1 => format!("event {i}: nothing to report"),
+            _ => format!("event {i}: asked [REDACTED:private_person]"),
+        };
+        assert_eq!(redacted, &expected, "text {i}");
+    }
+
+    // Every packed text was remembered under its own key, so asking again
+    // sends nothing.
+    let again = adapter.redact_texts(&texts).await.expect("call succeeds");
+    assert_eq!(again, results);
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .expect("recording on")
+            .len(),
+        requests.len(),
+        "texts classified in a pack are served from the window cache"
+    );
+}
+
+/// A text over `max_input_bytes` fails the whole call before anything is
+/// sent, with the error `redact_text` gives it.
+#[tokio::test]
+async fn an_oversized_text_fails_the_batch_before_any_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(name_spans_at_codepoints)
+        .expect(0)
+        .mount(&server)
+        .await;
+    let adapter = NearAiPrivacyFilterAdapter::new(
+        server.uri(),
+        "openai/privacy-filter",
+        "test-api-key-do-not-leak",
+        Duration::from_secs(5),
+        64,
+    )
+    .expect("adapter builds");
+    let big = "x".repeat(65);
+    let alone = adapter.redact_text(&big).await.unwrap_err();
+    let batched = adapter
+        .redact_texts(&["fine", &big, "also fine"])
+        .await
+        .unwrap_err();
+    assert_eq!(batched.to_string(), alone.to_string());
+}

@@ -26,7 +26,7 @@ pub(crate) fn is_transient_classifier_status(status: reqwest::StatusCode) -> boo
         || status == reqwest::StatusCode::REQUEST_TIMEOUT
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct ClassifySpan {
     pub(crate) category: String,
     pub(crate) start: usize,
@@ -309,6 +309,284 @@ pub(crate) fn apply_windowed_spans(
     apply_spans(backend, text, &all_spans)
 }
 
+/// What separates two texts packed into one classify request.
+///
+/// A blank line: the classifier is trained on prose, where a paragraph break
+/// ends an entity, so a name ending one text and a name starting the next are
+/// not read as one. Spans the classifier nevertheless reports across it are
+/// split at the text boundaries (see [`redact_items_batched`]); a span that
+/// lies wholly inside the separator touches no text and is dropped.
+pub(crate) const BATCH_ITEM_SEPARATOR: &str = "\n\n";
+
+/// One classify request's worth of transport for [`redact_items_batched`].
+#[async_trait::async_trait]
+pub(crate) trait WindowClassifier: Sync {
+    /// Classify one window of a text too large for a single request. This is
+    /// the path every window took before packing, so a backend's per-window
+    /// memo applies here unchanged.
+    async fn classify_window(
+        &self,
+        window: &str,
+    ) -> Result<Vec<ClassifySpan>, TraceContributionError>;
+
+    /// Classify a request built from several whole texts joined by
+    /// [`BATCH_ITEM_SEPARATOR`]. Defaults to [`Self::classify_window`]; a
+    /// backend whose memo is keyed per text overrides it to skip a lookup
+    /// that can only miss.
+    async fn classify_pack(&self, pack: &str) -> Result<Vec<ClassifySpan>, TraceContributionError> {
+        self.classify_window(pack).await
+    }
+
+    /// Spans previously recorded for exactly this text, in its own codepoint
+    /// coordinates. A hit means the text is not sent again.
+    fn cached_item_spans(&self, _item: &str) -> Option<Vec<ClassifySpan>> {
+        None
+    }
+
+    /// Record the spans a packed request produced for one of its texts.
+    fn remember_item_spans(&self, _item: &str, _spans: &[ClassifySpan]) {}
+}
+
+/// Token cost of `text` against the classifier's budget, with the same
+/// fallback [`chunk_token_ranges`] uses when no tokenizer is available.
+fn batch_token_cost(text: &str) -> usize {
+    classifier_token_count(text).unwrap_or_else(|| text.len().div_ceil(3))
+}
+
+enum BatchUnit {
+    /// Whole texts (indices into the unique-text table) joined by the
+    /// separator, with each member's codepoint range inside `text`.
+    Pack {
+        text: String,
+        members: Vec<(usize, std::ops::Range<usize>)>,
+    },
+    /// One window of a single text over the budget, chunked exactly as
+    /// `redact_text` chunks it.
+    Window {
+        unique: usize,
+        range: std::ops::Range<usize>,
+        codepoint_start: usize,
+    },
+}
+
+/// Clip `spans`, in a packed request's codepoint coordinates, to the texts
+/// `members` places in it, returning each member's spans in its own
+/// coordinates.
+///
+/// Spans are validated against the whole request first (the same rule as
+/// `apply_spans`), so a malformed response fails the request rather than
+/// being silently attributed. A positive-width span keeps, for every text it
+/// overlaps, exactly the overlapping part -- a span straddling a boundary
+/// redacts both sides -- and is dropped if it lies wholly in a separator. A
+/// zero-width span stays where it lies, inside (or at either edge of) one
+/// text.
+fn split_pack_spans(
+    backend: &'static str,
+    members: &[(usize, std::ops::Range<usize>)],
+    spans: &[ClassifySpan],
+) -> Result<Vec<Vec<ClassifySpan>>, TraceContributionError> {
+    let total = members.last().map(|(_, range)| range.end).unwrap_or(0);
+    let mut per_member: Vec<Vec<ClassifySpan>> = vec![Vec::new(); members.len()];
+    for span in spans {
+        if span.start > span.end || span.end > total {
+            return Err(TraceContributionError::RedactionFailed {
+                reason: format!("{backend} privacy classifier returned out-of-range span"),
+            });
+        }
+        // Members are ascending and disjoint: skip those ending before the
+        // span starts.
+        let first = members.partition_point(|(_, range)| range.end < span.start);
+        for (slot, (_, range)) in members.iter().enumerate().skip(first) {
+            if range.start > span.end {
+                break;
+            }
+            let start = span.start.max(range.start);
+            let end = span.end.min(range.end);
+            let attributable = if span.start == span.end {
+                range.start <= span.start && span.start <= range.end
+            } else {
+                start < end
+            };
+            if !attributable {
+                continue;
+            }
+            per_member[slot].push(ClassifySpan {
+                category: span.category.clone(),
+                start: start - range.start,
+                end: end - range.start,
+                score: span.score,
+            });
+            if span.start == span.end {
+                break;
+            }
+        }
+    }
+    Ok(per_member)
+}
+
+/// Redact `items` with as few classify requests as the budget allows.
+///
+/// Every non-blank text is classified -- none is skipped -- and each result is
+/// built by [`apply_spans`] / [`apply_windowed_spans`] over that text alone, so
+/// its redacted text, report and summary have exactly the shape a single-text
+/// `redact_text` call produces:
+///
+/// - A blank text returns `None` without a request, as `redact_text` does.
+/// - Identical texts are classified once and share the result.
+/// - A text whose token cost exceeds `max_tokens` is windowed on its own with
+///   [`chunk_token_ranges`], as before; it never shares a request.
+/// - Smaller texts are packed whole, in order, separated by
+///   [`BATCH_ITEM_SEPARATOR`], into requests of at most `max_tokens`.
+///
+/// Spans come back in the packed request's CODEPOINT coordinates and are
+/// mapped to texts by offset ([`split_pack_spans`]). The redacted request is
+/// never split back apart on the separator -- a redaction may consume it.
+///
+/// Requests run at most `max_concurrent_requests` at a time, in order; the
+/// first failing request's error is returned and no results are.
+pub(crate) async fn redact_items_batched(
+    backend: &'static str,
+    classifier: &dyn WindowClassifier,
+    items: &[&str],
+    max_tokens: usize,
+    max_concurrent_requests: usize,
+) -> Result<Vec<Option<SafePrivacyFilterRedaction>>, TraceContributionError> {
+    use futures::stream::{StreamExt, TryStreamExt};
+
+    let max_tokens = max_tokens.max(1);
+
+    // Unique non-blank texts, in first-appearance order.
+    let mut unique_index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut uniques: Vec<&str> = Vec::new();
+    let mut item_unique: Vec<Option<usize>> = Vec::with_capacity(items.len());
+    for item in items {
+        if item.trim().is_empty() {
+            item_unique.push(None);
+            continue;
+        }
+        let next = uniques.len();
+        let index = *unique_index.entry(item).or_insert_with(|| {
+            uniques.push(item);
+            next
+        });
+        item_unique.push(Some(index));
+    }
+
+    // Per unique text: spans for a packed (or cached) text, or windows for an
+    // oversized one.
+    let mut packed_spans: Vec<Option<Vec<ClassifySpan>>> = vec![None; uniques.len()];
+    let mut oversized: Vec<bool> = vec![false; uniques.len()];
+    let mut units: Vec<BatchUnit> = Vec::new();
+
+    let separator_cost = batch_token_cost(BATCH_ITEM_SEPARATOR);
+    let separator_codepoints = BATCH_ITEM_SEPARATOR.chars().count();
+    let mut open_text = String::new();
+    let mut open_members: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
+    let mut open_cost = 0usize;
+    let mut open_codepoints = 0usize;
+
+    for (unique, text) in uniques.iter().enumerate() {
+        let cost = batch_token_cost(text);
+        if cost > max_tokens {
+            oversized[unique] = true;
+            let mut codepoint_start = 0usize;
+            for range in chunk_token_ranges(text, max_tokens) {
+                let codepoints = text[range.clone()].chars().count();
+                units.push(BatchUnit::Window {
+                    unique,
+                    range,
+                    codepoint_start,
+                });
+                codepoint_start += codepoints;
+            }
+            continue;
+        }
+        if let Some(spans) = classifier.cached_item_spans(text) {
+            packed_spans[unique] = Some(spans);
+            continue;
+        }
+        if !open_members.is_empty() && open_cost + separator_cost + cost > max_tokens {
+            units.push(BatchUnit::Pack {
+                text: std::mem::take(&mut open_text),
+                members: std::mem::take(&mut open_members),
+            });
+            open_cost = 0;
+            open_codepoints = 0;
+        }
+        if !open_members.is_empty() {
+            open_text.push_str(BATCH_ITEM_SEPARATOR);
+            open_cost += separator_cost;
+            open_codepoints += separator_codepoints;
+        }
+        let codepoints = text.chars().count();
+        open_text.push_str(text);
+        open_members.push((unique, open_codepoints..open_codepoints + codepoints));
+        open_cost += cost;
+        open_codepoints += codepoints;
+    }
+    if !open_members.is_empty() {
+        units.push(BatchUnit::Pack {
+            text: open_text,
+            members: open_members,
+        });
+    }
+
+    // `buffered` preserves order, so responses line up with `units` and the
+    // first failing request's error is the one returned.
+    // Boxed up front: a lazily mapped stream of borrowing async blocks trips
+    // the compiler's higher-ranked `Send` inference inside `async_trait`.
+    let requests: Vec<
+        futures::future::BoxFuture<'_, Result<Vec<ClassifySpan>, TraceContributionError>>,
+    > = units
+        .iter()
+        .map(|unit| match unit {
+            BatchUnit::Pack { text, .. } => classifier.classify_pack(text),
+            BatchUnit::Window { unique, range, .. } => {
+                classifier.classify_window(&uniques[*unique][range.clone()])
+            }
+        })
+        .collect();
+    let responses: Vec<Vec<ClassifySpan>> = futures::stream::iter(requests)
+        .buffered(max_concurrent_requests.max(1))
+        .try_collect()
+        .await?;
+
+    let mut windows: Vec<Vec<(usize, Vec<ClassifySpan>)>> = vec![Vec::new(); uniques.len()];
+    for (unit, spans) in units.iter().zip(responses) {
+        match unit {
+            BatchUnit::Window {
+                unique,
+                codepoint_start,
+                ..
+            } => windows[*unique].push((*codepoint_start, spans)),
+            BatchUnit::Pack { members, .. } => {
+                let per_member = split_pack_spans(backend, members, &spans)?;
+                for ((unique, _), member_spans) in members.iter().zip(per_member) {
+                    classifier.remember_item_spans(uniques[*unique], &member_spans);
+                    packed_spans[*unique] = Some(member_spans);
+                }
+            }
+        }
+    }
+
+    let mut unique_results: Vec<Option<SafePrivacyFilterRedaction>> =
+        Vec::with_capacity(uniques.len());
+    for (unique, text) in uniques.iter().enumerate() {
+        let result = if oversized[unique] {
+            apply_windowed_spans(backend, text, &windows[unique])?
+        } else {
+            let spans = packed_spans[unique].take().unwrap_or_default();
+            apply_spans(backend, text, &spans)?
+        };
+        unique_results.push(result);
+    }
+
+    Ok(item_unique
+        .into_iter()
+        .map(|unique| unique.and_then(|unique| unique_results[unique].clone()))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +599,36 @@ mod tests {
             score,
         }
     }
+    #[test]
+    fn pack_spans_are_clipped_to_each_text_and_never_cross_a_boundary() {
+        // "abc" at 0..3, separator 3..5, "defg" at 5..9, separator 9..11,
+        // "hi" at 11..13.
+        let members = vec![(0, 0..3), (1, 5..9), (2, 11..13)];
+        let spans = vec![
+            span("private_name", 3, 5, 0.9),  // wholly in a separator: dropped
+            span("private_name", 2, 6, 0.8),  // straddles 0|1: both sides
+            span("private_name", 1, 13, 0.7), // straddles all three
+            span("private_name", 9, 9, 0.6),  // zero-width at the end of 1
+        ];
+        let per = split_pack_spans("near-ai", &members, &spans).unwrap();
+        let ranges = |m: &Vec<ClassifySpan>| m.iter().map(|s| (s.start, s.end)).collect::<Vec<_>>();
+        assert_eq!(ranges(&per[0]), vec![(2, 3), (1, 3)]);
+        assert_eq!(ranges(&per[1]), vec![(0, 1), (0, 4), (4, 4)]);
+        assert_eq!(ranges(&per[2]), vec![(0, 2)]);
+    }
+
+    #[test]
+    fn an_out_of_range_pack_span_fails_the_request() {
+        let members = vec![(0, 0..3), (1, 5..9)];
+        for bad in [
+            span("private_name", 0, 10, 0.9),
+            span("private_name", 4, 2, 0.9),
+        ] {
+            let err = split_pack_spans("near-ai", &members, &[bad]).unwrap_err();
+            assert!(err.to_string().contains("out-of-range"));
+        }
+    }
+
     #[test]
     fn replaces_single_span() {
         let text = "email me at alice@example.com please";

@@ -45,7 +45,9 @@ use async_trait::async_trait;
 use futures::stream::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
-use crate::privacy_filter_spans::{ClassifySpan, apply_windowed_spans, chunk_token_ranges};
+use crate::privacy_filter_spans::{
+    ClassifySpan, WindowClassifier, apply_windowed_spans, chunk_token_ranges, redact_items_batched,
+};
 use crate::trace_contribution::{
     PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES, PrivacyFilterAdapter, PrivacyFilterConfigError,
     SafePrivacyFilterRedaction, TraceContributionError,
@@ -195,6 +197,48 @@ impl PrivacyFilterAdapter for SelfHostedPrivacyFilterAdapter {
             .await?;
 
         apply_windowed_spans(BACKEND, text, &windows)
+    }
+
+    /// Packs many texts into each request, up to the same per-window token
+    /// budget -- which here bounds a request's DURATION, so a pack takes no
+    /// longer than one window of a large field did. Blank texts are not
+    /// sent, a text over `max_input_bytes` fails the call with the same
+    /// error `redact_text` returns (before any request), and a text over the
+    /// budget is windowed alone as `redact_text` windows it. Requests share
+    /// the field windows' concurrency limit.
+    async fn redact_texts(
+        &self,
+        texts: &[&str],
+    ) -> Result<Vec<Option<SafePrivacyFilterRedaction>>, TraceContributionError> {
+        for text in texts {
+            if !text.trim().is_empty() && text.len() > self.max_input_bytes {
+                return Err(TraceContributionError::RedactionFailed {
+                    reason: format!(
+                        "{BACKEND} privacy classifier input exceeded limit: input_len={} max_input_bytes={}",
+                        text.len(),
+                        self.max_input_bytes
+                    ),
+                });
+            }
+        }
+        redact_items_batched(
+            BACKEND,
+            self,
+            texts,
+            self.max_input_tokens,
+            self.max_concurrent_windows,
+        )
+        .await
+    }
+}
+
+#[async_trait]
+impl WindowClassifier for SelfHostedPrivacyFilterAdapter {
+    async fn classify_window(
+        &self,
+        window: &str,
+    ) -> Result<Vec<ClassifySpan>, TraceContributionError> {
+        SelfHostedPrivacyFilterAdapter::classify_window(self, window).await
     }
 }
 
