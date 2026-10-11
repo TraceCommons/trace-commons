@@ -31,6 +31,7 @@ the link.
 | Running a versioned pipeline corpus locally | [`./pipeline-lab.md`](./pipeline-lab.md) |
 | Qualifying a versioned pipeline candidate locally | [`./pipeline-qualification.md`](./pipeline-qualification.md) |
 | Activating, rolling back, or containing the versioned pipeline for a tenant, suspending a policy, or reading the legacy drain report | [`./pipeline-activation.md`](./pipeline-activation.md) |
+| Arming, re-arming, or disarming default routing of every tenant to the versioned pipeline | [`./pipeline-activation.md`](./pipeline-activation.md) ("Default routing") and [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) (stage 4a) |
 | Smoke-testing a move to the versioned pipeline, stage by stage | [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) |
 | Qualifying the signed native passkey entitlement and profile | [`./native-passkey-release-qualification.md`](./native-passkey-release-qualification.md) |
 | Preparing offline anonymized pilot response projections | [`./network-recording-projections.md`](./network-recording-projections.md) |
@@ -206,8 +207,9 @@ Every runbook in this directory, with a one-line description.
 - [`./pipeline-activation.md`](./pipeline-activation.md) — the pipeline's
   scope lists and routing row, the nine `/v1/admin/pipeline/` routes
   (qualification, activation, rollback, containment, deactivation, policy
-  suspension, routing, and the legacy drain report), and the rules for the
-  receipt, settlement, payout, withdrawal, and rebuild paths.
+  suspension, routing, and the legacy drain report), default routing of
+  every tenant once an operator arms it for the running revision, and the
+  rules for the receipt, settlement, payout, withdrawal, and rebuild paths.
 - [`./pipeline-lab.md`](./pipeline-lab.md) — running a versioned pipeline
   corpus locally with `pipeline.py run` and `pipeline.py package`: the HF
   pin, report fields, isolation and privacy, and failure labels.
@@ -218,8 +220,9 @@ Every runbook in this directory, with a one-line description.
   what local evidence is not.
 - [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) — the four
   stages of moving a deployment to the versioned pipeline (deploy with it off,
-  offline replay, one throwaway tenant, first real tenant) and what must hold
-  at each before the next starts.
+  offline replay, one throwaway tenant, first real tenant, then default
+  routing for every tenant) and what must hold at each before the next
+  starts.
 - [`./pii-classify-policy.md`](./pii-classify-policy.md) — `TRACE_COMMONS_PII_CLASSIFY_POLICY`
   (`all-events` / `prose-only`): the measured ~10x round-trip reduction from
   restricting the NEAR AI privacy filter to prose events, the accepted

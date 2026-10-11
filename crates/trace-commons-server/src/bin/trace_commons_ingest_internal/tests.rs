@@ -6238,6 +6238,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
         pipeline_index_rebuilds: Arc::default(),
+        pipeline_default_routing: None,
+        pipeline_worker_pass_stats: Arc::default(),
         db_contributor_reads,
         db_reviewer_reads,
         db_reviewer_require_object_refs: false,
@@ -29242,6 +29244,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
         pipeline_index_rebuilds: Arc::default(),
+        pipeline_default_routing: None,
+        pipeline_worker_pass_stats: Arc::default(),
         db_contributor_reads: false,
         db_reviewer_reads: false,
         db_reviewer_require_object_refs: false,
@@ -98885,6 +98889,13 @@ mod pipeline_restore_pg_tests;
 /// `pub(super)` helpers it reuses.
 #[path = "pipeline_activation_pg_tests.rs"]
 mod pipeline_activation_pg_tests;
+
+/// Pipeline default routing (spec 2026-10-10): the operator-armed mode that
+/// routes every tenant with no routing row to the pipeline. Nested here
+/// beside `pipeline_activation_pg_tests`, whose `pub(super)` route fixture it
+/// reuses.
+#[path = "pipeline_default_routing_pg_tests.rs"]
+mod pipeline_default_routing_pg_tests;
 
 /// The nineteen `validate_*_reason` / `validate_*_purpose` wrappers all reduce
 /// to this, so the trim / reject-empty / reject-over-1024 contract and the two

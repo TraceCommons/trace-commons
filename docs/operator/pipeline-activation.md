@@ -41,6 +41,9 @@ The pipeline now has these properties:
 - The legacy drain report shows what the legacy path still owes a tenant. It
   disables nothing: this release retires no legacy writer.
 - Destructive schema cleanup is not part of this phase.
+- Default routing (off unless an operator arms it for the running revision)
+  activates every tenant that has no routing row, through the same checks.
+  See "Default routing".
 
 ## Scope lists and the routing row
 
@@ -1123,6 +1126,268 @@ change came first: read the routing again before you decide. If the answer is
 A fix-forward is an activation of a new bundle (steps 2 and 3 for that bundle).
 It needs the readiness. It is refused while a suspended policy holds a run of
 the tenant in `retry`: see "Suspend a policy".
+
+## Default routing
+
+Default routing routes every tenant that has no routing row to the pipeline,
+existing tenants and pooled tenants included. It exists for deployments where
+each person who signs up gets their own tenant, so no operator activates each
+one by hand. Design: `docs/superpowers/specs/2026-10-10-pipeline-default-routing-design.md`.
+
+It is off unless an operator turns it on, and it activates nothing until the
+host holds a signed check-result set for the code revision that is running.
+With the mode off, nothing below runs: no loop, no cross-tenant read, and the
+scope of a process is its receipts list.
+
+### Settings
+
+| Variable | Values | Default |
+|---|---|---|
+| `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING` | `off`, `all` | `off` (unset or empty is `off`) |
+| `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_RESULTS_DIR` | directory with `signed-package.json` and one `<check_id>.attestation.json` per check | required with `all` |
+| `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_INTERVAL_SECONDS` | 5 to 3600 | 60 |
+| `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_BATCH` | 1 to 1000 | 50 |
+
+The results directory is what `pipeline.py promote assemble --output DIR`
+writes ([pipeline-qualification.md](pipeline-qualification.md)): the signed
+package and the 22 signed results, the same material an operator posts to
+`POST qualifications` and `POST activate`. The results do not name a tenant,
+so one set serves every tenant.
+
+Ingest refuses to start with `all` in each of these cases, with the label
+shown:
+
+| Condition | Label |
+|---|---|
+| a value other than `off` or `all` | `pipeline_default_routing_mode_invalid` |
+| `TRACE_COMMONS_PIPELINE_RUNTIME` is not `production` | `pipeline_default_routing_requires_production_runtime` |
+| a trust store is missing | `pipeline_trust_store_missing` |
+| the build has no code revision | `pipeline_code_revision_unset` |
+| no database (no routing store) | `pipeline_routing_store_missing` |
+| `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` is set | `pipeline_default_routing_test_dependencies_conflict` |
+| the results directory variable is unset or empty | `pipeline_default_routing_results_dir_missing` |
+| interval or batch out of range | `pipeline_default_routing_config_invalid` |
+| the runtime role cannot execute the V124 functions | `pipeline_default_routing_enumeration_unavailable` |
+
+With `all`, the runtime must also pass the checks of a runtime that processes
+tenants (a credit issuer, and production-qualified dependencies), as it does
+with a non-empty receipts list.
+
+### Armed or not
+
+A process with `all` starts unarmed. Before the listener opens, and then at
+the start of every loop pass, it reads the results directory and checks the
+set the way the admin routes check a request:
+
+1. the package against the package trust store;
+2. every result against the check trust store;
+3. the promotion over the results, now: ready, naming the running revision,
+   and naming this package;
+4. the package's dependency profile on this process, and the startup checks
+   of a tenant bundle.
+
+If any check fails, the process stays unarmed, logs one WARN with the label
+when the state changes, and reports the label in
+`GET /v1/admin/config-status`:
+
+| Case | Label |
+|---|---|
+| the directory or `signed-package.json` is missing or unreadable, or there are no results | `pipeline_default_routing_results_missing` |
+| a file does not parse, is over 1 MiB, or there are more than 64 results | `pipeline_default_routing_results_invalid` |
+| a signature fails, or the signer is not trusted | the verifier's label, for example `check_attestation_signer_untrusted` |
+| the results name another revision | `pipeline_default_routing_revision_mismatch` |
+| a result is past its maximum age | `pipeline_default_routing_results_stale` |
+| the promotion is not ready for another reason | `bundle_qualification_promotion_not_ready` |
+| the results name another package than `signed-package.json` | `pipeline_default_routing_package_mismatch` |
+| the package cannot run on this process | that check's label |
+
+An unarmed process activates no tenant. Uploads keep their current routing:
+a tenant with no routing row stays on the legacy path. The directory is read
+again on every pass, so fixing it needs no restart.
+
+**An armed set expires.** It stops activating at the earliest
+`observed_at + maximum_age_seconds` among its results. The signer sets the
+maximum age: 24 hours by default and 7 days at most. Sign both runs of a
+default-routing set with the maximum (`pipeline.py qualify ...
+--evidence-max-age-seconds 604800` and `pipeline.py promote sign ...
+--evidence-max-age-seconds 604800`) and re-arm at least weekly.
+From 24 hours before expiry, each pass logs
+`pipeline_default_routing_results_expiring`.
+
+`GET /v1/admin/config-status` reports:
+
+- `pipeline_default_routing_mode`: `off` or `all`;
+- `pipeline_default_routing_armed`;
+- `pipeline_default_routing_label`: why it is not armed, or `null`;
+- `pipeline_default_routing_expires_in_seconds`;
+- `pipeline_default_routing_last_pass`: `activated`, `refused`, `skipped`,
+  `requalified`, and `duration_ms` of the last loop pass;
+- `pipeline_default_routing_routed_tenant_count`;
+- `pipeline_worker_last_pass_tenant_count` and
+  `pipeline_worker_last_pass_duration_ms`: the tenants the pipeline worker's
+  last pass drained, and how long it took (see Throughput below).
+
+It never shows a path, a tenant id, or a key id.
+
+### How a tenant is activated
+
+An armed process activates a tenant with no routing row through the same
+code the admin routes use: `POST qualifications` and then `POST activate`,
+with the same checks, the same gate, and the same readiness. Two things
+differ:
+
+- the actor is a fixed system principal,
+  `principal_sha256:f181c8ce8ad8456d28933772fb616dd07c088b830c3a9e9df8b328652f59151b`
+  (derived from the label `trace_commons.system.pipeline_default_routing`);
+- the reason code is `pipeline_default_routing`.
+
+So `GET /v1/admin/pipeline/routing` shows which activations were automatic.
+
+The activation always expects that the tenant has no routing row. The
+routing store checks this under the routing lock. A tenant whose row exists
+in any state is left as it is: `legacy` after a `deactivate`, `contained`,
+or `pipeline`. The loop never calls `contain`, `deactivate`, or `rollback`.
+
+Two paths activate:
+
+- **The first upload.** When an armed process takes an upload from a tenant
+  with no routing row, it activates the tenant first, then reads the routing
+  again, so the upload is a pipeline receipt. Concurrent first uploads write
+  one activation: one caller per tenant in a process, and the routing lock
+  across processes. If the activation is refused, the upload still succeeds
+  on its current routing, and the tenant is left alone for 10 minutes. A
+  remediation upload never activates.
+- **The loop.** Every interval, a pass routes up to `BATCH` tenants that
+  have a `trace_tenants` row and no routing row, so a tenant that signed up
+  is routed before its first upload where possible. The cursor wraps at the
+  end of the list.
+
+The cross-tenant list comes from two `SECURITY DEFINER` functions (V124,
+`trace_pipeline_unrouted_tenants` and `trace_pipeline_routed_tenants`). They
+are owned by a no-login role that cannot bypass row-level security, and they
+return tenant ids (and the routing state) only. `trace_ingest_runtime` holds
+EXECUTE on both, so no grant by hand is needed.
+
+### Which tenants a process serves
+
+Without the mode, a process serves the tenants on its receipts list. With
+`all`, it also serves each tenant whose routing row is `pipeline` or
+`contained` and whose bundles passed the startup checks in this process. It
+keeps those tenants in a cache that the loop reads again when it is older
+than 30 seconds. It adds a tenant at once when it activates it, and when an
+upload arrives for a routed tenant it has not cached yet (another replica,
+or an operator, routed it since the last refresh), armed or not. The
+worker builds its tenant list on every pass from the receipts list, the
+drain list, and this cache, so it processes a tenant routed after start
+without a restart.
+
+A tenant whose bundle check fails stays out of the cache, with a WARN
+`pipeline_default_routing_tenant_bundle_check_failed`, and its uploads are
+refused with `503 pipeline_tenant_not_served`.
+
+A tenant deactivated to `legacy` leaves the cache on the next refresh. Its
+new uploads take the legacy path. A retry of an upload the pipeline already
+took still replays its pipeline receipt, and its pipeline submissions stay in
+the contributor's status: with the mode configured, a process answers both
+from the run that owns the submission, whatever the routing row says now.
+
+The worker is different. A tenant that default routing routed was never on
+an env list, so once it leaves the cache the worker stops draining it: its
+runs still in flight wait until an operator adds it to
+`TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` and restarts. This is not like a
+tenant an operator activated by hand, which stays on the receipts list after
+a deactivate (so the worker keeps draining it) until the operator moves it to
+the drain list. Before deactivating a default-routed tenant with runs in
+flight, add it to the drain list.
+
+### After a deploy
+
+A new build has a new revision, so the set on the host names the old one:
+the new process starts unarmed with `pipeline_default_routing_revision_mismatch`.
+Until it is re-armed, new tenants stay on the legacy path and routed tenants
+answer `503 pipeline_bundle_not_qualified`.
+
+Re-arm by running the qualification and the promote cycle on the new
+revision (`pipeline.py qualify`, then `pipeline.py promote` up to
+`assemble`) and replacing the directory's contents. `promote assemble`
+refuses an existing output, so assemble into a sibling directory (same
+owner, mode 0700), then swap it in. A directory cannot be renamed over a
+non-empty one (`rename(2)` fails with `ENOTEMPTY`, and `mv new results`
+nests `new` inside `results`, where the loop never looks, since it reads
+only the top level). Either:
+
+- move the old set aside, then move the new one in:
+  `mv results results.prev && mv results.new results`. A pass that runs
+  between the two moves reports `pipeline_default_routing_results_missing`
+  and arms nothing, which fails closed; the next pass arms. Or
+- point `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_RESULTS_DIR` at a symlink
+  and replace the symlink in one step:
+  `ln -s results.<revision> results.tmp && mv -T results.tmp results`
+  (GNU `mv`). The loop follows the symlink.
+
+No restart is needed. Once the process arms, the loop re-qualifies, on the
+new revision, each tenant whose routing row default routing wrote (actor and
+reason code above) and whose active bundle is the armed bundle.
+Re-qualification does not change the routing row: a tenant stays as it is.
+
+It is not all at once. Each pass reads one page of
+`TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_BATCH` routed tenants (`pipeline`
+or `contained`, whoever routed them) and re-qualifies the ones on that page
+that default routing wrote; the next pass reads the next page. With N routed
+tenants in all, the last of them is re-qualified about `ceil(N / BATCH)`
+intervals after arming: with the defaults (`BATCH` 50, interval 60 s) and
+500 routed tenants, about 10 minutes. Until then, uploads of a tenant not
+yet reached answer `503 pipeline_bundle_not_qualified`; the upload path does
+not re-qualify. To shorten the window, raise the batch for the deploy.
+
+A tenant an operator activated by hand, or whose row an operator changed
+since (for example a `contain`), is not re-qualified by the loop. Qualify it
+through `POST /v1/admin/pipeline/qualifications` as before. A tenant whose
+active bundle is another bundle (after a rollback) is skipped with
+`pipeline_default_routing_requalify_bundle_differs`.
+
+### Disarm
+
+Remove the set from the directory: the next pass disarms. Or set the mode to
+`off` and restart. Tenants that were routed stay routed: disarming
+deactivates nobody. To move a tenant back, use `contain` or `deactivate` as
+for any tenant; default routing never undoes either.
+
+### Throughput
+
+Default routing changes no limit of the worker:
+
+- Score takes a per-tenant advisory lock, and the worker drains at most 32
+  runs per tenant per pass. A pooled tenant with many users advances at most
+  32 runs per pass, with Score serial inside the tenant. Its queue grows
+  while arrivals exceed that rate.
+- A pass drains its tenants one after another, so the pass time grows with
+  the number of routed tenants. Each idle tenant still costs its drain
+  queries.
+
+Measured on a laptop against local PostgreSQL, idle tenants only
+(`measure_idle_worker_pass_by_routed_tenant_count`, an ignored test in
+`pipeline_default_routing_pg_tests.rs`):
+
+| Routed tenants | Idle pass | Per tenant | First pass after the tenants were added |
+|---|---|---|---|
+| 1 | 2 ms | 2.4 ms | 12 ms |
+| 100 | 184 ms | 1.9 ms | 553 ms |
+| 500 | 1381 ms | 2.8 ms | 29380 ms |
+
+The first pass that reaches a tenant runs every follow-up step for it, so a
+large batch of newly routed tenants makes one slow pass. With hundreds of
+routed tenants, the 200 ms poll interval is a floor, not the cadence. Treat
+these numbers as an order of magnitude and measure on the host.
+
+Queue depth and age per tenant are in
+`GET /v1/admin/pipeline/operational-summary` (`work[].count` and
+`work[].oldest_age_seconds`). `GET /v1/admin/config-status` reports
+`pipeline_worker_last_pass_tenant_count` and
+`pipeline_worker_last_pass_duration_ms`. They are not on the
+unauthenticated `GET /v1/pipeline/readiness`: with default routing the tenant
+count rises as each new signup is routed, and anyone who can reach the probe
+could watch it.
 
 ## Suspend a policy
 
