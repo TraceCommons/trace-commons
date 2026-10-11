@@ -20,7 +20,12 @@ struct GlassSettingsContent: View {
             case .publicProfile: PublicProfileSection()
             case .watching: WatchingSection()
             case .watchedFolders: WatchedFoldersSection()
-            case .tools: ToolsSection()
+            case .tools:
+                ToolsSection()
+                // The Insights switches: in Tools because it waits for first
+                // run (R-43); the ledger feed's is in Private AI (Ron's #1287
+                // review).
+                InsightsSettingsCard()
             case .privateAI: PrivateAISection()
             case .witness: WitnessSection()
             case .projects: ProjectsSection()

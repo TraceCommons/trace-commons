@@ -30,27 +30,22 @@ struct ToolsSection: View {
     @State private var routingOverrideOpen: Bool?
 
     var body: some View {
+        // The container is always present, so `.onAppear` runs even when the
+        // core's copy is missing and the card draws nothing.
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            // The container is always present, so `.onAppear` runs even when
-            // the core's copy is missing and the card draws nothing.
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                if let copy = model.routingCopy {
-                    card(copy, form: model.routingDraft ?? model.routingForm)
-                } else {
-                    // The unavailable branch; test_refreshIsOnAnAlwaysPresentContainer pins that
-                    // `.onAppear` follows this container's closing brace directly.
-                    Color.clear.frame(width: 0, height: 0).accessibilityHidden(true)
-                }
+            if let copy = model.routingCopy {
+                card(copy, form: model.routingDraft ?? model.routingForm)
+            } else {
+                // The unavailable branch; test_refreshIsOnAnAlwaysPresentContainer pins that
+                // `.onAppear` follows this container's closing brace directly.
+                Color.clear.frame(width: 0, height: 0).accessibilityHidden(true)
             }
-            .onAppear {
-                // Asked every time the card appears: IronWire may have started
-                // since. It reads a file, opens no connection, declares nothing.
-                model.discoverRouting()
-                model.refreshRoutedTools()
-            }
-            // The Insights switches, here because Tools waits for first run
-            // (R-43); the ledger feed's is in Private AI (Ron's #1287 review).
-            InsightsSettingsCard()
+        }
+        .onAppear {
+            // Asked every time the card appears: IronWire may have started
+            // since. It reads a file, opens no connection, declares nothing.
+            model.discoverRouting()
+            model.refreshRoutedTools()
         }
     }
 

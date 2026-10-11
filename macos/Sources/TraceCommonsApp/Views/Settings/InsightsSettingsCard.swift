@@ -45,8 +45,8 @@ final class InsightsLeverCardSwitch {
 
 /// The Insights switches in Settings (Ron's #1287 review, adopted by the
 /// owner): count tokens in the watched folders (off by default, D4), the
-/// weekly summary card and the higher-than-usual card. Drawn in Tools,
-/// which waits for first run (R-43). Each switch reads the value its owner
+/// weekly summary card and the higher-than-usual card. Drawn under Tools
+/// (`GlassSettingsContent`), which waits for first run (R-43). Each switch reads the value its owner
 /// confirmed and is drawn only once that owner reported one; every word is
 /// the core's analytics copy.
 struct InsightsSettingsCard: View {

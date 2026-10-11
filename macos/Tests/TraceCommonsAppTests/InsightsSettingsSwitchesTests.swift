@@ -218,8 +218,14 @@ final class InsightsSettingsSwitchesTests: XCTestCase {
         XCTAssertTrue(card.contains("await lever.load()"))
         XCTAssertEqual(card.components(separatedBy: "GlassToggleStyle(.settings)").count - 1, 3)
 
-        let tools = try SettingsParityTests.text("Views/Settings/ToolsSection.swift")
-        XCTAssertEqual(tools.components(separatedBy: "InsightsSettingsCard()").count - 1, 1)
+        // Drawn under Tools, after its card, inside the modal's gate.
+        let content = try SettingsParityTests.text("Views/Settings/GlassSettingsContent.swift")
+        XCTAssertEqual(content.components(separatedBy: "InsightsSettingsCard()").count - 1, 1)
+        XCTAssertTrue(content.contains("case .tools:\n                ToolsSection()\n"))
+        let tools = try XCTUnwrap(content.range(of: "case .tools:"))
+        let next = try XCTUnwrap(content.range(of: "case .privateAI:"))
+        let drawn = try XCTUnwrap(content.range(of: "InsightsSettingsCard()"))
+        XCTAssertTrue(tools.upperBound < drawn.lowerBound && drawn.upperBound < next.lowerBound)
         XCTAssertFalse(SettingsSection.tools.availableBeforeOnboarding)
     }
 

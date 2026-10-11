@@ -127,9 +127,7 @@ final class SettingsParityTests: XCTestCase {
                            "model.routingProbeLine", "model.status.routing.state", "model.status.routing.derived",
                            "model.status.routing.lastRefreshAt", "model.routingEvidence", "model.routingCalls",
                            "model.applyIronWire(", "model.discoverRouting()", "model.refreshRoutedTools()",
-                           "RoutingPortInput.accept(",
-                           // The Insights switches (Ron's #1287 review).
-                           "InsightsSettingsCard()"],
+                           "RoutingPortInput.accept("],
                 copySources: ["RoutingSurface.toolRows(", "RoutingSurface.discoveryLine(", "RoutingSurface.connecting(",
                               "RoutingSurface.overrideIsCollapsed(", "RoutingSurface.stateLine(", "RoutingSurface.tone(forState:",
                               "RoutingSurface.showsLastChecked(", "TCRoutingCopy.lastChecked(",
