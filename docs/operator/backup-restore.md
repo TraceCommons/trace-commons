@@ -397,10 +397,13 @@ answers `404` there. Do these steps in this order:
      worker then claims the removals on its next invalidation pass. No operator
      action is needed. The tenant's next rebuild deletes the expired row when it
      ends.
-   - The margin is a contract with the index writer. The fence does not enforce
-     it. The guarantee holds as long as each index call returns within the 60
-     second margin; an index call that takes longer is outside what the fence
-     covers.
+   - The fence covers an index call that returns within the 60 second margin.
+     A call that takes longer is awaited by a task of its own in the process
+     that made it. When the call returns, that task reopens the run's index
+     removal, so an entry written after the removal ran is removed again on
+     the next invalidation pass. Until that pass, the entry can be found in
+     the index. This holds while the process lives: an index call that lands
+     after its process has exited is not seen by the pipeline.
 
    Step 3 stays. The route still refuses a tenant that its own process routes or
    drains (`409` `pipeline_index_rebuild_tenant_active`), because a Score of that

@@ -460,11 +460,17 @@ pub(crate) async fn pipeline_readiness_handler(
 /// also when the run's locks are released while a write goes on (a lost
 /// database session, an abort past the shutdown grace period, the process
 /// exit): the fence then expires on its own, at most the run deadline plus
-/// the margin (90 seconds at the defaults) after it was last set. This holds
-/// as long as each index call returns within the write fence margin
-/// (`PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`): a write starts only before
-/// the run's deadline, and the fence reaches the deadline plus the margin. A
-/// fence write that fails stops the rebuild with `503`
+/// the margin (90 seconds at the defaults) after it was last set. A write
+/// starts only before the run's deadline, and the fence reaches the deadline
+/// plus the margin (`PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`). An index
+/// call has no time limit of its own, so one can outlast the fence, and an
+/// invalidation claimed after the fence expired can run before that write
+/// lands. The late write is awaited until it returns and then reopens the
+/// run's invalidation, so the withdrawn revision is removed again (issue
+/// #1233, `reopen_invalidation_after_index_writes` in `versioned_pipeline`,
+/// which states the invariant). The fence keeps the removal from racing the
+/// writes it covers; the reopen covers a write that outlasts it. A fence
+/// write that fails stops the rebuild with `503`
 /// `index_rebuild_fence_unavailable`.
 ///
 /// It still refuses, with `409` `pipeline_index_rebuild_tenant_active`, a
@@ -1356,7 +1362,11 @@ pub(crate) async fn append_pipeline_credit_audit_events(
 /// `privacy_classification_failed`) are `lifecycle_status_change` events with
 /// the status `quarantined`; their ids derive from the run, with the labels
 /// `pipeline-privacy-pass-hold-audit` and
-/// `pipeline-privacy-classification-failed-audit`. The assessment event's id
+/// `pipeline-privacy-classification-failed-audit`. A run that ended `failed`
+/// before Review decided it, and moved its `received` submission to
+/// `rejected` (#1346), has one `lifecycle_status_change` event with the
+/// status `rejected` and the reason `pipeline_processing_failed`, its id
+/// derived with the label `pipeline-processing-failed-audit`. The assessment event's id
 /// is the assessment's, so the route's own append and this repair of a missed
 /// one are the same event; the automatic Review's event takes the id of the
 /// Review `phase_outcomes` row. Each event is read by id
@@ -1573,6 +1583,25 @@ async fn append_pipeline_review_audit_item(
             TraceCorpusStatus::Quarantined,
             trace_commons_server::versioned_pipeline_authority::PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
             "pipeline privacy classification audit event",
+        )
+        .await?;
+    }
+    if item.submission_rejected {
+        // #1346: the run failed before Review decided it, and its
+        // transaction moved the `received` submission to `rejected`.
+        append_pipeline_lifecycle_audit_event(
+            state,
+            db,
+            tenant_id,
+            item.submission_id,
+            deterministic_trace_uuid_for(
+                "pipeline-processing-failed-audit",
+                tenant_id,
+                item.run_id,
+            ),
+            TraceCorpusStatus::Rejected,
+            trace_commons_server::trace_corpus_storage::PIPELINE_PROCESSING_FAILED_STATUS_REASON,
+            "pipeline processing failure audit event",
         )
         .await?;
     }

@@ -369,12 +369,13 @@ impl ScorePolicy for CompatibilityScorePolicy {
     /// production scorer makes network calls (the NEAR AI scorer uses a
     /// blocking HTTP client), so the whole evaluation runs on the blocking
     /// pool, never on a runtime worker, as `main` runs the same scorer class
-    /// (Zaki review 1, round 2, N-6). A task that panicked or was cancelled
-    /// is `score_task_failed`.
+    /// (Zaki review 1, round 2, N-6), under the pipeline's bound on Score
+    /// evaluations (#1140, `run_score_evaluation`). A task that panicked or
+    /// was cancelled is `score_task_failed`.
     async fn execute(&self, input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
         let policy = self.clone();
         let input = input.clone();
-        tokio::task::spawn_blocking(move || policy.evaluate(&input))
+        crate::versioned_pipeline_blocking::run_score_evaluation(move || policy.evaluate(&input))
             .await
             .map_err(|_| permanent("score_task_failed"))?
     }
@@ -1677,6 +1678,96 @@ mod tests {
             .expect("the Score runs its dependencies off the runtime workers");
         let (result, _, _) = output.into_parts();
         assert_eq!(result.evidence.quality_passed, Some(true));
+    }
+
+    /// The reference scorer, sleeping on every call as a production scorer
+    /// holds its thread through a blocking network call, and recording how
+    /// many calls ran at once.
+    struct SleepingScorer {
+        inner: ReferencePerplexityScorer,
+        sleep: std::time::Duration,
+        calls: std::sync::atomic::AtomicUsize,
+        in_flight: std::sync::atomic::AtomicUsize,
+        max_in_flight: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SleepingScorer {
+        fn new(sleep: std::time::Duration) -> Self {
+            Self {
+                inner: ReferencePerplexityScorer::new(),
+                sleep,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                in_flight: std::sync::atomic::AtomicUsize::new(0),
+                max_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn hold<T>(&self, call: impl FnOnce() -> T) -> T {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(self.sleep);
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            call()
+        }
+    }
+
+    impl PerplexityScorer for SleepingScorer {
+        fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+            self.hold(|| self.inner.score(plaintext))
+        }
+
+        fn score_chunk(&self, chunk: &[u8]) -> anyhow::Result<ChunkPerplexity> {
+            self.hold(|| self.inner.score_chunk(chunk))
+        }
+    }
+
+    impl IdentifiedPerplexityScorer for SleepingScorer {
+        fn dependency_identity(&self) -> &str {
+            "sleeping_scorer_test_only"
+        }
+        fn content_descriptor(&self) -> Vec<u8> {
+            b"sleeping-scorer-test-only.v1".to_vec()
+        }
+    }
+
+    /// #1140: the compatibility Score -- the Score policy production runs --
+    /// takes at most `PIPELINE_SCORE_EVALUATION_CONCURRENCY` blocking
+    /// threads at once under a burst; the rest wait for a permit on the
+    /// runtime. Every evaluation still completes. The bundle's test covers
+    /// `FixedScorePolicy`; this one pins the compatibility wiring.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_burst_of_compatibility_scores_is_bounded_on_the_blocking_pool() {
+        use crate::versioned_pipeline_blocking::PIPELINE_SCORE_EVALUATION_CONCURRENCY;
+        let config = CompatibilityBundleConfig::local_reference();
+        let scorer = Arc::new(SleepingScorer::new(std::time::Duration::from_millis(50)));
+        let policy = CompatibilityScorePolicy::new(
+            manifest_pinning_trace_credit(&config),
+            config.clone(),
+            scorer.clone(),
+            Arc::new(ReferenceEmbedder::new()),
+            IsolatedPipelineIndex::new(),
+        )
+        .unwrap();
+        let burst = PIPELINE_SCORE_EVALUATION_CONCURRENCY * 3;
+        let mut scores = tokio::task::JoinSet::new();
+        for _ in 0..burst {
+            let policy = policy.clone();
+            scores.spawn(async move {
+                policy
+                    .execute(&score_input(b"hello world, this is a compatibility trace"))
+                    .await
+            });
+        }
+        while let Some(joined) = scores.join_next().await {
+            joined.unwrap().unwrap();
+        }
+        assert!(scorer.calls.load(Ordering::SeqCst) >= burst);
+        let max = scorer.max_in_flight.load(Ordering::SeqCst);
+        assert!(
+            (1..=PIPELINE_SCORE_EVALUATION_CONCURRENCY).contains(&max),
+            "{max} compatibility Score evaluations held blocking threads at once"
+        );
     }
 
     /// Finding 12: the reader a compatibility Score uses counts an

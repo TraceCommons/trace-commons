@@ -1782,6 +1782,15 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "pipeline_review_audit_marker",
         include_str!("../../../../migrations/V118__pipeline_review_audit_marker.sql"),
     ),
+    // V123 (#1346) records on a failed run that its failure moved the
+    // run's `received` submission to `rejected`:
+    // `pipeline_runs.submission_rejected_at`, the CHECK that only a failed
+    // run carries it, and the runtime role's column grant.
+    (
+        123,
+        "pipeline_failed_run_submission_rejection",
+        include_str!("../../../../migrations/V123__pipeline_failed_run_submission_rejection.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus
