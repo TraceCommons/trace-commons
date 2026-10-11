@@ -47,6 +47,7 @@ pub(crate) struct ClassifySpan {
 /// other control below 0x20 takes 6 (`\u00XX`), and everything else,
 /// including non-ASCII UTF-8, is copied as is. Additive over concatenation,
 /// so a pack's escaped size is the sum of its parts.
+#[cfg(feature = "near-ai-privacy-filter")]
 pub(crate) fn json_escaped_len(text: &str) -> usize {
     text.bytes()
         .map(|byte| match byte {
@@ -340,9 +341,11 @@ pub(crate) fn apply_windowed_spans(
 /// not read as one. Spans the classifier nevertheless reports across it are
 /// split at the text boundaries (see [`redact_items_batched`]); a span that
 /// lies wholly inside the separator touches no text and is dropped.
+#[cfg(feature = "near-ai-privacy-filter")]
 pub(crate) const BATCH_ITEM_SEPARATOR: &str = "\n\n";
 
 /// One classify request's worth of transport for [`redact_items_batched`].
+#[cfg(feature = "near-ai-privacy-filter")]
 #[async_trait::async_trait]
 pub(crate) trait WindowClassifier: Sync {
     /// Classify one window of a text too large for a single request. This is
@@ -373,6 +376,7 @@ pub(crate) trait WindowClassifier: Sync {
 
 /// Token cost of `text` against the classifier's budget, with the same
 /// fallback [`chunk_token_ranges`] uses when no tokenizer is available.
+#[cfg(feature = "near-ai-privacy-filter")]
 fn batch_token_cost(text: &str) -> usize {
     classifier_token_count(text).unwrap_or_else(|| text.len().div_ceil(3))
 }
@@ -382,6 +386,7 @@ fn batch_token_cost(text: &str) -> usize {
 /// fits -- with any window whose JSON-escaped size exceeds
 /// `max_input_json_bytes` cut further, after its last newline under the cap
 /// where there is one, so no request goes out over the body limit.
+#[cfg(feature = "near-ai-privacy-filter")]
 pub(crate) fn window_ranges(
     text: &str,
     max_tokens: usize,
@@ -422,6 +427,7 @@ pub(crate) fn window_ranges(
     ranges
 }
 
+#[cfg(feature = "near-ai-privacy-filter")]
 enum BatchUnit {
     /// Whole texts (indices into the unique-text table) joined by the
     /// separator, with each member's codepoint range inside `text`.
@@ -449,6 +455,7 @@ enum BatchUnit {
 /// redacts both sides -- and is dropped if it lies wholly in a separator. A
 /// zero-width span stays where it lies, inside (or at either edge of) one
 /// text.
+#[cfg(feature = "near-ai-privacy-filter")]
 fn split_pack_spans(
     backend: &'static str,
     members: &[(usize, std::ops::Range<usize>)],
@@ -517,6 +524,7 @@ fn split_pack_spans(
 ///
 /// Requests run at most `max_concurrent_requests` at a time, in order; the
 /// first failing request's error is returned and no results are.
+#[cfg(feature = "near-ai-privacy-filter")]
 pub(crate) async fn redact_items_batched(
     backend: &'static str,
     classifier: &dyn WindowClassifier,
@@ -704,11 +712,13 @@ mod tests {
     }
 
     /// Records every request and finds nothing.
+    #[cfg(feature = "near-ai-privacy-filter")]
     #[derive(Default)]
     struct RecordingClassifier {
         requests: std::sync::Mutex<Vec<String>>,
     }
 
+    #[cfg(feature = "near-ai-privacy-filter")]
     #[async_trait::async_trait]
     impl WindowClassifier for RecordingClassifier {
         async fn classify_window(
@@ -720,8 +730,10 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "near-ai-privacy-filter")]
     const BODY_CAP: usize = 200 * 1024;
 
+    #[cfg(feature = "near-ai-privacy-filter")]
     #[test]
     fn json_escaped_len_matches_serde_json() {
         for text in [
@@ -740,6 +752,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "near-ai-privacy-filter")]
     #[tokio::test]
     async fn whitespace_heavy_texts_pack_under_the_body_cap() {
         // Few tokens, many escaped bytes: runs of tabs and newlines.
@@ -770,6 +783,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "near-ai-privacy-filter")]
     #[tokio::test]
     async fn one_escape_heavy_text_over_the_body_cap_is_windowed_under_it() {
         // A padded table with escaped cells: runs of spaces and `=` cost
@@ -794,6 +808,7 @@ mod tests {
         assert_eq!(results[0].as_ref().unwrap().redacted_text, text);
     }
 
+    #[cfg(feature = "near-ai-privacy-filter")]
     #[test]
     fn pack_spans_are_clipped_to_each_text_and_never_cross_a_boundary() {
         // "abc" at 0..3, separator 3..5, "defg" at 5..9, separator 9..11,
@@ -812,6 +827,7 @@ mod tests {
         assert_eq!(ranges(&per[2]), vec![(0, 2)]);
     }
 
+    #[cfg(feature = "near-ai-privacy-filter")]
     #[test]
     fn an_out_of_range_pack_span_fails_the_request() {
         let members = vec![(0, 0..3), (1, 5..9)];
