@@ -316,10 +316,23 @@ pub const PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL: &str = "privacy_pass_revi
 /// admitted, so the policy would approve such a run; the server never calls
 /// it and records the rejection under this rule id instead.
 pub const PIPELINE_PRIVACY_PASS_REJECTED_RULE_ID: &str = "privacy_pass_human_review_rejected_v1";
-/// The ceiling on one privacy pass classifier call. A call that has not
-/// returned by then is a classifier failure
-/// (`privacy_classification_failed`).
+/// The default ceiling on one privacy pass classifier call. A call that has
+/// not returned by then is a classifier failure
+/// (`privacy_classification_failed`). An operator replaces it with
+/// `PipelineLeaseConfig::with_privacy_pass_max_timeout`
+/// (`TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS` in ingest).
 const PIPELINE_PRIVACY_PASS_MAX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
+/// The bounds an operator-set privacy pass ceiling must fall in: at least the
+/// commit margin's worth of classifier time, at most the two hours a lease
+/// may last.
+const PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_MIN: std::time::Duration =
+    std::time::Duration::from_secs(60);
+const PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_MAX: std::time::Duration =
+    std::time::Duration::from_secs(7200);
+/// Safe label for a privacy-pass ceiling outside
+/// `PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_MIN..=PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_MAX`.
+pub const PIPELINE_PRIVACY_PASS_TIMEOUT_INVALID_LABEL: &str =
+    "pipeline_privacy_pass_timeout_invalid";
 /// What a privacy pass keeps back from the Review lease cap for the work
 /// around its classifier call: loading the source, storing the output,
 /// the record transaction and the Review commit (decision P8).
@@ -899,6 +912,7 @@ pub struct PipelineLeaseConfig {
     review: Duration,
     score: Duration,
     settle: Duration,
+    privacy_pass_max_timeout: std::time::Duration,
 }
 
 impl PipelineLeaseConfig {
@@ -919,7 +933,35 @@ impl PipelineLeaseConfig {
             review,
             score,
             settle,
+            privacy_pass_max_timeout: PIPELINE_PRIVACY_PASS_MAX_TIMEOUT,
         })
+    }
+
+    /// Replaces the privacy pass's 900 s classifier ceiling (decision P8).
+    /// Refuses a value outside 60 s..=2 h with the safe label
+    /// `PIPELINE_PRIVACY_PASS_TIMEOUT_INVALID_LABEL`.
+    ///
+    /// It replaces the ceiling only: the pass is still bounded by
+    /// `review x PIPELINE_LEASE_RENEWAL_CAP_FACTOR - 60 s`
+    /// (`privacy_pass_timeout_for`), so a ceiling above that needs a longer
+    /// Review lease to take effect. A longer pass holds its Review lane
+    /// longer.
+    pub fn with_privacy_pass_max_timeout(
+        mut self,
+        ceiling: std::time::Duration,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            (PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_MIN..=PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_MAX)
+                .contains(&ceiling),
+            PIPELINE_PRIVACY_PASS_TIMEOUT_INVALID_LABEL
+        );
+        self.privacy_pass_max_timeout = ceiling;
+        Ok(self)
+    }
+
+    /// The privacy pass classifier ceiling: 900 s unless configured.
+    pub fn privacy_pass_max_timeout(&self) -> std::time::Duration {
+        self.privacy_pass_max_timeout
     }
 
     pub fn review(&self) -> Duration {
@@ -953,6 +995,7 @@ impl Default for PipelineLeaseConfig {
             review: Duration::seconds(PIPELINE_LEASE_DEFAULT_REVIEW_SECONDS),
             score: Duration::seconds(PIPELINE_LEASE_DEFAULT_SCORE_SECONDS),
             settle: Duration::seconds(PIPELINE_LEASE_DEFAULT_SETTLE_SECONDS),
+            privacy_pass_max_timeout: PIPELINE_PRIVACY_PASS_MAX_TIMEOUT,
         }
     }
 }
@@ -9098,7 +9141,8 @@ pub struct PipelineServiceBuilder {
     unqualified_routing: bool,
     index_rebuild_fence_margin: std::time::Duration,
     index_write_fence_margin: std::time::Duration,
-    privacy_pass_timeout_ceiling: std::time::Duration,
+    /// A test's override of the lease config's privacy pass ceiling.
+    privacy_pass_timeout_ceiling: Option<std::time::Duration>,
 }
 
 impl PipelineServiceBuilder {
@@ -9136,7 +9180,7 @@ impl PipelineServiceBuilder {
             index_write_fence_margin: std::time::Duration::from_secs(
                 PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS.unsigned_abs(),
             ),
-            privacy_pass_timeout_ceiling: PIPELINE_PRIVACY_PASS_MAX_TIMEOUT,
+            privacy_pass_timeout_ceiling: None,
         }
     }
 
@@ -9261,12 +9305,13 @@ impl PipelineServiceBuilder {
         self
     }
 
-    /// Replaces the privacy pass's 900 s ceiling
-    /// (`PIPELINE_PRIVACY_PASS_MAX_TIMEOUT`, decision P8). For tests only: a
-    /// short ceiling lets a test see a classifier call time out.
+    /// Replaces the privacy pass's ceiling, unbounded, over the lease
+    /// config's (`PipelineLeaseConfig::privacy_pass_max_timeout`, decision
+    /// P8). For tests only: a short ceiling lets a test see a classifier call
+    /// time out. Operators set the lease config's instead.
     #[doc(hidden)]
     pub fn with_privacy_pass_timeout_ceiling(mut self, ceiling: std::time::Duration) -> Self {
-        self.privacy_pass_timeout_ceiling = ceiling;
+        self.privacy_pass_timeout_ceiling = Some(ceiling);
         self
     }
 
@@ -9355,7 +9400,8 @@ impl PipelineServiceBuilder {
             self.privacy
                 .as_ref()
                 .is_some_and(|privacy| privacy.classifies_prose_pii()),
-            self.privacy_pass_timeout_ceiling,
+            self.privacy_pass_timeout_ceiling
+                .unwrap_or(self.lease_config.privacy_pass_max_timeout()),
         )?;
         let service = PipelineService {
             store: PgPipelineStore::new(self.backend.clone()),
@@ -17669,6 +17715,60 @@ mod tests {
     /// classifier 60 s refuses the build. A boundary that classifies nothing
     /// is bounded by the ceiling only, never by a short test lease, and
     /// never by a negative value.
+    /// The ceiling is an operator setting carried on the lease config
+    /// (`TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS`), bounded
+    /// to 60..=7200 s, and it only replaces the 900 s ceiling: the Review
+    /// lease bound still applies, so raising it alone does not lengthen a
+    /// pass under the default 5-minute Review lease.
+    #[test]
+    fn privacy_pass_ceiling_is_configurable_and_still_lease_bound() {
+        let seconds = std::time::Duration::from_secs;
+        let defaults = PipelineLeaseConfig::default();
+        assert_eq!(defaults.privacy_pass_max_timeout(), seconds(900));
+
+        let raised = defaults
+            .with_privacy_pass_max_timeout(seconds(3600))
+            .expect("3600 s is in range");
+        assert_eq!(raised.privacy_pass_max_timeout(), seconds(3600));
+        // Default Review lease 300 s: 300 x 4 - 60 = 1140 s, not 3600.
+        assert_eq!(
+            privacy_pass_timeout_for(raised.review(), true, raised.privacy_pass_max_timeout())
+                .unwrap(),
+            seconds(1140)
+        );
+        // A 20-minute Review lease leaves 4740 s, so the 3600 s ceiling binds.
+        let long_review =
+            PipelineLeaseConfig::new(Duration::seconds(1200), defaults.score(), defaults.settle())
+                .unwrap()
+                .with_privacy_pass_max_timeout(seconds(3600))
+                .unwrap();
+        assert_eq!(
+            privacy_pass_timeout_for(
+                long_review.review(),
+                true,
+                long_review.privacy_pass_max_timeout()
+            )
+            .unwrap(),
+            seconds(3600)
+        );
+        // Lowering it binds under the default lease too.
+        let lowered = defaults.with_privacy_pass_max_timeout(seconds(60)).unwrap();
+        assert_eq!(
+            privacy_pass_timeout_for(lowered.review(), true, lowered.privacy_pass_max_timeout())
+                .unwrap(),
+            seconds(60)
+        );
+        for bad in [0, 59, 7201, 86_400] {
+            let error = defaults
+                .with_privacy_pass_max_timeout(seconds(bad))
+                .expect_err("out of range is refused");
+            assert_eq!(
+                error.to_string(),
+                PIPELINE_PRIVACY_PASS_TIMEOUT_INVALID_LABEL
+            );
+        }
+    }
+
     #[test]
     fn privacy_pass_timeout_fits_inside_the_review_lease_cap() {
         let ceiling = PIPELINE_PRIVACY_PASS_MAX_TIMEOUT;
