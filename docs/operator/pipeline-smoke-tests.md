@@ -36,9 +36,13 @@ first. In short:
 - There is no shadow or dual-run mode. Each receipt has exactly one owner. A
   tenant on the pipeline is not scored by the legacy path, and its
   pipeline-owned receipts never move back to it. No tool compares the two
-  paths on the same traces; stage 3 compares the pipeline's decisions with
-  what the legacy gate recorded for the same synthetic traces on another
-  tenant.
+  paths on the same traces in a deployment. `pipeline.py compare` does it on
+  one machine, with the reference scorer and embedder and with the limits
+  that its report lists as blockers
+  ([`pipeline-comparison.md`](./pipeline-comparison.md)); it is local
+  evidence and not a smoke test of a deployment. Stage 3 compares the
+  pipeline's decisions with what the legacy gate recorded for the same
+  synthetic traces on another tenant.
 
 ## Stage 1: deploy with the pipeline off
 

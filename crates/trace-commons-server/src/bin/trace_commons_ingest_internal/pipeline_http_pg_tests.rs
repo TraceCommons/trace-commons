@@ -8639,7 +8639,7 @@ async fn compatibility_bundle_through_http_with_review_privacy_withdrawal_and_ex
 
 /// The legacy `NoveltyUtility` points delta the parity test configures
 /// (`TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`).
-const LEGACY_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: f32 = 2.5;
+pub(super) const LEGACY_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: f32 = 2.5;
 
 /// The gate policy version of the parity test's in-memory gate, which
 /// `main`'s `NoveltyUtility` reason carries.
