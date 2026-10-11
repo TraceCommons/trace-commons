@@ -850,6 +850,22 @@ extension DaemonData {
         public let opencodeSourceMode: String?
         /// The declared trajectory folder's mode; the path is never sent.
         public let trajectorySourceMode: String?
+        /// Whether Insights may read the proxy ledger (owner decision D3,
+        /// settled 2026-10-09: on by default): the menu-bar glance (`insights_glance`) and
+        /// the per-call `tokens` on `inference_calls` follow it. `nil` from a
+        /// daemon that predates it, never drawn as off.
+        public let insightsLedgerFeed: Bool?
+        /// Decode-only until the Insights settings draw it: the user's own
+        /// context-tip threshold in tokens; `nil` is unset, never a default.
+        public let insightsContextThreshold: Int?
+        /// Decode-only until the Insights settings draw it: whether the
+        /// daemon runs the counter pass for `insights_week` (owner decision
+        /// D4, open; off by default).
+        public let insightsCounterPass: Bool?
+        /// The weekly summary card's only switch (owner decisions D1 and D4,
+        /// open; on by default). The Insights window passes it to the core's
+        /// `comparisons`; `nil` from a daemon that predates it.
+        public let insightsRecapCardEnabled: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case quiescenceSecs = "quiescence_secs"
@@ -878,6 +894,10 @@ extension DaemonData {
             case clineSourceMode = "cline_source_mode"
             case opencodeSourceMode = "opencode_source_mode"
             case trajectorySourceMode = "trajectory_source_mode"
+            case insightsLedgerFeed = "insights_ledger_feed"
+            case insightsContextThreshold = "insights_context_threshold"
+            case insightsCounterPass = "insights_counter_pass"
+            case insightsRecapCardEnabled = "insights_recap_card_enabled"
         }
 
         public var scrubCheckMode: ScrubCheckMode? { scrubCheck.flatMap(ScrubCheckMode.init(rawValue:)) }
@@ -1406,8 +1426,29 @@ extension DaemonData {
         public let cost: PricedCost?
         /// IronWire's proof label, passed through. See `proofLabel`.
         public let proof: String
+        /// The ledger's own counters for this call, only while the Insights
+        /// ledger feed is on. Absent with the feed off or from an older
+        /// daemon: unknown, never zero.
+        public let tokens: InferenceCallTokens?
 
         public var proofLabel: ProofLabel { ProofLabel(rawValue: proof) ?? .unrecorded }
+    }
+
+    /// One call's token counters as the proxy reported them. Each is `nil`
+    /// when the proxy did not report it, which is not zero; a measured 0
+    /// stays 0. Raw, never summed: on `family: "openai"`, `input` already
+    /// includes `cache_read`.
+    public struct InferenceCallTokens: Codable, Equatable, Sendable {
+        public let input: UInt32?
+        public let cacheRead: UInt32?
+        public let cacheWrite: UInt32?
+        public let output: UInt32?
+
+        public enum CodingKeys: String, CodingKey {
+            case input, output
+            case cacheRead = "cache_read"
+            case cacheWrite = "cache_write"
+        }
     }
 
     /// An `inference_call_added` event (`inference_map::call_added`). A
@@ -1896,5 +1937,291 @@ extension DaemonData {
         public let max: Int
         /// `points_per_accepted_trace`.
         public let unit: String
+    }
+    // MARK: Insights feed T
+
+    /// `insights_week`: one local ISO week from the daemon's counter pass
+    /// (owner decision D4, open; off by default). Use it only when
+    /// `showsCounterPass`; anything else is drawn as the saved-imports feed.
+    /// Labels and counts only: no path, digest or session id crosses.
+    public struct InsightsWeek: Codable, Equatable, Sendable {
+        public let enabled: Bool
+        public let feed: String
+        /// `nil` while disabled; `false` when the store or key could not be
+        /// read, which is never drawn as zero.
+        public let readable: Bool?
+        public let reason: String?
+        public let updatedAt: String?
+        public let sessionsStored: Int?
+        public let isoWeek: String?
+        public let weekStart: String?
+        public let comparable: Bool?
+        public let unavailable: String?
+        public let changeVsLastWeek: [InsightsWeekChange]?
+        public let rollup: InsightsWeekRollup?
+        /// The core's own Overview, Patterns and weekly-figures shapes, kept
+        /// as the JSON they came as: the app decodes them with the same
+        /// `TCBridge` types the in-process feed S reads use, and passes
+        /// `history` to the core's `comparisons` unchanged. Absent from a
+        /// daemon that predates them.
+        public let overview: CoreJSON?
+        public let patterns: CoreJSON?
+        public let history: CoreJSON?
+        /// `insights_recap_card_enabled`, passed to `comparisons`.
+        public let recapCardEnabled: Bool?
+        /// Whether `rollup.sessions[]` rows carry `routing`. Absent from a
+        /// daemon that predates it, which is read as false: no route drawn.
+        public let routingAvailable: Bool?
+        /// Why not, while `routingAvailable` is false: `ledger_feed_off`
+        /// (the contributor turned the ledger feed off) or `no_ledger`.
+        public let routingUnavailable: String?
+
+        /// Enabled, readable, from the counter pass, and carrying a rollup and
+        /// the core's Overview for it.
+        public var showsCounterPass: Bool {
+            enabled && readable == true && feed == "counter_pass" && rollup != nil && overview != nil
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case enabled, feed, readable, reason, comparable, unavailable, rollup
+            case overview, patterns, history
+            case recapCardEnabled = "recap_card_enabled"
+            case updatedAt = "updated_at"
+            case sessionsStored = "sessions_stored"
+            case isoWeek = "iso_week"
+            case weekStart = "week_start"
+            case changeVsLastWeek = "change_vs_last_week"
+            case routingAvailable = "routing_available"
+            case routingUnavailable = "routing_unavailable"
+        }
+    }
+
+    /// `insights_glance`: today's routed calls per tool from the proxy ledger
+    /// (owner decision D3, settled 2026-10-09: on by default). Three shapes: off
+    /// (`enabled: false`), unreadable (`readable: false`), and the day's
+    /// figures. Every field a shape can omit is optional, so no shape is
+    /// undecodable. Only an enabled, readable, fresh answer with rows is
+    /// drawn; the others show no glance, never a zero.
+    public struct InsightsGlance: Codable, Equatable, Sendable {
+        public let enabled: Bool
+        public let feed: String
+        /// `nil` while disabled; `false` when no ledger answered.
+        public let readable: Bool?
+        public let updatedAt: String?
+        /// `nil` is treated as stale: fail closed.
+        public let stale: Bool?
+        /// The local day the figures cover, `YYYY-MM-DD`.
+        public let date: String?
+        /// One row per tool, in the daemon's order; never summed together.
+        public let tools: [InsightsGlanceTool]?
+        public let coverage: InsightsGlanceCoverage?
+        public let contextTip: InsightsContextTip?
+
+        public enum CodingKeys: String, CodingKey {
+            case enabled, feed, readable, stale, date, tools, coverage
+            case updatedAt = "updated_at"
+            case contextTip = "context_tip"
+        }
+    }
+
+    /// One tool's day. `tokens` sums only the known calls, so it is partial
+    /// when `0 < knownCalls < calls`; `nil` when no call is known. A `nil`
+    /// `cacheShare` with known `tokens` means the known calls read no input:
+    /// the tokens are drawn without a share, never a share of zero.
+    public struct InsightsGlanceTool: Codable, Equatable, Sendable {
+        public let tool: String
+        public let calls: Int
+        public let knownCalls: Int
+        public let tokens: UInt64?
+        public let cacheShare: InsightsGlanceShare?
+
+        public enum CodingKeys: String, CodingKey {
+            case tool, calls, tokens
+            case knownCalls = "known_calls"
+            case cacheShare = "cache_share"
+        }
+    }
+
+    /// The share of input read from cache, as the daemon's exact fraction
+    /// and its rounded permille. `TCShellCore` cannot see `TCBridge`'s
+    /// `InsightsShareFigure`, so the glance has its own.
+    public struct InsightsGlanceShare: Codable, Equatable, Sendable {
+        public let numerator: UInt64
+        public let denominator: UInt64
+        public let permille: UInt64
+    }
+
+    public struct InsightsGlanceCoverage: Codable, Equatable, Sendable {
+        public let calls: Int
+        public let known: Int
+        public let unknown: Int
+        /// Ledger rows that could not be read; the day may be incomplete.
+        public let unreadableRows: Int
+
+        public enum CodingKeys: String, CodingKey {
+            case calls, known, unknown
+            case unreadableRows = "unreadable_rows"
+        }
+    }
+
+    /// The context tip. `state` is `held`, `threshold_unset`, `no_session`,
+    /// `no_figure`, `quiet` or `lit`; anything else is no tip. Only `lit`
+    /// carries figures.
+    public struct InsightsContextTip: Codable, Equatable, Sendable {
+        public let state: String
+        public let context: UInt64?
+        public let threshold: Int?
+
+        /// The figures to draw, only for a `lit` tip that carries both.
+        public var lit: (context: UInt64, threshold: Int)? {
+            guard state == "lit", let context, let threshold else { return nil }
+            return (context, threshold)
+        }
+    }
+
+    /// A part of a reply kept whole, as JSON bytes, for a layer that decodes
+    /// it with the core's own types. Integers stay integers.
+    public struct CoreJSON: Codable, Equatable, Sendable {
+        public let data: Data
+
+        public init(from decoder: Decoder) throws {
+            data = try JSONEncoder().encode(JSONValue(from: decoder))
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            try JSONDecoder().decode(JSONValue.self, from: data).encode(to: encoder)
+        }
+    }
+
+    /// One source's change against last week; `permille` is `nil` with a
+    /// reason whenever either week cannot be compared.
+    public struct InsightsWeekChange: Codable, Equatable, Sendable {
+        public let source: String
+        public let permille: Int?
+        public let unavailable: String?
+    }
+
+    public struct InsightsWeekRollup: Codable, Equatable, Sendable {
+        public let weekStart: String
+        public let coverage: InsightsWeekCoverage
+        public let undatedSessions: Int
+        /// One line per harness; never summed together.
+        public let sources: [InsightsWeekSource]
+        public let byDay: [InsightsWeekDay]?
+        public let codexIntervalTokens: Int64?
+        /// Alphabetical by declared label, unknown (`nil`) last.
+        public let byModel: [InsightsWeekModel]
+        public let sessions: [InsightsWeekSession]
+
+        public enum CodingKeys: String, CodingKey {
+            case coverage, sources, sessions
+            case weekStart = "week_start"
+            case undatedSessions = "undated_sessions"
+            case byDay = "by_day"
+            case codexIntervalTokens = "codex_interval_tokens"
+            case byModel = "by_model"
+        }
+    }
+
+    public struct InsightsWeekCoverage: Codable, Equatable, Sendable {
+        public let known: Int
+        public let partial: Int
+        public let unknown: Int
+        public let reasons: [String: Int]
+    }
+
+    public struct InsightsWeekSource: Codable, Equatable, Sendable {
+        public let source: String
+        public let sessions: Int
+        /// `nil` is unknown, never zero.
+        public let tokens: Int64?
+        public let largestSessionTokens: Int64?
+        public let cacheShare: InsightsWeekShare?
+
+        public enum CodingKeys: String, CodingKey {
+            case source, sessions, tokens
+            case largestSessionTokens = "largest_session_tokens"
+            case cacheShare = "cache_share"
+        }
+    }
+
+    public struct InsightsWeekShare: Codable, Equatable, Sendable {
+        public let numerator: Int64
+        public let denominator: Int64
+    }
+
+    public struct InsightsWeekDay: Codable, Equatable, Sendable {
+        public let date: String
+        public let uncached: Int64
+        public let cacheRead: Int64
+        public let cacheWrite: Int64
+        public let output: Int64
+
+        public enum CodingKeys: String, CodingKey {
+            case date, uncached, output
+            case cacheRead = "cache_read"
+            case cacheWrite = "cache_write"
+        }
+    }
+
+    public struct InsightsWeekModel: Codable, Equatable, Sendable {
+        /// `nil` is an unknown label.
+        public let label: String?
+        public let tokens: Int64
+    }
+
+    /// One counted session. No reference to it crosses: no id, digest or
+    /// path.
+    public struct InsightsWeekSession: Codable, Equatable, Sendable {
+        public let source: String?
+        /// The transcript's count; `nil` is unknown, never zero.
+        public let tokens: Int64?
+        public let state: String
+        public let reasons: [String]
+        /// The transcript's first recorded event, RFC 3339; `nil` when it
+        /// has none, or from a daemon that predates it.
+        public let startedAt: String?
+        /// Where its calls went, from the proxy's record; `nil` while
+        /// `routingAvailable` is not true.
+        public let routing: InsightsWeekRouting?
+
+        public enum CodingKeys: String, CodingKey {
+            case source, tokens, state, reasons, routing
+            case startedAt = "started_at"
+        }
+    }
+
+    /// A session's route. `category` is `unobserved`, `unrecorded`,
+    /// `outside`, `mixed`, `check_failed`, `routed_verified` or
+    /// `routed_unverified`; only `routed_verified` is proof. `unobserved`
+    /// (no proxy record) carries every figure `nil`. The tokens are the
+    /// proxy's own per-call count, never the transcript's.
+    public struct InsightsWeekRouting: Codable, Equatable, Sendable {
+        public let category: String
+        public let reasons: [String]?
+        public let tokens: InsightsWeekRouteTokens?
+        public let calls: Int64?
+        public let callsWithoutCounts: Int64?
+
+        public enum CodingKeys: String, CodingKey {
+            case category, reasons, tokens, calls
+            case callsWithoutCounts = "calls_without_counts"
+        }
+    }
+
+    /// Proxy tokens per bucket. A bucket holding any call with unknown
+    /// counters is `nil`, never zero; a bucket with no calls is a true 0.
+    public struct InsightsWeekRouteTokens: Codable, Equatable, Sendable {
+        public let verified: Int64?
+        public let routedUnverified: Int64?
+        public let checkFailed: Int64?
+        public let outside: Int64?
+        public let unrecorded: Int64?
+
+        public enum CodingKeys: String, CodingKey {
+            case verified, outside, unrecorded
+            case routedUnverified = "routed_unverified"
+            case checkFailed = "check_failed"
+        }
     }
 }

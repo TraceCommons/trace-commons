@@ -159,6 +159,7 @@ struct ToolsSection: View {
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+
             }
         }
     }

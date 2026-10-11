@@ -1,0 +1,21 @@
+{
+  "type": "pattern_sessions",
+  "pattern_sessions": {
+    "pattern": "repeated_reads",
+    "feed": "saved",
+    "generation": 4783315849904727193,
+    "week_start": "2026-09-14",
+    "tz": 0,
+    "sessions": [
+      {
+        "session_ref": "f2f7",
+        "count": 3,
+        "tokens": null,
+        "state": "partial",
+        "reasons": [
+          "some_turns_unknown"
+        ]
+      }
+    ]
+  }
+}

@@ -99,10 +99,20 @@ final class InferenceStore {
                 _ = await (calls, destinations)
             case .snapshot, .statusChanged, .resyncRequired:
                 await load()
-            case .queueChanged, .digestDue, .reengageDue, .previewReady, .unknown:
+            case .queueChanged, .digestDue, .reengageDue, .previewReady, .usageChanged, .unknown:
                 break
             }
         }
+    }
+
+    /// The tab came into view, or the ledger feed's switch moved: everything
+    /// is read again, so a call loaded before the feed was turned off in
+    /// Settings stops drawing its tokens now rather than when the next call
+    /// arrives. Reads only; while the daemon is still starting it reads
+    /// nothing, as `run()` does.
+    func appeared() async {
+        guard !awaiting else { return }
+        await load()
     }
 
     func load() async {

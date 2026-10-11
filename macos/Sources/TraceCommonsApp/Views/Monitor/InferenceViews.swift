@@ -24,6 +24,10 @@ struct InferenceTabView: View {
     var onOpenSettings: () -> Void = {}
     @EnvironmentObject private var model: AppModel
 
+    /// The core's analytics words (`tc_insights_copy_json`), for each
+    /// call's ledger counters.
+    private static let insightsCopy = TCInsights.copy() ?? [:]
+
     var body: some View {
         // The Folders step scrolls itself, so the switch sits outside the
         // ledger's scroll; the refresh sits on the stack, which is always
@@ -47,6 +51,11 @@ struct InferenceTabView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onAppear { model.refreshAll() }
+        // The settings refresh re-reads the ledger feed's switch; this
+        // re-reads the calls, so tokens the daemon stopped sending go too.
+        // Keyed on the switch: Settings is its own window, so this tab can
+        // stay in view while the feed is turned off there.
+        .task(id: model.daemonSettings?.insightsLedgerFeed) { await store.appeared() }
     }
 
     private var ledger: some View {
@@ -231,6 +240,18 @@ struct InferenceTabView: View {
                     .foregroundStyle(GlassColor.textTertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                // The ledger's own counters, only while the feed is on: each
+                // as the proxy reported it, never added together.
+                if let tokens = call.tokens {
+                    Text(InferenceTokenWords.line(tokens, copy: Self.insightsCopy))
+                        .glassType(GlassTokens.TypeScale.caption.monospaced)
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        // Read out in place of the line, so the combined row
+                        // says unknown where the line draws the dash.
+                        .accessibilityLabel(InferenceTokenWords.accessibilityLine(tokens, copy: Self.insightsCopy))
+                }
             }
             Spacer(minLength: GlassTokens.Space.s4)
             Text(Self.priced([call.cost]))
@@ -424,6 +445,40 @@ private struct InspectorFactRow: View {
         }
         .glassType(GlassTokens.TypeScale.body)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// A call's four ledger counters, each with the core's label, in a fixed
+/// order: input, cache read, cache write, output. Never added together
+/// (on the OpenAI family, input already holds the cache reads). A counter
+/// the proxy did not report is the dash; a measured zero stays zero.
+enum InferenceTokenWords {
+    private static let labels = [
+        "metric_input_tokens", "analytics_series_cache_read", "analytics_series_cache_write",
+        "metric_output_tokens",
+    ]
+
+    private static func counters(_ tokens: DaemonData.InferenceCallTokens) -> [UInt32?] {
+        [tokens.input, tokens.cacheRead, tokens.cacheWrite, tokens.output]
+    }
+
+    static func line(_ tokens: DaemonData.InferenceCallTokens, copy: [String: String]) -> String {
+        pairs(tokens, copy: copy) { InsightsOverviewWords.figure(nil, copy: copy) }
+    }
+
+    /// The same pairs read out, with unknown where the line draws the dash.
+    static func accessibilityLine(_ tokens: DaemonData.InferenceCallTokens, copy: [String: String]) -> String {
+        pairs(tokens, copy: copy) { MonitorWords.unknown }
+    }
+
+    private static func pairs(
+        _ tokens: DaemonData.InferenceCallTokens, copy: [String: String], unknown: () -> String
+    ) -> String {
+        zip(labels, counters(tokens)).map { key, value in
+            let figure = value.map { InsightsOverviewWords.figure(UInt64($0), copy: copy) } ?? unknown()
+            return "\(InsightsOverviewWords.text(key, copy)) \(figure)"
+        }
+        .joined(separator: " · ")
     }
 }
 

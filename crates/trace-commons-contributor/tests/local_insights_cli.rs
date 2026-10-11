@@ -1341,3 +1341,116 @@ fn invoke_text(config: &Path, store: &Path, args: &[&str]) -> String {
     );
     String::from_utf8(output.stdout).unwrap()
 }
+
+/// A Codex rollout whose observed interval is on 2026-09-11.
+fn codex_rollout(path: &Path) {
+    let token = |time: &str, input: u64, cached: u64, output: u64| {
+        serde_json::json!({
+            "type":"event_msg", "timestamp":time,
+            "payload":{"type":"token_count","info":{"total_token_usage":{
+                "input_tokens":input,"cached_input_tokens":cached,"output_tokens":output,
+                "reasoning_output_tokens":0,"total_tokens":input + output
+            }}}
+        })
+    };
+    let rows = [
+        serde_json::json!({"type":"session_meta","timestamp":"2026-09-11T00:00:00Z","payload":{"id":"PRIVATE_SESSION_ID","model_provider":"openai"}}),
+        serde_json::json!({"type":"turn_context","timestamp":"2026-09-11T00:00:00Z","payload":{"model":"fixture-model"}}),
+        token("2026-09-11T00:00:01Z", 100, 20, 20),
+        serde_json::json!({"type":"response_item","timestamp":"2026-09-11T00:00:02Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"PRIVATE_BODY"}]}}),
+        token("2026-09-11T00:00:03Z", 150, 40, 30),
+    ];
+    std::fs::write(
+        path,
+        rows.iter()
+            .map(|row| row.to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn week_reads_saved_snapshots_by_their_own_dates_and_compares_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("enrollment");
+    let store = dir.path().join("insights");
+    // An absent store reads as an empty week and is not created.
+    let empty = value(invoke(
+        &config,
+        &store,
+        &["week", "--week-start", "2026-09-09", "--tz", "0"],
+    ));
+    assert_eq!(empty["sessions"], 0);
+    assert!(!store.exists());
+
+    let file = dir.path().join("rollout.jsonl");
+    codex_rollout(&file);
+    let saved = value(invoke(
+        &config,
+        &store,
+        &[
+            "analyze",
+            "--source",
+            "codex",
+            "--file",
+            file.to_str().unwrap(),
+            "--save",
+        ],
+    ));
+    let week = value(invoke(
+        &config,
+        &store,
+        &["week", "--week-start", "2026-09-09", "--tz", "0"],
+    ));
+    assert_eq!(week["feed"], "saved");
+    assert_eq!(week["week_start"], "2026-09-07");
+    assert_eq!(week["sessions"], 1);
+    assert_eq!(week["sources"][0]["source"], "codex");
+    assert_eq!(week["sources"][0]["tokens"], 60);
+    assert_eq!(week["sources"][0]["change"], "needs_counter_pass");
+    assert_eq!(
+        week["sources"][0]["largest_session"]["session_ref"],
+        saved["id"]
+    );
+    let text = week.to_string();
+    assert!(!text.contains("PRIVATE_BODY"));
+    assert!(!text.contains("PRIVATE_SESSION_ID"));
+    assert!(!text.contains(file.to_str().unwrap()));
+
+    // The week before holds nothing: the import date does not place it.
+    let before = value(invoke(
+        &config,
+        &store,
+        &["week", "--week-start", "2026-08-31", "--tz", "0"],
+    ));
+    assert_eq!(before["sessions"], 0);
+
+    let inputs = value(invoke(
+        &config,
+        &store,
+        &[
+            "week",
+            "--week-start",
+            "2026-09-09",
+            "--tz",
+            "0",
+            "--card",
+            "tokens",
+        ],
+    ));
+    assert_eq!(inputs["card"], "tokens");
+    assert_eq!(inputs["sessions"][0]["session_ref"], saved["id"]);
+    // The first reading already held counters, so the session is partial.
+    assert_eq!(inputs["sessions"][0]["state"], "partial");
+    assert_eq!(
+        inputs["sessions"][0]["reasons"],
+        serde_json::json!(["codex_baseline_excluded"])
+    );
+
+    let refused = invoke(&config, &store, &["week", "--tz", "100000"]);
+    assert!(!refused.status.success());
+    let refusal: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(refusal["error"], "insights_tz_invalid");
+    assert!(!config.exists());
+}

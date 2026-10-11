@@ -429,6 +429,8 @@ pub const METHODS: &[&str] = &[
     "inference_connection_install",
     "inference_connection_disconnect",
     "inference_calls",
+    "insights_glance",
+    "insights_week",
     "inference_summary",
     "inference_call_proof",
     "model_spend",
@@ -529,6 +531,8 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "route_disclosure",
     "tool_destinations",
     "inference_calls",
+    "insights_glance",
+    "insights_week",
     "inference_call_proof",
     "private_ai",
     "list_pending",
@@ -611,6 +615,12 @@ pub const EVENT_PREVIEW_READY: &str = "preview_ready";
 /// `inference_map::call_added`. At most `inference_map::MAX_ADDED_PER_TICK`
 /// per tick, newest kept.
 pub const EVENT_INFERENCE_CALL_ADDED: &str = "inference_call_added";
+/// The poll tick's ledger read added at least one call while the Insights
+/// ledger feed is on (the default; owner decision D3, settled 2026-10-09).
+/// At most one per tick, and
+/// `{}`: a pulse to re-read `insights_glance`, carrying no figure. See
+/// `insights_glance::publish_usage_changed`.
+pub const EVENT_USAGE_CHANGED: &str = "usage_changed";
 /// Verdict news landed (nudge U2): `refresh_history` found submissions that
 /// newly reached accepted, held for privacy review or final credit, against
 /// the daemon's own high-water mark. Counts only: `{newly_accepted,
@@ -1007,6 +1017,10 @@ pub struct DaemonShared {
     /// is the durable recovery source; these queues are bounded and local to
     /// the daemon process.
     pub(crate) skill_loop: Mutex<super::skill_loop::SkillLoopState>,
+    /// The Insights counter pass (feed T) and its store. Inert while the
+    /// `insights_counter_pass` setting is off (owner decision D4, open). See
+    /// `daemon::insights_week`.
+    pub(crate) insights_counter: super::insights_week::CounterPass,
     /// The contribution-mission catalogue behind `list_pending`'s
     /// `mission_fit`. In memory only and `None` until something writes it,
     /// which in production nothing does until Z7/Z8's server catalogue
@@ -1349,6 +1363,7 @@ impl DaemonShared {
         let paused = state.paused;
         let pin_store = store.clone();
         let managed = Mutex::new(super::managed::ManagedService::open(&store));
+        let insights_counter = super::insights_week::CounterPass::for_store(&store);
         Ok(Self {
             managed,
             store,
@@ -1410,6 +1425,7 @@ impl DaemonShared {
             harness_plans: super::harness::PlanStore::default(),
             native_identity: Mutex::new(Default::default()),
             skill_loop: Mutex::new(super::skill_loop::SkillLoopState::default()),
+            insights_counter,
             mission_catalogue: Mutex::new(None),
             estimate_table: Mutex::new(EstimateTableSlot::built_in()),
             preview_builds: std::sync::atomic::AtomicUsize::new(0),
@@ -2046,9 +2062,16 @@ impl DaemonShared {
             return;
         };
         ledger.refresh().await;
+        // The route tallies, from the snapshot the refresh above committed.
+        // Not from `take_added_rows`: that baselines after a restart and
+        // hands out nothing for the window, so calls would go uncounted.
+        // Off unless the ledger feed and the counter pass are both on.
+        super::insights_week::fold_ledger_after_refresh(self, ledger.as_ref());
         // Once per row this tick read that no earlier tick had. Reads only
         // the snapshot the refresh above committed; never a second fetch.
-        super::inference_map::publish_added_calls(self, &ledger.take_added_rows());
+        let added = ledger.take_added_rows();
+        super::inference_map::publish_added_calls(self, &added);
+        super::insights_glance::publish_usage_changed(self, &added);
         if let Some(has_rows) = self.routing_transition(ledger.has_rows()) {
             // Hash-only by construction: `has_rows` is a bool, and nothing
             // else about the ledger -- port, token, row contents -- appears
@@ -3492,7 +3515,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 "events": [
                     EVENT_SNAPSHOT, EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED,
                     EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED, EVENT_INFERENCE_CALL_ADDED,
-                    "managed_changed", EVENT_HISTORY_CHANGED,
+                    "managed_changed", EVENT_USAGE_CHANGED, EVENT_HISTORY_CHANGED,
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
             }),
@@ -3502,6 +3525,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "route_disclosure" => handle_route_disclosure(shared, req),
         "tool_destinations" => super::inference_map::handle_destinations(shared, req),
         "inference_calls" => super::inference_map::handle_calls(shared, req),
+        "insights_glance" => super::insights_glance::handle_glance(shared, req),
+        "insights_week" => super::insights_week::handle_week(shared, req),
         "inference_call_proof" => super::network_data::handle_proof(shared, req),
         "private_ai" => super::network_data::handle_private_ai(shared, req),
         "list_pending" => handle_list_pending(shared, req),
@@ -16628,7 +16653,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 80, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 82, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

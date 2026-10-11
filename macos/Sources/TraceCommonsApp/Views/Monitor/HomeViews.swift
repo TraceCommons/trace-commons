@@ -73,7 +73,7 @@ struct HomeTabView: View {
         // that held them is gone), hosted as Home pages under the shell's
         // breadcrumb.
         case .insights:
-            InsightsView(storeSelection: insightsStoreSelection)
+            InsightsView(storeSelection: insightsStoreSelection, daemon: store.client)
         case .missionDrafts:
             MissionDraftsView(model: missionDrafts)
         }
