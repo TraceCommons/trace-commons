@@ -60,12 +60,11 @@ public struct MonitorTracesGraphCopy: MonitorWordTable {
 }
 
 /// Ron's #1146 words for the flow map (`preview_copy::MonitorFlowMapCopy`):
-/// its accessible names, the node cards and the hint under a peeked card.
+/// its accessible names and the node cards.
 /// Counted nouns fill the sentences' `{label}`; a singular is its own line.
 public struct MonitorFlowMapCopy: MonitorWordTable {
     public let mapLabel: String
     public let zoomLabel: String
-    public let hint: String
     public let sessionsOne: String
     public let sessions: String
     public let tracesOne: String
@@ -94,7 +93,6 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
     enum CodingKeys: String, CodingKey, CaseIterable {
         case mapLabel = "map_label"
         case zoomLabel = "zoom_label"
-        case hint
         case sessionsOne = "sessions_one"
         case sessions
         case tracesOne = "traces_one"

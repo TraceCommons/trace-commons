@@ -144,11 +144,7 @@ struct SettingsWindowView: View {
         SettingsModal(
             request: navigation.settingsRequest ?? SettingsRequest(section: nil),
             navigation: navigation, paused: model.status.paused,
-            onClose: { dismiss() },
-            onPrivateAI: {
-                // The Private AI pointer opens Inference in the Monitor.
-                OpenMonitor.request(.inference)
-            })
+            onClose: { dismiss() })
             .frame(minWidth: GlassTokens.Size.modalNavWidth * 3, minHeight: 420)
             // Confirmations raised by a section cover this window, with
             // #1146's close button in the core's words.

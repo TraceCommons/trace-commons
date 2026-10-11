@@ -138,10 +138,9 @@ final class SettingsParityTests: XCTestCase {
                 accessibility: ["GlassToggleStyle(.settings)", ".accessibilityLabel(copy.portTitle)",
                                 ".accessibilityLabel(copy.folderTitle)", ".accessibilityElement(children: .combine)"]),
         Section(glass: "Views/Settings/PrivateAISection.swift",
-                bindings: ["model.privateInferenceCopy", "OpenMonitor.request(.inference)",
+                bindings: ["PrivateAISettingsPanels(store: store)", "store.attach(", "await store.run()",
                            "model.routeDisclosureState", "model.routeDisclosureUnreadableCopy", "model.refreshRouteDisclosure()"],
-                copySources: ["copy.settingsTitle", "copy.settingsMoved", "copy.destination",
-                              "copy.route", "copy.localFilter", "witness.heading", "witness.addressLabel", "witness.signingLabel",
+                copySources: ["copy.route", "copy.localFilter", "witness.heading", "witness.addressLabel", "witness.signingLabel",
                               "witness.measurementsLabel", "witness.check", "witness.classifier", "witness.origin",
                               "copy.attestedBodies", "copy.receipts", "facts.url", "facts.signingAddress", "facts.pinnedMeasurements",
                               "disclosure.copy.title", "model.routeDisclosureUnreadableCopy?.title",
@@ -307,8 +306,10 @@ final class SettingsParityTests: XCTestCase {
                      "struct RouteDisclosureUnreadableGlassLine: View"] {
             XCTAssertEqual(source.components(separatedBy: name).count - 1, 1, "\(name) is not declared exactly once")
         }
-        XCTAssertTrue(source.contains("Button(copy.destination)"))
-        XCTAssertTrue(source.contains(".buttonStyle(GlassButtonStyle(.link))"))
+        // The panels are the section's own now (owner, 2026-10-10): no
+        // pointer back to the Monitor.
+        XCTAssertFalse(source.contains("Button(copy.destination)"))
+        XCTAssertTrue(source.contains("PrivateAISettingsPanels(store: store)"))
         for arm in ["case .shown(let disclosure):", "case .loading:", "case .unreadable:"] {
             XCTAssertEqual(source.components(separatedBy: arm).count - 1, 1, "\(arm) is not drawn exactly once")
         }
@@ -493,6 +494,6 @@ final class SettingsParityTests: XCTestCase {
             XCTAssertFalse(source.contains(".tcScreen()"), rel)
         }
         let modal = try Self.text("Views/Monitor/SettingsModal.swift")
-        XCTAssertTrue(modal.contains("GlassSettingsContent(navigation: navigation, section: item, onPrivateAI: onPrivateAI)"))
+        XCTAssertTrue(modal.contains("GlassSettingsContent(navigation: navigation, section: item)"))
     }
 }

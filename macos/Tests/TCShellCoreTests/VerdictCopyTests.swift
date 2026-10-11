@@ -28,7 +28,7 @@ final class VerdictCopyTests: XCTestCase {
     func testTheDisclosureCaptionIsIntact() {
         XCTAssertEqual(
             VerdictCopy.caption,
-            "Optional. This is recorded as the trace outcome; the preview above does not show it."
+            "Optional. Recorded with the trace; not shown in the preview."
         )
     }
 

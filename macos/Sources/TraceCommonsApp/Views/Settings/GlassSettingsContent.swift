@@ -7,9 +7,6 @@ import TCDesign
 struct GlassSettingsContent: View {
     var navigation: MainWindowNavigation?
     let section: SettingsSection
-    /// The Private AI pointer's way out of the Monitor's Settings modal;
-    /// nil elsewhere (`PrivateAISection.onPointer`).
-    var onPrivateAI: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -24,7 +21,7 @@ struct GlassSettingsContent: View {
             case .watching: WatchingSection()
             case .watchedFolders: WatchedFoldersSection()
             case .tools: ToolsSection()
-            case .privateAI: PrivateAISection(onPointer: onPrivateAI)
+            case .privateAI: PrivateAISection()
             case .witness: WitnessSection()
             case .projects: ProjectsSection()
             case .changes: ChangesSection()

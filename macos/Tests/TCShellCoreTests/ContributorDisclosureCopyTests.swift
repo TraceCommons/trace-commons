@@ -11,7 +11,7 @@ final class ContributorDisclosureCopyTests: XCTestCase {
     {
       "witness_review": {"heading": "ignored by this decoder"},
       "outcome": {
-        "verdict_question": "Q", "worked": "W", "partly": "P", "failed": "F",
+        "verdict_question": "Q", "worked": "W", "partly": "P", "failed": "F", "verdict_none": "N",
         "verdict_caption": "C", "correction_question": "CQ", "correction_placeholder": "CP",
         "correction_caption": "CC", "correction_credential_headline": "CH",
         "correction_credential_body": "CB", "submit_all_as": "S", "submit_all_as_tooltip": "ST",
@@ -31,6 +31,7 @@ final class ContributorDisclosureCopyTests: XCTestCase {
         XCTAssertEqual(copy.outcome.worked, "W")
         XCTAssertEqual(copy.outcome.partly, "P")
         XCTAssertEqual(copy.outcome.failed, "F")
+        XCTAssertEqual(copy.outcome.verdictNone, "N")
         XCTAssertEqual(copy.outcome.correctionQuestion, "CQ")
         XCTAssertEqual(copy.outcome.submitAllAs, "S")
         XCTAssertEqual(copy.outcome.maxCorrectionChars, 2000)
@@ -52,6 +53,7 @@ final class ContributorDisclosureCopyTests: XCTestCase {
     /// bundle this shell cannot render, never a blank button.
     func testAnEmptyWordOrNoLimitDecodesToNothing() {
         XCTAssertNil(ContributorDisclosureCopy.decode(fromJSON: Self.fixture.replacingOccurrences(of: #""worked": "W""#, with: #""worked": """#)))
+        XCTAssertNil(ContributorDisclosureCopy.decode(fromJSON: Self.fixture.replacingOccurrences(of: #""verdict_none": "N""#, with: #""verdict_none": """#)))
         XCTAssertNil(ContributorDisclosureCopy.decode(fromJSON: Self.fixture.replacingOccurrences(of: "2000", with: "0")))
         XCTAssertNil(ContributorDisclosureCopy.decode(fromJSON: "{}"))
         XCTAssertNil(ContributorDisclosureCopy.decode(fromJSON: nil))
