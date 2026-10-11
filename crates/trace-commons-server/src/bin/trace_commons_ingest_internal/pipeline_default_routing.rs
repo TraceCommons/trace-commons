@@ -1010,10 +1010,12 @@ impl PipelineDefaultRouting {
         }
     }
 
-    /// Reads every `pipeline` or `contained` tenant and rebuilds the cache:
-    /// a tenant new to it is admitted only once its bundles pass the start
-    /// checks here; a tenant no longer routed (deactivated to legacy) drops
-    /// out. A read that fails keeps the cache as it is.
+    /// Reads every `pipeline` or `contained` tenant and brings the cache up
+    /// to date in place: a tenant new to it is added, one at a time, once its
+    /// bundles pass the start checks here; a tenant cached before the read
+    /// and no longer routed (deactivated to legacy) drops out. A tenant
+    /// another caller admits while the refresh runs is kept. A read that
+    /// fails keeps the cache as it is.
     pub(crate) async fn refresh_cache(&self, state: &AppState) {
         let (Some(activation), Some(service)) = (
             state.pipeline_activation.as_deref(),
@@ -1021,6 +1023,7 @@ impl PipelineDefaultRouting {
         ) else {
             return;
         };
+        let before = self.routed_tenants();
         let mut routed = BTreeSet::new();
         let mut after: Option<String> = None;
         loop {
@@ -1048,29 +1051,36 @@ impl PipelineDefaultRouting {
                 break;
             }
         }
-        let known = self.routed_tenants();
-        let mut admitted = BTreeSet::new();
-        for tenant_id in routed {
-            if known.contains(&tenant_id) {
-                admitted.insert(tenant_id);
-                continue;
-            }
+        // Each tenant that passes its check is added at once, not with the
+        // rest at the end: a refresh cut short (the start's time limit)
+        // keeps the tenants it reached, and `refreshed_at` stays as it was,
+        // so the next pass refreshes again.
+        for tenant_id in routed.iter().filter(|tenant_id| !self.serves(tenant_id)) {
             match service
-                .check_tenant_bundles(&tenant_id, &state.pipeline_main_gate, true)
+                .check_tenant_bundles(tenant_id, &state.pipeline_main_gate, true)
                 .await
             {
                 Ok(()) => {
-                    admitted.insert(tenant_id);
+                    self.cache
+                        .write()
+                        .unwrap_or_else(lock_poisoned)
+                        .tenants
+                        .insert(tenant_id.clone());
                 }
                 Err(error) => tracing::warn!(
-                    tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    tenant_storage_ref = %tenant_storage_ref(tenant_id),
                     error_hash = %safe_display_error_hash(&error),
                     "{PIPELINE_DEFAULT_ROUTING_TENANT_BUNDLE_CHECK_FAILED_LABEL}"
                 ),
             }
         }
+        // Only a tenant cached before the read and absent from it leaves: a
+        // tenant admitted while the refresh ran (an upload, an activation)
+        // was routed after the read began, and stays.
         let mut cache = self.cache.write().unwrap_or_else(lock_poisoned);
-        cache.tenants = admitted;
+        cache
+            .tenants
+            .retain(|tenant_id| routed.contains(tenant_id) || !before.contains(tenant_id));
         cache.refreshed_at = Some(tokio::time::Instant::now());
     }
 
@@ -1211,6 +1221,23 @@ async fn admit_if_routed(
     }
 }
 
+/// `admit_if_routed` for a caller that holds only the state: the retry of a
+/// submission a pipeline run owns, on a process that has not cached the
+/// tenant. Nothing without the mode or a runtime.
+pub(crate) async fn admit_routed_tenant(
+    state: &AppState,
+    tenant_id: &str,
+    routing: &NewReceiptRouting,
+) {
+    let (Some(default_routing), Some(service)) = (
+        state.pipeline_default_routing.as_deref(),
+        state.pipeline_service.as_deref(),
+    ) else {
+        return;
+    };
+    admit_if_routed(default_routing, state, service, tenant_id, routing).await;
+}
+
 /// The loop of the mode `all`, beside the worker: one `run_pass` every
 /// `interval`, until `stop` fires.
 pub(crate) struct DefaultRoutingLoopHandle {
@@ -1238,8 +1265,10 @@ pub(crate) fn spawn_default_routing_loop(state: Arc<AppState>) -> Option<Default
 }
 
 /// The start's first look, before the listener opens: the arming and the
-/// cache, within `limit`. A tenant the refresh does not reach is admitted on
-/// a later pass; nothing here refuses the start.
+/// cache, within `limit`. The tenants the refresh checked before `limit` ran
+/// out stay cached (`refresh_cache` adds each as it passes); a tenant it did
+/// not reach is admitted on a later pass, or by its first upload or retry.
+/// Nothing here refuses the start.
 pub(crate) async fn prepare_default_routing(state: &AppState, limit: StdDuration) {
     let Some(routing) = state.pipeline_default_routing.as_deref() else {
         return;
@@ -1258,7 +1287,9 @@ pub(crate) async fn prepare_default_routing(state: &AppState, limit: StdDuration
     }
 }
 
-/// Counters of the worker's last pass, read by `GET /v1/pipeline/readiness`.
+/// Counters of the worker's last pass, read by `GET /v1/admin/config-status`
+/// (admin only: the tenant count rises as each new signup is routed, so it
+/// is not on the unauthenticated readiness probe).
 #[derive(Debug, Default)]
 pub(crate) struct PipelineWorkerPassStats {
     pub(crate) tenant_count: AtomicU64,

@@ -745,6 +745,35 @@ async fn the_worker_processes_a_tenant_routed_after_it_started() {
             .load(std::sync::atomic::Ordering::Relaxed)
             >= 1
     );
+    // The pass figures are on the admin config-status, not on the
+    // unauthenticated readiness probe, where a poller could watch the
+    // tenant count rise as each new signup is routed.
+    let status = fixture
+        .config_status(&fixture.state, &fixture.newcomer_admin)
+        .await;
+    assert!(
+        status["pipeline_worker_last_pass_tenant_count"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
+        "{status}"
+    );
+    assert!(
+        status["pipeline_worker_last_pass_duration_ms"].is_u64(),
+        "{status}"
+    );
+    let (_, readiness) = route_request(
+        fixture.state.clone(),
+        "GET",
+        "/v1/pipeline/readiness",
+        HeaderMap::new(),
+        None,
+    )
+    .await;
+    assert!(
+        readiness.get("worker_last_pass_tenant_count").is_none()
+            && readiness.get("worker_last_pass_duration_ms").is_none(),
+        "{readiness}"
+    );
     let _ = worker.stop.send(true);
     pipeline_runtime::join_or_abort(worker.join, StdDuration::from_secs(10)).await;
 }
@@ -965,4 +994,178 @@ async fn a_replica_serves_a_tenant_another_replica_routed_without_waiting() {
     assert_eq!(status, StatusCode::OK, "{receipt}");
     assert!(is_pipeline_receipt(&receipt), "{receipt}");
     assert!(DefaultRoutingFixture::routing_of(&replica_b).serves(&fixture.newcomer));
+}
+
+/// A process never serves a bundle it has not checked: on a replica whose
+/// `main` gate configuration is not the one the tenant's bundle was built
+/// for, the bundle check fails, so neither the upload's admission nor a
+/// cache refresh caches the tenant, and its upload is refused with `503
+/// pipeline_tenant_not_served`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tenant_whose_bundle_check_fails_here_is_not_served() {
+    let Some(fixture) = DefaultRoutingFixture::new().await else {
+        return;
+    };
+    fixture.rearm().await;
+    let (_, receipt) = fixture.newcomer_upload("on_replica_a").await;
+    assert!(is_pipeline_receipt(&receipt), "{receipt}");
+
+    let mismatched = fixture.process(|state| {
+        state.pipeline_main_gate = MainGateConfig {
+            perplexity_floor_micros: Some(2_000),
+            ..state.pipeline_main_gate
+        };
+    });
+    let routing = DefaultRoutingFixture::routing_of(&mismatched);
+    routing.rearm(&mismatched).await;
+    let (status, refused) = fixture
+        .upload_as(&mismatched, &fixture.newcomer_contributor, "mismatched")
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], PIPELINE_TENANT_NOT_SERVED_LABEL);
+    assert!(!routing.serves(&fixture.newcomer));
+
+    routing.refresh_cache(&mismatched).await;
+    assert!(
+        !routing.serves(&fixture.newcomer),
+        "a refresh does not cache it either"
+    );
+    let (status, refused) = fixture
+        .upload_as(&mismatched, &fixture.newcomer_contributor, "after_refresh")
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], PIPELINE_TENANT_NOT_SERVED_LABEL);
+}
+
+/// `POST /v1/contributors/me/submission-status` for `submission_id` through
+/// `state` by `token`: the status rows the caller sees.
+async fn submission_status(
+    state: &Arc<AppState>,
+    token: &str,
+    submission_id: Uuid,
+) -> Vec<serde_json::Value> {
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        "/v1/contributors/me/submission-status",
+        auth_headers(token),
+        Some(serde_json::json!({ "submission_ids": [submission_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body.as_array().expect("a status list").clone()
+}
+
+/// A retried upload, and the contributor's status read, on a replica that
+/// has not cached a tenant another replica routed are answered from the
+/// pipeline run that owns the id: the retry replays its receipt (not `409
+/// submission_owned_by_pipeline_run`) and the status lists the submission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_on_a_replica_that_has_not_cached_the_tenant_replays_its_receipt() {
+    let Some(fixture) = DefaultRoutingFixture::new().await else {
+        return;
+    };
+    fixture.rearm().await;
+    let envelope = clean_envelope("default_routing_retry_uncached").await;
+    let body = serde_json::to_vec(&envelope).unwrap();
+    let (status, receipt) = route_trace(&fixture.state, &fixture.newcomer_contributor, &body).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert!(is_pipeline_receipt(&receipt), "{receipt}");
+
+    // Replica C: its status read comes first, before anything admits the
+    // tenant there.
+    let replica_c = fixture.process(|_| {});
+    assert!(!DefaultRoutingFixture::routing_of(&replica_c).serves(&fixture.newcomer));
+    let statuses = submission_status(
+        &replica_c,
+        &fixture.newcomer_contributor,
+        envelope.submission_id,
+    )
+    .await;
+    assert_eq!(
+        statuses.len(),
+        1,
+        "the pipeline submission is listed: {statuses:?}"
+    );
+    assert_eq!(
+        statuses[0]["submission_id"],
+        envelope.submission_id.to_string()
+    );
+
+    // Replica B: the retry of the same body.
+    let replica_b = fixture.process(|_| {});
+    assert!(!DefaultRoutingFixture::routing_of(&replica_b).serves(&fixture.newcomer));
+    let (status, receipt) = route_trace(&replica_b, &fixture.newcomer_contributor, &body).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert!(
+        is_pipeline_receipt(&receipt),
+        "the receipt replays: {receipt}"
+    );
+    assert!(
+        DefaultRoutingFixture::routing_of(&replica_b).serves(&fixture.newcomer),
+        "the routed tenant is admitted on the way"
+    );
+}
+
+/// A default-routed tenant deactivated to `legacy` leaves the cache on the
+/// next refresh, but a retry of an upload the pipeline took still replays
+/// its receipt and its status still lists it: a run owns the id whatever the
+/// routing row says now. The tenant's new uploads go to the legacy path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_after_the_tenant_is_deactivated_replays_its_receipt() {
+    let Some(fixture) = DefaultRoutingFixture::new().await else {
+        return;
+    };
+    fixture.rearm().await;
+    let envelope = clean_envelope("default_routing_retry_deactivated").await;
+    let body = serde_json::to_vec(&envelope).unwrap();
+    let (status, receipt) = route_trace(&fixture.state, &fixture.newcomer_contributor, &body).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert!(is_pipeline_receipt(&receipt), "{receipt}");
+    let record = fixture
+        .view(&fixture.newcomer)
+        .await
+        .routing
+        .expect("activated")
+        .activation_record_id;
+    let (status, deactivated) = route_request(
+        fixture.state.clone(),
+        "POST",
+        "/v1/admin/pipeline/deactivate",
+        auth_headers(&fixture.newcomer_admin),
+        Some(serde_json::json!({
+            "reason_code": "operator_returns_tenant_to_legacy",
+            "expected_record_id": record,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deactivated}");
+    fixture.routing().refresh_cache(&fixture.state).await;
+    assert!(!fixture.routing().serves(&fixture.newcomer));
+
+    let (status, receipt) = route_trace(&fixture.state, &fixture.newcomer_contributor, &body).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert!(
+        is_pipeline_receipt(&receipt),
+        "the receipt replays: {receipt}"
+    );
+    let statuses = submission_status(
+        &fixture.state,
+        &fixture.newcomer_contributor,
+        envelope.submission_id,
+    )
+    .await;
+    assert_eq!(
+        statuses.len(),
+        1,
+        "the pipeline submission is listed: {statuses:?}"
+    );
+
+    let (status, receipt) = fixture.newcomer_upload("after_deactivate").await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert!(!is_pipeline_receipt(&receipt), "legacy again: {receipt}");
+    assert!(
+        !fixture.routing().serves(&fixture.newcomer),
+        "a legacy tenant is not admitted"
+    );
 }

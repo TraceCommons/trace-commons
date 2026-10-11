@@ -382,11 +382,6 @@ pub(crate) struct PipelineReadinessResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
     drain_tenant_count: usize,
-    /// The tenants the worker's last pass drained, and how long it took
-    /// (spec 2026-10-10): a pass drains its tenants one after another, so
-    /// its time grows with the number of routed tenants.
-    worker_last_pass_tenant_count: u64,
-    worker_last_pass_duration_ms: u64,
 }
 
 /// Answers `GET /v1/pipeline/readiness`. Unauthenticated and registered in
@@ -398,14 +393,6 @@ pub(crate) async fn pipeline_readiness_handler(
     State(state): State<Arc<AppState>>,
 ) -> (StatusCode, Json<PipelineReadinessResponse>) {
     let drain_tenant_count = state.pipeline_drain_tenant_ids.len();
-    let worker_last_pass_tenant_count = state
-        .pipeline_worker_pass_stats
-        .tenant_count
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let worker_last_pass_duration_ms = state
-        .pipeline_worker_pass_stats
-        .duration_ms
-        .load(std::sync::atomic::Ordering::Relaxed);
     if state.pipeline_service.is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -413,8 +400,6 @@ pub(crate) async fn pipeline_readiness_handler(
                 status: "not_ready",
                 reason: Some("pipeline_runtime_absent"),
                 drain_tenant_count,
-                worker_last_pass_tenant_count,
-                worker_last_pass_duration_ms,
             }),
         );
     }
@@ -428,8 +413,6 @@ pub(crate) async fn pipeline_readiness_handler(
                 status: "not_ready",
                 reason: Some("pipeline_worker_not_ready"),
                 drain_tenant_count,
-                worker_last_pass_tenant_count,
-                worker_last_pass_duration_ms,
             }),
         );
     }
@@ -439,8 +422,6 @@ pub(crate) async fn pipeline_readiness_handler(
             status: "ready",
             reason: None,
             drain_tenant_count,
-            worker_last_pass_tenant_count,
-            worker_last_pass_duration_ms,
         }),
     )
 }

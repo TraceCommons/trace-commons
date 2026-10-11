@@ -12999,6 +12999,13 @@ struct TraceCommonsConfigStatusResponse {
     pipeline_default_routing_last_pass: Option<pipeline_default_routing::DefaultRoutingPassReport>,
     /// The tenants in the routed-tenant cache. Never their ids.
     pipeline_default_routing_routed_tenant_count: usize,
+    /// The tenants the pipeline worker's last pass drained, and how long it
+    /// took (spec 2026-10-10): a pass drains its tenants one after another,
+    /// so its time grows with the number of routed tenants. Here, behind
+    /// admin auth, and not on the unauthenticated readiness probe: with
+    /// default routing the count rises as each new signup is routed.
+    pipeline_worker_last_pass_tenant_count: u64,
+    pipeline_worker_last_pass_duration_ms: u64,
     signed_token_auth_enabled: bool,
     signed_token_key_count: usize,
     signed_token_eddsa_key_count: usize,
@@ -13281,6 +13288,14 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         pipeline_default_routing_expires_in_seconds: default_routing.expires_in_seconds,
         pipeline_default_routing_last_pass: default_routing.last_pass,
         pipeline_default_routing_routed_tenant_count: default_routing.routed_tenant_count,
+        pipeline_worker_last_pass_tenant_count: state
+            .pipeline_worker_pass_stats
+            .tenant_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        pipeline_worker_last_pass_duration_ms: state
+            .pipeline_worker_pass_stats
+            .duration_ms
+            .load(std::sync::atomic::Ordering::Relaxed),
         signed_token_auth_enabled: state.signed_token_verifier.is_some(),
         signed_token_key_count: signed_token_verifier
             .as_ref()
@@ -14617,7 +14632,9 @@ fn pipeline_content_conflict() -> (StatusCode, Json<ApiError>) {
 
 /// The label a retried upload gets for a submission id that a pipeline run
 /// owns when no pipeline runtime may replay it: the tenant is on neither
-/// pipeline list, or no runtime is injected (Zaki review 1, round 2, N-3).
+/// pipeline list and pipeline default routing is not configured, or no
+/// runtime is injected (Zaki review 1, round 2, N-3;
+/// `pipeline_runtime_for_owned_retry`).
 const SUBMISSION_OWNED_BY_PIPELINE_RUN: &str = "submission_owned_by_pipeline_run";
 
 /// The 409 label of a `main` route that refuses a submission a pipeline run
@@ -14637,7 +14654,9 @@ const PIPELINE_RUN_OWNS_SUBMISSION: &str = "pipeline_run_owns_submission";
 /// receipt, and a different body is refused as the pipeline refuses it
 /// (`pipeline_content_conflict`). With no such runtime, a run found
 /// through the database (`PgPipelineStore`) refuses the upload with
-/// `SUBMISSION_OWNED_BY_PIPELINE_RUN`. `Ok(None)` when no pipeline run owns
+/// `SUBMISSION_OWNED_BY_PIPELINE_RUN`, unless pipeline default routing is
+/// configured: then the run's receipt is replayed the same way
+/// (`owned_retry_receipt`). `Ok(None)` when no pipeline run owns
 /// the id: the upload takes `main`'s path.
 async fn pipeline_owned_submission_receipt(
     state: &AppState,
@@ -14647,39 +14666,14 @@ async fn pipeline_owned_submission_receipt(
     ownership_conflict: &'static str,
 ) -> ApiResult<Option<TraceSubmissionReceipt>> {
     if let Some(pipeline_service) = pipeline_runtime_for_replay(state, tenant) {
-        let idempotency_key = submission_id.to_string();
-        let Some(PipelineReplayReceipt {
-            result,
-            auth_principal_ref,
-        }) = pipeline_service
-            .replay_receipt(tenant.tenant_id(), &idempotency_key, raw_body)
-            .await
-            .map_err(internal_error)?
-        else {
-            return Ok(None);
-        };
-        if !can_access_submission_ref(tenant.auth(), &auth_principal_ref) {
-            return Err(api_error(StatusCode::CONFLICT, ownership_conflict));
-        }
-        return match result {
-            PipelineReceiptResult::Replayed(_) => Ok(Some(pipeline_processing_receipt())),
-            PipelineReceiptResult::ContentConflict => Err(pipeline_content_conflict()),
-            // `replay_receipt` only ever builds a `Replayed` or a
-            // `ContentConflict` result (`replay_result`, over a run it
-            // found); any other variant fails closed rather than letting
-            // the upload reach the legacy upsert.
-            // Neither routing result is ever built by `replay_receipt`: a
-            // replay is answered in every routing state, so it names no
-            // routing and no legacy owner.
-            PipelineReceiptResult::Created(_)
-            | PipelineReceiptResult::Tombstoned
-            | PipelineReceiptResult::QuotaExceeded(_)
-            | PipelineReceiptResult::SourceSessionWithdrawn
-            | PipelineReceiptResult::LegacyOwned
-            | PipelineReceiptResult::NotRouted(_) => {
-                Err(internal_error("pipeline_replay_result_unexpected"))
-            }
-        };
+        return replay_pipeline_receipt(
+            pipeline_service,
+            tenant,
+            submission_id,
+            raw_body,
+            ownership_conflict,
+        )
+        .await;
     }
     if let Some(store) = state.pipeline_store.as_ref() {
         if store
@@ -14687,13 +14681,104 @@ async fn pipeline_owned_submission_receipt(
             .await
             .map_err(internal_error)?
         {
-            return Err(api_error(
-                StatusCode::CONFLICT,
-                SUBMISSION_OWNED_BY_PIPELINE_RUN,
-            ));
+            return owned_retry_receipt(state, tenant, submission_id, raw_body, ownership_conflict)
+                .await;
         }
     }
     Ok(None)
+}
+
+/// The runtime that replays a retry of a submission id a pipeline run owns
+/// when `pipeline_runtime_for_replay` has none for the tenant: with pipeline
+/// default routing configured (spec 2026-10-10), the injected runtime. Under
+/// that mode a tenant may have been routed by another replica, or routed and
+/// then deactivated to `legacy`, without ever being on an env list, so this
+/// process's routed-tenant cache does not say whether its earlier uploads
+/// went through the pipeline: the run that owns the id does. The replay only
+/// reads that run (`PipelineService::replay_receipt`, tenant-scoped); it runs
+/// no bundle and routes nothing.
+fn pipeline_runtime_for_owned_retry(state: &AppState) -> Option<&Arc<PipelineService>> {
+    state
+        .pipeline_default_routing
+        .as_ref()
+        .and(state.pipeline_service.as_ref())
+}
+
+/// The answer to a retry of a submission id that a pipeline run owns, in a
+/// process `pipeline_runtime_for_replay` gives no runtime for the tenant: the
+/// replayed receipt through `pipeline_runtime_for_owned_retry` when there is
+/// one, else `409 SUBMISSION_OWNED_BY_PIPELINE_RUN`. Never `Ok(None)`: the
+/// legacy path never writes an id a run owns.
+async fn owned_retry_receipt(
+    state: &AppState,
+    tenant: &TenantCtx,
+    submission_id: Uuid,
+    raw_body: &[u8],
+    ownership_conflict: &'static str,
+) -> ApiResult<Option<TraceSubmissionReceipt>> {
+    let owned = || api_error(StatusCode::CONFLICT, SUBMISSION_OWNED_BY_PIPELINE_RUN);
+    let Some(pipeline_service) = pipeline_runtime_for_owned_retry(state) else {
+        return Err(owned());
+    };
+    match replay_pipeline_receipt(
+        pipeline_service,
+        tenant,
+        submission_id,
+        raw_body,
+        ownership_conflict,
+    )
+    .await?
+    {
+        Some(receipt) => Ok(Some(receipt)),
+        None => Err(owned()),
+    }
+}
+
+/// Replays the pipeline receipt of `submission_id` through `pipeline_service`
+/// for the principal the pipeline recorded: the same body replays the
+/// receipt, a different body is refused as the pipeline refuses it
+/// (`pipeline_content_conflict`), and another principal is refused with
+/// `ownership_conflict`. `Ok(None)` when no run holds the key.
+async fn replay_pipeline_receipt(
+    pipeline_service: &PipelineService,
+    tenant: &TenantCtx,
+    submission_id: Uuid,
+    raw_body: &[u8],
+    ownership_conflict: &'static str,
+) -> ApiResult<Option<TraceSubmissionReceipt>> {
+    let idempotency_key = submission_id.to_string();
+    let Some(PipelineReplayReceipt {
+        result,
+        auth_principal_ref,
+    }) = pipeline_service
+        .replay_receipt(tenant.tenant_id(), &idempotency_key, raw_body)
+        .await
+        .map_err(internal_error)?
+    else {
+        return Ok(None);
+    };
+    if !can_access_submission_ref(tenant.auth(), &auth_principal_ref) {
+        return Err(api_error(StatusCode::CONFLICT, ownership_conflict));
+    }
+    match result {
+        PipelineReceiptResult::Replayed(_) => Ok(Some(pipeline_processing_receipt())),
+        PipelineReceiptResult::ContentConflict => Err(pipeline_content_conflict()),
+        // `replay_receipt` only ever builds a `Replayed` or a
+        // `ContentConflict` result (`replay_result`, over a run it
+        // found); any other variant fails closed rather than letting
+        // the upload reach the legacy upsert.
+        // Neither routing result is ever built by `replay_receipt`: a
+        // replay is answered in every routing state, so it names no
+        // routing and no legacy owner.
+        PipelineReceiptResult::Created(_)
+        | PipelineReceiptResult::Tombstoned
+        | PipelineReceiptResult::QuotaExceeded(_)
+        | PipelineReceiptResult::SourceSessionWithdrawn
+        | PipelineReceiptResult::LegacyOwned
+        | PipelineReceiptResult::NotRouted(_) => {
+            Err(internal_error("pipeline_replay_result_unexpected"))
+        }
+    }
 }
 
 /// `pipeline_owned_submission_receipt` for a new upload (the call before the
@@ -14705,7 +14790,10 @@ async fn pipeline_owned_submission_receipt(
 /// the id, as `main` does. With the routing store that one statement also
 /// reads the tenant's routing (`run_and_routing_for_upload`), so the route
 /// decision of such a process adds no transaction to the upload. A run that
-/// owns the id is refused with `SUBMISSION_OWNED_BY_PIPELINE_RUN`, as before.
+/// owns the id is refused with `SUBMISSION_OWNED_BY_PIPELINE_RUN`, as before,
+/// unless pipeline default routing is configured: then the retry replays its
+/// receipt (`owned_retry_receipt`), after a routed tenant this process has
+/// not cached is admitted.
 ///
 /// A read that fails: a process with no runtime answers as `main` answers its
 /// failed run read (`internal_error`); a process with a runtime answers `503
@@ -14741,10 +14829,16 @@ async fn pipeline_owner_and_routing_for_new_upload(
                     }
                 })?;
             if has_pipeline_run {
-                return Err(api_error(
-                    StatusCode::CONFLICT,
-                    SUBMISSION_OWNED_BY_PIPELINE_RUN,
-                ));
+                // With default routing, a `pipeline` or `contained` tenant
+                // this process has not cached yet is admitted first, so its
+                // worker drains it; the retry then replays its receipt
+                // whatever the tenant's routing is now.
+                pipeline_default_routing::admit_routed_tenant(state, tenant.tenant_id(), &routing)
+                    .await;
+                let receipt =
+                    owned_retry_receipt(state, tenant, submission_id, raw_body, ownership_conflict)
+                        .await?;
+                return Ok((receipt, Some(routing)));
             }
             return Ok((None, Some(routing)));
         }
@@ -17343,13 +17437,15 @@ async fn submission_status_handler(
     // credit view above: the account's principal set when the caller is
     // linked to an account, else the caller's own principal. Read only for a
     // tenant on the receipts or the drain list, the tenants whose retried
-    // uploads replay pipeline receipts (`pipeline_runtime_for_replay`); any
-    // other tenant's answer is `main`'s alone, with no pipeline query (Zaki
-    // review 1, round 2, item 6).
-    let pipeline_product = state
-        .pipeline_product
-        .as_ref()
-        .filter(|_| pipeline_runtime_for_replay(state.as_ref(), &tenant).is_some());
+    // uploads replay pipeline receipts (`pipeline_runtime_for_replay`), and,
+    // with pipeline default routing configured, every tenant, since any of
+    // them may have uploaded through the pipeline without being on a list
+    // (`pipeline_runtime_for_owned_retry`); any other tenant's answer is
+    // `main`'s alone, with no pipeline query (Zaki review 1, round 2, item 6).
+    let pipeline_product = state.pipeline_product.as_ref().filter(|_| {
+        pipeline_runtime_for_replay(state.as_ref(), &tenant).is_some()
+            || pipeline_runtime_for_owned_retry(state.as_ref()).is_some()
+    });
     let pipeline_by_submission = match pipeline_product {
         Some(product) => {
             let principal_refs = account_principals.map_or_else(
