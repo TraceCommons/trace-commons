@@ -64,6 +64,28 @@ final class FlatThemeContrastTests: XCTestCase {
         }
     }
 
+    // MARK: Non-text
+
+    /// The selected main-window tab is marked by the ember alone, so its
+    /// peak, where the line is at full strength, is a non-text indicator
+    /// and clears 3:1 against the pane over the worst desktop, in focus and
+    /// out of focus (where inactiveDim darkens the pane). Taken over the
+    /// bare pane, without the halo or the rule under it, both of which
+    /// deepen the ember. Light only: Dark's ember is about 1.5:1 and
+    /// reaching 3:1 there would turn it a pale lavender, so it is left as
+    /// the owner chose it.
+    func test_flatLightTabEmberPeakClearsTheNonTextFloor() throws {
+        let theme = "flatLight"
+        let ember = try Self.colour("tabEmber", theme: theme)
+        let pane = try XCTUnwrap(Self.grounds(theme).first { $0.0 == "pane" }?.1)
+        let outOfFocus = Self.over(pane, try Self.colour("inactiveDim", theme: theme))
+        for (name, ground) in [("in focus", pane), ("out of focus", outOfFocus)] {
+            let ratio = Self.contrast(Self.over(ground, ember), ground)
+            XCTAssertGreaterThanOrEqual(
+                ratio, 3, "\(theme): the tab ember \(name) is \(String(format: "%.2f", ratio)):1 over the worst desktop")
+        }
+    }
+
     // MARK: Grounds
 
     /// The pane over the worst desktop for the theme's text, and a card, a

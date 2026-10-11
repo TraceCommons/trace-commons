@@ -58,7 +58,7 @@
     "switchKnobEdge": { "hex": "#000000", "alpha": 0.65, "note": "A 1pt ring inside the white switch knob, drawn on the watch switch when on (owner ruling, 2026-10-07: hold the WCAG floors). #1146 draws the knob white on every track; on the bright dark-appearance watch green white is about 1.8:1, so the knob is told apart from its track by this ring, which over the white knob clears 3:1 against the track (3.9; SwitchContrastTests). Light needs no help (the knob alone clears 3:1) and keeps a faint ring.", "light": { "hex": "#000000", "alpha": 0.18 } },
     "hairline": { "hex": "#ffffff", "alpha": 0.07, "note": "Rows inside a list only; never around a container.", "light": { "hex": "#000000", "alpha": 0.08 } },
     "rule": { "hex": "#ffffff", "alpha": 0.12, "note": "The 0.5pt rule under a modal's header and over its footer, and over the Traces graph footer (#1146 rgba(255,255,255,0.12)).", "light": { "hex": "#000000", "alpha": 0.12 } },
-    "tabEmber": { "hex": "#8a3dff", "note": "The main window tabs' ember (owner choice, 2026-10-10, the Ember Rule at 1.4x): a 2pt line laid on the tab rule under the selected tab, this colour at its middle fading to nothing at either end, reaching 30% past the tab each side. Light is lower, as a glow on a light pane reads stronger.", "light": { "hex": "#7a2cf5", "alpha": 0.84 } },
+    "tabEmber": { "hex": "#8a3dff", "note": "The main window tabs' ember (owner choice, 2026-10-10, the Ember Rule at 1.4x): a 2pt line laid on the tab rule under the selected tab, this colour at its middle fading to nothing at either end, reaching 30% past the tab each side. Light is lower, as a glow on a light pane reads stronger. The flat theme's Light is the same purple deepened (#5809d4) so the ember, which alone marks the selected tab, clears 3:1 against the pane over the worst desktop in and out of focus (3.34 and 3.12; #7a2cf5 was 2.31 and 2.17; FlatThemeContrastTests). Dark stays about 1.5:1: 3:1 there needs a pale lavender.", "light": { "hex": "#7a2cf5", "alpha": 0.84 } },
     "tabEmberHalo": { "hex": "#8a3dff", "alpha": 0.31, "note": "The faint halo rising from the tab ember behind the selected title: this colour at the rule, fading upward and outward to nothing.", "light": { "hex": "#7a2cf5", "alpha": 0.22 } },
     "popoverFill": { "hex": "#22242a", "alpha": 0.94, "light": { "hex": "#f7f7f9", "alpha": 0.84 } },
     "menuFill": { "hex": "#22242a", "alpha": 0.94, "light": { "hex": "#f7f7f9", "alpha": 0.8 } },
@@ -359,7 +359,8 @@
         "consentFill": { "hex": "#ffffff", "alpha": 0.22 },
         "cardHover": { "hex": "#ffffff", "alpha": 0.5 },
         "mapFieldInner": { "hex": "#ffffff", "alpha": 0.1 },
-        "mapFieldOuter": { "hex": "#ffffff", "alpha": 0.22 }
+        "mapFieldOuter": { "hex": "#ffffff", "alpha": 0.22 },
+        "tabEmber": { "hex": "#5809d4", "alpha": 0.84 }
       },
       "gradient": {
         "paneFill": {
