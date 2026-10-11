@@ -2335,6 +2335,7 @@ where
 /// steps. The caller bounds the wait
 /// (`join_or_abort`); aborting this task drops the drains' `JoinSet`, which
 /// aborts every drain and its lanes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_concurrent_pipeline_worker<
     Probe,
     ProbeFuture,
