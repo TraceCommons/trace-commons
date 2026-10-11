@@ -362,5 +362,8 @@ public struct InsightsGoalState: Decodable, Sendable, Equatable {
         public let goal: InsightsGoal
     }
     public let goals: [Stored]
+    /// The lever card's Settings switch is off. `nil` from a core that
+    /// does not send it: unknown, never read as on.
+    public let lever_card_off: Bool?
     public let recap_opened_week: String?
 }

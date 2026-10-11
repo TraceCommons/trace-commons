@@ -19,6 +19,14 @@ struct PrivateAISection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             PrivateAISettingsPanels(store: store)
+            // Count Private AI tokens (Ron's #1287 review: moved here from
+            // Tools). This section is open before first run (R-38), so the
+            // switch waits for it (R-43): no Insights write is reachable
+            // outside first run.
+            if model.onboardingKnown, !model.requiresOnboarding,
+               let feed = model.daemonSettings?.insightsLedgerFeed {
+                GlassCard { ledgerFeed(feed) }
+            }
             switch model.routeDisclosureState {
             case .shown(let disclosure):
                 GlassEyebrowCard(disclosure.copy.title) {
@@ -43,6 +51,36 @@ struct PrivateAISection: View {
             let attachment = MonitorWindowView.Attachment(model)
             store.attach(MonitorWindowView.sampleClient() ?? model.daemonData, awaiting: attachment.awaiting)
             await store.run()
+        }
+    }
+}
+
+extension PrivateAISection {
+    /// The core's analytics words, which label the ledger feed's switch.
+    private static let insightsCopy = TCInsights.copy() ?? [:]
+
+    /// Whether Insights counts the tokens in calls routed here
+    /// (`insights_ledger_feed`). On by default (owner ruling, 2026-10-09);
+    /// this is the one place that turns it off. Drawn only from the
+    /// daemon's own value, never for a daemon that does not report it, and
+    /// moved only by a write the daemon confirmed.
+    @ViewBuilder
+    private func ledgerFeed(_ feed: Bool) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            Toggle(InsightsOverviewWords.text("analytics_setting_ledger_feed", Self.insightsCopy), isOn: Binding(
+                get: { feed },
+                set: { on in Task { await model.setInsightsLedgerFeed(on) } }
+            ))
+            .toggleStyle(GlassToggleStyle(.settings))
+            // It takes no second write while one is in flight.
+            .disabled(model.insightsLedgerFeedBusy)
+            Text(InsightsOverviewWords.text("analytics_feed_ledger", Self.insightsCopy))
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let refusal = model.insightsLedgerFeedRefusal {
+                GlassNotice(tone: .outside) { Text(refusal) }
+            }
         }
     }
 }

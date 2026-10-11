@@ -7,7 +7,7 @@ import XCTest
 
 /// The Insights ledger feed (`insights_ledger_feed`) is on by default
 /// (owner ruling, 2026-10-09), so the Inference tab no longer draws a switch
-/// for it; Settings' Tools section offers the one way to turn it off. The
+/// for it; Settings' Private AI section offers the one way to turn it off. The
 /// switch reads the daemon's value, moves only on a write the daemon
 /// confirmed, and is not drawn for a daemon that does not report it.
 @MainActor
@@ -108,18 +108,23 @@ final class InsightsLedgerFeedSettingTests: XCTestCase {
 
     // MARK: Source rules
 
-    /// The switch is in Settings' Tools section, beside the routing it
-    /// counts, drawn only from the daemon's own value, labelled in the
-    /// core's words, and takes no second write while one is in flight.
-    func test_theToolsSectionDrawsTheSwitchFromTheDaemonsValue() throws {
+    /// The switch is in Settings' Private AI section (Ron's #1287 review,
+    /// as #1341 laid it out), drawn only from the daemon's own value,
+    /// labelled in the core's words, and takes no second write while one
+    /// is in flight. Tools no longer draws it.
+    func test_thePrivateAISectionDrawsTheSwitchFromTheDaemonsValue() throws {
+        let section = try SettingsParityTests.text("Views/Settings/PrivateAISection.swift")
+        XCTAssertTrue(section.contains("let feed = model.daemonSettings?.insightsLedgerFeed {"))
+        XCTAssertTrue(section.contains(#"InsightsOverviewWords.text("analytics_setting_ledger_feed", Self.insightsCopy)"#))
+        XCTAssertTrue(section.contains(#"InsightsOverviewWords.text("analytics_feed_ledger", Self.insightsCopy)"#))
+        XCTAssertTrue(section.contains("Task { await model.setInsightsLedgerFeed(on) }"))
+        XCTAssertTrue(section.contains(".disabled(model.insightsLedgerFeedBusy)"))
+        XCTAssertTrue(section.contains("if let refusal = model.insightsLedgerFeedRefusal {"))
+        XCTAssertTrue(section.contains("private static let insightsCopy = TCInsights.copy() ?? [:]"))
         let tools = try SettingsParityTests.text("Views/Settings/ToolsSection.swift")
-        XCTAssertTrue(tools.contains("if let feed = settings.insightsLedgerFeed {"))
-        XCTAssertTrue(tools.contains(#"InsightsOverviewWords.text("analytics_setting_ledger_feed", Self.insightsCopy)"#))
-        XCTAssertTrue(tools.contains(#"InsightsOverviewWords.text("analytics_feed_ledger", Self.insightsCopy)"#))
-        XCTAssertTrue(tools.contains("Task { await model.setInsightsLedgerFeed(on) }"))
-        XCTAssertTrue(tools.contains(".disabled(model.insightsLedgerFeedBusy)"))
-        XCTAssertTrue(tools.contains("if let refusal = model.insightsLedgerFeedRefusal {"))
-        XCTAssertTrue(tools.contains("private static let insightsCopy = TCInsights.copy() ?? [:]"))
+        for needle in ["insightsLedgerFeed", "setInsightsLedgerFeed(", "analytics_setting_ledger_feed"] {
+            XCTAssertFalse(tools.contains(needle), "Tools still holds \(needle)")
+        }
     }
 
     /// The Inference tab draws the tokens and no switch for them; nothing
@@ -141,9 +146,19 @@ final class InsightsLedgerFeedSettingTests: XCTestCase {
         XCTAssertTrue(views.contains("private static let insightsCopy = TCInsights.copy() ?? [:]"))
     }
 
-    /// Tools is a write section, so it waits for first run (R-43).
-    func test_theSwitchIsNotAWriteSurfaceBeforeOnboarding() {
-        XCTAssertFalse(SettingsSection.tools.availableBeforeOnboarding)
+    /// Private AI is open before first run (R-38), so the switch is not
+    /// drawn until onboarding is known and done (R-43): hidden, not drawn
+    /// disabled.
+    func test_theSwitchIsNotAWriteSurfaceBeforeOnboarding() throws {
+        XCTAssertTrue(SettingsSection.privateAI.availableBeforeOnboarding)
+        let section = try SettingsParityTests.text("Views/Settings/PrivateAISection.swift")
+        XCTAssertTrue(section.contains("""
+                    if model.onboardingKnown, !model.requiresOnboarding,
+                       let feed = model.daemonSettings?.insightsLedgerFeed {
+                        GlassCard { ledgerFeed(feed) }
+                    }
+        """))
+        XCTAssertEqual(section.components(separatedBy: "ledgerFeed(feed)").count - 1, 1)
     }
 }
 

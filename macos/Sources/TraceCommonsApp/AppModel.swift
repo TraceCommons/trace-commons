@@ -2096,42 +2096,73 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The Insights switches that are daemon settings, by their key.
+    enum InsightsDaemonSwitch: String, CaseIterable, Hashable, Sendable {
+        /// Count Private AI tokens (`insights_ledger_feed`, on by default).
+        case ledgerFeed = "insights_ledger_feed"
+        /// Count tokens in watched folders (`insights_counter_pass`, off
+        /// by default; owner decision D4).
+        case counterPass = "insights_counter_pass"
+        /// The weekly summary card (`insights_recap_card_enabled`).
+        case recapCard = "insights_recap_card_enabled"
+
+        /// The daemon's value; `nil` from a daemon that does not report it.
+        func value(_ settings: DaemonSettingsView) -> Bool? {
+            switch self {
+            case .ledgerFeed: settings.insightsLedgerFeed
+            case .counterPass: settings.insightsCounterPass
+            case .recapCard: settings.insightsRecapCardEnabled
+            }
+        }
+    }
+
+    /// The Insights switches with a write in flight; each takes no other.
+    @Published private(set) var insightsSwitchBusy: Set<InsightsDaemonSwitch> = []
+    /// The core's words for a write the daemon refused or did not confirm
+    /// (`MonitorScreensCopy.requestFailed`), by switch; cleared by that
+    /// switch's next confirmed write.
+    @Published private(set) var insightsSwitchRefusal: [InsightsDaemonSwitch: String] = [:]
+
     /// A ledger-feed write is in flight; the switch takes no other.
-    @Published private(set) var insightsLedgerFeedBusy = false
-    /// The core's words for a ledger-feed write the daemon refused or did
-    /// not confirm (`MonitorScreensCopy.requestFailed`); cleared by the next
-    /// confirmed write.
-    @Published private(set) var insightsLedgerFeedRefusal: String?
+    var insightsLedgerFeedBusy: Bool { insightsSwitchBusy.contains(.ledgerFeed) }
+    /// The refusal said under the ledger-feed switch.
+    var insightsLedgerFeedRefusal: String? { insightsSwitchRefusal[.ledgerFeed] }
 
     /// Turns the Insights ledger feed on or off (`insights_ledger_feed`).
+    func setInsightsLedgerFeed(_ on: Bool) async {
+        await setInsightsSwitch(.ledgerFeed, on)
+    }
+
+    /// Turns one Insights daemon switch on or off, sending only its key.
     /// Nothing is applied optimistically: the switch reads
     /// `daemonSettings`, and only a reply that echoes what was asked counts
     /// as confirmed. A reply carrying another value is where the daemon
     /// stands, kept and refused; a failed write reads the settings back and
     /// never claims the asked value.
-    func setInsightsLedgerFeed(_ on: Bool) async {
-        guard !insightsLedgerFeedBusy else { return }
+    func setInsightsSwitch(_ which: InsightsDaemonSwitch, _ on: Bool) async {
+        guard !insightsSwitchBusy.contains(which) else { return }
         guard let client else {
-            insightsLedgerFeedRefusal = MonitorWords.table?.requestFailed
+            insightsSwitchRefusal[which] = MonitorWords.table?.requestFailed
             return
         }
-        insightsLedgerFeedBusy = true
-        defer { insightsLedgerFeedBusy = false }
+        insightsSwitchBusy.insert(which)
+        defer { insightsSwitchBusy.remove(which) }
+        let key = which.rawValue
         let result = await Task.detached(priority: .userInitiated) {
-            Result { try client.setSettings(["insights_ledger_feed": on]) }
+            Result { try client.setSettings([key: on]) }
         }.value
         switch result {
-        case .success(let settings) where settings.insightsLedgerFeed == on:
+        case .success(let settings) where which.value(settings) == on:
             daemonSettings = settings
-            insightsLedgerFeedRefusal = nil
+            insightsSwitchRefusal[which] = nil
         case .success(let settings):
-            if settings.insightsLedgerFeed != nil { daemonSettings = settings }
-            insightsLedgerFeedRefusal = MonitorWords.table?.requestFailed
+            if which.value(settings) != nil { daemonSettings = settings }
+            insightsSwitchRefusal[which] = MonitorWords.table?.requestFailed
         case .failure:
             if let confirmed = await Task.detached(operation: { try? client.settings() }).value {
                 daemonSettings = confirmed
             }
-            insightsLedgerFeedRefusal = MonitorWords.table?.requestFailed
+            insightsSwitchRefusal[which] = MonitorWords.table?.requestFailed
         }
     }
 

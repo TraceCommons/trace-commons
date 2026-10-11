@@ -438,6 +438,12 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "Show the weekly summary card",
     ),
     ("analytics_setting_lever", "Lever suggestions"),
+    // The `insights_counter_pass` switch (owner decision D4: off by
+    // default; Ron's #1287 review).
+    (
+        "analytics_setting_counter_pass",
+        "Count tokens in watched folders",
+    ),
     // The `insights_ledger_feed` switch (owner decision D3, settled
     // 2026-10-09: on by default, the switch turns it off).
     (

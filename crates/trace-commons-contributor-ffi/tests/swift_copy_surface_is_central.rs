@@ -1072,11 +1072,20 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCInsights.swift",
         "tc_insights_copy_json",
     ),
-    // Settings' Tools section labels the ledger feed's off switch (on by
-    // default) and its feed line in the core's analytics words.
+    // Settings' Private AI section labels the ledger feed's off switch (on
+    // by default) and its feed line in the core's analytics words.
     (
         "Insights ledger feed switch words",
-        "TraceCommonsApp/Views/Settings/ToolsSection.swift",
+        "TraceCommonsApp/Views/Settings/PrivateAISection.swift",
+        "TCInsights.copy()",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_copy_json",
+    ),
+    // Settings' Tools section labels the watched-folder counting, weekly
+    // summary and higher-than-usual card switches in the same words.
+    (
+        "Insights settings switch words",
+        "TraceCommonsApp/Views/Settings/InsightsSettingsCard.swift",
         "TCInsights.copy()",
         "TCBridge/TCInsights.swift",
         "tc_insights_copy_json",

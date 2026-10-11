@@ -30,22 +30,27 @@ struct ToolsSection: View {
     @State private var routingOverrideOpen: Bool?
 
     var body: some View {
-        // The container is always present, so `.onAppear` runs even when the
-        // core's copy is missing and the card draws nothing.
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            if let copy = model.routingCopy {
-                card(copy, form: model.routingDraft ?? model.routingForm)
-            } else {
-                // The unavailable branch; test_refreshIsOnAnAlwaysPresentContainer pins that
-                // `.onAppear` follows this container's closing brace directly.
-                Color.clear.frame(width: 0, height: 0).accessibilityHidden(true)
+            // The container is always present, so `.onAppear` runs even when
+            // the core's copy is missing and the card draws nothing.
+            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                if let copy = model.routingCopy {
+                    card(copy, form: model.routingDraft ?? model.routingForm)
+                } else {
+                    // The unavailable branch; test_refreshIsOnAnAlwaysPresentContainer pins that
+                    // `.onAppear` follows this container's closing brace directly.
+                    Color.clear.frame(width: 0, height: 0).accessibilityHidden(true)
+                }
             }
-        }
-        .onAppear {
-            // Asked every time the card appears: IronWire may have started
-            // since. It reads a file, opens no connection, declares nothing.
-            model.discoverRouting()
-            model.refreshRoutedTools()
+            .onAppear {
+                // Asked every time the card appears: IronWire may have started
+                // since. It reads a file, opens no connection, declares nothing.
+                model.discoverRouting()
+                model.refreshRoutedTools()
+            }
+            // The Insights switches, here because Tools waits for first run
+            // (R-43); the ledger feed's is in Private AI (Ron's #1287 review).
+            InsightsSettingsCard()
         }
     }
 
@@ -160,37 +165,6 @@ struct ToolsSection: View {
                     .foregroundStyle(GlassColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                if let settings = model.daemonSettings {
-                    ledgerFeed(settings)
-                }
-            }
-        }
-    }
-
-    /// The core's analytics words, which label the ledger feed's switch.
-    private static let insightsCopy = TCInsights.copy() ?? [:]
-
-    /// Whether Insights counts the tokens in calls routed here
-    /// (`insights_ledger_feed`). On by default (owner ruling, 2026-10-09);
-    /// this is the one place that turns it off. Drawn only from the
-    /// daemon's own value, never for a daemon that does not report it, and
-    /// moved only by a write the daemon confirmed.
-    @ViewBuilder
-    private func ledgerFeed(_ settings: DaemonSettingsView) -> some View {
-        if let feed = settings.insightsLedgerFeed {
-            Toggle(InsightsOverviewWords.text("analytics_setting_ledger_feed", Self.insightsCopy), isOn: Binding(
-                get: { feed },
-                set: { on in Task { await model.setInsightsLedgerFeed(on) } }
-            ))
-            .toggleStyle(GlassToggleStyle(.settings))
-            // It takes no second write while one is in flight.
-            .disabled(model.insightsLedgerFeedBusy)
-            Text(InsightsOverviewWords.text("analytics_feed_ledger", Self.insightsCopy))
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if let refusal = model.insightsLedgerFeedRefusal {
-                GlassNotice(tone: .outside) { Text(refusal) }
             }
         }
     }

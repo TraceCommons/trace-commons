@@ -737,10 +737,19 @@ struct DaemonSettingsView: Decodable, Equatable {
     /// What the listener is actually doing.
     var privateInferenceState: PrivateInferenceStateView? = nil
     /// Whether Insights may read the proxy ledger's token counters
-    /// (`insights_ledger_feed`). On by default; Settings' Tools section is
-    /// the one place that turns it off. Absent from a daemon that predates
-    /// the key, which draws no switch rather than an "off" nobody set.
+    /// (`insights_ledger_feed`). On by default; Settings' Private AI
+    /// section is the one place that turns it off. Absent from a daemon
+    /// that predates the key, which draws no switch rather than an "off"
+    /// nobody set.
     var insightsLedgerFeed: Bool? = nil
+    /// Whether the daemon counts tokens in the watched folders for
+    /// Insights (`insights_counter_pass`; owner decision D4, off by
+    /// default). Absent from an older daemon: no switch, never an "off".
+    var insightsCounterPass: Bool? = nil
+    /// The weekly summary card's switch (`insights_recap_card_enabled`, on
+    /// by default); "Hide" on the card turns it off. Absent from an older
+    /// daemon: no switch, never an "off".
+    var insightsRecapCardEnabled: Bool? = nil
 
     /// The four source modes as the routing surface takes them. Absent
     /// means `unset`, which watches the conventional location and is
@@ -779,6 +788,8 @@ struct DaemonSettingsView: Decodable, Equatable {
         case privateInferenceOfferSeen = "private_inference_offer_seen"
         case privateInferenceState = "private_inference_state"
         case insightsLedgerFeed = "insights_ledger_feed"
+        case insightsCounterPass = "insights_counter_pass"
+        case insightsRecapCardEnabled = "insights_recap_card_enabled"
     }
 }
 
