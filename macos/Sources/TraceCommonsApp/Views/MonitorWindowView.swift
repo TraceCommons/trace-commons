@@ -53,8 +53,10 @@ struct MonitorWindowView: View {
         case privateAI
     }
 
-    /// The Traces tree's inset from the pane's edge (#1146 `px-2`).
-    static let treeInset: CGFloat = 8
+    /// The main pane's side inset: the inspector's (owner, 2026-10-10), so
+    /// the tabs, the notices, the tree and every tab's cards sit as far in
+    /// from the pane's sides as the inspector's content does.
+    static let mainInset: CGFloat = GlassTokens.Space.inspectorPaddingHorizontal
 
     /// Where the gear asks for Settings, which opens in its own window
     /// (owner, 2026-10-08), and where an outside opener's destination waits
@@ -201,10 +203,11 @@ struct MonitorWindowView: View {
                     ) { entryId in
                         Self.select(.session(entryID: entryId), selection: &selection, showsInspector: &showsInspector)
                     }
-                    // #1146 insets the tree 8 from the pane's edge (`px-2`),
-                    // closer than the other tabs' 12.
-                    .padding(.horizontal, Self.treeInset - GlassTokens.Space.panePadding)
-                case .inference: InferenceTabView(store: inference, traces: traces)
+                case .inference:
+                    InferenceTabView(store: inference, traces: traces) {
+                        navigation.requestSettings(at: .privateAI)
+                        openWindow(id: WindowID.settings)
+                    }
                 case .home:
                     HomeTabView(
                         store: home, traces: traces,
@@ -228,7 +231,7 @@ struct MonitorWindowView: View {
                         complete: TracesGraphFooter.countable(home.history, failure: home.failures["list_history"]) != nil,
                         sessions: traces.tree.allSessions, tool: selectedTool,
                         focus: $mapFocus, onFocus: focusMap)
-                        .padding(.horizontal, GlassTokens.Space.panePadding)
+                        .padding(.horizontal, MonitorWindowView.mainInset)
                         .padding(.vertical, GlassTokens.Space.s5)
                         // #1146's fixed height, rule included (height 0 to
                         // 206 over .25s as it opens).
@@ -626,15 +629,14 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
     /// plus `ml-1.5`.
     static var settingsGap: CGFloat { GlassTokens.Space.s4 + GlassTokens.Space.s3 }
 
-    /// The tab's own insets in the pane (#1146 `monitor-shell.tsx`): the
-    /// Traces tree runs 8pt from the pane's sides and to its bottom (the
-    /// graph sits under it); the other tabs keep 12 on the sides and below.
+    /// The tab's own insets in the pane: the inspector's side inset for
+    /// every tab (owner, 2026-10-10, `MonitorWindowView.mainInset`). The
+    /// Traces tree runs to the pane's bottom (the graph sits under it); the
+    /// other tabs keep 12 below.
     static func contentInsets(_ tab: MonitorWindowView.Tab) -> EdgeInsets {
-        tab == .traces
-            ? EdgeInsets(top: 0, leading: GlassTokens.Space.treeInset, bottom: 0, trailing: GlassTokens.Space.treeInset)
-            : EdgeInsets(
-                top: 0, leading: GlassTokens.Space.panePadding, bottom: GlassTokens.Space.panePadding,
-                trailing: GlassTokens.Space.panePadding)
+        let side = MonitorWindowView.mainInset
+        return EdgeInsets(
+            top: 0, leading: side, bottom: tab == .traces ? 0 : GlassTokens.Space.panePadding, trailing: side)
     }
 
     var body: some View {
@@ -674,7 +676,7 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                         GlassRoundButton(MonitorWords.table?.settingsTitle ?? "", icon: .glyph(.gear), action: onSettings)
                     }
                     // Clearance for the real traffic lights, not an origin.
-                    .padding(.leading, GlassTokens.Space.windowControlsWidth - GlassTokens.Space.panePadding)
+                    .padding(.leading, GlassTokens.Space.windowControlsWidth - MonitorWindowView.mainInset)
                     .frame(height: GlassTokens.Size.controlLarge)
                     // Centre the row on the traffic lights, which the unified
                     // title bar centres 26pt below the window's top edge.
@@ -727,7 +729,8 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                             })
                     }
                 }
-                .padding([.horizontal, .top], GlassTokens.Space.panePadding)
+                .padding(.horizontal, MonitorWindowView.mainInset)
+                .padding(.top, GlassTokens.Space.panePadding)
                 .zIndex(1)
                 if gate == .awaiting {
                     SettingsAwaiting()
@@ -739,7 +742,7 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                     if let breadcrumb {
                         GlassBreadcrumb(breadcrumb, backLabel: MonitorWords.table?.shell.backToHome ?? MonitorWindowView.Tab.home.title,
                                         onBack: breadcrumb.first?.action)
-                            .padding(.horizontal, GlassTokens.Space.panePadding)
+                            .padding(.horizontal, MonitorWindowView.mainInset)
                             .padding(.top, GlassTokens.Space.s4)
                     }
                     content()

@@ -243,7 +243,7 @@ final class TracesInspectorHostTests: XCTestCase {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertFalse(window.contains("PrivateAIInspectorView("))
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
-        XCTAssertEqual(views.components(separatedBy: "PrivateAIInspectorView(\n").count - 1, 1)
+        XCTAssertEqual(views.components(separatedBy: "PrivateAIInspectorView(store: store)").count - 1, 1)
     }
 
     /// The column draws the host; an opened History row shows in

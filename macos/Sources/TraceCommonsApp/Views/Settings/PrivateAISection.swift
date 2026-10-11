@@ -3,42 +3,22 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-/// Where the Private AI switch moved to, and the route disclosure: the raw
-/// send, both enclaves, and where the witness came from. The pointer draws
-/// nothing if the core's words did not arrive; the disclosure always draws
+/// The Private AI section: the standard settings, the local tools and the
+/// connection (owner, 2026-10-10: moved here from the Private AI tab, whose
+/// foot card opens this section), then the route disclosure: the raw send,
+/// both enclaves, and where the witness came from. The panels draw nothing
+/// if the core's words did not arrive; the disclosure always draws
 /// something, so the outer container is always present and carries the
 /// refresh. Unreadable is said as such and never drawn as some other route.
 struct PrivateAISection: View {
     @EnvironmentObject private var model: AppModel
-    /// Where the pointer goes when Settings is the Monitor's modal: it closes
-    /// the modal and opens the Inference tab (Ron's #1146). With none, the
-    /// pointer opens the Monitor at Inference (`OpenMonitor`).
-    var onPointer: (() -> Void)? = nil
+    /// The switch and the tools, read through the data contract on this
+    /// window's own attachment to the daemon, as the Monitor's tab read them.
+    @State private var store = InferenceStore(client: nil)
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            if let copy = model.privateInferenceCopy {
-                GlassEyebrowCard(copy.settingsTitle) {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                        Text(copy.settingsMoved)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        // The label is the destination's own, so the tab
-                        // and this pointer can never name it differently.
-                        // It lands on the Inference inspector, where the
-                        // switch is.
-                        Button(copy.destination) {
-                            if let onPointer {
-                                onPointer()
-                            } else {
-                                OpenMonitor.request(.inference)
-                            }
-                        }
-                        .buttonStyle(GlassButtonStyle(.link))
-                    }
-                }
-            }
+            PrivateAISettingsPanels(store: store)
             switch model.routeDisclosureState {
             case .shown(let disclosure):
                 GlassEyebrowCard(disclosure.copy.title) {
@@ -57,6 +37,13 @@ struct PrivateAISection: View {
             }
         }
         .onAppear { model.refreshRouteDisclosure() }
+        // The app's live client, re-attached whenever the daemon restarts
+        // or start-up ends (`MonitorWindowView.Attachment`).
+        .task(id: MonitorWindowView.Attachment(model)) {
+            let attachment = MonitorWindowView.Attachment(model)
+            store.attach(MonitorWindowView.sampleClient() ?? model.daemonData, awaiting: attachment.awaiting)
+            await store.run()
+        }
     }
 }
 

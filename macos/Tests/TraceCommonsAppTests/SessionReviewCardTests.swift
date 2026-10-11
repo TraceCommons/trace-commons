@@ -83,7 +83,9 @@ final class SessionReviewCardTests: XCTestCase {
 
     /// The correction field is drawn only under Partly or Failed, and what
     /// was written under them is never sent once the verdict moves to Worked
-    /// or to none. A draft for one session is never another session's.
+    /// or to none. The text is kept, though: the arrow keys step through
+    /// Worked on the way from Partly to Failed, and that step never wipes
+    /// what was typed. A draft for one session is never another session's.
     func test_theCorrectionShowsOnlyUnderPartlyOrFailed() throws {
         var draft = SessionReviewDraft(entryId: "A")
         XCTAssertNil(draft.verdict)
@@ -100,10 +102,16 @@ final class SessionReviewCardTests: XCTestCase {
         draft.choose(.worked)
         XCTAssertFalse(draft.correctionOffered)
         XCTAssertNil(draft.correctionToSend, "a correction is never sent under Worked")
-        XCTAssertEqual(draft.correction, "", "leaving Partly or Failed clears what was written")
+        draft.choose(.failed)
+        XCTAssertEqual(draft.correctionToSend, "It never ran the tests.",
+                       "passing through Worked keeps what was typed")
+        draft.choose(.worked)
         // Choosing the chosen answer again takes it back.
         draft.choose(.worked)
         XCTAssertNil(draft.verdict)
+        XCTAssertNil(draft.correctionToSend, "a correction is never sent with no answer")
+        draft.choose(.partly)
+        XCTAssertEqual(draft.correctionToSend, "It never ran the tests.")
 
         // The core's limit is held at the keyboard.
         var long = SessionReviewDraft(entryId: "A")
@@ -313,9 +321,13 @@ final class SessionReviewCardTests: XCTestCase {
     /// Not enrolled the muted one.
     func test_theVerdictAndChipAreRons() throws {
         let card = try Self.text(Self.card)
-        XCTAssertTrue(card.contains(".buttonStyle(GlassButtonStyle(.glass, selected: selected))"))
+        // The answers are radios, one at most (owner, 2026-10-10).
+        XCTAssertTrue(card.contains("GlassRadioRow(\n                outcome.verdictQuestion, selection: draft.verdict,"))
+        // Assistive tech's "none" choice is named in the core's words.
+        XCTAssertTrue(card.contains("none: outcome.verdictNone"), "the verdict's none choice is not the core's word")
+        XCTAssertFalse(card.contains(".buttonStyle(GlassButtonStyle(.glass, selected: selected))"), "the pressed-button answers are back")
         XCTAssertFalse(card.contains(".glassTier(selected ? .controlSelected : .control)"), "the custom verdict pill is back")
-        XCTAssertFalse(card.contains("Image(systemName: \"checkmark\")"), "the chosen answer is the purple button, not a mark")
+        XCTAssertFalse(card.contains("Image(systemName: \"checkmark\")"), "the chosen answer is a radio, not a mark")
         XCTAssertTrue(card.contains(".glassType(GlassTokens.TypeScale.label.weight(.semibold))"))
         XCTAssertTrue(card.contains("GlassChip(glass: summary.enrolled == true ? review.enrolled : review.notEnrolled,"))
         XCTAssertTrue(card.contains("muted: summary.enrolled != true)"), "unknown enrolment reads as not enrolled")

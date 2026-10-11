@@ -3,74 +3,33 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-/// The Inference tab's Private AI page, in #1146's order
-/// (`private-ai-page.tsx`): the subtitle, the Inference access / Runtime
-/// stat pair, then the tools, the connection (the switch, then sign-in), the
-/// balance and the funding panels. Sign-in and the tools keep their live
-/// `AppModel` paths; the switch reads and writes through the data contract
-/// (`InferenceStore`).
+/// The Private AI tab's account cards, after the Private AI summary and the
+/// calls: saved model accounts and managed sessions, the balance and the
+/// funding, then the card that opens the Private AI section of Settings.
+/// The standard settings, the local tools and the connection (the switch,
+/// then sign-in) are in that section (owner, 2026-10-10:
+/// `PrivateAISettingsPanels`).
 ///
 /// Nothing is drawn until the core's Private AI words arrive: a destination
 /// missing the sentence on what turning the switch on exposes is worse than
 /// none (`AppModel.privateInferenceCopy`).
 struct InferenceAccountSection: View {
     let store: InferenceStore
+    /// Opens the Private AI section of Settings.
+    var onOpenSettings: () -> Void = {}
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
         if let copy = model.privateInferenceCopy {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                // No subtitle and no Inference access / Runtime pair (owner,
-                // 2026-10-09): the Private AI summary above says both.
                 // Saved model accounts and managed sessions, which #1146
-                // has no panel for (owner ruling O3: in the main pane), come
-                // before the global heading, as on main: that heading says
-                // everything under it changes standard sessions, and the
-                // managed cards never do.
+                // has no panel for (owner ruling O3: in the main pane).
                 ManagedSessionsSection()
-                // The standard tool settings below are global; managed
-                // launches never edit them.
-                ManagedGlobalSettingsHeader()
-                GlassCard {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
-                        PrivateAIPanelHeader(
-                            eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,
-                            refresh: copy.panelRefresh, onRefresh: { refreshTools() })
-                        HarnessListSection(copy: copy, titled: false)
-                    }
-                }
-                PrivateAISwitchCard(
-                    copy: copy,
-                    isOn: store.privateAI?.on,
-                    state: Self.surfaceState(store.privateAI?.state),
-                    calls: model.privateInferenceCalls,
-                    busy: store.privateAIBusy,
-                    refusal: store.privateAIRefusal,
-                    onSet: { on in
-                        Task { @MainActor in
-                            await store.setPrivateAI(on: on, unconfirmed: copy.writeUnconfirmed)
-                            model.refreshSettings()
-                        }
-                    },
-                    onDismiss: { store.dismissPrivateAIRefusal() },
-                    onRefresh: { refreshConnection() },
-                    // #1146: the sign-in is part of the connection panel.
-                    credential: AnyView(CredentialSection(copy: copy, prominent: true, titled: false)))
                 PrivateAIBalanceCard(copy: copy)
-                GlassCard { FundingRow(copy: copy) }
+                FundingRow(copy: copy)
+                PrivateAISettingsLinkCard(copy: copy, onOpen: onOpenSettings)
             }
         }
-    }
-
-    private func refreshTools() {
-        model.refreshHarnesses()
-        Task { @MainActor in await store.load() }
-    }
-
-    private func refreshConnection() {
-        model.refreshSettings()
-        model.refreshNearAiCredential()
-        Task { @MainActor in await store.load() }
     }
 
     /// The daemon's listener report as the card's state. Unreported is the
@@ -90,12 +49,102 @@ struct InferenceAccountSection: View {
     }
 }
 
+/// The Private AI section of Settings (owner, 2026-10-10; they were the
+/// Private AI tab's): the standard-settings heading, the local tools and
+/// the connection (the switch, then sign-in). The managed cards are not
+/// here: the heading says everything under it changes standard sessions,
+/// and the managed cards never do. Sign-in and the tools keep their live
+/// `AppModel` paths; the switch reads and writes through the data contract
+/// (`InferenceStore`).
+struct PrivateAISettingsPanels: View {
+    let store: InferenceStore
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        if let copy = model.privateInferenceCopy {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                // The standard tool settings below are global; managed
+                // launches never edit them.
+                ManagedGlobalSettingsHeader()
+                GlassCard {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+                        PrivateAIPanelHeader(
+                            eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,
+                            refresh: copy.panelToolsRefreshAccessibility, onRefresh: { refreshTools() })
+                        HarnessListSection(copy: copy, titled: false)
+                    }
+                }
+                PrivateAISwitchCard(
+                    copy: copy,
+                    isOn: store.privateAI?.on,
+                    state: InferenceAccountSection.surfaceState(store.privateAI?.state),
+                    calls: model.privateInferenceCalls,
+                    busy: store.privateAIBusy,
+                    refusal: store.privateAIRefusal,
+                    onSet: { on in
+                        Task { @MainActor in
+                            await store.setPrivateAI(on: on, unconfirmed: copy.writeUnconfirmed)
+                            model.refreshSettings()
+                        }
+                    },
+                    onDismiss: { store.dismissPrivateAIRefusal() },
+                    onRefresh: { refreshConnection() },
+                    // #1146: the sign-in is part of the connection panel.
+                    credential: AnyView(CredentialSection(copy: copy, prominent: true, titled: false)))
+            }
+        }
+    }
+
+    private func refreshTools() {
+        model.refreshHarnesses()
+        Task { @MainActor in await store.load() }
+    }
+
+    private func refreshConnection() {
+        model.refreshSettings()
+        model.refreshNearAiCredential()
+        Task { @MainActor in await store.load() }
+    }
+}
+
+/// The card at the foot of the Private AI tab that opens the Private AI
+/// section of Settings, where the standard settings, the local tools and
+/// the connection are (owner, 2026-10-10): a medium gear on the left, the
+/// title over its sentence, and a chevron on the right, centred on the
+/// card's height. The whole card opens the section, as Home's cards do
+/// (owner, 2026-10-10: a chevron, no Open button); VoiceOver hears the
+/// core's name for where it goes. Every word is the core's.
+struct PrivateAISettingsLinkCard: View {
+    let copy: PrivateInferenceCopy
+    let onOpen: () -> Void
+
+    var body: some View {
+        Button(action: onOpen) {
+            GlassIconCard(
+                systemImage: "gearshape", title: copy.panelSettingsTitle, subtitle: [copy.panelSettingsBody],
+                interactive: true,
+                trailing: {
+                    // Home's chevron (`HomeChevron`), drawn here too.
+                    Image(systemName: "chevron.right")
+                        .glassGlyph(10, weight: .semibold)
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .accessibilityHidden(true)
+                })
+        }
+        .buttonStyle(GlassPressStyle())
+        .accessibilityHint(copy.panelSettingsOpenAccessibility)
+    }
+}
+
 /// A Private AI panel's header, as #1146's panels draw it: an eyebrow over
-/// the panel's heading, and a re-read link on the right that keeps to one
-/// line at its own width.
+/// the panel's heading, and a re-read icon on the right (owner,
+/// 2026-10-10: an icon, not a link), named for assistive tech in the
+/// core's words for that panel ("Refresh your tools") so the panels' icons
+/// are told apart.
 struct PrivateAIPanelHeader: View {
     let eyebrow: String
     var title: String?
+    /// The refresh icon's accessible name, from the core.
     let refresh: String
     var disabled = false
     let onRefresh: () -> Void
@@ -115,9 +164,7 @@ struct PrivateAIPanelHeader: View {
                 }
             }
             Spacer(minLength: GlassTokens.Space.s4)
-            Button(action: onRefresh) { Text(refresh).lineLimit(1) }
-                .buttonStyle(GlassButtonStyle(.link))
-                .fixedSize()
+            GlassRefreshButton(refresh, action: onRefresh)
                 .disabled(disabled)
         }
     }
@@ -159,15 +206,14 @@ struct PrivateAIBalanceCard: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
 
+    /// Under its icon (owner, 2026-10-10): the heading with its re-read
+    /// icon, what the figures cover, and the state or the figures under it.
     var body: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
-                PrivateAIPanelHeader(
-                    eyebrow: copy.panelBalanceEyebrow, title: copy.balanceTitle,
-                    refresh: copy.panelBalanceRefresh, disabled: model.credentialBusy,
-                    onRefresh: { model.refreshNearAiBalance() })
-                BalanceRow(copy: copy)
-            }
-        }
+        GlassIconCard(
+            systemImage: "dollarsign.circle", title: copy.balanceTitle, subtitle: [copy.balanceWhat],
+            refresh: .init(
+                copy.panelBalanceRefreshAccessibility,
+                isDisabled: model.credentialBusy, action: { model.refreshNearAiBalance() }),
+            content: { BalanceRow(copy: copy, showsScope: false) })
     }
 }
