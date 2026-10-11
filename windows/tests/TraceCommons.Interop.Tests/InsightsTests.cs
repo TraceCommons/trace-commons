@@ -568,7 +568,7 @@ public sealed class InsightsAnalyticsTests
     }
 
     [Fact]
-    public void TheWindowShowsTheFourTabsAndSpendDisabledWithCoreWordsOnly()
+    public void TheWindowShowsTheFourTabsAndNoSpendWithCoreWordsOnly()
     {
         string xaml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "Controls", "InsightsView.xaml.txt"));
         string code = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "Controls", "InsightsView.xaml.cs.txt"));
@@ -577,8 +577,8 @@ public sealed class InsightsAnalyticsTests
         int sessions = xaml.IndexOf("Header=\"{Binding [analytics_tab_sessions]}\"", StringComparison.Ordinal);
         int analyze = xaml.IndexOf("Header=\"{Binding [analytics_tab_analyze]}\"", StringComparison.Ordinal);
         Assert.True(overview >= 0 && overview < patterns && patterns < sessions && sessions < analyze);
-        Assert.Contains("{Binding [analytics_tab_spend]}", xaml);
-        Assert.Contains("{Binding [analytics_later]}", xaml);
+        Assert.DoesNotContain("analytics_tab_spend", xaml);
+        Assert.DoesNotContain("analytics_later", xaml);
         Assert.DoesNotContain("ProgressRing", xaml);
         Assert.Contains("ViewModel.SelectTabAsync(", code);
     }

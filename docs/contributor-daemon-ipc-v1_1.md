@@ -5706,8 +5706,8 @@ Additive; a daemon that predates it refuses it as `settings-unknown-field`,
 and `get_settings` from it omits it. Takes a boolean and defaults to `true`
 (owner decisions D1 and D4, open), and a settings file written before the key
 existed loads it as `true`. It is the only switch for the Insights window's
-weekly summary card ("Show the weekly summary card", and the card's own
-"Turn off"); the Insights store keeps no switch of its own. It shows nothing
+weekly summary card ("Weekly summary" in Settings, and the card's own
+"Hide"); the Insights store keeps no switch of its own. It shows nothing
 while `insights_counter_pass` is off, and it sends no notification.
 
 #### `scrub_check`

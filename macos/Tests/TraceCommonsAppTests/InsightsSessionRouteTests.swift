@@ -133,21 +133,31 @@ final class InsightsSessionRouteTests: XCTestCase {
         }
         // Turned off in Settings: the column goes and one line says why.
         XCTAssertEqual(InsightsRouteWords.column(try unavailable("ledger_feed_off")), .feedOff)
-        // No proxy ledger, or a reason this build does not know: the column
-        // goes and nothing is said in the shell's own words.
-        XCTAssertEqual(InsightsRouteWords.column(try unavailable("no_ledger")), .hidden)
+        // No proxy ledger: the column goes and the core's line says no
+        // Private AI calls are recorded yet (Ron's review of #1287).
+        XCTAssertEqual(InsightsRouteWords.column(try unavailable("no_ledger")), .noLedger)
+        // A reason this build does not know: the column goes and nothing is
+        // said in the shell's own words.
         XCTAssertEqual(InsightsRouteWords.column(try unavailable("something_new")), .hidden)
     }
 
     func testTheFeedOffLineIsTheCoresAndNamesTheSwitch() throws {
         let copy = try Self.coreCopy()
-        let line = try XCTUnwrap(InsightsRouteWords.feedOffLine(.feedOff, copy: copy))
+        let line = try XCTUnwrap(InsightsRouteWords.unavailableLine(.feedOff, copy: copy))
         XCTAssertEqual(line, copy["analytics_route_feed_off"])
         let switchLabel = try XCTUnwrap(copy["analytics_setting_ledger_feed"])
-        XCTAssertTrue(line.lowercased().contains(switchLabel.lowercased().replacingOccurrences(
-            of: "count tokens", with: "counting tokens")), "the line names Settings' switch")
-        XCTAssertNil(InsightsRouteWords.feedOffLine(.shown, copy: copy))
-        XCTAssertNil(InsightsRouteWords.feedOffLine(.hidden, copy: copy))
+        XCTAssertTrue(line.contains("\"\(switchLabel)\""),
+                      "the line names Settings' switch: \(line)")
+        XCTAssertNil(InsightsRouteWords.unavailableLine(.shown, copy: copy))
+        XCTAssertNil(InsightsRouteWords.unavailableLine(.hidden, copy: copy))
+    }
+
+    func testNoLedgerShowsTheCoresNoCallsLine() throws {
+        let copy = try Self.coreCopy()
+        let line = try XCTUnwrap(InsightsRouteWords.unavailableLine(.noLedger, copy: copy))
+        XCTAssertEqual(line, copy["analytics_route_no_ledger"])
+        XCTAssertFalse(line.isEmpty)
+        XCTAssertNotEqual(line, copy["analytics_route_feed_off"])
     }
 
     // MARK: Words
@@ -331,7 +341,7 @@ final class InsightsSessionRouteTests: XCTestCase {
         for key in ["analytics_drill_private", "analytics_route_measure_note"] {
             XCTAssertTrue(source.contains("\"\(key)\""), key)
         }
-        XCTAssertTrue(source.contains("InsightsRouteWords.feedOffLine("))
+        XCTAssertTrue(source.contains("InsightsRouteWords.unavailableLine("))
         XCTAssertTrue(source.contains("InsightsRouteWords.category("))
         XCTAssertTrue(source.contains("InsightsRouteWords.split("))
         // The two measures are drawn side by side, never added together.

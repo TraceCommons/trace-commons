@@ -422,7 +422,7 @@ struct InsightsCounterSessionsView: View {
             if routed {
                 Text(text("analytics_route_measure_note")).insightsCaption()
             }
-            if let line = InsightsRouteWords.feedOffLine(sessions.column, copy: copy) {
+            if let line = InsightsRouteWords.unavailableLine(sessions.column, copy: copy) {
                 Text(line).insightsCaption()
             }
         }

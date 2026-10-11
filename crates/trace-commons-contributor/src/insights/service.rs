@@ -430,13 +430,14 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("summary_limitation_source_formats_are_not_model_identity", "Source formats identify the imported file format, not which model performed the work."),
         ("summary_limitation_no_model_rankings_time_savings_or_cost", "These observations do not establish model rankings, time saved, or cost."),
         // The feed line: which counter rows the window's week figures come
-        // from. DRAFT, NEEDS APPROVAL (owner decision D17, open).
-        ("insights_feed_saved", "Only sessions you analyzed are counted."),
-        ("insights_feed_counter_pass", "Sessions in your watched folders."),
-        ("insights_feed_counter_pass_unavailable", "Watched-folder counting is unavailable right now."),
+        // from. The same words as their `analytics_feed_*` twins, approved
+        // in Ron's 2026-10-11 owner review (D17).
+        ("insights_feed_saved", "Only traces you analyzed are counted."),
+        ("insights_feed_counter_pass", "Traces in your watched folders."),
+        ("insights_feed_counter_pass_unavailable", "Can't count watched folders right now."),
     ].into_iter().map(|(key, value)| (key.to_owned(), value.to_owned()))
     .chain(super::card_presentation::ui_copy())
-    // Token analytics, DRAFT, NEEDS APPROVAL (owner decision D17, open).
+    // Token analytics, approved in Ron's 2026-10-11 owner review (D17).
     .chain(super::analytics_copy::ANALYTICS_COPY.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())))
     .collect()
 }
@@ -444,8 +445,8 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
 /// The feed-line keys in [`ui_copy`]: saved imports (feed S), the daemon's
 /// counter pass (feed T), and the notice that the counter pass could not be
 /// read, shown with the saved-imports line. A shell names the feed it shows
-/// with these and authors no sentence of its own. Their wording is DRAFT,
-/// NEEDS APPROVAL (owner decision D17, open).
+/// with these and authors no sentence of its own. Their wording is approved
+/// (Ron's 2026-10-11 owner review, D17).
 pub const INSIGHTS_FEED_LINE_KEYS: &[&str] = &[
     "insights_feed_saved",
     "insights_feed_counter_pass",
@@ -1527,7 +1528,7 @@ mod tests {
     /// the two: renaming or adding a variant leaves a shell indexing a
     /// missing key. Iterate every variant and require its key to exist.
     #[test]
-    fn the_insights_feed_lines_are_core_copy_and_marked_draft() {
+    fn the_insights_feed_lines_are_core_copy_and_match_their_analytics_twins() {
         let copy = ui_copy();
         for key in INSIGHTS_FEED_LINE_KEYS {
             assert!(
@@ -1537,16 +1538,21 @@ mod tests {
         }
         assert_eq!(
             copy["insights_feed_saved"],
-            "Only sessions you analyzed are counted."
+            "Only traces you analyzed are counted."
         );
         assert_eq!(
             copy["insights_feed_counter_pass"],
-            "Sessions in your watched folders."
+            "Traces in your watched folders."
         );
         assert_eq!(
             copy["insights_feed_counter_pass_unavailable"],
-            "Watched-folder counting is unavailable right now."
+            "Can't count watched folders right now."
         );
+        // Each feed line reads the same as its analytics twin.
+        for key in INSIGHTS_FEED_LINE_KEYS {
+            let twin = key.replacen("insights_", "analytics_", 1);
+            assert_eq!(copy[*key], copy[&twin], "{key}");
+        }
     }
 
     #[test]
@@ -1577,6 +1583,217 @@ mod tests {
         }
     }
 
+    /// Ron's owner review of #1287 (D17, adopted by the owner 2026-10-11):
+    /// his table's approved words, the two new strings and the four removed
+    /// keys. The route split is pinned in the test above with its fifth,
+    /// check-failed slot.
+    #[test]
+    fn the_analytics_words_are_rons_approved_table() {
+        use super::super::analytics_copy::ANALYTICS_COPY;
+        let copy = ui_copy();
+        for (key, words) in [
+            ("analytics_lever_title", "Higher than usual"),
+            ("analytics_goals_title", "Goals"),
+            (
+                "analytics_coverage_line",
+                "Counts known for {k} of {n} traces · {p} partial · {u} unknown, not counted as zero",
+            ),
+            (
+                "analytics_coverage_undated",
+                "{d} traces have no dates and aren't in any week.",
+            ),
+            (
+                "analytics_coverage_overlap",
+                "{r} traces overlap an earlier import and are counted once.",
+            ),
+            (
+                "analytics_coverage_too_few",
+                "Not enough traces this week to compare.",
+            ),
+            (
+                "analytics_reason_codex_baseline_excluded",
+                "Usage before the first reading isn't counted",
+            ),
+            (
+                "analytics_reason_truncated",
+                "Too many turns; some weren't kept",
+            ),
+            (
+                "analytics_reason_some_turns_unknown",
+                "Some turns have no token counts",
+            ),
+            ("analytics_reason_spans_weeks", "Spans more than one week"),
+            ("analytics_reason_no_usage_counters", "No token counts"),
+            (
+                "analytics_reason_source_unsupported",
+                "This format has no token counts",
+            ),
+            ("analytics_reason_undated", "No dates"),
+            (
+                "analytics_reason_some_calls_unrecorded",
+                "Some calls have no record of where they went",
+            ),
+            (
+                "analytics_feed_saved",
+                "Only traces you analyzed are counted.",
+            ),
+            (
+                "analytics_feed_ledger",
+                "Only calls routed through Private AI are counted.",
+            ),
+            (
+                "analytics_feed_counter_pass",
+                "Traces in your watched folders.",
+            ),
+            (
+                "analytics_feed_counter_pass_unavailable",
+                "Can't count watched folders right now.",
+            ),
+            (
+                "analytics_feed_comparisons_need_counter_pass",
+                "Comparing weeks needs watched-folder counting.",
+            ),
+            ("analytics_unknown_label", "Unknown"),
+            (
+                "analytics_source_codex",
+                "Codex · total from first to last reading",
+            ),
+            (
+                "analytics_codex_interval",
+                "Codex · whole-trace totals, not by day",
+            ),
+            (
+                "analytics_model_labels_note",
+                "Model names as the agent reported them, not necessarily the model that answered.",
+            ),
+            ("analytics_drill_title", "Breakdown"),
+            ("analytics_route_unobserved", "No record"),
+            ("analytics_route_unrecorded", "Destination not recorded"),
+            ("analytics_route_verified", "Through Private AI, verified"),
+            (
+                "analytics_route_measure_note",
+                "Private AI counts tokens per call, so its total can differ from the trace's.",
+            ),
+            (
+                "analytics_route_feed_off",
+                "Turn on \"Count Private AI tokens\" in Settings to see where calls went.",
+            ),
+            (
+                "analytics_patterns_intro",
+                "Found from tool calls and token counts. No trace text is stored.",
+            ),
+            (
+                "analytics_patterns_overlap",
+                "Patterns overlap, so they don't add up to your total.",
+            ),
+            (
+                "analytics_pattern_repeated_reads_count",
+                "{r} reads of {f} files that weren't edited in between",
+            ),
+            (
+                "analytics_estimate_from_result_size",
+                "estimated from result size",
+            ),
+            (
+                "analytics_pattern_retried_calls_count",
+                "{c} calls repeated with the same tool and input, with only reads in between",
+            ),
+            ("analytics_from_counters", "from token counts"),
+            (
+                "analytics_claude_sessions_only",
+                "Claude Code traces only: {k} of {n}.",
+            ),
+            ("analytics_see_sessions", "Show {n} traces"),
+            ("analytics_goal_cache_share", "Cache share at least {p}%"),
+            ("analytics_goal_delete", "Delete"),
+            ("analytics_lever_show_reads", "Show reads"),
+            (
+                "analytics_lever_off",
+                "Hidden after you marked it not useful.",
+            ),
+            ("analytics_marker_inferred", "Inferred from token counts."),
+            (
+                "analytics_marker_reread_detail",
+                "Not edited since the last read.",
+            ),
+            (
+                "analytics_session_header",
+                "{date} · {harness} · {n} turns · {t} tokens · {span} long",
+            ),
+            (
+                "analytics_codex_not_recorded",
+                "Per-turn counts aren't shown for Codex traces.",
+            ),
+            ("analytics_glance_routed_only", "Private AI calls only"),
+            ("analytics_tip_mute", "Mute"),
+            ("analytics_mark_a11y_tip", "New context tip"),
+            (
+                "analytics_recap_fewer",
+                "{n} traces · {p}% fewer tokens than last week",
+            ),
+            (
+                "analytics_recap_more",
+                "{n} traces · {p}% more tokens than last week",
+            ),
+            (
+                "analytics_recap_pattern_up",
+                "{pattern} up {p}% on your usual week.",
+            ),
+            (
+                "analytics_recap_threshold",
+                "{n} traces passed your {threshold} threshold.",
+            ),
+            ("analytics_recap_open", "View week"),
+            ("analytics_recap_turn_off", "Hide"),
+            (
+                "analytics_recap_notification",
+                "Last week: {t} tokens across {n} traces, counts known for {k} of {n}.",
+            ),
+            ("analytics_setting_ledger_feed", "Count Private AI tokens"),
+            ("analytics_setting_recap_card", "Weekly summary"),
+            ("analytics_setting_lever", "Higher-than-usual card"),
+            (
+                "analytics_route_no_ledger",
+                "No Private AI calls recorded yet.",
+            ),
+            (
+                "analytics_setting_counter_pass",
+                "Count tokens in watched folders",
+            ),
+        ] {
+            assert_eq!(copy.get(key).map(String::as_str), Some(words), "{key}");
+        }
+        for key in [
+            "analytics_tab_spend",
+            "analytics_later",
+            "analytics_proxy_session",
+            "analytics_proxy_retries",
+        ] {
+            assert!(!copy.contains_key(key), "{key} was removed");
+        }
+        // User-facing copy says "trace", not "session", with two exceptions:
+        // the Sessions tab (with its card title and drill-down column
+        // header) and the context tip's "current session".
+        let exceptions = [
+            "analytics_tab_sessions",
+            "analytics_card_sessions",
+            "analytics_drill_session",
+            "analytics_tip_context",
+        ];
+        for (key, words) in ANALYTICS_COPY {
+            if !exceptions.contains(key) {
+                assert!(!words.to_lowercase().contains("session"), "{key}: {words}");
+            }
+        }
+        for key in INSIGHTS_FEED_LINE_KEYS {
+            assert!(!copy[*key].to_lowercase().contains("session"), "{key}");
+        }
+        assert_eq!(
+            copy["analytics_tip_context"],
+            "Context is at {ctx} in your current session."
+        );
+    }
+
     #[test]
     fn ui_copy_carries_the_analytics_words_and_none_of_the_held_ones() {
         use super::super::analytics_copy::{ANALYTICS_COPY, ANALYTICS_PLACEHOLDERS};
@@ -1590,15 +1807,14 @@ mod tests {
         for (key, words) in [
             ("analytics_tab_overview", "Overview"),
             ("analytics_tab_analyze", "Analyze"),
-            ("analytics_later", "Later"),
             ("analytics_unavailable", "\u{2014}"),
             (
                 "analytics_feed_saved",
-                "Only sessions you analyzed are counted.",
+                "Only traces you analyzed are counted.",
             ),
             (
                 "analytics_feed_comparisons_need_counter_pass",
-                "Week-to-week comparisons need watched-folder counting.",
+                "Comparing weeks needs watched-folder counting.",
             ),
             (
                 "analytics_by_project_unavailable",
@@ -1606,7 +1822,7 @@ mod tests {
             ),
             (
                 "analytics_coverage_line",
-                "Usage known for {k} of {n} sessions \u{b7} {p} partial \u{b7} {u} unknown, not counted as zero",
+                "Counts known for {k} of {n} traces \u{b7} {p} partial \u{b7} {u} unknown, not counted as zero",
             ),
             ("analytics_glance_tokens_only", "{tokens} tokens"),
             // A saved session's picker and drill-down label, never its id.
@@ -1618,22 +1834,16 @@ mod tests {
                 "analytics_session_label_undated",
                 "Undated \u{b7} {harness} \u{b7} {t} tokens",
             ),
-            (
-                "analytics_setting_ledger_feed",
-                "Count tokens in routed calls",
-            ),
+            ("analytics_setting_ledger_feed", "Count Private AI tokens"),
             // Where a feed T session's calls went (design part B). Only
             // proof reads "verified"; no proxy record never reads as "not
             // private".
             ("analytics_drill_private", "Private AI"),
-            ("analytics_route_unobserved", "No proxy record"),
-            (
-                "analytics_route_unrecorded",
-                "Proxy didn't record where calls went",
-            ),
+            ("analytics_route_unobserved", "No record"),
+            ("analytics_route_unrecorded", "Destination not recorded"),
             ("analytics_route_outside", "Not through Private AI"),
             ("analytics_route_mixed", "Partly through Private AI"),
-            ("analytics_route_verified", "Private AI, verified"),
+            ("analytics_route_verified", "Through Private AI, verified"),
             (
                 "analytics_route_unverified",
                 "Through Private AI, not verified",
@@ -1648,15 +1858,15 @@ mod tests {
             ),
             (
                 "analytics_route_measure_note",
-                "Proxy tokens count each call and can differ from the transcript's count.",
+                "Private AI counts tokens per call, so its total can differ from the trace's.",
             ),
             (
                 "analytics_route_feed_off",
-                "Where calls went shows only while counting tokens in routed calls is on.",
+                "Turn on \"Count Private AI tokens\" in Settings to see where calls went.",
             ),
             (
                 "analytics_reason_some_calls_unrecorded",
-                "Some calls have no proxy record of where they went",
+                "Some calls have no record of where they went",
             ),
         ] {
             assert_eq!(copy[key], words, "{key}");

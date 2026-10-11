@@ -555,11 +555,15 @@ mod tests {
             serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
         unsafe { tc_string_free(result) };
         assert_eq!(copy["analytics_tab_analyze"], "Analyze");
-        assert_eq!(copy["analytics_later"], "Later");
+        assert_eq!(
+            copy["analytics_route_no_ledger"],
+            "No Private AI calls recorded yet."
+        );
         assert_eq!(
             copy["analytics_feed_saved"],
-            "Only sessions you analyzed are counted."
+            "Only traces you analyzed are counted."
         );
+        assert!(copy.get("analytics_later").is_none(), "removed in review");
     }
 
     #[test]

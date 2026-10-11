@@ -847,24 +847,34 @@ struct InsightsCounterSessions: Equatable, Sendable {
 /// private". The tokens here are the proxy's per-call count, drawn beside
 /// the transcript's and never added to it.
 enum InsightsRouteWords {
-    /// The Private AI column: drawn, replaced by the feed-off line, or left
-    /// out with nothing said.
-    enum Column: Equatable, Sendable { case shown, feedOff, hidden }
+    /// The Private AI column: drawn, replaced by the feed-off line or the
+    /// no-ledger line, or left out with nothing said.
+    enum Column: Equatable, Sendable { case shown, feedOff, noLedger, hidden }
 
     private static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
     private static func dash(_ copy: [String: String]) -> String { text("analytics_unavailable", copy) }
 
     /// Drawn only when the daemon says the rows carry a route. The feed
-    /// turned off in Settings gets its line; no proxy ledger, an older
-    /// daemon, or a reason this build does not know draw nothing.
+    /// turned off in Settings and no proxy ledger each get their line; an
+    /// older daemon or a reason this build does not know draw nothing.
     static func column(_ week: DaemonData.InsightsWeek) -> Column {
         if week.routingAvailable == true { return .shown }
-        return week.routingUnavailable == "ledger_feed_off" ? .feedOff : .hidden
+        switch week.routingUnavailable {
+        case "ledger_feed_off": return .feedOff
+        case "no_ledger": return .noLedger
+        default: return .hidden
+        }
     }
 
-    /// The one line shown in place of the column while the feed is off.
-    static func feedOffLine(_ column: Column, copy: [String: String]) -> String? {
-        column == .feedOff ? text("analytics_route_feed_off", copy) : nil
+    /// The one line shown in place of the column: the feed is off, or no
+    /// Private AI call is recorded yet. `nil` when the column is drawn or
+    /// left out with nothing said.
+    static func unavailableLine(_ column: Column, copy: [String: String]) -> String? {
+        switch column {
+        case .feedOff: return text("analytics_route_feed_off", copy)
+        case .noLedger: return text("analytics_route_no_ledger", copy)
+        case .shown, .hidden: return nil
+        }
     }
 
     /// The category's word; the dash for a missing route or a category this

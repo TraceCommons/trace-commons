@@ -1,17 +1,22 @@
 //! The token analytics words: tabs, the Overview, Patterns and Sessions
 //! cards, the glance card and tip, the weekly summary card and Settings.
 //!
-//! Every entry is DRAFT, NEEDS APPROVAL (owner decision D17, open). No shell
-//! authors any of these sentences; each reads this table through `ui_copy()`
-//! (`tc_insights_copy_json`, or the `copy` operation of `tc_insights_call`).
+//! Every entry is approved: Ron approved the words in his 2026-10-11 owner
+//! review of #1287 (owner decision D17), and the owner adopted that review.
+//! User-facing words say "trace", not "session", except the Sessions tab
+//! (with its card title and drill-down column header) and the context tip's
+//! "current session". No shell authors any of these sentences; each reads
+//! this table through `ui_copy()` (`tc_insights_copy_json`, or the `copy`
+//! operation of `tc_insights_call`).
 //!
 //! Every number or name a sentence carries is a `{name}` hole from
 //! [`ANALYTICS_PLACEHOLDERS`]; the shell fills it and adds nothing else.
 //!
 //! Held, and so absent, until owner decision D2: every advice sentence, the
-//! what-if sentences and anything that recommends an action. No run of weeks
-//! is counted anywhere (owner decision D1, open). No money appears here
-//! (owner decision D5, open).
+//! what-if sentences and anything that recommends an action (held again in
+//! Ron's 2026-10-11 review). No run of weeks is counted anywhere (owner
+//! decision D1: six weekly marks, no streaks). No money appears here (owner
+//! decision D5).
 //!
 //! The glance, tip and news-mark words (`analytics_glance_*`,
 //! `analytics_tip_*`, `analytics_mark_a11y_tip`) stay in this table: the
@@ -53,7 +58,7 @@ pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
     "o",
 ];
 
-/// Key, words. DRAFT, NEEDS APPROVAL (owner decision D17, open).
+/// Key, words. Approved in Ron's 2026-10-11 owner review (D17).
 pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // The figure that is not shown: unknown, or not computed under this feed.
     ("analytics_unavailable", "—"),
@@ -61,14 +66,12 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_tab_overview", "Overview"),
     ("analytics_tab_patterns", "Patterns"),
     ("analytics_tab_sessions", "Sessions"),
-    ("analytics_tab_spend", "Spend"),
-    ("analytics_later", "Later"),
     ("analytics_tab_analyze", "Analyze"),
     ("analytics_this_week", "This week"),
     ("analytics_today", "Today"),
     ("analytics_where_tokens_went", "Where tokens went"),
-    ("analytics_lever_title", "Lever of the week"),
-    ("analytics_goals_title", "Your goals"),
+    ("analytics_lever_title", "Higher than usual"),
+    ("analytics_goals_title", "Goals"),
     ("analytics_reread_title", "Most re-read files"),
     ("analytics_input_each_turn", "Input sent each turn"),
     ("analytics_your_week", "Your week · {range}"),
@@ -76,19 +79,19 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // 2. Coverage.
     (
         "analytics_coverage_line",
-        "Usage known for {k} of {n} sessions · {p} partial · {u} unknown, not counted as zero",
+        "Counts known for {k} of {n} traces · {p} partial · {u} unknown, not counted as zero",
     ),
     (
         "analytics_coverage_undated",
-        "{d} sessions have no recorded dates and are not in any week.",
+        "{d} traces have no dates and aren't in any week.",
     ),
     (
         "analytics_coverage_overlap",
-        "{r} sessions overlap an earlier import and are counted once.",
+        "{r} traces overlap an earlier import and are counted once.",
     ),
     (
         "analytics_coverage_too_few",
-        "Not enough sessions this week to compare.",
+        "Not enough traces this week to compare.",
     ),
     // Coverage states and reasons, for the drill-down's Coverage and Reason
     // columns. Not enumerated in the spec's copy list; added so no shell
@@ -98,26 +101,23 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_state_unknown", "Unknown"),
     (
         "analytics_reason_codex_baseline_excluded",
-        "Counters from before the first reading are left out",
+        "Usage before the first reading isn't counted",
     ),
     (
         "analytics_reason_truncated",
-        "Too many turns to keep them all",
+        "Too many turns; some weren't kept",
     ),
     (
         "analytics_reason_some_turns_unknown",
-        "Some turns have no usage counters",
+        "Some turns have no token counts",
     ),
-    (
-        "analytics_reason_spans_weeks",
-        "Runs across more than one week",
-    ),
-    ("analytics_reason_no_usage_counters", "No usage counters"),
+    ("analytics_reason_spans_weeks", "Spans more than one week"),
+    ("analytics_reason_no_usage_counters", "No token counts"),
     (
         "analytics_reason_source_unsupported",
-        "This file format has no usage counters",
+        "This format has no token counts",
     ),
-    ("analytics_reason_undated", "No recorded dates"),
+    ("analytics_reason_undated", "No dates"),
     (
         "analytics_reason_reimport_overlap",
         "Overlaps an earlier import",
@@ -132,28 +132,28 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // calls'. It never marks the transcript's token figure unknown.
     (
         "analytics_reason_some_calls_unrecorded",
-        "Some calls have no proxy record of where they went",
+        "Some calls have no record of where they went",
     ),
     // 3. Feed lines.
     (
         "analytics_feed_saved",
-        "Only sessions you analyzed are counted.",
+        "Only traces you analyzed are counted.",
     ),
     (
         "analytics_feed_ledger",
-        "Routed calls only. Sessions outside Private AI are not counted.",
+        "Only calls routed through Private AI are counted.",
     ),
     (
         "analytics_feed_counter_pass",
-        "Sessions in your watched folders.",
+        "Traces in your watched folders.",
     ),
     (
         "analytics_feed_counter_pass_unavailable",
-        "Watched-folder counting is unavailable right now.",
+        "Can't count watched folders right now.",
     ),
     (
         "analytics_feed_comparisons_need_counter_pass",
-        "Week-to-week comparisons need watched-folder counting.",
+        "Comparing weeks needs watched-folder counting.",
     ),
     // 4. Card names.
     ("analytics_card_tokens", "Tokens"),
@@ -163,7 +163,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_card_by_model", "By model"),
     ("analytics_card_by_project", "By project"),
     ("analytics_card_by_tool", "By tool"),
-    ("analytics_unknown_label", "Unknown label"),
+    ("analytics_unknown_label", "Unknown"),
     (
         "analytics_by_project_unavailable",
         "Not available for analyzed files",
@@ -179,11 +179,11 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     (
         "analytics_source_codex",
-        "Codex · change between first and last counter",
+        "Codex · total from first to last reading",
     ),
     (
         "analytics_codex_interval",
-        "Codex · interval totals, not by day",
+        "Codex · whole-trace totals, not by day",
     ),
     // 6. Change and best.
     ("analytics_change_down", "▼ {p}% vs last week"),
@@ -195,7 +195,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_best_week", "Your best week · previous best {q}%"),
     ("analytics_largest", "Largest: {t} tokens"),
     // 7. Drill-down.
-    ("analytics_drill_title", "What makes up this number"),
+    ("analytics_drill_title", "Breakdown"),
     ("analytics_drill_session", "Session"),
     ("analytics_drill_tokens", "Tokens"),
     ("analytics_drill_coverage", "Coverage"),
@@ -205,14 +205,11 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // summed with or reconciled to the transcript's. Only verified proof
     // reads "verified"; no proxy record is never "not private".
     ("analytics_drill_private", "Private AI"),
-    ("analytics_route_unobserved", "No proxy record"),
-    (
-        "analytics_route_unrecorded",
-        "Proxy didn't record where calls went",
-    ),
+    ("analytics_route_unobserved", "No record"),
+    ("analytics_route_unrecorded", "Destination not recorded"),
     ("analytics_route_outside", "Not through Private AI"),
     ("analytics_route_mixed", "Partly through Private AI"),
-    ("analytics_route_verified", "Private AI, verified"),
+    ("analytics_route_verified", "Through Private AI, verified"),
     (
         "analytics_route_unverified",
         "Through Private AI, not verified",
@@ -227,45 +224,51 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     (
         "analytics_route_measure_note",
-        "Proxy tokens count each call and can differ from the transcript's count.",
+        "Private AI counts tokens per call, so its total can differ from the trace's.",
     ),
     // Shown once in place of the column while the `insights_ledger_feed`
-    // switch ("Count tokens in routed calls", Settings > Tools) is off.
+    // switch ("Count Private AI tokens", Settings > Private AI) is off.
     (
         "analytics_route_feed_off",
-        "Where calls went shows only while counting tokens in routed calls is on.",
+        "Turn on \"Count Private AI tokens\" in Settings to see where calls went.",
+    ),
+    // Shown once in place of the column while there is no proxy ledger to
+    // read (`routing_unavailable` "no_ledger").
+    (
+        "analytics_route_no_ledger",
+        "No Private AI calls recorded yet.",
     ),
     // 8. By model.
     (
         "analytics_model_labels_note",
-        "Declared model labels. They show what the agent reported, not which model served the request.",
+        "Model names as the agent reported them, not necessarily the model that answered.",
     ),
     // 9. Patterns intro.
     (
         "analytics_patterns_intro",
-        "Patterns found in tool calls and usage counters. No session text is stored.",
+        "Found from tool calls and token counts. No trace text is stored.",
     ),
     (
         "analytics_patterns_overlap",
-        "These patterns overlap, so they do not add up to your total.",
+        "Patterns overlap, so they don't add up to your total.",
     ),
     // 10. Repeated reads.
     ("analytics_pattern_repeated_reads", "Repeated reads"),
     (
         "analytics_pattern_repeated_reads_count",
-        "{r} reads of {f} files with no edit tool call to them in between",
+        "{r} reads of {f} files that weren't edited in between",
     ),
     (
         "analytics_estimate_from_result_size",
-        "about, from result size",
+        "estimated from result size",
     ),
     // 11. Retried tool calls.
     ("analytics_pattern_retried_calls", "Retried tool calls"),
     (
         "analytics_pattern_retried_calls_count",
-        "{c} calls repeated with the same tool and arguments, with only reads in between",
+        "{c} calls repeated with the same tool and input, with only reads in between",
     ),
-    // 12. Edit, failed command, edit (owner decision D9, open).
+    // 12. Edit, failed command, edit (owner decision D9: kept, labelled inferred).
     (
         "analytics_pattern_edit_fail_edit",
         "Edit, failed command, edit",
@@ -284,14 +287,14 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_pattern_long_context_line",
         "Input sent after context passed {threshold}",
     ),
-    ("analytics_from_counters", "from counters"),
+    ("analytics_from_counters", "from token counts"),
     // 14.
     (
         "analytics_claude_sessions_only",
-        "Claude Code sessions only: {k} of {n}.",
+        "Claude Code traces only: {k} of {n}.",
     ),
-    ("analytics_see_sessions", "See {n} sessions →"),
-    // 15. Re-read table (owner decision D8, open: letters, never a name).
+    ("analytics_see_sessions", "Show {n} traces"),
+    // 15. Re-read table (owner decision D8: letters plus extension, never a name).
     ("analytics_reread_file", "File"),
     ("analytics_reread_reads", "Reads"),
     (
@@ -303,7 +306,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_file_label_no_ext", "File {letter}"),
     // 16. Goals.
     ("analytics_goal_add", "Add goal"),
-    ("analytics_goal_cache_share", "Input read from cache ≥ {p}%"),
+    ("analytics_goal_cache_share", "Cache share at least {p}%"),
     ("analytics_goal_repeated_reads", "Repeated reads under {t}"),
     ("analytics_goal_long_context", "Long context under {t}"),
     ("analytics_goal_weekly_tokens", "Weekly tokens under {t}"),
@@ -315,17 +318,17 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_goals_note",
         "Goals are compared only with your own past weeks.",
     ),
-    ("analytics_goal_delete", "Delete goal"),
+    ("analytics_goal_delete", "Delete"),
     // 17. Lever (an observation only; its advice sentence is held, D2).
     (
         "analytics_lever_line",
         "{f} files were read again {r} times, about {t} tokens.",
     ),
-    ("analytics_lever_show_reads", "Show the reads"),
+    ("analytics_lever_show_reads", "Show reads"),
     ("analytics_lever_not_useful", "Not useful"),
     (
         "analytics_lever_off",
-        "Lever suggestions are off. Turn them on in Settings.",
+        "Hidden after you marked it not useful.",
     ),
     // 18. Markers.
     (
@@ -342,11 +345,11 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "Every turn after this one is in the long-context range.",
     ),
     ("analytics_marker_shrank", "Context shrank at turn {t}"),
-    ("analytics_marker_inferred", "Inferred from usage counters."),
+    ("analytics_marker_inferred", "Inferred from token counts."),
     ("analytics_marker_reread", "File {letter} read again"),
     (
         "analytics_marker_reread_detail",
-        "No edit tool call to it since the last read.",
+        "Not edited since the last read.",
     ),
     // A re-read is read from the order of tool calls, not from usage
     // counters, so its card carries this label instead. Not in the spec's
@@ -358,7 +361,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // 19. Session header.
     (
         "analytics_session_header",
-        "{date} · {harness} · {n} turns · {t} tokens · {span} between first and last event",
+        "{date} · {harness} · {n} turns · {t} tokens · {span} long",
     ),
     // A saved session's label in the session picker and the drill-down rows,
     // so neither shows the snapshot ID: the first recorded event's local date
@@ -376,10 +379,8 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_turn", "Turn {n}"),
     (
         "analytics_codex_not_recorded",
-        "Turn-by-turn usage isn't recorded for Codex sessions.",
+        "Per-turn counts aren't shown for Codex traces.",
     ),
-    ("analytics_proxy_session", "Proxy session {label}"),
-    ("analytics_proxy_retries", "proxy retries, not tool retries"),
     // 20. Glance and tip (the tip is held until D2 and a user threshold).
     (
         "analytics_glance_line",
@@ -387,26 +388,23 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     // A day whose known calls read no input, so no cache share.
     ("analytics_glance_tokens_only", "{tokens} tokens"),
-    ("analytics_glance_routed_only", "Routed calls only"),
+    ("analytics_glance_routed_only", "Private AI calls only"),
     (
         "analytics_tip_context",
         "Context is at {ctx} in your current session.",
     ),
     ("analytics_tip_threshold", "Your threshold is {threshold}."),
-    ("analytics_tip_mute", "Mute tips"),
-    (
-        "analytics_mark_a11y_tip",
-        "New: a context tip for your current session.",
-    ),
+    ("analytics_tip_mute", "Mute"),
+    ("analytics_mark_a11y_tip", "New context tip"),
     // 21. Weekly summary card (feed T only). Its title is
     // `analytics_your_week`.
     (
         "analytics_recap_fewer",
-        "{n} sessions · {p}% fewer tokens than last week",
+        "{n} traces · {p}% fewer tokens than last week",
     ),
     (
         "analytics_recap_more",
-        "{n} sessions · {p}% more tokens than last week",
+        "{n} traces · {p}% more tokens than last week",
     ),
     (
         "analytics_recap_best_cache",
@@ -416,28 +414,25 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_recap_goal_not_met", "Goal not met: {goal}."),
     (
         "analytics_recap_pattern_up",
-        "{pattern} went up {p}% against your usual week.",
+        "{pattern} up {p}% on your usual week.",
     ),
     (
         "analytics_recap_threshold",
-        "{n} sessions passed your {threshold} threshold.",
+        "{n} traces passed your {threshold} threshold.",
     ),
-    ("analytics_recap_open", "Open recap"),
-    ("analytics_recap_turn_off", "Turn off"),
+    ("analytics_recap_open", "View week"),
+    ("analytics_recap_turn_off", "Hide"),
     // 22. Weekly summary notification sentence (no notification is sent
     // until owner decision D1).
     (
         "analytics_recap_notification",
-        "Last week: {t} tokens across {n} sessions, usage known for {k} of {n}.",
+        "Last week: {t} tokens across {n} traces, counts known for {k} of {n}.",
     ),
     // 23. Settings.
     ("analytics_setting_context_threshold", "Context threshold"),
     ("analytics_setting_not_set", "Not set"),
-    (
-        "analytics_setting_recap_card",
-        "Show the weekly summary card",
-    ),
-    ("analytics_setting_lever", "Lever suggestions"),
+    ("analytics_setting_recap_card", "Weekly summary"),
+    ("analytics_setting_lever", "Higher-than-usual card"),
     // The `insights_counter_pass` switch (owner decision D4: off by
     // default; Ron's #1287 review).
     (
@@ -446,9 +441,5 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     // The `insights_ledger_feed` switch (owner decision D3, settled
     // 2026-10-09: on by default, the switch turns it off).
-    (
-        "analytics_setting_ledger_feed",
-        "Count tokens in routed calls",
-    ),
-    // 24. The Spend chip is `analytics_later`.
+    ("analytics_setting_ledger_feed", "Count Private AI tokens"),
 ];

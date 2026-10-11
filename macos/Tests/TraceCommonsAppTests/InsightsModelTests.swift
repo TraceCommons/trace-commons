@@ -176,7 +176,7 @@ extension InsightsModelTests {
 final class InsightsOverviewTests: XCTestCase {
     static let words: [String: String] = [
         "analytics_unavailable": "\u{2014}",
-        "analytics_coverage_line": "Usage known for {k} of {n} sessions \u{b7} {p} partial \u{b7} {u} unknown, not counted as zero",
+        "analytics_coverage_line": "Counts known for {k} of {n} traces \u{b7} {p} partial \u{b7} {u} unknown, not counted as zero",
         "analytics_feed_saved": "FEED_SAVED",
         "analytics_feed_comparisons_need_counter_pass": "NEEDS_T",
         "analytics_unknown_label": "UNKNOWN_LABEL",
@@ -226,7 +226,7 @@ final class InsightsOverviewTests: XCTestCase {
     func testCoverageAndFeedLinesAreTheCoresWordsFilled() throws {
         let week = try overview()
         XCTAssertEqual(InsightsOverviewWords.coverageLine(week.coverage, copy: Self.words),
-                       "Usage known for 1 of 4 sessions \u{b7} 1 partial \u{b7} 2 unknown, not counted as zero")
+                       "Counts known for 1 of 4 traces \u{b7} 1 partial \u{b7} 2 unknown, not counted as zero")
         XCTAssertEqual(InsightsOverviewWords.feedLines(week.feed, copy: Self.words), ["FEED_SAVED", "NEEDS_T"])
         XCTAssertEqual(InsightsOverviewWords.feedLines("counter_pass", copy: Self.words), [""])
         XCTAssertEqual(InsightsOverviewWords.feedLines("counter_pass", copy: ["analytics_feed_counter_pass": "FEED_T"]),
@@ -483,7 +483,7 @@ final class InsightsPatternsTests: XCTestCase {
         "analytics_from_counters": "COUNTERS",
         "analytics_inferred_from_order": "INFERRED",
         "analytics_claude_sessions_only": "Claude only: {k} of {n}.",
-        "analytics_see_sessions": "See {n} sessions",
+        "analytics_see_sessions": "Show {n} traces",
         "analytics_file_label": "File {letter} \u{b7} {ext}",
         "analytics_file_label_no_ext": "File {letter}",
     ]
@@ -562,7 +562,7 @@ final class InsightsPatternsTests: XCTestCase {
         XCTAssertEqual(week.reread_files.map { InsightsPatternsWords.fileLabel($0, copy: Self.words) },
                        ["File B \u{b7} .rs", "File A"])
         XCTAssertEqual(InsightsPatternsWords.claudeOnlyLine(week, copy: Self.words), "Claude only: 1 of 2.")
-        XCTAssertEqual(InsightsPatternsWords.seeSessions(week.cards[0], copy: Self.words), "See 1 sessions")
+        XCTAssertEqual(InsightsPatternsWords.seeSessions(week.cards[0], copy: Self.words), "Show 1 traces")
     }
 
     @MainActor
@@ -981,12 +981,12 @@ final class InsightsComparisonsTests: XCTestCase {
         "analytics_pattern_retried_calls": "RETRIED",
         "analytics_pattern_repeated_reads": "REPEATED",
         "analytics_your_week": "Your week \u{b7} {range}",
-        "analytics_recap_fewer": "{n} sessions \u{b7} {p}% fewer tokens than last week",
-        "analytics_recap_more": "{n} sessions \u{b7} {p}% more tokens than last week",
+        "analytics_recap_fewer": "{n} traces \u{b7} {p}% fewer tokens than last week",
+        "analytics_recap_more": "{n} traces \u{b7} {p}% more tokens than last week",
         "analytics_recap_best_cache": "Best cache week yet: {p}%. Previous best {q}%.",
         "analytics_recap_goal_met": "Goal met: {goal}.",
-        "analytics_recap_pattern_up": "{pattern} went up {p}% against your usual week.",
-        "analytics_recap_threshold": "{n} sessions passed your {threshold} threshold.",
+        "analytics_recap_pattern_up": "{pattern} up {p}% on your usual week.",
+        "analytics_recap_threshold": "{n} traces passed your {threshold} threshold.",
         "claude_code": "Claude Code",
     ]
 
@@ -1179,13 +1179,13 @@ final class InsightsComparisonsTests: XCTestCase {
         """.utf8))
         let words = Self.words
         XCTAssertEqual(InsightsComparisonsWords.recapChange(recap.sources[0], sessions: recap.sessions, copy: words),
-                       "6 sessions \u{b7} 20% fewer tokens than last week")
+                       "6 traces \u{b7} 20% fewer tokens than last week")
         XCTAssertNil(InsightsComparisonsWords.recapChange(recap.sources[1], sessions: recap.sessions, copy: words),
                      "no comparable week: no line, never 0%")
         XCTAssertEqual(recap.items.compactMap { InsightsComparisonsWords.recapItem($0, copy: words) }, [
             "Best cache week yet: 45%. Previous best 30%.",
             "Goal met: Repeated reads under 50K.",
-            "REPEATED went up 150% against your usual week.",
+            "REPEATED up 150% on your usual week.",
         ])
         XCTAssertNil(InsightsComparisonsWords.recapThreshold(recap, copy: words),
                      "no threshold line until the user sets one")

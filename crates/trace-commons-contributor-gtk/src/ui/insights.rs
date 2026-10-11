@@ -405,9 +405,9 @@ impl InsightsView {
             .build();
         analyze.append(&scroller);
         // The tabs: Overview, Patterns and Sessions over the saved
-        // snapshots, then Analyze, which is the whole screen above. Spend
-        // is not a tab: it is shown disabled beside them with its Later
-        // chip, with no content and no figures.
+        // snapshots, then Analyze, which is the whole screen above. There
+        // is no Spend tab: a tab that can't be used is hidden, not drawn
+        // disabled (Ron's review of #1287; no money in Insights, D5).
         let analytics = analytics::AnalyticsTabs::new(store_dir.clone());
         let tabs = gtk::Stack::new();
         tabs.set_vexpand(true);
@@ -425,13 +425,6 @@ impl InsightsView {
         switcher.set_stack(Some(&tabs));
         let tab_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         tab_row.append(&switcher);
-        let spend = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        spend.append(&gtk::Label::new(Some(copy("analytics_tab_spend"))));
-        let later = gtk::Label::new(Some(copy("analytics_later")));
-        later.add_css_class("dim-label");
-        spend.append(&later);
-        spend.set_sensitive(false);
-        tab_row.append(&spend);
         for setter in [
             gtk::prelude::WidgetExt::set_margin_top,
             gtk::prelude::WidgetExt::set_margin_start,

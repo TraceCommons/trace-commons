@@ -489,8 +489,9 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
                 .collect(),
         );
     }
-    // The Insights token analytics words (spec section 8, DRAFT): tabs,
-    // Overview, Patterns, Sessions, the glance, the weekly summary card.
+    // The Insights token analytics words (spec section 8, approved in Ron's
+    // 2026-10-11 owner review): tabs, Overview, Patterns, Sessions, the
+    // glance, the weekly summary card.
     add(
         "insights::analytics_copy::ANALYTICS_COPY",
         trace_commons_contributor::insights::analytics_copy::ANALYTICS_COPY

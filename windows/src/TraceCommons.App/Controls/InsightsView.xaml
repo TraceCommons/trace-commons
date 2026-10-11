@@ -6,18 +6,10 @@
         Overview, Patterns and Sessions over the saved snapshots, then
         Analyze, the whole earlier screen. Every word is bound to the
         core's copy; every figure is the core's. Bars are plain
-        rectangles, never a ring. Spend is not a tab: it sits beside the
-        tabs, disabled, with its Later chip.
+        rectangles, never a ring. There is no Spend tab: a tab that can't
+        be used is hidden, not drawn disabled.
     -->
     <Pivot x:Name="Tabs" SelectionChanged="OnTabChanged">
-        <Pivot.RightHeader>
-            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" Margin="0,0,28,0" Opacity="0.5" IsHitTestVisible="False">
-                <TextBlock Text="{Binding [analytics_tab_spend]}" VerticalAlignment="Center" />
-                <Border BorderBrush="{ThemeResource TcHairlineBrush}" BorderThickness="1" CornerRadius="8" Padding="8,2">
-                    <TextBlock Text="{Binding [analytics_later]}" FontSize="12" />
-                </Border>
-            </StackPanel>
-        </Pivot.RightHeader>
         <PivotItem Header="{Binding [analytics_tab_overview]}">
             <ScrollViewer>
                 <StackPanel Padding="28" Spacing="12" MaxWidth="1000" HorizontalAlignment="Stretch">

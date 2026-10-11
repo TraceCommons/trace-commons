@@ -418,8 +418,8 @@ pub(super) fn marker_lines(marker: &DrillMarker, threshold: u64) -> Vec<String> 
     lines
 }
 
-/// The tabs, in the macOS order. Spend is not a tab: it is shown disabled
-/// beside them with its Later chip.
+/// The tabs, in the macOS order. There is no Spend tab (Ron's review of
+/// #1287: a tab that can't be used is hidden, not drawn disabled).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Tab {
     Overview,
