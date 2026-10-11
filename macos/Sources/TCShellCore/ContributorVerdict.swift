@@ -49,7 +49,7 @@ public enum VerdictCopy {
     /// sentence is the only place that exemption is disclosed to the
     /// contributor. Do not reword, shorten, or drop it.
     public static let caption =
-        "Optional. This is recorded as the trace outcome; the preview above does not show it."
+        "Optional. Recorded with the trace; not shown in the preview."
 
     /// The bulk verdict control beside `Submit all`. The plain button stays
     /// a one-click unanswered submit; this is the opt-in path for answering

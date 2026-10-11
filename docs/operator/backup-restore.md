@@ -210,6 +210,14 @@ answers `404` there. Do these steps in this order:
    with `TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN` needs. A tenant with
    no audit event after the backup needs no backfill.
 
+   A pipeline receipt admitted after the backup has no run in the restored
+   database, and its `submitted` event in the file has no status. The
+   backfill writes that event with the status `received`, because its
+   submission has no file record (a pipeline submission never has one), and
+   then the tenant's later events. It does not need a pipeline runtime in
+   the process that runs it. The run itself is not restored: the receipt is
+   lost with the rest of the database's changes after the backup.
+
    If a tenant must be stopped before its backfill, send `contain`. It
    commits and stops the tenant's uploads, although it answers the `500`
    label. The record id of that containment is in the log's error line
@@ -348,7 +356,14 @@ answers `404` there. Do these steps in this order:
    run whose writes take longer than that deadline fails on every rerun. A
    fence that cannot be written (a database fault) stops the rebuild before
    that run's first write with `503` `index_rebuild_fence_unavailable`. Rerun
-   once the database is healthy.
+   once the database is healthy. When the store call for a stored command
+   fails, the rebuild stops with `503` `index_command_unreadable`: an outage,
+   and also a command the store reports missing, corrupt or bound to another
+   tenant, or one it cannot decrypt under the loaded key. A second run helps
+   once the store is back or the right key is loaded. A command that the
+   store read and that fails its run's checks (hash, revision, index, model)
+   stops it with `409` `index_command_invalid`, which a second run does not
+   change.
 
    A withdrawal during the rebuild is safe because of the rebuild's fence, not
    because no withdrawal happens: withdrawals come from clients, from `main`'s
@@ -382,10 +397,13 @@ answers `404` there. Do these steps in this order:
      worker then claims the removals on its next invalidation pass. No operator
      action is needed. The tenant's next rebuild deletes the expired row when it
      ends.
-   - The margin is a contract with the index writer. The fence does not enforce
-     it. The guarantee holds as long as each index call returns within the 60
-     second margin; an index call that takes longer is outside what the fence
-     covers.
+   - The fence covers an index call that returns within the 60 second margin.
+     A call that takes longer is awaited by a task of its own in the process
+     that made it. When the call returns, that task reopens the run's index
+     removal, so an entry written after the removal ran is removed again on
+     the next invalidation pass. Until that pass, the entry can be found in
+     the index. This holds while the process lives: an index call that lands
+     after its process has exited is not seen by the pipeline.
 
    Step 3 stays. The route still refuses a tenant that its own process routes or
    drains (`409` `pipeline_index_rebuild_tenant_active`), because a Score of that

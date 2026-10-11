@@ -561,6 +561,10 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
         Utc::now(),
         crate::credit_estimate_table::random_draw(),
     );
+    // The contribution-mission slot's fetch schedule: due on the first tick
+    // with a config, then every `MISSION_SLOT_REFRESH`. A local of this loop
+    // too.
+    let mut mission_slot_schedule = activity_missions::MissionSlotSchedule::default();
     let mut sigterm = signal_stream();
     let shutdown_signal = Arc::clone(&shared.shutdown_signal);
 
@@ -652,6 +656,14 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                     // On its own fixed schedule, not this tick's: most
                     // ticks find it not due and return at once.
                     refresh_estimate_table(shared, now, &mut table_schedule).await;
+                    // Likewise on its own schedule, and likewise a public,
+                    // anonymous read that sends nothing about this Mac.
+                    activity_missions::refresh_mission_slot(
+                        shared,
+                        now,
+                        &mut mission_slot_schedule,
+                    )
+                    .await;
                 }
                 // A fetched table ageing out is the clock alone: announced
                 // here, outside the `!dry_run` block, with no fetch.
@@ -4491,6 +4503,61 @@ mod tests {
                 .basis,
             ipc::ESTIMATE_BASIS_PUBLISHED
         );
+    }
+
+    /// The tick loop itself fetches the published activity catalogue on its
+    /// first tick with a config, and fills the contribution-mission slot
+    /// with the missions that carry a supported predicate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_supervisor_fills_the_mission_slot_on_its_first_tick() {
+        use axum::routing::get;
+        let today = Utc::now().date_naive();
+        let policy: trace_commons_protocol::activity_missions::ActivityPolicy =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "policy_id": "wiring",
+                "starts_on": today - chrono::Duration::days(1),
+                "ends_before": today + chrono::Duration::days(30),
+                "qualification": "accepted",
+                "missions": [
+                    {"id": "claude", "title": "Claude Code sessions", "required_contributions": 1,
+                     "predicate": {"version": 1, "tools": ["claude-code"], "min_sessions": 1}},
+                    {"id": "count", "title": "Any contribution", "required_contributions": 1},
+                ],
+                "daily": null, "levels": null, "badges": null,
+            }))
+            .unwrap();
+        let catalogue =
+            trace_commons_protocol::activity_missions::ActivityCatalogue::new(Some(policy))
+                .unwrap();
+        let router = Router::new().route(
+            "/v1/activity-missions",
+            get(move || {
+                let catalogue = catalogue.clone();
+                async move { Json(catalogue) }
+            }),
+        );
+        let ingest = TransientRetryHarness::spawn(router).await;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_with_ingest(dir.path(), &ingest);
+        let supervisor = tokio::spawn(run_supervisor(Arc::clone(&shared), false));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let filled = loop {
+            let slot = mission_matching::live_catalogue(&shared.mission_catalogue, Utc::now());
+            if slot.is_some() || std::time::Instant::now() > deadline {
+                break slot;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        shared.shutdown.store(true, Ordering::Relaxed);
+        shared.shutdown_signal.notify_one();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), supervisor).await;
+        let ids: Vec<String> = filled
+            .expect("the first tick fills the slot")
+            .missions
+            .into_iter()
+            .map(|m| m.mission_id)
+            .collect();
+        assert_eq!(ids, vec!["claude"]);
     }
 
     /// Without a config there is no origin to ask: nothing is sent and the

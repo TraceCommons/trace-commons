@@ -370,9 +370,20 @@ stale.
 
 ## Re-assessing quarantined submissions
 
-Quarantine is not always a verdict about the trace. A submission is quarantined
-when its POST-backstop residual risk is Medium or High, and that assessment is
-only as good as the classifier that produced it.
+Quarantine is not always a verdict about the trace. The backstop quarantines a
+submission when its POST-backstop residual risk is High, or Medium on a
+deployment without `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS=true` (the
+pilot sets it, so there Medium is accepted: PII the classifier found and
+removed raises the risk to Medium, not High), or when its backstop attempts
+are exhausted. That assessment is only as good as the classifier that
+produced it.
+
+Backstop releases before the GHSA-q7pr-c684-grrq fix did not write the
+post-backstop risk to `trace_submissions.privacy_risk`, so on those rows the
+column still shows the submit-time value; a quarantined row reading `medium`
+may have been quarantined at High. The remediation pass in
+[pii-backstop.md](pii-backstop.md) rewrites the column from the rescrubbed
+envelope.
 
 The pilot's 114 historical quarantines were **all** assessed between 2026-08-25
 and 08-27 -- inside the window when the hosted classifier's token ceiling was

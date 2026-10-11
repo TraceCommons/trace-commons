@@ -492,6 +492,7 @@ private struct OverrideConfirmation: View {
 }
 
 /// The popover's own glass, only where nothing else provides a material.
+/// Inside `MenuBarExtra` it pins the window's top edge instead.
 private struct PanelSurface: ViewModifier {
     let owns: Bool
 
@@ -499,10 +500,66 @@ private struct PanelSurface: ViewModifier {
         if owns {
             content.glassSurface(.popover, radius: GlassTokens.Radius.menuPanel, floating: true)
         } else {
-            content
+            content.background(MenuBarTopEdgePin().frame(width: 0, height: 0))
         }
     }
 }
+
+/// Holds the `MenuBarExtra` window's top edge under the menu bar while the
+/// panel changes height. An `NSWindow` that is resized keeps its bottom
+/// edge, so opening a pill's sub-list grew the window upward into the menu
+/// bar, where AppKit pushed it back down, and closing it then dropped the
+/// top edge away from the menu bar. The top is the one the system gave the
+/// window when it opened (it becomes key on each opening).
+struct MenuBarTopEdgePin: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { Pin() }
+
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    /// The origin that puts `frame`'s top edge at `top`, or nil when it is
+    /// already there. Pure, so tested.
+    static func pinnedOrigin(_ frame: CGRect, top: CGFloat?) -> CGPoint? {
+        guard let top, abs(frame.maxY - top) > 0.5 else { return nil }
+        return CGPoint(x: frame.minX, y: top - frame.height)
+    }
+
+    private final class Pin: NSView {
+        private var top: CGFloat?
+        private var observers: [NSObjectProtocol] = []
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers = []
+            top = nil
+            guard let window else { return }
+            if window.isKeyWindow { top = window.frame.maxY }
+            let center = NotificationCenter.default
+            observers.append(center.addObserver(
+                forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main
+            ) { [weak self, weak window] _ in
+                MainActor.assumeIsolated {
+                    guard let window else { return }
+                    self?.top = window.frame.maxY
+                }
+            })
+            observers.append(center.addObserver(
+                forName: NSWindow.didResizeNotification, object: window, queue: .main
+            ) { [weak self, weak window] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let window, window.isVisible,
+                          let origin = MenuBarTopEdgePin.pinnedOrigin(window.frame, top: self.top) else { return }
+                    window.setFrameOrigin(origin)
+                }
+            })
+        }
+
+        deinit {
+            observers.forEach(NotificationCenter.default.removeObserver)
+        }
+    }
+}
+
 
 /// The menu-bar item in the glass system: the last seven days as a strip,
 /// with the decisions-owed badge. Grey while paused.

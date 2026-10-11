@@ -397,6 +397,18 @@ address the Admission reason before approval.
 Review runs asynchronously. It transforms the stored trace before the server
 commits the approved revision to the registry.
 
+Before the bound Review policy runs, the server runs its own privacy pass
+(spec 2026-10-09, pipeline async privacy rescrub). It calls the prose-PII
+classifier on the stored trace, stores the output as an encrypted object,
+and records the pass on the run once. The Review policy gets that output as
+its source artifact, never the stored trace itself. A bundle cannot opt
+out. A pass that raises the trace's privacy risk above its receipt-time
+risk holds the run for a human review, and the server commits a reviewer's
+rejection of such a run that Admission admitted. A classifier failure
+retries within Review's attempt budget and then fails the run; it never
+falls back to the deterministic output. A run received after the pass
+existed cannot be approved without a recorded pass.
+
 A static Review policy can pass the trace through during tests. A production
 policy can scrub PII or apply another required transformation.
 
@@ -677,6 +689,14 @@ pipeline_runs
   index_membership: undecided | excluded | included
   index_command_ref, index_command_hash nullable
   index_write_state: none | pending | complete | failed
+  privacy_pass_required (TRUE for every run received since V117)
+  privacy_pass_object_ref_id, privacy_pass_content_hash,
+    privacy_pass_source_hash, privacy_pass_residual_risk_basis,
+    privacy_pass_outcome: cleared | escalated,
+    privacy_pass_recorded_at nullable (all six set together)
+  privacy_pass_approval_assessment_hash,
+    privacy_pass_approval_resolved_reasons nullable (an escalated run's
+    approval)
   created_at, updated_at
   unique (tenant_id, request_idempotency_key)
 
@@ -746,7 +766,9 @@ The receipt path performs these operations:
    here, before any limit is counted.
 3. Refuse a tombstoned request-content hash, and enforce rate and quota
    limits. A refusal returns a safe label and stores nothing.
-4. Store the encrypted trace body.
+4. Store the encrypted trace body, after the bounded, local deterministic
+   rescrub. The receipt never calls the prose-PII classifier; Review's
+   privacy pass does.
 5. Resolve and validate the active bundle.
 6. Execute Admission.
 7. Commit the run, Admission outcome, and next phase in one transaction.

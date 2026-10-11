@@ -102,7 +102,7 @@ final class SettingsModalTests: XCTestCase {
         XCTAssertTrue(modal.contains("proxy.scrollTo(item, anchor: .top)"), "the list does not scroll the body")
         XCTAssertTrue(modal.contains(".id(item)"))
         XCTAssertTrue(modal.contains("ComputeView(model: compute)"))
-        XCTAssertTrue(modal.contains("GlassSettingsContent(navigation: navigation, section: item, onPrivateAI: onPrivateAI)"))
+        XCTAssertTrue(modal.contains("GlassSettingsContent(navigation: navigation, section: item)"))
         XCTAssertFalse(modal.contains(".id(section)"), "a section replaces the body instead of scrolling to it")
         XCTAssertFalse(modal.contains("List(selection:"), "the list selects a view instead of scrolling")
     }
@@ -164,17 +164,18 @@ final class SettingsModalTests: XCTestCase {
         XCTAssertEqual(navigation.settingsRequest?.section, .compute)
     }
 
-    /// The Private AI pointer opens the Monitor at the Inference tab, as
-    /// Ron's `navigate(routePaths["private-ai"])` does; Settings stays open
-    /// beside it.
-    func test_privateAIPointerOpensInference() throws {
+    /// The Private AI section draws the standard settings, the tools and
+    /// the connection itself (owner, 2026-10-10), so it no longer points
+    /// back at the Monitor; the Private AI tab's foot card opens it.
+    func test_privateAISectionHoldsTheToolsAndTheConnection() throws {
         let main = try Self.text("TraceCommonsAppMain.swift")
         let host = try XCTUnwrap(main.components(separatedBy: "struct SettingsWindowView: View {").last)
-        XCTAssertTrue(host.contains("OpenMonitor.request(.inference)"))
+        XCTAssertFalse(host.contains("onPrivateAI:"), "Settings points back at the Monitor again")
 
         let content = try Self.text("Views/Settings/GlassSettingsContent.swift")
-        XCTAssertTrue(content.contains("case .privateAI: PrivateAISection(onPointer: onPrivateAI)"))
+        XCTAssertTrue(content.contains("case .privateAI: PrivateAISection()"))
         let section = try Self.text("Views/Settings/PrivateAISection.swift")
-        XCTAssertTrue(section.contains("if let onPointer {\n                                onPointer()"))
+        XCTAssertTrue(section.contains("PrivateAISettingsPanels(store: store)"))
+        XCTAssertTrue(section.contains("store.attach(MonitorWindowView.sampleClient() ?? model.daemonData"))
     }
 }

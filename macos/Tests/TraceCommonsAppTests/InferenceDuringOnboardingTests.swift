@@ -7,8 +7,8 @@ import TCShellCore
 
 /// Private AI sign-in is reachable before Commons enrollment (R-38), as the
 /// legacy window allowed: the Inference request opens the Monitor while
-/// onboarding is required, the strip shows Inference alone, and its
-/// inspector draws the sign-in. Drawing it completes no onboarding. Home
+/// onboarding is required, the strip shows Private AI alone, and its foot
+/// card opens the Private AI section of Settings, which draws the sign-in. Drawing it completes no onboarding. Home
 /// and Traces still open first run.
 final class InferenceDuringOnboardingTests: XCTestCase {
     @MainActor
@@ -22,14 +22,22 @@ final class InferenceDuringOnboardingTests: XCTestCase {
         XCTAssertEqual(shown, .inference, "a restored Home is not drawn during onboarding")
 
         let copy = try XCTUnwrap(model.privateInferenceCopy)
-        let image = try render(
-            // The account (sign-in) is in the Inference main pane since
-            // Ron's #1146 placement (#1241), not the inspector.
+        // Sign-in is in the Private AI section of Settings (owner,
+        // 2026-10-10), which Settings draws before onboarding, and the
+        // Private AI tab's foot card opens it.
+        XCTAssertTrue(SettingsSection.privateAI.availableBeforeOnboarding)
+        let tab = try recognizedWords(render(
             InferenceAccountSection(store: InferenceStore(client: nil))
                 .environmentObject(model)
-                .environment(\.colorScheme, .light))
-        let words = try recognizedWords(image)
-        XCTAssertTrue(words.contains(copy.credentialWhat),
+                .environment(\.colorScheme, .light)))
+        // The foot card is the way there: the whole card opens the section.
+        XCTAssertTrue(tab.contains(copy.panelSettingsTitle),
+                      "the Private AI tab must lead to sign-in before Commons enrollment")
+        let settings = try recognizedWords(render(
+            PrivateAISettingsPanels(store: InferenceStore(client: nil))
+                .environmentObject(model)
+                .environment(\.colorScheme, .light)))
+        XCTAssertTrue(settings.contains(copy.credentialWhat),
                       "Private AI must show sign-in before Commons enrollment")
 
         // Drawing it finished nothing.

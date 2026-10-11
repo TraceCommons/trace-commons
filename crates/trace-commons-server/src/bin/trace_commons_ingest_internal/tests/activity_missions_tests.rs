@@ -231,3 +231,90 @@ async fn activity_missions_authenticated_http_progress_is_read_from_account_reco
         "mission reads never manufacture ledger awards"
     );
 }
+
+fn predicate_policy(predicate: serde_json::Value) -> String {
+    let today = Utc::now().date_naive();
+    serde_json::json!({"schema_version":1,"policy_id":"test-policy","starts_on":today,"ends_before":today+Duration::days(30),"qualification":"accepted","missions":[{"id":"rust","title":"Rust sessions","required_contributions":1,"predicate":predicate},{"id":"any","title":"Any contribution","required_contributions":1}],"daily":null,"levels":null,"badges":null}).to_string()
+}
+
+#[test]
+fn activity_missions_startup_accepts_v1_predicates_and_refuses_the_rest() {
+    let v1 = serde_json::json!({"version":1,"tools":["claude-code"],"languages":["rust"],"min_sessions":2});
+    let policy = activity_missions::policy_from_raw(Ok(predicate_policy(v1)))
+        .unwrap()
+        .expect("configured");
+    assert_eq!(
+        policy.missions[0]
+            .supported_predicate()
+            .map(|p| p.min_sessions),
+        Some(2)
+    );
+    assert!(policy.missions[1].predicate.is_none());
+    assert!(
+        activity_missions::policy_from_raw(Err(std::env::VarError::NotPresent))
+            .unwrap()
+            .is_none()
+    );
+    // Malformed fails startup, as the rest of the policy does: a version
+    // the server cannot validate, an unknown field, a predicate that
+    // restricts nothing, a value over a bound, no version.
+    for bad in [
+        serde_json::json!({"version":2,"tools":["codex"],"min_sessions":1}),
+        serde_json::json!({"version":1,"tools":["codex"],"min_sessions":1,"repo_size":"large"}),
+        serde_json::json!({"version":1,"min_sessions":1}),
+        serde_json::json!({"version":1,"tools":["Not A Label"],"min_sessions":1}),
+        serde_json::json!({"version":1,"tools":["codex"],"min_sessions":0}),
+        serde_json::json!({"tools":["codex"],"min_sessions":1}),
+    ] {
+        let refused = activity_missions::policy_from_raw(Ok(predicate_policy(bad.clone())));
+        assert_eq!(
+            refused.err().map(|e| e.to_string()).as_deref(),
+            Some("activity_missions_policy_invalid"),
+            "{bad}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn activity_missions_catalogue_publishes_predicates_under_the_digest() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state(temp.path().into());
+    let publish = |state: &mut Arc<AppState>, predicate: serde_json::Value| {
+        Arc::get_mut(state).unwrap().activity_missions_policy =
+            activity_missions::policy_from_raw(Ok(predicate_policy(predicate))).unwrap();
+    };
+    publish(
+        &mut state,
+        serde_json::json!({"version":1,"tools":["claude-code"],"languages":["rust"],"min_sessions":2}),
+    );
+    let first = body(read(state.clone(), "/v1/activity-missions").await).await;
+    assert_eq!(first["state"], "configured");
+    assert_eq!(
+        first["policy"]["missions"][0]["predicate"],
+        serde_json::json!({"version":1,"tools":["claude-code"],"tool_families":[],"languages":["rust"],"min_sessions":2})
+    );
+    assert!(
+        first["policy"]["missions"][1].get("predicate").is_none(),
+        "a mission without a predicate carries none"
+    );
+    // What a client reads back verifies against the published digest.
+    let read_back: trace_commons_protocol::activity_missions::ActivityCatalogue =
+        serde_json::from_value(first.clone()).unwrap();
+    assert_eq!(
+        read_back.policy.unwrap().digest().unwrap(),
+        first["policy_sha256"].as_str().unwrap()
+    );
+
+    publish(
+        &mut state,
+        serde_json::json!({"version":1,"tools":["claude-code"],"languages":["rust"],"min_sessions":3}),
+    );
+    let second = body(read(state.clone(), "/v1/activity-missions").await).await;
+    assert_ne!(
+        first["policy_sha256"], second["policy_sha256"],
+        "the digest covers the predicate"
+    );
+    // No matching result is accepted on the public route.
+    let response = read(state, "/v1/activity-missions?matched=rust").await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}

@@ -7316,6 +7316,45 @@ impl TraceCorpusStore for PgBackend {
         Ok(rows.into_iter().map(|row| row.get(0)).collect())
     }
 
+    async fn record_released_submission_privacy_summary(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        privacy_risk: &str,
+        redaction_counts: &BTreeMap<String, u32>,
+        canonical_summary_hash: &str,
+    ) -> Result<u64, DatabaseError> {
+        let redaction_counts = serde_json::to_value(redaction_counts).map_err(|e| {
+            DatabaseError::Serialization(format!("trace redaction counts encode failed: {e}"))
+        })?;
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let updated = tx
+            .execute(
+                "UPDATE trace_submissions
+                 SET privacy_risk = $3,
+                     redaction_counts = $4,
+                     canonical_summary_hash = $5,
+                     updated_at = NOW()
+                 WHERE tenant_id = $1
+                   AND submission_id = $2
+                   AND status IN ('accepted', 'quarantined')
+                   AND revoked_at IS NULL
+                   AND purged_at IS NULL",
+                &[
+                    &tenant_id,
+                    &submission_id,
+                    &privacy_risk,
+                    &redaction_counts,
+                    &canonical_summary_hash,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(updated)
+    }
+
     async fn clear_pii_backstop_attempts(
         &self,
         tenant_id: &str,

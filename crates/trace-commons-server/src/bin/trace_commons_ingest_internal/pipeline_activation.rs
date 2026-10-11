@@ -413,7 +413,7 @@ pub(crate) fn infrastructure_profile_from_state(
 /// The profile the routes give the qualification and the gate:
 /// `infrastructure_profile_from_state`, or, in a test build only, the test
 /// state's override.
-fn route_infrastructure_profile(state: &AppState) -> ProductionInfrastructureProfile {
+pub(crate) fn route_infrastructure_profile(state: &AppState) -> ProductionInfrastructureProfile {
     #[cfg(test)]
     if let Some(profile) = &state.pipeline_infrastructure_override {
         return profile.clone();
@@ -448,7 +448,7 @@ fn legacy_records_authoritative(state: &AppState, tenant_id: &str) -> bool {
 /// (`^[a-z0-9_]{1,64}$`), or a safe label with one `:<check_id>` suffix whose
 /// check id is a safe label too, the form `evaluate_promotion` gives a
 /// refusal or a blocker about one check (final fix wave K2).
-fn is_refusal_label(label: &str) -> bool {
+pub(crate) fn is_refusal_label(label: &str) -> bool {
     is_safe_label(label)
         || label
             .split_once(':')
@@ -588,7 +588,7 @@ pub(crate) const PIPELINE_QUALIFICATION_START_CHECK_INCOMPLETE_LABEL: &str =
 /// the check returns, so the limit is not one for each tenant: a long
 /// receipts list and a slow database would then hold the start for the
 /// product of the two.
-const PIPELINE_START_CHECK_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+pub(crate) const PIPELINE_START_CHECK_TIMEOUT: StdDuration = StdDuration::from_secs(5);
 
 /// At start, for a process that is not started for unqualified routing
 /// (review round 1, point 3; amendment A9): says which tenants on this
@@ -710,13 +710,13 @@ fn require_activation_store(state: &AppState) -> ApiResult<&PipelineActivationSt
 /// The two trust stores and the deployed revision, each from the state:
 /// `503` `pipeline_trust_store_missing` without both stores, `409`
 /// `bundle_runtime_revision_unknown` without the revision.
-struct TrustAndRevision<'a> {
-    package: &'a BundlePackageTrustStore,
-    check: &'a CheckResultTrustStore,
-    revision: &'a str,
+pub(crate) struct TrustAndRevision<'a> {
+    pub(crate) package: &'a BundlePackageTrustStore,
+    pub(crate) check: &'a CheckResultTrustStore,
+    pub(crate) revision: &'a str,
 }
 
-fn trust_and_revision(state: &AppState) -> ApiResult<TrustAndRevision<'_>> {
+pub(crate) fn trust_and_revision(state: &AppState) -> ApiResult<TrustAndRevision<'_>> {
     let (Some(package), Some(check)) = (
         state.pipeline_package_trust.as_deref(),
         state.pipeline_check_trust.as_deref(),
@@ -880,6 +880,26 @@ pub(crate) struct ActivateBody {
     expected_record_id: ExpectedRecord,
 }
 
+impl ActivateBody {
+    /// The body pipeline default routing activates with: the armed bundle,
+    /// the armed results, its own reason code, and always the expectation
+    /// that the tenant has no routing row (`ExpectedRecord::NoRow`), so the
+    /// store refuses it for a tenant whose routing an operator, or another
+    /// process, already decided (`pipeline_routing_state_changed`).
+    pub(crate) fn for_tenant_with_no_row(
+        bundle_id: String,
+        reason_code: &str,
+        attestations: Vec<PipelineCheckAttestation>,
+    ) -> Self {
+        Self {
+            bundle_id,
+            reason_code: reason_code.to_string(),
+            attestations,
+            expected_record_id: ExpectedRecord::NoRow,
+        }
+    }
+}
+
 /// An optional expectation field that is present in a body: a value of `T`.
 /// `null` is no value of `T`: it is refused as a value that does not parse,
 /// where a plain `Option` field would read it as an absent one. The routing
@@ -1032,9 +1052,10 @@ async fn gate_inputs<'a>(
 ) -> ApiResult<GateInputs<'a>> {
     require_bundle_id(&body.bundle_id)?;
     bound_attestations(&body.attestations)?;
-    if !state.tenant_rollout_gates.enabled_for(
-        TraceTenantRolloutFeature::PipelineReceipts,
-        false,
+    // The receipts list, or (spec 2026-10-10) a process configured for
+    // pipeline default routing, whose scope is every tenant.
+    if !super::pipeline_default_routing::pipeline_tenant_in_activation_scope(
+        state,
         &tenant.tenant_id,
     ) {
         return Err(api_error(
@@ -1137,34 +1158,55 @@ pub(crate) async fn pipeline_qualify_handler(
 ) -> ApiResult<Json<BundleQualificationRecord>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let service = require_pipeline_service(state.as_ref())?;
+    require_pipeline_service(state.as_ref())?;
     let body = request_body(body)?;
-    bound_attestations(&body.attestations)?;
-    let trust = trust_and_revision(state.as_ref())?;
+    qualify_for_tenant(
+        state.as_ref(),
+        &tenant,
+        &body.signed_package,
+        &body.attestations,
+    )
+    .await
+    .map(Json)
+}
+
+/// The qualification of `POST /v1/admin/pipeline/qualifications` after its
+/// authentication: the route and pipeline default routing
+/// (`pipeline_default_routing`) both call it, so a qualification has one
+/// path and one set of checks, whoever asks for it. `tenant` is the
+/// credential's context for the route, and the system actor's for default
+/// routing; the qualification is recorded for `tenant.tenant_id` and its
+/// audit row under `tenant.principal_ref`.
+pub(crate) async fn qualify_for_tenant(
+    state: &AppState,
+    tenant: &TenantAuth,
+    signed_package: &SignedBundlePackage,
+    attestations: &[PipelineCheckAttestation],
+) -> ApiResult<BundleQualificationRecord> {
+    let service = require_pipeline_service(state)?;
+    bound_attestations(attestations)?;
+    let trust = trust_and_revision(state)?;
     let qualifications = state
         .pipeline_qualification
         .as_deref()
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, PIPELINE_ROUTING_STORE_MISSING_LABEL))?;
     // The package's signature first, before any work on the package (fix
     // round 1); `qualify_bundle_attested` verifies it again.
-    trust
-        .package
-        .verify(&body.signed_package)
-        .map_err(refusal)?;
+    trust.package.verify(signed_package).map_err(refusal)?;
     let dependencies = ProductionDependencyProfile::for_bundle(
         service,
-        &body.signed_package.package,
-        route_infrastructure_profile(state.as_ref()),
+        &signed_package.package,
+        route_infrastructure_profile(state),
     )
     .map_err(refusal)?;
     let record = match qualifications
         .qualify_bundle_attested(
             &tenant.tenant_id,
-            &body.signed_package,
+            signed_package,
             trust.package,
             trust.check,
             &dependencies,
-            &body.attestations,
+            attestations,
             trust.revision,
         )
         .await
@@ -1179,7 +1221,7 @@ pub(crate) async fn pipeline_qualify_handler(
             return Err(
                 match trust
                     .check
-                    .verify_all(&body.attestations)
+                    .verify_all(attestations)
                     .ok()
                     .and_then(|verified| evaluate_promotion(&verified.evidence, Utc::now()).ok())
                 {
@@ -1195,14 +1237,14 @@ pub(crate) async fn pipeline_qualify_handler(
         Err(error) => return Err(activation_error(error)),
     };
     record_action(
-        state.as_ref(),
-        &tenant,
+        state,
+        tenant,
         "qualify",
         &record.metadata.evidence_hash,
         None,
     )
     .await?;
-    Ok(Json(record))
+    Ok(record)
 }
 
 /// `POST /v1/admin/pipeline/activate`: routes the tenant's new receipts to
@@ -1215,16 +1257,38 @@ pub(crate) async fn pipeline_activate_handler(
 ) -> ApiResult<Json<TenantRouting>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_admin(&tenant)?;
-    let service = require_pipeline_service(state.as_ref())?;
+    require_pipeline_service(state.as_ref())?;
     let body = request_body(body)?;
-    let inputs = gate_inputs(state.as_ref(), service, &tenant, &body).await?;
-    let summary = require_pipeline_product(state.as_ref())?
+    activate_for_tenant(state.as_ref(), &tenant, &body)
+        .await
+        .map(Json)
+}
+
+/// The activation of `POST /v1/admin/pipeline/activate` after its
+/// authentication: the route and pipeline default routing both call it, so
+/// an activation has one path, one gate, and one readiness check, whoever
+/// asks for it (`qualify_for_tenant` says the same of a qualification).
+///
+/// When this process runs default routing, a tenant this call activated is
+/// also admitted to its routed-tenant cache once its bundles pass the start
+/// checks (`PipelineDefaultRouting::admit`), so the worker and the upload
+/// path serve it without waiting for the next refresh. A failed append of
+/// the audit row (`pipeline_change_committed_audit_failed`) admits it too:
+/// the change committed.
+pub(crate) async fn activate_for_tenant(
+    state: &AppState,
+    tenant: &TenantAuth,
+    body: &ActivateBody,
+) -> ApiResult<TenantRouting> {
+    let service = require_pipeline_service(state)?;
+    let inputs = gate_inputs(state, service, tenant, body).await?;
+    let summary = require_pipeline_product(state)?
         .operational_summary(&tenant.tenant_id)
         .await
         .map_err(activation_error)?;
     let readiness = ActivationReadiness::from_operational_summary(&summary);
-    let routing = require_activation_store(state.as_ref())?
-        .activate_tenant(inputs.request(&tenant, &body), &readiness)
+    let routing = require_activation_store(state)?
+        .activate_tenant(inputs.request(tenant, body), &readiness)
         .await
         .map_err(|error| {
             promotion_refusal(
@@ -1233,15 +1297,21 @@ pub(crate) async fn pipeline_activate_handler(
                 &inputs.promotion,
             )
         })?;
-    record_action(
-        state.as_ref(),
-        &tenant,
+    let recorded = record_action(
+        state,
+        tenant,
         "activate",
         &routing.evidence_hash,
         Some(routing.activation_record_id),
     )
-    .await?;
-    Ok(Json(routing))
+    .await;
+    if let Some(default_routing) = state.pipeline_default_routing.as_deref() {
+        default_routing
+            .admit(state, service, &tenant.tenant_id)
+            .await;
+    }
+    recorded?;
+    Ok(routing)
 }
 
 /// `POST /v1/admin/pipeline/rollback`: selects, for a `pipeline` or
@@ -1963,7 +2033,8 @@ mod tests {
                 normalize_audit_event_metadata(
                     &event,
                     StorageTraceAuditAction::PolicyUpdate,
-                    live.clone()
+                    live.clone(),
+                    false,
                 )
                 .expect("the mirror accepts the row"),
                 live
@@ -1978,7 +2049,8 @@ mod tests {
                 normalize_audit_event_metadata(
                     &event,
                     StorageTraceAuditAction::PolicyUpdate,
-                    other
+                    other,
+                    false,
                 )
                 .is_err(),
                 "{label}: a row of another label is refused"

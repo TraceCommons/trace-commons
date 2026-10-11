@@ -373,6 +373,8 @@ pub struct MonitorSessionReviewCopy {
     pub outcome_unavailable: &'static str,
     pub outcome_loading: &'static str,
     pub look_inside: &'static str,
+    /// The collapsed section under the review holding the trace's facts.
+    pub trace_details: &'static str,
     /// Contribute's label when it cannot be pressed. Approved 2026-10-08 (button rule).
     pub enroll_to_approve: &'static str,
     pub not_eligible: &'static str,
@@ -622,6 +624,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
                 Contribution is disabled.",
             outcome_loading: "Loading outcome and correction disclosure\u{2026}",
             look_inside: "Look inside",
+            trace_details: "Trace details",
             enroll_to_approve: "Enroll",
             not_eligible: "Not eligible",
             checking_eligibility: "Checking eligibility\u{2026}",
@@ -974,8 +977,6 @@ pub struct MonitorFlowMapCopy {
     /// The map's accessible name, and its zoom controls'.
     pub map_label: &'static str,
     pub zoom_label: &'static str,
-    /// Under a card shown by hovering, not pinned.
-    pub hint: &'static str,
     pub sessions_one: &'static str,
     pub sessions: &'static str,
     pub traces_one: &'static str,
@@ -1352,7 +1353,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             projects_empty: "No projects seen yet. Traces appear here after discovery.",
             changes_heading: "Change log",
             tab_home: "Home",
-            tab_inference: "Inference",
+            tab_inference: "Private AI",
             tab_traces: "Traces",
             tabs_label: "Monitor",
             map_views_label: "Map view",
@@ -1388,7 +1389,6 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         flow_map: MonitorFlowMapCopy {
             map_label: "Flow map",
             zoom_label: "Map zoom",
-            hint: "hover to peek \u{00b7} click to pin",
             sessions_one: "1 trace",
             sessions: "{count} traces",
             traces_one: "1 trace",

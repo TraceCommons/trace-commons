@@ -19362,6 +19362,79 @@ mod tests {
             assert_eq!(status["nudge"]["mission_fit"], NUDGE_BACKLOG_THRESHOLD);
         }
 
+        /// End to end: no catalogue is published with a predicate, so
+        /// `status` and `list_pending` carry no `mission_fit`; once the
+        /// activity catalogue publishes one, the scheduled refresh fills the
+        /// slot and both gain it. Counts only: no mission id reaches either.
+        #[tokio::test]
+        async fn status_and_list_pending_gain_mission_fit_from_a_published_predicate() {
+            use crate::daemon::activity_missions::{MissionSlotSchedule, refresh_mission_slot};
+            let answer = Arc::new(std::sync::Mutex::new((
+                axum::http::StatusCode::OK,
+                super::missions::predicate_catalogue(&[serde_json::Value::Null]),
+            )));
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (base, server) = super::missions::activity_server(answer.clone(), calls).await;
+            let s = live();
+            let mut cfg = s.store.load_config().unwrap().unwrap();
+            cfg.ingest_url = format!("{base}/v1/traces");
+            cfg.allowed_hosts = Some("127.0.0.1".into());
+            s.store.save_config(&cfg).unwrap();
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 6);
+            seed_idle(&s, ASK, crate::source::SOURCE_CODEX, 7);
+            see_every_pending_entry(&s);
+            let fits = |s: &DaemonShared| -> Vec<Option<u64>> {
+                let r = handle_request(s, &req("list_pending", serde_json::json!({})));
+                r.result.unwrap()["pending"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|e| e.get("mission_fit").and_then(serde_json::Value::as_u64))
+                    .collect()
+            };
+
+            // Published, but no mission carries a predicate: unknown.
+            let mut schedule = MissionSlotSchedule::default();
+            refresh_mission_slot(&s, Utc::now(), &mut schedule).await;
+            let status = status_of(&s);
+            assert!(
+                status["idle_sessions"].get("mission_fit").is_none(),
+                "{status}"
+            );
+            assert!(status["nudge"].get("mission_fit").is_none());
+            assert!(fits(&s).iter().all(Option::is_none));
+
+            *answer.lock().unwrap() = (
+                axum::http::StatusCode::OK,
+                super::missions::predicate_catalogue(&[
+                    serde_json::json!({"version":1,"tools":["claude-code"],"min_sessions":1}),
+                    serde_json::Value::Null,
+                ]),
+            );
+            // The next scheduled fetch, on the real clock: a slot received
+            // "in the future" would rightly read as not live.
+            assert!(!schedule.due(Utc::now()));
+            let mut schedule = MissionSlotSchedule::default();
+            refresh_mission_slot(&s, Utc::now(), &mut schedule).await;
+            let status = status_of(&s);
+            assert_eq!(status["idle_sessions"]["count"], 3, "{status}");
+            assert_eq!(status["idle_sessions"]["mission_fit"], 2, "{status}");
+            assert_eq!(status["nudge"]["lead"], "idle_sessions");
+            assert_eq!(status["nudge"]["mission_fit"], 2);
+            let mut listed = fits(&s);
+            listed.sort();
+            assert_eq!(listed, vec![Some(0), Some(1), Some(1)]);
+            let all = format!(
+                "{status}{}",
+                handle_request(&s, &req("list_pending", serde_json::json!({})))
+                    .result
+                    .unwrap()
+            );
+            assert!(!all.contains("m-0") && !all.contains("Mission 0"), "{all}");
+            server.abort();
+        }
+
         /// Gates close the lead, so `nudge` carries no `mission_fit`; the
         /// idle fact, like its count, is still reported.
         #[test]

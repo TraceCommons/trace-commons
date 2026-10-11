@@ -10,6 +10,7 @@ final class ContributorDisclosureCopyExportTests: XCTestCase {
         // `outcome_copy`'s words, as the core holds them.
         XCTAssertEqual(copy.outcome.verdictQuestion, "Did this trace do what you asked?")
         XCTAssertEqual([copy.outcome.worked, copy.outcome.partly, copy.outcome.failed], ["Worked", "Partly", "Failed"])
+        XCTAssertEqual(copy.outcome.verdictNone, "No answer")
         XCTAssertEqual(copy.outcome.submitAllAs, "Submit as...")
         XCTAssertGreaterThan(copy.outcome.maxCorrectionChars, 0)
         // Ask me / Automatic / Never, by wire mode.

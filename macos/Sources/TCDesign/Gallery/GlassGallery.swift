@@ -120,7 +120,7 @@ public struct GlassGallery: View {
                 }
             }
             .frame(width: 320, height: 200)
-            GlassNodeCard("nodeCard", detail: "detail", hint: "hint")
+            GlassNodeCard("nodeCard", detail: "detail")
             GlassMenu {
                 GlassMenuItem("checked", checked: true) {}
                 GlassMenuSeparator()
@@ -479,7 +479,7 @@ public struct GlassGallery: View {
                         GlassRoundButton("Settings", systemImage: "gearshape") {}
                     }
                     Spacer()
-                    GlassNodeCard("nodeCard", detail: "detail", hint: "hint")
+                    GlassNodeCard("nodeCard", detail: "detail")
                         .frame(width: GlassTokens.Size.nodeCardWidth)
                 }
                 .padding(14)

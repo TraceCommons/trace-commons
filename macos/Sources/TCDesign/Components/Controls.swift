@@ -580,6 +580,66 @@ public struct GlassPicker<Value: Hashable>: View {
     }
 }
 
+/// A glass pill with two parts (owner, 2026-10-10): the action on the
+/// left, and a chevron on the right that opens a menu of variants of it.
+/// The inline glass button's box, split by a hairline. The chevron is
+/// named by `menuLabel` for assistive tech; the action by its title.
+public struct GlassSplitButton<MenuContent: View>: View {
+    private let title: String
+    private let menuLabel: String
+    private let action: () -> Void
+    private let menu: MenuContent
+
+    public init(
+        _ title: String, menuLabel: String, action: @escaping () -> Void,
+        @ViewBuilder menu: () -> MenuContent
+    ) {
+        self.title = title
+        self.menuLabel = menuLabel
+        self.action = action
+        self.menu = menu()
+    }
+
+    public var body: some View {
+        let metrics = GlassButtonStyle.metrics(.glass, size: .inline)
+        HStack(spacing: 0) {
+            Button(action: action) {
+                Text(title)
+                    .lineLimit(1)
+                    .padding(.leading, metrics.horizontalPadding ?? 0)
+                    .padding(.trailing, GlassTokens.Space.s4)
+                    .frame(minHeight: metrics.minHeight)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(GlassPressStyle())
+            Rectangle()
+                .fill(GlassColor.ink(0.14))
+                .frame(width: 1)
+                .padding(.vertical, 6)
+                .accessibilityHidden(true)
+            Menu {
+                menu
+            } label: {
+                GlassGlyphView(.chevronDown)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .padding(.leading, GlassTokens.Space.s3)
+                    .padding(.trailing, GlassTokens.Space.s4)
+                    .frame(minHeight: metrics.minHeight)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.button)
+            .buttonStyle(GlassPressStyle())
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel(menuLabel)
+        }
+        .glassType(metrics.type)
+        .foregroundStyle(GlassColor.textPrimary)
+        .glassSurface(.control)
+        .fixedSize()
+    }
+}
+
 /// The picker's pill: dot, label, #1146's 10pt chevron, on the control
 /// tier, with the control hover in place of its fill. `invalid` adds the
 /// outside-red ring (`GlassSelect`). `trailing` is the inset after the

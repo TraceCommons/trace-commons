@@ -195,8 +195,9 @@ old behaviour, because no application has shipped against `v1` yet. See
   or `review_backlog` leads. Each is how many of the daemon's live
   contribution-mission catalogue's matched missions a session fits (per
   entry), or how many sessions fit at least one (on `status`). **Absent,
-  never 0, while the daemon holds no live catalogue** -- which today is
-  always, since nothing writes it until Z7/Z8's server catalogue exists.
+  never 0, while the daemon holds no live catalogue** -- which is the case
+  until the server's activity-missions policy publishes a mission with a
+  version-1 predicate (see "The catalogue" under "Mission fit" below).
   Counts only: no mission id, title or criterion. No new method and no new
   event; `nudge::lead` reads none of it. See
   ["Mission fit"](#mission-fit-list_pendingmission_fit-and-status).
@@ -2894,11 +2895,41 @@ carries the field.
 
 **The catalogue.** The daemon holds at most one, in memory only: never
 persisted, emptied by `unenroll` and by a restart. It is live for 24 hours
-after it arrives (OWNER DECISION V2), after which it reads as absent. A
+after it arrives (OWNER DECISION V2), and never past the start (00:00 UTC) of
+the published policy's `ends_before`; after either it reads as absent. A
 catalogue the daemon refuses empties the slot rather than leaving an older
-one in force. **Nothing writes it today**: its writer is the fetch of Z7/Z8's
-server catalogue. `mission_matches` neither reads nor writes it -- its
-catalogue stays a parameter and matching still changes nothing (M2).
+one in force. `mission_matches` neither reads nor writes it -- its catalogue
+stays a parameter and matching still changes nothing (M2).
+
+**Its one writer** is a scheduled fetch of the public, anonymous
+`GET /v1/activity-missions` (the same request `activity_missions_catalogue`
+sends, with the same origin, scheme, allowlist and size checks): on the first
+daemon tick with a config, then every 6 hours after an attempt, whatever its
+outcome. It is skipped in a dry run. Nothing about the queue or local work is
+an input to it or goes with it. Of the published policy's missions, only those
+carrying a version-1 `predicate` (see
+`docs/superpowers/specs/2026-10-02-configured-activity-missions-design.md`)
+enter the slot, as `{mission_id, title, criteria}` with the predicate's lists
+and `min_sessions` as `criteria`. A mission without a predicate, or with a
+predicate version this build does not read, is left out, so fitting a mission
+never means fitting everything. The outcomes:
+
+| Fetch | Slot |
+|---|---|
+| fails (transport, status, bounds, a digest that does not verify) | left as it is; it reads as absent once 24 hours old |
+| policy `unconfigured`, outside its dates, or no mission with a version-1 predicate | emptied: `mission_fit` absent |
+| missions with a version-1 predicate | replaced by them |
+
+When the slot's live catalogue changes, the daemon publishes `queue_changed`
+and `status_changed`: on the fetch that changes it, and on the first daemon tick
+after it ages out or its policy ends, which no fetch does. `unenroll` empties the slot, and with no config left the
+fetch sends nothing until the next enrollment; every tick without a config
+empties the slot again, so a fetch already in flight when `unenroll` ran cannot
+leave the old enrollment's missions in it. The 6-hour schedule and the slot belong to
+one enrollment: the first tick under a new one (a new ingest URL or device
+key) empties the slot and fetches, even inside the previous enrollment's
+interval, so a failure of that fetch leaves `mission_fit` absent rather than
+the previous enrollment's.
 
 **What fits.** An entry is read through the same M1/M2 rule
 `mission_matches` applies: adapter on, folder not Never, session neither kept
@@ -3014,10 +3045,9 @@ These are not the published mission packages (`GET /v1/missions`).
 {"matches": ["m-rust"], "read": {"tools": 1, "folders": 2}}
 ```
 
-**The catalogue.** A parameter, for now: the daemon fetches nothing for
-this call. The server catalogue is Z7/Z8's, and when it exists the daemon
-will download it with a request that is the same for every contributor;
-nothing per-contributor is sent for it either way. The shape is
+**The catalogue.** A parameter: the daemon fetches nothing for this call,
+and neither reads nor writes the mission slot the scheduled fetch of the
+activity catalogue fills (see "Mission fit"). The shape is
 **PROVISIONAL, owned by Z7/Z8** (`contribution_missions::ContributionMissionCatalogue`):
 `schema_version` (1) and `missions[]` of `{mission_id, title, criteria}`.
 `criteria` lists are each "any of", and an empty or absent list does not
@@ -7926,7 +7956,18 @@ Response envelopes and progress rows tolerate additive unknown fields and
 omit them from IPC. Known schema versions, policy digests, reward flags and
 credit conditions remain enforced. Policy and nested rule objects remain strict
 and digest-covered; changing their shape requires a supported schema-version
-change rather than an unversioned extension.
+change rather than an unversioned extension. The one versioned extension point
+is a mission's optional `predicate` block: version 1 is read strictly (an
+unknown field in it refuses the catalogue), while a block of a later version is
+carried, key-sorted so the digest still verifies, and treated as absent. A
+later-version block holding a float or an integer outside i64/u64 is malformed
+and refuses the catalogue, since it would not re-serialize to the bytes the
+server hashed. The
+catalogue this method returns carries predicates as published; matching on them
+happens only in the daemon's mission slot. A shell checking mission keys must
+therefore admit `predicate`: the native macOS app reads a version-1 block
+against its key set and carries a later version unread, and an app from before
+this release refuses the whole catalogue once a mission carries one.
 
 Both replies carry `consent_copy::ACTIVITY_MISSIONS_DISCLOSURE` assembled in Rust.
 Neither read changes capture, contribution consent, project modes, scopes,
