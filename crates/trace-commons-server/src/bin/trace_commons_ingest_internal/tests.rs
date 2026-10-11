@@ -6240,6 +6240,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         pipeline_index_rebuilds: Arc::default(),
         pipeline_default_routing: None,
         pipeline_worker_pass_stats: Arc::default(),
+        pipeline_worker_concurrency: pipeline_runtime::PIPELINE_WORKER_DEFAULT_CONCURRENCY,
+        pipeline_worker_wake: Arc::default(),
         db_contributor_reads,
         db_reviewer_reads,
         db_reviewer_require_object_refs: false,
@@ -29509,6 +29511,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         pipeline_index_rebuilds: Arc::default(),
         pipeline_default_routing: None,
         pipeline_worker_pass_stats: Arc::default(),
+        pipeline_worker_concurrency: pipeline_runtime::PIPELINE_WORKER_DEFAULT_CONCURRENCY,
+        pipeline_worker_wake: Arc::default(),
         db_contributor_reads: false,
         db_reviewer_reads: false,
         db_reviewer_require_object_refs: false,
@@ -99160,6 +99164,12 @@ mod pipeline_activation_pg_tests;
 /// reuses.
 #[path = "pipeline_default_routing_pg_tests.rs"]
 mod pipeline_default_routing_pg_tests;
+
+/// `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY`: the worker's concurrent
+/// supervisor and tenant lanes. Nested here beside `pipeline_http_pg_tests`,
+/// whose `pub(super)` fixtures it reuses.
+#[path = "pipeline_worker_concurrency_tests.rs"]
+mod pipeline_worker_concurrency_tests;
 
 /// The nineteen `validate_*_reason` / `validate_*_purpose` wrappers all reduce
 /// to this, so the trim / reject-empty / reject-over-1024 contract and the two

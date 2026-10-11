@@ -229,7 +229,7 @@ impl PipelinePrivacyBoundary for PassThroughPipelinePrivacyBoundary {
 /// pipeline runtime reads and writes pipeline artifacts through. Delegates to
 /// `test_artifact_store` (this file's parent, `tests.rs`) rather than
 /// duplicating its crypto setup.
-fn local_artifacts(dir: &tempfile::TempDir) -> Arc<LocalEncryptedTraceArtifactStore> {
+pub(super) fn local_artifacts(dir: &tempfile::TempDir) -> Arc<LocalEncryptedTraceArtifactStore> {
     test_artifact_store(dir.path())
 }
 
@@ -625,7 +625,7 @@ pub(super) async fn expire_run_lease(
 /// tenant-scoped transaction. Proves "one logical effect across the
 /// restart": exactly one outcome per phase (Admission, Review, Score,
 /// Settle) survives the crash and resume, never a duplicate.
-async fn count_outcomes(
+pub(super) async fn count_outcomes(
     backend: &Arc<PgBackend>,
     tenant_id: &str,
     submission_id: uuid::Uuid,
@@ -7115,7 +7115,7 @@ async fn a_busy_tenant_score_lock_ends_the_tenants_worker_batch() {
 /// service comes out of `assemble_ingest_pipeline_runtime`, the seam ingest's
 /// real boot uses, over `configured_store`, with its own `trace_credit`
 /// recording adapter and no crash point.
-fn assemble_compatibility_pipeline_service(
+pub(super) fn assemble_compatibility_pipeline_service(
     backend: Arc<PgBackend>,
     configured_store: &ConfiguredTraceArtifactStore,
     index: Arc<IsolatedPipelineIndex>,
@@ -7213,7 +7213,7 @@ fn assemble_compatibility_pipeline_service_with_checks(
 
 /// A metadata-only, Low-risk envelope whose consent allows model training,
 /// the allowed use `main`'s `NoveltyUtility` credit requires.
-async fn model_training_envelope() -> TraceContributionEnvelope {
+pub(super) async fn model_training_envelope() -> TraceContributionEnvelope {
     let mut envelope = sample_envelope().await;
     make_metadata_only_low_risk(&mut envelope);
     envelope.consent.scopes = vec![ConsentScope::ModelTraining];
@@ -10810,7 +10810,11 @@ async fn credit_leg_is_audited(owner: &PgBackend, tenant: &str, run_id: Uuid) ->
 
 /// How many `CreditMutate` rows the database audit log holds for
 /// `submission_id`.
-async fn credit_mutate_audit_rows(owner: &PgBackend, tenant: &str, submission_id: Uuid) -> i64 {
+pub(super) async fn credit_mutate_audit_rows(
+    owner: &PgBackend,
+    tenant: &str,
+    submission_id: Uuid,
+) -> i64 {
     let mut client = owner.trace_pool_for_test().get().await.unwrap();
     let tx = tenant_tx(&mut client, tenant).await;
     let rows = tx
