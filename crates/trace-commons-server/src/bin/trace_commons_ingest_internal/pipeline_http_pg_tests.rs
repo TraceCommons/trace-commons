@@ -8076,7 +8076,7 @@ impl PipelinePrivacyBoundary for FailingPrivacyBoundary {
 /// Polls the state of `submission_id`'s run in `tenant_id` every 100 ms, up
 /// to 60 s, until it is `expected`; the live worker moves the run, never this
 /// test. Panics with the last state it saw when the bound passes.
-async fn wait_for_run_state(
+pub(super) async fn wait_for_run_state(
     backend: &Arc<PgBackend>,
     tenant_id: &str,
     submission_id: Uuid,

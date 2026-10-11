@@ -1759,6 +1759,15 @@ struct AppState {
     /// (`POST /v1/workers/pipeline/index-rebuild`): one per tenant at a time,
     /// drained at shutdown (`pipeline_runtime::PipelineIndexRebuilds`).
     pipeline_index_rebuilds: Arc<pipeline_runtime::PipelineIndexRebuilds>,
+    /// Pipeline default routing (`TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING=all`,
+    /// spec 2026-10-10): `None` without the mode, and then nothing of it runs.
+    /// With it, the arming from the results directory, the routed-tenant
+    /// cache the worker and the upload path serve from, and the loop's state
+    /// (`pipeline_default_routing::PipelineDefaultRouting`).
+    pipeline_default_routing: Option<Arc<pipeline_default_routing::PipelineDefaultRouting>>,
+    /// The tenant count and the duration of the worker's last pass, reported
+    /// by `GET /v1/pipeline/readiness`.
+    pipeline_worker_pass_stats: Arc<pipeline_default_routing::PipelineWorkerPassStats>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -4013,10 +4022,17 @@ impl AppState {
         let pipeline_lease_config = parse_pipeline_lease_config_from_env()?;
         let pipeline_drain_tenant_ids =
             parse_trace_rollout_tenant_ids_from_env(TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS)?;
+        // Spec 2026-10-10: pipeline default routing. Off unless the mode is
+        // `all`; a bad variable refuses the start with its label.
+        let pipeline_default_routing_config =
+            pipeline_default_routing::default_routing_config_from_env()?;
+        // With default routing on, every tenant may be processed, so the
+        // assembly's refusals for a runtime that processes tenants (no
+        // credit issuer, dependencies not production-qualified) apply.
         let pipeline_tenants_processed = pipeline_runtime::pipeline_tenants_processed(
             &tenant_rollout_gates,
             &pipeline_drain_tenant_ids,
-        );
+        ) || pipeline_default_routing_config.is_some();
         let novelty_utility_require_production_gate =
             env_truthy(TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE);
         // Ruling T15-6: the configuration of `main`'s NoveltyUtility credit
@@ -4151,6 +4167,35 @@ impl AppState {
         // refuses the start.
         let pipeline_code_revision_hash =
             pipeline_activation::deployed_code_revision(DEPLOYED_CODE_REVISION_HASH)?;
+        // Spec 2026-10-10: the mode `all` needs the production runtime, both
+        // trust stores, a revision, the routing stores, and no test
+        // dependencies, and the runtime role must be able to call the V124
+        // enumeration; each missing piece refuses the start with its label.
+        pipeline_default_routing::validate_default_routing_start(
+            pipeline_default_routing_config.as_ref(),
+            pipeline_default_routing::DefaultRoutingStartFacts {
+                production_runtime: pipeline_runtime_selection
+                    == PipelineRuntimeSelection::Production
+                    && pipeline_service.is_some(),
+                trust_stores: pipeline_trust_stores.package.is_some()
+                    && pipeline_trust_stores.check.is_some(),
+                code_revision: pipeline_code_revision_hash.is_some(),
+                routing_store: pipeline_activation.is_some()
+                    && pipeline_qualification.is_some()
+                    && pipeline_product.is_some(),
+                allow_test_dependencies: pipeline_allow_test_dependencies,
+            },
+        )?;
+        if pipeline_default_routing_config.is_some() {
+            if let Some(activation) = pipeline_activation.as_deref() {
+                pipeline_default_routing::validate_default_routing_enumeration(activation).await?;
+            }
+        }
+        let pipeline_default_routing = pipeline_default_routing_config.map(|config| {
+            Arc::new(pipeline_default_routing::PipelineDefaultRouting::new(
+                config,
+            ))
+        });
         // Review round 1, point 3: a new upload of a `pipeline` tenant needs
         // a qualification of its active bundle on this revision. Say at the
         // start which listed tenants have none; this only logs, and all
@@ -4695,6 +4740,8 @@ impl AppState {
             pipeline_worker_ready,
             pipeline_drain_tenant_ids: Arc::new(pipeline_drain_tenant_ids),
             pipeline_index_rebuilds: Arc::default(),
+            pipeline_default_routing,
+            pipeline_worker_pass_stats: Arc::default(),
             db_contributor_reads,
             db_reviewer_reads,
             db_reviewer_require_object_refs,
@@ -12938,6 +12985,20 @@ struct TraceCommonsConfigStatusResponse {
     /// key id, or a key.
     pipeline_package_trust_store_loaded: bool,
     pipeline_check_trust_store_loaded: bool,
+    /// Pipeline default routing (spec 2026-10-10): `off` or `all`
+    /// (`TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING`).
+    pipeline_default_routing_mode: &'static str,
+    /// Whether this process holds a verified result set for its revision
+    /// that has not expired, and so activates tenants with no routing row.
+    pipeline_default_routing_armed: bool,
+    /// Why it is not armed, a safe label (`null` when armed or off).
+    pipeline_default_routing_label: Option<String>,
+    /// Seconds until the armed set's earliest result expires.
+    pipeline_default_routing_expires_in_seconds: Option<i64>,
+    /// The counts and the duration of the loop's last pass.
+    pipeline_default_routing_last_pass: Option<pipeline_default_routing::DefaultRoutingPassReport>,
+    /// The tenants in the routed-tenant cache. Never their ids.
+    pipeline_default_routing_routed_tenant_count: usize,
     signed_token_auth_enabled: bool,
     signed_token_key_count: usize,
     signed_token_eddsa_key_count: usize,
@@ -13196,6 +13257,10 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
     let central_issuer_profile_missing_controls =
         credit_settlement_central_issuer_profile_missing_config(&central_issuer_profile_config);
     let central_issuer_profile_ready = central_issuer_profile_missing_controls.is_empty();
+    let default_routing = state.pipeline_default_routing.as_deref().map_or_else(
+        pipeline_default_routing::DefaultRoutingStatus::off,
+        pipeline_default_routing::PipelineDefaultRouting::status,
+    );
     TraceCommonsConfigStatusResponse {
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
         db_mirror_configured: state.db_mirror.is_some(),
@@ -13210,6 +13275,12 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         pipeline_code_revision_configured: state.pipeline_code_revision_hash.is_some(),
         pipeline_package_trust_store_loaded: state.pipeline_package_trust.is_some(),
         pipeline_check_trust_store_loaded: state.pipeline_check_trust.is_some(),
+        pipeline_default_routing_mode: default_routing.mode,
+        pipeline_default_routing_armed: default_routing.armed,
+        pipeline_default_routing_label: default_routing.label,
+        pipeline_default_routing_expires_in_seconds: default_routing.expires_in_seconds,
+        pipeline_default_routing_last_pass: default_routing.last_pass,
+        pipeline_default_routing_routed_tenant_count: default_routing.routed_tenant_count,
         signed_token_auth_enabled: state.signed_token_verifier.is_some(),
         signed_token_key_count: signed_token_verifier
             .as_ref()
@@ -14491,11 +14562,9 @@ fn pipeline_runtime_for_tenant<'a>(
     state: &'a AppState,
     tenant: &TenantCtx,
 ) -> Option<&'a Arc<PipelineService>> {
-    if !state.tenant_rollout_gates.enabled_for(
-        TraceTenantRolloutFeature::PipelineReceipts,
-        false,
-        tenant.tenant_id(),
-    ) {
+    // The receipts list, or (spec 2026-10-10) a tenant pipeline default
+    // routing admitted to this process's routed-tenant cache.
+    if !pipeline_default_routing::pipeline_tenant_served(state, tenant.tenant_id()) {
         return None;
     }
     state.pipeline_service.as_ref()
@@ -15441,6 +15510,17 @@ async fn submit_trace_handler(
         // otherwise the legacy path owns its id.
         // `route_pipeline_receipt` acts on the decision after every legacy
         // check.
+        // Spec 2026-10-10: a process armed for pipeline default routing
+        // routes a tenant with no routing row to the pipeline first, so a new
+        // signup's first upload is a pipeline receipt. A refusal there never
+        // fails the upload: it keeps its current routing.
+        let routing_read = pipeline_default_routing::route_before_first_upload(
+            state.as_ref(),
+            tenant.tenant_id(),
+            remediating_prior.is_some(),
+            routing_read,
+        )
+        .await;
         let upload_route = decide_upload_route(
             state.as_ref(),
             &tenant,
@@ -20629,6 +20709,8 @@ use production_assembly::PipelineRuntimeSelection;
 
 #[path = "trace_commons_ingest_internal/pipeline_activation.rs"]
 mod pipeline_activation;
+#[path = "trace_commons_ingest_internal/pipeline_default_routing.rs"]
+mod pipeline_default_routing;
 use pipeline_activation::{
     pipeline_activate_handler, pipeline_admin_body_limit, pipeline_contain_handler,
     pipeline_deactivate_handler, pipeline_legacy_drain_handler,

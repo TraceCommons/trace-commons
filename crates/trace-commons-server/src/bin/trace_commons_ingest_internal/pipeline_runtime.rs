@@ -382,6 +382,11 @@ pub(crate) struct PipelineReadinessResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
     drain_tenant_count: usize,
+    /// The tenants the worker's last pass drained, and how long it took
+    /// (spec 2026-10-10): a pass drains its tenants one after another, so
+    /// its time grows with the number of routed tenants.
+    worker_last_pass_tenant_count: u64,
+    worker_last_pass_duration_ms: u64,
 }
 
 /// Answers `GET /v1/pipeline/readiness`. Unauthenticated and registered in
@@ -393,6 +398,14 @@ pub(crate) async fn pipeline_readiness_handler(
     State(state): State<Arc<AppState>>,
 ) -> (StatusCode, Json<PipelineReadinessResponse>) {
     let drain_tenant_count = state.pipeline_drain_tenant_ids.len();
+    let worker_last_pass_tenant_count = state
+        .pipeline_worker_pass_stats
+        .tenant_count
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let worker_last_pass_duration_ms = state
+        .pipeline_worker_pass_stats
+        .duration_ms
+        .load(std::sync::atomic::Ordering::Relaxed);
     if state.pipeline_service.is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -400,6 +413,8 @@ pub(crate) async fn pipeline_readiness_handler(
                 status: "not_ready",
                 reason: Some("pipeline_runtime_absent"),
                 drain_tenant_count,
+                worker_last_pass_tenant_count,
+                worker_last_pass_duration_ms,
             }),
         );
     }
@@ -413,6 +428,8 @@ pub(crate) async fn pipeline_readiness_handler(
                 status: "not_ready",
                 reason: Some("pipeline_worker_not_ready"),
                 drain_tenant_count,
+                worker_last_pass_tenant_count,
+                worker_last_pass_duration_ms,
             }),
         );
     }
@@ -422,6 +439,8 @@ pub(crate) async fn pipeline_readiness_handler(
             status: "ready",
             reason: None,
             drain_tenant_count,
+            worker_last_pass_tenant_count,
+            worker_last_pass_duration_ms,
         }),
     )
 }
@@ -736,10 +755,10 @@ pub(crate) fn pipeline_index_rebuild_error(error: anyhow::Error) -> (StatusCode,
 /// shutdown grace period -- to confirm it actually did. `ready` is the same
 /// `Arc<AtomicBool>` as `AppState::pipeline_worker_ready`, so the readiness
 /// handler and the worker share one flag rather than needing to agree on two.
-struct PipelineWorkerHandle {
-    stop: tokio::sync::watch::Sender<bool>,
-    join: tokio::task::JoinHandle<()>,
-    ready: Arc<std::sync::atomic::AtomicBool>,
+pub(crate) struct PipelineWorkerHandle {
+    pub(crate) stop: tokio::sync::watch::Sender<bool>,
+    pub(crate) join: tokio::task::JoinHandle<()>,
+    pub(crate) ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// How many runs of one tenant's pipeline queue the worker drains before
@@ -1931,11 +1950,18 @@ pub(crate) async fn validate_pipeline_tenant_bundles(
 /// first list onto the second keeps its runs in flight, index
 /// invalidations, payouts and confirmations, and staged receipt sweeps
 /// processed, while no receipt of its is routed (Zaki review 1, item 7).
+///
+/// With pipeline default routing (spec 2026-10-10), the tenants it admitted
+/// to the routed-tenant cache too: the list is built again on every pass, so
+/// a tenant routed after start is drained without a restart.
 pub(crate) fn pipeline_worker_tenant_ids(state: &AppState) -> Vec<String> {
     let mut tenant_ids = state
         .tenant_rollout_gates
         .tenant_ids(TraceTenantRolloutFeature::PipelineReceipts);
     tenant_ids.extend(state.pipeline_drain_tenant_ids.iter().cloned());
+    if let Some(default_routing) = state.pipeline_default_routing.as_deref() {
+        tenant_ids.extend(default_routing.routed_tenants());
+    }
     tenant_ids.into_iter().collect()
 }
 
@@ -1944,12 +1970,12 @@ pub(crate) fn pipeline_worker_tenant_ids(state: &AppState) -> Vec<String> {
 /// none.
 ///
 /// Each iteration runs one `run_pipeline_worker_pass` over
-/// `pipeline_worker_tenant_ids` (the `PipelineReceipts` rollout tenants and
-/// the drain list, read once at start), then sleeps
+/// `pipeline_worker_tenant_ids` (the `PipelineReceipts` rollout tenants, the
+/// drain list, and the tenants pipeline default routing admitted, read again
+/// for each pass), records the pass's tenant count and duration, then sleeps
 /// `PIPELINE_WORKER_POLL_INTERVAL` or until `stop` fires.
-fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
+pub(crate) fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
     let service = state.pipeline_service.clone()?;
-    let tenant_ids = pipeline_worker_tenant_ids(&state);
     let cadence = Arc::new(std::sync::Mutex::new(PipelineFollowUpCadence::default()));
     let ready = state.pipeline_worker_ready.clone();
     let worker_ready = ready.clone();
@@ -1958,9 +1984,12 @@ fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
         while !*stop_rx.borrow() {
             let probe_service = service.clone();
             let drain_service = service.clone();
+            let tenant_ids = pipeline_worker_tenant_ids(&state);
+            let tenant_count = tenant_ids.len();
+            let started = std::time::Instant::now();
             run_pipeline_worker_pass(
                 async move { probe_service.readiness().await },
-                tenant_ids.clone(),
+                tenant_ids,
                 |tenant_id| {
                     drain_pipeline_tenant(
                         state.clone(),
@@ -1973,6 +2002,9 @@ fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
                 &stop_rx,
             )
             .await;
+            state
+                .pipeline_worker_pass_stats
+                .record(tenant_count, started.elapsed());
 
             tokio::select! {
                 _ = tokio::time::sleep(PIPELINE_WORKER_POLL_INTERVAL) => {},
@@ -2056,7 +2088,17 @@ pub async fn run_pipeline_app(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     register_default_bundles_for_rollout_tenants(&state).await?;
+    // Spec 2026-10-10: before the listener opens, pipeline default routing
+    // reads its arming and fills its routed-tenant cache, within the start
+    // check's time limit; then its loop runs beside the worker.
+    super::pipeline_default_routing::prepare_default_routing(
+        &state,
+        super::pipeline_activation::PIPELINE_START_CHECK_TIMEOUT,
+    )
+    .await;
     let worker = spawn_pipeline_worker(state.clone());
+    let default_routing =
+        super::pipeline_default_routing::spawn_default_routing_loop(state.clone());
     let rebuilds = state.pipeline_index_rebuilds.clone();
     let grace = parse_usize_env(
         TRACE_COMMONS_SHUTDOWN_GRACE_SECONDS,
@@ -2077,8 +2119,18 @@ pub async fn run_pipeline_app(
             join_or_abort(worker.join, StdDuration::from_secs(grace)).await;
         }
     };
+    let stop_default_routing = async {
+        if let Some(default_routing) = default_routing {
+            let _ = default_routing.stop.send(true);
+            join_or_abort(default_routing.join, StdDuration::from_secs(grace)).await;
+        }
+    };
     // Zaki's re-review of #1166, Low: an index rebuild whose client has gone
     // still runs; it gets the worker's grace period, at the same time.
-    tokio::join!(stop_worker, rebuilds.drain(StdDuration::from_secs(grace)));
+    tokio::join!(
+        stop_worker,
+        stop_default_routing,
+        rebuilds.drain(StdDuration::from_secs(grace))
+    );
     result
 }
