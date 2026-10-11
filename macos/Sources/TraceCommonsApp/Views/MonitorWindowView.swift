@@ -712,7 +712,7 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                         case .awaiting, .open:
                             EmptyView()
                         }
-                        GlassSegmentedTabs(
+                        GlassRuleTabs(
                             MonitorWords.table?.shell.tabsLabel ?? "",
                             selection: Binding(
                                 get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
@@ -724,7 +724,8 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                                     dot: item == .inference ? inferenceDot : item == .traces ? tracesDot : nil,
                                     accessibilityValue: item == .inference
                                         ? inferenceDescription : item == .traces ? tracesDescription : nil)
-                            })
+                            },
+                            bleed: GlassTokens.Space.panePadding)
                     }
                 }
                 .padding([.horizontal, .top], GlassTokens.Space.panePadding)

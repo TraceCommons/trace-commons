@@ -96,6 +96,10 @@ public enum GlassTokens {
         public static var hairline: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.07, light: GlassRGBA(0x000000, alpha: 0.08)), flat: GlassRGBA(0xFFFFFF, alpha: 0.08, light: GlassRGBA(0x000000, alpha: 0.08))) }
         /// The 0.5pt rule under a modal's header and over its footer, and over the Traces graph footer (#1146 rgba(255,255,255,0.12)).
         public static var rule: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.12, light: GlassRGBA(0x000000, alpha: 0.12)), flat: GlassRGBA(0xFFFFFF, alpha: 0.12, light: GlassRGBA(0x000000, alpha: 0.12))) }
+        /// The main window tabs' ember (owner choice, 2026-10-10, the Ember Rule at 1.4x): a 2pt line laid on the tab rule under the selected tab, this colour at its middle fading to nothing at either end, reaching 30% past the tab each side. Light is lower, as a glow on a light pane reads stronger.
+        public static let tabEmber: GlassRGBA = GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 0.84))
+        /// The faint halo rising from the tab ember behind the selected title: this colour at the rule, fading upward and outward to nothing.
+        public static let tabEmberHalo: GlassRGBA = GlassRGBA(0x8A3DFF, alpha: 0.31, light: GlassRGBA(0x7A2CF5, alpha: 0.22))
         public static var popoverFill: GlassRGBA { GlassTheme.pick(GlassRGBA(0x22242A, alpha: 0.94, light: GlassRGBA(0xF7F7F9, alpha: 0.84)), flat: GlassRGBA(0x0B0F22, alpha: 0.82, light: GlassRGBA(0xF7F7F9, alpha: 0.84))) }
         public static var menuFill: GlassRGBA { GlassTheme.pick(GlassRGBA(0x22242A, alpha: 0.94, light: GlassRGBA(0xF7F7F9, alpha: 0.8)), flat: GlassRGBA(0x0B0F22, alpha: 0.82, light: GlassRGBA(0xF7F7F9, alpha: 0.8))) }
         /// Light: deep enough for menuHoverText at 4.5:1 (4.91).
@@ -213,6 +217,8 @@ public enum GlassTokens {
             "switchKnobEdge": switchKnobEdge,
             "hairline": hairline,
             "rule": rule,
+            "tabEmber": tabEmber,
+            "tabEmberHalo": tabEmberHalo,
             "popoverFill": popoverFill,
             "menuFill": menuFill,
             "menuHover": menuHover,

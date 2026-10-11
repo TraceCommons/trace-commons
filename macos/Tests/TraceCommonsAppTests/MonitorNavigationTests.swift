@@ -676,7 +676,7 @@ final class MonitorNavigationTests: XCTestCase {
                                 case .awaiting, .open:
                                     EmptyView()
                                 }
-                                GlassSegmentedTabs(
+                                GlassRuleTabs(
                                     MonitorWords.table?.shell.tabsLabel ?? "",
                                     selection: Binding(
                                         get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
@@ -690,7 +690,7 @@ final class MonitorNavigationTests: XCTestCase {
         """), "before the core says, the pane waits")
         let pane = try XCTUnwrap(window.range(of: "private struct MonitorMainPane"))
         let map = try XCTUnwrap(window.range(of: "private struct MonitorMapPane"))
-        XCTAssertEqual(window[pane.lowerBound ..< map.lowerBound].components(separatedBy: "GlassSegmentedTabs(").count - 1, 1,
+        XCTAssertEqual(window[pane.lowerBound ..< map.lowerBound].components(separatedBy: "GlassRuleTabs(").count - 1, 1,
                        "a second tab strip in the main pane would escape the gate")
         // The main pane's content switches on the shown tab, never the
         // restored one, and the inspector reads the shown tab too.

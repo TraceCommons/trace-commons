@@ -134,6 +134,136 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
     }
 }
 
+/// The main window's tabs (owner choice, 2026-10-10, the Ember Rule): the
+/// titles over a rule that spans the pane edge to edge, the selected one in
+/// primary ink with an ember laid on the rule under it, a 2pt purple line
+/// fading out 30% past the tab each side, and a faint halo rising behind
+/// its title. The ember glides to a newly selected tab; under Reduce Motion
+/// it moves at once. Segments, badges and dots are `GlassSegment`'s.
+public struct GlassRuleTabs<Value: Hashable>: View {
+    private let label: String
+    private let segments: [GlassSegment<Value>]
+    @Binding private var selection: Value
+    /// How far the rule runs past the tabs on each side, so it reaches the
+    /// pane's edges from inside its padding.
+    private let bleed: CGFloat
+    @State private var hovered: Value?
+    @Namespace private var ember
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    public init(_ label: String, selection: Binding<Value>, segments: [GlassSegment<Value>], bleed: CGFloat = 0) {
+        self.label = label
+        self._selection = selection
+        self.segments = segments
+        self.bleed = bleed
+    }
+
+    /// How far the ember line reaches past its tab, as a share of the
+    /// tab's width, each side.
+    static var emberReach: CGFloat { 0.3 }
+    /// The ember line's thickness and the halo's height.
+    static var emberLine: CGFloat { 2 }
+    static var haloHeight: CGFloat { 26 }
+
+    public var body: some View {
+        ZStack(alignment: .bottom) {
+            Rectangle()
+                .fill(GlassTokens.Color.rule.color)
+                .frame(height: 1)
+                .padding(.horizontal, -bleed)
+            HStack(spacing: 0) {
+                ForEach(segments) { segment in
+                    tab(segment)
+                }
+            }
+        }
+        .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.85), value: selection)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(label)
+    }
+
+    private func tab(_ segment: GlassSegment<Value>) -> some View {
+        let selected = segment.value == selection
+        return Button {
+            selection = segment.value
+        } label: {
+            HStack(spacing: GlassTokens.Space.inlineGap) {
+                Text(segment.title)
+                if let dot = segment.dot {
+                    GlassStatusDot(dot, size: 6)
+                }
+                // With a text equivalent, the badge is not read on its own:
+                // the segment's value says it in words.
+                Group {
+                    switch segment.badge {
+                    case .count(let count): GlassBadge(count: count, subtle: true)
+                    case .unknown: GlassBadge(count: nil, subtle: true)
+                    case nil: EmptyView()
+                    }
+                }
+                .accessibilityHidden(segment.accessibilityValue != nil)
+            }
+            .glassType(GlassTokens.TypeScale.body.weight(selected ? .semibold : .medium))
+            .foregroundStyle(Self.ink(selected: selected, hovering: hovered == segment.value))
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: GlassTokens.Size.segmentedTrack + GlassTokens.Space.s4)
+            .background(alignment: .bottom) {
+                if selected { emberGlow.matchedGeometryEffect(id: "ember", in: ember) }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { inside in
+            if inside {
+                hovered = segment.value
+            } else if hovered == segment.value {
+                hovered = nil
+            }
+        }
+        .accessibilityValue(segment.accessibilityValue ?? "")
+        .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
+    }
+
+    /// The halo behind the title and the ember line on the rule, sized to
+    /// the tab they sit under.
+    private var emberGlow: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            let ember = GlassTokens.Color.tabEmber.color
+            let halo = GlassTokens.Color.tabEmberHalo.color
+            ZStack(alignment: .bottom) {
+                // Brightest at the rule under the title's middle, gone by
+                // `haloHeight` up and by the tab's sides: the ellipse is
+                // centred on the frame's foot and reaches half its height and
+                // width, so it is clear before any edge.
+                EllipticalGradient(
+                    colors: [halo, halo.opacity(0)],
+                    center: .bottom, startRadiusFraction: 0, endRadiusFraction: 0.5)
+                    .frame(width: width * 1.1, height: Self.haloHeight * 2)
+                LinearGradient(
+                    colors: [ember.opacity(0), ember, ember.opacity(0)],
+                    startPoint: .leading, endPoint: .trailing)
+                    .frame(width: width * (1 + Self.emberReach * 2), height: Self.emberLine)
+                    // Centred on the 1pt rule.
+                    .offset(y: (Self.emberLine - 1) / 2)
+            }
+            .frame(width: width, height: proxy.size.height, alignment: .bottom)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    /// A title's ink: primary when selected or under the pointer, otherwise
+    /// secondary (which deepens under Increase Contrast).
+    static func ink(selected: Bool, hovering: Bool) -> Color {
+        inksPrimary(selected: selected, hovering: hovering) ? GlassColor.textPrimary : GlassColor.textSecondary
+    }
+
+    static func inksPrimary(selected: Bool, hovering: Bool) -> Bool {
+        selected || hovering
+    }
+}
+
 /// A crumb in `GlassBreadcrumb`.
 public struct GlassCrumb: Identifiable {
     public let title: String

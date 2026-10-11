@@ -110,6 +110,22 @@ final class ComponentParityTests: XCTestCase {
         XCTAssertEqual(GlassBarSlide(from: 0, to: 0), .none)
     }
 
+    /// The main tabs' ember: a title in primary ink when selected or under
+    /// the pointer, secondary otherwise; a 2pt line reaching 30% past the
+    /// tab each side; the line full in dark and lower in light, the halo
+    /// faint in both.
+    func test_theRuleTabsEmber() {
+        XCTAssertTrue(GlassRuleTabs<Int>.inksPrimary(selected: true, hovering: false))
+        XCTAssertTrue(GlassRuleTabs<Int>.inksPrimary(selected: false, hovering: true))
+        XCTAssertFalse(GlassRuleTabs<Int>.inksPrimary(selected: false, hovering: false))
+        XCTAssertEqual(GlassRuleTabs<Int>.emberReach, 0.3)
+        XCTAssertEqual(GlassRuleTabs<Int>.emberLine, 2)
+        XCTAssertEqual(GlassTokens.Color.tabEmber.alpha, 1)
+        XCTAssertLessThan(GlassTokens.Color.tabEmber.light.alpha, 1)
+        XCTAssertLessThan(GlassTokens.Color.tabEmberHalo.alpha, 0.5)
+        XCTAssertLessThan(GlassTokens.Color.tabEmberHalo.light.alpha, 0.5)
+    }
+
     /// The map field is #1146's ellipse: 80% by 60%, centred at 50% / 55%.
     func test_theMapFieldGeometry() {
         XCTAssertEqual(GlassMapField.radii, CGSize(width: 0.8, height: 0.6))
