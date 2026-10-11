@@ -99704,6 +99704,33 @@ fn a_pipeline_only_submission_reports_mains_status_vocabulary() {
     }
 }
 
+/// #1346: the pipeline's own document of a submission that its failed run
+/// rejected (the run `failed`, the stored row `rejected`) says why, with no
+/// pending points; a Review rejection (the run `rejected`) does not get that
+/// line.
+#[test]
+fn a_submission_its_failed_run_rejected_is_explained() {
+    use trace_commons_gate_api::pipeline::Phase;
+    use trace_commons_server::versioned_pipeline_product::PipelineProcessingStatus as P;
+    let mut status = pipeline_contributor_status_fixture();
+    status.processing = P::Failed;
+    status.submission_status = "rejected".to_string();
+    status.current_phase = Some(Phase::Review);
+    status.instruments.clear();
+    let projected = submission_status_from_pipeline(&status);
+    assert_eq!(projected.status, "rejected");
+    assert_eq!(
+        projected.explanation,
+        vec![PIPELINE_PROCESSING_FAILED_EXPLANATION.to_string()]
+    );
+    assert_eq!(projected.credit_points_pending, 0.0);
+
+    status.processing = P::Rejected;
+    let projected = submission_status_from_pipeline(&status);
+    assert_eq!(projected.status, "rejected");
+    assert!(projected.explanation.is_empty(), "{projected:?}");
+}
+
 /// Ruling F-M8: points that will never arrive are not pending. A run whose
 /// Trace Credit leg was forfeited (a withdrawal came first) or failed (Settle
 /// failed it) reports no pending points and no final points; the pipeline

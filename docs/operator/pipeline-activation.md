@@ -663,15 +663,26 @@ The deployed code revision. `TRACE_COMMONS_BUILD_CODE_REVISION_HASH` is a
 build-time variable. Set it when you compile `trace-commons-ingest`, to the
 output of `python3 scripts/operator/pipeline.py revision` for the same tree
 (`sha256:` and 64 lowercase hex digits). The tool hashes the path and content
-of every file in the checkout that git tracks, and of every untracked file that
-the repository's own `.gitignore` files do not ignore, except the top-level
-`.local`, `.vscode`, and `target` directories, and an untracked `.cargo`
-directory at any depth (a developer's local cargo configuration). A `.cargo`
-file that git tracks is part of the revision. A host's `.git/info/exclude` and
-a user's global excludes file hide nothing from it, so one checkout gives one
-revision on every host. So any edit, a document included, and any stray
-untracked file, changes the revision, and the command needs a git checkout.
-Qualify and build from the same clean tree.
+of the files that can change what the server's binaries do or what a
+qualification run finds (#1249): the crates that `trace-commons-server` is
+built from (its build dependency closure by `path`, without
+dev-dependencies), the files those crates include from elsewhere in the tree,
+the workspace `Cargo.toml` and `Cargo.lock`, a toolchain file, a top-level
+`.cargo` directory, `cloudbuild.yaml`, `migrations/`, and the qualification
+tooling and its inputs. The full list, and what the tool refuses rather than
+guess, is under "Signed check results" in
+[pipeline-qualification.md](pipeline-qualification.md). Of those paths it takes
+each file that git tracks and each untracked file that the repository's own
+`.gitignore` files do not ignore, except under the top-level `.local`,
+`.vscode`, and `target` directories, and an untracked `.cargo` directory at
+any depth (a developer's local cargo configuration). A `.cargo` file that git
+tracks is part of the revision. A host's `.git/info/exclude` and a user's
+global excludes file hide nothing from it, so one checkout gives one revision
+on every host. So an edit under a covered path, and a stray untracked file
+there, changes the revision; an edit to any other document, to a client shell
+(`macos/`, `windows/`, `tauri-desktop/`, `crates/trace-commons-contributor-gtk`,
+the contributor crates), to `community/`, to `deploy/`, or to CI does not.
+The command needs a git checkout. Qualify and build from the same clean tree.
 
 A binary built without the variable has no revision: `qualifications`,
 `activate`, and `rollback` answer `409` `bundle_runtime_revision_unknown`. A
@@ -877,7 +888,7 @@ rolled back to.
 
 ### After a deploy: the qualification is read again for each new upload
 
-A deploy changes the code revision and changes no routing row. So each process
+A deploy of a new code revision changes no routing row. So each process
 checks one term of the gate again, for each new upload of a tenant whose row
 says `pipeline`: the tenant's active bundle must have a qualification row for
 the revision that the process was built from.
@@ -955,6 +966,14 @@ How to see it:
   `pipeline_qualification_start_check_incomplete` one time, with
   `tenants_not_read`, the count of the listed tenants that it did not read.
   None of these stops the start: the upload path makes the refusal.
+
+First compare revisions. Run `python3 scripts/operator/pipeline.py revision`
+on the tree you are about to deploy. If it prints the revision of the running
+build (the value it was built with, which is also the
+`metadata.code_revision_hash` of the qualifications recorded on it), the
+deploy keeps every qualification and needs none of the steps below:
+a change only to files outside the revision (a document, a client shell, CI,
+`deploy/`) builds the same revision. Build it with that value as usual.
 
 The deploy procedure. `qualifications` records a qualification for the revision
 of the process that answers it, and a request cannot name another revision. So
@@ -2558,6 +2577,15 @@ index command is already deleted: it is excluded from the index and its
 legs are forfeited. A Review or Score attempt whose commit is refused, for
 any reason (the submission stopped being operable, its lease expired, a
 settlement adapter is missing), deletes the objects it wrote.
+
+A run that waits for Review or Score when its submission is withdrawn,
+revoked, expired or purged ends on its next attempt: `failed` with
+`submission_inoperable`, charged that one attempt, with nothing scored
+and no settlement leg seeded. That holds for a run held before Score by a
+suspended Score policy too, once the policy is resumed. Such a run is not
+a fault; a run that ends `attempts_exhausted` is. Settle does not end the
+run this way: it completes the run, excluded from the index, with its
+open legs forfeited as above.
 
 `main`'s revocation routes (`DELETE /v1/traces/{id}`,
 `POST /v1/traces/{id}/revoke`, `DELETE /v1/traces`) mark the submission

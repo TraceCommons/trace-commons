@@ -1782,11 +1782,19 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "pipeline_review_audit_marker",
         include_str!("../../../../migrations/V118__pipeline_review_audit_marker.sql"),
     ),
+    // V123 (#1346) records on a failed run that its failure moved the
+    // run's `received` submission to `rejected`:
+    // `pipeline_runs.submission_rejected_at`, the CHECK that only a failed
+    // run carries it, and the runtime role's column grant.
+    (
+        123,
+        "pipeline_failed_run_submission_rejection",
+        include_str!("../../../../migrations/V123__pipeline_failed_run_submission_rejection.sql"),
+    ),
     // V124 (spec 2026-10-10, pipeline default routing): the two cross-tenant
     // reads default routing makes, tenant ids only, through SECURITY DEFINER
     // functions owned by a NOLOGIN, NOBYPASSRLS guard (the V85 pattern), with
-    // EXECUTE granted to trace_ingest_runtime. Numbered past V119 to V123,
-    // which open pull requests may take.
+    // EXECUTE granted to trace_ingest_runtime. V123 is #1346's.
     (
         124,
         "pipeline_default_routing",

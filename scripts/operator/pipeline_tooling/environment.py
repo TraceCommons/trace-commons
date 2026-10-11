@@ -19,6 +19,7 @@ import re
 import secrets
 import subprocess
 import time
+import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -128,11 +129,264 @@ def _invoke_psql(command, *, env, input_text):
     return result
 
 
+# What the code revision covers besides the server crate's dependency
+# closure (#1249). Each entry is a file, or a directory and everything under
+# it, relative to the repository root; an entry that does not exist covers
+# nothing until it does.
+#
+# - The workspace manifest and lockfile, a toolchain pin, and a checked-in
+#   cargo configuration decide how every covered crate builds.
+# - `cloudbuild.yaml` names the features the deployed binaries are built
+#   with.
+# - `migrations/` is the schema the binary applies at start.
+# - The rest is what a qualification run reads: its tooling, the contract
+#   manifest, the default corpus, the package digest vector that the
+#   qualification module's tests and the self-test both read, and the
+#   top-level `.gitignore`, which the self-test reads and which decides the
+#   files listed here (`CodeRevisionRepositoryTests` checks that every input
+#   the tooling names is covered).
+CODE_REVISION_ROOT_CRATE = "crates/trace-commons-server"
+CODE_REVISION_COVERED = (
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain",
+    "rust-toolchain.toml",
+    ".cargo",
+    "cloudbuild.yaml",
+    "migrations",
+    "scripts/operator/pipeline.py",
+    "scripts/operator/pipeline_tooling",
+    "scripts/operator/pipeline-deployment-inventory.py",
+    "scripts/operator/test_pipeline_tooling.py",
+    "scripts/operator/fixtures/pipeline-package-digests-vector.json",
+    "docs/superpowers/specs/2026-09-11-versioned-pipeline-contract-test-manifest.json",
+    "docs/superpowers/specs/fixtures",
+    ".gitignore",
+)
+
+# The dependency tables whose `path` entries are part of a crate's build. A
+# `[dev-dependencies]` table is not one of them (#1249, an owner decision): a
+# dev-dependency is compiled into the test binaries a qualification run
+# builds, but never into the server binaries the revision identifies. So a
+# change to one (the contributor crate) can change what a qualification run
+# finds, a compile failure for one, and keep the revision; it cannot change
+# what the deployed server does. Adding "dev-dependencies" here for the root
+# crate alone would cover it, and would requalify on every contributor
+# change.
+_BUILD_DEPENDENCY_TABLES = ("dependencies", "build-dependencies")
+
+# `include_str!`, `include_bytes!` and `include!`. An argument is a string
+# literal, resolved against the including file's directory, or
+# `concat!(env!("CARGO_MANIFEST_DIR"), "<literal>")`, resolved against the
+# crate's. An occurrence followed by `\"` is text inside a string literal,
+# not a call. Any other argument is refused: the file it reads is unknown.
+_INCLUDE_CALL = re.compile(r"\binclude(?:_str|_bytes)?!\s*\(")
+_INCLUDE_LITERAL = re.compile(r'\binclude(?:_str|_bytes)?!\s*\(\s*"([^"\\]*)"\s*,?\s*\)')
+_INCLUDE_MANIFEST_DIR = re.compile(
+    r'\binclude(?:_str|_bytes)?!\s*\(\s*concat!\s*\(\s*env!\s*\(\s*"CARGO_MANIFEST_DIR"\s*\)\s*,'
+    r'\s*"([^"\\]*)"\s*,?\s*\)\s*,?\s*\)'
+)
+_INCLUDE_IN_STRING = re.compile(r'\binclude(?:_str|_bytes)?!\s*\(\s*\\"')
+# `#[path = "..."]`, and `#[cfg_attr(<cfg>, path = "...")]`, which loads a
+# module file the same way when its condition holds.
+_PATH_ATTRIBUTE = re.compile(r'#\s*\[\s*(?:cfg_attr\s*\([^\]]*?\bpath|path)\s*=\s*"([^"\\]*)"')
+# An out-of-line module declaration, `mod name;`, with any attributes and
+# visibility. In a Rust file outside the covered crates its file is not
+# resolved by the scan, so one is refused (`code_revision_include_unresolved`).
+_OUT_OF_LINE_MODULE = re.compile(
+    r"(?m)^\s*(?:#\s*\[[^\]]*\]\s*)*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;"
+)
+
+
+def _tree_relative(base, relative):
+    """`relative`, resolved against the directory `base`, as a normalized
+    `/`-separated path; both relative to the repository root. Refused
+    (`code_revision_path_outside_tree`) when it leaves the tree."""
+    joined = os.path.normpath(os.path.join(base, relative))
+    require(
+        not os.path.isabs(relative) and joined != ".." and not joined.startswith(".." + os.sep),
+        "code_revision_path_outside_tree",
+    )
+    return Path(joined).as_posix()
+
+
+def _read_manifest(root, relative):
+    path = root / relative
+    require(path.is_file(), "code_revision_manifest_missing")
+    try:
+        return tomllib.loads(path.read_text())
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as error:
+        raise ToolingError("code_revision_manifest_invalid") from error
+
+
+def _path_dependencies(manifest, crate, workspace_dependencies):
+    """The crate directories `manifest` (of the crate at `crate`) names
+    through `path`, in its build dependency tables, for every target."""
+    tables = [manifest.get(name, {}) for name in _BUILD_DEPENDENCY_TABLES]
+    for target in manifest.get("target", {}).values():
+        tables.extend(target.get(name, {}) for name in _BUILD_DEPENDENCY_TABLES)
+    found = []
+    for table in tables:
+        for name, spec in table.items():
+            if not isinstance(spec, dict):
+                continue
+            if spec.get("workspace") is True:
+                inherited = workspace_dependencies.get(name)
+                if isinstance(inherited, dict) and "path" in inherited:
+                    found.append(_tree_relative(".", inherited["path"]))
+            elif "path" in spec:
+                found.append(_tree_relative(crate, spec["path"]))
+    return found
+
+
+def _code_revision_crates(root):
+    """The crate directories the server's binaries are built from: the
+    server crate and, transitively, every crate its build dependency tables
+    reach by `path` (a workspace-inherited one included), plus any crate the
+    workspace's `[patch]` or `[replace]` tables substitute by `path`. Sorted,
+    relative to `root`. A crate without a readable `Cargo.toml` is refused
+    (`code_revision_manifest_missing`)."""
+    workspace = _read_manifest(root, "Cargo.toml")
+    workspace_dependencies = workspace.get("workspace", {}).get("dependencies", {})
+    pending = [CODE_REVISION_ROOT_CRATE]
+    for source in workspace.get("patch", {}).values():
+        pending.extend(
+            _tree_relative(".", spec["path"])
+            for spec in source.values()
+            if isinstance(spec, dict) and "path" in spec
+        )
+    pending.extend(
+        _tree_relative(".", spec["path"])
+        for spec in workspace.get("replace", {}).values()
+        if isinstance(spec, dict) and "path" in spec
+    )
+    crates = set()
+    while pending:
+        crate = pending.pop()
+        if crate in crates:
+            continue
+        crates.add(crate)
+        manifest = _read_manifest(root, f"{crate}/Cargo.toml")
+        pending.extend(_path_dependencies(manifest, crate, workspace_dependencies))
+    return sorted(crates)
+
+
+def _included_paths(root, crate, source):
+    """The files the Rust source `source` (relative to `root`, in the crate
+    at `crate`) includes or loads as a module by `#[path]`, relative to
+    `root`, each paired with whether it is Rust source (`include!` and
+    `#[path]`; not `include_str!` or `include_bytes!`)."""
+    text = (root / source).read_text(errors="replace")
+    directory = os.path.dirname(source)
+    found = []
+    for call in _INCLUDE_CALL.finditer(text):
+        if _INCLUDE_IN_STRING.match(text, call.start()):
+            continue
+        is_source = text.startswith("include!", call.start())
+        literal = _INCLUDE_LITERAL.match(text, call.start())
+        if literal:
+            found.append((_tree_relative(directory, literal.group(1)), is_source))
+            continue
+        manifest_relative = _INCLUDE_MANIFEST_DIR.match(text, call.start())
+        require(manifest_relative is not None, "code_revision_include_unresolved")
+        found.append((_tree_relative(crate, manifest_relative.group(1).lstrip("/")), is_source))
+    for attribute in _PATH_ATTRIBUTE.finditer(text):
+        found.append((_tree_relative(directory, attribute.group(1)), True))
+    return found
+
+
+def _listed_files():
+    """Every tracked-or-untracked, non-ignored file of the checkout, relative
+    to `ROOT`, as `git` lists it (see `_code_revision_hash`)."""
+    listing = subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.excludesFile=",
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-per-directory=.gitignore",
+            "--exclude=.cargo/",
+            "-z",
+        ],
+        check=True,
+        capture_output=True,
+        cwd=ROOT,
+    )
+    files = set()
+    for raw in listing.stdout.split(b"\0"):
+        if not raw:
+            continue
+        path = Path(raw.decode())
+        if path.parts and path.parts[0] in _EXCLUDED_TREE_DIRS:
+            continue
+        if (ROOT / path).is_file():
+            files.add(path.as_posix())
+    return files
+
+
+def _code_revision_paths():
+    """The files the code revision hashes, sorted (#1249): of the listed
+    files, those under a crate of `_code_revision_crates`, under an entry of
+    `CODE_REVISION_COVERED`, or included (`include_str!`, `include_bytes!`,
+    `include!`, `#[path]`, `#[cfg_attr(..., path = ...)]`) by a Rust file of
+    a covered crate, or, transitively, by a Rust file that one of those
+    loads by `include!` or `#[path]`. An included file outside those
+    prefixes that is not listed is refused (`code_revision_include_missing`):
+    its bytes would otherwise be left out of the hash unseen. So is an
+    out-of-line `mod name;` in a loaded Rust file outside the covered crates
+    (`code_revision_include_unresolved`): the scan does not resolve its
+    file. The scan reads comments too, so a comment naming such a file adds
+    it, which only widens the revision."""
+    files = _listed_files()
+    prefixes = [*_code_revision_crates(ROOT), *CODE_REVISION_COVERED]
+
+    def covered(path):
+        return any(path == prefix or path.startswith(prefix + "/") for prefix in prefixes)
+
+    crates = _code_revision_crates(ROOT)
+    selected = {path for path in files if covered(path)}
+    # Each Rust file of a covered crate, then, transitively, each file an
+    # `include!` or `#[path]` loads as Rust source, wherever it is: what that
+    # file includes is compiled into the same crate. `CARGO_MANIFEST_DIR` is
+    # the including crate's throughout.
+    pending = [
+        (source, crate)
+        for crate in crates
+        for source in sorted(path for path in selected if path.startswith(crate + "/") and path.endswith(".rs"))
+    ]
+    scanned = {source for source, _ in pending}
+    while pending:
+        source, crate = pending.pop()
+        if not any(source.startswith(other + "/") for other in crates):
+            # A module file outside every covered crate: a child module it
+            # declares out of line lives in a file the scan does not
+            # resolve, so it is refused rather than left out.
+            text = (ROOT / source).read_text(errors="replace")
+            require(_OUT_OF_LINE_MODULE.search(text) is None, "code_revision_include_unresolved")
+        for included, is_source in _included_paths(ROOT, crate, source):
+            if not covered(included):
+                require(included in files, "code_revision_include_missing")
+                selected.add(included)
+            # A target under a covered prefix that is not listed is not
+            # there, and so cannot change what is built.
+            if is_source and included in files and included not in scanned:
+                scanned.add(included)
+                pending.append((included, crate))
+    return sorted(selected, key=lambda path: path.encode())
+
+
 def _code_revision_hash():
-    """Ports the tree hash from `ef97a459:scripts/operator/run-pipeline-
-    qualification.sh` lines 70-88: every tracked-or-untracked, non-ignored
-    file's path and content, in sorted path order, excluding the top-level
-    `.local`, `.vscode`, and `target` directories.
+    """The code revision: the length-prefixed path and content of each file
+    of `_code_revision_paths()`, in sorted path order (#1249 narrowed the
+    set of files; the framing is the one ported from `ef97a459:scripts/
+    operator/run-pipeline-qualification.sh` lines 70-88). A file outside
+    that set, a document or a client shell, does not change it.
+
+    The files are taken from git's listing: every tracked-or-untracked,
+    non-ignored file, excluding the top-level `.local`, `.vscode`, and
+    `target` directories.
 
     "Non-ignored" means not ignored by the repository's own `.gitignore`
     files, and nothing else: `--exclude-per-directory=.gitignore` in place of
@@ -156,34 +410,12 @@ def _code_revision_hash():
     changes the revision.
     With no `.cargo` directory in the checkout the revision is what it was
     before this exception."""
-    listing = subprocess.run(
-        [
-            "git",
-            "-c",
-            "core.excludesFile=",
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-per-directory=.gitignore",
-            "--exclude=.cargo/",
-            "-z",
-        ],
-        check=True,
-        capture_output=True,
-        cwd=ROOT,
-    )
     tree = hashlib.sha256()
-    raw_paths = sorted(raw for raw in listing.stdout.split(b"\0") if raw)
-    for raw_path in raw_paths:
-        path = Path(raw_path.decode())
-        if path.parts and path.parts[0] in _EXCLUDED_TREE_DIRS:
-            continue
-        full_path = ROOT / path
-        if not full_path.is_file():
-            continue
+    for path in _code_revision_paths():
+        raw_path = path.encode()
         tree.update(len(raw_path).to_bytes(8, "big"))
         tree.update(raw_path)
-        content = full_path.read_bytes()
+        content = (ROOT / path).read_bytes()
         tree.update(len(content).to_bytes(8, "big"))
         tree.update(content)
     return "sha256:" + tree.hexdigest()
