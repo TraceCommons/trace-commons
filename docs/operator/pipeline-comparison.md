@@ -630,11 +630,15 @@ pair is unexplained.
 
 The full run is long (see [Time and memory](#time-and-memory)):
 
-- Change no file of the checkout during the run, and commit your work
-  first. The command hashes the tree at its start and at its end, and a run
-  that passed fails with `code_revision_changed` if the hashes differ. The
-  hash leaves out `.local/`, `.vscode/`, `target/`, and each file that
-  `.gitignore` ignores.
+- Commit your work first, and change no file of the checkout during the run.
+  The code revision hash covers the files that can change what the server
+  does or what a qualification run finds: the crates that
+  `crates/trace-commons-server` is built from, the files that they include,
+  the migrations, the workspace manifests, and the qualification tooling and
+  its fixtures. The list is in the entry `pipeline.py revision` of
+  [Signed check results](pipeline-qualification.md#signed-check-results).
+  The command computes the hash at its start and at its end, and a run that
+  passed fails with `code_revision_changed` if the two values differ.
 - The command prints nothing until its end. For the progress, count the
   lines of `compare_run-timing.jsonl` in the newest run directory: one line
   for the calibration, then one line for each trace.
