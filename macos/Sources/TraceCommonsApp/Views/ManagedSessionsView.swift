@@ -64,7 +64,7 @@ struct ManagedSessionsSection: View {
             model.managedText("terminal_scope").replacingOccurrences(of: "{destination}", with: $0)
         }
         let refresh: GlassCardRefresh? = snapshot == nil ? nil : .init(
-            PrivateAIPanelHeader.refreshName(model.managedText("refresh"), title: model.managedText("accounts_title")),
+            model.managedText("accounts_refresh_accessibility"),
             isDisabled: model.managedBusy, action: { model.refreshManagedSessions() })
         // Nothing under the head: a head-only card, so its actions centre
         // on the whole card rather than on a head above an empty body.

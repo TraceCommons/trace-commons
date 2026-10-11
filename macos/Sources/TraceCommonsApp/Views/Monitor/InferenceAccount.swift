@@ -70,7 +70,7 @@ struct PrivateAISettingsPanels: View {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
                         PrivateAIPanelHeader(
                             eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,
-                            refresh: copy.panelRefresh, onRefresh: { refreshTools() })
+                            refresh: copy.panelToolsRefreshAccessibility, onRefresh: { refreshTools() })
                         HarnessListSection(copy: copy, titled: false)
                     }
                 }
@@ -131,11 +131,13 @@ struct PrivateAISettingsLinkCard: View {
 
 /// A Private AI panel's header, as #1146's panels draw it: an eyebrow over
 /// the panel's heading, and a re-read icon on the right (owner,
-/// 2026-10-10: an icon, not a link), named "Refresh <heading>" for
-/// assistive tech so the panels' icons are told apart.
+/// 2026-10-10: an icon, not a link), named for assistive tech in the
+/// core's words for that panel ("Refresh your tools") so the panels' icons
+/// are told apart.
 struct PrivateAIPanelHeader: View {
     let eyebrow: String
     var title: String?
+    /// The refresh icon's accessible name, from the core.
     let refresh: String
     var disabled = false
     let onRefresh: () -> Void
@@ -155,17 +157,9 @@ struct PrivateAIPanelHeader: View {
                 }
             }
             Spacer(minLength: GlassTokens.Space.s4)
-            GlassRefreshButton(Self.refreshName(refresh, title: title ?? eyebrow), action: onRefresh)
+            GlassRefreshButton(refresh, action: onRefresh)
                 .disabled(disabled)
         }
-    }
-}
-
-extension PrivateAIPanelHeader {
-    /// The refresh icon's name: the core's "Refresh" and the panel it
-    /// re-reads.
-    static func refreshName(_ refresh: String, title: String) -> String {
-        title.isEmpty ? refresh : refresh + " " + title
     }
 }
 
@@ -211,7 +205,7 @@ struct PrivateAIBalanceCard: View {
         GlassIconCard(
             systemImage: "dollarsign.circle", title: copy.balanceTitle, subtitle: [copy.balanceWhat],
             refresh: .init(
-                PrivateAIPanelHeader.refreshName(copy.panelBalanceRefresh, title: copy.balanceTitle),
+                copy.panelBalanceRefreshAccessibility,
                 isDisabled: model.credentialBusy, action: { model.refreshNearAiBalance() }),
             content: { BalanceRow(copy: copy, showsScope: false) })
     }

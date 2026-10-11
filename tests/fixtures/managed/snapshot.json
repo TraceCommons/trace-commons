@@ -92,6 +92,7 @@
     "launch_unknown": "Refresh, then try again.",
     "action_failed": "That didn't work. Try again.",
     "accounts_title": "Saved accounts",
+    "accounts_refresh_accessibility": "Refresh saved accounts",
     "state_starting": "Starting",
     "state_running": "Running",
     "state_exited": "Exited",

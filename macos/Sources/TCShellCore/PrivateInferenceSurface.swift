@@ -266,6 +266,11 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let panelSettingsBody: String
     public let panelSettingsOpen: String
     public let panelSettingsOpenAccessibility: String
+    /// Each panel's refresh icon's accessible name, which says what it
+    /// re-reads.
+    public let panelToolsRefreshAccessibility: String
+    public let panelConnectionRefreshAccessibility: String
+    public let panelBalanceRefreshAccessibility: String
     public let statInferenceAccess: String
     public let statRuntime: String
     public let runtimeOn: String
@@ -449,6 +454,9 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case panelSettingsBody = "panel_settings_body"
         case panelSettingsOpen = "panel_settings_open"
         case panelSettingsOpenAccessibility = "panel_settings_open_accessibility"
+        case panelToolsRefreshAccessibility = "panel_tools_refresh_accessibility"
+        case panelConnectionRefreshAccessibility = "panel_connection_refresh_accessibility"
+        case panelBalanceRefreshAccessibility = "panel_balance_refresh_accessibility"
         case statInferenceAccess = "stat_inference_access"
         case statRuntime = "stat_runtime"
         case runtimeOn = "runtime_on"

@@ -700,6 +700,12 @@ public sealed record PrivateInferenceCopy
     public string PanelSettingsOpen { get; init; } = string.Empty;
     [JsonPropertyName("panel_settings_open_accessibility")]
     public string PanelSettingsOpenAccessibility { get; init; } = string.Empty;
+    [JsonPropertyName("panel_tools_refresh_accessibility")]
+    public string PanelToolsRefreshAccessibility { get; init; } = string.Empty;
+    [JsonPropertyName("panel_connection_refresh_accessibility")]
+    public string PanelConnectionRefreshAccessibility { get; init; } = string.Empty;
+    [JsonPropertyName("panel_balance_refresh_accessibility")]
+    public string PanelBalanceRefreshAccessibility { get; init; } = string.Empty;
     [JsonPropertyName("stat_inference_access")]
     public string StatInferenceAccess { get; init; } = string.Empty;
     [JsonPropertyName("stat_runtime")]

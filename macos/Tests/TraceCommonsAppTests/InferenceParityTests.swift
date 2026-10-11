@@ -487,6 +487,22 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(views.contains("ManagedGlobalSettingsHeader()"), "the global heading sits over the tools it names")
     }
 
+    /// Each refresh icon is named for assistive tech in the core's words
+    /// ("Refresh saved accounts"), never by joining "Refresh" to a title
+    /// in Swift.
+    func test_eachRefreshIconIsNamedInTheCoresWords() throws {
+        let account = try Self.text("Views/Monitor/InferenceAccount.swift")
+        let panel = try Self.text("Views/PrivateInferenceView.swift")
+        let managed = try Self.text("Views/ManagedSessionsView.swift")
+        for source in [account, panel, managed] {
+            XCTAssertFalse(source.contains("refreshName"), "a refresh name is joined in Swift again")
+        }
+        XCTAssertTrue(account.contains("refresh: copy.panelToolsRefreshAccessibility"))
+        XCTAssertTrue(account.contains("copy.panelBalanceRefreshAccessibility,"))
+        XCTAssertTrue(panel.contains("refresh: copy.panelConnectionRefreshAccessibility"))
+        XCTAssertTrue(managed.contains("model.managedText(\"accounts_refresh_accessibility\")"))
+    }
+
     /// The Runtime tile reads the listener's report, as the core's
     /// `runtime_word` does: every running label is on, only `off` is off, and
     /// an unreported or unfamiliar label is unknown, never off.

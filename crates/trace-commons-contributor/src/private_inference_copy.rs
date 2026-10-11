@@ -761,6 +761,13 @@ pub struct PrivateInferenceCopy {
     pub panel_settings_body: &'static str,
     pub panel_settings_open: &'static str,
     pub panel_settings_open_accessibility: &'static str,
+    /// Each panel's refresh icon's accessible name, which says what it
+    /// re-reads: [`PANEL_TOOLS_REFRESH_ACCESSIBILITY`],
+    /// [`PANEL_CONNECTION_REFRESH_ACCESSIBILITY`] and
+    /// [`PANEL_BALANCE_REFRESH_ACCESSIBILITY`].
+    pub panel_tools_refresh_accessibility: &'static str,
+    pub panel_connection_refresh_accessibility: &'static str,
+    pub panel_balance_refresh_accessibility: &'static str,
     /// The page's two stat tiles and the runtime tile's words, chosen by
     /// [`runtime_word`].
     pub stat_inference_access: &'static str,
@@ -2131,6 +2138,13 @@ pub const PANEL_SETTINGS_BODY: &str = "Configure your Private AI settings and co
 pub const PANEL_SETTINGS_OPEN: &str = "Open";
 /// The button's accessible name, which names the section it opens.
 pub const PANEL_SETTINGS_OPEN_ACCESSIBILITY: &str = "Open Private AI settings";
+/// The tools panel's refresh icon's accessible name. The icons all say
+/// [`PANEL_REFRESH`]; each name says what that one re-reads.
+pub const PANEL_TOOLS_REFRESH_ACCESSIBILITY: &str = "Refresh your tools";
+/// The connection panel's refresh icon's accessible name.
+pub const PANEL_CONNECTION_REFRESH_ACCESSIBILITY: &str = "Refresh Private AI connection";
+/// The balance panel's refresh icon's accessible name.
+pub const PANEL_BALANCE_REFRESH_ACCESSIBILITY: &str = "Refresh NEAR AI balance";
 /// The stat tile whose value is the credential's state line.
 pub const STAT_INFERENCE_ACCESS: &str = "NEAR AI";
 /// The stat tile whose value is one of the `RUNTIME_*` words.
@@ -2360,6 +2374,9 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         panel_settings_body: PANEL_SETTINGS_BODY,
         panel_settings_open: PANEL_SETTINGS_OPEN,
         panel_settings_open_accessibility: PANEL_SETTINGS_OPEN_ACCESSIBILITY,
+        panel_tools_refresh_accessibility: PANEL_TOOLS_REFRESH_ACCESSIBILITY,
+        panel_connection_refresh_accessibility: PANEL_CONNECTION_REFRESH_ACCESSIBILITY,
+        panel_balance_refresh_accessibility: PANEL_BALANCE_REFRESH_ACCESSIBILITY,
         stat_inference_access: STAT_INFERENCE_ACCESS,
         stat_runtime: STAT_RUNTIME,
         runtime_on: RUNTIME_ON,
@@ -2982,6 +2999,33 @@ pub use crate::daemon::private_inference::{
 
 #[cfg(test)]
 mod tests {
+    /// The panels' refresh icons all say "Refresh", so each has its own
+    /// accessible name that says what it re-reads (docs/ui-copy-guide.md
+    /// section 5), carried by the export rather than joined in a shell.
+    #[test]
+    fn each_panel_refresh_has_its_own_accessible_name() {
+        let copy = private_inference_copy();
+        let names = [
+            copy.panel_tools_refresh_accessibility,
+            copy.panel_connection_refresh_accessibility,
+            copy.panel_balance_refresh_accessibility,
+        ];
+        assert_eq!(
+            names,
+            [
+                "Refresh your tools",
+                "Refresh Private AI connection",
+                "Refresh NEAR AI balance"
+            ]
+        );
+        for name in names {
+            assert!(
+                name.starts_with(PANEL_REFRESH),
+                "{name} hides the visible action"
+            );
+        }
+    }
+
     #[test]
     fn only_the_declared_templates_carry_holes() {
         let value = serde_json::to_value(private_inference_copy()).unwrap();
@@ -4653,7 +4697,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            177,
+            180,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
