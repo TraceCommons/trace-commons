@@ -216,6 +216,9 @@ public struct GlassRuleTabs<Value: Hashable>: View {
             .background(alignment: .bottom) {
                 if selected { emberGlow.matchedGeometryEffect(id: "ember", in: ember) }
             }
+            // The press is a wash behind the title and the ember, never the
+            // title, as on the segmented tabs.
+            .glassPressedWash(RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous))
             .contentShape(Rectangle())
         }
         .buttonStyle(GlassPressStyle())
