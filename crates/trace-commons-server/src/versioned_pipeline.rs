@@ -4576,12 +4576,19 @@ impl PgPipelineStore {
     /// `rebuildable_index_run_predicate!`, whose `NOT EXISTS` on
     /// `pipeline_index_invalidations` sees the invalidation. If the
     /// withdrawal committed after the fence, the claim sees the fence. A
-    /// fence holds nothing back once it has expired or been deleted, and
-    /// then no write it covered is running: a row expires at the deadline of
-    /// the last run it covered plus the write fence margin, while a write
-    /// starts only before that deadline and returns within the margin; a
-    /// rebuild deletes its own row only once none of its writes is running,
-    /// and another rebuild's row only once it has expired.
+    /// fence holds nothing back once it has expired or been deleted. A row
+    /// expires at the deadline of the last run it covered plus the write
+    /// fence margin, and a write starts only before that deadline; a
+    /// rebuild deletes its own row only once none of its writes is running
+    /// (a call still in flight at the margin leaves the row to expire), and
+    /// another rebuild's row only once it has expired. An index call has no time limit of its own, so a write
+    /// the fence covered can still be running after the fence is gone, and
+    /// this claim can remove the revision before that write lands. That is
+    /// not left standing: the late write is awaited until it returns and
+    /// then reopens the run's invalidation, so the removal runs again
+    /// (`reopen_invalidation_after_index_writes`, issue #1233, which states
+    /// the invariant). The fence bounds how long claims are held back; it
+    /// does not prove that no covered write is in flight.
     /// `NOW()` is the claim transaction's start, no later than the
     /// statement's snapshot, so a fence is never read as expired early.
     ///
@@ -9134,8 +9141,11 @@ impl PipelineServiceBuilder {
     /// (`PipelineService::rebuild_index_run`): how long a run past its
     /// deadline waits for the index call in flight, and how far past the
     /// run's deadline its committed fence reaches. Defaults to
-    /// `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`, the margin every index
-    /// writer call must return within. For tests only: a shorter margin lets
+    /// `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`. The margin bounds how
+    /// long a run is held, not how long an index call runs: a call that
+    /// outlasts it is awaited by `reopen_invalidation_after_index_writes`,
+    /// which reopens the run's invalidation when the call returns (issue
+    /// #1233). For tests only: a shorter margin lets
     /// a test see a lost rebuild's fence expire. Settle's own margin is
     /// `with_index_write_fence_margin`.
     #[doc(hidden)]
@@ -16471,6 +16481,45 @@ async fn reopen_invalidation_after_index_writes<T>(
     }
 }
 
+/// The time left before `lease_expires_at`, read on the database's clock
+/// (`clock_timestamp()`), the clock that set it, and never negative: a lease
+/// that has ended has none left. Settle's index dispatch builds its
+/// deadline from this (`index_dispatch_deadline`), so a step of the
+/// process's wall clock cannot move it (issue #1233). Public for the
+/// runtime tests only.
+#[doc(hidden)]
+pub async fn index_lease_remaining_on_db_clock<C: deadpool_postgres::GenericClient>(
+    client: &C,
+    lease_expires_at: DateTime<Utc>,
+) -> Result<std::time::Duration, tokio_postgres::Error> {
+    let milliseconds: i64 = client
+        .query_one(
+            "SELECT GREATEST(
+                        0,
+                        (EXTRACT(EPOCH FROM ($1::timestamptz - clock_timestamp())) * 1000)::bigint
+                    )",
+            &[&lease_expires_at],
+        )
+        .await?
+        .get(0);
+    Ok(std::time::Duration::from_millis(
+        milliseconds.unsigned_abs(),
+    ))
+}
+
+/// Settle's index dispatch deadline on the monotonic clock: `now` plus the
+/// earlier of the lease's remaining time
+/// (`index_lease_remaining_on_db_clock`) and the dispatch budget
+/// (`PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS`, multi-lens review L4-1). No
+/// upsert starts at or past it (issue #1233).
+fn index_dispatch_deadline(
+    now: std::time::Instant,
+    lease_remaining: std::time::Duration,
+    budget: std::time::Duration,
+) -> std::time::Instant {
+    now + lease_remaining.min(budget)
+}
+
 /// Settle's index dispatch (Step 5), run in a task of its own (multi-lens
 /// review L4-3). One transaction locks the run row (`ensure_current_lease`),
 /// then the submission row (the guard), then the Settle policy's status row
@@ -16557,20 +16606,12 @@ async fn dispatch_index_write(dispatch: IndexDispatch) -> anyhow::Result<IndexDi
     // `lease_expires_at`, and the deadline is on the monotonic clock, so the
     // process's wall clock plays no part.
     let lease_expires_at = run.lease_expires_at.ok_or_else(stale_lease_error)?;
-    let lease_remaining_milliseconds: i64 = tx
-        .query_one(
-            "SELECT GREATEST(
-                        0,
-                        (EXTRACT(EPOCH FROM ($1::timestamptz - clock_timestamp())) * 1000)::bigint
-                    )",
-            &[&lease_expires_at],
-        )
-        .await?
-        .get(0);
-    let deadline = std::time::Instant::now()
-        + std::time::Duration::from_millis(lease_remaining_milliseconds.unsigned_abs()).min(
-            std::time::Duration::from_secs(PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS.unsigned_abs()),
-        );
+    let lease_remaining = index_lease_remaining_on_db_clock(&tx, lease_expires_at).await?;
+    let deadline = index_dispatch_deadline(
+        std::time::Instant::now(),
+        lease_remaining,
+        std::time::Duration::from_secs(PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS.unsigned_abs()),
+    );
     let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
     // Each entry is written under its own key: the command pairs them, so
     // one entry is never stored under another's key.
@@ -16820,6 +16861,22 @@ pub fn is_pipeline_artifact_wrapper(wrapper: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #1233, defect 2: Settle's index dispatch deadline is a
+    /// monotonic `Instant`, the earlier of the lease's remaining time (read
+    /// on the database's clock) and the dispatch budget, from `now`.
+    #[test]
+    fn the_index_dispatch_deadline_is_the_earlier_of_the_lease_and_the_budget() {
+        let now = std::time::Instant::now();
+        let s = std::time::Duration::from_secs;
+        assert_eq!(index_dispatch_deadline(now, s(5), s(30)), now + s(5));
+        assert_eq!(index_dispatch_deadline(now, s(300), s(30)), now + s(30));
+        assert_eq!(
+            index_dispatch_deadline(now, std::time::Duration::ZERO, s(30)),
+            now,
+            "a lease with no time left starts no upsert"
+        );
+    }
 
     #[test]
     fn the_sweep_logs_a_store_refusal_only_when_it_is_a_label() {

@@ -10031,6 +10031,52 @@ async fn a_claim_taken_before_a_reopen_does_not_complete_the_invalidation() {
     assert_eq!(state, "pending");
 }
 
+/// Issue #1233, defect 2: Settle's index dispatch reads the lease's
+/// remaining time on the database's clock, the clock that set
+/// `lease_expires_at`, through the runtime login. A lease ending in five
+/// seconds has at most five seconds left and loses only the round trip; one
+/// that already ended has none (the `GREATEST(0, ..)` clamp), and a far
+/// lease is not clamped. A step of the process's wall clock cannot be made
+/// in a test, so this pins the read the deadline is built from, and
+/// `index_dispatch_deadline`'s own test pins the deadline.
+#[tokio::test]
+async fn the_index_dispatch_reads_the_lease_remaining_on_the_database_clock() {
+    let Some(backend) = runtime_backend(2).await else {
+        return;
+    };
+    let client = backend.trace_pool_for_test().get().await.unwrap();
+    let mut lease_ends = Vec::new();
+    for offset in ["5 seconds", "-30 seconds", "1 day"] {
+        let row = client
+            .query_one("SELECT clock_timestamp() + $1::text::interval", &[&offset])
+            .await
+            .unwrap();
+        lease_ends.push(row.get::<_, chrono::DateTime<chrono::Utc>>(0));
+    }
+    let remaining = index_lease_remaining_on_db_clock(&client, lease_ends[0])
+        .await
+        .unwrap();
+    assert!(
+        remaining <= std::time::Duration::from_secs(5)
+            && remaining > std::time::Duration::from_secs(3),
+        "a lease ending in 5 s has between 3 and 5 s left: {remaining:?}"
+    );
+    assert_eq!(
+        index_lease_remaining_on_db_clock(&client, lease_ends[1])
+            .await
+            .unwrap(),
+        std::time::Duration::ZERO,
+        "a lease that ended has no time left"
+    );
+    let remaining = index_lease_remaining_on_db_clock(&client, lease_ends[2])
+        .await
+        .unwrap();
+    assert!(
+        remaining > std::time::Duration::from_secs(86_400 - 60),
+        "a far lease is not clamped: {remaining:?}"
+    );
+}
+
 /// Issue #1233: the reopen a late index write makes
 /// (`reopen_index_invalidation_after_late_write`). A run with no
 /// invalidation has nothing to reopen. On a `pending` invalidation that a
