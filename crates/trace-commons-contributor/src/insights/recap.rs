@@ -284,14 +284,18 @@ fn recap(weeks: &[WeekFigures], request: ComparisonsRequest, state: &GoalState) 
             met,
         });
     }
-    // Rule 3: the pattern furthest above its usual week, by the lever's rule.
-    if let Ok(outcome) = lever(
-        Feed::CounterPass,
-        this,
-        earlier,
-        &state.lever_dismissals,
-        &state.lever_reenables,
-    ) && let Some(pick) = outcome.pick
+    // Rule 3: the pattern furthest above its usual week, by the lever's rule,
+    // and not while the lever's card is switched off in Settings: the same
+    // observation, as a kind's "Not useful" already leaves it out here.
+    if !state.lever_card_off
+        && let Ok(outcome) = lever(
+            Feed::CounterPass,
+            this,
+            earlier,
+            &state.lever_dismissals,
+            &state.lever_reenables,
+        )
+        && let Some(pick) = outcome.pick
     {
         items.push(RecapItem::PatternUp {
             pattern: pick.kind,
@@ -583,6 +587,36 @@ mod tests {
             ]
         );
         assert_eq!(recap.past_threshold, None);
+    }
+
+    /// The lever's card switched off in Settings leaves the summary card's
+    /// pattern line out too, as a kind turned off by "Not useful" already
+    /// is: the same observation, by the lever's rule. The other items stay.
+    #[test]
+    fn the_lever_card_switched_off_leaves_the_pattern_line_out_of_the_summary() {
+        let weeks = closed_week_history();
+        let switched_off = GoalState {
+            lever_card_off: true,
+            ..state(vec![UNDER])
+        };
+        let recap = week_comparisons(Some(&weeks), request(monday(0)), &switched_off)
+            .recap
+            .unwrap();
+        assert_eq!(
+            recap.items,
+            vec![
+                RecapItem::BestCacheWeek {
+                    source: CLAUDE,
+                    permille: 450,
+                    previous_best_permille: 300
+                },
+                RecapItem::Goal {
+                    id: "goal-1".into(),
+                    goal: UNDER,
+                    met: true
+                },
+            ]
+        );
     }
 
     #[test]

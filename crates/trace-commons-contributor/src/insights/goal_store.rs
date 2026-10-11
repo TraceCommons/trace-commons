@@ -263,8 +263,9 @@ impl LocalInsightStore {
     }
 
     /// The Settings switch for the lever's card (`analytics_setting_lever`).
-    /// Off, no card is drawn. On, the card is back, and so is every kind
-    /// that three "Not useful" turned off
+    /// Off, no card is drawn, and the weekly summary card leaves out its
+    /// pattern line, the same observation. On, the card is back, and so is
+    /// every kind that three "Not useful" turned off
     /// ([`super::analytics_constants::LEVER_DISMISSALS_TO_DISABLE`]): that
     /// kind's "Not useful" are forgotten, so one given later, even in the
     /// same week, counts again from there.

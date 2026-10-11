@@ -176,9 +176,10 @@ pub const COUNTER_PASS_DEFAULT_ON: bool = false;
 /// notification: owner decision D1), and it shows nothing without feed T.
 /// Owner decisions D1 and D4, open.
 pub const RECAP_CARD_DEFAULT_ON: bool = true;
-/// Whether sessions in a folder whose rule is Never are left out of the
-/// counter pass, and their stored rows dropped. Owner decision D4, open; the
-/// recommended answer is yes.
+/// Whether sessions in a folder that is Never are left out of the counter
+/// pass, and their stored rows dropped: the folder's resolved rule, so a
+/// global Never contribution override leaves every folder out. Owner
+/// decision D4, settled in Ron's review of #1287.
 pub const COUNTER_PASS_EXCLUDES_NEVER_FOLDERS: bool = true;
 /// The counter store keeps at most this many sessions; past it the oldest go
 /// first. Owner decision D4, open (a capped daemon-local store).
