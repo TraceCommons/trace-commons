@@ -233,7 +233,7 @@ Admission and runs no Review. The owner ruled that the reject is intended.
 The source of the intent is the design
 [the async privacy rescrub design](../superpowers/specs/2026-10-09-pipeline-async-privacy-rescrub-design.md),
 which says twice: "A receipt-time High is still rejected by Admission." The
-full run of 2026-10-09 had one such pair in 10,000 traces.
+full run of 2026-10-11 has one such pair in 10,000 traces.
 
 With this rule, a trace whose risk is High at the receipt gets no reviewer
 in the pipeline. On `main`, a reviewer can approve it.
@@ -635,9 +635,14 @@ python3 scripts/operator/pipeline.py compare \
   --corpus docs/superpowers/specs/fixtures/versioned-pipeline-comparison-hf-pin-v1.json
 ```
 
-No report of a full run is committed yet. The committed report of a full
-run goes to `docs/superpowers/reports/`, with the build profile that made
-it: `compare --corpus` always uses Cargo's optimized build.
+The committed report of a full run is in `docs/superpowers/reports/`, with
+the build profile that made it: `compare --corpus` always uses Cargo's
+optimized build. The first one is the run of 2026-10-11:
+[`2026-10-11-pipeline-comparison-10k.md`](../superpowers/reports/2026-10-11-pipeline-comparison-10k.md),
+with its `.json`, `.result.json`, and `.evidence.json` files. Of 10,000
+traces, 9,852 pairs are equal, 148 pairs are permitted (147 by
+`medium_risk_privacy_review` and 1 by `high_risk_admission_reject`), and no
+pair is unexplained.
 
 The full run is long (see [Time and memory](#time-and-memory)):
 
@@ -747,26 +752,26 @@ files, so it needs the network.
 ### Time and memory
 
 These values are from one machine, a 12-core server, with the optimized
-build and a full cache. They are measurements of two partial runs, not of
-the full run.
+build and a full cache.
 
 | Run | Wall time |
 |---|---|
 | `--limit 100`, no build | 59 s |
 | `--limit 1000`, no build | 6 min 14 s |
+| The full run (10,000 traces), no build | 1 h 4 min 34 s |
 
 - A run that must build the optimized test binary first takes 3.5 to 5
   minutes more.
 - The calibration of the 1,000 bootstrap traces takes about 7 s. Each run
   does it, also with `--limit`.
 - The peak memory of the largest child process of a run with no build is
-  139 MB, for 100 traces and for 1,000 traces.
+  139 MB, for 100 traces and for 1,000 traces, and 141 MB for the full run.
 
-The full run of 10,000 traces is estimated at 1 to 1.5 hours. This is an
-estimate from the 1,000-trace run, not a measurement. The two index scans
-grow with the number of traces, and so do two reads of the old path: the
-audit log file and the credit event file of the tenant. These costs are
-small at 1,000 traces and are not measured beyond it.
+The full run of 2026-10-11 took 1 h 4 min 34 s. The two index scans grow
+with the number of traces, and so do two reads of the old path: the audit
+log file and the credit event file of the tenant. In that run the growth
+was small: the measured steps of the last 1,000 traces took 398 s, and
+those of the first 1,000 traces took 384 s.
 
 ### Disk space
 
@@ -781,8 +786,8 @@ small at 1,000 traces and are not measured beyond it.
 Each run makes its own export, so each run directory holds a full copy of
 the two corpus files under `compare/corpus/` (344 MB). It also holds the
 encrypted artifacts of the two tenants under `artifacts/`: about 290 MB for
-each 1,000 traces. A run directory of the full run is thus about 3.3 GB;
-this is an estimate from the two measured runs.
+each 1,000 traces. The run directory of the full run of 2026-10-11 is
+3.0 GB: 2.7 GB under `artifacts/` and 329 MB under `compare/`.
 
 Nothing under `.local/pipeline/runs/` is deleted automatically. After a
 run, remove the corpus files under `runs/<id>/compare/` and the directory
