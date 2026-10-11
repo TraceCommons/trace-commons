@@ -117,11 +117,13 @@ struct FundingRow: View {
     var body: some View {
         // #1146's funding panel, its own card after the balance, under its
         // icon (owner, 2026-10-10): the state in the head with the button
-        // on the right, and what the button opens under it.
+        // on the right, and what the button opens behind the info icon.
         GlassIconCard(
             systemImage: "creditcard", title: copy.fundingTitle,
             subtitle: [status?.view.message ?? copy.fundingUnavailable],
-            accessory: {
+            // What the button opens, behind the info icon (owner, 2026-10-10).
+            info: copy.fundingWhat,
+            trailing: {
                 Button {
                     load(opening: status?.destination)
                 } label: {
@@ -133,15 +135,6 @@ struct FundingRow: View {
                 .buttonStyle(GlassButtonStyle(.glass))
                 .fixedSize()
                 .disabled(model.credentialBusy || request != nil)
-            },
-            content: {
-                // What the button opens, under the head at the card's width,
-                // so the head's text column keeps one sentence beside the
-                // button.
-                Text(copy.fundingWhat)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
             })
         .onAppear {
             visible = true

@@ -61,30 +61,79 @@ public struct GlassCard<Content: View>: View {
     }
 }
 
-/// A card headed by an icon (owner, 2026-10-10): a medium SF Symbol on
-/// the left, the title over an optional subtitle, and an optional control
-/// on the right, centred on the head. Anything else the card holds sits
-/// under the head, aligned with the title rather than the icon.
+/// A bare refresh glyph, no pill around it (owner, 2026-10-10), named for
+/// assistive tech and in its tooltip.
+public struct GlassRefreshButton: View {
+    private let label: String
+    private let size: CGFloat
+    private let action: () -> Void
+
+    public init(_ label: String, size: CGFloat = 13, action: @escaping () -> Void) {
+        self.label = label
+        self.size = size
+        self.action = action
+    }
+
+    public var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.clockwise")
+                .glassGlyph(size, weight: .medium)
+                .foregroundStyle(GlassColor.textSecondary)
+                .frame(width: size + 7, height: size + 7)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(GlassPressStyle())
+        .accessibilityLabel(label)
+        .help(label)
+    }
+}
+
+/// A card headed by an icon (owner, 2026-10-10), laid out the same on
+/// every card:
+/// - the icon in a fixed column at the top left, level with the title;
+/// - the title, with the card's re-read icon right after it on its line;
+/// - the subtitle under it, with an info icon after its last line for the
+///   card's fine print (shown on hover and in a popover);
+/// - the card's actions on the right, centred on the head;
+/// - anything else the card holds under the head, aligned with the title.
 public struct GlassIconCard<Accessory: View, Content: View>: View {
+    /// The card's re-read control.
+    public struct Refresh {
+        let label: String
+        let isDisabled: Bool
+        let action: () -> Void
+
+        public init(_ label: String, isDisabled: Bool = false, action: @escaping () -> Void) {
+            self.label = label
+            self.isDisabled = isDisabled
+            self.action = action
+        }
+    }
+
     private let systemImage: String
     private let title: String
     private let subtitle: [String]
+    private let info: String?
+    private let refresh: Refresh?
     private let accessory: Accessory
     private let content: Content
+    @State private var infoOpen = false
 
     /// The icon's point size, and the column it sits in.
     public static var iconSize: CGFloat { 22 }
     static var iconColumn: CGFloat { 26 }
 
     /// `subtitle` is drawn line by line under the title, empty lines left
-    /// out.
+    /// out; `info` goes behind the info icon after it.
     public init(
-        systemImage: String, title: String, subtitle: [String] = [],
+        systemImage: String, title: String, subtitle: [String] = [], info: String? = nil, refresh: Refresh? = nil,
         @ViewBuilder accessory: () -> Accessory, @ViewBuilder content: () -> Content
     ) {
         self.systemImage = systemImage
         self.title = title
         self.subtitle = subtitle.filter { !$0.isEmpty }
+        self.info = info.flatMap { $0.isEmpty ? nil : $0 }
+        self.refresh = refresh
         self.accessory = accessory()
         self.content = content()
     }
@@ -93,23 +142,39 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
         GlassCard {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 HStack(alignment: .center, spacing: GlassTokens.Space.s5) {
-                    Image(systemName: systemImage)
-                        .glassGlyph(Self.iconSize, weight: .regular)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .frame(width: Self.iconColumn)
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                        Text(title)
-                            .glassType(GlassTokens.TypeScale.bodyStrong)
-                            .foregroundStyle(GlassColor.textPrimary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityAddTraits(.isHeader)
-                        ForEach(Array(subtitle.enumerated()), id: \.offset) { _, line in
-                            Text(line)
-                                .glassType(GlassTokens.TypeScale.caption)
-                                .foregroundStyle(GlassColor.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
+                    HStack(alignment: .top, spacing: GlassTokens.Space.s5) {
+                        Image(systemName: systemImage)
+                            .glassGlyph(Self.iconSize, weight: .regular)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .frame(width: Self.iconColumn, height: Self.iconColumn)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                            HStack(alignment: .center, spacing: GlassTokens.Space.s2) {
+                                Text(title)
+                                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                                    .foregroundStyle(GlassColor.textPrimary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .accessibilityAddTraits(.isHeader)
+                                if let refresh {
+                                    GlassRefreshButton(refresh.label, size: 12, action: refresh.action)
+                                        .disabled(refresh.isDisabled)
+                                }
+                                if subtitle.isEmpty { infoButton }
+                            }
+                            ForEach(Array(subtitle.enumerated()), id: \.offset) { index, line in
+                                if index == subtitle.count - 1, info != nil {
+                                    infoLine(line)
+                                } else {
+                                    Text(line)
+                                        .glassType(GlassTokens.TypeScale.caption)
+                                        .foregroundStyle(GlassColor.textSecondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
                         }
+                        // Level with the icon's column: the title's line sits
+                        // across the icon's upper half.
+                        .padding(.top, 3)
                     }
                     Spacer(minLength: GlassTokens.Space.s4)
                     accessory
@@ -122,18 +187,78 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
             }
         }
     }
+
+    /// The info icon on its own, after the title when there is no subtitle.
+    @ViewBuilder
+    private var infoButton: some View {
+        if let info {
+            Button { infoOpen.toggle() } label: {
+                Self.infoGlyph
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(GlassPressStyle())
+            .accessibilityLabel(info)
+            .help(info)
+            .popover(isPresented: $infoOpen, arrowEdge: .bottom) { infoPopover(info) }
+        }
+    }
+
+    /// The subtitle's last line with the info icon set in its text, right
+    /// after the last word wherever the line wraps. The line opens the
+    /// popover and shows the fine print on hover.
+    @ViewBuilder
+    private func infoLine(_ line: String) -> some View {
+        if let info {
+            Button { infoOpen.toggle() } label: {
+                (Text(line).foregroundColor(GlassColor.textSecondary)
+                    + Text("\u{00a0}\u{00a0}")
+                    + Self.infoGlyph.foregroundColor(GlassColor.textTertiary))
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(GlassPressStyle())
+            .accessibilityLabel(line)
+            .accessibilityHint(info)
+            .help(info)
+            .popover(isPresented: $infoOpen, arrowEdge: .bottom) { infoPopover(info) }
+        }
+    }
+
+    private static var infoGlyph: Text { Text(Image(systemName: "info.circle")) }
+
+    private func infoPopover(_ info: String) -> some View {
+        Text(info)
+            .glassType(GlassTokens.TypeScale.caption)
+            .foregroundStyle(GlassColor.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: 260, alignment: .leading)
+            .padding(GlassTokens.Space.s5)
+    }
 }
 
 public extension GlassIconCard where Content == EmptyView {
     /// A head-only card: `trailing` is the control on its right.
-    init(systemImage: String, title: String, subtitle: [String] = [], @ViewBuilder trailing: () -> Accessory) {
-        self.init(systemImage: systemImage, title: title, subtitle: subtitle, accessory: trailing) { EmptyView() }
+    init(
+        systemImage: String, title: String, subtitle: [String] = [], info: String? = nil, refresh: Refresh? = nil,
+        @ViewBuilder trailing: () -> Accessory
+    ) {
+        self.init(systemImage: systemImage, title: title, subtitle: subtitle, info: info, refresh: refresh,
+                  accessory: trailing) { EmptyView() }
     }
 }
 
 public extension GlassIconCard where Accessory == EmptyView {
-    init(systemImage: String, title: String, subtitle: [String] = [], @ViewBuilder content: () -> Content) {
-        self.init(systemImage: systemImage, title: title, subtitle: subtitle, accessory: { EmptyView() }, content: content)
+    init(
+        systemImage: String, title: String, subtitle: [String] = [], info: String? = nil, refresh: Refresh? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.init(systemImage: systemImage, title: title, subtitle: subtitle, info: info, refresh: refresh,
+                  accessory: { EmptyView() }, content: content)
     }
 }
 

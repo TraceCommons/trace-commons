@@ -246,7 +246,7 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(balance.contains("Button("), "the balance's sign-in is the credential card's, never a second one")
         XCTAssertFalse(balance.contains("palette("), "the balance reads the glass status, not the TC palette")
         let funding = try Self.text("Views/FundingRow.swift")
-        for needle in ["subtitle: [status?.view.message ?? copy.fundingUnavailable],", "Text(copy.fundingWhat)",
+        for needle in ["subtitle: [status?.view.message ?? copy.fundingUnavailable],", "info: copy.fundingWhat,",
                        "GlassIconCard(\n            systemImage: \"creditcard\", title: copy.fundingTitle,",
                        "Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)",
                        ".disabled(model.credentialBusy || request != nil)",
@@ -556,7 +556,9 @@ final class InferenceParityTests: XCTestCase {
     /// Launch sit on their own row at their own width, never wrapped.
     func test_theManagedActionsNeverBreakPerSyllable() throws {
         let source = try Self.text("Views/ManagedSessionsView.swift")
-        for needle in ["if model.managedSnapshot != nil { refreshLink }",
+        // The re-read icon sits after the title once the list is read
+        // (owner, 2026-10-10: the icon card's own place for it).
+        for needle in ["refresh: snapshot == nil ? nil : .init(",
                        "Text(model.managedText(\"add\")).lineLimit(1)",
                        "Text(model.managedText(\"launch\")).lineLimit(1)",
                        "return ViewThatFits(in: .horizontal) {",

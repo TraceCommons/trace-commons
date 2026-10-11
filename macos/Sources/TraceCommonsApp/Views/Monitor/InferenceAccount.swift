@@ -155,29 +155,9 @@ struct PrivateAIPanelHeader: View {
                 }
             }
             Spacer(minLength: GlassTokens.Space.s4)
-            RefreshIconButton(label: Self.refreshName(refresh, title: title ?? eyebrow), action: onRefresh)
+            GlassRefreshButton(Self.refreshName(refresh, title: title ?? eyebrow), action: onRefresh)
                 .disabled(disabled)
         }
-    }
-}
-
-/// A bare refresh glyph, no pill around it (owner, 2026-10-10), named for
-/// assistive tech and in its tooltip.
-struct RefreshIconButton: View {
-    let label: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: "arrow.clockwise")
-                .glassGlyph(13, weight: .medium)
-                .foregroundStyle(GlassColor.textSecondary)
-                .frame(width: GlassTokens.Size.control, height: GlassTokens.Size.control)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(GlassPressStyle())
-        .accessibilityLabel(label)
-        .help(label)
     }
 }
 
@@ -225,20 +205,14 @@ struct PrivateAIBalanceCard: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
 
-    /// Under its icon (owner, 2026-10-10): the heading and what the figures
-    /// cover in the head, with the re-read icon; the state or the figures
-    /// under it.
+    /// Under its icon (owner, 2026-10-10): the heading with its re-read
+    /// icon, what the figures cover, and the state or the figures under it.
     var body: some View {
         GlassIconCard(
             systemImage: "dollarsign.circle", title: copy.balanceTitle, subtitle: [copy.balanceWhat],
-            accessory: {
-                RefreshIconButton(
-                    label: PrivateAIPanelHeader.refreshName(copy.panelBalanceRefresh, title: copy.balanceTitle),
-                    action: { model.refreshNearAiBalance() })
-                    .disabled(model.credentialBusy)
-            }
-        ) {
-            BalanceRow(copy: copy, showsScope: false)
-        }
+            refresh: .init(
+                PrivateAIPanelHeader.refreshName(copy.panelBalanceRefresh, title: copy.balanceTitle),
+                isDisabled: model.credentialBusy, action: { model.refreshNearAiBalance() }),
+            content: { BalanceRow(copy: copy, showsScope: false) })
     }
 }
