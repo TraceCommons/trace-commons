@@ -1315,8 +1315,13 @@ gcloud builds submit --config cloudbuild.yaml \
 
 `_CODE_REVISION_HASH` becomes `TRACE_COMMONS_BUILD_CODE_REVISION_HASH` in the
 build. Compute it in the same clean checkout you upload: `pipeline.py revision`
-hashes the git tree, which `.gcloudignore` keeps out of the upload, so the build
-cannot compute it itself. Computing it before `gcloud builds submit`, as above,
+takes its file list from git and covers a few files under `docs/`, and
+`.gcloudignore` keeps `.git/`, the `.gitignore` files, and `docs/` out of the
+upload, so the build cannot compute it itself. The revision covers only what
+the server's binaries are built from and what a qualification reads
+([pipeline-qualification.md](pipeline-qualification.md), "Signed check
+results"), so a deploy of a change to anything else builds the same revision
+and keeps every pipeline qualification. Computing it before `gcloud builds submit`, as above,
 means a failed `pipeline.py revision` stops the command before anything is
 uploaded.
 
