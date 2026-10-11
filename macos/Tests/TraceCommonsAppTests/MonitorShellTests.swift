@@ -71,7 +71,8 @@ final class MonitorShellTests: XCTestCase {
             // The inspector's 16 by 18, on the column it scrolls.
             ".padding(GlassPaneInsets.inspector)",
             "GlassPane(padding: 0, isContent: true, edge: GlassTokens.Shadow.mapEdge) {",
-            "GlassMapField()",
+            // The field is the stage's, which lights it under the pointer.
+            "GlassMapStage(alignment: .topTrailing) {",
             ".padding(GlassTokens.Space.mapOverlayInset)",
             ".frame(width: Self.viewMenuWidth)",
             "static var viewMenuWidth: CGFloat { 250 }",

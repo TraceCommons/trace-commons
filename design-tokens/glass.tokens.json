@@ -371,15 +371,15 @@
         "cardFill": {
           "angle": 180,
           "stops": [
-            { "hex": "#ffffff", "alpha": 0.3, "at": 0 },
-            { "hex": "#ffffff", "alpha": 0.3, "at": 1 }
+            { "hex": "#ffffff", "alpha": 0.42, "at": 0 },
+            { "hex": "#ffffff", "alpha": 0.42, "at": 1 }
           ]
         },
         "cardFillQuiet": {
           "angle": 180,
           "stops": [
-            { "hex": "#ffffff", "alpha": 0.22, "at": 0 },
-            { "hex": "#ffffff", "alpha": 0.22, "at": 1 }
+            { "hex": "#ffffff", "alpha": 0.32, "at": 0 },
+            { "hex": "#ffffff", "alpha": 0.32, "at": 1 }
           ]
         },
         "controlFill": {
@@ -499,15 +499,15 @@
         "cardFill": {
           "angle": 180,
           "stops": [
-            { "hex": "#ffffff", "alpha": 0.05, "at": 0 },
-            { "hex": "#ffffff", "alpha": 0.05, "at": 1 }
+            { "hex": "#0d1124", "alpha": 0.25, "at": 0 },
+            { "hex": "#0d1124", "alpha": 0.25, "at": 1 }
           ]
         },
         "cardFillQuiet": {
           "angle": 180,
           "stops": [
-            { "hex": "#ffffff", "alpha": 0.04, "at": 0 },
-            { "hex": "#ffffff", "alpha": 0.04, "at": 1 }
+            { "hex": "#0d1124", "alpha": 0.2, "at": 0 },
+            { "hex": "#0d1124", "alpha": 0.2, "at": 1 }
           ]
         },
         "controlFill": {

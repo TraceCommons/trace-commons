@@ -645,16 +645,30 @@ enum GlassMapMarks {
         return result
     }
 
+    /// How far the shimmer band is turned counterclockwise from square to
+    /// the field's diagonal (owner, 2026-10-10).
+    static let shimmerTilt: Double = 5
+
     /// The shimmer band at `sweep` (its fractional part; each whole step is
-    /// one pass): the gradient's start and end, centred on a point that
-    /// travels the field's diagonal from beyond its top-left corner to
-    /// beyond its bottom-right, so a pass starts and ends off the field.
+    /// one pass): the gradient's start and end. Its centre travels the
+    /// field's diagonal from top-left to bottom-right; its axis is that
+    /// diagonal turned `shimmerTilt` degrees counterclockwise on screen, so
+    /// the band lies a little off square to its path. The pass starts and
+    /// ends with the whole band off the field.
     static func shimmerBand(sweep: Double, size: CGSize) -> (start: CGPoint, end: CGPoint) {
         let progress = CGFloat(sweep - sweep.rounded(.down))
         let half = shimmerHalfWidth
-        let along = -half + progress * (1 + half * 2)
-        func point(_ t: CGFloat) -> CGPoint { CGPoint(x: size.width * t, y: size.height * t) }
-        return (point(along - half), point(along + half))
+        // Far enough past each corner that the tilted band clears it.
+        let margin = half / CGFloat(cos(shimmerTilt * .pi / 180)) + 0.02
+        let along = -margin + progress * (1 + margin * 2)
+        let angle = shimmerTilt * .pi / 180
+        // Counterclockwise on screen, where y runs down.
+        let axis = CGVector(
+            dx: size.width * CGFloat(cos(angle)) + size.height * CGFloat(sin(angle)),
+            dy: -size.width * CGFloat(sin(angle)) + size.height * CGFloat(cos(angle)))
+        let centre = CGPoint(x: size.width * along, y: size.height * along)
+        return (CGPoint(x: centre.x - axis.dx * half, y: centre.y - axis.dy * half),
+                CGPoint(x: centre.x + axis.dx * half, y: centre.y + axis.dy * half))
     }
 
     /// How lit a mark is at `distance` from the pointer: 1 under it, easing

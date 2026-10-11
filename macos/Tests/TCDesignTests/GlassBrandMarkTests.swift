@@ -50,18 +50,30 @@ final class GlassBrandMarkTests: XCTestCase {
     }
 
     /// A pass starts and ends with the band off the field, crosses its
-    /// middle halfway, and runs top-left to bottom-right.
+    /// middle halfway, runs top-left to bottom-right, and lies turned
+    /// counterclockwise from square to the diagonal.
     func test_theShimmerCrossesTheDiagonal() {
         let size = CGSize(width: 400, height: 300)
+        let corners = [CGPoint.zero, CGPoint(x: 400, y: 0), CGPoint(x: 0, y: 300), CGPoint(x: 400, y: 300)]
+        // Where a point falls along the band's axis: below 0 is before the
+        // band, above 1 past it.
+        func position(_ p: CGPoint, _ band: (start: CGPoint, end: CGPoint)) -> CGFloat {
+            let axis = CGVector(dx: band.end.x - band.start.x, dy: band.end.y - band.start.y)
+            let length = axis.dx * axis.dx + axis.dy * axis.dy
+            return ((p.x - band.start.x) * axis.dx + (p.y - band.start.y) * axis.dy) / length
+        }
         let before = GlassMapMarks.shimmerBand(sweep: 0, size: size)
-        XCTAssertLessThanOrEqual(before.end.x, 0.001)
-        XCTAssertLessThanOrEqual(before.end.y, 0.001)
+        XCTAssertTrue(corners.allSatisfy { position($0, before) >= 1 }, "the band starts on the field")
+        let after = GlassMapMarks.shimmerBand(sweep: 0.9999, size: size)
+        XCTAssertTrue(corners.allSatisfy { position($0, after) <= 0 }, "the band ends on the field")
         let middle = GlassMapMarks.shimmerBand(sweep: 0.5, size: size)
         XCTAssertEqual((middle.start.x + middle.end.x) / 2, 200, accuracy: 0.001)
         XCTAssertEqual((middle.start.y + middle.end.y) / 2, 150, accuracy: 0.001)
-        let after = GlassMapMarks.shimmerBand(sweep: 0.9999, size: size)
-        XCTAssertGreaterThanOrEqual(after.start.x, 399.9)
-        XCTAssertGreaterThanOrEqual(after.start.y, 299.9)
+        // The axis is the diagonal turned 5 degrees counterclockwise: up on
+        // screen, which is a smaller angle below the horizontal.
+        let axis = atan2(middle.end.y - middle.start.y, middle.end.x - middle.start.x) * 180 / .pi
+        let diagonal = atan2(300.0, 400.0) * 180 / .pi
+        XCTAssertEqual(diagonal - axis, GlassMapMarks.shimmerTilt, accuracy: 0.001)
         // A later pass is the same pass.
         XCTAssertEqual(GlassMapMarks.shimmerBand(sweep: 3.5, size: size).start, middle.start)
     }
