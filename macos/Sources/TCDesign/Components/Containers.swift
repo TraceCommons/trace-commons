@@ -61,6 +61,82 @@ public struct GlassCard<Content: View>: View {
     }
 }
 
+/// A card headed by an icon (owner, 2026-10-10): a medium SF Symbol on
+/// the left, the title over an optional subtitle, and an optional control
+/// on the right, centred on the head. Anything else the card holds sits
+/// under the head, aligned with the title rather than the icon.
+public struct GlassIconCard<Accessory: View, Content: View>: View {
+    private let systemImage: String
+    private let title: String
+    private let subtitle: [String]
+    private let accessory: Accessory
+    private let content: Content
+
+    /// The icon's point size, and the column it sits in.
+    public static var iconSize: CGFloat { 22 }
+    static var iconColumn: CGFloat { 26 }
+
+    /// `subtitle` is drawn line by line under the title, empty lines left
+    /// out.
+    public init(
+        systemImage: String, title: String, subtitle: [String] = [],
+        @ViewBuilder accessory: () -> Accessory, @ViewBuilder content: () -> Content
+    ) {
+        self.systemImage = systemImage
+        self.title = title
+        self.subtitle = subtitle.filter { !$0.isEmpty }
+        self.accessory = accessory()
+        self.content = content()
+    }
+
+    public var body: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                HStack(alignment: .center, spacing: GlassTokens.Space.s5) {
+                    Image(systemName: systemImage)
+                        .glassGlyph(Self.iconSize, weight: .regular)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .frame(width: Self.iconColumn)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                        Text(title)
+                            .glassType(GlassTokens.TypeScale.bodyStrong)
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityAddTraits(.isHeader)
+                        ForEach(Array(subtitle.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .glassType(GlassTokens.TypeScale.caption)
+                                .foregroundStyle(GlassColor.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    Spacer(minLength: GlassTokens.Space.s4)
+                    accessory
+                }
+                if Content.self != EmptyView.self {
+                    content
+                        .padding(.leading, Self.iconColumn + GlassTokens.Space.s5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+}
+
+public extension GlassIconCard where Content == EmptyView {
+    /// A head-only card: `trailing` is the control on its right.
+    init(systemImage: String, title: String, subtitle: [String] = [], @ViewBuilder trailing: () -> Accessory) {
+        self.init(systemImage: systemImage, title: title, subtitle: subtitle, accessory: trailing) { EmptyView() }
+    }
+}
+
+public extension GlassIconCard where Accessory == EmptyView {
+    init(systemImage: String, title: String, subtitle: [String] = [], @ViewBuilder content: () -> Content) {
+        self.init(systemImage: systemImage, title: title, subtitle: subtitle, accessory: { EmptyView() }, content: content)
+    }
+}
+
 /// A card with an eyebrow heading and an optional accessory on the right.
 /// With `title`, #1146's two-level head: the eyebrow over an h2, the
 /// accessory (a chip, a re-read link) top-right. With `action` the whole

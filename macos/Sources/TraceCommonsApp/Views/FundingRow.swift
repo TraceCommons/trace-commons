@@ -115,30 +115,34 @@ struct FundingRow: View {
     @State private var visible = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            // #1146's funding panel: the billing eyebrow at the top of its
-            // own card, after the balance panel.
-            Text(copy.fundingTitle)
-                .glassType(GlassTokens.TypeScale.eyebrow)
-                .foregroundStyle(GlassColor.textTertiary)
-            Text(status?.view.message ?? copy.fundingUnavailable)
-                .glassType(GlassTokens.TypeScale.body)
-                .foregroundStyle(GlassColor.textPrimary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(copy.fundingWhat)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Button {
-                load(opening: status?.destination)
-            } label: {
-                // The glass style's own 28pt, as every inline card button
-                // (owner, 2026-10-08); a 44pt label made it the odd one out.
-                Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)
-            }
-            .buttonStyle(GlassButtonStyle(.glass))
-            .disabled(model.credentialBusy || request != nil)
-        }
+        // #1146's funding panel, its own card after the balance, under its
+        // icon (owner, 2026-10-10): the state in the head with the button
+        // on the right, and what the button opens under it.
+        GlassIconCard(
+            systemImage: "creditcard", title: copy.fundingTitle,
+            subtitle: [status?.view.message ?? copy.fundingUnavailable],
+            accessory: {
+                Button {
+                    load(opening: status?.destination)
+                } label: {
+                    // The glass style's own 28pt, as every inline card button
+                    // (owner, 2026-10-08); a 44pt label made it the odd one out.
+                    Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)
+                        .lineLimit(1)
+                }
+                .buttonStyle(GlassButtonStyle(.glass))
+                .fixedSize()
+                .disabled(model.credentialBusy || request != nil)
+            },
+            content: {
+                // What the button opens, under the head at the card's width,
+                // so the head's text column keeps one sentence beside the
+                // button.
+                Text(copy.fundingWhat)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            })
         .onAppear {
             visible = true
             load(opening: nil)

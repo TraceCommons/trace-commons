@@ -201,8 +201,11 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(source.contains("BalanceRow("), "the balance is its own panel")
         XCTAssertFalse(source.contains("FundingRow("), "the funding is its own panel")
         let account = try Self.text("Views/Monitor/InferenceAccount.swift")
-        for needle in ["PrivateAIBalanceCard(copy: copy)", "GlassCard { FundingRow(copy: copy) }", "BalanceRow(copy: copy)",
-                       "onRefresh: { model.refreshNearAiBalance() })"] {
+        // Each card under its icon (owner, 2026-10-10); the billing card
+        // draws its own.
+        for needle in ["PrivateAIBalanceCard(copy: copy)", "                FundingRow(copy: copy)\n",
+                       "BalanceRow(copy: copy, showsScope: false)", "action: { model.refreshNearAiBalance() })",
+                       "systemImage: \"dollarsign.circle\"", "systemImage: \"gearshape\""] {
             XCTAssertTrue(account.contains(needle), "InferenceAccount.swift lacks \(needle)")
         }
         for file in ["Views/CredentialSection.swift", "Views/BalanceRow.swift", "Views/FundingRow.swift", "Views/NearAiJoinView.swift"] {
@@ -243,7 +246,8 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(balance.contains("Button("), "the balance's sign-in is the credential card's, never a second one")
         XCTAssertFalse(balance.contains("palette("), "the balance reads the glass status, not the TC palette")
         let funding = try Self.text("Views/FundingRow.swift")
-        for needle in ["Text(status?.view.message ?? copy.fundingUnavailable)", "Text(copy.fundingWhat)",
+        for needle in ["subtitle: [status?.view.message ?? copy.fundingUnavailable],", "Text(copy.fundingWhat)",
+                       "GlassIconCard(\n            systemImage: \"creditcard\", title: copy.fundingTitle,",
                        "Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)",
                        ".disabled(model.credentialBusy || request != nil)",
                        ".onReceive(model.$credentialBusy.removeDuplicates().dropFirst())",
@@ -456,7 +460,7 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(account.contains("PrivateAIStatCard("), "the Inference access / Runtime pair is drawn again")
         let order = ["ManagedSessionsSection()",
                      "PrivateAIBalanceCard(copy: copy)",
-                     "GlassCard { FundingRow(copy: copy) }",
+                     "FundingRow(copy: copy)",
                      "PrivateAISettingsLinkCard(copy: copy, onOpen: onOpenSettings)",
                      "struct PrivateAISettingsPanels", "ManagedGlobalSettingsHeader()",
                      "eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,",

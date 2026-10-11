@@ -26,7 +26,7 @@ struct InferenceAccountSection: View {
                 // has no panel for (owner ruling O3: in the main pane).
                 ManagedSessionsSection()
                 PrivateAIBalanceCard(copy: copy)
-                GlassCard { FundingRow(copy: copy) }
+                FundingRow(copy: copy)
                 PrivateAISettingsLinkCard(copy: copy, onOpen: onOpenSettings)
             }
         }
@@ -116,36 +116,16 @@ struct PrivateAISettingsLinkCard: View {
     let copy: PrivateInferenceCopy
     let onOpen: () -> Void
 
-    /// The gear's size: medium, between a row glyph and a tile.
-    static let iconSize: CGFloat = 22
-
     var body: some View {
-        GlassCard {
-            HStack(alignment: .center, spacing: GlassTokens.Space.s5) {
-                Image(systemName: "gearshape")
-                    .glassGlyph(Self.iconSize, weight: .regular)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .frame(width: Self.iconSize + 4)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                    Text(copy.panelSettingsTitle)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityAddTraits(.isHeader)
-                    Text(copy.panelSettingsBody)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: GlassTokens.Space.s4)
+        GlassIconCard(
+            systemImage: "gearshape", title: copy.panelSettingsTitle, subtitle: [copy.panelSettingsBody],
+            trailing: {
                 Button(copy.panelSettingsOpen, action: onOpen)
                     .buttonStyle(GlassButtonStyle(.glass, small: true))
                     .lineLimit(1)
                     .fixedSize()
                     .accessibilityLabel(copy.panelSettingsOpenAccessibility)
-            }
-        }
+            })
     }
 }
 
@@ -245,15 +225,20 @@ struct PrivateAIBalanceCard: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
 
+    /// Under its icon (owner, 2026-10-10): the heading and what the figures
+    /// cover in the head, with the re-read icon; the state or the figures
+    /// under it.
     var body: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
-                PrivateAIPanelHeader(
-                    eyebrow: copy.panelBalanceEyebrow, title: copy.balanceTitle,
-                    refresh: copy.panelBalanceRefresh, disabled: model.credentialBusy,
-                    onRefresh: { model.refreshNearAiBalance() })
-                BalanceRow(copy: copy)
+        GlassIconCard(
+            systemImage: "dollarsign.circle", title: copy.balanceTitle, subtitle: [copy.balanceWhat],
+            accessory: {
+                RefreshIconButton(
+                    label: PrivateAIPanelHeader.refreshName(copy.panelBalanceRefresh, title: copy.balanceTitle),
+                    action: { model.refreshNearAiBalance() })
+                    .disabled(model.credentialBusy)
             }
+        ) {
+            BalanceRow(copy: copy, showsScope: false)
         }
     }
 }

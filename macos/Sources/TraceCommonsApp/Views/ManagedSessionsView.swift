@@ -51,18 +51,18 @@ struct ManagedSessionsSection: View {
 
     // MARK: Accounts
 
+    /// The accounts card under its icon (owner, 2026-10-10): the title
+    /// and description in the head with the re-read icon; the two actions
+    /// sit on their own row under it, so no label is ever squeezed into
+    /// breaking per syllable (V1).
     private var accountsCard: some View {
-        // The header carries only the re-read link, as #1146's panels do;
-        // the two actions sit on their own row under the description, so
-        // no label is ever squeezed into breaking per syllable (V1).
-        GlassEyebrowCard(model.managedText("accounts_title"), accessory: {
-            if model.managedSnapshot != nil { refreshLink }
-        }) {
+        GlassIconCard(
+            systemImage: "person.crop.circle.badge.checkmark",
+            title: model.managedText("accounts_title"),
+            subtitle: [model.managedText("description")],
+            accessory: { if model.managedSnapshot != nil { refreshLink } }
+        ) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                Text(model.managedText("description"))
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 if let snapshot = model.managedSnapshot {
                     accountActions(snapshot)
                     actionFailure
@@ -223,19 +223,23 @@ struct ManagedSessionsSection: View {
 
     // MARK: Sessions
 
+    /// The sessions card under its icon (owner, 2026-10-10): with none, the
+    /// empty line is the head's subtitle and the card is one row; otherwise
+    /// the sessions are listed under the head.
+    @ViewBuilder
     private func sessionsCard(_ snapshot: ManagedSnapshot) -> some View {
-        GlassEyebrowCard(model.managedText("title")) {
-            if snapshot.sessions.isEmpty {
-                Text(model.managedText("empty"))
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-            } else {
+        if snapshot.sessions.isEmpty {
+            GlassIconCard(
+                systemImage: "terminal", title: model.managedText("title"),
+                subtitle: [model.managedText("empty")], trailing: { EmptyView() })
+        } else {
+            GlassIconCard(systemImage: "terminal", title: model.managedText("title"), content: {
                 VStack(spacing: 0) {
                     ForEach(Array(snapshot.sessions.enumerated()), id: \.element.id) { index, session in
                         GlassTableRow(first: index == 0) { sessionRow(session) }
                     }
                 }
-            }
+            })
         }
     }
 
