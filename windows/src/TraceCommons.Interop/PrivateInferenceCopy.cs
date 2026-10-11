@@ -692,6 +692,14 @@ public sealed record PrivateInferenceCopy
     public string PanelBalanceEyebrow { get; init; } = string.Empty;
     [JsonPropertyName("panel_balance_refresh")]
     public string PanelBalanceRefresh { get; init; } = string.Empty;
+    [JsonPropertyName("panel_settings_title")]
+    public string PanelSettingsTitle { get; init; } = string.Empty;
+    [JsonPropertyName("panel_settings_body")]
+    public string PanelSettingsBody { get; init; } = string.Empty;
+    [JsonPropertyName("panel_settings_open")]
+    public string PanelSettingsOpen { get; init; } = string.Empty;
+    [JsonPropertyName("panel_settings_open_accessibility")]
+    public string PanelSettingsOpenAccessibility { get; init; } = string.Empty;
     [JsonPropertyName("stat_inference_access")]
     public string StatInferenceAccess { get; init; } = string.Empty;
     [JsonPropertyName("stat_runtime")]
@@ -887,6 +895,10 @@ public sealed record PrivateInferenceCopy
             PanelConnectionEyebrow,
             PanelBalanceEyebrow,
             PanelBalanceRefresh,
+            PanelSettingsTitle,
+            PanelSettingsBody,
+            PanelSettingsOpen,
+            PanelSettingsOpenAccessibility,
             StatInferenceAccess,
             StatRuntime,
             RuntimeOn,
