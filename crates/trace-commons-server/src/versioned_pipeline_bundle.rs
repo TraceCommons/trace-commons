@@ -147,12 +147,18 @@ impl AdmissionPolicy for MinimalAdmissionPolicy {
                     true,
                     Some("privacy_review_required"),
                 ),
+                // Owner decision PC-D27 (2026-10-11): a receipt-time High is
+                // held for a human like a Medium, never rejected here -- as
+                // `main`'s legacy path quarantines it and the Review-start
+                // privacy pass holds a High it finds (D1). Its own label
+                // lets an operator tell it from a Medium hold.
                 PrivacyRisk::High => (
-                    AdmissionDecision::Reject {
-                        reason: ReasonCode::new("privacy_risk_rejected").expect("static label"),
+                    AdmissionDecision::Quarantine {
+                        reason: ReasonCode::new("privacy_risk_high_review_required")
+                            .expect("static label"),
                     },
                     true,
-                    Some("privacy_risk_rejected"),
+                    Some("privacy_risk_high_review_required"),
                 ),
             }
         };

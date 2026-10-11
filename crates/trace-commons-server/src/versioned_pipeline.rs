@@ -306,7 +306,8 @@ pub const PIPELINE_PRIVACY_PASS_MISSING_LABEL: &str = "privacy_pass_missing";
 /// `privacy_pass_outcome`), held for a human whatever
 /// Admission decided: the run's parking label, the review queue's hold
 /// reason, and a reason an approving assessment must resolve. Distinct from
-/// Admission's `privacy_review_required`.
+/// Admission's `privacy_review_required` (Medium) and
+/// `privacy_risk_high_review_required` (High).
 pub const PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL: &str = "privacy_pass_review_required";
 /// Rule id of a Review rejection the server commits itself: a reviewer's
 /// Reject of an Admission-admitted run the privacy pass escalated (Q2).
@@ -1020,9 +1021,11 @@ pub fn pipeline_privacy_risk(
 /// (`found_and_removed`) and the redaction counts recorded for audit. High
 /// means something redaction did not resolve (a key finding, a coverage gap,
 /// a survivor, a residual scan that could not run) and is held for a human,
-/// never rejected (D1). A receipt already at High never reaches the pass
-/// (Admission rejects it), and a Medium receipt Admission quarantined keeps
-/// Admission's hold whatever the pass clears.
+/// never rejected (D1). A receipt already at High is held by Admission
+/// (`privacy_risk_high_review_required`, owner decision PC-D27,
+/// 2026-10-11), so the pass cannot escalate it (its risk is not above the
+/// receipt's) and returns `Cleared`; that run, like a Medium receipt
+/// Admission quarantined, keeps Admission's hold whatever the pass clears.
 pub fn privacy_pass_outcome(
     receipt_risk: PrivacyRisk,
     pass_risk: PrivacyRisk,

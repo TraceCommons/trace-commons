@@ -2062,10 +2062,10 @@ mod tests {
                 },
             ),
             (
-                "privacy_risk_rejected".to_string(),
+                "privacy_high_risk_review_rejected".to_string(),
                 CompatibilityFixtureDecision {
-                    admission: "reject".to_string(),
-                    review: "skipped".to_string(),
+                    admission: "quarantine".to_string(),
+                    review: "rejected".to_string(),
                     score: "skipped".to_string(),
                     settle: "skipped".to_string(),
                 },

@@ -29,7 +29,8 @@ another corpus file (default:
 [`versioned-pipeline-minimal-corpus-v1.json`](../superpowers/specs/fixtures/versioned-pipeline-minimal-corpus-v1.json),
 five fixtures: `clean_tool_plan`, `locally_redacted_secret`,
 `privacy_quarantine_approved`, `privacy_quarantine_rejected`,
-`privacy_risk_rejected`). `--corpus-digest sha256:HEX` refuses a corpus file
+`privacy_high_risk_review_rejected`; the last is a High-risk receipt
+Admission holds for review, which the harness's reviewer then rejects). `--corpus-digest sha256:HEX` refuses a corpus file
 whose bytes do not hash to that digest -- checked before any database
 starts. `--postgres-admin-url URL` and `--archive` work as in
 [pipeline-qualification.md](pipeline-qualification.md).
