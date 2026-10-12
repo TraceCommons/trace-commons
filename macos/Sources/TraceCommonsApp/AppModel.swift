@@ -1852,6 +1852,35 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// "Dismiss all": records every notice above the tabs that has its own
+    /// acknowledgement as shown -- grant voids, arming rewordings and the
+    /// legacy-migration notice -- in one round trip each, then re-reads
+    /// status so the daemon's own lists decide what stays. It re-arms and
+    /// changes nothing else, exactly as each card's own acknowledgement.
+    func acknowledgeAllNotices() {
+        let voids = status.grantVoids.map(\.id)
+        let rewordings = status.armingRewordings.map(\.id)
+        let legacy = legacyMigrationNotice != nil
+        firstRunNotice = nil
+        perform(
+            "acknowledge_all_notices",
+            work: { client in
+                if !voids.isEmpty { try client.acknowledgeGrantVoids(ids: voids) }
+                if !rewordings.isEmpty { try client.acknowledgeArmingRewordings(ids: rewordings) }
+                if legacy { try client.acknowledgeLegacyInviteMigration() }
+            }
+        ) { _ in
+            self.refreshStatus()
+            self.refreshAudit()
+        }
+    }
+
+    /// How many notices "Dismiss all" would acknowledge.
+    var acknowledgeableNoticeCount: Int {
+        status.grantVoids.count + status.armingRewordings.count
+            + (legacyMigrationNotice != nil ? 1 : 0) + (firstRunNotice != nil ? 1 : 0)
+    }
+
     /// Projects whose "Ask me" the daemon refused, by project id, so
     /// the notice can show the Rust's refusal line. Cleared on a retry.
     @Published private(set) var askFirstRefused: Set<String> = []

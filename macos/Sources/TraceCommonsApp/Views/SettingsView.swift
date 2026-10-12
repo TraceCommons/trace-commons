@@ -120,6 +120,9 @@ enum ActionNoticeWords {
     /// can be put away; nil when the core's copy does not decode, and the
     /// caller falls back to `dismissWord`.
     static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismissAction
+    /// The dismiss-all word over the notices above the tabs; nil when the core's
+    /// table cannot be read.
+    static let coreDismissAllWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismissAll
 
     /// The dismiss control's name when the whole table does not decode: the
     /// same core word, read from its one key, so a glass notice still names

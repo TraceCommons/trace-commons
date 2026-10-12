@@ -175,6 +175,10 @@ pub struct MonitorTracesCopy {
     /// confirmation's and the review card's. Apart from [`Self::dismiss`],
     /// native's "Not this one", which this does not replace.
     pub dismiss_action: &'static str,
+    /// Acknowledges every notice above the tabs that has its own
+    /// acknowledgement, in one press: one arming rewording per armed folder
+    /// otherwise means one "Got it" per folder.
+    pub dismiss_all: &'static str,
     /// The arming offer's eyebrow, over the core's arming copy.
     pub optional_automation: &'static str,
     /// The Traces tree's rows and the Dismiss-session confirmation.
@@ -533,6 +537,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
         core_unreachable: MONITOR_CORE_UNREACHABLE,
         request_failed: MONITOR_REQUEST_FAILED,
         dismiss_action: "Dismiss",
+        dismiss_all: "Dismiss all",
         optional_automation: "OPTIONAL AUTOMATION",
         tree: MonitorTreeCopy {
             tree_label: "Tools, folders and traces",
@@ -796,6 +801,8 @@ pub struct MonitorScreensCopy {
     pub recent_activity: &'static str,
     /// Sessions worth a second look.
     pub flagged: &'static str,
+    /// Raises the app's main window from the menu bar.
+    pub open_app: &'static str,
     /// Opens the folders' rules.
     pub manage_rules: &'static str,
     /// Opens Settings.
@@ -1249,6 +1256,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         kept: "kept",
         recent_activity: "Recent activity",
         flagged: SECOND_LOOK_HEADING,
+        open_app: concat!("Open ", crate::app_name!()),
         manage_rules: "Manage rules…",
         // #1146 tray word (`tray.rs`), with the ellipsis of a command that
         // opens a window; the modal it opens is titled bare "Settings".
