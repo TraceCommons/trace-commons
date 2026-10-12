@@ -2440,7 +2440,19 @@ final class AppModel: ObservableObject {
     /// the hosts wait on `onboardingKnown` before acting on it.
     var requiresOnboarding: Bool {
         if startup == .needsRoots { return true }
+        if Self.reviewSkipsSignIn { return false }
         return !status.loggedIn || !isOnboardingComplete
+    }
+
+    /// Debug builds only: `TC_REVIEW_SKIP_SIGN_IN=1` opens the main window
+    /// without the NEAR AI sign-in, so a design review can reach the screens
+    /// behind it (owner, 2026-10-12). A release build never reads it.
+    static var reviewSkipsSignIn: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["TC_REVIEW_SKIP_SIGN_IN"] == "1"
+        #else
+        false
+        #endif
     }
 
     /// Whether a watch-only first run was finished against this config

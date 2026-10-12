@@ -809,7 +809,7 @@ public struct GlassToggleStyle: ToggleStyle {
             } label: {
                 ZStack(alignment: configuration.isOn ? .trailing : .leading) {
                     Capsule()
-                        .fill(configuration.isOn ? GlassAccent.fill(onColor) : AnyShapeStyle(GlassTokens.Color.toggleOff.color))
+                        .fill(configuration.isOn ? onColor.color : GlassTokens.Color.toggleOff.color)
                         .glassPressedFill()
                     Circle()
                         .fill(Self.knob(kind, isOn: configuration.isOn).color)

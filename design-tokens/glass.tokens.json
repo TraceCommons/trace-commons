@@ -115,11 +115,11 @@
   },
   "gradient": {
     "accentFill": {
-      "angle": 135,
-      "note": "The accent as a gradient (owner, 2026-10-12): selected states, toggles, checkboxes, step progress and the primary button. Classic draws it as its flat selected fill; the flat theme runs teal to green in Light and the brand purple to magenta in Dark, each stop holding white text at 5:1 or more.",
+      "angle": 0,
+      "note": "The accent as a gradient, for decoration only (owner, 2026-10-12): the selected tab's glow and the promotion cards' tint. Controls keep the solid accent. Stop 0 is the darker, drawn at the bottom of the tab glow; stop 1 the lighter, at its top. Classic keeps its purples; the flat theme runs teal to green in Light and the brand purple to magenta in Dark. No text sits on it.",
       "stops": [
-        { "hex": "#ffffff", "alpha": 0.16, "at": 0, "light": { "hex": "#ffffff" } },
-        { "hex": "#ffffff", "alpha": 0.16, "at": 1, "light": { "hex": "#ffffff" } }
+        { "hex": "#6d14f3", "at": 0, "light": { "hex": "#6d14f3" } },
+        { "hex": "#8a3dff", "at": 1, "light": { "hex": "#7a2cf5" } }
       ]
     },
     "paneFill": { "angle": 160, "stops": [
@@ -355,7 +355,7 @@
         "purpleSoft": { "hex": "#1a7d8d" },
         "tabEmber": { "hex": "#2493a6" },
         "tabEmberHalo": { "hex": "#2493a6", "alpha": 0.3 },
-        "promoTintEnd": { "hex": "#3fbf8a" },
+        "promoTintEnd": { "hex": "#42bcca" },
         "inactiveDim": { "hex": "#000000", "alpha": 0.04 },
         "textSecondary": { "hex": "#3c3c43" },
         "textTertiary": { "hex": "#3d3d43" },
@@ -387,10 +387,10 @@
       },
       "gradient": {
         "accentFill": {
-          "angle": 135,
+          "angle": 0,
           "stops": [
             { "hex": "#0f7480", "alpha": 1, "at": 0 },
-            { "hex": "#1b7f4a", "alpha": 1, "at": 1 }
+            { "hex": "#34c47c", "alpha": 1, "at": 1 }
           ]
         },
         "paneFill": {
@@ -423,10 +423,10 @@
           ]
         },
         "ctaFill": {
-          "angle": 135,
+          "angle": 180,
           "stops": [
-            { "hex": "#0f7480", "alpha": 1, "at": 0 },
-            { "hex": "#1b7f4a", "alpha": 1, "at": 1 }
+            { "hex": "#116373", "alpha": 1, "at": 0 },
+            { "hex": "#116373", "alpha": 1, "at": 1 }
           ]
         },
         "ctaSecondaryFill": {
@@ -437,10 +437,10 @@
           ]
         },
         "checkboxOnFill": {
-          "angle": 135,
+          "angle": 180,
           "stops": [
-            { "hex": "#0f7480", "alpha": 1, "at": 0 },
-            { "hex": "#1b7f4a", "alpha": 1, "at": 1 }
+            { "hex": "#116373", "alpha": 1, "at": 0 },
+            { "hex": "#116373", "alpha": 1, "at": 1 }
           ]
         }
       },
@@ -490,7 +490,6 @@
         "paneBase": { "hex": "#0d1124", "alpha": 0.96 },
         "paneOpaque": { "hex": "#0d1124" },
         "glassVeil": { "hex": "#070a1a", "alpha": 0.68 },
-        "promoTintEnd": { "hex": "#e0359a" },
         "inactiveDim": { "hex": "#070a1a", "alpha": 0.14 },
         "wellFill": { "hex": "#000000", "alpha": 0.3 },
         "fieldFill": { "hex": "#000000", "alpha": 0.3 },
@@ -520,10 +519,10 @@
       },
       "gradient": {
         "accentFill": {
-          "angle": 135,
+          "angle": 0,
           "stops": [
             { "hex": "#6d14f3", "alpha": 1, "at": 0 },
-            { "hex": "#c2187a", "alpha": 1, "at": 1 }
+            { "hex": "#e0359a", "alpha": 1, "at": 1 }
           ]
         },
         "paneFill": {
@@ -556,10 +555,10 @@
           ]
         },
         "ctaFill": {
-          "angle": 135,
+          "angle": 180,
           "stops": [
             { "hex": "#6d14f3", "alpha": 1, "at": 0 },
-            { "hex": "#c2187a", "alpha": 1, "at": 1 }
+            { "hex": "#6d14f3", "alpha": 1, "at": 1 }
           ]
         }
      ,
@@ -571,10 +570,10 @@
           ]
         },
         "checkboxOnFill": {
-          "angle": 135,
+          "angle": 180,
           "stops": [
-            { "hex": "#6d14f3", "alpha": 1, "at": 0 },
-            { "hex": "#c2187a", "alpha": 1, "at": 1 }
+            { "hex": "#8a3dff", "alpha": 0.8, "at": 0 },
+            { "hex": "#6d14f3", "alpha": 0.7, "at": 1 }
           ]
         }
       },

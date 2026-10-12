@@ -53,7 +53,7 @@ struct HomeInsightsVisual: View {
                             .lineLimit(1)
                         GeometryReader { proxy in
                             Capsule()
-                                .fill(GlassAccent.fill(GlassTokens.Color.purpleSoft))
+                                .fill(GlassTokens.Color.purpleSoft.color)
                                 .frame(width: max(4, proxy.size.width * Double(bar.tokens) / most))
                         }
                         .frame(height: 6)

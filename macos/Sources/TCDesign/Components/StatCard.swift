@@ -48,7 +48,7 @@ public struct GlassStatCard: View {
                     .frame(width: Self.iconSide, height: Self.iconSide)
                     .background(
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(GlassAccent.fill(GlassTokens.Color.controlSelected)))
+                            .fill(GlassTokens.Color.controlSelected.color))
                     .accessibilityHidden(true)
             }
         }

@@ -733,7 +733,7 @@ private struct HistoryFilterPill: View {
             .fixedSize()
             .padding(.horizontal, GlassTokens.Space.s5)
             .padding(.vertical, 5)
-            .background(Capsule().fill(selected ? GlassAccent.fill(GlassTokens.Color.controlSelected) : AnyShapeStyle(Color.clear)))
+            .background(Capsule().fill(selected ? GlassTokens.Color.controlSelected.color : Color.clear))
             .contentShape(Capsule())
         }
         .buttonStyle(GlassPressStyle())
