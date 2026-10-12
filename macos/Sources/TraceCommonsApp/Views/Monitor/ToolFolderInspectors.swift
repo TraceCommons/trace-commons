@@ -87,10 +87,35 @@ struct FolderInspector: View {
                 placeholder: "—"
             )
             .disabled(store.writing.contains(folder.id))
-            ForEach(store.disclosureLines(folder.disclosure), id: \.self) { caption($0) }
+            disclosure(words)
             if folder.isBucket, let note = ProjectCopy.unresolvedBucketNote { caption(note) }
         } else {
             caption(words.inspector.noRule)
+        }
+    }
+
+    /// What an armed folder is told: the one sentence for its route (owner,
+    /// 2026-10-12), with the long, precise disclosure behind an info button
+    /// beside it. If the core's "More about" words are unavailable the long
+    /// form is drawn instead, so it is never unreachable.
+    @ViewBuilder
+    private func disclosure(_ words: MonitorTracesCopy) -> some View {
+        if let copy = store.armedDisclosure(folder.disclosure) {
+            if let label = Self.moreAboutLabel(words.inspector.contributionRule) {
+                HStack(alignment: .top, spacing: GlassTokens.Space.s2) {
+                    caption(copy.summary)
+                    GlassInfoButton(label, text: copy.lines.joined(separator: "\n\n"))
+                }
+            } else {
+                ForEach(copy.lines, id: \.self) { caption($0) }
+            }
+        }
+    }
+
+    /// The core's "More about {title}" for the rule section, nil if unread.
+    static func moreAboutLabel(_ title: String) -> String? {
+        TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode).map {
+            FirstRunCopy.fill($0.uses.moreAbout, ["title": title])
         }
     }
 
