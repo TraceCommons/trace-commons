@@ -1060,6 +1060,48 @@ pub fn pipeline_privacy_risk(
     }
 }
 
+/// The Admission rule id a Medium receipt is admitted under when the
+/// operator accepts Medium risk (`admission_privacy_risk`). The receipt
+/// records it in place of the bundle's own `minimal_admission_v1`, so an
+/// operator can tell those admissions from a Low's. A label, nothing else.
+pub const PIPELINE_ADMISSION_ACCEPT_FOUND_AND_REMOVED_RULE_ID: &str =
+    "minimal_admission_v1_accept_found_and_removed";
+
+/// The privacy risk the receipt hands Admission, and whether the operator's
+/// accept-Medium setting lowered it. `accept_medium_risk` is ingest's
+/// `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS`.
+///
+/// Owner decision 2026-10-12 ("once PII is removed, accept", applied to
+/// Admission): with the setting on, a Medium whose basis records only what
+/// redaction found and removed -- `FoundAndRemoved`, with or without
+/// `ConsentContentFlag` -- is handed to Admission as Low, so the bundle's
+/// Admission policy admits it, unchanged. Everything else is exactly
+/// `pipeline_privacy_risk`: with the setting off, a Medium of any other
+/// basis (an empty one, a declared Medium nothing was found for), and every
+/// High (a key finding, a coverage gap, a survivor, a residual scan that
+/// could not run) keep their hold. The Review-start privacy pass never
+/// calls this: it compares on `pipeline_privacy_risk`, so the receipt it
+/// compares against stays Medium and a pass High still escalates.
+pub fn admission_privacy_risk(
+    risk: &ResidualPiiRisk,
+    basis: &[ResidualRiskCondition],
+    accept_medium_risk: bool,
+) -> (PrivacyRisk, bool) {
+    let mapped = pipeline_privacy_risk(risk, basis);
+    let found_and_removed_only = basis.contains(&ResidualRiskCondition::FoundAndRemoved)
+        && basis.iter().all(|condition| {
+            matches!(
+                condition,
+                ResidualRiskCondition::FoundAndRemoved | ResidualRiskCondition::ConsentContentFlag
+            )
+        });
+    if accept_medium_risk && mapped == PrivacyRisk::Medium && found_and_removed_only {
+        (PrivacyRisk::Low, true)
+    } else {
+        (mapped, false)
+    }
+}
+
 /// The Review-start privacy pass's outcome (decision P3, as amended by the
 /// owner decision of 2026-10-10, "once PII removed we should go to
 /// accepted"). `receipt_risk` and `pass_risk` are both on Admission's scale
@@ -1078,6 +1120,10 @@ pub fn pipeline_privacy_risk(
 /// 2026-10-11), so the pass cannot escalate it (its risk is not above the
 /// receipt's) and returns `Cleared`; that run, like a Medium receipt
 /// Admission quarantined, keeps Admission's hold whatever the pass clears.
+/// A found-and-removed Medium Admission admitted under the operator's
+/// accept-Medium setting (`admission_privacy_risk`) is still Medium here,
+/// so a pass Medium clears it like any admitted run and only a pass High
+/// escalates it.
 pub fn privacy_pass_outcome(
     receipt_risk: PrivacyRisk,
     pass_risk: PrivacyRisk,
@@ -9015,6 +9061,15 @@ pub struct PipelineReceiptRequest<'a> {
     pub server_envelope: &'a TraceContributionEnvelope,
     pub residual_risk_basis: &'a [ResidualRiskCondition],
     pub limits: PipelineAdmissionLimits,
+    /// The operator's `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS`, as
+    /// ingest holds it (`AppState::accept_medium_risk_submissions`). When
+    /// `true`, a Medium receipt whose basis records only what redaction
+    /// found and removed (`admission_privacy_risk`) is admitted, the narrow
+    /// pipeline reading of the setting `main`'s legacy path applies to every
+    /// Medium. When `false`, Admission sees exactly
+    /// `pipeline_privacy_risk`. The bundle's Admission policy never reads
+    /// it.
+    pub accept_medium_risk: bool,
     /// The source session `main`'s admission claimed for this upload, as
     /// `(account_id, session_digest)`: the final receipt transaction locks
     /// it and refuses the receipt when it is withdrawn (Zaki review 1,
@@ -10525,6 +10580,7 @@ impl PipelineService {
             server_envelope: &envelope,
             residual_risk_basis: &residual_risk_basis,
             limits: request.limits,
+            accept_medium_risk: request.accept_medium_risk,
         };
         let envelope = request.server_envelope;
 
@@ -10616,9 +10672,10 @@ impl PipelineService {
         // any other Reject, never `MinimalAdmissionPolicy`'s permanent
         // `authority_missing` error (SYS-003, reserved for the missing-
         // source case this receipt already handled).
-        let privacy_risk = pipeline_privacy_risk(
+        let (privacy_risk, accepted_medium) = admission_privacy_risk(
             &envelope.privacy.residual_pii_risk,
             request.residual_risk_basis,
+            request.accept_medium_risk,
         );
         let admission_input = AdmissionInput {
             run_id,
@@ -10641,11 +10698,19 @@ impl PipelineService {
             quota_available: true,
             privacy_risk,
         };
-        let admission = bundle
+        let mut admission = bundle
             .admission
             .execute(&admission_input)
             .await
             .map_err(|error| anyhow::anyhow!(error.label().to_string()))?;
+        if accepted_medium && matches!(admission.decision, AdmissionDecision::Admit) {
+            // The policy saw Low; the evidence records the Medium the
+            // receipt mapped, and the rule names the setting that admitted
+            // it, so the stored outcome stays truthful.
+            admission.evidence.privacy_risk = Some(PrivacyRisk::Medium);
+            admission.evaluation.rule_id =
+                PIPELINE_ADMISSION_ACCEPT_FOUND_AND_REMOVED_RULE_ID.to_string();
+        }
         let stored = StoredPhaseResult::from_result(Phase::Admission, &admission)?;
 
         // 7. The final transaction.
@@ -17672,6 +17737,77 @@ mod tests {
         assert_eq!(
             pipeline_privacy_risk(&ResidualPiiRisk::High, &[]),
             PrivacyRisk::High
+        );
+    }
+
+    /// Owner decision 2026-10-12: with the operator's accept-Medium setting
+    /// on, a Medium whose basis is only what redaction found and removed
+    /// (with or without the consent flag) reaches Admission as Low and is
+    /// marked as lowered. A declared Medium with no basis, any other basis
+    /// condition, every High, and every case with the setting off map
+    /// exactly as `pipeline_privacy_risk`.
+    #[test]
+    fn admission_privacy_risk_accepts_only_a_found_and_removed_medium() {
+        use ResidualRiskCondition::{
+            ConsentContentFlag, CoverageIncomplete, FoundAndRemoved, KeyFinding, ResidualSurvivor,
+        };
+        let medium = ResidualPiiRisk::Medium;
+        for basis in [
+            &[FoundAndRemoved][..],
+            &[FoundAndRemoved, ConsentContentFlag][..],
+            &[ConsentContentFlag, FoundAndRemoved][..],
+        ] {
+            assert_eq!(
+                admission_privacy_risk(&medium, basis, true),
+                (PrivacyRisk::Low, true),
+                "{basis:?}"
+            );
+            assert_eq!(
+                admission_privacy_risk(&medium, basis, false),
+                (PrivacyRisk::Medium, false),
+                "{basis:?}"
+            );
+        }
+        // Already Low on Admission's scale: not lowered by the setting.
+        assert_eq!(
+            admission_privacy_risk(&medium, &[ConsentContentFlag], true),
+            (PrivacyRisk::Low, false)
+        );
+        // A declared Medium nothing was found for keeps its hold.
+        assert_eq!(
+            admission_privacy_risk(&medium, &[], true),
+            (PrivacyRisk::Medium, false)
+        );
+        for basis in [
+            &[FoundAndRemoved, KeyFinding][..],
+            &[FoundAndRemoved, CoverageIncomplete][..],
+            &[FoundAndRemoved, ResidualSurvivor][..],
+            &[
+                FoundAndRemoved,
+                ResidualRiskCondition::ResidualScanUnavailable,
+            ][..],
+        ] {
+            assert_eq!(
+                admission_privacy_risk(&medium, basis, true),
+                (PrivacyRisk::Medium, false),
+                "{basis:?}"
+            );
+        }
+        for basis in [
+            &[][..],
+            &[FoundAndRemoved][..],
+            &[FoundAndRemoved, ConsentContentFlag][..],
+            &[ResidualRiskCondition::ResidualScanUnavailable][..],
+        ] {
+            assert_eq!(
+                admission_privacy_risk(&ResidualPiiRisk::High, basis, true),
+                (PrivacyRisk::High, false),
+                "{basis:?}"
+            );
+        }
+        assert_eq!(
+            admission_privacy_risk(&ResidualPiiRisk::Low, &[FoundAndRemoved], true),
+            (PrivacyRisk::Low, false)
         );
     }
 
