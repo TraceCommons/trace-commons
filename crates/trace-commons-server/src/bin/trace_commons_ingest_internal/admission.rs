@@ -261,7 +261,7 @@ pub(super) async fn anchor(state: &AppState, tenant: &TenantCtx) -> ApiResult<Op
         .as_ref()
         .ok_or_else(|| denied_at("anchor_db_unconfigured"))?;
     let stored = db
-        .get_near_provisioned_anchor(tenant.tenant_id(), tenant.principal_ref())
+        .get_near_provisioned_anchor(tenant.tenant_id(), &tenant.account_principal_ref())
         .await
         .map_err(|_| denied_at("db_error:anchor_lookup"))?
         .ok_or_else(|| denied_at("anchor_missing"))?;
@@ -640,21 +640,24 @@ async fn reserve_account(
         .db_mirror
         .as_ref()
         .ok_or_else(|| denied_at("account_db_unconfigured"))?;
-    let account =
-        resolve_contribution_account(db.as_ref(), tenant.tenant_id(), tenant.principal_ref())
-            .await
-            .map_err(|refusal| match refusal {
-                trace_commons_server::account_trust::TrustRefusal::Unlinked => api_error(
-                    StatusCode::FORBIDDEN,
-                    AdmissionRefusal::AccountIdentityUnlinked.label(),
-                ),
-                trace_commons_server::account_trust::TrustRefusal::Refused => {
-                    denied_at("account_trust_refused")
-                }
-                trace_commons_server::account_trust::TrustRefusal::Unavailable => {
-                    denied_at("account_trust_unavailable")
-                }
-            })?;
+    // The device principal for a device-key claim, not the claim's own
+    // signed-claim principal: provisioning keys the account, the anchor and
+    // the ledger's live-device check by it (`TenantCtx::account_principal_ref`).
+    let principal = tenant.account_principal_ref();
+    let account = resolve_contribution_account(db.as_ref(), tenant.tenant_id(), &principal)
+        .await
+        .map_err(|refusal| match refusal {
+            trace_commons_server::account_trust::TrustRefusal::Unlinked => api_error(
+                StatusCode::FORBIDDEN,
+                AdmissionRefusal::AccountIdentityUnlinked.label(),
+            ),
+            trace_commons_server::account_trust::TrustRefusal::Refused => {
+                denied_at("account_trust_refused")
+            }
+            trace_commons_server::account_trust::TrustRefusal::Unavailable => {
+                denied_at("account_trust_unavailable")
+            }
+        })?;
     if let Some(existing) = tenant
         .read_submission_record(&state.root, submission)
         .map_err(internal_error)?
@@ -901,7 +904,7 @@ async fn reserve_account(
     }
     let reservation = AccountAdmissionReservation {
         account: account.clone(),
-        principal_ref: tenant.principal_ref().into(),
+        principal_ref: principal.clone(),
         expected_trust_version: None,
         submission_id: submission,
         body_hash,
@@ -954,7 +957,7 @@ async fn reserve_account(
         _guard: guard,
         processing: false,
         completed,
-        account: Some((account.clone(), tenant.principal_ref().into())),
+        account: Some((account.clone(), principal)),
         source_claim: Some((account.account_id(), digest)),
     })
 }

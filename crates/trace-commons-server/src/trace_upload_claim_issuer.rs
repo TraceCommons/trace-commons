@@ -1967,6 +1967,13 @@ impl TraceUploadClaimIssuerState {
                 .or(workload.sub.as_deref()),
             "workload subject is required",
         )?;
+        // A device-shaped actor is reserved for the device-key paths, which
+        // write one only after verifying that device's signature. Ingest
+        // resolves the device's account from it, so a workload token must
+        // not be able to name a device it never proved.
+        if crate::account_trust::is_device_shaped_actor(&actor) {
+            return Err(IssuerError::forbidden("workload subject is reserved"));
+        }
         let grant_principal_ref = signed_claim_auth_principal_ref(&tenant_id, &actor);
         self.issue_claim_for_authorized_actor(
             AuthorizedUploadClaimActor {
@@ -2070,18 +2077,23 @@ impl TraceUploadClaimIssuerState {
         let device_key_id = auth.device_key_id;
         // Grants are governed at the device level regardless of per-user subject.
         let grant_principal_ref =
-            principal_storage_ref(&format!("device:{tenant_id}:{device_key_id}"));
+            crate::account_trust::device_principal_ref(&tenant_id, &device_key_id);
         // When the instance asserts a per-user subject, the issued principal is
         // namespaced under the device so subjects cannot collide across
         // instances/tenants and the blast radius stays inside this tenant. Absent a
         // subject, behavior is unchanged (principal == raw device_key_id).
-        let actor = match request.subject.as_deref() {
-            Some(raw) => {
-                let subject = normalize_subject(raw)?;
-                format!("instance:{tenant_id}:{device_key_id}:user:{subject}")
-            }
-            None => device_key_id,
-        };
+        // Ingest parses the device key id back out of this actor to find the
+        // device's account (`account_trust::device_claim_key_id`).
+        let subject = request
+            .subject
+            .as_deref()
+            .map(normalize_subject)
+            .transpose()?;
+        let actor = crate::account_trust::device_claim_actor(
+            &tenant_id,
+            &device_key_id,
+            subject.as_deref(),
+        );
         let (ceiling_scopes, ceiling_uses) = self
             .resolve_device_scope_ceiling(&tenant_id, &grant_principal_ref, now)
             .await?;
@@ -2136,8 +2148,9 @@ impl TraceUploadClaimIssuerState {
         let claims =
             verify_device_workload_jwt(&auth.token, &public_key_bytes, Some(&self.audience))?;
         validate_device_workload_claims(&claims, &tenant_id)?;
-        let actor = auth.device_key_id;
-        let grant_principal_ref = principal_storage_ref(&format!("device:{tenant_id}:{actor}"));
+        let actor = crate::account_trust::device_claim_actor(&tenant_id, &auth.device_key_id, None);
+        let grant_principal_ref =
+            crate::account_trust::device_principal_ref(&tenant_id, &auth.device_key_id);
         let (ceiling_scopes, ceiling_uses) = self
             .resolve_device_scope_ceiling(&tenant_id, &grant_principal_ref, now)
             .await?;
@@ -4048,6 +4061,56 @@ mod tests {
             payload.contains("public_attribution"),
             "minted claim carries the requested scope: {payload}"
         );
+    }
+
+    /// Ingest resolves a device's account from a device-shaped actor, so the
+    /// workload path, which verifies no device key, may not mint one -- in
+    /// either `sub` or `principal_ref`, bare or `instance:` form.
+    #[tokio::test]
+    async fn workload_path_refuses_a_device_shaped_actor() {
+        let state = test_config().build_state().expect("state builds");
+        let key = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        let instance = crate::account_trust::device_claim_actor("tenant-a", key, Some("u"));
+        for (sub, principal_ref) in [
+            (Some(key), None),
+            (Some(instance.as_str()), None),
+            (Some("principal:agent-1"), Some(instance.as_str())),
+            (None, Some(key)),
+        ] {
+            let workload = WorkloadClaims {
+                sub: sub.map(str::to_string),
+                principal_ref: principal_ref.map(str::to_string),
+                tenant_id: Some("tenant-a".to_string()),
+                iss: None,
+                aud: None,
+                exp: Utc::now().timestamp() + 60,
+                iat: Some(Utc::now().timestamp()),
+                allowed_consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+                allowed_uses: vec![TraceAllowedUse::Debugging],
+                invite_code: None,
+            };
+            let request = TraceUploadClaimRequest {
+                schema_version: TRACE_UPLOAD_CLAIM_REQUEST_SCHEMA_VERSION.to_string(),
+                tenant_id: Some("tenant-a".to_string()),
+                audience: Some("trace-commons-upload".to_string()),
+                trace_id: None,
+                submission_id: None,
+                consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+                allowed_uses: vec![TraceAllowedUse::Debugging],
+                subject: None,
+                requested_at: Utc::now(),
+            };
+            let error = state
+                .issue_claim(&workload, request)
+                .await
+                .expect_err("device-shaped workload actor refused");
+            assert_eq!(
+                error.status,
+                StatusCode::FORBIDDEN,
+                "{sub:?} {principal_ref:?}"
+            );
+            assert_eq!(error.message, "workload subject is reserved");
+        }
     }
 
     #[tokio::test]

@@ -7856,6 +7856,75 @@ async fn submit_rate_limit_separates_colliding_static_and_signed_principals() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+/// Account admission looks a device-key upload claim up by the device's
+/// provisioned principal, recovered from the issuer's actor, and every other
+/// credential by its own principal. `principal_ref()` never changes.
+#[test]
+fn account_principal_ref_recovers_only_the_claims_own_device() {
+    use trace_commons_server::account_trust::{device_claim_actor, device_principal_ref};
+    const TENANT: &str = "nearai-0000000000000000000000000000000000000000000000000000000000000000";
+    const KEY: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    let subject = trace_commons_protocol::onboarding::user_subject_hash("near-ai-user");
+    let ctx = |tenant: &str, sub: &str, principal_ref: Option<&str>| {
+        let mut claims = serde_json::json!({
+            "tenant_id": tenant,
+            "exp": (Utc::now() + Duration::minutes(5)).timestamp(),
+            "role": "contributor",
+            "sub": sub,
+        });
+        if let Some(principal_ref) = principal_ref {
+            claims["principal_ref"] = serde_json::json!(principal_ref);
+        }
+        TenantCtx::from_auth(
+            signed_token_claims_to_auth(serde_json::from_value(claims).expect("claims"))
+                .expect("auth"),
+        )
+    };
+    let device = device_principal_ref(TENANT, KEY);
+
+    // Both actor forms the issuer mints for a device, with `principal_ref`
+    // equal to `sub` as the issuer writes it, or absent.
+    for actor in [
+        device_claim_actor(TENANT, KEY, Some(&subject)),
+        device_claim_actor(TENANT, KEY, None),
+    ] {
+        for principal_ref in [Some(actor.as_str()), None] {
+            let ctx = ctx(TENANT, &actor, principal_ref);
+            assert_eq!(ctx.account_principal_ref(), device, "{actor}");
+            assert_ne!(ctx.principal_ref(), device, "ownership key is unchanged");
+            assert_eq!(
+                ctx.principal_ref(),
+                signed_claim_principal_refs(TENANT, &actor).0
+            );
+        }
+    }
+
+    // Falls back to the claim's own principal, which resolves no device row.
+    let foreign = device_claim_actor("nearai-other", KEY, Some(&subject));
+    let workload = "principal:agent-1".to_string();
+    for (tenant, sub, principal_ref) in [
+        // Another tenant's actor names no device in this one.
+        (TENANT, foreign.as_str(), None),
+        // A non-device actor.
+        (TENANT, workload.as_str(), None),
+        // `sub` names a device but the principal was derived from something
+        // else: `sub` is not borrowed.
+        (TENANT, KEY, Some("principal:agent-1")),
+    ] {
+        let ctx = ctx(tenant, sub, principal_ref);
+        assert_eq!(ctx.account_principal_ref(), ctx.principal_ref(), "{sub}");
+    }
+
+    // A static token keeps its own principal.
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, TENANT, KEY, TokenRole::Contributor);
+    let static_ctx = TenantCtx::from_auth(tokens.get(KEY).expect("token").clone());
+    assert_eq!(
+        static_ctx.account_principal_ref(),
+        static_ctx.principal_ref()
+    );
+}
+
 #[test]
 fn method_bound_principal_refs_separate_static_and_signed_namespaces() {
     let colliding = "signed:a:b:c";

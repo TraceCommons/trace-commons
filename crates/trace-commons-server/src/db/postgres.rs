@@ -6208,13 +6208,9 @@ fn onboarding_device_tenant_access_grant_id(tenant_id: &str, device_key_id: &str
     )
 }
 
+/// One derivation for provisioning, the issuer and ingest's account lookup.
 fn onboarding_device_principal_ref(tenant_id: &str, device_key_id: &str) -> String {
-    let digest = Sha256::digest(format!(
-        "device:{}:{}",
-        tenant_id.trim(),
-        device_key_id.trim()
-    ));
-    format!("principal_sha256:{}", hex::encode(digest))
+    crate::account_trust::device_principal_ref(tenant_id, device_key_id)
 }
 
 fn sha256_prefixed(input: &str) -> String {
