@@ -75,6 +75,22 @@ public struct GlassPromoCard<Content: View>: View {
         scheme == .dark ? 1 : 0.85
     }
 
+    /// The lift under the pointer: a faint brightening in the dark theme,
+    /// and in light a faint deepening of the brand tint, never a wash of
+    /// white over the tint (owner, 2026-10-12: the light hover was far too
+    /// bright).
+    @ViewBuilder
+    static func hover(_ scheme: ColorScheme, shape: RoundedRectangle) -> some View {
+        if scheme == .dark {
+            shape.fill(Color.white.opacity(Self.hoverDark)).blendMode(.plusLighter)
+        } else {
+            shape.fill(GlassTokens.Color.purpleSoft.color.opacity(Self.hoverLight))
+        }
+    }
+
+    static var hoverDark: Double { 0.06 }
+    static var hoverLight: Double { 0.07 }
+
     public var body: some View {
         let shape = RoundedRectangle(cornerRadius: GlassTier.card.radius, style: .continuous)
         let strength = Self.strength(colorScheme)
@@ -89,9 +105,7 @@ public struct GlassPromoCard<Content: View>: View {
                     GlassPromoLight(
                         treatment: treatment, pointer: pointer, strength: strength, still: reduceMotion)
                     if interactive, pointer != nil {
-                        shape.fill(GlassTokens.Color.cardHover.color)
-                            .blendMode(.plusLighter)
-                            .opacity(0.5)
+                        Self.hover(colorScheme, shape: shape)
                     }
                 }
                 .glassPressedFill()
@@ -112,8 +126,9 @@ public struct GlassPromoCard<Content: View>: View {
     }
 }
 
-/// The brand tint every treatment starts from: purple at the top leading
-/// corner fading to blue at the bottom trailing one.
+/// The brand tint every treatment starts from: the accent at the top
+/// leading corner fading to `promoTintEnd` at the bottom trailing one
+/// (purple to blue in the dark theme, orange to amber in light).
 private struct GlassPromoTint: View {
     let strength: Double
 
@@ -121,8 +136,8 @@ private struct GlassPromoTint: View {
         LinearGradient(
             colors: [
                 GlassTokens.Color.purpleSoft.color.opacity(0.34 * strength),
-                GlassTokens.Color.purple.color.opacity(0.16 * strength),
-                GlassTokens.Color.blue.color.opacity(0.20 * strength),
+                GlassTokens.Color.purpleSoft.color.opacity(0.2 * strength),
+                GlassTokens.Color.promoTintEnd.color.opacity(0.22 * strength),
             ],
             startPoint: .topLeading, endPoint: .bottomTrailing)
     }
@@ -159,7 +174,7 @@ private struct GlassPromoLight: View {
             let size = box.size
             let blobs: [(Color, Double, Double, Double, CGFloat)] = [
                 (GlassTokens.Color.purpleSoft.color, 0.11, 0.0, 0.62, 0.9),
-                (GlassTokens.Color.blue.color, 0.07, 2.1, 0.5, 0.75),
+                (GlassTokens.Color.promoTintEnd.color, 0.07, 2.1, 0.5, 0.75),
                 (GlassTokens.Color.purpleText.color, 0.05, 4.2, 0.32, 0.6),
             ]
             ZStack {
@@ -229,7 +244,7 @@ private struct GlassPromoEdge: View {
 
     private static var ring: [Color] {
         [
-            GlassTokens.Color.purpleSoft.color, GlassTokens.Color.blue.color,
+            GlassTokens.Color.purpleSoft.color, GlassTokens.Color.promoTintEnd.color,
             GlassTokens.Color.purpleText.color, GlassTokens.Color.purpleSoft.color,
         ]
     }
@@ -253,7 +268,7 @@ private struct GlassPromoEdge: View {
                 LinearGradient(
                     colors: [
                         GlassTokens.Color.purpleSoft.color.opacity(0.7 * strength),
-                        GlassTokens.Color.blue.color.opacity(0.35 * strength),
+                        GlassTokens.Color.promoTintEnd.color.opacity(0.35 * strength),
                     ],
                     startPoint: .topLeading, endPoint: .bottomTrailing),
                 lineWidth: 1)
