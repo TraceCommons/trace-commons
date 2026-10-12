@@ -2,6 +2,20 @@
 //!
 //! The buttons `launch`, `use_default`, `reconnect` and `save_login`:
 //! Approved 2026-10-08 (button rule). `launch_title` keeps the launch dialog's full title.
+//!
+//! Sessions on the NEAR AI sign-in. Each of these keys is proposed
+//! 2026-10-12, awaiting owner approval:
+//! - `start_claude` "Start Claude Code" -- proposed 2026-10-12, awaiting owner approval
+//! - `start_codex` "Start Codex" -- proposed 2026-10-12, awaiting owner approval
+//! - `sign_in_scope` "Uses your NEAR AI sign-in. Runs in Terminal, in the
+//!   folder you choose." -- proposed 2026-10-12, awaiting owner approval
+//! - `sign_in_needed` "Sign in to NEAR AI to start a session." -- proposed
+//!   2026-10-12, awaiting owner approval. Also the line a shell shows for
+//!   the refusal `managed-near-ai-sign-in-required`.
+//! - `sign_in_near_ai` "Sign in" -- the button that starts the NEAR AI
+//!   sign-in. Proposed 2026-10-12, awaiting owner approval.
+//! - `sign_in_near_ai_accessibility` "Sign in to NEAR AI" -- its accessible
+//!   name. Proposed 2026-10-12, awaiting owner approval.
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "Managed sessions",
@@ -65,7 +79,13 @@ pub fn copy() -> serde_json::Value {
             "auth_sign_in_required": "Needs sign-in",
             "auth_checking": "Checking",
             "auth_ready": "Ready",
-            "auth_unavailable": "Unavailable"
+            "auth_unavailable": "Unavailable",
+            "start_claude": "Start Claude Code",
+            "start_codex": "Start Codex",
+            "sign_in_scope": "Uses your NEAR AI sign-in. Runs in Terminal, in the folder you choose.",
+            "sign_in_needed": "Sign in to NEAR AI to start a session.",
+            "sign_in_near_ai": "Sign in",
+            "sign_in_near_ai_accessibility": "Sign in to NEAR AI"
     }"#).expect("static managed copy is valid JSON")
 }
 
@@ -88,6 +108,24 @@ mod tests {
             copy["accounts_refresh_accessibility"],
             "Refresh saved accounts"
         );
+    }
+
+    /// The NEAR AI sign-in launch reads these words, exactly as proposed.
+    #[test]
+    fn the_sign_in_launch_has_its_words() {
+        let copy = copy();
+        assert_eq!(copy["start_claude"], "Start Claude Code");
+        assert_eq!(copy["start_codex"], "Start Codex");
+        assert_eq!(
+            copy["sign_in_scope"],
+            "Uses your NEAR AI sign-in. Runs in Terminal, in the folder you choose."
+        );
+        assert_eq!(
+            copy["sign_in_needed"],
+            "Sign in to NEAR AI to start a session."
+        );
+        assert_eq!(copy["sign_in_near_ai"], "Sign in");
+        assert_eq!(copy["sign_in_near_ai_accessibility"], "Sign in to NEAR AI");
     }
 
     /// Every lifecycle and sign-in state a shell can be sent has a label,

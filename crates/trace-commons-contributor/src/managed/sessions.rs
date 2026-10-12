@@ -86,6 +86,11 @@ impl std::fmt::Debug for PreparedLaunch {
 pub struct LaunchContext {
     pub session: SessionView,
     pub proof: String,
+    /// The loopback port of a proxy the daemon hosts for this session. Set
+    /// only for a session on the NEAR AI sign-in, whose credential never
+    /// leaves the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_port: Option<u16>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -358,7 +363,11 @@ impl SessionRegistry {
         entry.last_seen = Utc::now();
         let session = entry.view.clone();
         self.commit(next)?;
-        Ok(LaunchContext { session, proof })
+        Ok(LaunchContext {
+            session,
+            proof,
+            route_port: None,
+        })
     }
 
     pub fn report(&mut self, report: LifecycleReport) -> Result<(), ManagedError> {
@@ -405,6 +414,26 @@ impl SessionRegistry {
         entry.view.state = report.state;
         entry.view.exit_code = report.exit_code;
         entry.last_seen = Utc::now();
+        self.commit(next)
+    }
+
+    /// The connection and state of a session, without consuming anything.
+    pub fn describe(&self, id: Uuid) -> Option<(ConnectionKind, SessionState)> {
+        self.data
+            .entries
+            .iter()
+            .find(|e| e.view.id == id)
+            .map(|e| (e.view.connection, e.view.state))
+    }
+
+    /// Fail a session that was never redeemed, for the ticket holder only.
+    pub fn fail_unredeemed(&mut self, session_id: Uuid, ticket: &str) -> Result<(), ManagedError> {
+        self.validate_ticket(session_id, ticket)?;
+        let mut next = self.data.clone();
+        if let Some(entry) = next.entries.iter_mut().find(|e| e.view.id == session_id) {
+            entry.view.state = SessionState::Failed;
+            entry.ticket_hash = None;
+        }
         self.commit(next)
     }
 
