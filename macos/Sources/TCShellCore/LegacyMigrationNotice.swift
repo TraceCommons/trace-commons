@@ -70,22 +70,38 @@ public struct LegacyMigrationOffer: Decodable, Equatable, Sendable {
     public let dismiss: String
     /// Beside the dismiss: the move stays in Settings.
     public let later: String
+    /// Shown in place of the button while the passkey step runs in the
+    /// browser.
+    public let passkeyWaiting: String
+    /// The passkey step ended without finishing: nothing was moved.
+    public let passkeyFailed: String
+    /// Stops waiting on the passkey step.
+    public let passkeyCancel: String
 
     enum CodingKeys: String, CodingKey {
         case title, body, action, working, dismiss, later
         case invitePrompt = "invite_prompt"
         case startFailed = "start_failed"
+        case passkeyWaiting = "passkey_waiting"
+        case passkeyFailed = "passkey_failed"
+        case passkeyCancel = "passkey_cancel"
     }
 
     /// The payload fields this shell decodes, by wire name. Compared against
     /// the live export by `TCBridgeTests`.
     public static let consumedFields = [
         "title", "body", "action", "working", "invite_prompt", "start_failed", "dismiss", "later",
+        "passkey_waiting", "passkey_failed", "passkey_cancel",
     ]
 
     /// The daemon's refusal label that asks for the invite, so the shell
     /// shows the invite field and sends what is pasted with the next move.
     public static let inviteNeededLabel = "legacy_migration_invite_needed"
+
+    /// The daemon's refusal label for a move that needs the passkey step
+    /// first (no session to provision the account with). The shell runs the
+    /// step itself and then retries the move.
+    public static let passkeyNeededLabel = "legacy_migration_no_near_ai_session"
 
     /// Decode the payload, or nil if it will not parse or a field is empty:
     /// shown whole or not at all.
@@ -97,7 +113,8 @@ public struct LegacyMigrationOffer: Decodable, Equatable, Sendable {
         }
         let words = [
             offer.title, offer.body, offer.action, offer.working, offer.invitePrompt,
-            offer.startFailed, offer.dismiss, offer.later,
+            offer.startFailed, offer.dismiss, offer.later, offer.passkeyWaiting, offer.passkeyFailed,
+            offer.passkeyCancel,
         ]
         return words.contains(where: \.isEmpty) ? nil : offer
     }

@@ -84,6 +84,8 @@ final class LegacyMigrationOfferModelTests: XCTestCase {
         let offer = try XCTUnwrap(AppModel().legacyMigrationOffer)
         XCTAssertFalse(offer.dismiss.isEmpty)
         XCTAssertFalse(offer.later.isEmpty)
+        XCTAssertTrue(offer.passkeyWaiting.contains("passkey"))
+        XCTAssertFalse(offer.passkeyCancel.isEmpty)
     }
 
     /// An invite-enrolled device the daemon offers the move to: Settings
@@ -244,6 +246,122 @@ final class LegacyMigrationOfferModelTests: XCTestCase {
         let last = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(sent[2].utf8)) as? [String: String])
         XCTAssertEqual(last, ["invite": "SYNTHETICINVITE01"])
+    }
+
+    // MARK: - The passkey step
+
+    /// With no session the move leads with the passkey step: Move runs it
+    /// (the browser step the first run uses), then retries the move without
+    /// a second press. Nothing says "sign in".
+    func testWithNoSessionThePasskeyStepRunsAndTheMoveContinues() async throws {
+        let tenant = freshTenant()
+        let daemon = MigrationDaemon(
+            answers: [
+                refusal("legacy_migration_no_near_ai_session"),
+                #"{"id":1,"result":{"migrated":true}}"#,
+            ],
+            statusJSON: statusJSON(tenant: tenant, offered: false,
+                                   notice: #"{"folders_kept":0,"automatic_grant_kept":false}"#))
+        let model = AppModel()
+        defer { model.shutdown() }
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        model.setStatusForTesting(try status(tenant: tenant, offered: true))
+        var steps = 0
+        var waitingDuringStep = false
+        model.legacyMigrationPasskeyStep = { [weak model] in
+            steps += 1
+            waitingDuringStep = model?.legacyMigrationAwaitingPasskey ?? false
+            return true
+        }
+
+        await model.migrateLegacyInvite()
+        XCTAssertEqual(steps, 1)
+        XCTAssertTrue(waitingDuringStep, "the offer says it waits on the passkey while the step runs")
+        XCTAssertFalse(model.legacyMigrationAwaitingPasskey)
+        XCTAssertEqual(daemon.calls.filter { $0.0 == "legacy_invite_migrate" }.count, 2)
+        XCTAssertNil(model.legacyMigrationRefusal)
+        XCTAssertFalse(model.legacyMigrationPasskeyFailed)
+        try await waitUntil { !model.isLegacyMigrationOffered }
+    }
+
+    /// Cancelled while waiting on the passkey: the move is not retried,
+    /// nothing changed, no failure is claimed, and the offer stays.
+    func testACancelledPasskeyStepChangesNothing() async throws {
+        let tenant = freshTenant()
+        let daemon = MigrationDaemon(
+            answers: [refusal("legacy_migration_no_near_ai_session")],
+            statusJSON: statusJSON(tenant: tenant, offered: true))
+        let model = AppModel()
+        defer { model.shutdown() }
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        model.setStatusForTesting(try status(tenant: tenant, offered: true))
+        var cancelled = 0
+        model.legacyMigrationPasskeyStep = {
+            while !Task.isCancelled { try? await Task.sleep(nanoseconds: 5_000_000) }
+            return false
+        }
+        model.legacyMigrationPasskeyCancel = { cancelled += 1 }
+
+        let move = Task { await model.migrateLegacyInvite() }
+        try await waitUntil { model.legacyMigrationAwaitingPasskey }
+        model.cancelLegacyMigrationPasskey()
+        await move.value
+
+        XCTAssertEqual(cancelled, 1, "the browser step is ended too")
+        XCTAssertEqual(daemon.calls.filter { $0.0 == "legacy_invite_migrate" }.count, 1)
+        XCTAssertFalse(model.legacyMigrationAwaitingPasskey)
+        XCTAssertFalse(model.legacyMigrationBusy)
+        XCTAssertFalse(model.legacyMigrationPasskeyFailed)
+        XCTAssertNil(model.legacyMigrationRefusal)
+        XCTAssertFalse(model.legacyMigrationStartFailed)
+        XCTAssertTrue(model.isLegacyMigrationOffered)
+    }
+
+    /// A passkey step that ends without finishing: the core's line, the
+    /// move is not retried, and the offer stays.
+    func testAFailedPasskeyStepSaysTheCoresLine() async throws {
+        let tenant = freshTenant()
+        let daemon = MigrationDaemon(
+            answers: [refusal("legacy_migration_no_near_ai_session")],
+            statusJSON: statusJSON(tenant: tenant, offered: true))
+        let model = AppModel()
+        defer { model.shutdown() }
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        model.setStatusForTesting(try status(tenant: tenant, offered: true))
+        model.legacyMigrationPasskeyStep = { false }
+
+        await model.migrateLegacyInvite()
+        XCTAssertTrue(model.legacyMigrationPasskeyFailed)
+        XCTAssertNil(model.legacyMigrationRefusal)
+        XCTAssertEqual(daemon.calls.filter { $0.0 == "legacy_invite_migrate" }.count, 1)
+        XCTAssertTrue(model.isLegacyMigrationOffered)
+        let line = try XCTUnwrap(model.legacyMigrationOffer?.passkeyFailed)
+        XCTAssertTrue(line.contains("passkey"))
+    }
+
+    /// The passkey step runs once per press: a second "no session" after it
+    /// finished is said as the refusal it is, not looped on.
+    func testThePasskeyStepRunsOncePerPress() async throws {
+        let tenant = freshTenant()
+        let daemon = MigrationDaemon(
+            answers: [
+                refusal("legacy_migration_no_near_ai_session"),
+                refusal("legacy_migration_no_near_ai_session"),
+            ],
+            statusJSON: statusJSON(tenant: tenant, offered: true))
+        let model = AppModel()
+        defer { model.shutdown() }
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+        model.setStatusForTesting(try status(tenant: tenant, offered: true))
+        var steps = 0
+        model.legacyMigrationPasskeyStep = { steps += 1; return true }
+
+        await model.migrateLegacyInvite()
+        XCTAssertEqual(steps, 1)
+        XCTAssertEqual(daemon.calls.filter { $0.0 == "legacy_invite_migrate" }.count, 2)
+        XCTAssertEqual(
+            model.legacyMigrationRefusal,
+            TCCoreCopy.legacyMigrationRefusalLine(label: "legacy_migration_no_near_ai_session"))
     }
 
     /// Move is hidden while the invite is asked for and nothing is pasted.

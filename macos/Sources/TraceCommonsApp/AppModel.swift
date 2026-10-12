@@ -1984,11 +1984,55 @@ final class AppModel: ObservableObject {
     @Published private(set) var legacyMigrationInviteNeeded = false
     /// The move could not be started at all (no daemon answer).
     @Published private(set) var legacyMigrationStartFailed = false
+    /// The move is waiting on the passkey step in the browser.
+    @Published private(set) var legacyMigrationAwaitingPasskey = false
+    /// The passkey step ended without finishing; nothing was moved.
+    @Published private(set) var legacyMigrationPasskeyFailed = false
+    /// The passkey step: the first run's browser step (`nearAILogin`), where
+    /// the person creates or uses their passkey and the daemon keeps the
+    /// session the move provisions the account with. True once it finished.
+    /// Replaced only by tests.
+    var legacyMigrationPasskeyStep: (() async -> Bool)?
+    /// Ends the browser step the passkey step began (`cancelNearAILogin`).
+    /// Replaced only by tests.
+    var legacyMigrationPasskeyCancel: (() async -> Void)?
+    /// The running passkey step, so Cancel can stop it.
+    private var legacyMigrationPasskeyTask: Task<Bool, Never>?
+
+    /// Cancel while waiting on the passkey: stop waiting and end the
+    /// browser step. Nothing is moved, and the offer stays.
+    func cancelLegacyMigrationPasskey() {
+        guard let task = legacyMigrationPasskeyTask else { return }
+        task.cancel()
+        let cancel = legacyMigrationPasskeyCancel ?? { [weak self] in _ = await self?.cancelNearAILogin() }
+        Task { await cancel() }
+    }
+
+    /// Runs the passkey step once, as its own task so Cancel can stop it.
+    /// True when it finished; false when it failed, ran out of time or was
+    /// cancelled (then `legacyMigrationPasskeyFailed` stays false).
+    private func runLegacyMigrationPasskeyStep() async -> Bool {
+        let step = legacyMigrationPasskeyStep ?? { [weak self] in await self?.nearAILogin() ?? false }
+        legacyMigrationAwaitingPasskey = true
+        let task = Task { await step() }
+        legacyMigrationPasskeyTask = task
+        let finished = await task.value
+        legacyMigrationPasskeyTask = nil
+        legacyMigrationAwaitingPasskey = false
+        if !finished && !task.isCancelled { legacyMigrationPasskeyFailed = true }
+        return finished && !task.isCancelled
+    }
 
     /// Move: `legacy_invite_migrate`, which the contributor chose. A refusal
     /// changes nothing and is said in the core's words; on success status is
     /// re-read, the daemon stops offering the move and its notice takes
     /// over. `invite` is sent only once the daemon asked for it.
+    ///
+    /// The move leads with the passkey step (owner, 2026-10-11): when the
+    /// daemon has no session to provision the account with
+    /// (`legacy_migration_no_near_ai_session`), this runs the passkey step
+    /// and then the move again, once, without a second press. A step that
+    /// does not finish moves nothing.
     func migrateLegacyInvite(invite: String? = nil) async {
         guard let client, !legacyMigrationBusy else { return }
         let pasted = invite?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1996,9 +2040,23 @@ final class AppModel: ObservableObject {
         legacyMigrationBusy = true
         legacyMigrationRefusal = nil
         legacyMigrationStartFailed = false
-        let outcome = await Task.detached(priority: .userInitiated) {
-            Result { try client.migrateLegacyInvite(invite: sent) }
-        }.value
+        legacyMigrationPasskeyFailed = false
+        let move = {
+            await Task.detached(priority: .userInitiated) {
+                Result { try client.migrateLegacyInvite(invite: sent) }
+            }.value
+        }
+        var outcome = await move()
+        if case .failure(let failure as DaemonClient.Failure) = outcome,
+            failure.message == LegacyMigrationOffer.passkeyNeededLabel, self.client === client
+        {
+            guard await runLegacyMigrationPasskeyStep(), self.client === client else {
+                legacyMigrationBusy = false
+                refreshStatus()
+                return
+            }
+            outcome = await move()
+        }
         legacyMigrationBusy = false
         guard self.client === client else { return }
         switch outcome {

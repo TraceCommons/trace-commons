@@ -73,7 +73,8 @@ final class LegacyMigrationNoticeTests: XCTestCase {
 
     private let offer = """
     {"title":"Move to your NEAR AI account","body":"b","action":"Move","working":"w",
-     "invite_prompt":"p","start_failed":"s","dismiss":"Dismiss","later":"l"}
+     "invite_prompt":"p","start_failed":"s","dismiss":"Dismiss","later":"l",
+     "passkey_waiting":"pw","passkey_failed":"pf","passkey_cancel":"Cancel"}
     """
 
     func testTheOfferDecodesWhole() throws {
@@ -84,6 +85,9 @@ final class LegacyMigrationNoticeTests: XCTestCase {
         XCTAssertEqual(decoded.startFailed, "s")
         XCTAssertEqual(decoded.dismiss, "Dismiss")
         XCTAssertEqual(decoded.later, "l")
+        XCTAssertEqual(decoded.passkeyWaiting, "pw")
+        XCTAssertEqual(decoded.passkeyFailed, "pf")
+        XCTAssertEqual(decoded.passkeyCancel, "Cancel")
     }
 
     /// Shown whole or not at all, as the notice is. A core older than the
@@ -94,7 +98,7 @@ final class LegacyMigrationNoticeTests: XCTestCase {
                 of: #""\#(field)":"#, with: #""\#(field)":"","ignored":"#)
             XCTAssertNil(LegacyMigrationOffer.decode(fromJSON: emptied), field)
         }
-        let older = offer.replacingOccurrences(of: #","dismiss":"Dismiss","later":"l""#, with: "")
+        let older = offer.replacingOccurrences(of: #","dismiss":"Dismiss","later":"l","#, with: ",")
         XCTAssertNotEqual(older, offer)
         XCTAssertNil(LegacyMigrationOffer.decode(fromJSON: older))
         XCTAssertNil(LegacyMigrationOffer.decode(fromJSON: "null"))
