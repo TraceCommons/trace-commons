@@ -25,6 +25,27 @@ final class ManagedSessionsRenderTests: XCTestCase {
         try render(ManagedRemoveSheet(account: account, onClose: {}).environmentObject(model), size: CGSize(width: 520, height: 240), to: directory.appendingPathComponent("managed-remove.png"))
     }
 
+    /// The NEAR AI sign-in card both ways: Start buttons with a sign-in,
+    /// the sign-in line and button without one.
+    @MainActor
+    func testTheSignInCardRendersSignedInAndSignedOut() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let fixture = try String(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json"), encoding: .utf8)
+        let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }
+        let model = AppModel()
+        model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(fixture.utf8))
+        XCTAssertEqual(model.managedSnapshot?.nearAiSignedIn, true)
+        try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 720, height: 560), to: directory.appendingPathComponent("managed-sign-in.png"))
+        try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 360, height: 640), to: directory.appendingPathComponent("managed-sign-in-compact.png"))
+        let signedOut = fixture.replacingOccurrences(of: #""near_ai_signin": true"#, with: #""near_ai_signin": false"#)
+        XCTAssertNotEqual(signedOut, fixture)
+        model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(signedOut.utf8))
+        XCTAssertEqual(model.managedSnapshot?.nearAiSignedIn, false)
+        try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 720, height: 560), to: directory.appendingPathComponent("managed-sign-in-needed.png"))
+    }
+
     @MainActor
     private func render<V: View>(_ view: V, size: CGSize, to url: URL) throws {
         _ = NSApplication.shared
