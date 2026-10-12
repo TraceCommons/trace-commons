@@ -319,65 +319,66 @@ async fn activity_missions_catalogue_publishes_predicates_under_the_digest() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
-fn v2_policy(predicate: serde_json::Value, frontier: Option<serde_json::Value>) -> String {
-    let mut value: serde_json::Value = serde_json::from_str(&predicate_policy(predicate)).unwrap();
-    if let Some(frontier) = frontier {
-        value["frontier_models"] = frontier;
-    }
-    value.to_string()
-}
-
 fn v2_frontier() -> serde_json::Value {
     serde_json::json!({"version":2,"outcomes":["failure"],"failure_modes":["context_loss"],"models":"frontier","min_tier":"e2","with_correction":true,"min_sessions":1})
 }
 
+fn resolve(
+    predicate: serde_json::Value,
+    frontier: Option<&str>,
+) -> anyhow::Result<Option<Arc<trace_commons_protocol::activity_missions::ActivityPolicy>>> {
+    activity_missions::policy_from_raw_with_frontier(
+        Ok(predicate_policy(predicate)),
+        frontier
+            .map(str::to_string)
+            .ok_or(std::env::VarError::NotPresent),
+    )
+}
+
 #[test]
 fn activity_missions_startup_accepts_v2_predicates_and_refuses_malformed_ones() {
-    let list = || Some(serde_json::json!(["claude-opus-4"]));
-    let policy = activity_missions::policy_from_raw(Ok(v2_policy(v2_frontier(), list())))
-        .unwrap()
-        .expect("configured");
-    assert!(policy.missions[0].predicate.is_some());
-    assert_eq!(
-        policy.frontier_models.as_deref().unwrap(),
-        ["claude-opus-4"]
-    );
+    let list = Some(r#"["claude-opus-4.5","gpt-4.1"]"#);
+    let policy = resolve(v2_frontier(), list).unwrap().expect("configured");
+    let published = serde_json::to_string(&*policy).unwrap();
+    assert!(!published.contains("frontier"), "{published}");
+    assert!(published.contains(r#""models":["claude-opus-4.5","gpt-4.1"]"#));
     for (why, bad, frontier) in [
-        ("frontier without the policy list", v2_frontier(), None),
-        (
-            "empty policy list",
-            v2_frontier(),
-            Some(serde_json::json!([])),
-        ),
+        ("frontier without the list", v2_frontier(), None),
+        ("empty list", v2_frontier(), Some("[]")),
+        ("list is not JSON", v2_frontier(), Some("claude")),
+        ("list of non-strings", v2_frontier(), Some("[1]")),
+        ("list label", v2_frontier(), Some(r#"["Bad Model"]"#)),
         (
             "min_tier e3",
             serde_json::json!({"version":2,"min_tier":"e3","min_sessions":1}),
-            list(),
+            list,
         ),
         (
             "unknown outcome",
             serde_json::json!({"version":2,"outcomes":["win"],"min_sessions":1}),
-            list(),
+            list,
         ),
         (
             "unknown field",
             serde_json::json!({"version":2,"outcomes":["failure"],"min_sessions":1,"repo_size":"x"}),
-            list(),
+            list,
         ),
         (
             "restricts nothing",
             serde_json::json!({"version":2,"min_sessions":1}),
-            list(),
+            list,
         ),
         (
             "bad model label",
             serde_json::json!({"version":2,"models":["Bad Model"],"min_sessions":1}),
-            list(),
+            list,
         ),
     ] {
-        let refused = activity_missions::policy_from_raw(Ok(v2_policy(bad.clone(), frontier)));
         assert_eq!(
-            refused.err().map(|e| e.to_string()).as_deref(),
+            resolve(bad, frontier)
+                .err()
+                .map(|e| e.to_string())
+                .as_deref(),
             Some("activity_missions_policy_invalid"),
             "{why}"
         );
@@ -385,25 +386,18 @@ fn activity_missions_startup_accepts_v2_predicates_and_refuses_malformed_ones() 
 }
 
 #[tokio::test]
-async fn activity_missions_catalogue_publishes_v2_predicates_under_the_digest() {
+async fn activity_missions_catalogue_publishes_resolved_v2_predicates_under_the_digest() {
     let temp = tempfile::tempdir().unwrap();
     let mut state = test_state(temp.path().into());
     Arc::get_mut(&mut state).unwrap().activity_missions_policy =
-        activity_missions::policy_from_raw(Ok(v2_policy(
-            v2_frontier(),
-            Some(serde_json::json!(["claude-opus-4"])),
-        )))
-        .unwrap();
+        resolve(v2_frontier(), Some(r#"["claude-opus-4.5"]"#)).unwrap();
     let published = body(read(state.clone(), "/v1/activity-missions").await).await;
     assert_eq!(published["state"], "configured");
     assert_eq!(
         published["policy"]["missions"][0]["predicate"],
-        serde_json::json!({"version":2,"tools":[],"tool_families":[],"languages":[],"outcomes":["failure"],"failure_modes":["context_loss"],"models":"frontier","min_tier":"e2","with_correction":true,"min_sessions":1})
+        serde_json::json!({"version":2,"tools":[],"tool_families":[],"languages":[],"outcomes":["failure"],"failure_modes":["context_loss"],"models":["claude-opus-4.5"],"min_tier":"e2","with_correction":true,"min_sessions":1})
     );
-    assert_eq!(
-        published["policy"]["frontier_models"],
-        serde_json::json!(["claude-opus-4"])
-    );
+    assert!(published["policy"].get("frontier_models").is_none());
     let read_back: trace_commons_protocol::activity_missions::ActivityCatalogue =
         serde_json::from_value(published.clone()).unwrap();
     assert_eq!(

@@ -69,11 +69,15 @@ Read from `main` at 7009d82ae.
 
 ## Definitions
 
-**Frontier model.** A model on a server-published list,
-`frontier_models` in the activity policy, matched against the per-call model
-label (F1). The list is versioned with the policy so it can change without a
-client release. A trace qualifies when the failing calls were made by a listed
-model.
+**Frontier model.** A model on the operator's frontier list, matched against
+the per-call model label (F1). The list is operator config
+(`TRACE_COMMONS_ACTIVITY_MISSIONS_FRONTIER_MODELS_JSON`, a JSON array of
+model labels), not a key of the published policy: released clients refuse a
+policy with an unknown top-level key. At startup the server resolves each
+V2 predicate's `"frontier"` to that explicit list, so the published policy
+and its digest carry only explicit lists, and the list changes with the
+policy, without a client release. A trace qualifies when the failing calls
+were made by a listed model.
 
 **Failure.** The model was asked to do something it could have done, and the
 session ended without it done, done wrong, or done only after the person
@@ -186,14 +190,20 @@ improve every trace's outcome metadata.
 
 - `outcomes`: any of the `TaskSuccess` values.
 - `failure_modes`: any of the `TraceFailureMode` values.
-- `models`: `"frontier"` (the policy's list) or an explicit list.
+- `models`: an explicit list of model labels (lowercase letters, digits,
+  `-`, `_` and `.`, so `gpt-4.1` and `claude-opus-4.5` are valid). In operator
+  input the string `"frontier"` stands for the operator's frontier list; the
+  server resolves it at startup, fails startup if no list is configured, and
+  never publishes the keyword.
 - `min_tier`: the lowest evidence tier the client counts, at most `e2`
   (E3 is server-side).
 - `with_correction`: the contributor wrote a correction.
 
 The V1 rules carry over: lists are "any of", fields combine with AND, at
 least one restricting field, unknown fields refused, matching stays on the
-device. A V1-only client ignores V2 missions rather than mis-matching them.
+device. A V1-only client ignores V2 missions rather than mis-matching them, and the
+published policy has no key a released client refuses. `min_tier` alone and
+`with_correction: true` alone each count as restricting.
 
 ### F4. Verification on the server, at Review
 
@@ -260,7 +270,8 @@ scrubbed envelope.
 ## Open decisions for the owner
 
 - **D1. The frontier list.** Which models are on it at launch, and who
-  updates it. Proposed: the operator publishes it in the activity policy.
+  updates it. Proposed: the operator configures it (resolved server-side, published
+  explicitly in each V2 predicate).
 - **D2. Unattested weight.** Most frontier traces come from Anthropic and
   OpenAI directly, where the model label cannot be proven. Proposed: settle
   them at a reduced weight rather than refuse them, since refusing them would

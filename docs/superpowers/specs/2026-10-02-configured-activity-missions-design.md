@@ -74,18 +74,22 @@ slice F3) adds to version 1's fields, all optional but for `version` and
 - `outcomes` are `TaskSuccess` values and `failure_modes` are
   `TraceFailureMode` values, both snake_case, "any of", at most 32, no
   duplicates; the free-form `other` failure mode is refused.
-- `models` is the string `"frontier"` or a list of model labels (version 1's
-  label rules). `"frontier"` means the policy's new optional top-level
-  `frontier_models` list (a non-empty label list, bounded like a version-1
-  list), and a policy using it without that list is refused.
+- `models` is a list of model labels: at most 32, no duplicates, each 1-64
+  bytes of lowercase letters, digits, `-`, `_` or `.` (the only list that may
+  hold `.`). Operator input may instead write the string `"frontier"`, which
+  the server resolves at startup to the explicit list in
+  `TRACE_COMMONS_ACTIVITY_MISSIONS_FRONTIER_MODELS_JSON` (a JSON array under
+  the same label rules, 1-32 values). Startup fails if `"frontier"` is used
+  without that list. The published predicate and the digest carry only the
+  explicit list, and the policy gains no top-level key, so a released client
+  still reads it.
 - `min_tier` is `e0`, `e1` or `e2` (E3 is server-side); `with_correction` is
   a bool.
 - Every version-1 rule carries over: bounds, charset, no duplicates, unknown
   fields refused, a title of at most 200 characters, and at least one
-  restricting field (a non-empty list, `models`, `min_tier`, or
-  `with_correction: true`). The version is per mission, so the policy stays
-  one document; a policy without version-2 missions or `frontier_models`
-  keeps its digest.
+  restricting field (a non-empty list, a non-empty `models`, `min_tier` alone,
+  or `with_correction: true` alone). The version is per mission, so the policy
+  stays one document; a policy without version-2 missions keeps its digest.
 - A client that does not yet match outcomes skips version-2 missions, as it
   does a mission without a predicate. The contributor daemon does so now.
 - The block is digest-covered. Every predicate block serializes as key-sorted
