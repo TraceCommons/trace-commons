@@ -25,6 +25,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:vm="using:TraceCommons.App.ViewModels"
     xmlns:interop="using:TraceCommons.Interop"
+    xmlns:controls="using:TraceCommons.App.Controls"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
@@ -75,6 +76,17 @@
                         </ItemsControl>
                     </StackPanel>
                 </Border>
+
+                <!--
+                    Move a legacy invite identity to the contributor's NEAR AI
+                    account. Shown only while the daemon offers it. The same
+                    control the main window's notices card uses, here without
+                    the dismiss: the move stays available as long as it is
+                    offered. Every string is bound, from the Rust.
+                -->
+                <controls:LegacyMigrationOfferView x:Name="LegacyOfferView"
+                                                   ShowsDismiss="False"
+                                                   Visibility="{x:Bind LegacyOffer.IsAvailable, Mode=OneWay}" />
 
                 <TextBlock Text="STARTUP"
                            Style="{StaticResource TcEyebrowTextStyle}"
