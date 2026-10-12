@@ -289,16 +289,17 @@ fn parse_export_with_record_budget(
             bail!("opencode_reordered_messages");
         }
         previous = Some(created);
+        // The assistant message's own model, in the same `provider/model`
+        // form as the session label, on every step it produced (F1).
+        let mut turn_model: Option<String> = None;
         if role == "assistant" {
             let parent = id(mi, "parentID")?;
             if parent == message_id || !seen_messages.contains(parent) {
                 bail!("opencode_missing_parent");
             }
-            models.insert(format!(
-                "{}/{}",
-                field(mi, "providerID")?,
-                field(mi, "modelID")?
-            ));
+            let label = format!("{}/{}", field(mi, "providerID")?, field(mi, "modelID")?);
+            models.insert(label.clone());
+            turn_model = Some(label);
         }
         let parts = message["parts"]
             .as_array()
@@ -361,6 +362,7 @@ fn parse_export_with_record_budget(
                         // Identity/flag strings are not tool content. Keep them
                         // in the validated export, not the submitted payload.
                         structured: Value::Null,
+                        model: turn_model.clone(),
                         ..Default::default()
                     });
                 }
@@ -393,6 +395,7 @@ fn parse_export_with_record_budget(
                         // raw_event_for wraps this as `arguments`; do not
                         // mix import identity markers into executable inputs.
                         structured: Value::Object(input.clone()),
+                        model: turn_model.clone(),
                         ..Default::default()
                     });
                     if matches!(status, "completed" | "error") {
@@ -495,6 +498,20 @@ mod tests {
         );
         assert_eq!(t.events[2].tool_call_id, t.events[3].tool_call_id);
         assert_eq!(t.events[3].success, Some(true));
+        // F1: every step an assistant message produced carries its model.
+        assert_eq!(
+            t.events
+                .iter()
+                .map(|e| e.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                None,
+                Some("fixture/model"),
+                Some("fixture/model"),
+                None,
+                Some("fixture/model")
+            ]
+        );
         assert!(t.events[4].structured.is_null());
         assert!(t.routing.is_empty() && t.attested_call.is_none());
         assert!(

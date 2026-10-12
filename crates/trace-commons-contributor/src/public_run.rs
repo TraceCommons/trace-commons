@@ -316,6 +316,8 @@ mod tests {
                 success: Some(true),
                 failure_modes: Vec::new(),
                 side_effect: SideEffectLevel::ReadOnly,
+                model: None,
+                exit_code: None,
             }],
             outcome: OutcomeMetadata {
                 user_feedback: UserFeedback::Correction,

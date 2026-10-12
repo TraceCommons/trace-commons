@@ -1048,6 +1048,8 @@ fn raw_routing_event_for(row: &crate::routing::RoutedExchange) -> RawTraceContri
         }),
         success: None,
         failure_modes: Vec::new(),
+        model: None,
+        exit_code: None,
     }
 }
 
@@ -1139,11 +1141,40 @@ fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEv
         },
         success: e.success,
         failure_modes: Vec::new(),
+        model: e.model.clone(),
+        exit_code: e.exit_code,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// F1: the per-call model label and the exit code are carried from the
+    /// adapter's event to the raw event as they are, and absent stays absent.
+    #[test]
+    fn per_call_model_and_exit_code_are_carried_as_recorded() {
+        let mut transcript = fixture_transcript();
+        transcript.events = vec![
+            crate::source::SessionEvent {
+                kind: crate::source::SessionEventKind::ToolCall,
+                tool_name: Some("Bash".into()),
+                model: Some("claude-opus-5".into()),
+                ..Default::default()
+            },
+            crate::source::SessionEvent {
+                exit_code: Some(101),
+                ..crate::source::SessionEvent::tool_result(None, None, None, Some(false))
+            },
+            crate::source::SessionEvent::user("plain", None),
+        ];
+        let raw = build_raw_contribution(&transcript, &test_config(), chrono::Utc::now());
+        assert_eq!(raw.events[0].model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(raw.events[0].exit_code, None);
+        assert_eq!(raw.events[1].exit_code, Some(101));
+        assert_eq!(raw.events[1].model, None);
+        assert_eq!(raw.events[2].model, None);
+        assert_eq!(raw.events[2].exit_code, None);
+    }
+
     #[tokio::test]
     async fn native_identity_survives_envelope_and_redaction() {
         let mut transcript = fixture_transcript();
@@ -1189,6 +1220,8 @@ mod tests {
                 token_counts: None,
                 tool_call_id: Some("tu_1".to_string()),
                 success: call_success,
+                model: None,
+                exit_code: None,
             },
             crate::source::SessionEvent {
                 served_by: None,
@@ -1200,6 +1233,8 @@ mod tests {
                 token_counts: None,
                 tool_call_id: Some(result_id.to_string()),
                 success: result_success,
+                model: None,
+                exit_code: None,
             },
         ];
         t
@@ -1361,6 +1396,8 @@ mod tests {
             cost_usd: None,
             success: Some(true),
             failure_modes: Vec::new(),
+            model: None,
+            exit_code: None,
         });
 
         let redactor =
@@ -1555,6 +1592,8 @@ mod tests {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
         });
         let cfg = test_config();
         let redactor = near_ai_redactor(base);
@@ -1629,6 +1668,8 @@ mod tests {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
         });
         let cfg = test_config();
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -1661,6 +1702,8 @@ mod tests {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
         });
         let cfg = test_config();
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -1699,6 +1742,8 @@ mod tests {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
         });
         let cfg = test_config();
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -1729,6 +1774,8 @@ mod tests {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
         });
         let big = build_raw_contribution(&t, &cfg, chrono::Utc::now());
         assert!(raw_contribution_size_ok(&big).is_err());
@@ -1759,6 +1806,8 @@ mod tests {
                 token_counts: None,
                 tool_call_id: None,
                 success: None,
+                model: None,
+                exit_code: None,
             },
             crate::source::SessionEvent {
                 served_by: None,
@@ -1770,6 +1819,8 @@ mod tests {
                 token_counts: None,
                 tool_call_id: None,
                 success: None,
+                model: None,
+                exit_code: None,
             },
         ];
 
@@ -1845,6 +1896,8 @@ mod tests {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -1876,6 +1929,8 @@ mod tests {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -1899,6 +1954,8 @@ mod tests {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -1919,6 +1976,8 @@ mod tests {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
         };
         let raw = super::raw_event_for(&event, chrono::Utc::now());
         assert_eq!(
@@ -2043,6 +2102,8 @@ mod tests {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -2069,6 +2130,8 @@ mod tests {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -2375,6 +2438,8 @@ mod tests {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -2403,6 +2468,8 @@ mod tests {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -2547,6 +2614,8 @@ mod tests {
                 cache_write_5m_tokens: 0,
                 cache_write_1h_tokens: 0,
             }),
+            model: None,
+            exit_code: None,
         };
         let listed = crate::source::SessionEvent {
             served_by: Some(crate::source::ServedBy {
@@ -2582,6 +2651,8 @@ mod tests {
             tool_call_id: None,
             success: None,
             served_by: None,
+            model: None,
+            exit_code: None,
         };
         let mapped = raw_events_for(&[event], chrono::Utc::now());
         assert_eq!(

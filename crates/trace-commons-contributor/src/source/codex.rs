@@ -392,6 +392,9 @@ fn parse_session_reader(
 
     let mut events = Vec::new();
     let mut model: Option<String> = None;
+    // The model of the most recent `turn_context`: what the steps after it
+    // ran under. `model` above stays the session's first.
+    let mut turn_model: Option<String> = None;
     let mut agent_version: Option<String> = None;
     let mut native_id: Option<String> = None;
     let mut cwd: Option<String> = None;
@@ -455,20 +458,27 @@ fn parse_session_reader(
                         agent_version = Some(v.to_string());
                     }
                 }
-            } else if model.is_none() {
-                if let Some(m) = payload
-                    .and_then(|p| p.get("model"))
-                    .and_then(|v| v.as_str())
-                {
+            } else if let Some(m) = payload
+                .and_then(|p| p.get("model"))
+                .and_then(|v| v.as_str())
+                .filter(|m| !m.is_empty())
+            {
+                if model.is_none() {
                     model = Some(m.to_string());
                 }
+                turn_model = Some(m.to_string());
             }
             continue;
         }
 
         match record_type {
             "response_item" => {
-                map_response_item(payload, record_timestamp, &mut events);
+                map_response_item(
+                    payload,
+                    record_timestamp,
+                    turn_model.as_deref(),
+                    &mut events,
+                );
             }
             other => {
                 events.push(SessionEvent::opaque(other, record_timestamp));
@@ -523,11 +533,48 @@ fn call_id(payload: &Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// The exit status Codex itself states for a shell command, in one of the
+/// three shapes it writes:
+///
+/// * a header block ending in an `Output:` line that contains
+///   `Process exited with code N` (`exec_command`);
+/// * a first line `Exit code: N`, again above an `Output:` line;
+/// * a JSON string `{"output": ..., "metadata": {"exit_code": N, ...}}`.
+///
+/// Only those positions are read: a command whose own output says
+/// "Process exited with code 9" sits below the `Output:` line and is not
+/// taken for Codex's header. A command still running has no code, and none
+/// is claimed.
+fn codex_exit_code(output: &str) -> Option<i32> {
+    if output.starts_with('{') {
+        let parsed: Value = serde_json::from_str(output).ok()?;
+        let code = parsed.get("metadata")?.get("exit_code")?.as_i64()?;
+        return i32::try_from(code).ok();
+    }
+    let lines: Vec<&str> = output.lines().collect();
+    let header_end = lines.iter().position(|line| line.trim_end() == "Output:")?;
+    let header = &lines[..header_end];
+    if let Some(code) = header
+        .first()
+        .and_then(|line| line.trim_end().strip_prefix("Exit code: "))
+    {
+        return code.parse().ok();
+    }
+    header.iter().find_map(|line| {
+        line.trim_end()
+            .strip_prefix("Process exited with code ")?
+            .parse()
+            .ok()
+    })
+}
+
 fn map_response_item(
     payload: Option<&Value>,
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    model: Option<&str>,
     events: &mut Vec<SessionEvent>,
 ) {
+    let model = model.map(str::to_string);
     let Some(payload) = payload else {
         events.push(SessionEvent::opaque("response_item", timestamp));
         return;
@@ -567,6 +614,8 @@ fn map_response_item(
                 token_counts: None,
                 tool_call_id: None,
                 success: None,
+                model: (role == "assistant").then(|| model.clone()).flatten(),
+                exit_code: None,
             });
         }
         "function_call" | "custom_tool_call" => {
@@ -595,6 +644,8 @@ fn map_response_item(
                 token_counts: None,
                 tool_call_id: call_id(payload),
                 success: None,
+                model: model.clone(),
+                exit_code: None,
             });
         }
         "function_call_output" | "custom_tool_call_output" => {
@@ -608,19 +659,29 @@ fn map_response_item(
                 Some(other) => serde_json::to_string(other).ok(),
                 None => None,
             };
-            // Only an explicit verdict counts. An exit code would have to be
-            // interpreted per tool, and guessing here would put a fabricated
-            // outcome on a real trace.
+            // An exit code is read only where Codex wrote it in one of its own
+            // fixed shapes (see `codex_exit_code`), never guessed from
+            // command output.
+            let exit_code = match payload.get("output") {
+                Some(Value::String(s)) => codex_exit_code(s),
+                Some(Value::Object(obj)) => obj
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .and_then(codex_exit_code),
+                _ => None,
+            };
+            // An explicit verdict wins. Without one, a stated exit code is
+            // the verdict: zero succeeded, anything else did not (frontier
+            // failure missions, F1).
             let success = payload
                 .get("output")
                 .and_then(|output| output.get("success"))
-                .and_then(|v| v.as_bool());
-            events.push(SessionEvent::tool_result(
-                timestamp,
-                content,
-                call_id(payload),
-                success,
-            ));
+                .and_then(|v| v.as_bool())
+                .or(exit_code.map(|code| code == 0));
+            events.push(SessionEvent {
+                exit_code,
+                ..SessionEvent::tool_result(timestamp, content, call_id(payload), success)
+            });
         }
         "reasoning" => {
             // Reasoning is captured as a first-class event and redacted
@@ -650,6 +711,8 @@ fn map_response_item(
                     token_counts: None,
                     tool_call_id: None,
                     success: None,
+                    model: model.clone(),
+                    exit_code: None,
                 });
             }
         }
@@ -1063,7 +1126,7 @@ mod tests {
             "content": [{ "type": "reasoning_text", "text": "file A needs a guard" }]
         });
         let mut events = Vec::new();
-        super::map_response_item(Some(&payload), None, &mut events);
+        super::map_response_item(Some(&payload), None, None, &mut events);
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, SessionEventKind::Reasoning);
@@ -1077,7 +1140,7 @@ mod tests {
     fn reasoning_items_with_no_text_are_dropped() {
         let payload = serde_json::json!({ "type": "reasoning" });
         let mut events = Vec::new();
-        super::map_response_item(Some(&payload), None, &mut events);
+        super::map_response_item(Some(&payload), None, None, &mut events);
         assert!(events.is_empty());
     }
 
@@ -1098,16 +1161,14 @@ mod tests {
             "output": "src"
         });
         let mut events = Vec::new();
-        super::map_response_item(Some(&call), None, &mut events);
-        super::map_response_item(Some(&output), None, &mut events);
+        super::map_response_item(Some(&call), None, None, &mut events);
+        super::map_response_item(Some(&output), None, None, &mut events);
         assert_eq!(events[0].tool_call_id.as_deref(), Some("c7"));
         assert_eq!(events[1].tool_call_id.as_deref(), Some("c7"));
     }
 
     #[test]
-    fn only_an_explicit_verdict_sets_success() {
-        // An exit code would have to be read per tool, so it is not read at
-        // all: a guessed outcome on a real trace is worse than no outcome.
+    fn an_explicit_verdict_sets_success_and_a_bare_output_claims_none() {
         let explicit = serde_json::json!({
             "type": "function_call_output",
             "call_id": "c8",
@@ -1119,9 +1180,132 @@ mod tests {
             "output": "fine"
         });
         let mut events = Vec::new();
-        super::map_response_item(Some(&explicit), None, &mut events);
-        super::map_response_item(Some(&bare), None, &mut events);
+        super::map_response_item(Some(&explicit), None, None, &mut events);
+        super::map_response_item(Some(&bare), None, None, &mut events);
         assert_eq!(events[0].success, Some(false));
+        assert_eq!(events[0].exit_code, None);
         assert_eq!(events[1].success, None);
+        assert_eq!(events[1].exit_code, None);
+    }
+
+    fn output(text: &str) -> serde_json::Value {
+        serde_json::json!({"type": "function_call_output", "call_id": "c", "output": text})
+    }
+
+    /// F1: Codex states a shell command's exit status in one of three shapes
+    /// of its own making. Each is read from its fixed position only, and a
+    /// parsed code sets `success` where the harness gave no verdict -- the
+    /// spec's call (frontier failure missions, F1), replacing the earlier
+    /// rule that no exit code was read at all.
+    #[test]
+    fn a_shell_exit_code_is_read_from_codex_own_header() {
+        let cases: Vec<(serde_json::Value, Option<i32>, Option<bool>)> = vec![
+            (
+                output(
+                    "Chunk ID: f5bd80\nWall time: 0.0000 seconds\nProcess exited with code 1\nOriginal token count: 44\nOutput:\nsed: no such file",
+                ),
+                Some(1),
+                Some(false),
+            ),
+            (
+                output(
+                    "Chunk ID: 6b74bd\nWall time: 0.1 seconds\nProcess exited with code 0\nOutput:\nok",
+                ),
+                Some(0),
+                Some(true),
+            ),
+            (
+                output("Exit code: 2\nWall time: 0.3 seconds\nOutput:\nerror"),
+                Some(2),
+                Some(false),
+            ),
+            (
+                output(r#"{"output":"src\n","metadata":{"exit_code":0,"duration_seconds":0.1}}"#),
+                Some(0),
+                Some(true),
+            ),
+            (
+                output(r#"{"output":"boom","metadata":{"exit_code":127,"duration_seconds":0.1}}"#),
+                Some(127),
+                Some(false),
+            ),
+            // Still running: no code yet, so none is claimed.
+            (
+                output(
+                    "Chunk ID: 1\nWall time: 1.0 seconds\nProcess running with session ID 5\nOutput:\n",
+                ),
+                None,
+                None,
+            ),
+            // The command's own output saying it is not Codex's header.
+            (
+                output("Chunk ID: 1\nWall time: 1.0 seconds\nOutput:\nProcess exited with code 9"),
+                None,
+                None,
+            ),
+            (output("make: Exit code: 3"), None, None),
+            (
+                output(r#"{"output":"x","metadata":{"exit_code":"0"}}"#),
+                None,
+                None,
+            ),
+            // An explicit verdict wins over the code.
+            (
+                serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": "c",
+                    "output": {"success": true, "output": "Exit code: 1\nOutput:\n"}
+                }),
+                Some(1),
+                Some(true),
+            ),
+        ];
+        for (payload, code, success) in cases {
+            let mut events = Vec::new();
+            super::map_response_item(Some(&payload), None, None, &mut events);
+            assert_eq!(
+                (events[0].exit_code, events[0].success),
+                (code, success),
+                "{payload}"
+            );
+        }
+    }
+
+    /// F1: each model turn carries the model of the `turn_context` it ran
+    /// under; the session keeps its first model.
+    #[test]
+    fn a_session_that_switches_models_labels_each_call() {
+        let lines = [
+            serde_json::json!({"type": "session_meta", "payload": {"id": "s", "cwd": "/w"}}),
+            serde_json::json!({"type": "turn_context", "payload": {"model": "gpt-5.2-codex"}}),
+            serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"text": "go"}]}}),
+            serde_json::json!({"type": "response_item", "payload": {"type": "reasoning", "summary": [{"text": "plan"}]}}),
+            serde_json::json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": "{}", "call_id": "c1"}}),
+            serde_json::json!({"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1", "output": "ok"}}),
+            serde_json::json!({"type": "turn_context", "payload": {"model": "gpt-5.5"}}),
+            serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"text": "done"}]}}),
+        ];
+        let bytes = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let t = super::parse_session_bytes(bytes.as_bytes()).unwrap();
+        assert_eq!(t.model.as_deref(), Some("gpt-5.2-codex"));
+        let labelled: Vec<(SessionEventKind, Option<&str>)> = t
+            .events
+            .iter()
+            .map(|e| (e.kind.clone(), e.model.as_deref()))
+            .collect();
+        assert_eq!(
+            labelled,
+            vec![
+                (SessionEventKind::User, None),
+                (SessionEventKind::Reasoning, Some("gpt-5.2-codex")),
+                (SessionEventKind::ToolCall, Some("gpt-5.2-codex")),
+                (SessionEventKind::ToolResult, None),
+                (SessionEventKind::Assistant, Some("gpt-5.5")),
+            ]
+        );
     }
 }

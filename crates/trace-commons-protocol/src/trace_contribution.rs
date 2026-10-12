@@ -409,8 +409,21 @@ pub struct TraceContributionEvent {
     pub cost_usd: Option<Decimal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub success: Option<bool>,
+    /// The process exit status a tool result reported, where the harness
+    /// recorded one (a shell command). Absent means none was recorded, which
+    /// is not zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failure_modes: Vec<TraceFailureMode>,
+    /// The model that produced this step, as the harness labelled it on the
+    /// message: set on every model-turn event (an assistant message, its
+    /// reasoning, and the tool calls it made) where the transcript names a
+    /// model per message. `ironclaw.model_name` stays the session's first
+    /// model; this is the per-call answer for a session that switched.
+    /// Absent means the transcript did not say, never "same as the session".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default)]
     pub side_effect: SideEffectLevel,
 }
@@ -1733,8 +1746,17 @@ pub struct RawTraceContributionEvent {
     /// not know, which is not the same as failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub success: Option<bool>,
+    /// See [`TraceContributionEvent::exit_code`]. Absent means none was
+    /// recorded, which is not zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failure_modes: Vec<TraceFailureMode>,
+    /// See [`TraceContributionEvent::model`]. Contributor-supplied text, so
+    /// it goes through the same metadata classification and credential
+    /// refusal as `ironclaw.model_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1840,6 +1862,8 @@ impl RawTraceContribution {
                         cost_usd: None,
                         success: None,
                         failure_modes: Vec::new(),
+                        exit_code: None,
+                        model: None,
                     });
                 }
                 TraceResponse::Text {
@@ -1864,6 +1888,8 @@ impl RawTraceContribution {
                         cost_usd: None,
                         success: None,
                         failure_modes: Vec::new(),
+                        exit_code: None,
+                        model: None,
                     });
                 }
                 TraceResponse::ToolCalls {
@@ -1903,6 +1929,8 @@ impl RawTraceContribution {
                             cost_usd: None,
                             success: None,
                             failure_modes: Vec::new(),
+                            exit_code: None,
+                            model: None,
                         });
                     }
                 }
@@ -1928,6 +1956,8 @@ impl RawTraceContribution {
                     cost_usd: None,
                     success: None,
                     failure_modes: Vec::new(),
+                    exit_code: None,
+                    model: None,
                 });
             }
         }
@@ -1976,6 +2006,8 @@ impl RawTraceContribution {
                 // reported regardless of the payload consent above.
                 success: Some((200..400).contains(&exchange.response.status)),
                 failure_modes: Vec::new(),
+                exit_code: None,
+                model: None,
             });
         }
 
@@ -2052,6 +2084,8 @@ impl RawTraceContribution {
                     cost_usd: None,
                     success: None,
                     failure_modes: Vec::new(),
+                    exit_code: None,
+                    model: None,
                 });
             }
 
@@ -2099,6 +2133,8 @@ impl RawTraceContribution {
                         cost_usd: None,
                         success: None,
                         failure_modes: Vec::new(),
+                        exit_code: None,
+                        model: None,
                     });
                 }
 
@@ -2147,6 +2183,8 @@ impl RawTraceContribution {
                     cost_usd: None,
                     success,
                     failure_modes: Vec::new(),
+                    exit_code: None,
+                    model: None,
                 });
 
                 // `ToolResult` is defined in the schema and was never emitted
@@ -2186,6 +2224,8 @@ impl RawTraceContribution {
                         cost_usd: None,
                         success,
                         failure_modes: Vec::new(),
+                        exit_code: None,
+                        model: None,
                     });
                 }
             }
@@ -2217,6 +2257,8 @@ impl RawTraceContribution {
                     cost_usd: None,
                     success: None,
                     failure_modes: Vec::new(),
+                    exit_code: None,
+                    model: None,
                 });
             }
 
@@ -5000,7 +5042,9 @@ impl DeterministicTraceRedactor {
                 token_counts: raw_event.token_counts,
                 cost_usd: raw_event.cost_usd,
                 success: raw_event.success,
+                exit_code: raw_event.exit_code,
                 failure_modes: raw_event.failure_modes,
+                model: raw_event.model,
                 side_effect,
             });
         }
@@ -5812,6 +5856,10 @@ fn redact_envelope_side_channels(
     for event in &mut envelope.events {
         if let Some(tool_name) = event.tool_name.as_mut() {
             redact_string_in_place(redactor, tool_name, report, state);
+        }
+        // The per-call model label is as free-form as `model_name` above.
+        if let Some(model) = event.model.as_mut() {
+            redact_string_in_place(redactor, model, report, state);
         }
     }
 
@@ -12008,6 +12056,75 @@ mod tests {
         );
     }
 
+    /// Absent means absent: an event that carries neither the per-call model
+    /// label nor an exit code serialises with neither key, so every envelope
+    /// built before these fields existed is byte-identical after.
+    #[test]
+    fn per_call_model_and_exit_code_are_omitted_when_absent() {
+        let raw = raw_contribution_with_content("ran the build");
+        let raw_json = serde_json::to_value(&raw.events[0]).unwrap();
+        assert!(raw_json.get("model").is_none(), "{raw_json}");
+        assert!(raw_json.get("exit_code").is_none(), "{raw_json}");
+
+        let event_json = serde_json::to_value(message_event("hello")).unwrap();
+        assert!(event_json.get("model").is_none(), "{event_json}");
+        assert!(event_json.get("exit_code").is_none(), "{event_json}");
+
+        // And an older envelope with neither key still reads.
+        let back: TraceContributionEvent = serde_json::from_value(event_json).unwrap();
+        assert_eq!(back.model, None);
+        assert_eq!(back.exit_code, None);
+    }
+
+    #[tokio::test]
+    async fn per_call_model_and_exit_code_reach_the_envelope() {
+        let mut raw = raw_contribution_with_content("ran the build");
+        raw.events[0].model = Some("claude-opus-5".into());
+        raw.events[0].exit_code = Some(2);
+        let envelope = DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .redact_trace(raw)
+            .await
+            .expect("a model label and an exit code are ordinary metadata");
+        assert_eq!(envelope.events[0].model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(envelope.events[0].exit_code, Some(2));
+    }
+
+    /// The per-call label is contributor-supplied text exactly as
+    /// `ironclaw.model_name` is, so it takes the same refusal.
+    #[tokio::test]
+    async fn a_credential_in_a_per_call_model_is_refused_not_masked() {
+        let mut raw = raw_contribution_with_content("ran the build");
+        raw.events[0].model = Some("sk-ant-EXPOSEDsecret0123456789abcdefghij".to_string());
+        let error = DeterministicTraceRedactor::deterministic_only(Vec::new())
+            .redact_trace(raw)
+            .await
+            .expect_err("a credential in a per-call model is a refusal");
+        assert!(
+            matches!(
+                &error,
+                TraceContributionError::RedactionFailed { reason }
+                    if reason == METADATA_CREDENTIAL_REFUSAL
+            ),
+            "got {error:?}"
+        );
+    }
+
+    /// The server re-scrub walks side-channel fields one by one, so the
+    /// per-call label has to be named there or a patched client could land
+    /// text in it unscrubbed.
+    #[test]
+    fn rescrub_redacts_a_per_call_model_label() {
+        let mut envelope = bare_envelope();
+        let mut event = message_event("hello");
+        event.model = Some("/Users/zaki/proj/secret-model".to_string());
+        envelope.events.push(event);
+        let redactor =
+            DeterministicTraceRedactor::deterministic_only(vec!["/Users/zaki".to_string()]);
+        rescrub_trace_envelope_with(&redactor, &mut envelope);
+        let model = envelope.events[0].model.as_deref().expect("label kept");
+        assert!(!model.contains("/Users/zaki"), "{model}");
+    }
+
     /// `TYPED_METADATA_FIELDS` and the dynamic-key allowlist in
     /// `redact_metadata_value` are both keyed on schema field names, and
     /// neither coupling is visible from the struct definitions: adding a
@@ -12068,6 +12185,8 @@ mod tests {
             event.cost_usd = Some(Default::default());
             event.success = Some(true);
             event.failure_modes = vec![TraceFailureMode::Other("mode".into())];
+            event.model = Some("model".into());
+            event.exit_code = Some(1);
             event.structured_payload = serde_json::json!({"DYNAMIC": 1});
         }
 
@@ -12111,6 +12230,9 @@ mod tests {
             "event_id",
             "event_type",
             "events",
+            // The per-call exit code (F1). An integer: the classifier never
+            // sees it, so it needs no TYPED_METADATA_FIELDS entry.
+            "exit_code",
             "expected_assertions",
             "explanation",
             "failure_modes",
@@ -12120,6 +12242,10 @@ mod tests {
             "ironclaw",
             "latency_ms",
             "message_text_included",
+            // The per-call model label (F1). Deliberately NOT typed: like
+            // `model_name` it is contributor-supplied text, classified and
+            // refused on a credential.
+            "model",
             "model_name",
             "nearest_cluster_id",
             "nearest_trace_ids",
@@ -13547,6 +13673,8 @@ mod tests {
             success: None,
             failure_modes: Vec::new(),
             side_effect: SideEffectLevel::None,
+            exit_code: None,
+            model: None,
         }
     }
 
@@ -15555,6 +15683,8 @@ mod attested_body_redaction_tests {
             cost_usd: None,
             success: Some(true),
             failure_modes: Vec::new(),
+            exit_code: None,
+            model: None,
         });
         raw
     }

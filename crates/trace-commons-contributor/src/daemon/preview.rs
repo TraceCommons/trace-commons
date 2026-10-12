@@ -2819,6 +2819,8 @@ mod tests {
         routed.tool_category = Some("shell".into());
         routed.parent_event_id = Some(uuid::Uuid::new_v4());
         routed.success = Some(true);
+        routed.model = Some("claude-opus-5".into());
+        routed.exit_code = Some(1);
         envelope.events.push(routed);
 
         assert_eq!(
@@ -2853,6 +2855,29 @@ mod tests {
             assert!(fields.contains(&expected), "{expected}: {fields:?}");
         }
         assert!(!fields.contains(&LEAVES_OTHER), "{fields:?}");
+    }
+
+    /// F1: the per-call model label is named as the model, and the exit
+    /// code as part of the conversation beside `success`, so the preview
+    /// never shows the contributor less than is sent.
+    #[tokio::test]
+    async fn the_per_call_model_and_exit_code_are_named_in_the_preview() {
+        use crate::consent_copy::*;
+        let mut envelope = envelope_with_tool_events().await;
+        envelope.ironclaw.model_name = None;
+        for event in &mut envelope.events {
+            event.model = None;
+        }
+        assert!(!leaves_this_mac_fields(&envelope).contains(&LEAVES_MODEL));
+        envelope.events[0].model = Some("claude-opus-5".into());
+        assert!(leaves_this_mac_fields(&envelope).contains(&LEAVES_MODEL));
+
+        let mut only_exit = envelope_with_tool_events().await;
+        for event in &mut only_exit.events {
+            event.exit_code = None;
+        }
+        only_exit.events[0].exit_code = Some(2);
+        assert_eq!(unlabelled_envelope_keys(&only_exit), Vec::<String>::new());
     }
 
     #[tokio::test]

@@ -313,6 +313,17 @@ pub struct SessionEvent {
     /// `None` means the harness did not record an outcome, which is not the
     /// same as failure.
     pub success: Option<bool>,
+    /// The model the transcript names for the message this step came from.
+    /// Set on every model-turn event (assistant text, reasoning, and each
+    /// tool call the message made), unlike `token_counts`, which belongs to
+    /// the message once. Distinct from `served_by`, which is set only when
+    /// the step can be priced and never reaches an envelope; this one does,
+    /// as the envelope event's `model`.
+    pub model: Option<String>,
+    /// The process exit status a tool result reported, read only from the
+    /// harness's own structured field or fixed header. `None` means none was
+    /// recorded, never zero.
+    pub exit_code: Option<i32>,
 }
 
 /// Common event shapes without inferred provenance, usage, or outcomes.

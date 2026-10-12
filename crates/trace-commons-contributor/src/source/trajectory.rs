@@ -167,6 +167,8 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                     token_counts: None,
                     tool_call_id: None,
                     success: None,
+                    model: None,
+                    exit_code: None,
                 });
             }
             "system" => {
@@ -188,6 +190,8 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                     token_counts: None,
                     tool_call_id: None,
                     success: None,
+                    model: None,
+                    exit_code: None,
                 });
             }
             "user" | "reasoning" => {
@@ -206,6 +210,8 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                     token_counts: None,
                     tool_call_id: None,
                     success: None,
+                    model: None,
+                    exit_code: None,
                 });
             }
             "assistant" => {
@@ -245,6 +251,8 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                                 // relies on; it was validated and discarded.
                                 tool_call_id: Some(id),
                                 success: None,
+                                model: None,
+                                exit_code: None,
                             });
                         }
                     }
@@ -266,6 +274,8 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                             token_counts: None,
                             tool_call_id: None,
                             success: None,
+                            model: None,
+                            exit_code: None,
                         });
                     }
                 }

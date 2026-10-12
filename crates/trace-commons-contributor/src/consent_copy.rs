@@ -2137,10 +2137,13 @@ fn classify(path: &[&str]) -> Class {
         ["events", "timestamp"] | ["events", "latency_ms"] => Label(LEAVES_TIMING),
         ["events", "token_counts"] | ["events", "cost_usd"] => Label(LEAVES_USAGE_AND_COST),
         ["events", "tool_name"] | ["events", "tool_category"] => Label(LEAVES_TOOL),
+        // The per-call model label (F1) is the model, as `model_name` is.
+        ["events", "model"] => Label(LEAVES_MODEL),
         [
             "events",
             "event_id" | "parent_event_id" | "event_type" | "redacted_content"
-            | "structured_payload" | "tool_call_id" | "success" | "failure_modes" | "side_effect",
+            | "structured_payload" | "tool_call_id" | "success" | "exit_code" | "failure_modes"
+            | "side_effect",
         ] => Label(LEAVES_CONVERSATION),
         ["outcome"] => Descend,
         ["outcome", "human_correction"] => Label(LEAVES_CORRECTION),

@@ -940,6 +940,8 @@ fn load_group(parent: &Path, budget: u64) -> anyhow::Result<SessionTranscript> {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
         });
     }
     for (index, (_, bytes)) in members.iter().enumerate() {
@@ -959,6 +961,8 @@ fn load_group(parent: &Path, budget: u64) -> anyhow::Result<SessionTranscript> {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
         });
         let member = parse_session(bytes);
         unparseable += member.unparseable;
@@ -1021,6 +1025,9 @@ fn parse_session(bytes: &[u8]) -> ParsedSession {
     let mut cwd: Option<String> = None;
     let mut started_at: Option<chrono::DateTime<chrono::Utc>> = None;
     let mut unparseable = 0usize;
+    // Ids of the Bash calls seen so far, so a result's `Exit code N` header
+    // is read for a shell command and nothing else.
+    let mut bash_calls: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for line in text.lines() {
         let line = line.trim();
@@ -1060,12 +1067,23 @@ fn parse_session(bytes: &[u8]) -> ParsedSession {
 
         match record_type {
             "user" => {
-                map_user_record(&record, record_timestamp, &mut events);
+                map_user_record(&record, record_timestamp, &bash_calls, &mut events);
             }
             "assistant" => {
                 if model.is_none() {
                     if let Some(m) = record.pointer("/message/model").and_then(|v| v.as_str()) {
                         model = Some(m.to_string());
+                    }
+                }
+                if let Some(Value::Array(blocks)) = record.pointer("/message/content") {
+                    for block in blocks {
+                        if block.get("type").and_then(Value::as_str) == Some("tool_use")
+                            && block.get("name").and_then(Value::as_str) == Some("Bash")
+                        {
+                            if let Some(id) = block.get("id").and_then(Value::as_str) {
+                                bash_calls.insert(id.to_string());
+                            }
+                        }
                     }
                 }
                 map_assistant_record(&record, record_timestamp, &mut events);
@@ -1133,9 +1151,24 @@ pub(crate) fn parse_selected_file_bytes(bytes: &[u8]) -> anyhow::Result<Vec<Sess
     Ok(parse_session(&normalized).events)
 }
 
+/// The exit status Claude Code states for a failed Bash call: the result's
+/// first line, exactly `Exit code N`. Claude Code records no structured exit
+/// code, and prints this header only on a non-zero exit, so a result without
+/// it says nothing about the code -- it is not read as zero.
+fn claude_bash_exit_code(content: Option<&str>) -> Option<i32> {
+    content?
+        .lines()
+        .next()?
+        .trim_end()
+        .strip_prefix("Exit code ")?
+        .parse()
+        .ok()
+}
+
 fn map_user_record(
     record: &Value,
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    bash_calls: &std::collections::HashSet<String>,
     events: &mut Vec<SessionEvent>,
 ) {
     let content = record.pointer("/message/content");
@@ -1154,6 +1187,14 @@ fn map_user_record(
                     }
                     Some("tool_result") => {
                         let flattened = flatten_block_content(block.get("content"));
+                        let tool_call_id = block
+                            .get("tool_use_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        let exit_code = tool_call_id
+                            .as_ref()
+                            .filter(|id| bash_calls.contains(id.as_str()))
+                            .and_then(|_| claude_bash_exit_code(flattened.as_deref()));
                         events.push(SessionEvent {
                             served_by: None,
                             kind: SessionEventKind::ToolResult,
@@ -1162,13 +1203,12 @@ fn map_user_record(
                             structured: Value::Null,
                             tool_name: None,
                             token_counts: None,
-                            tool_call_id: block
-                                .get("tool_use_id")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string()),
+                            tool_call_id,
                             // `is_error` is the transcript's own verdict on
                             // the call. Absent, the harness did not say.
                             success: block.get("is_error").and_then(|v| v.as_bool()).map(|e| !e),
+                            model: None,
+                            exit_code,
                         });
                     }
                     _ => {}
@@ -1185,6 +1225,8 @@ fn map_user_record(
                     token_counts: None,
                     tool_call_id: None,
                     success: None,
+                    model: None,
+                    exit_code: None,
                 });
             }
         }
@@ -1230,6 +1272,13 @@ fn map_assistant_record(
     // What it would have cost needs more than those two counts, and is built
     // only from a record that states all of it -- see `served_by_of`.
     let served_by = usage.and_then(|u| served_by_of(record, u));
+    // The model this message names, on every event it emits: unlike the
+    // usage above, the label belongs to each step, not once to the record.
+    let model = record
+        .pointer("/message/model")
+        .and_then(|v| v.as_str())
+        .filter(|m| !m.is_empty())
+        .map(str::to_string);
 
     let Some(Value::Array(blocks)) = record.pointer("/message/content") else {
         return;
@@ -1263,6 +1312,8 @@ fn map_assistant_record(
                     token_counts: token_counts_unused.take(),
                     tool_call_id: None,
                     success: None,
+                    model: model.clone(),
+                    exit_code: None,
                 });
                 texts.clear();
             }
@@ -1295,6 +1346,8 @@ fn map_assistant_record(
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
                     success: None,
+                    model: model.clone(),
+                    exit_code: None,
                 });
             }
             Some("thinking") => {
@@ -1313,6 +1366,8 @@ fn map_assistant_record(
                             token_counts: None,
                             tool_call_id: None,
                             success: None,
+                            model: model.clone(),
+                            exit_code: None,
                         });
                     }
                 }
@@ -3092,9 +3147,113 @@ mod tests {
             ]}
         });
         let mut events = Vec::new();
-        super::map_user_record(&record, None, &mut events);
+        super::map_user_record(&record, None, &Default::default(), &mut events);
         assert_eq!(events[0].success, Some(false));
         assert_eq!(events[0].tool_call_id.as_deref(), Some("tu_9"));
+    }
+
+    fn jsonl(records: &[Value]) -> Vec<u8> {
+        records
+            .iter()
+            .map(|r| r.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into_bytes()
+    }
+
+    fn assistant(model: &str, blocks: Value) -> Value {
+        json!({"type": "assistant", "message": {"model": model, "content": blocks}})
+    }
+
+    fn tool_result(id: &str, is_error: bool, content: &str) -> Value {
+        json!({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": id, "is_error": is_error, "content": content}
+        ]}})
+    }
+
+    /// F1: a session that switches models attributes each step to the model
+    /// that made it. The session-level label stays the first model.
+    #[test]
+    fn a_session_that_switches_models_labels_each_call() {
+        let parsed = parse_session(&jsonl(&[
+            json!({"type": "user", "message": {"role": "user", "content": "go"}}),
+            assistant(
+                "claude-opus-5",
+                json!([
+                    {"type": "thinking", "thinking": "plan"},
+                    {"type": "text", "text": "running it"},
+                    {"type": "tool_use", "id": "tu_1", "name": "Bash", "input": {"command": "ls"}}
+                ]),
+            ),
+            tool_result("tu_1", false, "src"),
+            assistant("claude-sonnet-5", json!([{"type": "text", "text": "done"}])),
+        ]));
+        assert_eq!(parsed.model.as_deref(), Some("claude-opus-5"));
+        let labelled: Vec<(SessionEventKind, Option<&str>)> = parsed
+            .events
+            .iter()
+            .map(|e| (e.kind.clone(), e.model.as_deref()))
+            .collect();
+        assert_eq!(
+            labelled,
+            vec![
+                (SessionEventKind::User, None),
+                (SessionEventKind::Reasoning, Some("claude-opus-5")),
+                (SessionEventKind::Assistant, Some("claude-opus-5")),
+                (SessionEventKind::ToolCall, Some("claude-opus-5")),
+                (SessionEventKind::ToolResult, None),
+                (SessionEventKind::Assistant, Some("claude-sonnet-5")),
+            ]
+        );
+    }
+
+    /// An assistant record that names no model leaves its events unlabelled
+    /// rather than borrowing the session's.
+    #[test]
+    fn an_unnamed_model_is_not_borrowed_from_the_session() {
+        let parsed = parse_session(&jsonl(&[
+            assistant("claude-opus-5", json!([{"type": "text", "text": "a"}])),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "b"}]}}),
+        ]));
+        assert_eq!(parsed.events[1].model, None);
+    }
+
+    /// Claude Code states a non-zero exit only as the first line of an
+    /// errored Bash result, `Exit code N`. That header is read for Bash
+    /// results and nothing else; a clean result says nothing, so it is not
+    /// read as zero.
+    #[test]
+    fn a_bash_exit_code_is_read_from_its_header_only() {
+        let parsed = parse_session(&jsonl(&[
+            assistant(
+                "claude-opus-5",
+                json!([
+                    {"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "cargo test"}},
+                    {"type": "tool_use", "id": "b2", "name": "Bash", "input": {"command": "ls"}},
+                    {"type": "tool_use", "id": "r1", "name": "Read", "input": {"file_path": "/x"}},
+                    {"type": "tool_use", "id": "b3", "name": "Bash", "input": {"command": "false"}}
+                ]),
+            ),
+            tool_result("b1", true, "Exit code 101\nerror: test failed"),
+            tool_result("b2", false, "src"),
+            tool_result("r1", true, "Exit code 1\nnot a shell"),
+            tool_result("b3", true, "the output said Exit code 3 somewhere"),
+        ]));
+        let results: Vec<(Option<i32>, Option<bool>)> = parsed
+            .events
+            .iter()
+            .filter(|e| e.kind == SessionEventKind::ToolResult)
+            .map(|e| (e.exit_code, e.success))
+            .collect();
+        assert_eq!(
+            results,
+            vec![
+                (Some(101), Some(false)),
+                (None, Some(true)),
+                (None, Some(false)),
+                (None, Some(false)),
+            ]
+        );
     }
 
     #[test]
@@ -3107,7 +3266,7 @@ mod tests {
             ]}
         });
         let mut events = Vec::new();
-        super::map_user_record(&record, None, &mut events);
+        super::map_user_record(&record, None, &Default::default(), &mut events);
         assert_eq!(events[0].success, None);
     }
 }

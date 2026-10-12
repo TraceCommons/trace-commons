@@ -265,6 +265,12 @@ fn timestamp_of(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> 
 /// call paired with its result -- the order the turn happened in.
 fn map_gemini_message(message: &Value, model: &mut Option<String>, events: &mut Vec<SessionEvent>) {
     let turn_timestamp = timestamp_of(message.get("timestamp"));
+    // This message's own model, on every step it produced (F1).
+    let turn_model = message
+        .get("model")
+        .and_then(|v| v.as_str())
+        .filter(|m| !m.is_empty())
+        .map(str::to_string);
     if model.is_none() {
         if let Some(m) = message.get("model").and_then(|v| v.as_str()) {
             *model = Some(m.to_string());
@@ -294,6 +300,8 @@ fn map_gemini_message(message: &Value, model: &mut Option<String>, events: &mut 
                 token_counts: None,
                 tool_call_id: None,
                 success: None,
+                model: turn_model.clone(),
+                exit_code: None,
             });
         }
     }
@@ -320,6 +328,8 @@ fn map_gemini_message(message: &Value, model: &mut Option<String>, events: &mut 
             token_counts,
             tool_call_id: None,
             success: None,
+            model: turn_model.clone(),
+            exit_code: None,
         });
     }
 
@@ -345,6 +355,8 @@ fn map_gemini_message(message: &Value, model: &mut Option<String>, events: &mut 
             token_counts: None,
             tool_call_id: tool_call_id.clone(),
             success: None,
+            model: turn_model.clone(),
+            exit_code: None,
         });
         // `resultDisplay` is the rendered-for-a-terminal form of the same
         // answer; `result` is the answer. Only one of them is carried.
@@ -414,6 +426,8 @@ fn load_session(path: &Path, cwd: Option<String>) -> anyhow::Result<SessionTrans
                 token_counts: None,
                 tool_call_id: None,
                 success: None,
+                model: None,
+                exit_code: None,
             }),
             "gemini" => map_gemini_message(message, &mut model, &mut events),
             other => events.push(SessionEvent::opaque(
@@ -678,6 +692,41 @@ mod tests {
 
         // Token counts ride on the assistant turn that spent them.
         assert_eq!(t.events[3].token_counts, Some((1200, 340)));
+    }
+
+    /// F1: each `gemini` message's own `model` labels the steps it produced;
+    /// the session keeps its first model, and results carry none.
+    #[test]
+    fn a_session_that_switches_models_labels_each_call() {
+        let first = serde_json::json!({
+            "type": "gemini", "model": "gemini-3-pro", "content": "looking",
+            "thoughts": [{"subject": "plan", "description": "read it"}],
+            "toolCalls": [{"id": "c1", "name": "read_file", "args": {}, "status": "success", "result": "x"}]
+        });
+        let second =
+            serde_json::json!({"type": "gemini", "model": "gemini-3-flash", "content": "done"});
+        let unnamed = serde_json::json!({"type": "gemini", "content": "and"});
+        let mut model = None;
+        let mut events = Vec::new();
+        for message in [&first, &second, &unnamed] {
+            super::map_gemini_message(message, &mut model, &mut events);
+        }
+        assert_eq!(model.as_deref(), Some("gemini-3-pro"));
+        let labelled: Vec<(SessionEventKind, Option<&str>)> = events
+            .iter()
+            .map(|e| (e.kind.clone(), e.model.as_deref()))
+            .collect();
+        assert_eq!(
+            labelled,
+            vec![
+                (SessionEventKind::Reasoning, Some("gemini-3-pro")),
+                (SessionEventKind::Assistant, Some("gemini-3-pro")),
+                (SessionEventKind::ToolCall, Some("gemini-3-pro")),
+                (SessionEventKind::ToolResult, None),
+                (SessionEventKind::Assistant, Some("gemini-3-flash")),
+                (SessionEventKind::Assistant, None),
+            ]
+        );
     }
 
     /// `content` may be a string or an array of parts, and `displayContent`

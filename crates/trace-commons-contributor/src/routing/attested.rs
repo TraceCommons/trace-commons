@@ -505,6 +505,8 @@ pub fn attested_exchange_event(call: &AttestedCall) -> RawTraceContributionEvent
         cost_usd: None,
         success: Some((200..400).contains(&call.status)),
         failure_modes: Vec::new(),
+        model: None,
+        exit_code: None,
     }
 }
 

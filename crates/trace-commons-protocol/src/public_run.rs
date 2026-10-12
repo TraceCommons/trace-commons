@@ -283,6 +283,8 @@ mod tests {
             success: None,
             failure_modes: Vec::new(),
             side_effect: SideEffectLevel::None,
+            exit_code: None,
+            model: None,
         }
     }
 

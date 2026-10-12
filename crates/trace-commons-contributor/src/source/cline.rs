@@ -291,6 +291,14 @@ fn token_counts_of(message: &Value) -> Option<(u32, u32)> {
 fn map_message(message: &Value, model: &mut Option<String>, events: &mut Vec<SessionEvent>) {
     let timestamp = timestamp_millis(message.get("ts"));
     let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
+    // An assistant message's own model, on every step it produced (F1). A
+    // user message is not a model turn, whatever `modelInfo` it carries.
+    let turn_model = message
+        .get("modelInfo")
+        .and_then(|m| m.get("id"))
+        .and_then(|v| v.as_str())
+        .filter(|id| role == "assistant" && !id.is_empty())
+        .map(str::to_string);
     if model.is_none() {
         if let Some(id) = message
             .get("modelInfo")
@@ -345,6 +353,8 @@ fn map_message(message: &Value, model: &mut Option<String>, events: &mut Vec<Ses
                     token_counts: token_counts.take(),
                     tool_call_id: None,
                     success: None,
+                    model: turn_model.clone(),
+                    exit_code: None,
                 });
             }
             "thinking" => {
@@ -364,6 +374,8 @@ fn map_message(message: &Value, model: &mut Option<String>, events: &mut Vec<Ses
                     token_counts: None,
                     tool_call_id: None,
                     success: None,
+                    model: turn_model.clone(),
+                    exit_code: None,
                 });
             }
             "tool_use" => events.push(SessionEvent {
@@ -382,6 +394,8 @@ fn map_message(message: &Value, model: &mut Option<String>, events: &mut Vec<Ses
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
                 success: None,
+                model: turn_model.clone(),
+                exit_code: None,
             }),
             // Only an explicit `is_error` is a verdict. Absent means the
             // harness said nothing, which is not success.
@@ -639,6 +653,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(t.session_hash, crate::source::session_hash(&bytes));
+    }
+
+    #[test]
+    fn a_session_that_switches_models_labels_each_call() {
+        // F1: an assistant message's `modelInfo.id` labels each step it
+        // produced; a user message's never does, and the session keeps its
+        // first model.
+        let messages = [
+            serde_json::json!({"role": "user", "content": "go", "modelInfo": {"id": "claude-opus-5"}}),
+            serde_json::json!({"role": "assistant", "modelInfo": {"id": "claude-opus-5"}, "content": [
+                {"type": "thinking", "thinking": "plan"},
+                {"type": "text", "text": "running"},
+                {"type": "tool_use", "id": "t1", "name": "execute_command", "input": {}}
+            ]}),
+            serde_json::json!({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+            ]}),
+            serde_json::json!({"role": "assistant", "modelInfo": {"id": "gpt-5.5"}, "content": "done"}),
+        ];
+        let mut model = None;
+        let mut events = Vec::new();
+        for message in &messages {
+            map_message(message, &mut model, &mut events);
+        }
+        assert_eq!(model.as_deref(), Some("claude-opus-5"));
+        let labelled: Vec<(SessionEventKind, Option<&str>)> = events
+            .iter()
+            .map(|e| (e.kind.clone(), e.model.as_deref()))
+            .collect();
+        assert_eq!(
+            labelled,
+            vec![
+                (SessionEventKind::User, None),
+                (SessionEventKind::Reasoning, Some("claude-opus-5")),
+                (SessionEventKind::Assistant, Some("claude-opus-5")),
+                (SessionEventKind::ToolCall, Some("claude-opus-5")),
+                (SessionEventKind::ToolResult, None),
+                (SessionEventKind::Assistant, Some("gpt-5.5")),
+            ]
+        );
     }
 
     #[test]

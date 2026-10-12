@@ -167,6 +167,8 @@ fn routing_event_with_sentinel_cost() -> TraceContributionEvent {
         success: None,
         failure_modes: Vec::new(),
         side_effect: SideEffectLevel::None,
+        exit_code: None,
+        model: None,
     }
 }
 
@@ -346,6 +348,8 @@ fn user_message_event(text: &str) -> TraceContributionEvent {
         success: None,
         failure_modes: Vec::new(),
         side_effect: SideEffectLevel::None,
+        exit_code: None,
+        model: None,
     }
 }
 
