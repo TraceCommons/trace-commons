@@ -632,9 +632,10 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
         .collect(),
     );
 
-    // The legacy invite migration, connecting inference, and where sessions
-    // go -- surfaces macOS has not built yet, pinned so that when it does
-    // they arrive with the core's words.
+    // The legacy invite migration (offer, notice and refusals), then
+    // connecting inference and where sessions go -- surfaces macOS has not
+    // built yet, pinned so that when it does they arrive with the core's
+    // words.
     let mut legacy = table(json!(consent::legacy_migration_offer()));
     legacy.extend(
         [
@@ -902,6 +903,22 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCConsentCopy.swift",
         "tc_legacy_migration_notice",
     ),
+    // The offer to move, in Settings and as a card above the tabs, and a
+    // refused move's sentence, both worded by the model.
+    (
+        "legacy migration offer",
+        "TraceCommonsApp/AppModel.swift",
+        "TCCoreCopy.legacyMigrationOfferJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_legacy_migration_offer_json",
+    ),
+    (
+        "legacy migration refusal",
+        "TraceCommonsApp/AppModel.swift",
+        "TCCoreCopy.legacyMigrationRefusalLine",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_legacy_migration_refusal_text",
+    ),
     (
         "witness capacity notice",
         "TraceCommonsApp/HealthCopy.swift",
@@ -1158,20 +1175,10 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
 
 /// Bridge functions for surfaces macOS has not built yet. Each must still
 /// reach its export, so the screen that comes has the core's words to read.
-const BRIDGE_ONLY: &[(&str, &str)] = &[
-    (
-        "TCBridge/TCCoreCopy.swift",
-        "tc_legacy_migration_offer_json",
-    ),
-    (
-        "TCBridge/TCCoreCopy.swift",
-        "tc_legacy_migration_refusal_text",
-    ),
-    (
-        "TCBridge/TCCoreCopy.swift",
-        "tc_inference_connection_copy_json",
-    ),
-];
+const BRIDGE_ONLY: &[(&str, &str)] = &[(
+    "TCBridge/TCCoreCopy.swift",
+    "tc_inference_connection_copy_json",
+)];
 
 #[test]
 fn swift_screens_render_core_copy_at_every_safety_surface() {

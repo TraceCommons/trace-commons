@@ -3,34 +3,103 @@ import Foundation
 /// `status.legacy_invite_migration`: whether moving a legacy invite identity
 /// to a NEAR AI account is offered, and the notice after it moved.
 ///
-/// Only the notice is read here, and only to hand it back to the Rust
+/// `offered` is the daemon's own answer (`legacy_migration::status_value`):
+/// a legacy `tenant-` identity enrolled by an invite, not yet moved. This
+/// shell does not work it out from the tenant id. The daemon cannot tell a
+/// pooled invite from a personal one before the commons answers, so a
+/// pooled device is offered the move too and is refused with its own line.
+///
+/// The notice is read only to hand it back to the Rust
 /// (`TCConsentCopy.legacyMigrationNoticeJSON`), which reads `folders_kept`
 /// and returns the words. This shell never reads it to choose a sentence.
-/// The offer itself is made in the Tauri app, not here.
 ///
-/// A daemon that predates the field, or a notice that is not an object,
-/// reads as nothing to show.
+/// A daemon that predates the field, an `offered` that is not `true`, or a
+/// notice that is not an object, reads as nothing to offer or show.
 public struct LegacyMigrationWire: Decodable, Equatable, Sendable {
+    /// Whether the daemon offers the move.
+    public let offered: Bool
     /// The notice object as the daemon sent it, re-encoded, or nil when there
     /// is none.
     public let noticeJSON: String?
 
-    public static let none = LegacyMigrationWire(noticeJSON: nil)
+    public static let none = LegacyMigrationWire(offered: false, noticeJSON: nil)
 
-    init(noticeJSON: String?) {
+    init(offered: Bool = false, noticeJSON: String?) {
+        self.offered = offered
         self.noticeJSON = noticeJSON
     }
 
     public init(from decoder: Decoder) throws {
         let value = try JSONValue(from: decoder)
-        guard case .object(let fields) = value, case .object? = fields["notice"],
-            let notice = fields["notice"]
-        else {
+        guard case .object(let fields) = value else {
+            offered = false
+            noticeJSON = nil
+            return
+        }
+        if case .bool(true)? = fields["offered"] {
+            offered = true
+        } else {
+            offered = false
+        }
+        guard case .object? = fields["notice"], let notice = fields["notice"] else {
             noticeJSON = nil
             return
         }
         let data = try JSONEncoder().encode(notice)
         noticeJSON = String(decoding: data, as: UTF8.self)
+    }
+}
+
+/// The offer to move a legacy invite identity to a NEAR AI account, in the
+/// Rust's words (`consent_copy::legacy_migration_offer`, across
+/// `TCCoreCopy.legacyMigrationOfferJSON`). Drawn in Settings and, until it
+/// is dismissed, as a card in the notices. No property is written in Swift.
+public struct LegacyMigrationOffer: Decodable, Equatable, Sendable {
+    public let title: String
+    public let body: String
+    /// The button that starts the move (`legacy_invite_migrate`).
+    public let action: String
+    /// Shown in place of the button while the move runs.
+    public let working: String
+    /// The invite field's label, shown only after the daemon refused with
+    /// `legacy_migration_invite_needed`.
+    public let invitePrompt: String
+    /// The move could not be started at all: nothing ran.
+    public let startFailed: String
+    /// The card's dismiss. Puts the card away for good on this Mac.
+    public let dismiss: String
+    /// Beside the dismiss: the move stays in Settings.
+    public let later: String
+
+    enum CodingKeys: String, CodingKey {
+        case title, body, action, working, dismiss, later
+        case invitePrompt = "invite_prompt"
+        case startFailed = "start_failed"
+    }
+
+    /// The payload fields this shell decodes, by wire name. Compared against
+    /// the live export by `TCBridgeTests`.
+    public static let consumedFields = [
+        "title", "body", "action", "working", "invite_prompt", "start_failed", "dismiss", "later",
+    ]
+
+    /// The daemon's refusal label that asks for the invite, so the shell
+    /// shows the invite field and sends what is pasted with the next move.
+    public static let inviteNeededLabel = "legacy_migration_invite_needed"
+
+    /// Decode the payload, or nil if it will not parse or a field is empty:
+    /// shown whole or not at all.
+    public static func decode(fromJSON json: String) -> LegacyMigrationOffer? {
+        guard let data = json.data(using: .utf8),
+            let offer = try? JSONDecoder().decode(LegacyMigrationOffer.self, from: data)
+        else {
+            return nil
+        }
+        let words = [
+            offer.title, offer.body, offer.action, offer.working, offer.invitePrompt,
+            offer.startFailed, offer.dismiss, offer.later,
+        ]
+        return words.contains(where: \.isEmpty) ? nil : offer
     }
 }
 

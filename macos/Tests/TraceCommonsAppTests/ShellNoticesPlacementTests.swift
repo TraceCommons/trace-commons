@@ -12,7 +12,7 @@ final class ShellNoticesPlacementTests: XCTestCase {
             XCTAssertTrue(try MonitorNavigationTests.text(file).contains("ShellNotices()"), "\(file) does not draw the notices")
         }
         let notices = try MonitorNavigationTests.text("Views/ShellNotices.swift")
-        for card in ["AttachedDaemonNotice()", "GrantVoidNotices(", "ArmingRewordingNotices(", "GateHeldNoticeCard(", "LegacyMigrationNoticeCard("] {
+        for card in ["AttachedDaemonNotice()", "GrantVoidNotices(", "ArmingRewordingNotices(", "GateHeldNoticeCard(", "LegacyMigrationNoticeCard(", "LegacyMigrationOfferCard("] {
             XCTAssertTrue(notices.contains(card), "ShellNotices lacks \(card)")
         }
         XCTAssertNil(notices.range(of: #"\bTC\."#, options: .regularExpression))
@@ -25,7 +25,8 @@ final class ShellNoticesPlacementTests: XCTestCase {
     func test_theCardsAreDefinedOnce() throws {
         let notices = try MonitorNavigationTests.text("Views/ShellNotices.swift")
         for name in ["ShellNotices", "AttachedDaemonNotice", "GrantVoidNotices", "GrantVoidNoticeCard",
-                     "ArmingRewordingNotices", "ArmingRewordedNoticeCard", "GateHeldNoticeCard", "LegacyMigrationNoticeCard"] {
+                     "ArmingRewordingNotices", "ArmingRewordedNoticeCard", "GateHeldNoticeCard", "LegacyMigrationNoticeCard",
+                     "LegacyMigrationOfferCard", "LegacyMigrationMoveControls"] {
             XCTAssertEqual(notices.components(separatedBy: "struct \(name): View").count - 1, 1, "\(name) is not defined once")
         }
         XCTAssertEqual(notices.components(separatedBy: "GrantVoidNotices(").count - 1, 1)
@@ -43,6 +44,11 @@ final class ShellNoticesPlacementTests: XCTestCase {
         let cards: [(name: String, buttons: [String])] = [
             ("AttachedDaemonNotice", []),
             ("LegacyMigrationNoticeCard", [acknowledge]),
+            ("LegacyMigrationOfferCard", []),
+            ("LegacyMigrationMoveControls", [
+                "Button(offer.action) { Task { await model.migrateLegacyInvite(invite: invite) } }",
+                "Button(offer.dismiss, action: onDismiss)",
+            ]),
             ("GrantVoidNoticeCard", ["Button(action, action: onRearm)", acknowledge]),
             ("ArmingRewordedNoticeCard", ["Button(action, action: onAskFirst)", acknowledge]),
             ("GateHeldNoticeCard", ["Button(action) { onAskFirst(projectID) }"]),
@@ -67,7 +73,7 @@ final class ShellNoticesPlacementTests: XCTestCase {
     /// status label), and no literal sentence is written here.
     func test_theCardsAreGlassNoticesWithNoSentenceOfTheirOwn() throws {
         let notices = try MonitorNavigationTests.text("Views/ShellNotices.swift")
-        XCTAssertGreaterThanOrEqual(notices.components(separatedBy: "GlassNotice(").count - 1, 5)
+        XCTAssertGreaterThanOrEqual(notices.components(separatedBy: "GlassNotice(").count - 1, 6)
         XCTAssertNil(notices.range(of: #"Text\(\s*""#, options: .regularExpression), "a literal Text(\"...\")")
         XCTAssertNil(notices.range(of: #"Button\(\s*""#, options: .regularExpression), "a literal Button(\"...\")")
     }

@@ -903,10 +903,13 @@ pub fn witness_capacity_notice_for_wire(value: &serde_json::Value) -> Option<Wit
 // Moving a legacy invite identity to a NEAR AI account
 // ---------------------------------------------------------------------------
 //
-// Every constant in this section was approved 2026-10-06: written with the
-// client half of the legacy invite migration so that no shell writes its
-// own. The Tauri client renders all of it; macOS,
-// Windows and GTK render only the notice after a move
+// The constants in this section were approved 2026-10-06, except
+// `LEGACY_MIGRATION_OFFER_DISMISS` and `LEGACY_MIGRATION_OFFER_LATER`, which
+// are not yet approved. They were written with the client half of the
+// legacy invite migration so that no shell writes its own. The Tauri and
+// macOS clients render the offer (macOS also as a dismissible card in its
+// notices, which is what the two unapproved constants are for); Windows and
+// GTK render only the notice after a move
 // (`legacy_migration_notice_for_wire`), not the offer. The daemon reports
 // the move under `status.legacy_invite_migration` and refuses it with
 // `legacy_migration_*` labels (`daemon::legacy_migration::LABELS`).
@@ -921,6 +924,15 @@ pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You ca
 
 /// Approved 2026-10-06. The button that starts the move. Approved 2026-10-08 (button rule).
 pub const LEGACY_MIGRATION_OFFER_ACTION: &str = "Move";
+
+/// Not yet approved. Puts away the offer where it is a card among a shell's
+/// notices, for good on that device; the move stays in Settings. Its own
+/// key, not the notice's acknowledgement (`docs/ui-copy-guide.md` 4).
+pub const LEGACY_MIGRATION_OFFER_DISMISS: &str = "Dismiss";
+
+/// Not yet approved. Beside the dismiss on the offer card, so putting the
+/// card away is not taken for declining the move for good.
+pub const LEGACY_MIGRATION_OFFER_LATER: &str = "You can move later from Settings.";
 
 /// Approved 2026-10-06. Shown while the move runs.
 pub const LEGACY_MIGRATION_WORKING: &str = "Moving to your NEAR AI account...";
@@ -1052,6 +1064,10 @@ pub struct LegacyMigrationOfferCopy {
     pub working: &'static str,
     pub invite_prompt: &'static str,
     pub start_failed: &'static str,
+    /// The offer card's dismiss. Only where the offer is a dismissible card.
+    pub dismiss: &'static str,
+    /// Beside that dismiss: the move is still in Settings.
+    pub later: &'static str,
 }
 
 #[must_use]
@@ -1063,6 +1079,8 @@ pub fn legacy_migration_offer() -> LegacyMigrationOfferCopy {
         working: LEGACY_MIGRATION_WORKING,
         invite_prompt: LEGACY_MIGRATION_INVITE_PROMPT,
         start_failed: LEGACY_MIGRATION_START_FAILED,
+        dismiss: LEGACY_MIGRATION_OFFER_DISMISS,
+        later: LEGACY_MIGRATION_OFFER_LATER,
     }
 }
 
@@ -3385,6 +3403,26 @@ mod tests {
                 .contains("keeps working"),
             "a pooled invite is told it keeps working"
         );
+    }
+
+    /// The offer card in a shell's notices can be put away for good, so it
+    /// carries its own dismiss -- a separate key from the notice's
+    /// acknowledgement and from the move, and a short one -- and a line that
+    /// says where the move still is once it has gone.
+    #[test]
+    fn the_migration_offer_can_be_dismissed_and_says_where_it_stays() {
+        let offer = legacy_migration_offer();
+        assert_eq!(offer.dismiss, LEGACY_MIGRATION_OFFER_DISMISS);
+        assert_eq!(offer.later, LEGACY_MIGRATION_OFFER_LATER);
+        assert!(!offer.dismiss.is_empty());
+        assert!(offer.dismiss.split_whitespace().count() <= 2);
+        assert_ne!(offer.dismiss, offer.action);
+        assert_ne!(offer.dismiss, "Not this one");
+        assert!(offer.later.contains("Settings"));
+        let fields = serde_json::to_value(&offer).unwrap();
+        for key in ["dismiss", "later"] {
+            assert!(fields[key].as_str().is_some_and(|s| !s.is_empty()), "{key}");
+        }
     }
 
     #[test]

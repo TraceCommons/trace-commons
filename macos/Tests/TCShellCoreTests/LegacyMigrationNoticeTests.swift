@@ -47,4 +47,56 @@ final class LegacyMigrationNoticeTests: XCTestCase {
         XCTAssertNil(LegacyMigrationNotice.decode(fromJSON: "null"))
         XCTAssertNil(LegacyMigrationNotice.decode(fromJSON: "not json"))
     }
+
+    // MARK: - The offer
+
+    private func wire(_ json: String) throws -> LegacyMigrationWire {
+        try JSONDecoder().decode(LegacyMigrationWire.self, from: Data(json.utf8))
+    }
+
+    /// `offered` is the daemon's answer, read as it came: only `true` offers
+    /// the move. A missing field, a non-boolean, a non-object and a daemon
+    /// too old to know about the move all offer nothing.
+    func testOfferedIsReadOnlyWhenTheDaemonSaysTrue() throws {
+        XCTAssertTrue(try wire(#"{"offered":true,"notice":null}"#).offered)
+        XCTAssertFalse(try wire(#"{"offered":false,"notice":null}"#).offered)
+        XCTAssertFalse(try wire(#"{"notice":null}"#).offered)
+        XCTAssertFalse(try wire(#"{"offered":"true"}"#).offered)
+        XCTAssertFalse(try wire(#"{"offered":1}"#).offered)
+        XCTAssertFalse(try wire(#"[]"#).offered)
+        XCTAssertFalse(LegacyMigrationWire.none.offered)
+        // Offered and the notice are independent fields.
+        let both = try wire(#"{"offered":true,"notice":{"folders_kept":0}}"#)
+        XCTAssertTrue(both.offered)
+        XCTAssertNotNil(both.noticeJSON)
+    }
+
+    private let offer = """
+    {"title":"Move to your NEAR AI account","body":"b","action":"Move","working":"w",
+     "invite_prompt":"p","start_failed":"s","dismiss":"Dismiss","later":"l"}
+    """
+
+    func testTheOfferDecodesWhole() throws {
+        let decoded = try XCTUnwrap(LegacyMigrationOffer.decode(fromJSON: offer))
+        XCTAssertEqual(decoded.title, "Move to your NEAR AI account")
+        XCTAssertEqual(decoded.action, "Move")
+        XCTAssertEqual(decoded.invitePrompt, "p")
+        XCTAssertEqual(decoded.startFailed, "s")
+        XCTAssertEqual(decoded.dismiss, "Dismiss")
+        XCTAssertEqual(decoded.later, "l")
+    }
+
+    /// Shown whole or not at all, as the notice is. A core older than the
+    /// card's dismiss gives no offer rather than a card with no way out.
+    func testAnOfferMissingAWordDecodesToNothing() {
+        for field in LegacyMigrationOffer.consumedFields {
+            let emptied = offer.replacingOccurrences(
+                of: #""\#(field)":"#, with: #""\#(field)":"","ignored":"#)
+            XCTAssertNil(LegacyMigrationOffer.decode(fromJSON: emptied), field)
+        }
+        let older = offer.replacingOccurrences(of: #","dismiss":"Dismiss","later":"l""#, with: "")
+        XCTAssertNotEqual(older, offer)
+        XCTAssertNil(LegacyMigrationOffer.decode(fromJSON: older))
+        XCTAssertNil(LegacyMigrationOffer.decode(fromJSON: "null"))
+    }
 }

@@ -302,9 +302,10 @@ final class CoreCopyExportTests: XCTestCase {
         XCTAssertTrue(prompt.contains("cannot be recalled"), prompt)
     }
 
-    /// Exported for the screens macOS does not have yet (the legacy invite
-    /// migration panel, the connecting-inference step, the Flow 1 grant
-    /// screens), so they arrive with the core's words rather than their own.
+    /// Exported for the screens macOS does not have yet (the
+    /// connecting-inference step, the Flow 1 grant screens), so they arrive
+    /// with the core's words rather than their own, and for the legacy
+    /// invite migration offer (`LegacyMigrationNoticeBridgeTests`).
     func testTheRemainingTablesCrossAsJSONObjects() throws {
         for (name, json) in [
             ("legacy migration offer", TCCoreCopy.legacyMigrationOfferJSON()),
