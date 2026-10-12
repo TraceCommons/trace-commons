@@ -174,28 +174,6 @@ struct GlassPaneFill: View {
     }
 }
 
-/// The app's pane tint without a material under it: #1146's veil and the
-/// pane gradient. For a surface the system already puts on its own
-/// material (the menu-bar popover's window), so it reads as the app's
-/// panes do without a second layer of glass (owner, 2026-10-12).
-public struct GlassPaneTint: View {
-    private let radius: CGFloat
-
-    public init(radius: CGFloat = 0) {
-        self.radius = radius
-    }
-
-    public var body: some View {
-        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        ZStack {
-            shape.fill(GlassTokens.Color.glassVeil.color)
-            shape.fill(GlassTokens.Gradient.paneFill.linear)
-        }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-}
-
 /// The blur under a floating surface: the HUD material blended within the
 /// window, so it blurs the map or pane the surface floats on (#1146's
 /// `backdrop-filter` on its floating controls, popovers and node cards). The spec's popover tier asks for blur 24 at 170% saturation; the

@@ -494,10 +494,12 @@ private struct OverrideConfirmation: View {
     }
 }
 
-/// The popover's own glass, only where nothing else provides a material.
-/// Inside `MenuBarExtra` the system window's material stays under it, with
-/// the app's pane tint over it so the popover reads as the app's panes do
-/// (owner, 2026-10-12), and the window's top edge is pinned.
+/// The popover's surface. Inside `MenuBarExtra` it is the app's own pane,
+/// the same glass, veil and gradient as the main window's and the edge
+/// rail's panes (owner, 2026-10-12: one glass spec), with the system
+/// window's own material hidden under it (`MenuBarMaterialMask`), so there
+/// is never glass on glass; and the window's top edge is pinned. The debug
+/// preview window, which has no material, draws the popover tier.
 private struct PanelSurface: ViewModifier {
     let owns: Bool
 
@@ -507,10 +509,67 @@ private struct PanelSurface: ViewModifier {
         } else {
             content
                 .background {
-                    // Full bleed: the window clips it to its own corners.
-                    GlassPaneTint().ignoresSafeArea()
+                    // Full bleed, rounded as the window is.
+                    Color.clear
+                        .glassTier(.pane, radius: GlassTokens.Radius.menuPanel)
+                        .ignoresSafeArea()
                 }
+                .background(MenuBarMaterialMask().frame(width: 0, height: 0))
                 .background(MenuBarTopEdgePin().frame(width: 0, height: 0))
+        }
+    }
+}
+
+/// Hides the `MenuBarExtra` window's own material, so the popover's pane
+/// is the only glass: every visual-effect view behind the panel's content
+/// has its material masked out (`maskImage`, which masks the material and
+/// never the views inside it), and the window draws no background of its
+/// own. With none found, nothing changes.
+struct MenuBarMaterialMask: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { Mask() }
+
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    /// An image with nothing in it: as a mask it shows none of a material.
+    static let empty: NSImage = {
+        let image = NSImage(size: NSSize(width: 1, height: 1))
+        image.capInsets = NSEdgeInsetsZero
+        image.resizingMode = .stretch
+        return image
+    }()
+
+    /// The visual-effect views under `root`, depth first.
+    static func effects(in root: NSView) -> [NSVisualEffectView] {
+        var found: [NSVisualEffectView] = []
+        if let effect = root as? NSVisualEffectView { found.append(effect) }
+        for child in root.subviews { found += effects(in: child) }
+        return found
+    }
+
+    private final class Mask: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window, let frame = window.contentView?.superview ?? window.contentView else { return }
+            // The pane's own glass is an NSGlassEffectView or, before
+            // macOS 26, a vibrancy view inside the panel's content; only the
+            // window's, outside this view's hosting tree, are masked.
+            let hosting = enclosingHosting()
+            for effect in MenuBarMaterialMask.effects(in: frame) where hosting.map({ !effect.isDescendant(of: $0) }) ?? true {
+                effect.maskImage = MenuBarMaterialMask.empty
+            }
+            window.isOpaque = false
+            window.backgroundColor = .clear
+        }
+
+        /// The SwiftUI hosting view this view sits in.
+        private func enclosingHosting() -> NSView? {
+            var view: NSView? = superview
+            var last: NSView?
+            while let current = view {
+                if String(describing: type(of: current)).contains("NSHostingView") { last = current }
+                view = current.superview
+            }
+            return last
         }
     }
 }

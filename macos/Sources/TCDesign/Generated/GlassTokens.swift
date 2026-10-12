@@ -70,7 +70,7 @@ public enum GlassTokens {
         /// A pane under Reduce Transparency: solid, no material (spec).
         public static var paneOpaque: GlassRGBA { GlassTheme.pick(GlassRGBA(0x1C1E24, alpha: 1, light: GlassRGBA(0xF2F3F6, alpha: 1)), flat: GlassRGBA(0x0D1124, alpha: 1, light: GlassRGBA(0xF2F3F6, alpha: 1))) }
         /// Over native glass, the thin dark veil kept for text contrast.
-        public static var glassVeil: GlassRGBA { GlassTheme.pick(GlassRGBA(0x0C0E14, alpha: 0.28, light: GlassRGBA(0xFFFFFF, alpha: 0.3)), flat: GlassRGBA(0x070A1A, alpha: 0.72, light: GlassRGBA(0xFFFFFF, alpha: 0.55))) }
+        public static var glassVeil: GlassRGBA { GlassTheme.pick(GlassRGBA(0x0C0E14, alpha: 0.28, light: GlassRGBA(0xFFFFFF, alpha: 0.3)), flat: GlassRGBA(0x070A1A, alpha: 0.68, light: GlassRGBA(0xFFFFFF, alpha: 0.55))) }
         /// The closed edge rail's handle, a 3 by 72 bar drawn straight on the desktop at the screen's right edge (Run 1 OS-level Explorations, 1b). Not text: it marks where to rest the pointer.
         public static let edgeRailHandle: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.28, light: GlassRGBA(0x1D1D1F, alpha: 0.28))
         /// Painted over a pane's veil while its window is out of focus, so a background window reads darker. Classic paints nothing (alpha 0); the flat theme sets it.
