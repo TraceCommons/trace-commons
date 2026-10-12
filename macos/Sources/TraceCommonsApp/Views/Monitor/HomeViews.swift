@@ -185,8 +185,9 @@ private struct HomeOverview: View {
 
     /// A Home card that is a way into a screen, laid out as the Private AI
     /// cards are (owner, 2026-10-11): the icon, the title over the core's
-    /// subtitle, the card's accessory and a chevron on the right, and the
-    /// card's rows under the head. The whole card opens the screen.
+    /// subtitle, the card's accessory on the right, the card's rows under
+    /// the head, and a chevron centred on the whole card. The whole card
+    /// opens the screen.
     private func homeCard<Accessory: View, Content: View>(
         systemImage: String, title: String, subtitle: String?, promo: GlassPromoTreatment? = nil,
         action: @escaping () -> Void,
@@ -195,13 +196,8 @@ private struct HomeOverview: View {
         Button(action: action) {
             GlassIconCard(
                 systemImage: systemImage, title: title, subtitle: subtitle.map { [$0] } ?? [],
-                interactive: true, promo: promo,
-                accessory: {
-                    HStack(spacing: GlassTokens.Space.s5) {
-                        accessory()
-                        GlassChevron()
-                    }
-                },
+                interactive: true, promo: promo, chevron: true,
+                accessory: accessory,
                 content: content)
         }
         .buttonStyle(GlassPressStyle())

@@ -276,7 +276,7 @@ private struct EdgeRailPeekCard: View {
         Button { open(destination) } label: {
             GlassIconCard(
                 systemImage: systemImage, title: title, subtitle: subtitle.map { [$0] } ?? [],
-                interactive: true, promo: promo, trailing: { GlassChevron() })
+                interactive: true, promo: promo, chevron: true, trailing: { EmptyView() })
         }
         .buttonStyle(GlassPressStyle())
     }
@@ -344,7 +344,7 @@ private struct EdgeRailPeekCard: View {
             if let words, !folders.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(words.tree.treeTitle)
-                        .glassType(GlassTokens.TypeScale.title)
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
                         .foregroundStyle(GlassColor.textPrimary)
                         .accessibilityAddTraits(.isHeader)
                         .padding(.bottom, GlassTokens.Space.s2)

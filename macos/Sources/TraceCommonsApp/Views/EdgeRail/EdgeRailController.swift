@@ -48,6 +48,8 @@ final class EdgeRailController {
         let root = EdgeRailView(state: state, onOpenChange: { [weak self] open in self?.place(open: open) })
             .environmentObject(model)
             .tint(GlassTokens.Color.purpleSoft.color)
+            // No focus ring drawn round controls (owner, 2026-10-11).
+            .focusEffectDisabled()
             // The panel never becomes key, but the rail is what the person
             // is using while it is open: it draws in focus, without the
             // flat theme's out-of-focus dim (`inactiveDim`).
