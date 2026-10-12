@@ -385,7 +385,7 @@ pub(super) fn act_with_provider(app: &Rc<App>, action: CredentialAction, provide
 /// come back as an error -- and both mean the same thing to the caller: no tab
 /// opened anywhere. The distinction is not worth keeping, because the answer
 /// to either is the same.
-fn open_browser(url: &str) -> bool {
+pub(super) fn open_browser(url: &str) -> bool {
     gtk::gio::AppInfo::launch_default_for_uri(url, None::<&gtk::gio::AppLaunchContext>).is_ok()
 }
 

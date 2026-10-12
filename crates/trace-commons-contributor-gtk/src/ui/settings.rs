@@ -170,6 +170,8 @@ pub struct SettingsView {
     /// the daemon and nothing on it can be painted as working: the indicator
     /// belongs beside the control, on the screen that has both.
     private_inference_link: gtk::Button,
+    /// The move to a NEAR AI account, drawn only while the daemon offers it.
+    pub legacy_move: super::legacy_move::Controls,
     /// The port a running IronWire published, or `None` for a machine that
     /// published nothing.
     ///
@@ -279,6 +281,8 @@ impl SettingsView {
         pause_button.set_halign(gtk::Align::Start);
         state_card.append(&pause_button);
         content.append(&state_card);
+        let legacy_move = super::legacy_move::Controls::new(false);
+        content.append(&legacy_move.root);
 
         content.append(&style::section(CONTRIBUTION_HEADING));
         let contribution_card = style::card(gtk::Orientation::Vertical, space::M);
@@ -735,6 +739,7 @@ impl SettingsView {
             routing_evidence_pending: std::cell::Cell::new(false),
             filling_routing: std::cell::Cell::new(false),
             private_inference_link,
+            legacy_move,
             routing_discovered_port: std::cell::Cell::new(None),
             witness_status,
             disclosure,
