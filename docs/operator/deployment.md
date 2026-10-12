@@ -557,6 +557,51 @@ Two more things this incident showed:
   change."** It links the same library crate as ingest; its published sha256
   differed across a range in which its own `bin` file was untouched.
 
+### Then: re-arm the versioned pipeline (every new code revision)
+
+A deploy that changes the code revision (`python3 scripts/operator/pipeline.py
+revision` on the tree to ship differs from the running build's) is not done when
+`/health` shows the new `build_commit`. Every tenant whose routing row says
+`pipeline` -- every tenant default routing routed, and every tenant activated by
+hand -- is refused new uploads with `503` `pipeline_bundle_not_qualified` until
+its active bundle is qualified on the new revision. Default routing also
+disarms itself (`pipeline_default_routing_revision_mismatch` at start), so new
+tenants stop being routed. The refusal stores nothing on the server, but the
+contributor app marks each refused upload failed and reports the commons as
+unreachable, so intake for those tenants is closed and their contributors see
+an outage.
+
+The start log says so, as WARN lines:
+`pipeline_active_bundle_not_qualified` for each listed tenant, and
+`pipeline default routing is not armed`. Treat either as an unfinished deploy.
+
+The procedure is
+[`pipeline-activation.md`](pipeline-activation.md), "After a deploy: the
+qualification is read again for each new upload", and the "Default routing"
+re-arm. In order, on the deployed commit:
+
+1. the promote cycle's phase A on the host: `pipeline.py qualify`, then
+   `promote init`, `package-checks`, `hf-canary`, `remote-restore`;
+2. one ingest boot with the adapters-check variables, which writes
+   `pipeline_production_adapters` for the run (one restart);
+3. `promote adapters`, `promote sign`, `promote assemble`;
+4. replace the default-routing results directory's contents with the new
+   signed set (no restart), and qualify each hand-activated tenant's bundle
+   with `POST /v1/admin/pipeline/qualifications`.
+
+Then check that the start WARN lines are gone on the next pass and that `GET
+/v1/admin/pipeline/routing` answers `active_bundle_qualified_on_revision`
+`true`.
+
+A deploy that keeps the revision -- only documents, client shells, CI or
+`deploy/` changed -- needs none of this. To keep the closed window short, run
+phase A on the commit you are about to ship before installing it, as the
+procedure says.
+
+On 2026-10-12 four ingest deploys (17:02 to 22:09 UTC) skipped this, and every
+pipeline-routed tenant was refused new uploads from the first of them until
+the re-arm. Only a log of each error response's label (#1395) showed it.
+
 ### V74: the public-run functions move to a runtime role
 
 V64 meant to close its four public-run definer functions
