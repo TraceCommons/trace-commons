@@ -3,21 +3,19 @@
 //! The buttons `launch`, `use_default`, `reconnect` and `save_login`:
 //! Approved 2026-10-08 (button rule). `launch_title` keeps the launch dialog's full title.
 //!
-//! Sessions on the NEAR AI sign-in. Each of these keys is proposed
-//! 2026-10-12, awaiting owner approval:
-//! - `start_claude` "Start Claude Code" -- proposed 2026-10-12, awaiting owner approval
-//! - `start_codex` "Start Codex" -- proposed 2026-10-12, awaiting owner approval
+//! Sessions on the NEAR AI sign-in. Approved 2026-10-12:
+//! - `start_claude` "Start Claude Code"
+//! - `start_codex` "Start Codex"
 //! - `sign_in_scope` "Uses your NEAR AI sign-in. Runs in {destination}, in the
-//!   folder you choose." -- proposed 2026-10-12, awaiting owner approval.
-//!   Shells fill `{destination}` from `capabilities.terminal_destination`,
-//!   as for `launch_scope`, so Windows never reads "Terminal".
-//! - `sign_in_needed` "Sign in to NEAR AI to start a session." -- proposed
-//!   2026-10-12, awaiting owner approval. Also the line a shell shows for
-//!   the refusal `managed-near-ai-sign-in-required`.
+//!   folder you choose." Shells fill `{destination}` from
+//!   `capabilities.terminal_destination`, as for `launch_scope`, so Windows
+//!   never reads "Terminal".
+//! - `sign_in_needed` "Sign in to NEAR AI to start a session." Also the line
+//!   a shell shows for the refusal `managed-near-ai-sign-in-required`.
 //! - `sign_in_near_ai` "Sign in" -- the button that starts the NEAR AI
-//!   sign-in. Proposed 2026-10-12, awaiting owner approval.
+//!   sign-in.
 //! - `sign_in_near_ai_accessibility` "Sign in to NEAR AI" -- its accessible
-//!   name. Proposed 2026-10-12, awaiting owner approval.
+//!   name.
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "Managed sessions",
