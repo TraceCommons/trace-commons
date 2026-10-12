@@ -489,6 +489,22 @@ final class TracesRowWordsTests: XCTestCase {
             XCTAssertTrue(view.folderNotes(folder).isEmpty, folder.label)
         }
         XCTAssertTrue(store.disclosureLines("scrubbed").isEmpty)
+        // The Contribution rule card says the one sentence, and the long
+        // form is the info button's text, not drawn beside it (owner,
+        // 2026-10-12).
+        let card = try XCTUnwrap(store.armedDisclosure(armed.disclosure))
+        XCTAssertEqual(card.summary, words.summary)
+        XCTAssertEqual(card.lines, words.lines)
+        XCTAssertFalse(card.lines.contains(card.summary))
+        XCTAssertNil(store.armedDisclosure("scrubbed"))
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/ToolFolderInspectors.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(source.contains("caption(copy.summary)"))
+        XCTAssertTrue(source.contains("GlassInfoButton(label, text: copy.lines.joined("))
+        XCTAssertFalse(source.contains("store.disclosureLines("))
     }
 
     /// A held session says the core's word for it, so the amber flag is

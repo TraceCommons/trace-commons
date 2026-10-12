@@ -26,6 +26,21 @@ final class AutomaticGrantCopyExportTests: XCTestCase {
         XCTAssertNotEqual(patterns.lines[0], model.lines[0])
     }
 
+    /// The one sentence each route gets for the Contribution rule card,
+    /// approved by the owner on 2026-10-12, word for word.
+    func testEachRouteHasItsApprovedOneSentence() throws {
+        let patterns = try XCTUnwrap(AutomaticGrantCopy.decode(
+            fromJSON: TCCoreCopy.automaticGrantCopyJSON(disclosure: "patterns_only")))
+        let model = try XCTUnwrap(AutomaticGrantCopy.decode(
+            fromJSON: TCCoreCopy.automaticGrantCopyJSON(disclosure: "model_scrubbed")))
+        XCTAssertEqual(
+            patterns.summary,
+            "Near.ai removes keys, emails, phone numbers and file paths, but names and anything written in plain text can still go out, and no one reviews traces before they're sent.")
+        XCTAssertEqual(
+            model.summary,
+            "Near.ai removes keys, emails, phone numbers and file paths, and a privacy model catches most names, but some personal details can still go out, and no one reviews traces before they're sent.")
+    }
+
     func testAnUnknownNameHasNoWords() {
         XCTAssertNil(TCCoreCopy.automaticGrantCopyJSON(disclosure: "scrubbed"))
         XCTAssertNil(AutomaticGrantCopy.decode(fromJSON: TCCoreCopy.automaticGrantCopyJSON(disclosure: "")))

@@ -188,6 +188,28 @@ pub const AUTO_SCRUB_LIMIT: &str = "The patterns are reliable for the formats th
 /// change the layout.
 pub const AUTO_NO_REVIEW: &str = "No one looks at a trace before it is sent, including you.";
 
+/// The one sentence the Contribution rule card says under Automatic when
+/// no privacy model is confirmed to have run (`Disclosure::PatternsOnly`).
+///
+/// Approved 2026-10-12 (owner), word for word. The long, precise
+/// disclosure ([`AUTO_PATTERNS_ONLY_SCOPE`], [`AUTO_PATTERNS_ONLY_LIMIT`],
+/// [`AUTO_NO_REVIEW`]) stays one click away, behind the card's info button,
+/// and in the arming dialog.
+pub const AUTO_SUMMARY_PATTERNS_ONLY: &str = concat!(
+    crate::app_name!(),
+    " removes keys, emails, phone numbers and file paths, but names and anything written in plain text can still go out, and no one reviews traces before they're sent."
+);
+
+/// The one sentence for the route where a privacy model runs
+/// (`Disclosure::ModelScrubbed`).
+///
+/// Approved 2026-10-12 (owner), word for word. See
+/// [`AUTO_SUMMARY_PATTERNS_ONLY`].
+pub const AUTO_SUMMARY_MODEL: &str = concat!(
+    crate::app_name!(),
+    " removes keys, emails, phone numbers and file paths, and a privacy model catches most names, but some personal details can still go out, and no one reviews traces before they're sent."
+);
+
 /// Every fixed string on this surface, in one payload.
 ///
 /// Shaped for the C ABI: `tc_consent_copy` serialises this and hands the
@@ -755,6 +777,10 @@ pub struct AutomaticGrantCopy {
     pub disclosure: &'static str,
     pub patterns_only: Option<ScrubCopy>,
     pub model_scrubbed: Option<ScrubCopy>,
+    /// The one sentence a card shows for this disclosure (approved
+    /// 2026-10-12). `patterns_only`, `model_scrubbed` and `no_review` are the
+    /// long form, for an info button and the arming dialog.
+    pub summary: &'static str,
     pub no_review: &'static str,
     pub scope_required: &'static str,
     pub path_automatic: &'static str,
@@ -775,9 +801,10 @@ pub fn automatic_grant_copy(
     disclosure: crate::daemon::automatic_gate::Disclosure,
 ) -> AutomaticGrantCopy {
     use crate::daemon::automatic_gate::Disclosure;
-    let (label, patterns_only, model_scrubbed) = match disclosure {
+    let (label, summary, patterns_only, model_scrubbed) = match disclosure {
         Disclosure::PatternsOnly => (
             "patterns_only",
+            AUTO_SUMMARY_PATTERNS_ONLY,
             Some(ScrubCopy {
                 scope: AUTO_PATTERNS_ONLY_SCOPE,
                 limit: AUTO_PATTERNS_ONLY_LIMIT,
@@ -786,6 +813,7 @@ pub fn automatic_grant_copy(
         ),
         Disclosure::ModelScrubbed => (
             "model_scrubbed",
+            AUTO_SUMMARY_MODEL,
             None,
             Some(ScrubCopy {
                 scope: AUTO_SCRUB_SCOPE,
@@ -797,6 +825,7 @@ pub fn automatic_grant_copy(
         disclosure: label,
         patterns_only,
         model_scrubbed,
+        summary,
         no_review: AUTO_NO_REVIEW,
         scope_required: AUTO_SCOPE_REQUIRED,
         path_automatic: AUTO_PATH_AUTOMATIC,
@@ -3066,6 +3095,32 @@ mod tests {
             AUTO_NO_REVIEW,
             "No one looks at a trace before it is sent, including you."
         );
+        // Approved 2026-10-12 (owner), word for word.
+        assert_eq!(
+            AUTO_SUMMARY_PATTERNS_ONLY,
+            "Near.ai removes keys, emails, phone numbers and file paths, but names and anything written in plain text can still go out, and no one reviews traces before they're sent."
+        );
+        assert_eq!(
+            AUTO_SUMMARY_MODEL,
+            "Near.ai removes keys, emails, phone numbers and file paths, and a privacy model catches most names, but some personal details can still go out, and no one reviews traces before they're sent."
+        );
+    }
+
+    /// Each route gets its own one sentence, chosen here and not in a shell.
+    #[test]
+    fn the_grant_copy_carries_the_one_sentence_for_its_route() {
+        use crate::daemon::automatic_gate::Disclosure;
+        assert_eq!(
+            automatic_grant_copy(Disclosure::PatternsOnly).summary,
+            AUTO_SUMMARY_PATTERNS_ONLY
+        );
+        assert_eq!(
+            automatic_grant_copy(Disclosure::ModelScrubbed).summary,
+            AUTO_SUMMARY_MODEL
+        );
+        // The summary names the app by the macro, so a rename moves it.
+        assert!(AUTO_SUMMARY_MODEL.starts_with(crate::app_name!()));
+        assert!(AUTO_SUMMARY_PATTERNS_ONLY.starts_with(crate::app_name!()));
     }
 
     /// The two sentences make claims about the deterministic redactor, and
@@ -3119,6 +3174,53 @@ mod tests {
         assert!(!removed(&format!("Bearer{random_long}"), random_long));
     }
 
+    /// The one-sentence forms (approved 2026-10-12) list four things the
+    /// redactor removes: keys, emails, phone numbers and file paths. Each is
+    /// shown removed by the deterministic redactor, with no model, in
+    /// ordinary prose (`redact_text` is the path every text leaf takes), and
+    /// the limits of each are pinned so the sentence cannot drift past them.
+    #[test]
+    fn the_summary_sentences_list_only_what_the_redactor_removes() {
+        use trace_commons_protocol::trace_contribution::DeterministicTraceRedactor;
+
+        let redactor = DeterministicTraceRedactor::deterministic_only(Vec::new());
+        let removed = |text: &str, value: &str| {
+            let (out, _) = redactor.redact_text(text);
+            !out.contains(value)
+        };
+
+        // Keys, in a format the patterns know.
+        let key = "sk-proj-AbCdEf0123456789GhIjKlMnOpQrStUv";
+        assert!(removed(&format!("my key is {key} thanks"), key));
+        let aws = "AKIAIOSFODNN7EXAMPLE";
+        assert!(removed(&format!("export AWS_ACCESS_KEY_ID={aws}"), aws));
+
+        // Emails.
+        let email = "jane.doe@example.com";
+        assert!(removed(&format!("write to {email} about it"), email));
+
+        // File paths: a home directory path, which names the account.
+        let path = "/Users/janedoe/projects/secret-app/src/main.rs";
+        assert!(removed(&format!("edited {path} today"), "janedoe"));
+
+        // Phone numbers, in prose. International and parenthesised forms
+        // are removed on their own.
+        for number in ["+1 415 555 0132", "+44 20 7946 0958", "(415) 555-0132"] {
+            assert!(
+                removed(&format!("please ring me on {number} later"), number),
+                "{number} must be removed"
+            );
+        }
+        // A bare dashed number is removed only next to a word like "phone";
+        // ten digits with no separator, and a dashed number with no such
+        // word, are not. The sentence says "phone numbers" without this
+        // qualification; the long disclosure does not list phone numbers
+        // at all. Reported to the owner 2026-10-12.
+        assert!(removed("phone: 415-555-0132", "415-555-0132"));
+        assert!(!removed("order 415-555-0132 shipped", "415-555-0132"));
+        assert!(!removed("my number is 4155550132 ok", "4155550132"));
+    }
+
     /// The scope sentence may not promise more than the scrubber does.
     ///
     /// Two overclaims were found in review and each is pinned out: an
@@ -3140,6 +3242,26 @@ mod tests {
         assert!(AUTO_NO_REVIEW.contains("including you"));
         for hedge in ["usually", "may ", "might", "generally", "typically"] {
             assert!(!AUTO_NO_REVIEW.contains(hedge), "hedged with {hedge:?}");
+        }
+        // The one-sentence forms say it the same way: the clause is exact
+        // and no hedge word is anywhere in the sentence that carries it.
+        for summary in [AUTO_SUMMARY_PATTERNS_ONLY, AUTO_SUMMARY_MODEL] {
+            assert!(summary.ends_with("and no one reviews traces before they're sent."));
+            let clause = summary
+                .rsplit(", ")
+                .next()
+                .expect("the sentence has a last clause");
+            for hedge in [
+                "usually",
+                "may ",
+                "might",
+                "generally",
+                "typically",
+                "mostly",
+                "most ",
+            ] {
+                assert!(!clause.contains(hedge), "hedged with {hedge:?}");
+            }
         }
     }
 
