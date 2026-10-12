@@ -30,6 +30,8 @@ use crate::canonical_json;
 use crate::llm::recording::{TraceFile, TraceResponse};
 use crate::redaction::redact_sensitive_json;
 
+mod tool_output_detectors;
+
 pub const TRACE_CONTRIBUTION_SCHEMA_VERSION: &str = "ironclaw.trace_contribution.v1";
 pub const TRACE_CONTRIBUTION_POLICY_VERSION: &str = "2026-04-24";
 /// Bumped to v3 when the contextual-entropy pass began re-anchoring after `=`
@@ -4603,9 +4605,18 @@ impl DeterministicTraceRedactor {
         state: &mut RedactionState,
     ) -> (String, RedactionReport) {
         let mut report = RedactionReport::default();
-        let mut redacted = self.redact_private_emails(input, state, &mut report);
+        // Ahead of the email pass, so a `user@host.local` prompt or an
+        // `Author: Name <addr>` line is labelled for what it is; the email
+        // pass still takes the address itself. See `tool_output_detectors`.
+        let mut redacted =
+            tool_output_detectors::redact_identity_shapes(input, state, &mut report);
+        redacted = self.redact_private_emails(&redacted, state, &mut report);
         redacted = self.redact_generic_paths(&redacted, state, &mut report);
         redacted = self.redact_known_paths(&redacted, state, &mut report);
+        // After both path passes, so a name inside `/Users/<name>/...` is
+        // already a `local_path` placeholder and never reaches these.
+        redacted =
+            tool_output_detectors::redact_network_and_account_shapes(&redacted, state, &mut report);
         if state.edit_map.is_some() {
             state.track_ranges(
                 &pem_block_regex()
