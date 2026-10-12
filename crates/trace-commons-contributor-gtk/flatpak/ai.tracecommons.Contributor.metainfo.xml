@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.14.0" date="2026-10-12">
+      <description>
+        <p>If you joined with an invite, the app now offers to move your contributions to a NEAR AI account, and NEAR AI sign-in uses your NEAR wallet by default. More is removed from tool output before it leaves the device: git author names, IP addresses, private host names, account user names and phone numbers.</p>
+      </description>
+    </release>
     <release version="0.13.1" date="2026-10-11">
       <description>
         <p>When many notices are shown at once they now scroll instead of pushing the rest of the window out of view, and they can be dismissed together.</p>
