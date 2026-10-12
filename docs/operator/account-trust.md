@@ -13,7 +13,8 @@ mirror with enforced tenant RLS. Set:
 - `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON` to a JSON policy with the same
   version, positive `processing_cost_bound` and `bounded_allowance`, explicit
   `period` (`{"mode":"lifetime"}` or `{"mode":"fixed","seconds":...}`),
-  and `"growth_rule":"none"`
+  and `"growth_rule":"none"` (a flat allowance; see
+  [earned growth](#earned-growth-live-tiered-v1) for `"tiered-v1"`)
 - `TRACE_COMMONS_ACCOUNT_ADMISSION_LEASE_SECONDS` to an explicit positive
   duration no greater than 86400
 
@@ -21,8 +22,9 @@ There are no default numeric allowances. The bound is a conservative unit of
 server processing work. It must be calibrated against enforced request size
 and work ceilings; it is not money, tokens, or NEAR credit. A fixed period has
 an advisory retry delay to its next boundary. A lifetime period has no reset
-time, so the API does not invent one. Growth requires the explicit external
-evaluation configuration described below.
+time, so the API does not invent one. Growth requires either the explicit
+external evaluation configuration or a `tiered-v1` policy, both described
+below.
 
 V77 stores deduplicated, typed source facts for accepted credit events and
 gate evaluations. The database verifies the source row, account ownership,
@@ -204,36 +206,42 @@ sum spending across versions sharing the same duration and bucket. A version bum
 inside that bucket does not refresh the allowance. Changing period mode/duration
 is a separate reviewed policy change, not an implicit lifetime reset. Lease liveness uses PostgreSQL time.
 
-Trust facts are recorded for the earned-trust shadow and are still read by no
-admission path. `POST /v1/admin/record-account-trust-facts?limit=N&dry_run=true`
-(admin bearer, fail-closed without a DB mirror) records missing facts for open
-accounts in anchored tenants and returns label-only counts; a re-run records
-nothing new. The login running it needs the NOLOGIN role
-`trace_account_trust_worker` (V85), which carries EXECUTE on three definer
-functions and no table privilege; do not grant it to
-`trace_account_admission_runtime`. See
+Trust facts are what the earned-trust rule reads. Admission reads facts only
+through an `applied` evaluation (see [earned growth](#earned-growth-live-tiered-v1)).
+`POST /v1/admin/record-account-trust-facts?limit=N&dry_run=true` (admin or
+`account_trust_worker` bearer, fail-closed without a DB mirror) records
+missing facts for open accounts in anchored tenants and returns label-only
+counts; a re-run records nothing new. Since V126 the facts include
+`attested_submission`: an accepted submission whose V76 witness certificate is
+version 2 with a `provider_tee_final_call` and whose stored artifact matches
+the current submitted envelope. Gateway receipts and v1 certificates never
+count. The login running it needs the NOLOGIN role
+`trace_account_trust_worker` (V85, widened by V126), which carries EXECUTE on
+definer functions and no table privilege. See
 `docs/superpowers/specs/2026-09-26-earned-account-trust-design.md`.
 
-Earned-trust evaluation runs in shadow only. Admission never reads it, the
-production policy keeps `"growth_rule": "none"`, and V86's write function
-refuses every mode but `shadow`. A candidate growth policy is supplied
+A candidate growth policy can also be evaluated in shadow, supplied
 separately: `TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_JSON` (a base policy
 with `"growth_rule": "tiered-v1"` and a `growth` object) and
 `TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_VERSION`. Both absent is off. One
-without the other, or a malformed policy, refuses startup. With it set, each
-of these takes the admin bearer:
+without the other, or a malformed policy, refuses startup. Admission never
+reads a shadow row. The routes:
 
-- `POST /v1/admin/evaluate-account-trust?limit=N&as_of=RFC3339`: stores a
-  `shadow` evaluation for each account with facts, and appends a hash-only
-  `account_trust_tier_changed` row (outcome `shadow`) to `trace_account_audit`
-  when the tier moves. Run it on a schedule: decay takes effect only when it
-  runs.
-- `GET /v1/admin/account-trust/explain?account_ref=sha256:<hex>`: returns the
-  stored and recomputed evaluation side by side, with `reproduced`. The ref is
+- `POST /v1/admin/evaluate-account-trust?limit=N&mode=shadow|applied&as_of=RFC3339`
+  (admin or `account_trust_worker` bearer): stores an evaluation for each
+  account with facts, and appends a hash-only `account_trust_tier_changed`
+  row (outcome = the mode) to `trace_account_audit` when the tier moves.
+  `shadow` is the default and runs the shadow candidate at `as_of`.
+  `applied` (also accepted as `production`) runs the admission policy's own
+  `tiered-v1` rule and refuses `as_of`. Run it on a schedule: decay takes
+  effect only when it runs.
+- `GET /v1/admin/account-trust/explain?account_ref=sha256:<hex>&mode=shadow|applied`
+  (admin): returns the stored and recomputed evaluation side by side, with
+  `reproduced`. The ref is
   `sha256("trace-account-trust-ref.v1\n" || tenant_id || "\n" || account_id)`.
-- `POST /v1/admin/account-trust-drill` (`{"record_evidence": true}`): reproduces
-  every stored shadow evaluation and records `account_trust_explain`
-  rollout-smoke evidence. It passes only if at least one evaluation was
+- `POST /v1/admin/account-trust-drill` (`{"record_evidence": true, "mode": "applied"}`,
+  admin): reproduces every stored evaluation in the mode (default `shadow`)
+  and records `account_trust_explain` rollout-smoke evidence. It passes only if at least one evaluation was
   checked and every one reproduced. A later dedup rederive or a change to
   credit quality legitimately breaks reproduction until the next evaluation
   run. The check is not in the required rollout-smoke set while growth is
@@ -243,7 +251,9 @@ An account merge carries the absorbed account's trust facts to the survivor
 (V87), each source once. Evaluations are not carried: the next evaluation run
 re-evaluates the survivor over the union of facts. Each account reservation
 row has nullable `earned_tier` and `trust_evaluation_digest` columns (V88).
-They are NULL on every reservation while growth is shadow-only. When a
+They are NULL under `"growth_rule":"none"`; under `tiered-v1` or `external`
+they record the tier and digest the reservation relied on (tier 0 and a NULL
+digest when no fresh applied evaluation applied). When a
 reservation is refused as `account_limit_reached` and the account's fresh
 shadow evaluation would have fitted it under the candidate policy, ingest logs
 the label-only line `account_trust_shadow_would_admit` with a process-local
@@ -267,6 +277,158 @@ budget checks, on the authority kind the row recorded (an attested row is not
 debited). This recovery exception does not make expired evidence valid for
 a submission UUID that has never been reserved. The shared allowance health
 condition makes no promise that a lifetime budget will reset.
+
+## Earned growth, live (tiered-v1)
+
+Approved by Zaki on 2026-10-11 ("yes I approve live growth"). An admission
+policy that names `"growth_rule":"tiered-v1"` carries its own `growth` object,
+parsed by the same rule as a shadow candidate. Ingest then evaluates it
+itself: the worker writes an `applied` evaluation per account, and admission
+reads the newest one through V114's read. An account's allowance for the
+period is `min(bounded_allowance * multiplier[tier], allowance_ceiling)`. A
+missing evaluation, one older than `evaluation_max_age_seconds`, one from
+another policy version, or one whose inputs changed since it was computed
+(a new fact, a gate or dedup change, a principal or merge change) reads as
+tier 0: the base allowance, never less. `"growth_rule":"none"` is unchanged.
+
+Attested inference earns trust (decided the same day, reversing decision 5 of
+the spec). An accepted, un-netted, first-in-cluster submission with an
+`attested_submission` fact qualifies without passing the gate or the quality
+threshold; it counts `attested_unit_weight` units (default 1) toward the
+tier, under the same weekly cap; and a tier may require `attested_units`
+(default 0). A provider-TEE attested upload the gate never assigned a dedup
+cluster is not first in any cluster, so it earns nothing until the dedup pass
+reaches it.
+
+### The policy
+
+For user testing, with a weekly period. Replace `<BASE>` (100 recommended)
+and `<CEILING>` (`<BASE>` times 8: 800 for 100), and
+`PILOT_GATE_POLICY_VERSION` with the gate policy version in effect (query D1
+in the growth-tier draft: `SELECT gate_policy_version, count(*) FROM
+trace_gate_decisions GROUP BY 1`). Every number is a first draft.
+
+```json
+{
+  "version": "earned-trust-live-2026-10-11.1",
+  "processing_cost_bound": 1,
+  "bounded_allowance": <BASE>,
+  "period": {"mode": "fixed", "seconds": 604800},
+  "growth_rule": "tiered-v1",
+  "growth": {
+    "window_seconds": 7257600,
+    "weekly_cap": 10,
+    "attested_unit_weight": 2,
+    "q_min_micros": null,
+    "credit_quality_calibration_versions": [],
+    "penalty_cooldown_seconds": 7776000,
+    "evaluation_max_age_seconds": 172800,
+    "allowance_ceiling": <CEILING>,
+    "evaluator_versions": ["PILOT_GATE_POLICY_VERSION"],
+    "dedup_signal_versions": ["events.v1+fnv1a-3shingle-set.v2"],
+    "tiers": [
+      {"units": 0,  "active_weeks": 0, "age_seconds": 0,       "multiplier": 1},
+      {"units": 10, "active_weeks": 2, "age_seconds": 1209600, "multiplier": 2},
+      {"units": 30, "active_weeks": 4, "age_seconds": 3628800, "multiplier": 4, "attested_units": 5},
+      {"units": 60, "active_weeks": 8, "age_seconds": 7257600, "multiplier": 8, "attested_units": 10}
+    ]
+  }
+}
+```
+
+Tier 1 needs no attestation, so contributors without NEAR AI inference can
+still earn. `attested_unit_weight` 2 and the tier 2 and 3 `attested_units`
+are proposals for review, not decided values. Setting the policy is a version
+bump: `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION` must equal `version`.
+Spend in the current fixed bucket carries across versions, so switching from
+a lifetime period to a weekly one is a separate reviewed change and a weekly
+bucket starts counting from its boundary.
+
+### Switching growth live
+
+1. Apply migrations through V126, and confirm V115's frontier backfill left
+   no account without a frontier row (the query under the external contract
+   below).
+2. Grant the ingest login `trace_account_trust_worker` beside
+   `trace_account_admission_runtime`. Check, as the ingest login:
+   `SELECT pg_has_role(current_user,'trace_account_trust_worker','MEMBER')`.
+3. Run the shadow candidate with the same growth object for at least a day and
+   read `evaluate-account-trust?mode=shadow` and the drill. Fix any
+   `evaluator_versions` or `dedup_signal_versions` that leave every account at
+   tier 0.
+4. Mint the scheduler token: an EdDSA-signed tenant token with
+   `"role":"account_trust_worker"`, any non-empty `tenant_id` (the routes
+   enumerate every anchored tenant), a `sub`, a `jti`, and an `exp` within
+   `TRACE_COMMONS_SIGNED_TOKEN_MAX_TTL_SECONDS` if that is set. It opens the
+   record and evaluate routes and nothing else; every other admin and worker
+   route returns 403 to it. Put it only in the ingest environment file.
+   Revoke it by adding its `jti` to `TRACE_COMMONS_SIGNED_TOKEN_REVOKED_JTIS`.
+   If tenant access grants are enforced, this role has no storable grant
+   (V1's role CHECK predates it): use the signed-token path.
+5. Set the policy and the scheduler, then restart ingest:
+
+   ```
+   TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION=earned-trust-live-2026-10-11.1
+   TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON='<the policy, minified>'
+   TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_ENABLED=true
+   TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_TOKEN=<the token>
+   TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_INTERVAL_SECONDS=3600
+   ```
+
+   At startup ingest turns external growth on (V114), checks V114's contract
+   (`external_account_trust_contract_not_ready`) and V126's
+   (`tiered_account_trust_contract_not_ready`: the login must hold the
+   recorder's, the input reads', the generation read's and the V126 writer's
+   EXECUTE, and no direct write on facts or evaluations), and authenticates
+   the scheduler token. Any failure refuses startup with that label.
+6. Each scheduler tick records missing facts (up to 10 passes of
+   `TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_LIMIT` sources), then evaluates
+   `applied`, then `shadow` if a candidate is also set. The interval must be
+   shorter than `evaluation_max_age_seconds` or startup refuses; six hours
+   against a two-day maximum leaves room for several missed ticks. Ticks log
+   label-only counts and register liveness as `account_trust_scheduler`.
+   Between ticks, any change to an account's inputs (a new fact, a re-score or
+   dedup update to a gate decision in one of its clusters, a near-duplicate
+   joining one) sends it to the base allowance until the next tick. Start at
+   `INTERVAL_SECONDS=3600`, watch how often `account_trust_tier_changed`
+   audit rows flip, and lengthen the interval once that rate is known. A tick
+   evaluates at most 10,000 accounts; beyond that, the rest stay at base.
+7. Verify, right after a tick (a gate-field update between ticks legitimately
+   breaks reproduction until the next one): `POST /v1/admin/account-trust-drill`
+   with `{"mode":"applied","record_evidence":true}` passes;
+   `/v1/account/contribution-status` for a tier 1 account reports `ready`
+   past the base allowance; new reservation rows carry `earned_tier` and
+   `trust_evaluation_digest`.
+
+An operator can also run the two routes by hand with the scoped token or an
+admin token:
+
+```
+H='Authorization: Bearer <account_trust_worker token>'
+curl -fsS -X POST -H "$H" 'http://127.0.0.1:3907/v1/admin/record-account-trust-facts?limit=10000'
+curl -fsS -X POST -H "$H" 'http://127.0.0.1:3907/v1/admin/evaluate-account-trust?limit=10000&mode=applied'
+```
+
+### Rollback
+
+- **Stop growth:** bump the admission policy to a new version with
+  `"growth_rule":"none"` and restart. Admission stops reading evaluations at
+  once; spend already recorded stays, so nobody gets a fresh allowance from
+  the switch. Unset the scheduler variables too, or startup refuses a
+  scheduler with nothing to evaluate (unless a shadow candidate is set).
+- **The scheduler dies or its token expires:** every applied evaluation goes
+  stale within `evaluation_max_age_seconds` and every account falls to the
+  base allowance. That is the fail-safe direction; liveness escalates the
+  failing driver.
+- **External growth stays on.** Enabling it turned on V114's gate-write
+  invalidation, which takes dependency locks and scans gate facts on every
+  gate write, and the runtime has no path to turn it off. A policy bump to
+  `none` stops the reads, not the triggers. Turning the switch off is an
+  owner action on `trace_account_trust_external_growth`, safe only when no
+  ingest runs a `tiered-v1` or `external` policy.
+- **Bad evaluations:** a `tiered-v1` policy with a new version invalidates
+  every applied row of the old one immediately (admission reads only its own
+  version), so a corrected policy is a version bump plus one scheduler tick.
 
 ## External evaluation contract
 

@@ -521,7 +521,7 @@ credentials and adds two of its own. See
 |---|---|---|---|
 | `TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED` | optional | `false` | Explicit replacement switch. Off retains legacy evidence behavior. |
 | `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION` | R when enabled | (none) | Reviewed policy version allowed at startup. |
-| `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON` | R when enabled | (none) | Explicit bounded allowance, cost bound, period, and `growth_rule: none`. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON` | R when enabled | (none) | Explicit bounded allowance, cost bound, period, and `growth_rule`: `none` (flat), `external` (V114), or `tiered-v1` with a `growth` object (earned trust, live). |
 | `TRACE_COMMONS_ACCOUNT_ADMISSION_LEASE_SECONDS` | R when enabled | (none) | Positive processing lease, at most 86400 seconds. |
 | `TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_PROVIDER_SIGNERS` | See below | (none) | Comma-separated trusted provider-TEE signer keys. At least this or gateway signers must be configured. |
 | `TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_GATEWAY_SIGNERS` | See below | (none) | Comma-separated trusted gateway signer keys; optional when provider signers are configured. |
@@ -546,6 +546,22 @@ verifies and that carries `source_session` is admitted without debiting the
 bounded allowance.
 
 See [account trust](./account-trust.md) for the activation and response contract.
+
+## Earned account trust
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_JSON` | optional | (none) | A candidate `tiered-v1` policy evaluated in `shadow`; never read by admission. Set with the version or not at all. |
+| `TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_VERSION` | R with the JSON | (none) | Must equal the candidate's `version`. |
+| `TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_ENABLED` | optional | `false` | Toggle. `true` without the token refuses startup. |
+| `TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_TOKEN` | R when enabled | (none) | Bearer the scheduler presents to the record and evaluate routes. Must authenticate as role `account_trust_worker` (or `admin`, not recommended); anything else refuses startup. Never logged. |
+| `TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_INTERVAL_SECONDS` | optional | `21600` | Cadence, 60 to 86400. Must be shorter than every configured policy's `evaluation_max_age_seconds`, or startup refuses. |
+| `TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_LIMIT` | optional | `10000` | Sources per recorder pass, 1 to 10000. A tick makes at most 10 passes, then evaluates. |
+
+Each scheduler tick records missing facts, then evaluates `applied` when the
+admission policy names `tiered-v1` and `shadow` when a shadow policy is set.
+Startup refuses a scheduler with neither. Its liveness name is
+`account_trust_scheduler`. See [account trust](./account-trust.md#earned-growth-live-tiered-v1).
 
 ## Legacy invite linking (default off)
 

@@ -1,8 +1,10 @@
 # Earned Account Trust (Flow 3) — Design
 
-Date: 2026-09-26 (decisions recorded 2026-09-27)
+Date: 2026-09-26 (decisions recorded 2026-09-27; amended 2026-10-11)
 Status: design accepted; the seven questions it raised were decided on
-2026-09-27 (see "Decisions"). Implementation not started
+2026-09-27 (see "Decisions"). Shadow implemented (V84-V88). Amended
+2026-10-11: growth goes live and attested inference earns trust, reversing
+decision 5 (see "Amendment: live growth and attested inference")
 Item: Z9 in the #991 work split ("The earned-trust mechanism for Flow 3")
 Extends: [`2026-09-23-connect-and-forget-consent-design.md`](2026-09-23-connect-and-forget-consent-design.md),
 "The trust model" and "The three paths"
@@ -169,6 +171,9 @@ Signals deliberately **not** read in v1:
   but #1005's v2 certificate with signed `inference_provenance` is not yet a
   fact source. Decided (decision 5): not in v1; the follow-up is a tier
   requirement, never a multiplier, tracked in #1059.
+  > **Reversed 2026-10-11.** Provider-TEE attested inference now earns
+  > trust three ways, including as a faster route to volume. See
+  > "Amendment: live growth and attested inference".
 
 ### Aggregation
 
@@ -666,6 +671,13 @@ The options not taken are kept for the record.
    units, which would make connected inference a faster route to volume, the
    thing the consent spec declines ("one route toward automatic contribution,
    not the door to it").
+   > **Reversed by Zaki on 2026-10-11.** Asked whether "if they are uploading
+   > near.ai attested traces we should be allowing them to upload" meant (a)
+   > attested uploads buy volume directly, (b) attestation stands in for the
+   > gate and quality test, or (c) a tier requirement, he answered "I think a
+   > b and c". All three are adopted; see "Amendment: live growth and
+   > attested inference". The consent spec's caution is now carried by the
+   > weekly cap, which binds attested units as it binds every other unit.
 
 6. **The consent spec is amended:** Flow 3 earns allowance, and "nothing is
    earned silently" becomes a tier-change notice. The amendment is made in
@@ -678,3 +690,92 @@ The options not taken are kept for the record.
    contributor-cap and dedup passes use, and a scoped worker bearer before any
    recorder or evaluator runs unattended in production. Not taken: a scoped
    bearer from the start, which the operator-run batch phase does not need.
+   > **Done 2026-10-11** ("the scoped worked token sounds fine"): the
+   > `account_trust_worker` token role opens the record and evaluate routes
+   > and nothing else, and `TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_*` runs
+   > them unattended under it. Explain and the drill stay admin-only.
+
+## Amendment: live growth and attested inference
+
+Decided by Zaki on 2026-10-11. On going live: "We should start this now so we
+can test with users", then "yes I approve live growth". On attestation: "I
+think a b and c" (decision 5 above, reversed). On the allowance period: a
+week. On credentials: "the scoped worked token sounds fine" (decision 7). This
+section records what changed against the design above; the operator steps are
+in `docs/operator/account-trust.md`, "Earned growth, live (tiered-v1)".
+
+### The attested fact
+
+A seventh fact kind, `attested_submission`, with outcome
+`attested_provider_tee`, sourced from the submission (V126). The recorder
+verifies it from V76's witness evidence with the reader's VerifiedV2 rule
+(`db/trace_corpus_pg.rs`, `witness_claim_from_row`): certificate version 2,
+inference class `provider_tee_final_call`, the submission accepted and not
+revoked, purged or expired, and the stored `artifact_sha256` equal to the
+current `submitted_envelope` object. `occurred_at` is the certificate's
+`issued_at`. A gateway-class receipt does not show which model ran and is
+never this fact. V89's ledger label is not read: its contract is that nothing
+which gates, scores or prices a trace reads it. Like acceptance, the fact
+needs a live principal link.
+
+### The rule
+
+For each accepted submission in the window that no withdrawal, revocation,
+quarantine or penalty removed:
+
+- **(b)** it qualifies if a gate fact qualifies it (unchanged), **or** it has
+  an attested fact and is first in its dedup cluster. The attested path skips
+  the gate pass, the evaluator allowlist, the quality threshold and the dedup
+  signal allowlist; it keeps acceptance, netting, the penalty cutoff and
+  first-in-cluster. A submission the dedup pass never clustered is not first
+  in any cluster, so an attested upload earns nothing until the pass reaches
+  it.
+- **(a)** a qualifying attested submission counts `attested_unit_weight`
+  units (policy field, integer, default 1). The weight applies per
+  submission and the weekly cap applies to the weighted week:
+  `units_week = min(plain + weight * attested, weekly_cap)`. So attestation
+  reaches the cap sooner and never passes it. `units_capped` is the weighted
+  remainder.
+- **(c)** a tier may require `attested_units` (per-tier field, default 0;
+  tier 0 must be 0, the column must be monotone and no tier may require more
+  attested units than units). `attested_units` counts attested qualifying
+  submissions, capped per week at `weekly_cap`.
+
+The parser takes both fields as optional under `deny_unknown_fields`, and
+refuses a weight of 0 or one whose product with `weekly_cap` overflows. Both
+are part of the reviewed policy version. Each evaluation stores
+`attested_units` (V126; NULL on rows written before it reads as 0). The
+attested facts enter `facts_digest` as every fact does, and explain compares
+`attested_units` with the rest of the evaluation. The digest's encoding of the
+older kinds is unchanged, so earlier shadow rows still reproduce.
+
+### Live mode
+
+- The admission parser accepts `"growth_rule":"tiered-v1"` with a `growth`
+  object, validated by the same parser as a shadow candidate. It fills the
+  same read V114 built for `"external"` (`account_trust::ExternalGrowth`,
+  source `TieredV1`), with the policy's own version as the growth policy
+  version. `admission_ledger.rs` is unchanged: rules 1-6 of "How admission
+  reads trust" were already implemented there for `external`, including the
+  clamp to `[bounded_allowance, allowance_ceiling]`.
+- The stored mode is `applied` (V86's CHECK and V114's read), not a new
+  `production` value. The evaluate route accepts `production` as another
+  spelling.
+- The in-process evaluator writes `applied` rows through V126's
+  `trace_record_account_trust_evaluation_v2`, granted to
+  `trace_account_trust_worker`. It reads the account's input generation, its
+  facts and `transaction_timestamp()` in one REPEATABLE READ snapshot, and
+  the writer refuses the row if the generation moved. Admission consumes a row
+  only while its generation is current, so a later fact, gate or identity
+  change returns the account to tier 0 until the next run. This is stricter
+  than rule 2's staleness alone, and fails in the same direction.
+- V114's readiness check keeps the external evaluator from being the
+  admission runtime. `tiered-v1` deliberately makes them the same process:
+  the ingest login holds `trace_account_trust_worker` beside
+  `trace_account_admission_runtime`, and startup checks that it writes facts
+  and evaluations only through the definer functions
+  (`tiered_account_trust_contract_not_ready`).
+- The approval did not wait on switch-on conditions 1-7 of "Rollout";
+  whether each holds on the pilot was not checked when this was written.
+  Condition 8 (Zaki's approval) is met for live growth, but the tier table is
+  a first draft for user testing, not a calibrated value.
