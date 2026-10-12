@@ -10,7 +10,7 @@ use trace_commons_server::account_trust::{
     BoundedPolicy, TrustAccount, parse_bounded_policy, resolve_contribution_account,
 };
 use trace_commons_server::admission_evidence::{
-    AdmissionProviderTrust, verify_admission_evidence, verify_stored_admission_signature,
+    AdmissionProviderTrust, check_admission_evidence, verify_stored_admission_signature,
 };
 use trace_commons_server::admission_ledger::{
     AccountAdmissionReservation, AdmissionDecision, AdmissionLimits, AdmissionProcessingGuard,
@@ -136,8 +136,96 @@ pub(super) fn config_from_env(
 /// separates a declined contribution from an expired credential by this
 /// label, so a rename that moved only one side would put that back into
 /// reading the status alone.
-fn denied() -> (StatusCode, Json<ApiError>) {
+///
+/// Every site passes its own fixed label, logged once at `warn` as
+/// `admission_refusal`, so an operator can tell which check refused. The
+/// label is a `&'static str` and nothing else is logged: no tenant, account,
+/// principal, submission, header value or database error text (hash-only
+/// logging). The response is unchanged: `403 admission_refused`.
+fn denied_at(label: &'static str) -> (StatusCode, Json<ApiError>) {
+    trace_commons_server::admission_ledger::log_admission_refusal(label);
     api_error(StatusCode::FORBIDDEN, AdmissionRefusal::Refused.label())
+}
+
+/// [`denied_at`], plus which evidence check failed (a label from
+/// `ADMISSION_EVIDENCE_CHECK_LABELS`), on the same line.
+fn denied_with(label: &'static str, check: &'static str) -> (StatusCode, Json<ApiError>) {
+    tracing::warn!(
+        admission_refusal = label,
+        admission_check = check,
+        "admission refused"
+    );
+    api_error(StatusCode::FORBIDDEN, AdmissionRefusal::Refused.label())
+}
+
+/// Which path is reading admission evidence headers, for the refusal label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderSite {
+    /// `reserve_on_evidence_ledger`: a new upload with evidence.
+    EvidenceLedger,
+    /// `reserve_account`, replaying an existing V59 row.
+    LegacyReplay,
+    /// `reserve_account`, the account ledger with offered evidence.
+    Account,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderFault {
+    Count,
+    Missing,
+    NotText,
+    TooLong,
+}
+
+fn header_refusal(site: HeaderSite, evidence: bool, fault: HeaderFault) -> &'static str {
+    use HeaderFault::*;
+    use HeaderSite::*;
+    match (site, evidence, fault) {
+        (EvidenceLedger, true, Count) => "evidence_ledger:evidence_header_count",
+        (EvidenceLedger, true, Missing) => "evidence_ledger:evidence_header_missing",
+        (EvidenceLedger, true, NotText) => "evidence_ledger:evidence_header_not_text",
+        (EvidenceLedger, true, TooLong) => "evidence_ledger:evidence_header_too_long",
+        (EvidenceLedger, false, Count) => "evidence_ledger:signature_header_count",
+        (EvidenceLedger, false, Missing) => "evidence_ledger:signature_header_missing",
+        (EvidenceLedger, false, NotText) => "evidence_ledger:signature_header_not_text",
+        (EvidenceLedger, false, TooLong) => "evidence_ledger:signature_header_too_long",
+        (LegacyReplay, true, Count) => "legacy_replay:evidence_header_count",
+        (LegacyReplay, true, Missing) => "legacy_replay:evidence_header_missing",
+        (LegacyReplay, true, NotText) => "legacy_replay:evidence_header_not_text",
+        (LegacyReplay, true, TooLong) => "legacy_replay:evidence_header_too_long",
+        (LegacyReplay, false, Count) => "legacy_replay:signature_header_count",
+        (LegacyReplay, false, Missing) => "legacy_replay:signature_header_missing",
+        (LegacyReplay, false, NotText) => "legacy_replay:signature_header_not_text",
+        (LegacyReplay, false, TooLong) => "legacy_replay:signature_header_too_long",
+        (Account, true, Count) => "account:evidence_header_count",
+        (Account, true, Missing) => "account:evidence_header_missing",
+        (Account, true, NotText) => "account:evidence_header_not_text",
+        (Account, true, TooLong) => "account:evidence_header_too_long",
+        (Account, false, Count) => "account:signature_header_count",
+        (Account, false, Missing) => "account:signature_header_missing",
+        (Account, false, NotText) => "account:signature_header_not_text",
+        (Account, false, TooLong) => "account:signature_header_too_long",
+    }
+}
+
+/// Exactly one value of an admission header, as text, at most 8 KiB.
+fn single_header<'a>(headers: &'a HeaderMap, name: &str, site: HeaderSite) -> ApiResult<&'a str> {
+    let evidence = name == EVIDENCE_HEADER;
+    let refuse = |fault| denied_at(header_refusal(site, evidence, fault));
+    let values = headers.get_all(name);
+    if values.iter().count() != 1 {
+        return Err(refuse(HeaderFault::Count));
+    }
+    let value = values
+        .iter()
+        .next()
+        .ok_or_else(|| refuse(HeaderFault::Missing))?
+        .to_str()
+        .map_err(|_| refuse(HeaderFault::NotText))?;
+    if value.len() > 8192 {
+        return Err(refuse(HeaderFault::TooLong));
+    }
+    Ok(value)
 }
 
 /// This namespace is allocated only by verified NEAR provisioning. Both the
@@ -168,15 +256,20 @@ pub(super) async fn anchor(state: &AppState, tenant: &TenantCtx) -> ApiResult<Op
     if !is_anchored_tenant(tenant.tenant_id()) {
         return Ok(None);
     }
-    let db = state.db_mirror.as_ref().ok_or_else(denied)?;
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| denied_at("anchor_db_unconfigured"))?;
     let stored = db
         .get_near_provisioned_anchor(tenant.tenant_id(), tenant.principal_ref())
         .await
-        .map_err(|_| denied())?
-        .ok_or_else(denied)?;
-    let stored = stored.strip_prefix("sha256:").ok_or_else(denied)?;
+        .map_err(|_| denied_at("db_error:anchor_lookup"))?
+        .ok_or_else(|| denied_at("anchor_missing"))?;
+    let stored = stored
+        .strip_prefix("sha256:")
+        .ok_or_else(|| denied_at("anchor_not_sha256_prefixed"))?;
     if !is_hash(stored) {
-        return Err(denied());
+        return Err(denied_at("anchor_not_hash"));
     }
     Ok(Some(stored.to_string()))
 }
@@ -212,7 +305,7 @@ pub(super) fn evidence_plan(headers: &HeaderMap) -> EvidencePlan {
 ///
 /// This is the whole of the trial-window closure, in one pure function so it
 /// can be tested without a database. `verified` is `Some` only after
-/// [`verify_admission_evidence`] has accepted a receipt bound to this
+/// [`check_admission_evidence`] has accepted a receipt bound to this
 /// account's challenge; there is no third case, and in particular no case
 /// that yields a `window`-kind reservation. Reverting that is an edit to this
 /// function, and `an_unverified_request_never_binds_a_reservation` fails.
@@ -222,7 +315,7 @@ pub(super) fn evidence_binding(
 ) -> ApiResult<(Option<String>, Option<String>)> {
     match (plan, verified) {
         (EvidencePlan::Verify, Some((receipt, challenge))) => Ok((Some(receipt), Some(challenge))),
-        _ => Err(denied()),
+        _ => Err(denied_at("evidence_binding_unverified")),
     }
 }
 
@@ -295,8 +388,8 @@ impl Attempt {
             )
             .await
         };
-        if !transitioned.map_err(|_| denied())? {
-            return Err(denied());
+        if !transitioned.map_err(|_| denied_at("db_error:attempt_processing_transition"))? {
+            return Err(denied_at("attempt_processing_transition_refused"));
         }
         self.processing = true;
         Ok(())
@@ -334,8 +427,8 @@ impl Attempt {
             )
             .await
         };
-        if !transitioned.map_err(|_| denied())? {
-            return Err(denied());
+        if !transitioned.map_err(|_| denied_at("db_error:attempt_finish_transition"))? {
+            return Err(denied_at("attempt_finish_transition_refused"));
         }
         Ok(())
     }
@@ -367,11 +460,17 @@ pub(super) async fn reserve(
     let Some(anchor) = anchor(state, tenant).await? else {
         return Ok(None);
     };
-    state.admission.as_ref().ok_or_else(denied)?;
+    state
+        .admission
+        .as_ref()
+        .ok_or_else(|| denied_at("legacy_admission_unconfigured"))?;
     if !state.require_db_mirror_writes {
-        return Err(denied());
+        return Err(denied_at("legacy_db_mirror_writes_off"));
     }
-    let db = state.db_mirror.as_ref().ok_or_else(denied)?;
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| denied_at("legacy_db_unconfigured"))?;
     let plan = evidence_plan(headers);
     let body_hash = hash_hex(body);
     // A terminal retry is a read of an already-admitted immutable request.
@@ -392,14 +491,14 @@ pub(super) async fn reserve(
                 &body_hash,
             )
             .await
-            .map_err(|_| denied())?
+            .map_err(|_| denied_at("db_error:legacy_completed_lookup"))?
     {
-        return Err(denied());
+        return Err(denied_at("legacy_no_evidence_headers"));
     }
     let guard = db
         .acquire_admission_processing_lock(tenant.tenant_id(), submission)
         .await
-        .map_err(|_| denied())?
+        .map_err(|_| denied_at("db_error:legacy_processing_lock"))?
         .ok_or_else(|| api_error(StatusCode::CONFLICT, AdmissionRefusal::InProgress.label()))?;
     reserve_on_evidence_ledger(state, tenant, headers, body, envelope, anchor, guard)
         .await
@@ -420,15 +519,21 @@ async fn reserve_on_evidence_ledger(
     guard: AdmissionProcessingGuard,
 ) -> ApiResult<Attempt> {
     let submission = envelope.submission_id;
-    let config = state.admission.as_ref().ok_or_else(denied)?;
-    let db = state.db_mirror.as_ref().ok_or_else(denied)?;
+    let config = state
+        .admission
+        .as_ref()
+        .ok_or_else(|| denied_at("evidence_ledger_unconfigured"))?;
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| denied_at("evidence_ledger_db_unconfigured"))?;
     let plan = evidence_plan(headers);
     let body_hash = hash_hex(body);
     // Re-read under the lock: any check before it was advisory and unserialized.
     if db
         .lookup_completed_submission_admission(tenant.tenant_id(), &anchor, submission, &body_hash)
         .await
-        .map_err(|_| denied())?
+        .map_err(|_| denied_at("db_error:evidence_ledger_completed_lookup"))?
     {
         return Ok(Attempt {
             tenant_id: tenant.tenant_id().into(),
@@ -443,31 +548,19 @@ async fn reserve_on_evidence_ledger(
     }
     let verified = match plan {
         EvidencePlan::Verify => {
-            let read = |name: &str| -> ApiResult<&str> {
-                let values = headers.get_all(name);
-                if values.iter().count() != 1 {
-                    return Err(denied());
-                }
-                let value = values
-                    .iter()
-                    .next()
-                    .ok_or_else(denied)?
-                    .to_str()
-                    .map_err(|_| denied())?;
-                if value.len() > 8192 {
-                    return Err(denied());
-                }
-                Ok(value)
-            };
-            let evidence: AdmissionEvidence =
-                serde_json::from_str(read(EVIDENCE_HEADER)?).map_err(|_| denied())?;
-            let witness =
-                verified_witness_for_submission(state, headers, body).ok_or_else(denied)?;
-            let bypass = state.witness_bypass.as_ref().ok_or_else(denied)?;
+            let read = |name: &str| single_header(headers, name, HeaderSite::EvidenceLedger);
+            let evidence: AdmissionEvidence = serde_json::from_str(read(EVIDENCE_HEADER)?)
+                .map_err(|_| denied_at("evidence_ledger:evidence_json_invalid"))?;
+            let witness = verified_witness_for_submission(state, headers, body)
+                .ok_or_else(|| denied_at("evidence_ledger:witness_unverified"))?;
+            let bypass = state
+                .witness_bypass
+                .as_ref()
+                .ok_or_else(|| denied_at("evidence_ledger:witness_bypass_unconfigured"))?;
             if !bypass.policy_version_allowed(witness.redaction_policy_version()) {
-                return Err(denied());
+                return Err(denied_at("evidence_ledger:policy_version_not_allowed"));
             }
-            verify_admission_evidence(
+            check_admission_evidence(
                 &evidence,
                 read(SIGNATURE_HEADER)?,
                 &witness,
@@ -476,7 +569,7 @@ async fn reserve_on_evidence_ledger(
                 &anchor,
                 Utc::now().timestamp(),
             )
-            .map_err(|_| denied())?;
+            .map_err(|check| denied_with("evidence_ledger:evidence_unverified", check))?;
             Some((evidence.receipt_sha256, evidence.challenge_sha256))
         }
         EvidencePlan::RefuseNewSubmission => None,
@@ -495,7 +588,7 @@ async fn reserve_on_evidence_ledger(
     let decision = db
         .reserve_submission_admission(&reservation)
         .await
-        .map_err(|_| denied())?;
+        .map_err(|_| denied_at("db_error:evidence_ledger_reserve"))?;
     let completed = match decision {
         AdmissionDecision::Reserved => false,
         AdmissionDecision::Completed => true,
@@ -517,7 +610,7 @@ async fn reserve_on_evidence_ledger(
                 AdmissionRefusal::LimitReached.label(),
             ));
         }
-        AdmissionDecision::Refused => return Err(denied()),
+        AdmissionDecision::Refused => return Err(denied_at("evidence_ledger_refused")),
     };
     Ok(Attempt {
         tenant_id: reservation.tenant_id,
@@ -541,9 +634,12 @@ async fn reserve_account(
 ) -> ApiResult<Attempt> {
     let submission = envelope.submission_id;
     if !state.require_db_mirror_writes {
-        return Err(denied());
+        return Err(denied_at("account_db_mirror_writes_off"));
     }
-    let db = state.db_mirror.as_ref().ok_or_else(denied)?;
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| denied_at("account_db_unconfigured"))?;
     let account =
         resolve_contribution_account(db.as_ref(), tenant.tenant_id(), tenant.principal_ref())
             .await
@@ -552,7 +648,12 @@ async fn reserve_account(
                     StatusCode::FORBIDDEN,
                     AdmissionRefusal::AccountIdentityUnlinked.label(),
                 ),
-                _ => denied(),
+                trace_commons_server::account_trust::TrustRefusal::Refused => {
+                    denied_at("account_trust_refused")
+                }
+                trace_commons_server::account_trust::TrustRefusal::Unavailable => {
+                    denied_at("account_trust_unavailable")
+                }
             })?;
     if let Some(existing) = tenant
         .read_submission_record(&state.root, submission)
@@ -568,12 +669,12 @@ async fn reserve_account(
     let guard = db
         .acquire_admission_processing_lock(tenant.tenant_id(), submission)
         .await
-        .map_err(|_| denied())?
+        .map_err(|_| denied_at("db_error:account_processing_lock"))?
         .ok_or_else(|| api_error(StatusCode::CONFLICT, AdmissionRefusal::InProgress.label()))?;
     if db
         .get_trace_withdrawal(tenant.tenant_id(), submission)
         .await
-        .map_err(|_| denied())?
+        .map_err(|_| denied_at("db_error:account_withdrawal_lookup"))?
         .is_some()
     {
         // A submission-level tombstone, with or without a source session.
@@ -581,11 +682,13 @@ async fn reserve_account(
     }
     // The shared guard serializes both admission modes. Read *after* taking
     // it: a legacy worker may have completed while this request waited.
-    let legacy_anchor = anchor(state, tenant).await?.ok_or_else(denied)?;
+    let legacy_anchor = anchor(state, tenant)
+        .await?
+        .ok_or_else(|| denied_at("account_anchor_none"))?;
     if let Some(legacy) = db
         .legacy_admission_record(tenant.tenant_id(), submission)
         .await
-        .map_err(|_| denied())?
+        .map_err(|_| denied_at("db_error:legacy_record_lookup"))?
     {
         if legacy.anchor_hash != legacy_anchor || legacy.body_hash != hash_hex(body) {
             return Err(api_error(
@@ -611,37 +714,22 @@ async fn reserve_account(
         // imposing the now-expired first-use time window. A headerless replay
         // derives no new proof and is bound by the stored anchor/body instead.
         if evidence_plan(headers) == EvidencePlan::Verify {
-            let read = |name: &str| -> ApiResult<&str> {
-                let values = headers.get_all(name);
-                if values.iter().count() != 1 {
-                    return Err(denied());
-                }
-                let value = values
-                    .iter()
-                    .next()
-                    .ok_or_else(denied)?
-                    .to_str()
-                    .map_err(|_| denied())?;
-                if value.len() > 8192 {
-                    return Err(denied());
-                }
-                Ok(value)
-            };
-            let evidence: AdmissionEvidence =
-                serde_json::from_str(read(EVIDENCE_HEADER)?).map_err(|_| denied())?;
+            let read = |name: &str| single_header(headers, name, HeaderSite::LegacyReplay);
+            let evidence: AdmissionEvidence = serde_json::from_str(read(EVIDENCE_HEADER)?)
+                .map_err(|_| denied_at("legacy_replay:evidence_json_invalid"))?;
             let pin = state
                 .witness_capture_pin
                 .as_ref()
                 .or_else(|| state.witness_bypass.as_ref().map(WitnessBypassConfig::pin))
-                .ok_or_else(denied)?;
+                .ok_or_else(|| denied_at("legacy_replay:witness_pin_unconfigured"))?;
             verify_stored_admission_signature(&evidence, read(SIGNATURE_HEADER)?, pin)
-                .map_err(|_| denied())?;
+                .map_err(|_| denied_at("legacy_replay:stored_signature_invalid"))?;
             if evidence.account_anchor_sha256 != legacy_anchor
                 || legacy.receipt_hash.as_deref() != Some(evidence.receipt_sha256.as_str())
                 || legacy.challenge_hash.as_deref() != Some(evidence.challenge_sha256.as_str())
                 || evidence.artifact_sha256 != hash_hex(body)
             {
-                return Err(denied());
+                return Err(denied_at("legacy_replay:binding_mismatch"));
             }
         }
         let lease = Uuid::new_v4();
@@ -655,7 +743,7 @@ async fn reserve_account(
                 config.lease_seconds,
             )
             .await
-            .map_err(|_| denied())?;
+            .map_err(|_| denied_at("db_error:legacy_resume"))?;
         let completed = match decision {
             AdmissionDecision::Reserved => false,
             AdmissionDecision::Completed => true,
@@ -677,7 +765,7 @@ async fn reserve_account(
                     AdmissionRefusal::LimitReached.label(),
                 ));
             }
-            AdmissionDecision::Refused => return Err(denied()),
+            AdmissionDecision::Refused => return Err(denied_at("legacy_resume_refused")),
         };
         return Ok(Attempt {
             tenant_id: tenant.tenant_id().into(),
@@ -697,7 +785,7 @@ async fn reserve_account(
     let account_replay = if let Some(prior) = db
         .account_admission_record(tenant.tenant_id(), submission)
         .await
-        .map_err(|_| denied())?
+        .map_err(|_| denied_at("db_error:account_record_lookup"))?
     {
         if prior.account_id != account.account_id() || prior.body_hash != body_hash {
             return Err(api_error(
@@ -768,46 +856,37 @@ async fn reserve_account(
     if plan == EvidencePlan::Verify {
         // An offered legacy proof is always checked, even though account trust
         // is the new authority. A partial or malformed header cannot be ignored.
-        let read = |name: &str| -> ApiResult<&str> {
-            let values = headers.get_all(name);
-            if values.iter().count() != 1 {
-                return Err(denied());
-            }
-            let value = values
-                .iter()
-                .next()
-                .ok_or_else(denied)?
-                .to_str()
-                .map_err(|_| denied())?;
-            if value.len() > 8192 {
-                return Err(denied());
-            }
-            Ok(value)
-        };
-        let evidence: AdmissionEvidence =
-            serde_json::from_str(read(EVIDENCE_HEADER)?).map_err(|_| denied())?;
+        let read = |name: &str| single_header(headers, name, HeaderSite::Account);
+        let evidence: AdmissionEvidence = serde_json::from_str(read(EVIDENCE_HEADER)?)
+            .map_err(|_| denied_at("account:evidence_json_invalid"))?;
         if account_replay {
             let pin = state
                 .witness_capture_pin
                 .as_ref()
                 .or_else(|| state.witness_bypass.as_ref().map(WitnessBypassConfig::pin))
-                .ok_or_else(denied)?;
+                .ok_or_else(|| denied_at("account_replay:witness_pin_unconfigured"))?;
             verify_stored_admission_signature(&evidence, read(SIGNATURE_HEADER)?, pin)
-                .map_err(|_| denied())?;
+                .map_err(|_| denied_at("account_replay:stored_signature_invalid"))?;
             if evidence.account_anchor_sha256 != legacy_anchor
                 || evidence.artifact_sha256 != body_hash
             {
-                return Err(denied());
+                return Err(denied_at("account_replay:binding_mismatch"));
             }
         } else {
-            let providers = config.providers.as_ref().ok_or_else(denied)?;
-            let witness =
-                verified_witness_for_submission(state, headers, body).ok_or_else(denied)?;
-            let bypass = state.witness_bypass.as_ref().ok_or_else(denied)?;
+            let providers = config
+                .providers
+                .as_ref()
+                .ok_or_else(|| denied_at("account:evidence_providers_unconfigured"))?;
+            let witness = verified_witness_for_submission(state, headers, body)
+                .ok_or_else(|| denied_at("account:witness_unverified"))?;
+            let bypass = state
+                .witness_bypass
+                .as_ref()
+                .ok_or_else(|| denied_at("account:witness_bypass_unconfigured"))?;
             if !bypass.policy_version_allowed(witness.redaction_policy_version()) {
-                return Err(denied());
+                return Err(denied_at("account:policy_version_not_allowed"));
             }
-            verify_admission_evidence(
+            check_admission_evidence(
                 &evidence,
                 read(SIGNATURE_HEADER)?,
                 &witness,
@@ -816,7 +895,7 @@ async fn reserve_account(
                 &legacy_anchor,
                 Utc::now().timestamp(),
             )
-            .map_err(|_| denied())?;
+            .map_err(|check| denied_with("account:evidence_unverified", check))?;
             attested = true;
         }
     }
@@ -834,7 +913,7 @@ async fn reserve_account(
     let decision = db
         .reserve_account_admission(&reservation)
         .await
-        .map_err(|_| denied())?;
+        .map_err(|_| denied_at("db_error:account_reserve"))?;
     let completed = match decision.decision {
         AdmissionDecision::Reserved => false,
         AdmissionDecision::Completed => true,
@@ -866,7 +945,7 @@ async fn reserve_account(
                 decision.retry_after_seconds,
             ));
         }
-        AdmissionDecision::Refused => return Err(denied()),
+        AdmissionDecision::Refused => return Err(denied_at("account_ledger_refused")),
     };
     Ok(Attempt {
         tenant_id: tenant.tenant_id().into(),
@@ -902,7 +981,10 @@ pub(super) async fn account_status_handler(
                 AdmissionRefusal::AccountIdentityUnlinked.label(),
             ));
         }
-        let db = state.db_mirror.as_ref().ok_or_else(denied)?;
+        let db = state
+            .db_mirror
+            .as_ref()
+            .ok_or_else(|| denied_at("status_db_unconfigured"))?;
         let mut resolved = None;
         for principal in ctx.principal_set.to_vec() {
             if let Ok(account) =
@@ -914,12 +996,13 @@ pub(super) async fn account_status_handler(
                 }
             }
         }
-        let (account, principal) = resolved.ok_or_else(denied)?;
+        let (account, principal) =
+            resolved.ok_or_else(|| denied_at("status_account_unresolved"))?;
         let status = db
             .account_admission_status(&account, &principal, &config.policy)
             .await
-            .map_err(|_| denied())?
-            .ok_or_else(denied)?;
+            .map_err(|_| denied_at("db_error:status_lookup"))?
+            .ok_or_else(|| denied_at("status_missing"))?;
         let mut body = serde_json::json!({
             "authority":status.authority,
             "policy_version":status.policy_version,
@@ -965,12 +1048,17 @@ pub(super) async fn challenge_handler(
     if !ACCOUNT_RATE_LIMITER.check_principal(&format!("admission-challenge:{key}"), 10) {
         return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
-    let config = state.admission.as_ref().ok_or_else(denied)?;
-    let anchor = anchor(&state, &tenant).await?.ok_or_else(denied)?;
+    let config = state
+        .admission
+        .as_ref()
+        .ok_or_else(|| denied_at("challenge_unconfigured"))?;
+    let anchor = anchor(&state, &tenant)
+        .await?
+        .ok_or_else(|| denied_at("challenge_anchor_none"))?;
     let mut nonce = [0u8; 32];
     rand::rngs::OsRng
         .try_fill_bytes(&mut nonce)
-        .map_err(|_| denied())?;
+        .map_err(|_| denied_at("challenge_nonce_unavailable"))?;
     // The native proxy's deliberately bounded ephemeral binding is at most 15m.
     let expires = Utc::now() + Duration::seconds(config.limits.challenge_ttl_seconds.min(900));
     let binding = AdmissionBinding {
@@ -981,16 +1069,18 @@ pub(super) async fn challenge_handler(
     state
         .db_mirror
         .as_ref()
-        .ok_or_else(denied)?
+        .ok_or_else(|| denied_at("challenge_db_unconfigured"))?
         .issue_admission_challenge(
             tenant.tenant_id(),
             &anchor,
-            &binding.digest().map_err(|_| denied())?,
+            &binding
+                .digest()
+                .map_err(|_| denied_at("challenge_digest_invalid"))?,
             expires,
         )
         .await
-        .map_err(|_| denied())?;
-    let mut response = Json(serde_json::json!({"binding":binding.encode().map_err(|_| denied())?,"expires_at":expires.timestamp()})).into_response();
+        .map_err(|_| denied_at("db_error:challenge_issue"))?;
+    let mut response = Json(serde_json::json!({"binding":binding.encode().map_err(|_| denied_at("challenge_encode_invalid"))?,"expires_at":expires.timestamp()})).into_response();
     response.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
         HeaderValue::from_static("no-store"),
@@ -1250,5 +1340,207 @@ mod tests {
             (Some(receipt), Some(challenge)),
             "positive control: verified evidence does bind"
         );
+    }
+}
+
+#[cfg(test)]
+mod refusal_label_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// Every label an `admission_refused` here can log, one per site.
+    const ADMISSION_REFUSAL_LABELS: &[&str] = &[
+        "evidence_ledger:evidence_header_count",
+        "evidence_ledger:evidence_header_missing",
+        "evidence_ledger:evidence_header_not_text",
+        "evidence_ledger:evidence_header_too_long",
+        "evidence_ledger:signature_header_count",
+        "evidence_ledger:signature_header_missing",
+        "evidence_ledger:signature_header_not_text",
+        "evidence_ledger:signature_header_too_long",
+        "legacy_replay:evidence_header_count",
+        "legacy_replay:evidence_header_missing",
+        "legacy_replay:evidence_header_not_text",
+        "legacy_replay:evidence_header_too_long",
+        "legacy_replay:signature_header_count",
+        "legacy_replay:signature_header_missing",
+        "legacy_replay:signature_header_not_text",
+        "legacy_replay:signature_header_too_long",
+        "account:evidence_header_count",
+        "account:evidence_header_missing",
+        "account:evidence_header_not_text",
+        "account:evidence_header_too_long",
+        "account:signature_header_count",
+        "account:signature_header_missing",
+        "account:signature_header_not_text",
+        "account:signature_header_too_long",
+        "anchor_db_unconfigured",
+        "db_error:anchor_lookup",
+        "anchor_missing",
+        "anchor_not_sha256_prefixed",
+        "anchor_not_hash",
+        "evidence_binding_unverified",
+        "db_error:attempt_processing_transition",
+        "attempt_processing_transition_refused",
+        "db_error:attempt_finish_transition",
+        "attempt_finish_transition_refused",
+        "legacy_admission_unconfigured",
+        "legacy_db_mirror_writes_off",
+        "legacy_db_unconfigured",
+        "db_error:legacy_completed_lookup",
+        "legacy_no_evidence_headers",
+        "db_error:legacy_processing_lock",
+        "evidence_ledger_unconfigured",
+        "evidence_ledger_db_unconfigured",
+        "db_error:evidence_ledger_completed_lookup",
+        "evidence_ledger:evidence_json_invalid",
+        "evidence_ledger:witness_unverified",
+        "evidence_ledger:witness_bypass_unconfigured",
+        "evidence_ledger:policy_version_not_allowed",
+        "evidence_ledger:evidence_unverified",
+        "db_error:evidence_ledger_reserve",
+        "evidence_ledger_refused",
+        "account_db_mirror_writes_off",
+        "account_db_unconfigured",
+        "account_trust_refused",
+        "account_trust_unavailable",
+        "db_error:account_processing_lock",
+        "db_error:account_withdrawal_lookup",
+        "account_anchor_none",
+        "db_error:legacy_record_lookup",
+        "legacy_replay:evidence_json_invalid",
+        "legacy_replay:witness_pin_unconfigured",
+        "legacy_replay:stored_signature_invalid",
+        "legacy_replay:binding_mismatch",
+        "db_error:legacy_resume",
+        "legacy_resume_refused",
+        "db_error:account_record_lookup",
+        "account:evidence_json_invalid",
+        "account_replay:witness_pin_unconfigured",
+        "account_replay:stored_signature_invalid",
+        "account_replay:binding_mismatch",
+        "account:evidence_providers_unconfigured",
+        "account:witness_unverified",
+        "account:witness_bypass_unconfigured",
+        "account:policy_version_not_allowed",
+        "account:evidence_unverified",
+        "db_error:account_reserve",
+        "account_ledger_refused",
+        "status_db_unconfigured",
+        "status_account_unresolved",
+        "db_error:status_lookup",
+        "status_missing",
+        "challenge_unconfigured",
+        "challenge_anchor_none",
+        "challenge_nonce_unavailable",
+        "challenge_db_unconfigured",
+        "challenge_digest_invalid",
+        "db_error:challenge_issue",
+        "challenge_encode_invalid",
+    ];
+
+    /// Labels at `denied_at("...")` / `denied_with("...", ..)` call sites in
+    /// this file's production code. Read from the source so that a new site
+    /// reusing a label, or one missing from the list, fails here.
+    fn call_site_labels() -> Vec<String> {
+        let source = include_str!("admission.rs");
+        let production = source
+            .split(concat!("#[cfg(test)]\nmod ", "tests {"))
+            .next()
+            .unwrap();
+        let mut found = Vec::new();
+        for needle in [concat!("denied_at", "(\""), concat!("denied_with", "(\"")] {
+            let mut rest = production;
+            while let Some(at) = rest.find(needle) {
+                let tail = &rest[at + needle.len()..];
+                let end = tail.find('"').unwrap();
+                found.push(tail[..end].to_string());
+                rest = &tail[end..];
+            }
+        }
+        found
+    }
+
+    fn header_labels() -> Vec<&'static str> {
+        let mut labels = Vec::new();
+        for site in [
+            HeaderSite::EvidenceLedger,
+            HeaderSite::LegacyReplay,
+            HeaderSite::Account,
+        ] {
+            for evidence in [true, false] {
+                for fault in [
+                    HeaderFault::Count,
+                    HeaderFault::Missing,
+                    HeaderFault::NotText,
+                    HeaderFault::TooLong,
+                ] {
+                    labels.push(header_refusal(site, evidence, fault));
+                }
+            }
+        }
+        labels
+    }
+
+    #[test]
+    fn every_admission_refusal_site_has_its_own_static_label() {
+        let listed: BTreeSet<&str> = ADMISSION_REFUSAL_LABELS.iter().copied().collect();
+        assert_eq!(
+            listed.len(),
+            ADMISSION_REFUSAL_LABELS.len(),
+            "duplicate label"
+        );
+        let mut seen = BTreeSet::new();
+        for label in call_site_labels() {
+            assert!(listed.contains(label.as_str()), "{label} is not listed");
+            assert!(seen.insert(label.clone()), "{label} names two sites");
+        }
+        for label in header_labels() {
+            assert!(listed.contains(label), "{label} is not listed");
+            assert!(seen.insert(label.to_string()), "{label} names two sites");
+        }
+        assert_eq!(seen.len(), listed.len(), "a listed label has no site");
+        // Labels only: nothing that could be an identifier or free text.
+        for label in ADMISSION_REFUSAL_LABELS {
+            assert!(
+                label.bytes().all(|b| b.is_ascii_lowercase()
+                    || b.is_ascii_digit()
+                    || b == b'_'
+                    || b == b':'),
+                "{label}"
+            );
+        }
+        // At least the sites this was written for.
+        assert!(call_site_labels().len() >= 60);
+    }
+
+    #[test]
+    fn evidence_check_labels_are_unique_and_static() {
+        use trace_commons_server::admission_evidence::ADMISSION_EVIDENCE_CHECK_LABELS;
+        let set: BTreeSet<&str> = ADMISSION_EVIDENCE_CHECK_LABELS.iter().copied().collect();
+        assert_eq!(set.len(), ADMISSION_EVIDENCE_CHECK_LABELS.len());
+        for label in ADMISSION_EVIDENCE_CHECK_LABELS {
+            assert!(!ADMISSION_REFUSAL_LABELS.contains(label), "{label}");
+        }
+    }
+
+    /// The label is for the operator. The client still gets the one
+    /// refusal it has always got.
+    #[test]
+    fn a_labelled_refusal_answers_403_admission_refused() {
+        for (status, Json(body)) in [
+            denied_at("anchor_missing"),
+            denied_with("account:evidence_unverified", "evidence_expired"),
+        ] {
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(body.error, "admission_refused");
+            assert_eq!(body.error, AdmissionRefusal::Refused.label());
+            assert!(body.retry_after_seconds.is_none());
+        }
+        let headers = HeaderMap::new();
+        let (status, Json(body)) =
+            single_header(&headers, EVIDENCE_HEADER, HeaderSite::Account).unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body.error, "admission_refused");
     }
 }

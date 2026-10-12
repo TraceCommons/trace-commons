@@ -506,37 +506,96 @@ pub fn verify_admission_evidence(
     account_anchor: &str,
     now: i64,
 ) -> Result<(), AdmissionEvidenceError> {
+    check_admission_evidence(
+        evidence,
+        signature,
+        artifact,
+        witness_pin,
+        provider_trust,
+        account_anchor,
+        now,
+    )
+    .map_err(|_| AdmissionEvidenceError)
+}
+
+/// Every label [`check_admission_evidence`] can return, in check order.
+pub const ADMISSION_EVIDENCE_CHECK_LABELS: &[&str] = &[
+    "evidence_signing_bytes_invalid",
+    "evidence_signature_invalid",
+    "evidence_provider_untrusted",
+    "evidence_request_not_accepted",
+    "evidence_anchor_mismatch",
+    "evidence_artifact_mismatch",
+    "evidence_measurement_mismatch",
+    "evidence_policy_version_mismatch",
+    "evidence_issued_in_future",
+    "evidence_expired",
+    "evidence_receipt_identity_invalid",
+    "evidence_receipt_mismatch",
+];
+
+/// [`verify_admission_evidence`], answering which check failed.
+///
+/// The same checks in the same order; the `Err` is a fixed label naming the
+/// first one that failed, for an operator log line. It carries nothing from
+/// the evidence itself.
+pub fn check_admission_evidence(
+    evidence: &AdmissionEvidence,
+    signature: &str,
+    artifact: &VerifiedWitnessCertificate,
+    witness_pin: &WitnessPin,
+    provider_trust: &AdmissionProviderTrust,
+    account_anchor: &str,
+    now: i64,
+) -> Result<(), &'static str> {
     let bytes = evidence
         .signing_bytes()
-        .map_err(|_| AdmissionEvidenceError)?;
-    if !witness_pin.verifies_detached(&bytes, signature)
-        || !provider_trust.accepts(&evidence.provider_signer)
-        // The kind is inside the bytes the witness pin signed, so this side
-        // can apply the same rule the witness did rather than the
-        // kind-agnostic one it was stuck with.
-        || !provider_trust.accepts_request(
-            match evidence.signature_kind {
-                AdmissionSignatureKind::ProviderTee => ReceiptSignatureKind::ProviderTee,
-                AdmissionSignatureKind::Gateway => ReceiptSignatureKind::Gateway,
-            },
-            &evidence.model,
-            evidence.request_bytes,
-        )
-        || evidence.account_anchor_sha256 != account_anchor
-        || evidence.artifact_sha256 != artifact.redacted_sha256()
-        || evidence.witness_measurement != artifact.witness_measurement()
-        || evidence.redaction_policy_version != artifact.redaction_policy_version()
-        || evidence.issued_at > now
-        || evidence.expires_at <= now
-        || receipt_identity(
-            &evidence.provider_signer,
-            &evidence.request_sha256,
-            &evidence.response_sha256,
-        )
-        .map_err(|_| AdmissionEvidenceError)?
-            != evidence.receipt_sha256
-    {
-        return Err(AdmissionEvidenceError);
+        .map_err(|_| "evidence_signing_bytes_invalid")?;
+    if !witness_pin.verifies_detached(&bytes, signature) {
+        return Err("evidence_signature_invalid");
+    }
+    if !provider_trust.accepts(&evidence.provider_signer) {
+        return Err("evidence_provider_untrusted");
+    }
+    // The kind is inside the bytes the witness pin signed, so this side
+    // can apply the same rule the witness did rather than the
+    // kind-agnostic one it was stuck with.
+    if !provider_trust.accepts_request(
+        match evidence.signature_kind {
+            AdmissionSignatureKind::ProviderTee => ReceiptSignatureKind::ProviderTee,
+            AdmissionSignatureKind::Gateway => ReceiptSignatureKind::Gateway,
+        },
+        &evidence.model,
+        evidence.request_bytes,
+    ) {
+        return Err("evidence_request_not_accepted");
+    }
+    if evidence.account_anchor_sha256 != account_anchor {
+        return Err("evidence_anchor_mismatch");
+    }
+    if evidence.artifact_sha256 != artifact.redacted_sha256() {
+        return Err("evidence_artifact_mismatch");
+    }
+    if evidence.witness_measurement != artifact.witness_measurement() {
+        return Err("evidence_measurement_mismatch");
+    }
+    if evidence.redaction_policy_version != artifact.redaction_policy_version() {
+        return Err("evidence_policy_version_mismatch");
+    }
+    if evidence.issued_at > now {
+        return Err("evidence_issued_in_future");
+    }
+    if evidence.expires_at <= now {
+        return Err("evidence_expired");
+    }
+    let receipt = receipt_identity(
+        &evidence.provider_signer,
+        &evidence.request_sha256,
+        &evidence.response_sha256,
+    )
+    .map_err(|_| "evidence_receipt_identity_invalid")?;
+    if receipt != evidence.receipt_sha256 {
+        return Err("evidence_receipt_mismatch");
     }
     Ok(())
 }
