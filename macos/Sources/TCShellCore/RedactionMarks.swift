@@ -101,9 +101,10 @@ public enum RedactionMarks {
     /// same five `TranscriptMarkerScan`'s `allFixedTokensAreMatched` guard
     /// enumerates, and the two lists have to stay the same list:
     ///
-    /// * `<PRIVATE_{LABEL}_{n}>` -- minted by `apply_placeholder_regex` for
-    ///   exactly two labels, `local_path` and `private_email`. The only form
-    ///   with an ordinal.
+    /// * `<PRIVATE_{LABEL}_{n}>` -- minted from the placeholder map for
+    ///   `local_path`, `private_email` and, since #1362, the tool-output
+    ///   labels (`git_author`, `ip_address`, `private_hostname`,
+    ///   `os_username`, `phone_number`). The only form with an ordinal.
     /// * `[REDACTED:{label}]` -- `tool_sensitive_field{:action}` and every
     ///   `privacy_filter:{label}`. Names its category, carries no index.
     /// * `[REDACTED_PATH]` -- a URL's path component, not a path on this
