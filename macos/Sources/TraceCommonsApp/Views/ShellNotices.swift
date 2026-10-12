@@ -5,7 +5,8 @@ import TCShellCore
 
 /// The notices every window that shows the contributor's traces puts above
 /// everything else: the attached-daemon limits, grant voids, arming
-/// rewordings, a gate hold and the legacy-invite migration. One view, so the
+/// rewordings, a gate hold, the offer to move a legacy invite identity and
+/// the notice after it moved. One view, so the
 /// monitor and the first-run pane cannot drift apart on what they tell.
 ///
 /// Every sentence, title and button label on these cards comes from the core
@@ -93,6 +94,12 @@ struct ShellNotices: View {
             LegacyMigrationNoticeCard(
                 notice: model.legacyMigrationNotice,
                 onAcknowledge: { model.acknowledgeLegacyInviteMigration() }
+            )
+            // The offer to move, on a device enrolled by an invite, until it
+            // is moved or the card is dismissed. Settings keeps the offer.
+            LegacyMigrationOfferCard(
+                offer: model.showsLegacyMigrationOfferCard ? model.legacyMigrationOffer : nil,
+                onDismiss: { model.dismissLegacyMigrationOffer() }
             )
         }
     }
@@ -220,6 +227,94 @@ struct LegacyMigrationNoticeCard: View {
             .accessibilityElement(children: .contain)
             .accessibilityLabel(Text(notice.title))
         }
+    }
+}
+
+/// The offer to move a legacy invite identity to a NEAR AI account, as a
+/// card above the tabs. The words come from `consent_copy` across the ABI
+/// (`AppModel.legacyMigrationOffer`); this view only lays them out, and
+/// draws nothing when there is no offer to show.
+struct LegacyMigrationOfferCard: View {
+    let offer: LegacyMigrationOffer?
+    let onDismiss: () -> Void
+
+    var body: some View {
+        if let offer {
+            GlassNotice(tone: .ask, title: offer.title) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    Text(offer.body).fixedSize(horizontal: false, vertical: true)
+                    Text(offer.later).fixedSize(horizontal: false, vertical: true)
+                    LegacyMigrationMoveControls(offer: offer, onDismiss: onDismiss)
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(Text(offer.title))
+        }
+    }
+}
+
+/// Move, the invite field once the daemon asks for it, and how the move
+/// ended. Drawn by the card above the tabs and by Settings, so both say a
+/// refusal the same way. Every word is the core's: the refusal is
+/// `AppModel.legacyMigrationRefusal`, worded from the daemon's label.
+struct LegacyMigrationMoveControls: View {
+    @EnvironmentObject private var model: AppModel
+    let offer: LegacyMigrationOffer
+    /// The card's dismiss. Nil in Settings, where the offer stays for as
+    /// long as the daemon makes it.
+    var onDismiss: (() -> Void)? = nil
+    @State private var invite = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            if model.legacyMigrationInviteNeeded {
+                GlassTextField(offer.invitePrompt, text: $invite)
+                    .accessibilityLabel(offer.invitePrompt)
+            }
+            // The action first, the dismiss after it as a link (Ron,
+            // 2026-10-09).
+            HStack(spacing: GlassTokens.Space.s4) {
+                if model.legacyMigrationAwaitingPasskey {
+                    // The passkey step runs in the browser; Cancel stops
+                    // waiting on it and moves nothing.
+                    Text(offer.passkeyWaiting)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.updatesFrequently)
+                    Button(offer.passkeyCancel) { model.cancelLegacyMigrationPasskey() }
+                        .buttonStyle(GlassButtonStyle(.link))
+                        .lineLimit(1)
+                } else if model.legacyMigrationBusy {
+                    Text(offer.working)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.updatesFrequently)
+                } else if Self.canMove(inviteNeeded: model.legacyMigrationInviteNeeded, invite: invite) {
+                    Button(offer.action) { Task { await model.migrateLegacyInvite(invite: invite) } }
+                        .buttonStyle(GlassButtonStyle(.primary))
+                        .lineLimit(1)
+                }
+                // Puts the card away and moves nothing.
+                if let onDismiss {
+                    Button(offer.dismiss, action: onDismiss)
+                        .buttonStyle(GlassButtonStyle(.link))
+                        .lineLimit(1)
+                }
+            }
+            // A refused or unstarted move, under the buttons it is about.
+            if let refusal = model.legacyMigrationRefusal {
+                GlassAlert(refusal)
+            } else if model.legacyMigrationPasskeyFailed {
+                GlassAlert(offer.passkeyFailed)
+            } else if model.legacyMigrationStartFailed {
+                GlassAlert(offer.startFailed)
+            }
+        }
+    }
+
+    /// Move is hidden, not disabled, while the daemon has asked for the
+    /// invite and none has been pasted: pressing it could only be refused
+    /// the same way again.
+    static func canMove(inviteNeeded: Bool, invite: String) -> Bool {
+        !inviteNeeded || !invite.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 

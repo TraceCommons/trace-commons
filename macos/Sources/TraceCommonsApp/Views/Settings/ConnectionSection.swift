@@ -9,6 +9,7 @@ struct ConnectionSection: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             connection
             ContributionAccountCard()
+            LegacyMigrationSettingsCard()
         }
     }
 
@@ -81,6 +82,33 @@ struct ConnectionSection: View {
             let scans = copy?.tools.values.first { $0.key == tool }?.unsetScansConventional
             return scans == true ? .on : .ask
         default: return .ask
+        }
+    }
+}
+
+/// The offer to move a legacy invite identity to the contributor's NEAR AI
+/// account, for as long as the daemon makes it, whether or not the card
+/// above the tabs was dismissed. Every word is the core's
+/// (`AppModel.legacyMigrationOffer`); nothing is drawn without it.
+struct LegacyMigrationSettingsCard: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        if model.isLegacyMigrationOffered, let offer = model.legacyMigrationOffer {
+            GlassCard {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    Text(offer.title)
+                        .glassType(GlassTokens.TypeScale.title)
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.isHeader)
+                    Text(offer.body)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    LegacyMigrationMoveControls(offer: offer)
+                }
+            }
         }
     }
 }

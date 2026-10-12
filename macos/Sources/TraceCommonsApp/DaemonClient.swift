@@ -690,6 +690,16 @@ final class DaemonClient {
         _ = try rawResult("acknowledge_legacy_invite_migration", params: [:])
     }
 
+    /// Moves this legacy invite identity to the contributor's NEAR AI
+    /// account, because they pressed Move. Blocks for the whole move. A
+    /// refusal throws a `Failure` whose message is a `legacy_migration_*`
+    /// label; `invite` is sent only after `legacy_migration_invite_needed`.
+    func migrateLegacyInvite(invite: String?) throws {
+        var params: [String: Any] = [:]
+        if let invite { params["invite"] = invite }
+        _ = try rawResult("legacy_invite_migrate", params: params)
+    }
+
     /// Records that the void notices with these ids were shown -- see "Void
     /// notices" in the contract. Only the ids actually drawn: there is no
     /// "all", so a void raised after the shell drew is never cleared unseen.
