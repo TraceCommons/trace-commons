@@ -339,31 +339,30 @@
     "pulse": 1.6
   },
   "themes": {
-    "$comment": "Exploration (design/visual-theme-exploration): the flat glass theme, from getone.one's glass components. flatDark is its dark appearance: white text on navy-tinted glass. flatLight is its light appearance: dark text on white frosted glass (owner choice, 2026-10-09, over a tinted Light). Settings > General > Appearance picks Light, Dark or System. Each names only what it changes; a colour it leaves alone keeps its classic value for that appearance. Gradients and shadows are named by both or neither. Panes sit on clear Liquid Glass, lightly tinted with the veil, for the system's refraction, with the veil painted over it; Increase Contrast deepens the veil; Reduce Transparency is left to the system (R14). The map is on the same glass under a light field. Controls, cards, tags and frames are flat: a faint rim, a soft frame shadow, no highlight, shade or glow (owner feedback, 2026-10-09). Cards, panes, wells, controls, pills, menus, popovers and node cards drop the rim and are told apart by fill (and, where they float, a soft shadow) alone; a checkbox keeps its rim, which is the unchecked box; dark cards are the pane's navy, darker than the pane, rather than white over it (owner, 2026-10-10). Selected states are the brand purple, with textOnSelected on them. Every text colour clears 4.5:1 on the pane, a card, a quiet card and a field over the worst desktop -- a near-black #333333 for Light, which light Liquid Glass frosts no darker than, and white for Dark (FlatThemeContrastTests). Light is a cool grey (owner, 2026-10-12): a #e3e6ec veil at 66%, the lightest that holds the floors, under white cards (35%), quiet cards (29%) and controls (44%) and cool slate pills (wellFill #8a93a5 at 43%), each standing off the pane by the same contrast as Dark's do, with an orange accent in place of the brand purple, which read muddy on grey (owner, 2026-10-12): a vibrant #ff8c00 for fills, tints, selections, toggles and buttons with dark text on them (textOnSelected, textOnAccent #1d1d1f), a #f97316 tab ember, slate #2f3e46 accent text, and an amber far stop (#ffc107) on the Missions promotion (owner's palette, 2026-10-12); dark text; Dark's is 68%, the lightest that holds the floors (owner, 2026-10-12: a little more translucent). Panes are frosted Liquid Glass (regularTint) under the veil; out of focus inactiveDim darkens a window, as the system does; and the menu-bar popover, the edge rail and the main window share the one pane spec. The theme is chosen at launch with TC_GLASS_THEME (flat, the default on this branch, or classic).",
+    "$comment": "Exploration (design/visual-theme-exploration): the flat glass theme, from getone.one's glass components. flatDark is its dark appearance: white text on navy-tinted glass. flatLight is its light appearance: dark text on white frosted glass (owner choice, 2026-10-09, over a tinted Light). Settings > General > Appearance picks Light, Dark or System. Each names only what it changes; a colour it leaves alone keeps its classic value for that appearance. Gradients and shadows are named by both or neither. Panes sit on clear Liquid Glass, lightly tinted with the veil, for the system's refraction, with the veil painted over it; Increase Contrast deepens the veil; Reduce Transparency is left to the system (R14). The map is on the same glass under a light field. Controls, cards, tags and frames are flat: a faint rim, a soft frame shadow, no highlight, shade or glow (owner feedback, 2026-10-09). Cards, panes, wells, controls, pills, menus, popovers and node cards drop the rim and are told apart by fill (and, where they float, a soft shadow) alone; a checkbox keeps its rim, which is the unchecked box; dark cards are the pane's navy, darker than the pane, rather than white over it (owner, 2026-10-10). Selected states are the brand purple, with textOnSelected on them. Every text colour clears 4.5:1 on the pane, a card, a quiet card and a field over the worst desktop -- a near-black #333333 for Light, which light Liquid Glass frosts no darker than, and white for Dark (FlatThemeContrastTests). Light is a cool grey (owner, 2026-10-12): a #e3e6ec veil at 66%, the lightest that holds the floors, under white cards (35%), quiet cards (29%) and controls (44%) and cool slate pills (wellFill #8a93a5 at 43%), each standing off the pane by the same contrast as Dark's do, with a blue accent in place of the brand purple, from the owner's reference painting (2026-10-12; purple read muddy on grey and orange was set aside): #1f7aa8 fills and tints, a #2a8fc4 tab ember, #15608a selections, toggles and buttons under white text, #0c3f5c accent text, and a #6cb6d6 far stop on the Missions promotion; dark text; Dark's is 68%, the lightest that holds the floors (owner, 2026-10-12: a little more translucent). Panes are frosted Liquid Glass (regularTint) under the veil; out of focus inactiveDim darkens a window, as the system does; and the menu-bar popover, the edge rail and the main window share the one pane spec. The theme is chosen at launch with TC_GLASS_THEME (flat, the default on this branch, or classic).",
     "flatLight": {
       "color": {
         "glassVeil": { "hex": "#e3e6ec", "alpha": 0.66 },
-        "purpleSoft": { "hex": "#ff8c00" },
-        "tabEmber": { "hex": "#f97316" },
-        "tabEmberHalo": { "hex": "#f97316", "alpha": 0.3 },
-        "promoTintEnd": { "hex": "#ffc107" },
+        "purpleSoft": { "hex": "#1f7aa8" },
+        "tabEmber": { "hex": "#2a8fc4" },
+        "tabEmberHalo": { "hex": "#2a8fc4", "alpha": 0.3 },
+        "promoTintEnd": { "hex": "#6cb6d6" },
         "inactiveDim": { "hex": "#000000", "alpha": 0.04 },
         "textSecondary": { "hex": "#3c3c43" },
         "textTertiary": { "hex": "#3d3d43" },
         "placeholder": { "hex": "#000000", "alpha": 0.64 },
-        "purpleText": { "hex": "#2f3e46" },
+        "purpleText": { "hex": "#0c3f5c" },
         "statusOnText": { "hex": "#0b4628" },
         "statusAskText": { "hex": "#573403" },
         "statusOutsideText": { "hex": "#771814" },
         "destructiveText": { "hex": "#791313" },
-        "textOnSelected": { "hex": "#1d1d1f" },
-        "textOnAccent": { "hex": "#1d1d1f" },
-        "controlSelected": { "hex": "#ff8c00" },
-        "controlSelectedFloating": { "hex": "#ff8c00" },
-        "toggleOn": { "hex": "#ff8c00" },
-        "selection": { "hex": "#ff8c00" },
-        "menuSelection": { "hex": "#ff8c00" },
-        "menuHover": { "hex": "#ff8c00", "alpha": 0.9 },
+        "textOnSelected": { "hex": "#ffffff" },
+        "controlSelected": { "hex": "#15608a" },
+        "controlSelectedFloating": { "hex": "#15608a" },
+        "toggleOn": { "hex": "#15608a" },
+        "selection": { "hex": "#15608a" },
+        "menuSelection": { "hex": "#15608a" },
+        "menuHover": { "hex": "#15608a", "alpha": 0.9 },
         "wellFill": { "hex": "#8a93a5", "alpha": 0.43 },
         "fieldFill": { "hex": "#f4f6f9", "alpha": 0.6 },
         "consentFill": { "hex": "#f4f6f9", "alpha": 0.45 },
@@ -404,8 +403,8 @@
         "ctaFill": {
           "angle": 180,
           "stops": [
-            { "hex": "#ff8c00", "alpha": 1, "at": 0 },
-            { "hex": "#ff8c00", "alpha": 1, "at": 1 }
+            { "hex": "#15608a", "alpha": 1, "at": 0 },
+            { "hex": "#15608a", "alpha": 1, "at": 1 }
           ]
         }
       },
