@@ -165,6 +165,10 @@ These differences are required by the proposal. They are not defects.
 4. Membership is fixed when Score commits. A later change to the live
    index does not change that decision.
 5. Classifier-specific storage is not restored on this path.
+6. Admission quarantines a trace whose privacy risk is Medium for a cause
+   other than the consent content flag alone. `main` accepts such a trace
+   when `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS` is true. A reviewer
+   then approves or rejects the trace.
 
 ## Shadow comparison
 
