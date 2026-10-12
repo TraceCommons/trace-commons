@@ -534,6 +534,17 @@ With none set, a complete legacy `TRACE_COMMONS_ADMISSION_*` evidence policy is
 required instead. Evidence verification is required whenever account admission
 is enabled; the legacy minimum-byte setting does not toggle it on or off.
 
+With account admission enabled, the V59 evidence ledger's own policy is
+required too: `TRACE_COMMONS_ADMISSION_ENABLED` with its limits
+(`_WINDOW_ATTEMPTS`, `_ACCOUNT_COST_LIMIT`, `_GLOBAL_COST_LIMIT`,
+`_PROCESSING_COST_BOUND`, `_LEASE_SECONDS`, `_CHALLENGE_TTL_SECONDS`) and
+provider settings, which in turn need the witness bypass. The reason: an upload with verified evidence and no
+`source_session` is admitted on that ledger, exactly as with account admission
+off. Without it ingest refuses to start with
+`account_admission_requires_legacy_evidence_policy`. An upload whose evidence
+verifies and that carries `source_session` is admitted without debiting the
+bounded allowance.
+
 See [account trust](./account-trust.md) for the activation and response contract.
 
 ## Legacy invite linking (default off)

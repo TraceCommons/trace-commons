@@ -63,7 +63,10 @@ These legacy rows retain submission-level withdrawal protection only. They do
 not acquire a guarantee against a resumed session using a new submission UUID.
 Existing withdrawal tombstones still refuse replay and recovery. All new
 account-ledger submissions require valid `source_session` metadata before any
-budget reservation or content staging.
+budget reservation or content staging. A new upload with no `source_session`
+that offers admission evidence is not an account-ledger submission: it takes
+the V59 evidence ledger (see "Attested uploads" below). One with no
+`source_session` and no evidence is refused `422 source_session_invalid`.
 
 Before enabling, record read-only counts of legacy invite tenants, wallet
 accounts, NEAR AI accounts, ambiguous links, and unlinked devices with
@@ -122,6 +125,12 @@ with that independent policy, removing `TRACE_COMMONS_ADMISSION_MIN_REQUEST_BYTE
 evidence verification. Offered partial or invalid evidence is always refused.
 Keep the legacy admission/challenge configuration on every replica throughout
 the rolling deployment so clients can continue obtaining and sending evidence.
+Since 2026-10-11 it is required, not only kept: with account admission on,
+ingest refuses to start with `account_admission_requires_legacy_evidence_policy`
+unless the V59 evidence policy (`TRACE_COMMONS_ADMISSION_*`, including its
+limits) is configured, and that policy's own startup check
+(`admission_runtime_permissions_not_ready`) then requires the ingest login to
+keep EXECUTE on `trace_reserve_admission` and `trace_transition_admission`.
 
 A contribution-status response describes only the responding process. Clients
 must retain their R3 evidence check and send evidence until an operator attests
@@ -132,6 +141,61 @@ includes the V59 transition grant needed to complete and release legacy resumes.
 
 Invited accounts still obey the hourly submission quota, request limits, and
 transient capacity controls. Only cumulative account allowance is exempted.
+
+## Attested uploads (owner decision, 2026-10-11)
+
+An upload that offers NEAR AI admission evidence which verifies is admitted
+without debiting the bounded allowance. "Verifies" is the full first-use check
+the evidence path has always made, unweakened: the witness signature under the
+configured pin and redaction-policy allowlist, a provider-TEE or gateway
+signer from the account evidence policy, an accepted model, the minimum
+request bytes, an unexpired evidence window, and binding to this account's
+anchor and this exact artifact. Everything else still applies to it: the
+idempotency row, the processing lease, live account/device/principal checks,
+the trust version and invite-grant consistency, the hourly submission quota,
+request-size and capacity controls, `source_session` claiming and its
+withdrawal guard, and submission tombstones. An upload without evidence is
+debited exactly as before, and partial or invalid offered evidence is refused
+`403 admission_refused` as before.
+
+What is recorded, and what follows from it:
+
+- The reservation row is written with `authority_kind = 'attested'` (V125
+  widened that CHECK from `'account'` only) and `last_charged = FALSE`. No
+  budget row is created or read for it. The kind is fixed by a submission's
+  first reservation, like its account and body binding.
+- Release before processing refunds nothing, because nothing was charged.
+- A retry after a release or an expired lease re-reserves on the kind its row
+  records, with or without headers: an attested row recovers with no debit,
+  and an `'account'` row stays charged even if the retry now offers fresh
+  evidence. A replay's offered evidence is checked by stored signature and
+  binding only, which never establishes a new attested authority.
+- The freeze rule (a budget row whose limit, bound or version differs from the
+  configured policy refuses the reservation) guards the allowance, which an
+  attested reservation does not touch, so it does not refuse one. It still
+  refuses every unattested upload until the policy is corrected.
+- Invited accounts are already exempt from the allowance; an attested upload
+  from one is recorded as `'attested'`, with the same outcome.
+- `GET /v1/account/contribution-status` is unchanged. `ready` describes the
+  allowance an unattested upload would draw on: a fresh account reads
+  `ready: true`, and an account that has spent its allowance reads
+  `ready: false` with `account_limit_reached` even though an attested upload
+  from it would still be admitted.
+
+An upload with no `source_session` -- every 0.12.x client, and the witness
+build of 2026-09-04, which strips the field -- cannot be claimed against a
+source session, so it does not enter the account ledger. If it offers
+evidence, it takes the V59 evidence ledger exactly as it does with account
+admission off: the same verification against `TRACE_COMMONS_ADMISSION_*`, the
+same challenge, and the same per-account and global V59 limits. That is why the
+legacy evidence policy is required at startup. No account-ledger row is written
+for it. With no evidence it is refused `422 source_session_invalid`, and with
+partial or invalid evidence `403 admission_refused`. Note the asymmetry: an
+attested upload with `source_session` is not bounded by any account allowance,
+while one without it is still bounded by the V59 limits, exactly as today.
+
+Ingest logs no line for an attested admission; `authority_kind` on the
+reservation row is the audit record, and holds a label only.
 Lifetime allowance compares the requested cost with the sum of spending across
 all lifetime policy versions; changing the version, cost, or allowance cannot
 erase that history. Each version retains its original budget row, allowing an
@@ -199,7 +263,8 @@ signature, authenticated account anchor, and exact artifact hash must still
 match; partial or invalid signatures and foreign/altered bindings are refused.
 A completed retry returns the stored receipt with no debit. Released or expired
 leases re-reserve through the account ledger and its current live-identity and
-budget checks. This recovery exception does not make expired evidence valid for
+budget checks, on the authority kind the row recorded (an attested row is not
+debited). This recovery exception does not make expired evidence valid for
 a submission UUID that has never been reserved. The shared allowance health
 condition makes no promise that a lifetime budget will reset.
 

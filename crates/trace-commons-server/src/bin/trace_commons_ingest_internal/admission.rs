@@ -101,6 +101,20 @@ fn account_config_from_values(
     }))
 }
 
+/// Account admission sends an upload with verified evidence and no
+/// `source_session` to the V59 evidence ledger, so it cannot run without that
+/// ledger's policy (`TRACE_COMMONS_ADMISSION_*`). Refused at startup rather
+/// than per request, naming the missing control.
+pub(super) fn require_legacy_evidence_policy(
+    account_admission: bool,
+    legacy_admission: bool,
+) -> anyhow::Result<()> {
+    if account_admission && !legacy_admission {
+        anyhow::bail!("account_admission_requires_legacy_evidence_policy");
+    }
+    Ok(())
+}
+
 pub(super) fn config_from_env(
     witness: Option<&WitnessBypassConfig>,
     durable_db: bool,
@@ -209,6 +223,37 @@ pub(super) fn evidence_binding(
     match (plan, verified) {
         (EvidencePlan::Verify, Some((receipt, challenge))) => Ok((Some(receipt), Some(challenge))),
         _ => Err(denied()),
+    }
+}
+
+/// Where account admission sends a submission that has no prior V59 row,
+/// decided from three facts alone so the decision is testable without a
+/// database (the PostgreSQL matrix is `#[ignore]`d and runs only in CI's
+/// `postgres-suites`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AccountRoute {
+    /// A `source_session` is present: the account ledger. Offered evidence
+    /// is verified there, and a fresh verified proof admits the upload
+    /// without debiting the allowance.
+    AccountLedger,
+    /// No `source_session`, a new submission, and offered evidence: the V59
+    /// evidence ledger, verified and bounded exactly as with account
+    /// admission off. 0.12.x clients and the 2026-09-04 witness build never
+    /// send `source_session`; owner decision of 2026-10-11.
+    EvidenceLedger,
+    /// No `source_session` otherwise: `422 source_session_invalid`, as before.
+    RefuseMissingSource,
+}
+
+pub(super) fn account_route(
+    source_present: bool,
+    plan: EvidencePlan,
+    account_replay: bool,
+) -> AccountRoute {
+    match (source_present, plan, account_replay) {
+        (true, _, _) => AccountRoute::AccountLedger,
+        (false, EvidencePlan::Verify, false) => AccountRoute::EvidenceLedger,
+        (false, _, _) => AccountRoute::RefuseMissingSource,
     }
 }
 
@@ -322,7 +367,7 @@ pub(super) async fn reserve(
     let Some(anchor) = anchor(state, tenant).await? else {
         return Ok(None);
     };
-    let config = state.admission.as_ref().ok_or_else(denied)?;
+    state.admission.as_ref().ok_or_else(denied)?;
     if !state.require_db_mirror_writes {
         return Err(denied());
     }
@@ -356,13 +401,36 @@ pub(super) async fn reserve(
         .await
         .map_err(|_| denied())?
         .ok_or_else(|| api_error(StatusCode::CONFLICT, AdmissionRefusal::InProgress.label()))?;
-    // Re-read under the lock: the check above was advisory and unserialized.
+    reserve_on_evidence_ledger(state, tenant, headers, body, envelope, anchor, guard)
+        .await
+        .map(Some)
+}
+
+/// The V59 evidence ledger, entered with the shared processing guard already
+/// held. Account admission reaches it too, for an upload with verified
+/// evidence and no `source_session` (owner decision of 2026-10-11), so that
+/// upload is admitted exactly as it is with account admission off.
+async fn reserve_on_evidence_ledger(
+    state: &AppState,
+    tenant: &TenantCtx,
+    headers: &HeaderMap,
+    body: &[u8],
+    envelope: &TraceContributionEnvelope,
+    anchor: String,
+    guard: AdmissionProcessingGuard,
+) -> ApiResult<Attempt> {
+    let submission = envelope.submission_id;
+    let config = state.admission.as_ref().ok_or_else(denied)?;
+    let db = state.db_mirror.as_ref().ok_or_else(denied)?;
+    let plan = evidence_plan(headers);
+    let body_hash = hash_hex(body);
+    // Re-read under the lock: any check before it was advisory and unserialized.
     if db
         .lookup_completed_submission_admission(tenant.tenant_id(), &anchor, submission, &body_hash)
         .await
         .map_err(|_| denied())?
     {
-        return Ok(Some(Attempt {
+        return Ok(Attempt {
             tenant_id: tenant.tenant_id().into(),
             submission_id: submission,
             lease_id: Uuid::new_v4(),
@@ -371,7 +439,7 @@ pub(super) async fn reserve(
             completed: true,
             account: None,
             source_claim: None,
-        }));
+        });
     }
     let verified = match plan {
         EvidencePlan::Verify => {
@@ -451,7 +519,7 @@ pub(super) async fn reserve(
         }
         AdmissionDecision::Refused => return Err(denied()),
     };
-    Ok(Some(Attempt {
+    Ok(Attempt {
         tenant_id: reservation.tenant_id,
         submission_id: reservation.submission_id,
         lease_id: reservation.lease_id,
@@ -460,7 +528,7 @@ pub(super) async fn reserve(
         completed,
         account: None,
         source_claim: None,
-    }))
+    })
 }
 
 async fn reserve_account(
@@ -641,8 +709,31 @@ async fn reserve_account(
     } else {
         false
     };
-    // Only an exact existing V59 identity can omit source metadata. That
-    // branch above retains its original submission-level withdrawal guarantee.
+    // An exact existing V59 identity can omit source metadata (the branch
+    // above), and so can a new upload offering evidence, which goes to the
+    // V59 ledger. Both keep the submission-level withdrawal check above.
+    let plan = evidence_plan(headers);
+    match account_route(envelope.source_session.is_some(), plan, account_replay) {
+        AccountRoute::AccountLedger => {}
+        AccountRoute::EvidenceLedger => {
+            return reserve_on_evidence_ledger(
+                state,
+                tenant,
+                headers,
+                body,
+                envelope,
+                legacy_anchor,
+                guard,
+            )
+            .await;
+        }
+        AccountRoute::RefuseMissingSource => {
+            return Err(api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "source_session_invalid",
+            ));
+        }
+    }
     let source = envelope
         .source_session
         .as_ref()
@@ -670,7 +761,10 @@ async fn reserve_account(
     if source_status == StorageTraceSourceSessionStatus::Withdrawn {
         return Err(api_error(StatusCode::CONFLICT, "source_session_withdrawn"));
     }
-    let plan = evidence_plan(headers);
+    // Set only by a fresh, full verification below. A replay's stored-signature
+    // check does not re-verify the provider, model or freshness, so it never
+    // sets this; the ledger keeps whatever kind the first reservation recorded.
+    let mut attested = false;
     if plan == EvidencePlan::Verify {
         // An offered legacy proof is always checked, even though account trust
         // is the new authority. A partial or malformed header cannot be ignored.
@@ -723,6 +817,7 @@ async fn reserve_account(
                 Utc::now().timestamp(),
             )
             .map_err(|_| denied())?;
+            attested = true;
         }
     }
     let reservation = AccountAdmissionReservation {
@@ -734,6 +829,7 @@ async fn reserve_account(
         lease_id: Uuid::new_v4(),
         policy: config.policy.clone(),
         lease_seconds: config.lease_seconds,
+        attested,
     };
     let decision = db
         .reserve_account_admission(&reservation)
@@ -1046,6 +1142,43 @@ mod tests {
                 .get("retry_after_seconds")
                 .is_none()
         );
+    }
+
+    /// Owner decision of 2026-10-11: a sourceless upload offering evidence
+    /// takes the V59 ledger; without evidence it is still refused 422, and a
+    /// replay of an existing account row is never re-routed.
+    #[test]
+    fn a_sourceless_upload_reaches_the_evidence_ledger_only_with_offered_evidence() {
+        use AccountRoute::*;
+        use EvidencePlan::*;
+        for plan in [Verify, RefuseNewSubmission] {
+            for replay in [false, true] {
+                assert_eq!(account_route(true, plan, replay), AccountLedger);
+            }
+        }
+        assert_eq!(account_route(false, Verify, false), EvidenceLedger);
+        assert_eq!(
+            account_route(false, RefuseNewSubmission, false),
+            RefuseMissingSource
+        );
+        assert_eq!(account_route(false, Verify, true), RefuseMissingSource);
+        assert_eq!(
+            account_route(false, RefuseNewSubmission, true),
+            RefuseMissingSource
+        );
+    }
+
+    #[test]
+    fn account_admission_refuses_to_start_without_the_legacy_evidence_policy() {
+        assert_eq!(
+            require_legacy_evidence_policy(true, false)
+                .unwrap_err()
+                .to_string(),
+            "account_admission_requires_legacy_evidence_policy"
+        );
+        assert!(require_legacy_evidence_policy(true, true).is_ok());
+        assert!(require_legacy_evidence_policy(false, false).is_ok());
+        assert!(require_legacy_evidence_policy(false, true).is_ok());
     }
 
     /// The V59 trial window is closed, not narrowed: with no evidence headers

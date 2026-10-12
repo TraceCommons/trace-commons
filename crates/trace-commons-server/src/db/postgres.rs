@@ -1800,6 +1800,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "pipeline_default_routing",
         include_str!("../../../../migrations/V124__pipeline_default_routing.sql"),
     ),
+    // V125 (owner decision 2026-10-11): an account reservation admitted on
+    // verified NEAR AI evidence is recorded as authority_kind 'attested' and
+    // debits no allowance. Widens the V77 CHECK only; no grant changes.
+    (
+        125,
+        "account_admission_attested_kind",
+        include_str!("../../../../migrations/V125__account_admission_attested_kind.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus

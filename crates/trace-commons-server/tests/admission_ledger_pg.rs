@@ -228,6 +228,7 @@ async fn account_admission_atomicity_replay_and_revocation() {
         lease_id: Uuid::new_v4(),
         policy: policy.clone(),
         lease_seconds: 60,
+        attested: false,
     };
     let first = request(&principal);
     let second = request(&other);
