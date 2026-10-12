@@ -102217,3 +102217,33 @@ mod credit_estimate_tests {
         }
     }
 }
+
+/// An error response is logged under its label only when the label is a
+/// short fixed-vocabulary token; anything a caller formatted is logged as
+/// `unlabelled`, so no identifier reaches the log.
+#[test]
+fn api_error_log_label_keeps_only_label_shaped_messages() {
+    assert_eq!(
+        api_error_log_label("source_session_invalid"),
+        "source_session_invalid"
+    );
+    assert_eq!(
+        api_error_log_label("admission_refused"),
+        "admission_refused"
+    );
+    assert_eq!(
+        api_error_log_label("legacy_link:tenant_pooled"),
+        "legacy_link:tenant_pooled"
+    );
+    assert_eq!(api_error_log_label(""), "unlabelled");
+    assert_eq!(
+        api_error_log_label("Trace Commons DB reconciliation is not clean: x"),
+        "unlabelled"
+    );
+    assert_eq!(
+        api_error_log_label("tenant-a/submission 1234"),
+        "unlabelled"
+    );
+    assert_eq!(api_error_log_label(&"a".repeat(65)), "unlabelled");
+    assert_eq!(api_error_log_label("UPPER"), "unlabelled");
+}

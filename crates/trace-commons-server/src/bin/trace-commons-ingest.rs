@@ -78427,11 +78427,36 @@ struct ApiError {
     blockers: Option<Vec<String>>,
 }
 
+/// The label an error response is logged under: the response's own label
+/// when it is label-shaped, `unlabelled` otherwise. A few callers build their
+/// message with `format!`, and the log line must stay hash-only, so anything
+/// that is not a short fixed-vocabulary token is never written out.
+fn api_error_log_label(message: &str) -> &str {
+    let label_shaped = !message.is_empty()
+        && message.len() <= 64
+        && message.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b':' | b'.' | b'-')
+        });
+    if label_shaped { message } else { "unlabelled" }
+}
+
+/// One line per error response, so an operator can see which refusal a
+/// client received without the request body or any identifier.
+fn log_api_error(status: StatusCode, message: &str) {
+    tracing::info!(
+        status = status.as_u16(),
+        api_error = api_error_log_label(message),
+        "Trace Commons request answered with an error"
+    );
+}
+
 fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
+    let message = message.into();
+    log_api_error(status, &message);
     (
         status,
         Json(ApiError {
-            error: message.into(),
+            error: message,
             retry_after_seconds: None,
             blockers: None,
         }),
@@ -78443,10 +78468,12 @@ fn api_error_with_retry(
     message: impl Into<String>,
     retry_after_seconds: Option<i64>,
 ) -> (StatusCode, Json<ApiError>) {
+    let message = message.into();
+    log_api_error(status, &message);
     (
         status,
         Json(ApiError {
-            error: message.into(),
+            error: message,
             retry_after_seconds,
             blockers: None,
         }),
