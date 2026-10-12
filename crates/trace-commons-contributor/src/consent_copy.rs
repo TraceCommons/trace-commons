@@ -947,6 +947,17 @@ pub const LEGACY_MIGRATION_PASSKEY_FAILED: &str = "Your passkey step didn't fini
 /// Not yet approved. Stops waiting on the passkey step. Nothing is moved.
 pub const LEGACY_MIGRATION_PASSKEY_CANCEL: &str = "Cancel";
 
+/// Not yet approved. The accessible name of the offer card's Move button,
+/// so a screen reader can tell it from the one in Settings
+/// (`docs/ui-copy-guide.md` 5). The visible label stays
+/// `LEGACY_MIGRATION_OFFER_ACTION`.
+pub const LEGACY_MIGRATION_OFFER_ACTION_NAME_NOTICE: &str =
+    "Move to your NEAR AI account, from this notice";
+
+/// Not yet approved. The accessible name of the Move button in Settings.
+pub const LEGACY_MIGRATION_OFFER_ACTION_NAME_SETTINGS: &str =
+    "Move to your NEAR AI account, from Settings";
+
 /// Approved 2026-10-06. Shown while the move runs.
 pub const LEGACY_MIGRATION_WORKING: &str = "Moving to your NEAR AI account...";
 
@@ -1088,6 +1099,10 @@ pub struct LegacyMigrationOfferCopy {
     pub passkey_failed: &'static str,
     /// Stops waiting on the passkey step.
     pub passkey_cancel: &'static str,
+    /// The accessible name of `action` on the offer card in the notices.
+    pub action_name_notice: &'static str,
+    /// The accessible name of `action` in Settings.
+    pub action_name_settings: &'static str,
 }
 
 #[must_use]
@@ -1104,6 +1119,8 @@ pub fn legacy_migration_offer() -> LegacyMigrationOfferCopy {
         passkey_waiting: LEGACY_MIGRATION_PASSKEY_WAITING,
         passkey_failed: LEGACY_MIGRATION_PASSKEY_FAILED,
         passkey_cancel: LEGACY_MIGRATION_PASSKEY_CANCEL,
+        action_name_notice: LEGACY_MIGRATION_OFFER_ACTION_NAME_NOTICE,
+        action_name_settings: LEGACY_MIGRATION_OFFER_ACTION_NAME_SETTINGS,
     }
 }
 
@@ -3444,6 +3461,24 @@ mod tests {
         assert!(offer.later.contains("Settings"));
         let fields = serde_json::to_value(&offer).unwrap();
         for key in ["dismiss", "later"] {
+            assert!(fields[key].as_str().is_some_and(|s| !s.is_empty()), "{key}");
+        }
+    }
+
+    /// The two Move buttons, on the card and in Settings, look the same and
+    /// are named apart for a screen reader; each name says the visible
+    /// action (`docs/ui-copy-guide.md` 5).
+    #[test]
+    fn the_two_move_buttons_have_distinct_accessible_names() {
+        let offer = legacy_migration_offer();
+        assert_ne!(offer.action_name_notice, offer.action_name_settings);
+        for name in [offer.action_name_notice, offer.action_name_settings] {
+            assert!(name.starts_with(offer.action), "{name}");
+            assert_ne!(name, offer.action);
+        }
+        assert!(offer.action_name_settings.contains("Settings"));
+        let fields = serde_json::to_value(&offer).unwrap();
+        for key in ["action_name_notice", "action_name_settings"] {
             assert!(fields[key].as_str().is_some_and(|s| !s.is_empty()), "{key}");
         }
     }

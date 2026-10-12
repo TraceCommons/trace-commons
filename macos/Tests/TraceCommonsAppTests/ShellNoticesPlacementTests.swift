@@ -70,6 +70,22 @@ final class ShellNoticesPlacementTests: XCTestCase {
         }
     }
 
+    /// The card's Move and the one in Settings look the same; each is named
+    /// for its place, so a screen reader can tell them apart
+    /// (`docs/ui-copy-guide.md` 5). The controls take the place explicitly
+    /// rather than inferring it from the dismiss.
+    func test_theTwoMoveButtonsAreNamedForTheirPlace() throws {
+        let notices = try MonitorNavigationTests.text("Views/ShellNotices.swift")
+        XCTAssertEqual(
+            notices.components(separatedBy: ".accessibilityLabel(offer.actionName(for: placement))").count - 1, 1)
+        XCTAssertTrue(notices.contains("LegacyMigrationMoveControls(offer: offer, placement: .notice, onDismiss: onDismiss)"))
+        let settings = try MonitorNavigationTests.text("Views/Settings/ConnectionSection.swift")
+        XCTAssertTrue(settings.contains("LegacyMigrationMoveControls(offer: offer, placement: .settings)"))
+        XCTAssertTrue(settings.contains("model.isLegacyMigrationOfferDrawn"))
+        // Move only while the daemon offers it; a held refusal draws without it.
+        XCTAssertTrue(notices.contains("model.offersLegacyMigrationMove"))
+    }
+
     /// A card is a glass notice, its state carries words (the title is a
     /// status label), and no literal sentence is written here.
     func test_theCardsAreGlassNoticesWithNoSentenceOfTheirOwn() throws {
