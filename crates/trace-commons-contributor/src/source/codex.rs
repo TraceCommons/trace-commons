@@ -661,9 +661,12 @@ fn map_response_item(
                 Some(other) => serde_json::to_string(other).ok(),
                 None => None,
             };
-            // An exit code is read only where Codex wrote it in one of its own
-            // fixed shapes (see `codex_exit_code`), never guessed from
-            // command output.
+            // The exit code is recorded as a raw fact, read only where Codex
+            // wrote it in one of its own fixed shapes (see `codex_exit_code`).
+            // It does not set `success`: what a non-zero exit means depends
+            // on the command (`grep` with no match, `diff` with a difference),
+            // so it is interpreted, per command, only by the on-device
+            // detectors in `insights::failure_signals`.
             let exit_code = match payload.get("output") {
                 Some(Value::String(s)) => codex_exit_code(s),
                 Some(Value::Object(obj)) => obj
@@ -672,14 +675,13 @@ fn map_response_item(
                     .and_then(codex_exit_code),
                 _ => None,
             };
-            // An explicit verdict wins. Without one, a stated exit code is
-            // the verdict: zero succeeded, anything else did not (frontier
-            // failure missions, F1).
+            // Only an explicit verdict counts. An exit code would have to be
+            // interpreted per tool, and guessing here would put a fabricated
+            // outcome on a real trace.
             let success = payload
                 .get("output")
                 .and_then(|output| output.get("success"))
-                .and_then(|v| v.as_bool())
-                .or(exit_code.map(|code| code == 0));
+                .and_then(|v| v.as_bool());
             events.push(SessionEvent {
                 exit_code,
                 ..SessionEvent::tool_result(timestamp, content, call_id(payload), success)
@@ -1171,7 +1173,9 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_verdict_sets_success_and_a_bare_output_claims_none() {
+    fn only_an_explicit_verdict_sets_success() {
+        // An exit code would have to be read per tool, so it is not read at
+        // all: a guessed outcome on a real trace is worse than no outcome.
         let explicit = serde_json::json!({
             "type": "function_call_output",
             "call_id": "c8",
@@ -1186,9 +1190,7 @@ mod tests {
         super::map_response_item(Some(&explicit), None, None, &mut events);
         super::map_response_item(Some(&bare), None, None, &mut events);
         assert_eq!(events[0].success, Some(false));
-        assert_eq!(events[0].exit_code, None);
         assert_eq!(events[1].success, None);
-        assert_eq!(events[1].exit_code, None);
     }
 
     fn output(text: &str) -> serde_json::Value {
@@ -1196,10 +1198,9 @@ mod tests {
     }
 
     /// F1: Codex states a shell command's exit status in one of three shapes
-    /// of its own making. Each is read from its fixed position only, and a
-    /// parsed code sets `success` where the harness gave no verdict -- the
-    /// spec's call (frontier failure missions, F1), replacing the earlier
-    /// rule that no exit code was read at all.
+    /// of its own making. Each is read from its fixed position only and kept
+    /// as a raw fact; it never sets `success`, which stays the explicit
+    /// verdict alone (`only_an_explicit_verdict_sets_success`).
     #[test]
     fn a_shell_exit_code_is_read_from_codex_own_header() {
         let cases: Vec<(serde_json::Value, Option<i32>, Option<bool>)> = vec![
@@ -1208,29 +1209,29 @@ mod tests {
                     "Chunk ID: f5bd80\nWall time: 0.0000 seconds\nProcess exited with code 1\nOriginal token count: 44\nOutput:\nsed: no such file",
                 ),
                 Some(1),
-                Some(false),
+                None,
             ),
             (
                 output(
                     "Chunk ID: 6b74bd\nWall time: 0.1 seconds\nProcess exited with code 0\nOutput:\nok",
                 ),
                 Some(0),
-                Some(true),
+                None,
             ),
             (
                 output("Exit code: 2\nWall time: 0.3 seconds\nOutput:\nerror"),
                 Some(2),
-                Some(false),
+                None,
             ),
             (
                 output(r#"{"output":"src\n","metadata":{"exit_code":0,"duration_seconds":0.1}}"#),
                 Some(0),
-                Some(true),
+                None,
             ),
             (
                 output(r#"{"output":"boom","metadata":{"exit_code":127,"duration_seconds":0.1}}"#),
                 Some(127),
-                Some(false),
+                None,
             ),
             // Still running: no code yet, so none is claimed.
             (
@@ -1252,7 +1253,7 @@ mod tests {
                 None,
                 None,
             ),
-            // An explicit verdict wins over the code.
+            // The explicit verdict is the only verdict; the code beside it stays raw.
             (
                 serde_json::json!({
                     "type": "function_call_output",

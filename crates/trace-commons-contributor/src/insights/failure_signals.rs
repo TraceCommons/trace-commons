@@ -246,6 +246,26 @@ fn throwaway_key() -> DigestKey {
     DigestKey::from_bytes(bytes)
 }
 
+/// Whether a call succeeded, as the detectors read it.
+///
+/// A shell command's outcome counts only when the command is a test or
+/// build run ([`is_verification_command`]): there a non-zero exit is a
+/// failure. For any other command -- `grep` finding nothing, `diff` finding
+/// a difference, `test`, `[` -- a non-zero exit or an errored result means
+/// what that command says it means, not that the model failed, so it is
+/// read as no outcome at all. The adapter's `success` (the harness's own
+/// verdict) is preferred; the raw exit code is the fallback. Other tools
+/// keep the harness's verdict as recorded.
+fn call_outcome(tool: ToolKind, command: Option<&str>, result: &SessionEvent) -> Option<bool> {
+    if tool != ToolKind::Bash {
+        return result.success;
+    }
+    if !command.is_some_and(is_verification_command) {
+        return None;
+    }
+    result.success.or(result.exit_code.map(|code| code == 0))
+}
+
 /// The model's tool calls in order, each paired with its result by the
 /// harness's own call id. A call with no id, or no result, is unpaired, and
 /// an unpaired call never counts as failed or as a retry.
@@ -273,7 +293,10 @@ fn model_calls(events: &[SessionEvent]) -> Vec<ModelCall<'_>> {
             .tool_call_id
             .as_deref()
             .and_then(|id| results.get(id).copied());
-        let success = result.and_then(|r| r.success.or(r.exit_code.map(|code| code == 0)));
+        let command = (tool == ToolKind::Bash)
+            .then(|| command_of(&event.structured))
+            .flatten();
+        let success = result.and_then(|r| call_outcome(tool, command.as_deref(), r));
         let edited = if is_cycle_edit(tool) || tool == ToolKind::NotebookEdit {
             edited_paths(&event.structured)
         } else {
@@ -298,9 +321,7 @@ fn model_calls(events: &[SessionEvent]) -> Vec<ModelCall<'_>> {
                 success,
                 paired: result.is_some(),
             },
-            command: (tool == ToolKind::Bash)
-                .then(|| command_of(&event.structured))
-                .flatten(),
+            command,
             edited,
             result,
         });
@@ -821,11 +842,13 @@ mod tests {
             parts.push(edit(&format!("e{round}"), file));
             parts.push(bash(
                 &format!("b{round}"),
-                &format!("./check {round}"),
+                &format!("cargo test round{round}"),
                 false,
             ));
         }
         parts.push(edit("last", file_of_round.last().unwrap()));
+        // A passing run at the end, so the loop is the only signal.
+        parts.push(bash("final", "cargo test", true));
         session(parts)
     }
 
@@ -846,14 +869,15 @@ mod tests {
         assert!(detect(&edit_fail_rounds(&["/w/a.rs", "/w/a.rs"])).is_empty());
         let spread = session(vec![
             edit("1", "/w/a.rs"),
-            bash("b1", "./check 1", false),
+            bash("b1", "cargo test round1", false),
             edit("2", "/w/a.rs"),
             edit("3", "/w/b.rs"),
-            bash("b2", "./check 2", false),
+            bash("b2", "cargo test round2", false),
             edit("4", "/w/b.rs"),
             edit("5", "/w/c.rs"),
-            bash("b3", "./check 3", false),
+            bash("b3", "cargo test round3", false),
             edit("6", "/w/c.rs"),
+            bash("final", "cargo test", true),
         ]);
         assert!(detect(&spread).is_empty());
     }
@@ -878,7 +902,7 @@ mod tests {
                 call(
                     &format!("s{round}"),
                     "shell",
-                    json!({"command": ["bash", "-lc", format!("./run {round}")]}),
+                    json!({"command": ["bash", "-lc", format!("cargo test round{round}")]}),
                 ),
                 SessionEvent {
                     exit_code: Some(1),
@@ -894,6 +918,70 @@ mod tests {
             detect(&session(parts))
                 .signals
                 .contains(&FailureSignal::EditFailEditLoop)
+        );
+    }
+
+    /// A non-zero exit from a command that is not a test or build run is
+    /// that command's answer, not a failure: `grep` with no match and `diff`
+    /// with a difference exit 1, and neither counts toward an edit loop or as
+    /// a failed last verification. Shown with the raw exit code alone (the
+    /// Codex shape) and with the harness's own errored verdict (Claude Code).
+    #[test]
+    fn grep_diff_and_test_exiting_one_are_not_failures() {
+        for command in [
+            "grep -rn needle src",
+            "diff -u a.rs b.rs",
+            "test -f out.bin",
+            "[ -f out.bin ]",
+            "./check",
+        ] {
+            for errored in [None, Some(false)] {
+                let mut parts = Vec::new();
+                for round in 0..3 {
+                    parts.push(edit(&format!("e{round}"), "/w/a.rs"));
+                    let id = format!("b{round}");
+                    parts.push(vec![
+                        call(
+                            &id,
+                            "Bash",
+                            json!({ "command": format!("{command} {round}") }),
+                        ),
+                        SessionEvent {
+                            exit_code: Some(1),
+                            ..SessionEvent::tool_result(None, None, Some(id.clone()), errored)
+                        },
+                    ]);
+                }
+                parts.push(edit("last", "/w/a.rs"));
+                parts.push(vec![assistant("Done.")]);
+                assert!(
+                    detect(&session(parts)).is_empty(),
+                    "{command} with verdict {errored:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_test_run_exiting_non_zero_with_no_verdict_is_a_failure() {
+        let events = vec![
+            call(
+                "t",
+                "shell",
+                json!({"command": ["bash", "-lc", "cargo test"]}),
+            ),
+            SessionEvent {
+                exit_code: Some(101),
+                ..SessionEvent::tool_result(None, None, Some("t".into()), None)
+            },
+            assistant("Done."),
+        ];
+        assert_eq!(
+            detect(&events),
+            only(
+                FailureSignal::LastVerificationFailed,
+                Some(TraceFailureMode::MissingVerification)
+            )
         );
     }
 
