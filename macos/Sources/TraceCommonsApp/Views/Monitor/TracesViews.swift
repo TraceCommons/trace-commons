@@ -158,6 +158,8 @@ struct TracesTreeView: View {
                 VStack(spacing: 2) {
                     ForEach(store.tree.folders) { folderRows($0) }
                 }
+                // Folders are the top level: no tool level to indent past.
+                .environment(\.glassTreeRoot, .folder)
             }
             // The keyboard moves the selection; keep it on screen,
             // opening a session's folder if it was closed.
@@ -457,7 +459,7 @@ struct TracesTreeView: View {
     }
 
     /// #1146's inset for the lines under a folder row (`px-14`).
-    static let noteInset: CGFloat = 56
+    static let noteInset: CGFloat = 38
 
     @ViewBuilder
     private func folderRows(_ folder: TracesTree.FolderNode) -> some View {

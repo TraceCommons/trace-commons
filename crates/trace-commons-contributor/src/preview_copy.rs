@@ -544,7 +544,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
         optional_automation: "OPTIONAL AUTOMATION",
         tree: MonitorTreeCopy {
             tree_label: "Tools, folders and traces",
-            tree_title: "Waiting traces",
+            tree_title: "Watched Directories",
             reading_queue: "Reading local queue\u{2026}",
             submit: "Submit",
             submit_count: "Submit \u{00b7} {count}",
@@ -554,7 +554,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             reviewing: "Reviewing",
             review_tip: "Opens what would be sent. Nothing leaves until you contribute.",
             ignored_folder: "ignored \u{00b7} never queued",
-            ignore_folder: "Ignore folder",
+            ignore_folder: "Ignore Directory",
             watch_folder: "Watch this folder",
             watch_tool: "Watch {tool}",
             dismiss_session: "Dismiss trace",

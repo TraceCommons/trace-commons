@@ -105,9 +105,15 @@ final class ToolFolderInspectorTests: XCTestCase {
                        "GlassLegendCell(table.shared, value: Self.shared(folder, history: history), status: .shared)",
                        "GlassLegendCell(table.kept, value: String(folder.sessions.count), status: .kept)",
                        "InspectorSection(words.inspector.project)", "InspectorSection(words.inspector.contributionRule)",
-                       "InspectorSection(words.inspector.decisions)", "GlassCard(quiet: true)"] {
+                       "InspectorSection(words.inspector.decisions)"] {
             XCTAssertTrue(source.contains(needle), "ToolFolderInspectors.swift lacks \(needle)")
         }
+        // Each section is a quiet card (owner, 2026-10-11), so the Decisions
+        // content draws none of its own: never a card inside a card.
+        XCTAssertFalse(source.contains("GlassCard(quiet: true)"), "a card inside the Decisions section's card")
+        let host = try TracesParityTests.text("Views/Monitor/TracesInspectorHost.swift")
+        let section = try XCTUnwrap(host.range(of: "struct InspectorSection").map { String(host[$0.lowerBound...].prefix(1500)) })
+        XCTAssertTrue(section.contains("GlassCard(quiet: true)"), "an inspector section has no card")
         XCTAssertFalse(source.contains("GlassEyebrowCard("), "the folder inspector still draws eyebrow cards")
         XCTAssertFalse(source.contains("TracesTreeView.submitTitle("), "the inspector's Submit is the tree pill's")
     }

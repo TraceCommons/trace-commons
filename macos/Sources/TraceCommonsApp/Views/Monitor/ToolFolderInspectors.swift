@@ -101,56 +101,55 @@ struct FolderInspector: View {
     private func decisions(_ words: MonitorTracesCopy) -> some View {
         let offer = store.groupOffer(folder)
         let busy = store.writing.contains(folder.id)
-        GlassCard(quiet: true) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                    Text(folder.label)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                    if let path = folder.path, !path.isEmpty {
-                        caption(path)
-                    }
-                    caption(Self.waitingLine(folder.sessions.count, words: words))
-                    if let eligible = Self.eligibleLine(folder, offer: offer, words: words) {
-                        caption(eligible)
-                    }
+        // Its section is the card (`InspectorSection`): no card inside it.
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                Text(folder.label)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+                if let path = folder.path, !path.isEmpty {
+                    caption(path)
                 }
-                // Submit all eligible and Submit all as are one split
-                // button (owner, 2026-10-10): the action, and a chevron
-                // that opens Submit all as. Ignore, the decline, is a link
-                // after it (Ron, 2026-10-09).
-                HStack(spacing: GlassTokens.Space.s4) {
-                    let submits = Self.offersSubmitAll(folder, store: store)
-                    let title = store.submittingFolder == folder.id
-                        ? words.tree.submitting : Self.submitAllTitle(offer.count, words: words)
-                    if submits, let outcome = store.disclosure?.outcome {
-                        GlassSplitButton(title, menuLabel: outcome.submitAllAs) {
-                            Task { await store.contributeFolder(folder, verdict: nil) }
-                        } menu: {
-                            Button(outcome.submitAllAs) { choosingVerdict = true }
-                                .help(outcome.submitAllAsTooltip)
-                        }
-                        .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
-                    } else if submits {
-                        Button(title) { Task { await store.contributeFolder(folder, verdict: nil) } }
-                            .buttonStyle(GlassButtonStyle(.glass))
-                            .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
-                    }
-                    if let copy = ignoreCopy {
-                        Button(copy.button) { route(TracesTreeView.modeChange(folder, .ignore), .ignore) }
-                            .buttonStyle(GlassButtonStyle(.link))
-                            .help(copy.tooltip)
-                    }
-                }
-                .lineLimit(1)
-                .disabled(busy)
-                // A refused write, under the buttons it is about.
-                if let refused = store.writeErrors[folder.id] {
-                    GlassAlert(words.line(for: refused))
+                caption(Self.waitingLine(folder.sessions.count, words: words))
+                if let eligible = Self.eligibleLine(folder, offer: offer, words: words) {
+                    caption(eligible)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // Submit all eligible and Submit all as are one split
+            // button (owner, 2026-10-10): the action, and a chevron
+            // that opens Submit all as. Ignore, the decline, is a link
+            // after it (Ron, 2026-10-09).
+            HStack(spacing: GlassTokens.Space.s4) {
+                let submits = Self.offersSubmitAll(folder, store: store)
+                let title = store.submittingFolder == folder.id
+                    ? words.tree.submitting : Self.submitAllTitle(offer.count, words: words)
+                if submits, let outcome = store.disclosure?.outcome {
+                    GlassSplitButton(title, menuLabel: outcome.submitAllAs) {
+                        Task { await store.contributeFolder(folder, verdict: nil) }
+                    } menu: {
+                        Button(outcome.submitAllAs) { choosingVerdict = true }
+                            .help(outcome.submitAllAsTooltip)
+                    }
+                    .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
+                } else if submits {
+                    Button(title) { Task { await store.contributeFolder(folder, verdict: nil) } }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                        .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
+                }
+                if let copy = ignoreCopy {
+                    Button(copy.button) { route(TracesTreeView.modeChange(folder, .ignore), .ignore) }
+                        .buttonStyle(GlassButtonStyle(.link))
+                        .help(copy.tooltip)
+                }
+            }
+            .lineLimit(1)
+            .disabled(busy)
+            // A refused write, under the buttons it is about.
+            if let refused = store.writeErrors[folder.id] {
+                GlassAlert(words.line(for: refused))
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// Ron's `SubmitAllAsControl`: one outcome for every eligible session,

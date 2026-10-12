@@ -209,4 +209,14 @@ final class ComponentParityTests: XCTestCase {
         XCTAssertEqual(GlassTokens.Space.windowPadding, 0)
         XCTAssertEqual(GlassTokens.Space.paneGap, 10)
     }
+
+    /// A tree's top-level rows sit flush left, one level in for each level
+    /// under it: the Traces tree, whose top level is folders, starts its
+    /// folders at the edge (owner, 2026-10-11).
+    func testATreesTopLevelRowsSitFlushLeft() {
+        XCTAssertEqual(GlassListRow.leadingInset(.tool, root: .tool), 8)
+        XCTAssertEqual(GlassListRow.leadingInset(.folder, root: .tool), 26)
+        XCTAssertEqual(GlassListRow.leadingInset(.folder, root: .folder), 8)
+        XCTAssertEqual(GlassListRow.leadingInset(.session, root: .folder), 26)
+    }
 }
