@@ -49,11 +49,18 @@ public sealed record LegacyMigrationOfferCopy
     /// <summary>Stops waiting on the passkey step.</summary>
     [JsonPropertyName("passkey_cancel")] public string PasskeyCancel { get; init; } = string.Empty;
 
+    /// <summary>The accessible name of <see cref="Action"/> on the offer card.</summary>
+    [JsonPropertyName("action_name_notice")] public string ActionNameNotice { get; init; } = string.Empty;
+
+    /// <summary>The accessible name of <see cref="Action"/> in Settings.</summary>
+    [JsonPropertyName("action_name_settings")] public string ActionNameSettings { get; init; } = string.Empty;
+
     /// <summary>The payload fields this shell decodes, by wire name.</summary>
     public static readonly IReadOnlyList<string> ConsumedFields = new[]
     {
         "title", "body", "action", "working", "invite_prompt", "start_failed",
         "dismiss", "later", "passkey_waiting", "passkey_failed", "passkey_cancel",
+        "action_name_notice", "action_name_settings",
     };
 }
 
@@ -97,6 +104,7 @@ public static class LegacyMigrationOffers
             {
                 copy.Title, copy.Body, copy.Action, copy.Working, copy.InvitePrompt, copy.StartFailed,
                 copy.Dismiss, copy.Later, copy.PasskeyWaiting, copy.PasskeyFailed, copy.PasskeyCancel,
+                copy.ActionNameNotice, copy.ActionNameSettings,
             })
             {
                 if (string.IsNullOrEmpty(sentence))

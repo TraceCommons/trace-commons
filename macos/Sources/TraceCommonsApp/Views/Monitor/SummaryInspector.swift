@@ -205,13 +205,12 @@ private struct SummaryDecisionLine: View {
 }
 
 /// Ron's `QueueStatusPanel` grid: a cell per row, its label bold over its
-/// value, side by side between a top and a bottom hairline.
+/// value, side by side. No rules above or below it (owner, 2026-10-11).
 struct SafeguardGrid: View {
     let rows: [GlassKeyValueList.Item]
 
     var body: some View {
         VStack(spacing: 0) {
-            Rectangle().fill(GlassColor.hairline).frame(height: 1)
             HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
                 ForEach(rows, id: \.label) { row in
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
@@ -227,8 +226,7 @@ struct SafeguardGrid: View {
                     .accessibilityElement(children: .combine)
                 }
             }
-            .padding(.vertical, GlassTokens.Space.s4)
-            Rectangle().fill(GlassColor.hairline).frame(height: 1)
+            .padding(.vertical, GlassTokens.Space.s2)
         }
     }
 }

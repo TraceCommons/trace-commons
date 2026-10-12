@@ -136,6 +136,10 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
     /// A promotion treatment in place of the card tier (owner, 2026-10-11:
     /// Home's Missions card). The icon then takes the accent colour.
     private let promo: GlassPromoTreatment?
+    /// A chevron at the card's trailing edge, centred on the whole card
+    /// rather than on its head (owner, 2026-10-11), for a card that is a
+    /// way into somewhere, as `GlassEyebrowCard`'s is.
+    private let chevron: Bool
     @State private var infoOpen = false
 
     /// The icon's point size, and the column it sits in.
@@ -155,11 +159,12 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
     /// out; `info` goes behind the info icon after it.
     public init(
         systemImage: String, title: String, subtitle: [String] = [], info: String? = nil, refresh: Refresh? = nil,
-        interactive: Bool = false, promo: GlassPromoTreatment? = nil,
+        interactive: Bool = false, promo: GlassPromoTreatment? = nil, chevron: Bool = false,
         @ViewBuilder accessory: () -> Accessory, @ViewBuilder content: () -> Content
     ) {
         self.interactive = interactive
         self.promo = promo
+        self.chevron = chevron
         self.systemImage = systemImage
         self.title = title
         self.subtitle = subtitle.filter { !$0.isEmpty }
@@ -171,9 +176,17 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
 
     public var body: some View {
         if let promo {
-            GlassPromoCard(promo, interactive: interactive) { stack }
+            GlassPromoCard(promo, interactive: interactive) { withChevron }
         } else {
-            GlassCard(interactive: interactive) { stack }
+            GlassCard(interactive: interactive) { withChevron }
+        }
+    }
+
+    /// The card's stack, and its chevron centred on the whole of it.
+    private var withChevron: some View {
+        HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
+            stack
+            if chevron { GlassChevron() }
         }
     }
 
@@ -284,10 +297,11 @@ public extension GlassIconCard where Content == EmptyView {
     /// A head-only card: `trailing` is the control on its right.
     init(
         systemImage: String, title: String, subtitle: [String] = [], info: String? = nil, refresh: Refresh? = nil,
-        interactive: Bool = false, promo: GlassPromoTreatment? = nil, @ViewBuilder trailing: () -> Accessory
+        interactive: Bool = false, promo: GlassPromoTreatment? = nil, chevron: Bool = false,
+        @ViewBuilder trailing: () -> Accessory
     ) {
         self.init(systemImage: systemImage, title: title, subtitle: subtitle, info: info, refresh: refresh,
-                  interactive: interactive, promo: promo, accessory: trailing) { EmptyView() }
+                  interactive: interactive, promo: promo, chevron: chevron, accessory: trailing) { EmptyView() }
     }
 }
 

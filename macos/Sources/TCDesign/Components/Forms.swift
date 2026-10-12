@@ -252,6 +252,9 @@ public struct GlassRadioRow<Value: Hashable>: View {
             Spacer(minLength: 0)
         }
         .focusable()
+        // Keyboard focus moves through it, with no ring drawn round the
+        // row (owner, 2026-10-11).
+        .focusEffectDisabled()
         .onMoveCommand { direction in
             let step: Int
             switch direction {

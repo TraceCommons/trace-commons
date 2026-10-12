@@ -84,6 +84,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
             MenuBarGlassPanel(navigation: navigation, store: menuPanel)
                 .environmentObject(model)
                 .tint(GlassTokens.Color.purpleSoft.color)
+                // No focus ring drawn round controls (owner, 2026-10-11).
+                .focusEffectDisabled()
         } label: {
             Launcher(model: model, compute: compute, navigation: navigation,
                      appDelegate: appDelegate, missionDrafts: missionDrafts, menuPanel: menuPanel)
@@ -104,6 +106,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
             MenuBarPreviewWindow(navigation: navigation, store: menuPanel)
                 .environmentObject(model)
                 .tint(GlassTokens.Color.purpleSoft.color)
+                // No focus ring drawn round controls (owner, 2026-10-11).
+                .focusEffectDisabled()
         }
         .windowResizability(.contentSize)
         #endif
@@ -115,6 +119,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
             FirstRunWindowView(navigation: navigation)
                 .environmentObject(model)
                 .tint(GlassTokens.Color.purpleSoft.color)
+                // No focus ring drawn round controls (owner, 2026-10-11).
+                .focusEffectDisabled()
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 860, height: 760)
@@ -127,6 +133,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
                 .environmentObject(model)
                 .environment(compute)
                 .tint(GlassTokens.Color.purpleSoft.color)
+                // No focus ring drawn round controls (owner, 2026-10-11).
+                .focusEffectDisabled()
         }
         .defaultSize(width: GlassTokens.Size.modalWidth, height: 640)
         .windowResizability(.contentMinSize)
@@ -175,9 +183,12 @@ struct MonitorScene: Scene {
                 // user's chosen accent colour is a real departure from macOS
                 // convention and it is made on purpose: the accent is the
                 // single strongest cue that this app is the Trace product.
-                // Everything else about the controls -- shape, focus ring,
-                // keyboard behaviour -- stays stock.
+                // Everything else about the controls -- shape, keyboard
+                // behaviour -- stays stock; the focus ring is not drawn
+                // (owner, 2026-10-11).
                 .tint(GlassTokens.Color.purpleSoft.color)
+                // No focus ring drawn round controls (owner, 2026-10-11).
+                .focusEffectDisabled()
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
@@ -353,7 +364,7 @@ private struct Launcher: View {
         appDelegate.compute = compute
         appDelegate.model = model
         // The edge rail, if the contributor turned it on in Settings.
-        EdgeRailController.shared.attach(model: model, compute: compute)
+        EdgeRailController.shared.attach(model: model)
         navigation.registerServiceStart { startServices() }
         activateServices()
         // The only thing a digest action may do is open the Monitor at

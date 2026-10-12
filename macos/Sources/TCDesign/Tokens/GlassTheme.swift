@@ -46,10 +46,10 @@ public enum GlassTheme: String, Sendable, CaseIterable {
     /// panes, under a lighter map field (owner feedback, 2026-10-09).
     static var contentIsGlass: Bool { current == .flat }
 
-    /// The native material under a flat pane. `clearTint` is the default:
-    /// Liquid Glass, for the system's refraction, tinted with the veil,
-    /// which of the five came closest to the mock (owner comparison,
-    /// 2026-10-09). The veil is painted over it in both focus states, and a
+    /// The native material under a flat pane. `regularTint` is the default:
+    /// frosted Liquid Glass tinted with the veil (owner, 2026-10-12: more
+    /// frost than the clear glass picked on 2026-10-09, the veil's dark
+    /// tint unchanged). The veil is painted over it in both focus states, and a
     /// background window takes `inactiveDim` too, so it is the darker one.
     /// `TC_GLASS_MATERIAL` picks another, for comparison.
     enum FlatMaterial: String {
@@ -89,7 +89,7 @@ public enum GlassTheme: String, Sendable, CaseIterable {
     }
 
     static let flatMaterial: FlatMaterial =
-        ProcessInfo.processInfo.environment["TC_GLASS_MATERIAL"].flatMap(FlatMaterial.init(rawValue:)) ?? .clearTint
+        ProcessInfo.processInfo.environment["TC_GLASS_MATERIAL"].flatMap(FlatMaterial.init(rawValue:)) ?? .regularTint
 }
 
 /// The person's appearance choice: Light, Dark, or the system's

@@ -57,9 +57,6 @@ struct FlowMapScene: Equatable {
         var ringed = false
         /// A second line under the label (#1146: the credential's tools).
         var sublabel: String? = nil
-        /// The label is drawn on the node's leading side, level with it,
-        /// rather than under it (the compact maps' left column).
-        var labelLeading = false
 
         var cardTitle: String { title ?? label }
     }
@@ -134,9 +131,6 @@ struct FlowMapScene: Equatable {
     var nodes: [Node] = []
     var arcs: [Arc] = []
     var overflows: [Overflow] = []
-    /// The design space the scene is laid out in: #1146's portrait map, or
-    /// the compact maps' landscape one.
-    var canvas: CGSize = FlowMapScene.size
 
     static let size = CGSize(width: 580, height: 760)
 
@@ -390,114 +384,6 @@ struct FlowMapScene: Equatable {
     /// `HarnessToolArt`, beside the tools list the release window draws.
     static func glassTool(harness id: String) -> GlassTool? {
         HarnessToolArt.tool(harness: id)
-    }
-
-    // MARK: Compact
-
-    /// The compact maps' design space: landscape, for a small map beside
-    /// other content (the edge rail's peeks).
-    static let compactSize = CGSize(width: 600, height: 300)
-
-    /// The scene re-laid out for a small landscape map (owner, 2026-10-11:
-    /// the rail's maps laid out for their size). The nodes keep their
-    /// words, states and dims; only where they sit, and the arcs between
-    /// them, change.
-    ///
-    /// - Traces: the tools in a column on the left, labelled beside
-    ///   themselves, each joined to this computer, and this computer joined
-    ///   to the commons once by the strongest of the tools' commons arcs
-    ///   (moving over dashed over quiet). Folders are left out at this size;
-    ///   unwatched tools too, while any tool is watched.
-    /// - Private AI: the tools in a column on the left, each joined to the
-    ///   credential in its own arc's style.
-    func compact() -> FlowMapScene {
-        if nodes.contains(where: { $0.id == "hub" }) { return compactTraces() }
-        if nodes.contains(where: { $0.id == "destination" }) { return compactPrivateAI() }
-        return self
-    }
-
-    /// The y of row `index` of `count` in the compact column.
-    static func compactRow(_ index: Int, of count: Int) -> CGFloat {
-        let top: CGFloat = 40, bottom: CGFloat = 260
-        guard count > 1 else { return (top + bottom) / 2 }
-        return top + CGFloat(index) * (bottom - top) / CGFloat(count - 1)
-    }
-
-    static let compactColumnX: CGFloat = 200
-    static let compactHub = CGPoint(x: 370, y: 150)
-    /// Above this computer's level, so the two labels never meet.
-    static let compactLibrary = CGPoint(x: 515, y: 95)
-    static let compactDestination = CGPoint(x: 460, y: 140)
-
-    private func compactTraces() -> FlowMapScene {
-        var scene = FlowMapScene()
-        scene.canvas = Self.compactSize
-        let allTools = nodes.filter { $0.id.hasPrefix("tool:") }
-        let watched = allTools.filter { !$0.dashed }
-        let tools = watched.isEmpty ? allTools : watched
-        let hub = nodes.first { $0.id == "hub" }
-        let library = nodes.first { $0.id == "library" }
-
-        for (index, tool) in tools.enumerated() {
-            let at = CGPoint(x: Self.compactColumnX, y: Self.compactRow(index, of: tools.count))
-            var node = Self.moved(tool, to: at, radius: 17)
-            node.labelLeading = true
-            scene.nodes.append(node)
-            scene.arcs.append(Self.link(
-                from: CGPoint(x: at.x + 17, y: at.y), to: CGPoint(x: Self.compactHub.x - 21, y: Self.compactHub.y),
-                style: .quiet, dim: tool.dim))
-        }
-        // The commons link: the strongest style any tool's arc to it had.
-        let toLibrary = arcs.filter { $0.to == Self.libraryPoint }.map(\.style)
-        let style: Arc.Style? = toLibrary.contains(.flowing) ? .flowing
-            : toLibrary.contains(.dashed) ? .dashed : toLibrary.contains(.quiet) ? .quiet : nil
-        if let style {
-            scene.arcs.append(Self.link(
-                from: CGPoint(x: Self.compactHub.x + 21, y: Self.compactHub.y),
-                to: CGPoint(x: Self.compactLibrary.x - 16, y: Self.compactLibrary.y), style: style, dim: 1))
-        }
-        if let hub { scene.nodes.insert(Self.moved(hub, to: Self.compactHub, radius: 21), at: 0) }
-        if let library { scene.nodes.append(Self.moved(library, to: Self.compactLibrary, radius: 16)) }
-        return scene
-    }
-
-    private func compactPrivateAI() -> FlowMapScene {
-        var scene = FlowMapScene()
-        scene.canvas = Self.compactSize
-        let harnesses = nodes.filter { $0.id.hasPrefix("harness:") }
-        // `privateAI` adds one arc per tool, in the tools' order.
-        let styles = arcs.map(\.style)
-        let target = CGPoint(x: Self.compactDestination.x - 29, y: Self.compactDestination.y)
-        for (index, harness) in harnesses.enumerated() {
-            let at = CGPoint(x: Self.compactColumnX, y: Self.compactRow(index, of: harnesses.count))
-            var node = Self.moved(harness, to: at, radius: 17)
-            node.labelLeading = true
-            scene.nodes.append(node)
-            scene.arcs.append(Self.link(
-                from: CGPoint(x: at.x + 17, y: at.y), to: target,
-                style: index < styles.count ? styles[index] : .unknown, dim: 1))
-        }
-        if let destination = nodes.first(where: { $0.id == "destination" }) {
-            scene.nodes.insert(Self.moved(destination, to: Self.compactDestination, radius: 28), at: 0)
-        }
-        return scene
-    }
-
-    /// A node with a new place and size, everything else kept.
-    private static func moved(_ node: Node, to at: CGPoint, radius: CGFloat) -> Node {
-        var moved = Node(
-            id: node.id, kind: node.kind, at: at, radius: radius, label: node.label, detail: node.detail,
-            dim: node.dim, title: node.title, dashed: node.dashed, ringed: node.ringed, sublabel: node.sublabel)
-        moved.labelLeading = node.labelLeading
-        return moved
-    }
-
-    /// A left-to-right link, level at each end.
-    private static func link(from: CGPoint, to: CGPoint, style: Arc.Style, dim: Double) -> Arc {
-        let midX = (from.x + to.x) / 2
-        return Arc(
-            from: from, control1: CGPoint(x: midX, y: from.y), control2: CGPoint(x: midX, y: to.y), to: to,
-            style: style, dim: dim)
     }
 
     // MARK: Helpers
