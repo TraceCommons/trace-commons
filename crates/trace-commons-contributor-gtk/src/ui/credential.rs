@@ -71,9 +71,9 @@ impl ProviderSelector {
         let root = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         style::append_body(&root, copy.credential_provider_label);
         let selector = gtk::DropDown::from_strings(&[
+            copy.credential_provider_near,
             copy.credential_provider_github,
             copy.credential_provider_google,
-            copy.credential_provider_near,
         ]);
         selector.set_selected(selected);
         selector.set_size_request(-1, 44);
@@ -81,11 +81,11 @@ impl ProviderSelector {
             .label(copy.credential_wallet_notice)
             .wrap(true)
             .xalign(0.0)
-            .visible(selected == 2)
+            .visible(selected == 0)
             .build();
         selector.connect_selected_notify({
             let notice = notice.clone();
-            move |selector| notice.set_visible(selector.selected() == 2)
+            move |selector| notice.set_visible(selector.selected() == 0)
         });
         root.append(&selector);
         root.append(&notice);
@@ -98,7 +98,7 @@ impl ProviderSelector {
 }
 
 fn provider_id(selected: u32) -> Option<&'static str> {
-    ["github", "google", "near"].get(selected as usize).copied()
+    ["near", "github", "google"].get(selected as usize).copied()
 }
 
 /// The section's widgets. Built once and refilled, like every other screen in
