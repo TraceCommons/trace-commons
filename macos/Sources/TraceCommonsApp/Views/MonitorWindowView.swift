@@ -219,6 +219,7 @@ struct MonitorWindowView: View {
                             get: { selectedHistory },
                             set: { Self.openHistory($0, selected: &selectedHistory, showsInspector: &showsInspector) }),
                         openTraces: { tab = .traces },
+                        openPrivateAI: { tab = .inference },
                         insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts)
                 }
             } footer: {

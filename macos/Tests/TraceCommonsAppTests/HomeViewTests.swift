@@ -62,19 +62,23 @@ final class HomeViewTests: XCTestCase {
     func test_homeReadsWaitingFromOneStore() throws {
         let home = try Self.flat("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
-            "HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed))"))
+            "HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed), "
+                + "action: openTraces)"))
         XCTAssertFalse(home.contains("store.status?.decisionsOwed"), "Home reads waiting from a second store")
     }
 
     /// Ron's three stat cards; pending credit is a figure only beside the
-    /// commons' statement of what it waits on (D6), a dash otherwise.
+    /// commons' statement of what it waits on (D6), a dash otherwise. Each
+    /// opens where its number lives (owner, 2026-10-12).
     func test_homeStatCardsKeepD6() throws {
         let home = try Self.flat("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: HomeFormat.creditPendingWord, "
-                + "value: HomeFormat.pendingFigure(freshRollup?.creditPending, condition: condition))"))
+                + "value: HomeFormat.pendingFigure(freshRollup?.creditPending, condition: condition), "
+                + "action: openPrivateAI)"))
         XCTAssertTrue(home.contains(
-            "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted))"))
+            "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted), "
+                + "action: openHistory)"))
         // The credit summary after a failed read is no summary (D6 then
         // shows a dash and no condition), never the earlier sentence.
         XCTAssertTrue(home.contains("let condition = HomeFormat.pendingCondition(freshCredit)"))

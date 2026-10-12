@@ -285,7 +285,7 @@ public struct GlassCrumb: Identifiable {
     }
 }
 
-/// A back chevron, then crumbs: secondary › tertiary › current.
+/// A back chevron, then crumbs: secondary / tertiary / current.
 public struct GlassBreadcrumb: View {
     private let trail: [GlassCrumb]
     private let backLabel: String
@@ -332,7 +332,7 @@ public struct GlassBreadcrumb: View {
             }
             ForEach(Array(trail.enumerated()), id: \.element.id) { index, crumb in
                 if index > 0 {
-                    Text("›").foregroundStyle(GlassColor.textTertiary).accessibilityHidden(true)
+                    Text("/").foregroundStyle(GlassColor.textTertiary).accessibilityHidden(true)
                 }
                 if index == trail.count - 1 {
                     Text(crumb.title).foregroundStyle(GlassColor.textPrimary)

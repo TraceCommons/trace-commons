@@ -7,10 +7,14 @@ import SwiftUI
 public struct GlassStatCard: View {
     private let label: String
     private let value: String
+    /// A card that acts (it sits in a button): it lifts under the pointer,
+    /// as an interactive `GlassCard` does.
+    private let interactive: Bool
 
-    public init(_ label: String, value: String) {
+    public init(_ label: String, value: String, interactive: Bool = false) {
         self.label = label
         self.value = value
+        self.interactive = interactive
     }
 
     /// The value's type: #1146's 18px/700 tabular figure, on the nearest
@@ -35,7 +39,7 @@ public struct GlassStatCard: View {
         .padding(.vertical, 10)
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassTier(.card)
+        .glassTier(.card, hover: GlassCard<EmptyView>.hoverFill(interactive: interactive))
         .accessibilityElement(children: .combine)
     }
 }

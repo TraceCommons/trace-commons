@@ -174,7 +174,7 @@ public struct GlassBadge: View {
             .padding(.horizontal, 5)
             .frame(minWidth: subtle ? nil : 16, minHeight: subtle ? 14 : 16)
             .background(
-                Capsule().fill(subtle ? GlassColor.ink(0.16) : GlassTokens.Color.badgeFill.color)
+                Capsule().fill(subtle ? GlassTokens.Color.badgeFillSubtle.color : GlassTokens.Color.badgeFill.color)
             )
             .accessibilityLabel(label ?? Self.text(for: count))
     }
@@ -595,14 +595,27 @@ enum GlassMapMarks {
     /// The dot set between every other pair of marks along a row.
     static let dotSize: CGFloat = 1.6
     /// The marks at rest: white over the dark field, black over the light.
-    static let ink = GlassRGBA(0xFFFFFF, alpha: 0.096, light: GlassRGBA(0x000000, alpha: 0.08))
+    /// The flat theme's Light draws them white too, a light grid on the
+    /// light field rather than a dark one (owner, 2026-10-12).
+    static var ink: GlassRGBA {
+        GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.096, light: GlassRGBA(0x000000, alpha: 0.08)),
+                        flat: GlassRGBA(0xFFFFFF, alpha: 0.096, light: GlassRGBA(0xFFFFFF, alpha: 0.4)))
+    }
     /// The marks at the centre of the light: about twice their resting
     /// ink, no more (owner, 2026-10-10: the first cut was too bright).
-    static let litInk = GlassRGBA(0xFFFFFF, alpha: 0.2, light: GlassRGBA(0x000000, alpha: 0.15))
+    /// White on white cannot double, so the flat Light lifts to just short
+    /// of opaque-looking.
+    static var litInk: GlassRGBA {
+        GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.2, light: GlassRGBA(0x000000, alpha: 0.15)),
+                        flat: GlassRGBA(0xFFFFFF, alpha: 0.2, light: GlassRGBA(0xFFFFFF, alpha: 0.49)))
+    }
     /// The light itself, a soft white bloom under the pointer.
     static let bloom = GlassRGBA(0xFFFFFF, alpha: 0.035, light: GlassRGBA(0xFFFFFF, alpha: 0.2))
     /// The marks at the crest of the shimmer.
-    static let shimmerInk = GlassRGBA(0xFFFFFF, alpha: 0.24, light: GlassRGBA(0x000000, alpha: 0.16))
+    static var shimmerInk: GlassRGBA {
+        GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.24, light: GlassRGBA(0x000000, alpha: 0.16)),
+                        flat: GlassRGBA(0xFFFFFF, alpha: 0.24, light: GlassRGBA(0xFFFFFF, alpha: 0.49)))
+    }
     /// How often the shimmer crosses the field, how soon the first pass
     /// comes once the map is shown, and how long a pass takes: quick, as
     /// light glancing off a surface is.

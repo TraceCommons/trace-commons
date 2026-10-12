@@ -31,6 +31,8 @@ struct HomeTabView: View {
     @Binding var selection: String
     /// The status card's "Open Traces" link: switches the window's tab.
     var openTraces: () -> Void = {}
+    /// The pending-credit tile: switches the window to the Private AI tab.
+    var openPrivateAI: () -> Void = {}
     /// The hosted Insights and Mission drafts screens' inputs, from
     /// `TraceCommonsAppMain`.
     let insightsStoreSelection: InsightsStoreSelection
@@ -61,6 +63,7 @@ struct HomeTabView: View {
         case .overview:
             HomeOverview(
                 store: store, traces: traces, statusLabel: statusLabel, openTraces: openTraces,
+                openPrivateAI: openPrivateAI,
                 insightsHeading: Self.hostedHeading(.insights, missionDrafts: missionDrafts),
                 missionDrafts: missionDrafts,
                 openHistory: { page = .history }, openMissionDrafts: { page = .missionDrafts },
@@ -85,6 +88,7 @@ private struct HomeOverview: View {
     let traces: TracesStore
     let statusLabel: (String?) -> String?
     let openTraces: () -> Void
+    let openPrivateAI: () -> Void
     /// The core's Insights heading; nil until the core's copy has arrived,
     /// and then its card is not drawn.
     let insightsHeading: String?
@@ -225,14 +229,21 @@ private struct HomeOverview: View {
     /// Waiting is the Traces store's count, the one the Traces badge reads:
     /// one waiting number. A failed rollup or credit read is a dash, never
     /// the store's earlier value (`freshRollup`, `freshCredit`).
+    ///
+    /// Each tile is a way to where its number lives (owner, 2026-10-12):
+    /// waiting opens Traces, contributed opens History, and pending credit
+    /// opens Private AI.
     private var stats: some View {
         let condition = HomeFormat.pendingCondition(freshCredit)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
-                HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed))
-                HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted))
+                HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
+                             action: openTraces)
+                HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted),
+                             action: openHistory)
                 HomeStatTile(label: HomeFormat.creditPendingWord,
-                             value: HomeFormat.pendingFigure(freshRollup?.creditPending, condition: condition))
+                             value: HomeFormat.pendingFigure(freshRollup?.creditPending, condition: condition),
+                             action: openPrivateAI)
             }
             .fixedSize(horizontal: false, vertical: true)
             if let condition {
@@ -1344,10 +1355,20 @@ private struct HistoryPeriodCard: View {
 private struct HomeStatTile: View {
     let label: String
     let value: String
+    /// Opens where the number lives, and the whole tile is the button;
+    /// nil for a tile on the page its number lives on (History's).
+    var action: (() -> Void)?
 
     /// #1146's `StatCard`: a full card, the value bold and tabular.
     var body: some View {
-        GlassStatCard(label, value: value)
+        if let action {
+            Button(action: action) {
+                GlassStatCard(label, value: value, interactive: true)
+            }
+            .buttonStyle(GlassPressStyle())
+        } else {
+            GlassStatCard(label, value: value)
+        }
     }
 }
 
