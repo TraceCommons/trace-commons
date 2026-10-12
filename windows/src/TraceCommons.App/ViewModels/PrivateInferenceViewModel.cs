@@ -430,7 +430,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     public NearAiCredentialSurface.ProviderChoice[] CredentialProviders =>
         _copy is null ? [] : NearAiCredentialSurface.Providers(_copy);
 
-    private string _credentialProvider = NearAiCredentialSurface.ProviderGithub;
+    private string _credentialProvider = NearAiCredentialSurface.ProviderNear;
     public string CredentialProvider
     {
         get => _credentialProvider;

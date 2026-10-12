@@ -24,9 +24,11 @@ public sealed partial class SettingsView : UserControl
     private bool _tokenContributionDialogOpen;
     private bool _inferenceEvidenceDialogOpen;
 
-    public SettingsView(DaemonHost host)
+    public SettingsView(DaemonHost host, LegacyMigrationOfferViewModel legacyOffer)
     {
+        LegacyOffer = legacyOffer ?? throw new ArgumentNullException(nameof(legacyOffer));
         InitializeComponent();
+        LegacyOfferView.Offer = LegacyOffer;
 
         ViewModel = new PublicProfileViewModel(host);
         Settings = new ContributorSettingsViewModel(host);
@@ -34,6 +36,9 @@ public sealed partial class SettingsView : UserControl
     }
 
     public PublicProfileViewModel ViewModel { get; }
+
+    /// <summary>The offer to move a legacy invite identity, shared with the notices card.</summary>
+    public LegacyMigrationOfferViewModel LegacyOffer { get; }
 
     public ContributorSettingsViewModel Settings { get; }
 

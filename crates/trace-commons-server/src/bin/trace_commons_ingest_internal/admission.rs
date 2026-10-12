@@ -920,13 +920,27 @@ pub(super) async fn account_status_handler(
             .await
             .map_err(|_| denied())?
             .ok_or_else(denied)?;
-        Json(serde_json::json!({
+        let mut body = serde_json::json!({
             "authority":status.authority,
             "policy_version":status.policy_version,
             "ready":status.ready,
             "refusal_label":if status.ready { None } else { Some(AdmissionRefusal::AccountLimitReached.label()) },
             "retry_after_seconds":status.retry_after_seconds,
-        })).into_response()
+        });
+        // Spec rule 7: under tiered-v1, the account's own growth view beside
+        // `authority:"bounded"`. Absent otherwise, so `none` answers as before.
+        if let (Some(growth), Some(policy), Some(fields)) = (
+            status.growth.as_ref(),
+            state.account_trust_applied_policy.as_deref(),
+            body.as_object_mut(),
+        ) {
+            let view =
+                trace_commons_server::account_trust_growth::growth_status_view(policy, growth);
+            if let Ok(serde_json::Value::Object(extra)) = serde_json::to_value(view) {
+                fields.extend(extra);
+            }
+        }
+        Json(body).into_response()
     } else {
         Json(serde_json::json!({"authority":"legacy_evidence","policy_version":null,"ready":false,"refusal_label":null,"retry_after_seconds":null})).into_response()
     };

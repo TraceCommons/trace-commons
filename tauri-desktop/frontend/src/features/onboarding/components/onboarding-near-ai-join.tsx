@@ -92,9 +92,9 @@ export function OnboardingNearAiJoin({
                 onChange={(event) => nearAi.setProvider(event.target.value)}
                 disabled={nearAi.busy || blocked}
               >
+                <option value="near">NEAR wallet</option>
                 <option value="github">GitHub</option>
                 <option value="google">Google</option>
-                <option value="near">NEAR wallet</option>
               </NativeSelect>
             </Field>
             <Button

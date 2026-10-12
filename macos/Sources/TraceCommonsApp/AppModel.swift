@@ -1940,8 +1940,24 @@ final class AppModel: ObservableObject {
         statusRead == .answered && status.legacyInviteMigration.offered && legacyMigrationOffer != nil
     }
 
+    /// Whether the offer is drawn: while the daemon offers the move, and
+    /// after it stops because it refused this identity for good (a pooled
+    /// invite), for as long as that refusal is held, so the refusal is read
+    /// rather than vanishing with the offer. Only for the identity that was
+    /// refused.
+    var isLegacyMigrationOfferDrawn: Bool {
+        if isLegacyMigrationOffered { return true }
+        guard statusRead == .answered, legacyMigrationOffer != nil, legacyMigrationRefusal != nil,
+            let refused = legacyMigrationRefusalTenantID
+        else { return false }
+        return status.tenantID == refused
+    }
+
+    /// Move is drawn only while the daemon offers the move.
+    var offersLegacyMigrationMove: Bool { isLegacyMigrationOffered }
+
     var showsLegacyMigrationOfferCard: Bool {
-        isLegacyMigrationOffered && !isLegacyMigrationOfferDismissed
+        isLegacyMigrationOfferDrawn && !isLegacyMigrationOfferDismissed
     }
 
     /// Whether the card was dismissed on this Mac for this identity. A local
@@ -1978,6 +1994,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var legacyMigrationBusy = false
     /// The core's sentence for the last refused move, or nil.
     @Published private(set) var legacyMigrationRefusal: String?
+    /// The identity the held refusal was for, so another identity enrolled
+    /// on this Mac does not inherit it.
+    private var legacyMigrationRefusalTenantID: String?
     /// The daemon could not tell which invite this device joined with
     /// (`legacy_migration_invite_needed`): the offer asks for it, and the
     /// next Move sends it. Stays until a move succeeds.
@@ -2070,6 +2089,7 @@ final class AppModel: ObservableObject {
                 legacyMigrationInviteNeeded = true
             }
             legacyMigrationRefusal = legacyMigrationRefusalWording(failure.message)
+            legacyMigrationRefusalTenantID = status.tenantID
             if legacyMigrationRefusal == nil { legacyMigrationStartFailed = true }
         case .failure:
             recordRead("legacy_invite_migrate", answered: false)

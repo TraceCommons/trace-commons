@@ -619,7 +619,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `near_account_start` | `ingest_url`, `account_id` | `attempt_id`, `browser_url`, `status` | explicit wallet ceremony; keys and PKCE stay in daemon |
 | `near_account_status` | `attempt_id` | `attempt_id`, `status` | no account token or signing material |
 | `near_account_cancel` | `attempt_id` | cancellation state | cancels the matching local attempt |
-| `near_ai_credential_start` | `provider` (optional, default `github`) | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. The browser URL is returned **once** and no poll re-serves it |
+| `near_ai_credential_start` | `provider` (optional, default `near`) | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. The browser URL is returned **once** and no poll re-serves it |
 | `near_ai_credential_status` | `attempt_id` (optional) | `state`, plus `attempt_id` and `attempt_status` for a caller that named the current attempt | never errors on a missing or stale `attempt_id`: `state` is a fact about the machine. See "The credential state" below |
 | `near_ai_credential_cancel` | `attempt_id` (**required**) | `attempt_id`, `status` | stops this machine waiting on the browser; `near_ai_credential_unknown` if the id is not the current attempt |
 | `near_ai_credential_forget` | — | `removed`, `revoked: false` | removes the key from **this machine only**; `revoked` is always false and is not a placeholder. See "The credential state" below |

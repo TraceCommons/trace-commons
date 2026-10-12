@@ -363,6 +363,11 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
         Ok(false)
     }
+    /// The extra grants a `tiered-v1` admission policy's in-process
+    /// evaluator needs (V126). See `db/postgres_account_trust_growth.rs`.
+    async fn tiered_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
     async fn enable_external_account_trust_growth(&self) -> Result<(), DatabaseError> {
         Err(DatabaseError::Pool(
             "external_account_trust_unavailable".into(),
@@ -496,7 +501,19 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "account_trust_worker_unavailable".into(),
         ))
     }
-    /// Stores one evaluation (shadow only); returns whether the tier changed.
+    /// Evaluates one account under the admission policy's growth rule and
+    /// stores an `applied` row bound to its input generation, in one
+    /// snapshot. `None` when the account has no facts.
+    async fn evaluate_and_record_applied_account_trust(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+        _policy: &crate::account_trust_rule::GrowthPolicy,
+    ) -> Result<Option<(crate::account_trust_rule::Evaluation, bool)>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_worker_unavailable".into(),
+        ))
+    }
+    /// Stores one shadow evaluation; returns whether the tier changed.
     async fn record_account_trust_evaluation(
         &self,
         _account: &crate::account_trust::TrustAccount,

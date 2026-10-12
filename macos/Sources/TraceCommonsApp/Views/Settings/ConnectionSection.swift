@@ -94,7 +94,7 @@ struct LegacyMigrationSettingsCard: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        if model.isLegacyMigrationOffered, let offer = model.legacyMigrationOffer {
+        if model.isLegacyMigrationOfferDrawn, let offer = model.legacyMigrationOffer {
             GlassCard {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                     Text(offer.title)
@@ -106,7 +106,7 @@ struct LegacyMigrationSettingsCard: View {
                         .glassType(GlassTokens.TypeScale.body)
                         .foregroundStyle(GlassColor.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
-                    LegacyMigrationMoveControls(offer: offer)
+                    LegacyMigrationMoveControls(offer: offer, placement: .settings)
                 }
             }
         }

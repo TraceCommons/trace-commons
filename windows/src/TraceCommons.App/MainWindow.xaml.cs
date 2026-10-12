@@ -1111,7 +1111,7 @@ public sealed partial class MainWindow : Window
     {
         if (SettingsPane.Content is null)
         {
-            var settings = new SettingsView(_host);
+            var settings = new SettingsView(_host, ViewModel.LegacyOffer);
             // Settings no longer holds the model-calls switch; it holds a
             // pointer at the destination that does, and this is what turns
             // that pointer into navigation.
