@@ -5,10 +5,17 @@
 //! database, no clock. See
 //! `docs/superpowers/specs/2026-09-26-earned-account-trust-design.md`.
 //!
-//! Shadow only in this build. [`parse_shadow_growth_policy`] parses a
-//! candidate policy supplied separately from the admission policy, and
-//! `account_trust::parse_bounded_policy` still refuses every `growth_rule`
-//! other than `"none"`, so no allowance can be raised by anything here.
+//! [`parse_growth_policy`] parses a `tiered-v1` policy. A shadow candidate is
+//! supplied separately from the admission policy and never raises an
+//! allowance. When the admission policy itself names `tiered-v1`, the same
+//! parser reads it, the worker stores `applied` evaluations, and admission
+//! reads the latest fresh one (`account_trust::ExternalGrowth`).
+//!
+//! Attested inference (decided by Zaki on 2026-10-11, reversing decision 5 of
+//! the spec): an accepted submission with a provider-TEE attested final call
+//! qualifies without the gate and quality test, counts
+//! `attested_unit_weight` units toward a tier, and a tier may require a
+//! number of attested units.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -35,14 +42,19 @@ pub struct GrowthTier {
     pub active_weeks: u32,
     pub age_seconds: i64,
     pub multiplier: i64,
+    /// Attested units this tier requires, counted under the weekly cap.
+    pub attested_units: u32,
 }
 
-/// A candidate growth policy. Never read by admission in this build.
+/// A `tiered-v1` growth policy: a shadow candidate, or the admission
+/// policy's own growth rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrowthPolicy {
     base: BoundedPolicy,
     window_seconds: i64,
     weekly_cap: u32,
+    /// Units one attested qualified contribution counts toward a tier.
+    attested_unit_weight: u32,
     /// `None` runs the rule on gate pass alone: decision 2 of the spec lets
     /// the first shadow run do that while credit-quality V3 settles.
     q_min_micros: Option<i64>,
@@ -71,6 +83,9 @@ impl GrowthPolicy {
     pub fn tiers(&self) -> &[GrowthTier] {
         &self.tiers
     }
+    pub fn attested_unit_weight(&self) -> u32 {
+        self.attested_unit_weight
+    }
     /// `min(bounded_allowance * m_tier, allowance_ceiling)`. The top tier's
     /// product is checked at parse time, so no tier can overflow.
     pub fn effective_allowance(&self, tier: u32) -> i64 {
@@ -90,6 +105,8 @@ impl GrowthPolicy {
 struct RawGrowth {
     window_seconds: i64,
     weekly_cap: u32,
+    #[serde(default)]
+    attested_unit_weight: Option<u32>,
     q_min_micros: Option<i64>,
     penalty_cooldown_seconds: i64,
     evaluation_max_age_seconds: i64,
@@ -108,6 +125,8 @@ struct RawTier {
     active_weeks: u32,
     age_seconds: i64,
     multiplier: i64,
+    #[serde(default)]
+    attested_units: u32,
 }
 
 fn safe_label(value: &str) -> bool {
@@ -118,12 +137,14 @@ fn safe_label(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+'))
 }
 
-/// Parses a candidate growth policy: the base policy fields exactly as
+/// Parses a `tiered-v1` growth policy: the base policy fields exactly as
 /// `parse_bounded_policy` takes them, plus `"growth_rule": "tiered-v1"` and a
 /// `growth` object. The base fields are validated by `parse_bounded_policy`
 /// itself (with the growth rule and object removed), so the two can never
-/// disagree about what a valid base is.
-pub fn parse_shadow_growth_policy(
+/// disagree about what a valid base is. Used for the shadow candidate and,
+/// through `parse_bounded_policy`, for an admission policy that names
+/// `tiered-v1`.
+pub fn parse_growth_policy(
     json: &str,
     supported_versions: &[&str],
 ) -> Result<GrowthPolicy, PolicyError> {
@@ -140,6 +161,9 @@ pub fn parse_shadow_growth_policy(
     object.insert("growth_rule".into(), "none".into());
     let base = parse_bounded_policy(&value.to_string(), supported_versions)?;
     let raw: RawGrowth = serde_json::from_value(growth).map_err(|_| PolicyError)?;
+    // Absent is 1: an attested unit counts as much as any other. A weight is
+    // capped with the week, so `weight * weekly_cap` must fit.
+    let attested_unit_weight = raw.attested_unit_weight.unwrap_or(1);
 
     let quality_ok = match raw.q_min_micros {
         Some(q) => {
@@ -152,6 +176,8 @@ pub fn parse_shadow_growth_policy(
     };
     if raw.window_seconds <= 0
         || raw.weekly_cap == 0
+        || attested_unit_weight == 0
+        || attested_unit_weight.checked_mul(raw.weekly_cap).is_none()
         || !quality_ok
         || raw.credit_quality_calibration_versions.len() > MAX_ALLOWLIST
         || raw.penalty_cooldown_seconds < 0
@@ -173,6 +199,14 @@ pub fn parse_shadow_growth_policy(
         || first.active_weeks != 0
         || first.age_seconds != 0
         || first.multiplier != 1
+        || first.attested_units != 0
+    {
+        return Err(PolicyError);
+    }
+    if raw
+        .tiers
+        .iter()
+        .any(|tier| tier.attested_units > tier.units)
     {
         return Err(PolicyError);
     }
@@ -182,6 +216,7 @@ pub fn parse_shadow_growth_policy(
             || upper.active_weeks < lower.active_weeks
             || upper.age_seconds < lower.age_seconds
             || upper.multiplier < lower.multiplier
+            || upper.attested_units < lower.attested_units
         {
             return Err(PolicyError);
         }
@@ -194,6 +229,7 @@ pub fn parse_shadow_growth_policy(
         base,
         window_seconds: raw.window_seconds,
         weekly_cap: raw.weekly_cap,
+        attested_unit_weight,
         q_min_micros: raw.q_min_micros,
         penalty_cooldown_seconds: raw.penalty_cooldown_seconds,
         evaluation_max_age_seconds: raw.evaluation_max_age_seconds,
@@ -212,14 +248,16 @@ pub fn parse_shadow_growth_policy(
                 active_weeks: tier.active_weeks,
                 age_seconds: tier.age_seconds,
                 multiplier: tier.multiplier,
+                attested_units: tier.attested_units,
             })
             .collect(),
     })
 }
 
 /// One fact as the evaluator reads it: the fact row plus, for a gate
-/// evaluation, the current gate-decision fields and the cross-tenant
-/// first-in-cluster boolean (V86). The IDs never leave the worker.
+/// evaluation, the current gate-decision fields, and for a gate evaluation or
+/// an attested submission the cross-tenant first-in-cluster boolean (V86,
+/// V126). The IDs never leave the worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvaluationFact {
     pub source_kind: String,
@@ -242,8 +280,11 @@ pub struct Evaluation {
     pub tier: u32,
     pub effective_allowance: i64,
     pub units: u32,
-    /// Qualified contributions the weekly cap discarded: its binding rate.
+    /// Units the weekly cap discarded: its binding rate. Weighted, as `units`.
     pub units_capped: u32,
+    /// Attested qualified contributions, counted under the weekly cap. What a
+    /// tier's `attested_units` requirement reads.
+    pub attested_units: u32,
     pub active_weeks: u32,
     pub age_weeks: u32,
     pub netted_withdrawn: u32,
@@ -282,7 +323,8 @@ pub fn evaluate(
     let age_seconds = first_accepted.map_or(0, |at| (as_of - at).num_seconds().max(0));
 
     let window_start = as_of - chrono::Duration::seconds(policy.window_seconds);
-    let mut per_week: BTreeMap<i64, u32> = BTreeMap::new();
+    // Per week: (plain units, attested units).
+    let mut per_week: BTreeMap<i64, (u32, u32)> = BTreeMap::new();
     let (mut netted_withdrawn, mut netted_revoked, mut netted_quarantined) = (0u32, 0u32, 0u32);
     let mut accepted: BTreeMap<Uuid, DateTime<Utc>> = BTreeMap::new();
     for fact in &facts {
@@ -327,21 +369,47 @@ pub fn evaluate(
             }
             None => {}
         }
+        // A provider-TEE attested final call stands in for the gate and
+        // quality test; acceptance, netting, the penalty cutoff and
+        // first-in-cluster still apply.
+        let attested = facts
+            .iter()
+            .any(|f| f.submission_id == submission && attested_fact_qualifies(f));
         let gate_ok = facts
             .iter()
             .any(|f| f.submission_id == submission && gate_fact_qualifies(policy, f));
-        if !gate_ok {
+        if !attested && !gate_ok {
             continue;
         }
         let week = crate::contributor_cap::epoch_index(accepted_at.timestamp(), WEEK_DAYS);
-        *per_week.entry(week).or_default() += 1;
+        let entry = per_week.entry(week).or_default();
+        if attested {
+            entry.1 += 1;
+        } else {
+            entry.0 += 1;
+        }
     }
-    let units: u32 = per_week.values().map(|n| (*n).min(policy.weekly_cap)).sum();
+    // The weight applies per unit and the cap to the weighted week, so
+    // attestation buys volume no faster than the cap allows.
+    let weighted = |(plain, attested): (u32, u32)| {
+        plain.saturating_add(attested.saturating_mul(policy.attested_unit_weight))
+    };
+    let units: u32 = per_week
+        .values()
+        .map(|week| weighted(*week).min(policy.weekly_cap))
+        .sum();
     let units_capped: u32 = per_week
         .values()
-        .map(|n| n.saturating_sub(policy.weekly_cap))
+        .map(|week| weighted(*week).saturating_sub(policy.weekly_cap))
         .sum();
-    let active_weeks = per_week.values().filter(|n| **n > 0).count() as u32;
+    let attested_units: u32 = per_week
+        .values()
+        .map(|(_, attested)| (*attested).min(policy.weekly_cap))
+        .sum();
+    let active_weeks = per_week
+        .values()
+        .filter(|week| weighted(**week) > 0)
+        .count() as u32;
 
     let tier = if penalty_active {
         0
@@ -354,6 +422,7 @@ pub fn evaluate(
                 units >= row.units
                     && active_weeks >= row.active_weeks
                     && age_seconds >= row.age_seconds
+                    && attested_units >= row.attested_units
             })
             .map(|(index, _)| index as u32)
             .max()
@@ -366,6 +435,7 @@ pub fn evaluate(
         effective_allowance: policy.effective_allowance(tier),
         units,
         units_capped,
+        attested_units,
         active_weeks,
         age_weeks: u32::try_from(age_seconds / WEEK_SECONDS).unwrap_or(u32::MAX),
         netted_withdrawn,
@@ -374,6 +444,15 @@ pub fn evaluate(
         penalty_active,
         facts_digest,
     }
+}
+
+/// The V126 fact: a v2 witness certificate whose final call ran in a provider
+/// TEE, matching the accepted artifact when recorded. A gateway receipt does
+/// not show which model ran and is never recorded as this outcome.
+fn attested_fact_qualifies(fact: &EvaluationFact) -> bool {
+    fact.source_kind == "attested_submission"
+        && fact.outcome == "attested_provider_tee"
+        && fact.first_in_cluster == Some(true)
 }
 
 fn gate_fact_qualifies(policy: &GrowthPolicy, fact: &EvaluationFact) -> bool {
@@ -640,7 +719,7 @@ mod tests {
     }
 
     fn policy() -> GrowthPolicy {
-        parse_shadow_growth_policy(&policy_json(growth()), &["growth-test-v1"]).expect("valid")
+        parse_growth_policy(&policy_json(growth()), &["growth-test-v1"]).expect("valid")
     }
 
     fn with(mut value: serde_json::Value, key: &str, replacement: serde_json::Value) -> String {
@@ -676,8 +755,29 @@ mod tests {
                 credit_quality_calibration_version: (kind == "gate_evaluation").then_some(3),
                 dedup_signal_version: (kind == "gate_evaluation")
                     .then(|| "events.v2+simhash.v2".into()),
-                first_in_cluster: (kind == "gate_evaluation").then_some(true),
+                first_in_cluster: matches!(kind, "gate_evaluation" | "attested_submission")
+                    .then_some(true),
             });
+        }
+        /// An accepted, first-in-cluster submission with a provider-TEE
+        /// attestation and no gate evaluation at all, accepted on `day`.
+        fn attested(&mut self, day: i64) -> Uuid {
+            let submission = Uuid::new_v4();
+            self.push("accepted_submission", submission, "accepted", t(day));
+            self.push(
+                "attested_submission",
+                submission,
+                "attested_provider_tee",
+                t(day),
+            );
+            submission
+        }
+        fn last_attested(&mut self) -> &mut EvaluationFact {
+            self.0
+                .iter_mut()
+                .rev()
+                .find(|f| f.source_kind == "attested_submission")
+                .unwrap()
         }
         /// An accepted, gate-passed, quality-clearing, first-in-cluster
         /// submission accepted on `day`.
@@ -699,16 +799,53 @@ mod tests {
     // ---- parser -----------------------------------------------------------
 
     #[test]
-    fn none_still_parses_only_through_the_production_parser() {
+    fn none_parses_only_through_the_admission_parser() {
         let none = r#"{"version":"growth-test-v1","processing_cost_bound":10,"bounded_allowance":100,"period":{"mode":"lifetime"},"growth_rule":"none"}"#;
         assert!(parse_bounded_policy(none, &["growth-test-v1"]).is_ok());
         assert!(
-            parse_shadow_growth_policy(none, &["growth-test-v1"]).is_err(),
+            parse_growth_policy(none, &["growth-test-v1"]).is_err(),
             "a shadow policy must name a growth rule"
         );
+    }
+
+    #[test]
+    fn the_admission_parser_reads_tiered_v1_as_an_applied_growth_rule() {
+        let admission = parse_bounded_policy(&policy_json(growth()), &["growth-test-v1"])
+            .expect("tiered-v1 is an admission growth rule");
+        let applied = admission.external_growth().expect("growth is read");
+        assert_eq!(applied.policy_version, "growth-test-v1");
+        assert_eq!(applied.allowance_ceiling, 400);
+        assert_eq!(applied.evaluation_max_age_seconds, 2 * DAY);
+        assert_eq!(applied.source, crate::account_trust::GrowthSource::TieredV1);
+        assert_eq!(admission.bounded_allowance(), 100);
+        // The growth object is validated by the same parser as a shadow one.
+        let mut bad = growth();
+        bad["weekly_cap"] = serde_json::json!(0);
+        assert!(parse_bounded_policy(&policy_json(bad), &["growth-test-v1"]).is_err());
+        // tiered-v1 takes no external fields, and neither none nor external
+        // takes a growth object.
+        let mut mixed: serde_json::Value = serde_json::from_str(&policy_json(growth())).unwrap();
+        mixed["allowance_ceiling"] = serde_json::json!(400);
+        assert!(parse_bounded_policy(&mixed.to_string(), &["growth-test-v1"]).is_err());
+        let mut none_with_growth: serde_json::Value =
+            serde_json::from_str(&policy_json(growth())).unwrap();
+        none_with_growth["growth_rule"] = serde_json::json!("none");
+        assert!(parse_bounded_policy(&none_with_growth.to_string(), &["growth-test-v1"]).is_err());
+        let mut external_with_growth = none_with_growth.clone();
+        external_with_growth["growth_rule"] = serde_json::json!("external");
+        external_with_growth["growth_policy_version"] = serde_json::json!("g");
+        external_with_growth["allowance_ceiling"] = serde_json::json!(400);
+        external_with_growth["evaluation_max_age_seconds"] = serde_json::json!(60);
         assert!(
-            parse_bounded_policy(&policy_json(growth()), &["growth-test-v1"]).is_err(),
-            "the admission parser still refuses tiered-v1: shadow cannot reach admission"
+            parse_bounded_policy(&external_with_growth.to_string(), &["growth-test-v1"]).is_err()
+        );
+        // none is unchanged: no growth read at all.
+        let none = r#"{"version":"growth-test-v1","processing_cost_bound":10,"bounded_allowance":100,"period":{"mode":"lifetime"},"growth_rule":"none"}"#;
+        assert_eq!(
+            parse_bounded_policy(none, &["growth-test-v1"])
+                .unwrap()
+                .external_growth(),
+            None
         );
     }
 
@@ -728,7 +865,7 @@ mod tests {
         let mut gate_only: serde_json::Value = serde_json::from_str(&gate_only).unwrap();
         gate_only["growth"]["credit_quality_calibration_versions"] = serde_json::json!([]);
         assert!(
-            parse_shadow_growth_policy(&gate_only.to_string(), &["growth-test-v1"]).is_ok(),
+            parse_growth_policy(&gate_only.to_string(), &["growth-test-v1"]).is_ok(),
             "decision 2: gate pass alone, with no quality era named"
         );
     }
@@ -847,7 +984,7 @@ mod tests {
             ),
         ];
         for (label, json) in refused {
-            assert!(parse_shadow_growth_policy(&json, v).is_err(), "{label}");
+            assert!(parse_growth_policy(&json, v).is_err(), "{label}");
         }
     }
 
@@ -999,7 +1136,7 @@ mod tests {
         let mut g = growth();
         g["q_min_micros"] = serde_json::Value::Null;
         g["credit_quality_calibration_versions"] = serde_json::json!([]);
-        let policy = parse_shadow_growth_policy(&policy_json(g), &["growth-test-v1"]).unwrap();
+        let policy = parse_growth_policy(&policy_json(g), &["growth-test-v1"]).unwrap();
         let mut f = Facts::new();
         f.qualified(1);
         f.last_gate().credit_quality_micros = None;
@@ -1109,6 +1246,233 @@ mod tests {
         assert_eq!(
             forward.facts_digest,
             evaluate(&policy(), &later, t(7)).facts_digest
+        );
+    }
+
+    // ---- attested inference (decided 2026-10-11) --------------------------
+
+    fn attested_policy(weight: Option<u32>, tier_attested: [u32; 3]) -> GrowthPolicy {
+        let mut g = growth();
+        if let Some(weight) = weight {
+            g["attested_unit_weight"] = serde_json::json!(weight);
+        }
+        for (index, required) in tier_attested.iter().enumerate() {
+            g["tiers"][index]["attested_units"] = serde_json::json!(required);
+        }
+        parse_growth_policy(&policy_json(g), &["growth-test-v1"]).expect("valid")
+    }
+
+    #[test]
+    fn attested_fields_are_optional_and_default_to_no_change() {
+        let policy = policy();
+        assert_eq!(policy.attested_unit_weight(), 1);
+        assert!(policy.tiers().iter().all(|tier| tier.attested_units == 0));
+        let explicit = attested_policy(Some(3), [0, 1, 2]);
+        assert_eq!(explicit.attested_unit_weight(), 3);
+        assert_eq!(
+            explicit
+                .tiers()
+                .iter()
+                .map(|t| t.attested_units)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn malformed_attested_fields_are_refused() {
+        let v = &["growth-test-v1"];
+        let with_growth = |mutate: &dyn Fn(&mut serde_json::Value)| {
+            let mut g = growth();
+            mutate(&mut g);
+            policy_json(g)
+        };
+        let refused = [
+            (
+                "zero weight",
+                with_growth(&|g| g["attested_unit_weight"] = serde_json::json!(0)),
+            ),
+            (
+                "negative weight",
+                with_growth(&|g| g["attested_unit_weight"] = serde_json::json!(-1)),
+            ),
+            (
+                "weight times cap overflows",
+                with_growth(&|g| g["attested_unit_weight"] = serde_json::json!(u32::MAX)),
+            ),
+            (
+                "tier 0 requires attestation",
+                with_growth(&|g| g["tiers"][0]["attested_units"] = serde_json::json!(1)),
+            ),
+            (
+                "non-monotone attested requirement",
+                with_growth(&|g| {
+                    g["tiers"][1]["attested_units"] = serde_json::json!(2);
+                    g["tiers"][2]["attested_units"] = serde_json::json!(1);
+                }),
+            ),
+            (
+                "attested requirement above the tier's units",
+                with_growth(&|g| g["tiers"][1]["attested_units"] = serde_json::json!(4)),
+            ),
+            (
+                "unknown tier field",
+                with_growth(&|g| g["tiers"][1]["attested"] = serde_json::json!(1)),
+            ),
+        ];
+        for (label, json) in refused {
+            assert!(parse_growth_policy(&json, v).is_err(), "{label}");
+        }
+    }
+
+    #[test]
+    fn an_attested_acceptance_qualifies_without_the_gate_or_quality_test() {
+        // (b): no gate fact at all, yet the unit counts.
+        let mut f = Facts::new();
+        f.attested(1);
+        let e = evaluate(&policy(), &f.0, t(2));
+        assert_eq!((e.units, e.attested_units, e.active_weeks), (1, 1, 1));
+        // A gate-passed and attested submission is still one unit.
+        let mut both = Facts::new();
+        let s = both.qualified(1);
+        both.push("attested_submission", s, "attested_provider_tee", t(1));
+        let e = evaluate(&policy(), &both.0, t(2));
+        assert_eq!((e.units, e.attested_units), (1, 1));
+        // A failed gate does not stop an attested unit: attestation stands in
+        // for the test, it is not an extra condition on it.
+        let mut failed = Facts::new();
+        let s = failed.attested(1);
+        failed.push("gate_evaluation", s, "evaluated_failed", t(1));
+        assert_eq!(evaluate(&policy(), &failed.0, t(2)).units, 1);
+    }
+
+    #[test]
+    fn each_requirement_of_an_attested_unit_is_checked() {
+        let base = |mutate: &dyn Fn(&mut Facts)| {
+            let mut f = Facts::new();
+            f.attested(1);
+            mutate(&mut f);
+            let e = evaluate(&policy(), &f.0, t(2));
+            (e.units, e.attested_units)
+        };
+        assert_eq!(base(&|_| {}), (1, 1));
+        assert_eq!(
+            base(&|f| f.0.retain(|x| x.source_kind != "accepted_submission")),
+            (0, 0),
+            "attestation alone is not acceptance"
+        );
+        assert_eq!(
+            base(&|f| f.0[0].outcome = "accepted_self_reviewed".into()),
+            (0, 0)
+        );
+        assert_eq!(
+            base(&|f| f.last_attested().first_in_cluster = Some(false)),
+            (0, 0),
+            "a later member of a dedup cluster earns nothing, attested or not"
+        );
+        assert_eq!(base(&|f| f.last_attested().first_in_cluster = None), (0, 0));
+        assert_eq!(
+            base(&|f| f.last_attested().outcome = "attested_gateway".into()),
+            (0, 0),
+            "only the provider-TEE outcome counts"
+        );
+        assert_eq!(
+            base(&|f| f.last_attested().source_kind = "attested_other".into()),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn netting_and_penalties_remove_attested_units_too() {
+        for (kind, outcome) in [
+            ("submission_withdrawn", "withdrawn"),
+            ("submission_revoked", "revoked"),
+            ("submission_quarantined", "quarantined"),
+        ] {
+            let mut f = Facts::new();
+            let gone = f.attested(1);
+            f.push(kind, gone, outcome, t(2));
+            let e = evaluate(&policy(), &f.0, t(3));
+            assert_eq!((e.units, e.attested_units), (0, 0), "{kind}");
+        }
+        let mut f = Facts::new();
+        let s = f.attested(1);
+        f.push("abuse_penalty", s, "penalized", t(2));
+        let e = evaluate(&policy(), &f.0, t(30));
+        assert_eq!(
+            (e.units, e.attested_units),
+            (0, 0),
+            "an attested unit accepted before a penalty never counts again"
+        );
+    }
+
+    #[test]
+    fn the_attested_weight_buys_units_but_the_weekly_cap_still_binds() {
+        // (a): weight 2, weekly cap 3.
+        let policy = attested_policy(Some(2), [0, 0, 0]);
+        let mut f = Facts::new();
+        f.attested(1);
+        let e = evaluate(&policy, &f.0, t(2));
+        assert_eq!((e.units, e.attested_units, e.units_capped), (2, 1, 0));
+        // One attested (2) and one plain (1) fill the week exactly.
+        f.qualified(1);
+        let e = evaluate(&policy, &f.0, t(2));
+        assert_eq!((e.units, e.attested_units, e.units_capped), (3, 1, 0));
+        // Five attested in one week: 10 weighted units, capped at 3; the
+        // attested count is capped at the same 3.
+        let mut flood = Facts::new();
+        for _ in 0..5 {
+            flood.attested(1);
+        }
+        let e = evaluate(&policy, &flood.0, t(2));
+        assert_eq!((e.units, e.attested_units, e.units_capped), (3, 3, 7));
+        assert_eq!(e.active_weeks, 1);
+    }
+
+    #[test]
+    fn a_tier_can_require_attested_units() {
+        // (c): tier 1 needs one attested unit, tier 2 needs two.
+        let policy = attested_policy(None, [0, 1, 2]);
+        let mut plain = Facts::new();
+        for week in 0..3 {
+            for _ in 0..3 {
+                plain.qualified(week * 7 + 1);
+            }
+        }
+        let e = evaluate(&policy, &plain.0, t(22));
+        assert_eq!((e.units, e.attested_units), (9, 0));
+        assert_eq!(e.tier, 0, "units alone no longer reach tier 1");
+        let mut mixed = plain;
+        mixed.attested(15);
+        let e = evaluate(&policy, &mixed.0, t(22));
+        assert_eq!(e.attested_units, 1);
+        assert_eq!(e.tier, 1);
+        mixed.attested(16);
+        let e = evaluate(&policy, &mixed.0, t(22));
+        assert_eq!(e.tier, 2);
+    }
+
+    #[test]
+    fn attested_facts_enter_the_digest_and_reproduce() {
+        let mut f = Facts::new();
+        f.qualified(1);
+        let plain = evaluate(&policy(), &f.0, t(2));
+        f.attested(1);
+        let with_attested = evaluate(&policy(), &f.0, t(2));
+        assert_ne!(plain.facts_digest, with_attested.facts_digest);
+        let mut reversed = f.0.clone();
+        reversed.reverse();
+        assert_eq!(with_attested, evaluate(&policy(), &reversed, t(2)));
+        let mut moved = f.0.clone();
+        moved
+            .iter_mut()
+            .rev()
+            .find(|x| x.source_kind == "attested_submission")
+            .unwrap()
+            .first_in_cluster = Some(false);
+        assert_ne!(
+            with_attested.facts_digest,
+            evaluate(&policy(), &moved, t(2)).facts_digest
         );
     }
 

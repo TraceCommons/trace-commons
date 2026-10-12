@@ -32,6 +32,9 @@ pub enum TrustFactSource {
     SubmissionQuarantined(Uuid),
     /// An `abuse_penalty` credit-ledger event ID.
     AbusePenalty(Uuid),
+    /// A submission ID whose v2 witness certificate attests a provider-TEE
+    /// final call over the current accepted artifact (V76, V126).
+    AttestedSubmission(Uuid),
 }
 
 impl TrustFactSource {
@@ -42,7 +45,8 @@ impl TrustFactSource {
             | Self::SubmissionWithdrawn(id)
             | Self::SubmissionRevoked(id)
             | Self::SubmissionQuarantined(id)
-            | Self::AbusePenalty(id) => id,
+            | Self::AbusePenalty(id)
+            | Self::AttestedSubmission(id) => id,
         }
     }
 
@@ -54,6 +58,7 @@ impl TrustFactSource {
             Self::SubmissionRevoked(_) => "submission_revoked",
             Self::SubmissionQuarantined(_) => "submission_quarantined",
             Self::AbusePenalty(_) => "abuse_penalty",
+            Self::AttestedSubmission(_) => "attested_submission",
         }
     }
 
@@ -66,6 +71,7 @@ impl TrustFactSource {
             "submission_revoked" => Self::SubmissionRevoked(source_id),
             "submission_quarantined" => Self::SubmissionQuarantined(source_id),
             "abuse_penalty" => Self::AbusePenalty(source_id),
+            "attested_submission" => Self::AttestedSubmission(source_id),
             _ => return None,
         })
     }
@@ -87,6 +93,8 @@ pub enum TrustFactOutcome {
     Revoked,
     Quarantined,
     Penalized,
+    /// A provider-TEE attested final call over the accepted artifact.
+    AttestedProviderTee,
 }
 
 impl TrustFactOutcome {
@@ -102,6 +110,7 @@ impl TrustFactOutcome {
             "revoked" => Some(Self::Revoked),
             "quarantined" => Some(Self::Quarantined),
             "penalized" => Some(Self::Penalized),
+            "attested_provider_tee" => Some(Self::AttestedProviderTee),
             _ => None,
         }
     }
@@ -118,6 +127,7 @@ impl TrustFactOutcome {
             Self::Revoked => "revoked",
             Self::Quarantined => "quarantined",
             Self::Penalized => "penalized",
+            Self::AttestedProviderTee => "attested_provider_tee",
         }
     }
 }
@@ -212,12 +222,26 @@ impl BoundedPolicy {
     }
 }
 
-/// Explicit bounds for consuming externally recorded evaluations.
+/// Explicit bounds for consuming recorded `applied` evaluations. Admission
+/// reads them the same way whoever wrote them (V114).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalGrowth {
     pub policy_version: String,
     pub allowance_ceiling: i64,
     pub evaluation_max_age_seconds: i64,
+    pub source: GrowthSource,
+}
+
+/// Who computes the `applied` evaluations admission reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrowthSource {
+    /// `"growth_rule":"external"`: a separate evaluator login holding
+    /// `trace_account_trust_evaluator` (V114).
+    External,
+    /// `"growth_rule":"tiered-v1"`: this server's own evaluator runs the
+    /// policy's `growth` object (`account_trust_rule`) and writes through
+    /// V126. The growth policy version is the admission policy's version.
+    TieredV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,6 +265,8 @@ struct RawPolicy {
     growth_policy_version: Option<String>,
     allowance_ceiling: Option<i64>,
     evaluation_max_age_seconds: Option<i64>,
+    /// `tiered-v1` only; validated by `account_trust_rule::parse_growth_policy`.
+    growth: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -278,11 +304,32 @@ pub fn parse_bounded_policy(
         "none"
             if raw.growth_policy_version.is_none()
                 && raw.allowance_ceiling.is_none()
-                && raw.evaluation_max_age_seconds.is_none() =>
+                && raw.evaluation_max_age_seconds.is_none()
+                && raw.growth.is_none() =>
         {
             None
         }
-        "external" => {
+        crate::account_trust_rule::GROWTH_RULE_TIERED_V1
+            if raw.growth_policy_version.is_none()
+                && raw.allowance_ceiling.is_none()
+                && raw.evaluation_max_age_seconds.is_none() =>
+        {
+            let growth = crate::account_trust_rule::parse_growth_policy(json, supported_versions)?;
+            if growth
+                .evaluation_max_age_seconds()
+                .checked_mul(1000)
+                .is_none()
+            {
+                return Err(PolicyError);
+            }
+            Some(ExternalGrowth {
+                policy_version: raw.version.clone(),
+                allowance_ceiling: growth.allowance_ceiling(),
+                evaluation_max_age_seconds: growth.evaluation_max_age_seconds(),
+                source: GrowthSource::TieredV1,
+            })
+        }
+        "external" if raw.growth.is_none() => {
             let policy_version = raw.growth_policy_version.ok_or(PolicyError)?;
             let allowance_ceiling = raw.allowance_ceiling.ok_or(PolicyError)?;
             let evaluation_max_age_seconds = raw.evaluation_max_age_seconds.ok_or(PolicyError)?;
@@ -304,6 +351,7 @@ pub fn parse_bounded_policy(
                 policy_version,
                 allowance_ceiling,
                 evaluation_max_age_seconds,
+                source: GrowthSource::External,
             })
         }
         _ => return Err(PolicyError),
