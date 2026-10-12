@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.15.0" date="2026-10-12">
+      <description>
+        <p>Maintenance release for Linux: the version number follows the macOS and Windows apps, which can now start Claude Code or Codex on a NEAR AI sign-in.</p>
+      </description>
+    </release>
     <release version="0.14.0" date="2026-10-12">
       <description>
         <p>If you joined with an invite, the app now offers to move your contributions to a NEAR AI account, and NEAR AI sign-in uses your NEAR wallet by default. More is removed from tool output before it leaves the device: git author names, IP addresses, private host names, account user names and phone numbers.</p>
