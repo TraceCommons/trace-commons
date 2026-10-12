@@ -925,12 +925,10 @@ pub struct MonitorEdgeRailCopy {
     /// The rail's accessible name, and the closed rail's handle's.
     pub rail_label: &'static str,
     pub handle_label: &'static str,
-    /// The icons this table names; Private AI and Compute are Settings'
-    /// names, and Traces is the tab's. Waiting and Balance head their parts
-    /// of the Overview peek (owner, 2026-10-11: one Overview in place of
-    /// the Waiting, Tools and Balance icons). Overview is DRAFT, NEEDS
-    /// APPROVAL.
-    pub overview: &'static str,
+    /// The parts of the Home peek this table names (owner, 2026-10-11: one
+    /// Home peek in place of the Waiting, Tools and Balance icons). The
+    /// icons themselves are named by the app's tabs (Home, Traces) and
+    /// Settings (Private AI, Compute).
     pub waiting: &'static str,
     pub balance: &'static str,
     /// The mark at the foot of the rail.
@@ -944,9 +942,8 @@ pub struct MonitorEdgeRailCopy {
     pub tools_empty: &'static str,
     /// The Compute peek before the core has reported.
     pub compute_unreported: &'static str,
-    /// The Traces peek: its title, then what is on this Mac and what was
-    /// contributed, over its map and graph.
-    pub privacy_title: &'static str,
+    /// The Traces peek: what is on this Mac and what was contributed, over
+    /// its map and graph.
     pub on_this_mac: &'static str,
     pub on_this_mac_line_one: &'static str,
     pub on_this_mac_line: &'static str,
@@ -1487,10 +1484,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         },
         edge_rail: MonitorEdgeRailCopy {
             setting_toggle: "Show the edge rail",
-            setting_caption: "Rest the pointer on the right edge of the screen to glance at an overview, Private AI, your traces and compute.",
+            setting_caption: "Rest the pointer on the right edge of the screen to glance at Home, Private AI, your traces and compute.",
             rail_label: "Edge rail",
             handle_label: "Open the edge rail",
-            overview: "Overview",
             waiting: "Waiting",
             balance: "Balance",
             open_app: concat!("Open ", crate::app_name!()),
@@ -1499,7 +1495,6 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             review: "Review",
             tools_empty: "No tools found on this Mac yet.",
             compute_unreported: "Compute has not reported yet.",
-            privacy_title: "What is where, right now",
             on_this_mac: "On this Mac",
             on_this_mac_line_one: "1 session waiting here. Nothing leaves until you send it.",
             on_this_mac_line: "{count} sessions waiting here. Nothing leaves until you send it.",

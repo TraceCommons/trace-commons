@@ -174,7 +174,7 @@ private struct EdgeRailPeekCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            Text(peek == .traces ? rail?.privacyTitle ?? "" : peek.name(rail, nav: nav, shell: shell))
+            Text(peek.name(rail, nav: nav, shell: shell))
                 .glassType(GlassTokens.TypeScale.heading)
                 .foregroundStyle(GlassColor.textPrimary)
                 .accessibilityAddTraits(.isHeader)
@@ -191,18 +191,18 @@ private struct EdgeRailPeekCard: View {
     @ViewBuilder
     private var content: some View {
         switch peek {
-        case .overview: overview
+        case .home: home
         case .privateAI: privateAI
         case .traces: traces
         case .compute: computeSummary
         }
     }
 
-    // MARK: Overview
+    // MARK: Home
 
     /// What Waiting, Tools and Balance showed as three icons, as one page
     /// (owner, 2026-10-11), each part under its own name.
-    private var overview: some View {
+    private var home: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
             part(rail?.waiting ?? "") { waiting }
             part(nav?.tools ?? "") { tools }
@@ -212,7 +212,7 @@ private struct EdgeRailPeekCard: View {
         }
     }
 
-    /// One part of the Overview: its name as an eyebrow over its content.
+    /// One part of the Home peek: its name as an eyebrow over its content.
     private func part<Content: View>(_ name: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             Text(name)
@@ -297,11 +297,11 @@ private struct EdgeRailPeekCard: View {
             model.harnesses, read: data.inference.harnesses, failure: data.inference.failures["harness_list"])
         if harnesses != .none {
             FlowMapView(
-                scene: .privateAI(
+                scene: FlowMapScene.privateAI(
                     harnesses, destinationLabel: copy.destination,
                     privateAI: data.traces.destinations?.privateAi ?? data.traces.status?.privateInferenceState?.state,
                     sentence: { MonitorWindowView.rowSentence($0, copy: copy, calls: model.harnessCalls) },
-                    state: { HarnessSurface.state($0, calls: model.harnessCalls) }),
+                    state: { HarnessSurface.state($0, calls: model.harnessCalls) }).compact(),
                 legend: [], zoomable: false, accessibilityName: copy.destination)
         } else {
             Color.clear
@@ -349,6 +349,7 @@ private struct EdgeRailPeekCard: View {
             store.tree,
             gate: .init(state: state, status: store.status, destinations: store.destinations),
             contributed: .init(history: data.home.history, failure: data.home.failures["list_history"]))
+            .compact()
         return FlowMapView(
             scene: scene, legend: [], zoomable: false,
             accessibilityName: FlowMapScene.words?.mapLabel ?? shell?.tabTraces ?? "", state: state)
@@ -385,8 +386,7 @@ private struct EdgeRailPeekCard: View {
 
     // MARK: Shared
 
-    /// The peek's link: the section's name, or the Home tab's for the
-    /// Overview.
+    /// The peek's link: the section's name.
     private var link: some View {
         let words = rail?.open(section: peek.linkSection(rail, nav: nav, shell: shell))
         return HStack {
@@ -420,7 +420,8 @@ private struct EdgeRailPeekCard: View {
 }
 
 /// A small map in a peek: the window's map field and edge, at a fixed
-/// height, not zoomable.
+/// height, not zoomable, drawing a scene laid out for its size
+/// (`FlowMapScene.compact`).
 private struct EdgeRailMiniMap<Map: View>: View {
     @ViewBuilder let map: () -> Map
 

@@ -11,7 +11,6 @@ public struct MonitorEdgeRailCopy: MonitorWordTable {
     public let settingCaption: String
     public let railLabel: String
     public let handleLabel: String
-    public let overview: String
     public let waiting: String
     public let balance: String
     public let openApp: String
@@ -20,7 +19,6 @@ public struct MonitorEdgeRailCopy: MonitorWordTable {
     public let review: String
     public let toolsEmpty: String
     public let computeUnreported: String
-    public let privacyTitle: String
     public let onThisMac: String
     public let onThisMacLineOne: String
     public let onThisMacLine: String
@@ -34,7 +32,6 @@ public struct MonitorEdgeRailCopy: MonitorWordTable {
         case settingCaption = "setting_caption"
         case railLabel = "rail_label"
         case handleLabel = "handle_label"
-        case overview
         case waiting
         case balance
         case openApp = "open_app"
@@ -43,7 +40,6 @@ public struct MonitorEdgeRailCopy: MonitorWordTable {
         case review
         case toolsEmpty = "tools_empty"
         case computeUnreported = "compute_unreported"
-        case privacyTitle = "privacy_title"
         case onThisMac = "on_this_mac"
         case onThisMacLineOne = "on_this_mac_line_one"
         case onThisMacLine = "on_this_mac_line"

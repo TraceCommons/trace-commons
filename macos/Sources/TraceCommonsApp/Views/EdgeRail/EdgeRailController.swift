@@ -90,32 +90,32 @@ final class EdgeRailController {
 @MainActor
 final class EdgeRailState {
     var open = false
-    var peek: EdgeRailPeek = .overview
+    var peek: EdgeRailPeek = .home
 }
 
-/// The rail's icons, top to bottom (owner, 2026-10-11): an Overview that
+/// The rail's icons, top to bottom (owner, 2026-10-11): Home, which
 /// gathers what Waiting, Tools and Balance showed apart, then Private AI
 /// and Traces, each with a small map and graph, then Compute. The app's
 /// own tile closes the rail.
 enum EdgeRailPeek: CaseIterable, Identifiable {
-    case overview, privateAI, traces, compute
+    case home, privateAI, traces, compute
 
     var id: Self { self }
 
     var symbol: String {
         switch self {
-        case .overview: "square.grid.2x2"
+        case .home: "house"
         case .privateAI: "key"
         case .traces: "point.3.connected.trianglepath.dotted"
         case .compute: "cpu"
         }
     }
 
-    /// The icon's name: Settings' name for a section Settings has, the
-    /// Traces tab's for Traces, and the rail's own for the Overview.
+    /// The icon's name and its peek's title: the app's tab names for Home
+    /// and Traces (owner, 2026-10-11), Settings' names for the others.
     func name(_ rail: MonitorEdgeRailCopy?, nav: MonitorSettingsNavCopy?, shell: MonitorShellCopy?) -> String {
         switch self {
-        case .overview: rail?.overview ?? ""
+        case .home: shell?.tabHome ?? ""
         case .privateAI: nav?.privateAI ?? ""
         case .traces: shell?.tabTraces ?? ""
         case .compute: nav?.compute ?? ""
@@ -125,17 +125,16 @@ enum EdgeRailPeek: CaseIterable, Identifiable {
     /// Where the peek's link goes in the app.
     var destination: MonitorDestination {
         switch self {
-        case .overview: .home(.overview)
+        case .home: .home(.overview)
         case .privateAI: .inference
         case .traces: .traces(entryId: nil)
         case .compute: .settings(.compute)
         }
     }
 
-    /// The peek's link words: the app's Home tab for the Overview, else
-    /// the section's own name.
+    /// The peek's link words: the section's own name.
     func linkSection(_ rail: MonitorEdgeRailCopy?, nav: MonitorSettingsNavCopy?, shell: MonitorShellCopy?) -> String {
-        self == .overview ? shell?.tabHome ?? "" : name(rail, nav: nav, shell: shell)
+        name(rail, nav: nav, shell: shell)
     }
 }
 

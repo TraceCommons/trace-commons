@@ -22,8 +22,8 @@ public enum GlassPromoTreatment: String, Sendable, CaseIterable, Identifiable {
 
     public var id: String { rawValue }
 
-    /// The default (`aurora`) unless the environment or the defaults name
-    /// another.
+    /// The default (`spotlight`, owner, 2026-10-11) unless the environment
+    /// or the defaults name another.
     public static var stored: GlassPromoTreatment {
         resolve(
             environment: ProcessInfo.processInfo.environment["TC_PROMO_TREATMENT"],
@@ -38,7 +38,7 @@ public enum GlassPromoTreatment: String, Sendable, CaseIterable, Identifiable {
         for value in [environment, defaults] {
             if let value, let treatment = GlassPromoTreatment(rawValue: value) { return treatment }
         }
-        return .aurora
+        return .spotlight
     }
 
     /// Whether the treatment draws anything that moves on its own.
