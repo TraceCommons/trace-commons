@@ -274,7 +274,8 @@ fn spawn_http_counter() -> (
                                     "category": category,
                                     "start": start,
                                     "end": start + needle.len(),
-                                    "score": 0.99
+                                    "score": 0.99,
+                                    "text": needle
                                 })
                             })
                         })

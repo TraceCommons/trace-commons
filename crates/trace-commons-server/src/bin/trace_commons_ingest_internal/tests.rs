@@ -10497,8 +10497,16 @@ fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
 /// silently accepted value. Uses the real variable names -- no other test in
 /// this suite reads them, so setting and clearing them here does not race
 /// another test's env state.
+/// Serialises the two tests that set the variables
+/// `parse_pipeline_lease_config_from_env` reads: each asserts on the whole
+/// config, so one's setting must not leak into the other's read.
+static PIPELINE_LEASE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
+    let _guard = PIPELINE_LEASE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // SAFETY: env mutation in tests is OK here -- these three variables are
     // read only by `parse_pipeline_lease_config_from_env`, which nothing
     // else in this suite calls concurrently.
@@ -10549,6 +10557,52 @@ fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
         std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE);
         std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE);
     }
+}
+
+/// `TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS` replaces the
+/// privacy pass's 900 s ceiling: unset keeps it, 60..=7200 sets it, and
+/// anything else refuses startup with the safe label. The Review lease bound
+/// still applies on top of it (`privacy_pass_timeout_for`). Only this test
+/// reads the variable, so setting it does not race another test.
+#[test]
+fn pipeline_privacy_pass_timeout_env_sets_the_ceiling_or_refuses() {
+    let _guard = PIPELINE_LEASE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: env mutation in tests is OK here -- this variable is read only
+    // by `parse_pipeline_lease_config_from_env`, and the lease variables are
+    // left unset, as `pipeline_lease_config_env_...` leaves them.
+    unsafe { std::env::remove_var(TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS) };
+    let defaults = parse_pipeline_lease_config_from_env().expect("defaults parse");
+    assert_eq!(
+        defaults.privacy_pass_max_timeout(),
+        std::time::Duration::from_secs(900)
+    );
+
+    unsafe {
+        std::env::set_var(
+            TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS,
+            "3600",
+        )
+    };
+    let configured = parse_pipeline_lease_config_from_env().expect("3600 s is in range");
+    assert_eq!(
+        configured.privacy_pass_max_timeout(),
+        std::time::Duration::from_secs(3600)
+    );
+    assert_eq!(configured.review(), PipelineLeaseConfig::default().review());
+
+    for bad in ["59", "7201", "-1", "ten minutes", "1e3"] {
+        unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS, bad) };
+        let error = parse_pipeline_lease_config_from_env()
+            .expect_err("an out-of-range or unparsable ceiling refuses startup");
+        assert_eq!(
+            error.to_string(),
+            trace_commons_server::versioned_pipeline::PIPELINE_PRIVACY_PASS_TIMEOUT_INVALID_LABEL,
+            "{bad}"
+        );
+    }
+    unsafe { std::env::remove_var(TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS) };
 }
 
 /// Ruling T15-10: `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF` is
@@ -89780,6 +89834,7 @@ fn near_ai_spans(input: &str, needles: &[String]) -> Vec<serde_json::Value> {
                 "start": start,
                 "end": end,
                 "score": 0.99,
+                "text": needle,
             }));
             from = byte + needle.len();
         }

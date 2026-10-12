@@ -2556,6 +2556,7 @@ mod tests {
                                         "start": start,
                                         "end": start + value.chars().count(),
                                         "score": 0.99,
+                                        "text": value,
                                     }));
                                 }
                             }

@@ -679,6 +679,12 @@ const TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE: &str =
     "TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE";
 const TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE: &str =
     "TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE";
+/// Whole seconds replacing the privacy pass's 900 s classifier ceiling
+/// (60..=7200); see `parse_pipeline_lease_config_from_env`. The Review lease
+/// bound still applies, so raising it needs
+/// `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW` raised too.
+const TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS: &str =
+    "TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS";
 const TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES: &str =
     "TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES";
 const TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: &str =
@@ -10101,7 +10107,8 @@ fn parse_signed_token_max_ttl_seconds_from_env() -> anyhow::Result<Option<i64>> 
 /// The per-phase claim lease from
 /// `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_{REVIEW,SCORE,SETTLE}` (whole
 /// seconds each; unset keeps `PipelineLeaseConfig::default()`'s value for
-/// that phase). Fails closed with the single safe label
+/// that phase), carrying the privacy pass ceiling from
+/// `TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS`. Fails closed with the single safe label
 /// `pipeline_lease_config_invalid` for either failure mode -- a value that
 /// does not parse as a non-negative integer, or one that parses but falls
 /// outside `PipelineLeaseConfig::new`'s [1 second, 2 hours] bound -- rather
@@ -10121,7 +10128,25 @@ fn parse_pipeline_lease_config_from_env() -> anyhow::Result<PipelineLeaseConfig>
         TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE,
         defaults.settle(),
     )?;
-    PipelineLeaseConfig::new(review, score, settle)
+    let config = PipelineLeaseConfig::new(review, score, settle)?;
+    // `TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS`: whole
+    // seconds, 60..=7200, replacing the privacy pass's 900 s classifier
+    // ceiling. Anything else refuses startup with
+    // `pipeline_privacy_pass_timeout_invalid`.
+    let invalid = || {
+        anyhow::anyhow!(
+            trace_commons_server::versioned_pipeline::PIPELINE_PRIVACY_PASS_TIMEOUT_INVALID_LABEL
+        )
+    };
+    match optional_trimmed_env(TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS)
+        .map_err(|_| invalid())?
+    {
+        Some(raw) => {
+            let seconds: u64 = raw.parse().map_err(|_| invalid())?;
+            config.with_privacy_pass_max_timeout(StdDuration::from_secs(seconds))
+        }
+        None => Ok(config),
+    }
 }
 
 /// `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY`

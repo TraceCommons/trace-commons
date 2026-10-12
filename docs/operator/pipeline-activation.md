@@ -1938,6 +1938,12 @@ plus those 60 seconds.
   (30 minutes).
 - `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE` -- whole seconds, default 300
   (5 minutes).
+- `TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS` -- whole seconds,
+  60 to 7200, default 900. This is the ceiling on the Review-start privacy
+  pass classifier call, and the Review lease bound still applies on top of it.
+  A value outside the range refuses startup with
+  `pipeline_privacy_pass_timeout_invalid`. See "Timeout" under "The privacy
+  pass at the start of Review".
 
 Each variable is optional; an unset variable keeps its phase's default.
 Each configured value must be between 1 second and 2 hours (7200 seconds)
@@ -2226,6 +2232,22 @@ prose PII, a Review lease under 30 s leaves less than 60 s for the
 classifier, and the pipeline service refuses to build with
 `pipeline_lease_config_invalid`. A boundary that does not classify is
 bounded by the 900 s alone.
+
+`TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS` replaces the 900 s
+in that formula. Set it in whole seconds, from 60 to 7200; unset keeps
+900. Any other value refuses ingest startup with the safe label
+`pipeline_privacy_pass_timeout_invalid`.
+
+The setting replaces the ceiling only. The Review lease bound still applies,
+so the variable takes effect only up to `Review lease x 4 - 60 s`. To raise
+the timeout, raise `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW` as well, so
+that `lease x 4 - 60 s` is at least the new ceiling. At the default 300 s
+Review lease the bound is 1140 s. A 3600 s ceiling therefore needs a Review
+lease of at least 915 s; set 1200 s for margin.
+
+A longer pass holds its Review lane for longer. With worker concurrency 2,
+two slow traces can hold both lanes for the full timeout, which stalls
+Review for every tenant.
 
 **`redaction_hash` stays the receipt's.** The pass writes the submission's
 risk, basis, redaction counts and redaction pipeline version, and leaves its
