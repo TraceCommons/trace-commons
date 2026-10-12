@@ -13526,12 +13526,78 @@ mod tests {
         assert!(r.error.is_none());
         assert_eq!(routes(&s), 0);
 
-        // A second session loses its proxy when the sign-in goes.
-        redeem("codex").await;
+        let state_of = async |id: &serde_json::Value| {
+            let snapshot =
+                handle_request_async(&s, &req("managed_snapshot", serde_json::json!({})))
+                    .await
+                    .result
+                    .expect("snapshot");
+            snapshot["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| &row["id"] == id)
+                .map(|row| row["state"].clone())
+                .unwrap()
+        };
+
+        // A launcher that goes quiet: its proxy stops once the lease runs
+        // out, on a clock the test controls, and the session is failed.
+        let quiet = redeem("codex").await;
+        assert_eq!(routes(&s), 1);
+        let now = chrono::Utc::now();
+        crate::daemon::managed::sweep(&s, now + chrono::Duration::seconds(30)).await;
+        assert_eq!(routes(&s), 1, "inside the lease the proxy stays");
+        crate::daemon::managed::sweep(
+            &s,
+            now + crate::managed::sessions::LEASE + chrono::Duration::seconds(1),
+        )
+        .await;
+        assert_eq!(routes(&s), 0, "past the lease the proxy is stopped");
+        assert_eq!(state_of(&quiet["session"]["id"]).await, "failed");
+        // Its launcher's late final word changes nothing and is not refused.
+        let late = handle_request_async(
+            &s,
+            &req(
+                "managed_session_report",
+                serde_json::json!({
+                    "session_id": quiet["session"]["id"],
+                    "proof": quiet["proof"],
+                    "state": "exited",
+                    "process_id": 4243,
+                    "process_identity": "4243:1",
+                    "exit_code": 0,
+                }),
+            ),
+        )
+        .await;
+        assert!(late.error.is_none(), "{:?}", late.error);
+        assert_eq!(state_of(&quiet["session"]["id"]).await, "failed");
+
+        // A running session ends with the sign-in: proxy stopped, row ended.
+        let running = redeem("claude").await;
+        let r = handle_request_async(
+            &s,
+            &req(
+                "managed_session_report",
+                serde_json::json!({
+                    "session_id": running["session"]["id"],
+                    "proof": running["proof"],
+                    "state": "running",
+                    "process_id": 4244,
+                    "process_identity": "4244:1",
+                    "exit_code": null,
+                }),
+            ),
+        )
+        .await;
+        assert!(r.error.is_none());
+        assert_eq!(state_of(&running["session"]["id"]).await, "running");
         assert_eq!(routes(&s), 1);
         s.settings.lock().unwrap().near_ai_inference = None;
         crate::daemon::managed::close_routes_without_sign_in(&s).await;
         assert_eq!(routes(&s), 0);
+        assert_eq!(state_of(&running["session"]["id"]).await, "failed");
         server.abort();
     }
 

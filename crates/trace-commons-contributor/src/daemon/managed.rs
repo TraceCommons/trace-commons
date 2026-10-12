@@ -463,13 +463,37 @@ async fn redeem_async(shared: &DaemonShared, request: &Request) -> Response {
     respond(request, result)
 }
 
-/// Once the sign-in is gone, shut down every proxy it was lent to. Their
-/// sessions stop reaching NEAR AI; nothing falls back to another key.
+/// Once the sign-in is gone, shut down every proxy it was lent to and mark
+/// their sessions ended. They stop reaching NEAR AI; nothing falls back to
+/// another key.
 pub async fn close_routes_without_sign_in(shared: &DaemonShared) {
     if sign_in_present(shared) {
         return;
     }
-    let ended = with_service(shared, |service| Ok(service.take_routes(true))).unwrap_or_default();
+    let ended = with_service(shared, |service| {
+        let routes = service.take_routes(true);
+        service.sessions.end_sign_in_sessions()?;
+        Ok(routes)
+    })
+    .unwrap_or_default();
+    for route in ended {
+        route.shutdown().await;
+    }
+}
+
+/// Stop the proxy of a sign-in session whose launcher has gone quiet: one
+/// unheard for longer than the lease (`sessions::LEASE`) is failed, and its
+/// proxy shut down. The daemon's loop calls this on its own tick, so a
+/// launcher that dies is noticed with no shell open.
+pub async fn sweep(shared: &DaemonShared, now: chrono::DateTime<chrono::Utc>) {
+    let ended = with_service(shared, |service| {
+        if service.routes.is_empty() {
+            return Ok(vec![]);
+        }
+        service.sessions.sweep(now)?;
+        Ok(service.take_routes(false))
+    })
+    .unwrap_or_default();
     for route in ended {
         route.shutdown().await;
     }
