@@ -20,7 +20,7 @@ final class HomeViewTests: XCTestCase {
         for needle in [
             // The whole card opens Traces (owner, 2026-10-08), its words
             // the hint.
-            "return Button(action: openTraces) { GlassCard(interactive: true) {",
+            "Button(action: openTraces) { GlassCard(interactive: true) {",
             ".accessibilityHint(HomeFormat.openTracesWord)",
             "static var openTracesWord: String { MonitorWords.table?.openTraces ?? \"\" }",
             "store: store, traces: traces, statusLabel: statusLabel, openTraces: openTraces, ",
@@ -42,8 +42,9 @@ final class HomeViewTests: XCTestCase {
     func test_theStatusLinesShareALeftEdgeAfterTheDot() throws {
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains("VStack(alignment: .homeStatusText, spacing: GlassTokens.Space.s1) {"))
-        let status = try XCTUnwrap(home.range(of: "private func status(_ state: ScreenState) -> some View {"))
-        let statusEnd = try XCTUnwrap(home.range(of: "/// Ron's Missions card body:", range: status.upperBound..<home.endIndex))
+        // The status line is its own view, shared with the edge rail.
+        let status = try XCTUnwrap(home.range(of: "struct HomeStatusLine: View {"))
+        let statusEnd = try XCTUnwrap(home.range(of: "/// Rows inside a Home card", range: status.upperBound..<home.endIndex))
         let body = String(home[status.upperBound..<statusEnd.lowerBound])
         let texts = body.components(separatedBy: "\n").filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("Text(") }
         XCTAssertEqual(texts.count, 6)

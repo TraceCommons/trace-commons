@@ -173,10 +173,10 @@ private struct HomeOverview: View {
     }
 
     /// The Home cards' icons, in the Private AI cards' place for them.
-    static let missionsIcon = "sparkles"
-    static let historyIcon = "clock.arrow.circlepath"
-    static let insightsIcon = "chart.xyaxis.line"
-    static let catalogueIcon = "list.bullet.rectangle"
+    static let missionsIcon = HomeOverviewIcons.missions
+    static let historyIcon = HomeOverviewIcons.history
+    static let insightsIcon = HomeOverviewIcons.insights
+    static let catalogueIcon = HomeOverviewIcons.catalogue
 
     /// The Missions card's promotion treatment: the stored one, which a
     /// debug build's context menu changes for comparison.
@@ -220,15 +220,6 @@ private struct HomeOverview: View {
         }
     }
 
-    /// Paused, or watching N tools, from the core's status and the tree.
-    /// The stack-wide state (ScreenState) for the watching row: the core's
-    /// line when it does not answer, a dash before the first read or when
-    /// the core did not say whether watching is paused, Paused, or
-    /// watching N tools. A missing signal is never drawn as watching.
-    private var state: ScreenState {
-        HomeFormat.watchingState(store)
-    }
-
     /// Waiting, contributed and pending credit (#1146 `home-view.tsx`), each
     /// from the core: waiting is decisions owed, contributed the rollup's
     /// accepted count. Pending credit is a figure only beside the commons'
@@ -262,15 +253,14 @@ private struct HomeOverview: View {
     /// The whole card is the way into the tree, a chevron at its end as the
     /// other Home cards have (owner, 2026-10-08: no Open Traces link).
     private var watching: some View {
-        let state = state
-        return Button(action: openTraces) {
+        Button(action: openTraces) {
             GlassCard(interactive: true) {
                 HStack(spacing: GlassTokens.Space.s6) {
                     // #1146 `home-view.tsx`: the dot is the two lines' sibling,
                     // so the second line starts under the first line's words,
                     // after the dot, never under the dot.
                     VStack(alignment: .homeStatusText, spacing: GlassTokens.Space.s1) {
-                        status(state)
+                        HomeStatusLine(store: store)
                             .glassType(GlassTokens.TypeScale.bodyStrong)
                         // Ron's #1146 second line: sessions waiting and how many
                         // are worth a second look. Only from the core's count:
@@ -294,40 +284,6 @@ private struct HomeOverview: View {
         .accessibilityHint(HomeFormat.openTracesWord)
     }
 
-    @ViewBuilder
-    private func status(_ state: ScreenState) -> some View {
-        HStack(spacing: GlassTokens.Space.s6) {
-                switch state {
-                case .ready:
-                    switch HomeFormat.watching(store.status, destinations: store.destinations) {
-                    case .signedOut:
-                        GlassStatusDot(.ask, ring: true)
-                        Text(MonitorWords.signedOut)
-                            .alignmentGuide(.homeStatusText) { $0[.leading] }
-                    case .unhealthy(let label):
-                        GlassStatusDot(.outside, ring: true)
-                        Text(HealthCopy.core(label: label, maxQueueEntries: nil).title)
-                            .alignmentGuide(.homeStatusText) { $0[.leading] }
-                    case .watching(let tools):
-                        GlassStatusDot(.on, ring: true)
-                        Text(MonitorWords.table?.shell.watching(tools: tools) ?? FlowMapScene.pair(MonitorWords.watching, tools))
-                            .alignmentGuide(.homeStatusText) { $0[.leading] }
-                    }
-                case .paused:
-                    GlassStatusDot(.ask, ring: true)
-                    Text(MonitorWords.paused)
-                        .alignmentGuide(.homeStatusText) { $0[.leading] }
-                case .coreDown:
-                    GlassStatusDot(.outside, ring: true)
-                    Text(store.failures["status"].flatMap { MonitorWords.table?.line(for: $0) } ?? "—")
-                        .alignmentGuide(.homeStatusText) { $0[.leading] }
-                case .loading, .unknown:
-                    // No dot: unknown is never drawn as on, or as off.
-                    Text("—").accessibilityLabel(MonitorWords.unknown)
-                        .alignmentGuide(.homeStatusText) { $0[.leading] }
-                }
-        }
-    }
 
     /// Ron's Missions card body: up to two drafts, each its id over its
     /// source count with its status tag, a hairline between them; or his
@@ -395,6 +351,56 @@ private struct HomeOverview: View {
                     GlassTag(tag, tone: HomeFormat.tone(row.status)).fixedSize()
                 }
             }
+        }
+    }
+}
+
+/// The Home cards' icons, shared with the edge rail's Home peek.
+enum HomeOverviewIcons {
+    static let missions = "sparkles"
+    static let history = "clock.arrow.circlepath"
+    static let insights = "chart.xyaxis.line"
+    static let catalogue = "list.bullet.rectangle"
+}
+
+/// Home's status line (Ron's status card): the dot and the watching line,
+/// in the stack-wide states. Shared with the edge rail's Home peek, so the
+/// two never say different things.
+struct HomeStatusLine: View {
+    let store: HomeStore
+
+    var body: some View {
+        let state = HomeFormat.watchingState(store)
+        return HStack(spacing: GlassTokens.Space.s6) {
+                switch state {
+                case .ready:
+                    switch HomeFormat.watching(store.status, destinations: store.destinations) {
+                    case .signedOut:
+                        GlassStatusDot(.ask, ring: true)
+                        Text(MonitorWords.signedOut)
+                            .alignmentGuide(.homeStatusText) { $0[.leading] }
+                    case .unhealthy(let label):
+                        GlassStatusDot(.outside, ring: true)
+                        Text(HealthCopy.core(label: label, maxQueueEntries: nil).title)
+                            .alignmentGuide(.homeStatusText) { $0[.leading] }
+                    case .watching(let tools):
+                        GlassStatusDot(.on, ring: true)
+                        Text(MonitorWords.table?.shell.watching(tools: tools) ?? FlowMapScene.pair(MonitorWords.watching, tools))
+                            .alignmentGuide(.homeStatusText) { $0[.leading] }
+                    }
+                case .paused:
+                    GlassStatusDot(.ask, ring: true)
+                    Text(MonitorWords.paused)
+                        .alignmentGuide(.homeStatusText) { $0[.leading] }
+                case .coreDown:
+                    GlassStatusDot(.outside, ring: true)
+                    Text(store.failures["status"].flatMap { MonitorWords.table?.line(for: $0) } ?? "—")
+                        .alignmentGuide(.homeStatusText) { $0[.leading] }
+                case .loading, .unknown:
+                    // No dot: unknown is never drawn as on, or as off.
+                    Text("—").accessibilityLabel(MonitorWords.unknown)
+                        .alignmentGuide(.homeStatusText) { $0[.leading] }
+                }
         }
     }
 }
