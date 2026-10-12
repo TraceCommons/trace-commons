@@ -12,6 +12,12 @@ public enum GlassTokens {
     public enum Color {
         /// Brand purple from the Trace logo; the one action.
         public static let purple: GlassRGBA = GlassRGBA(0x6D14F3, alpha: 1)
+        /// The Trace mark's live trace (Claude Design 1c): the gradient's violet start, at the root.
+        public static let traceLiveStart: GlassRGBA = GlassRGBA(0x5B14FF, alpha: 1)
+        /// The Trace mark's live trace: the gradient's purple middle.
+        public static let traceLiveMid: GlassRGBA = GlassRGBA(0xB412C4, alpha: 1)
+        /// The Trace mark's live trace: the gradient's hot-pink end, and the glow on the current step.
+        public static let traceLiveEnd: GlassRGBA = GlassRGBA(0xFF0A6C, alpha: 1)
         /// Fills and the shared data series.
         public static let purpleSoft: GlassRGBA = GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1))
         /// Accent text and tertiary links.
@@ -168,6 +174,9 @@ public enum GlassTokens {
         /// Every color token by its JSON name.
         public static var all: [String: GlassRGBA] { [
             "purple": purple,
+            "traceLiveStart": traceLiveStart,
+            "traceLiveMid": traceLiveMid,
+            "traceLiveEnd": traceLiveEnd,
             "purpleSoft": purpleSoft,
             "purpleText": purpleText,
             "blue": blue,

@@ -141,8 +141,12 @@ private struct EdgeRailTile: View {
             case .symbol(let name):
                 Image(systemName: name).glassGlyph(17, weight: .regular)
             case .traceMark:
-                // PROVISIONAL until the 1c Live Traces artwork lands.
-                Image(systemName: "point.3.connected.trianglepath.dotted").glassGlyph(17, weight: .regular)
+                // In its colours, or in the selection's ink on the selected
+                // tile, where the gradient would not read on the fill.
+                // The mark fills about 60% of its square: 30pt draws it the
+                // size of the tiles' 17pt glyphs.
+                GlassTraceMark(ink: selected ? GlassTokens.Color.textOnSelected.color : nil)
+                    .frame(width: 30, height: 30)
             }
         }
         .onHover { if $0 { select() } }

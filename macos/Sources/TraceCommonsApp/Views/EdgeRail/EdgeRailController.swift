@@ -132,9 +132,8 @@ enum EdgeRailPeek: CaseIterable, Identifiable {
 /// What a rail icon draws: an SF Symbol, or the Trace mark.
 enum EdgeRailIcon: Equatable {
     case symbol(String)
-    /// The Trace logo's live-traces mark. PROVISIONAL: drawn as the
-    /// connected-points glyph until the Claude Design "1c Live Traces"
-    /// artwork is exported into `GlassLogoPaths`.
+    /// The Trace logo's live-trace mark (`GlassTraceMark`, Claude Design
+    /// 1c, owner 2026-10-12).
     case traceMark
 }
 

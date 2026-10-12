@@ -9,6 +9,9 @@
   "version": 1,
   "color": {
     "purple": { "hex": "#6d14f3", "note": "Brand purple from the Trace logo; the one action." },
+    "traceLiveStart": { "hex": "#5b14ff", "note": "The Trace mark's live trace (Claude Design 1c): the gradient's violet start, at the root." },
+    "traceLiveMid": { "hex": "#b412c4", "note": "The Trace mark's live trace: the gradient's purple middle." },
+    "traceLiveEnd": { "hex": "#ff0a6c", "note": "The Trace mark's live trace: the gradient's hot-pink end, and the glow on the current step." },
     "purpleSoft": { "hex": "#8a3dff", "note": "Fills and the shared data series.", "light": { "hex": "#7a2cf5" } },
     "purpleText": { "hex": "#c9b3ff", "note": "Accent text and tertiary links.", "light": { "hex": "#5b10cc" } },
     "blue": { "hex": "#3a7bd5", "note": "Toggles on, the kept data series, selection.", "light": { "hex": "#2f6bc4" } },
