@@ -203,6 +203,31 @@ pub struct HistoryRecord {
     pub uploaded_bytes: Option<u64>,
 }
 
+/// One `list_history` row: the cached [`HistoryRecord`], plus the
+/// [`status_bucket`] of its status as `bucket` (#1284).
+///
+/// The shells offer Withdraw, count and filter on `bucket`, so the rule
+/// "`processing` is `submitted`" lives here and nowhere in a shell. `status`
+/// stays the raw value, for the status word.
+///
+/// A wire view only: the cache file keeps [`HistoryRecord`] as it is, so a
+/// change to the bucket rule never needs a cache migration.
+#[derive(Debug, Serialize)]
+pub struct HistoryRow<'a> {
+    #[serde(flatten)]
+    pub record: &'a HistoryRecord,
+    pub bucket: &'a str,
+}
+
+impl<'a> From<&'a HistoryRecord> for HistoryRow<'a> {
+    fn from(record: &'a HistoryRecord) -> Self {
+        Self {
+            record,
+            bucket: status_bucket(&record.status),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HistoryCounts {
     pub submitted: u32,

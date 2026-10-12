@@ -144,7 +144,7 @@ use uuid::Uuid;
 use super::audit::{self, AuditEntry};
 use super::enroll;
 use super::health::HealthState;
-use super::history::{HistoryCache, rollup};
+use super::history::{HistoryCache, HistoryRow, rollup};
 use super::notify;
 use super::policy::{
     ERR_PROJECT_ID_UNRECOGNIZED, ERR_PROJECT_KEY_UNRECOGNIZED, ProjectMode, ProjectPolicy,
@@ -3753,7 +3753,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 .min(1000) as usize;
             match HistoryCache::load(&shared.store) {
                 Ok(records) => {
-                    let page: Vec<_> = records.into_iter().take(limit).collect();
+                    let page: Vec<HistoryRow> =
+                        records.iter().take(limit).map(HistoryRow::from).collect();
                     Response::ok(req.id, serde_json::json!({ "history": page }))
                 }
                 Err(_) => Response::err(req.id, ERR_UNAVAILABLE, "history-read-failed"),
@@ -14420,6 +14421,62 @@ mod tests {
             !json.contains(&crate::daemon::ipc::display_path(key)),
             "not even an abbreviated one: {json}"
         );
+    }
+
+    /// `list_history` carries each row's bucket next to its raw status
+    /// (#1284), so no shell needs a mapping of its own: a `processing`
+    /// receipt reads `bucket: "submitted"` and keeps `status: "processing"`,
+    /// and every other status is its own bucket.
+    #[test]
+    fn list_history_carries_each_rows_bucket() {
+        use crate::daemon::history::{HistoryCache, HistoryRecord, STATUS_PROCESSING};
+        let s = enrolled_shared();
+        let record = |status: &str| HistoryRecord {
+            submission_id: uuid::Uuid::new_v4(),
+            submitted_at: chrono::Utc::now(),
+            project_id: String::new(),
+            project_label: "proj".to_string(),
+            source: "claude_code".to_string(),
+            session_hash: "sha256:abc".to_string(),
+            status: status.to_string(),
+            consent_scopes: vec![],
+            credit_points_pending: 0.0,
+            credit_points_final: None,
+            explanations: vec![],
+            last_refreshed_at: None,
+            withdrawn_at: None,
+            revoked_at: None,
+            approved_unattended: None,
+            approved_verdict: None,
+            uploaded_bytes: None,
+        };
+        let statuses = [STATUS_PROCESSING, "submitted", "accepted", "withdrawn", "revoked"];
+        let records: Vec<_> = statuses.iter().map(|s| record(s)).collect();
+        HistoryCache::save(&s.store, &records).unwrap();
+
+        let result = handle_request(&s, &req("list_history", serde_json::json!({})))
+            .result
+            .expect("list_history answers");
+        let rows = result["history"].as_array().expect("history rows");
+        let pairs: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|r| (r["status"].as_str().unwrap(), r["bucket"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("processing", "submitted"),
+                ("submitted", "submitted"),
+                ("accepted", "accepted"),
+                ("withdrawn", "withdrawn"),
+                ("revoked", "revoked"),
+            ]
+        );
+        // The record's own fields are all still there, flattened beside it.
+        let record_keys = serde_json::to_value(&records[0]).unwrap();
+        for key in record_keys.as_object().unwrap().keys() {
+            assert!(rows[0].get(key).is_some(), "row lost `{key}`: {}", rows[0]);
+        }
     }
 
     /// A native session declares nothing and must not grow an empty label.

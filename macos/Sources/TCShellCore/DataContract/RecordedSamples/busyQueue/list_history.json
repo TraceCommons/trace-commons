@@ -19,7 +19,8 @@
       "revoked_at": null,
       "approved_unattended": false,
       "approved_verdict": "worked",
-      "uploaded_bytes": 14048
+      "uploaded_bytes": 14048,
+      "bucket": "submitted"
     },
     {
       "submission_id": "644587ac-f321-57d9-9b27-2c280db3de77",
@@ -40,7 +41,8 @@
       "revoked_at": null,
       "approved_unattended": true,
       "approved_verdict": null,
-      "uploaded_bytes": 16096
+      "uploaded_bytes": 16096,
+      "bucket": "accepted"
     },
     {
       "submission_id": "434b44db-62f5-55be-ace0-3d1b3f3bc171",
@@ -61,7 +63,8 @@
       "revoked_at": null,
       "approved_unattended": false,
       "approved_verdict": "partly",
-      "uploaded_bytes": 18144
+      "uploaded_bytes": 18144,
+      "bucket": "quarantined"
     },
     {
       "submission_id": "ba2ab01a-f1b1-5a1d-aa95-4eb8339646fc",
@@ -82,7 +85,8 @@
       "revoked_at": null,
       "approved_unattended": false,
       "approved_verdict": "failed",
-      "uploaded_bytes": 20192
+      "uploaded_bytes": 20192,
+      "bucket": "withdrawn"
     },
     {
       "submission_id": "0cfe272d-d0b1-5ac8-804e-fc37baea6cf1",
@@ -103,7 +107,8 @@
       "revoked_at": null,
       "approved_unattended": null,
       "approved_verdict": null,
-      "uploaded_bytes": 22240
+      "uploaded_bytes": 22240,
+      "bucket": "accepted"
     }
   ]
 }

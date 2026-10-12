@@ -223,6 +223,12 @@ old behaviour, because no application has shipped against `v1` yet. See
   the built-in table the order is mission fit, then turns, then recency.
   Any other string is refused with `order-unrecognized`, a non-string with
   `order-invalid`. No response field changes and no new method or event.
+- **History buckets (#1284).** `list_history` rows now carry `bucket`: the
+  status the daemon counts, selects and withdraws the row under
+  (`daemon::history::status_bucket`). `processing` is `submitted`, and every
+  other status is its own bucket. `status` stays the raw value. A shell
+  offers Withdraw, counts and filters on `bucket` and keeps no mapping of its
+  own. See ["`history_rollup`"](#history_rollup).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -643,7 +649,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208) and with `consent-scopes-not-chosen` while the enrollment's scopes were never chosen; see "The contribution override" below |
 | `clear_contribution_override` | — | `cleared`, `returned: <count>` | every folder back on its own mode; see "The contribution override" below |
 | `mission_matches` | `catalogue` (a contribution mission catalogue; PROVISIONAL, shape owned by Z7/Z8) | `matches[]` of mission ids, `read: {tools, folders}` (counts) | K16 (#1173): which contribution missions this Mac's work fits, worked out on this Mac only; read-only; refused with `catalogue-required`, `catalogue-invalid` or `catalogue-schema-unsupported`; see "`mission_matches`" below |
-| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, and `revoked_at` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)" and "Withdrawal dates on revoked rows (K12)" below |
+| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, `revoked_at`, and `bucket` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)" and "Withdrawal dates on revoked rows (K12)" below |
 | `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
 | `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
 | `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, publication state, and an opaque local owner-scope digest | one account-authenticated request; each excerpt capped at 700 characters; native clients use the digest only to evict account-owned caches after sign-in changes |
@@ -6012,6 +6018,12 @@ as no verdict. Admission runs inside the upload request, so a trace it
 quarantined or rejected gets the same `processing` receipt, and receipts are
 never rewritten. Render and offer a `processing` row exactly as `submitted`:
 same words, same withdrawal stage.
+
+Each `list_history` row carries this bucket as `bucket`, next to the raw
+`status`: `"submitted"` for a `processing` row, the status itself for every
+other row. Read `bucket` to offer Withdraw, to count and to filter, so the
+rule above has one copy, in the daemon. Read `status` for anything that
+wants the receipt's own value.
 
 A `list_history` row keeps the raw `processing` until a status read-back
 reports something for that submission. A server with the pipeline's product
