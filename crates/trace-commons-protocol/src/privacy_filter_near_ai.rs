@@ -10,9 +10,7 @@ use async_trait::async_trait;
 use futures::stream::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
-use crate::privacy_filter_spans::{
-    ClassifySpan, WindowClassifier, apply_windowed_spans, redact_items_batched, window_ranges,
-};
+use crate::privacy_filter_spans::{ClassifySpan, apply_windowed_spans, chunk_token_ranges};
 use crate::trace_contribution::{
     PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES, PrivacyFilterAdapter, PrivacyFilterConfigError,
     SafePrivacyFilterRedaction, TraceContributionError,
@@ -97,8 +95,7 @@ const _: () = assert!(
     "MAX_CLASSIFY_INPUT_TOKENS must stay well under the measured token limit"
 );
 
-/// Largest `privacy/classify` request BODY a packed request may have, in
-/// bytes of serialized JSON.
+/// Largest `privacy/classify` request BODY, in bytes of serialized JSON.
 ///
 /// The endpoint's binding limit is the body size, not tokens: measured
 /// 2026-09-03, a 232 KB body classified and a 250 KB body returned
@@ -106,14 +103,13 @@ const _: () = assert!(
 /// [`MAX_CLASSIFY_INPUT_TOKENS`]). A 413 is a permanent failure here, so the
 /// trace is charged for it.
 ///
-/// The token budget alone does not bound the body. JSON escaping inflates
-/// some content far past the ~3-5 bytes/token of prose and code: measured
-/// o200k_base tokens of escaped quotes and backslashes carry ~8 body bytes,
-/// `\r\n` ~16, tabs and newlines ~32, runs of `-`/`=` ~64, runs of spaces
-/// ~128. A 32,000-token pack of escaped JSON tool output, padded tables or
-/// whitespace-heavy logs is well past 256 KiB. Packing many fields per
-/// request makes such packs common, so packs are capped by this as well as
-/// by tokens, and a single field over it is windowed until each window fits.
+/// The token budget alone does not bound the body. JSON escaping and padding
+/// put far more than prose's ~3-5 bytes in a token: measured o200k_base
+/// tokens of escaped quotes and backslashes carry ~8 body bytes, `\r\n` ~16,
+/// tabs and newlines ~32, runs of `-`/`=` ~64, runs of spaces ~128. A
+/// 32,000-token window of escaped JSON tool output, a padded table or a
+/// whitespace-heavy log is well past 256 KiB. So a window whose body would
+/// exceed this is cut further (see [`window_ranges`]).
 ///
 /// 200 KiB leaves margin under the 232 KB proven success.
 pub const MAX_CLASSIFY_REQUEST_BODY_BYTES: usize = 200 * 1024;
@@ -172,10 +168,6 @@ pub struct NearAiPrivacyFilterAdapter {
     /// The key is a hash and the value is offsets and labels, so the cache
     /// holds no plaintext.
     window_cache: std::sync::Mutex<ClassifyWindowCache>,
-    /// Token budget for packing several whole texts into one request, from
-    /// [`PACK_MAX_TOKENS_ENV`]. `None` (the default) sends one text per
-    /// request -- see that constant for why.
-    pack_max_tokens: Option<usize>,
 }
 
 /// Per-adapter memo table. The adapter is constructed once per driver tick,
@@ -291,61 +283,7 @@ impl NearAiPrivacyFilterAdapter {
             max_input_bytes,
             max_input_tokens,
             window_cache: std::sync::Mutex::new(ClassifyWindowCache::default()),
-            pack_max_tokens: None,
         })
-    }
-}
-
-impl NearAiPrivacyFilterAdapter {
-    /// Pack whole texts into requests of up to `pack_max_tokens` tokens
-    /// (`None`: one text per request). See [`PACK_MAX_TOKENS_ENV`].
-    pub fn with_pack_max_tokens(mut self, pack_max_tokens: Option<usize>) -> Self {
-        self.pack_max_tokens = pack_max_tokens;
-        self
-    }
-}
-
-/// Operator setting: pack several whole texts (events, payload leaves and
-/// keys) into one `privacy/classify` request, up to this many o200k_base
-/// tokens per request. **Unset, blank or `0` -- the default -- sends one text
-/// per request**, the request pattern this adapter always had. Accepted
-/// values are `1..=MAX_CLASSIFY_INPUT_TOKENS`; anything else refuses to
-/// build the adapter with an `InvalidEnv` naming this variable.
-///
-/// **Off by default because packing costs recall.** A live shadow comparison
-/// on 30 real sessions (2026-10-11, counts only) at 32,000-token packs:
-/// packed classification MISSED 115 of the 335 entities (34%) that
-/// classifying each text alone found, and partly missed 8 more, while
-/// finding 25 that the per-text run did not. The model reads a long pack
-/// differently from a short field. Leave this unset until a pack size has
-/// been shown, by the same comparison, to keep recall.
-///
-/// Packing changes request count, not coverage: every text is still
-/// classified, spans are mapped back to the text they fall in by codepoint
-/// offset and clipped at text boundaries, and a text over the token or body
-/// budget is still windowed on its own. NEAR AI only: the self-hosted
-/// backend always sends one text per request.
-pub const PACK_MAX_TOKENS_ENV: &str = "TRACE_NEAR_AI_PRIVACY_PACK_MAX_TOKENS";
-
-/// Parse [`PACK_MAX_TOKENS_ENV`]: unset, blank or `0` is `None` (one text per
-/// request); a whole number in `1..=MAX_CLASSIFY_INPUT_TOKENS` is the pack
-/// budget; anything else refuses. The refusal names the variable and the
-/// accepted range, never the value.
-pub fn parse_pack_max_tokens(raw: Option<&str>) -> Result<Option<usize>, PrivacyFilterConfigError> {
-    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
-        return Ok(None);
-    };
-    let invalid = || PrivacyFilterConfigError::InvalidEnv {
-        var: PACK_MAX_TOKENS_ENV,
-        reason: format!(
-            "must be unset, 0 (off), or a whole number of tokens from 1 to {MAX_CLASSIFY_INPUT_TOKENS}"
-        ),
-    };
-    let parsed = raw.parse::<usize>().map_err(|_| invalid())?;
-    match parsed {
-        0 => Ok(None),
-        1..=MAX_CLASSIFY_INPUT_TOKENS => Ok(Some(parsed)),
-        _ => Err(invalid()),
     }
 }
 
@@ -417,17 +355,6 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
         Err(_) => MAX_CLASSIFY_INPUT_TOKENS,
     };
 
-    let pack_max_tokens = match std::env::var(PACK_MAX_TOKENS_ENV) {
-        Ok(value) => parse_pack_max_tokens(Some(&value))?,
-        Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            return Err(PrivacyFilterConfigError::InvalidEnv {
-                var: PACK_MAX_TOKENS_ENV,
-                reason: "must be valid UTF-8".to_string(),
-            });
-        }
-    };
-
     let adapter = NearAiPrivacyFilterAdapter::with_max_input_tokens(
         base_url,
         model,
@@ -435,8 +362,7 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
         Duration::from_millis(timeout_ms),
         max_input_bytes,
         max_input_tokens,
-    )?
-    .with_pack_max_tokens(pack_max_tokens);
+    )?;
     Ok(Arc::new(adapter))
 }
 
@@ -454,7 +380,147 @@ struct ClassifyResponse {
 #[derive(Deserialize)]
 struct ClassifyEntry {
     #[serde(default)]
-    spans: Vec<ClassifySpan>,
+    spans: Vec<NearAiSpan>,
+}
+
+/// A span as the endpoint reports it: offsets in CODEPOINTS, plus the text
+/// the endpoint says those offsets cover. `text` is checked against the
+/// request (see [`verify_span_texts`]) and then dropped; it is never logged.
+#[derive(Deserialize)]
+struct NearAiSpan {
+    category: String,
+    start: usize,
+    end: usize,
+    #[serde(default)]
+    score: f64,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// Bytes `text` occupies inside a JSON string literal, quotes excluded --
+/// exactly what `serde_json` writes: `"` and `\` and the short-escape
+/// controls (`\n`, `\r`, `\t`, backspace, form feed) take 2 bytes, every
+/// other control below 0x20 takes 6 (`\u00XX`), and everything else,
+/// including non-ASCII UTF-8, is copied as is.
+fn json_escaped_len(text: &str) -> usize {
+    text.bytes()
+        .map(|byte| match byte {
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 2,
+            0x00..=0x1f => 6,
+            _ => 1,
+        })
+        .sum()
+}
+
+/// The windows a field is classified in: [`chunk_token_ranges`]'s token
+/// windows -- unchanged whenever each window's body fits -- with any window
+/// whose JSON-escaped size exceeds `max_input_json_bytes` cut further, after
+/// its last newline under the cap where there is one, so no request goes out
+/// over [`MAX_CLASSIFY_REQUEST_BODY_BYTES`]. Contiguous and covering the
+/// whole text, on char boundaries.
+fn window_ranges(
+    text: &str,
+    max_tokens: usize,
+    max_input_json_bytes: usize,
+) -> Vec<std::ops::Range<usize>> {
+    let max_input_json_bytes = max_input_json_bytes.max(1);
+    let mut ranges = Vec::new();
+    for range in chunk_token_ranges(text, max_tokens) {
+        if json_escaped_len(&text[range.clone()]) <= max_input_json_bytes {
+            ranges.push(range);
+            continue;
+        }
+        let mut start = range.start;
+        while start < range.end {
+            let mut used = 0usize;
+            let mut end = start;
+            let mut last_newline_end: Option<usize> = None;
+            for (offset, character) in text[start..range.end].char_indices() {
+                let mut buffer = [0u8; 4];
+                let cost = json_escaped_len(character.encode_utf8(&mut buffer));
+                if used + cost > max_input_json_bytes && end > start {
+                    break;
+                }
+                used += cost;
+                end = start + offset + character.len_utf8();
+                if character == '\n' {
+                    last_newline_end = Some(end);
+                }
+            }
+            if end < range.end {
+                if let Some(newline_end) = last_newline_end {
+                    end = newline_end;
+                }
+            }
+            ranges.push(start..end);
+            start = end;
+        }
+    }
+    ranges
+}
+
+/// Hash-only label for a response whose span texts disagree with its offsets.
+const SPAN_TEXT_MISMATCH_LABEL: &str = "privacy_filter_span_text_mismatch";
+
+/// Fail closed unless every span's reported `text` is exactly the request
+/// input's codepoints `[start, end)`, then return the spans without it.
+///
+/// The endpoint reports, with each span, the text it covers (probed live on
+/// 2026-10-11 with ZWJ emoji, accented and CJK text, CRLF and blank lines:
+/// the codepoint slice equalled `text` on every span). It does not always
+/// hold: a shadow run on real sessions found one event whose spans' offsets
+/// disagree with their text even when the event is sent alone. An offset
+/// slip -- the right entity at shifted offsets -- passes every range check
+/// and redacts the wrong characters, leaving the PII in place and reporting
+/// success. This check turns that into a refusal. A span with no `text`
+/// cannot be checked, so it refuses too.
+///
+/// Spans whose offsets are out of range are passed through for
+/// `apply_spans`, which refuses them with its own error. Neither the span
+/// text nor the input is ever logged: the failure carries the label and the
+/// input's hash-only fingerprint.
+fn verify_span_texts(
+    input: &str,
+    spans: Vec<NearAiSpan>,
+) -> Result<Vec<ClassifySpan>, TraceContributionError> {
+    let mut boundaries: Vec<usize> = input.char_indices().map(|(byte, _)| byte).collect();
+    boundaries.push(input.len());
+    let mismatches = spans
+        .iter()
+        .filter(|span| {
+            if span.start > span.end || span.end >= boundaries.len() {
+                return false;
+            }
+            let covered = &input[boundaries[span.start]..boundaries[span.end]];
+            span.text.as_deref() != Some(covered)
+        })
+        .count();
+    if mismatches > 0 {
+        let diagnostics = classify_input_diagnostics(&[input]);
+        tracing::warn!(
+            classify_input = %diagnostics,
+            mismatched_spans = mismatches,
+            spans = spans.len(),
+            failure = SPAN_TEXT_MISMATCH_LABEL,
+            "near-ai privacy classify failed"
+        );
+        return Err(TraceContributionError::RedactionFailed {
+            reason: format!(
+                "near-ai privacy classifier span offsets disagree with span text: \
+                 {SPAN_TEXT_MISMATCH_LABEL} mismatched_spans={mismatches} spans={} {diagnostics}",
+                spans.len()
+            ),
+        });
+    }
+    Ok(spans
+        .into_iter()
+        .map(|span| ClassifySpan {
+            category: span.category,
+            start: span.start,
+            end: span.end,
+            score: span.score,
+        })
+        .collect())
 }
 
 #[async_trait]
@@ -494,15 +560,10 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
         // apply_spans pass validates and redacts against the whole field.
         //
         // Windows are bounded by the request BODY as well as by tokens (see
-        // MAX_CLASSIFY_REQUEST_BODY_BYTES): for ordinary text the windows
-        // are exactly the token windows; a window of escape- or
-        // whitespace-heavy text that would be refused with a 413 is cut
-        // further.
-        let ranges = window_ranges(
-            text,
-            self.max_input_tokens,
-            self.max_pack_input_json_bytes(),
-        );
+        // MAX_CLASSIFY_REQUEST_BODY_BYTES): for ordinary text they are
+        // exactly the token windows; a window of escape- or whitespace-heavy
+        // text that would be refused with a 413 is cut further.
+        let ranges = window_ranges(text, self.max_input_tokens, self.max_input_json_bytes());
 
         // Accumulate each window's starting codepoint in ONE pass over the
         // field. This used to be `text[..range.start].chars().count()` inside
@@ -546,119 +607,6 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
             .await?;
 
         apply_windowed_spans("near-ai", text, &windows)
-    }
-
-    /// One text per request -- each exactly as `redact_text` -- unless the
-    /// operator set [`PACK_MAX_TOKENS_ENV`]. It is off by default because
-    /// packing measurably lowered recall; see that constant.
-    ///
-    /// With packing on, whole texts are packed into requests of up to that
-    /// many tokens instead of one round trip per text. Each text keeps the
-    /// limits `redact_text` applies to it: a blank text
-    /// is not sent, a text over `max_input_bytes` fails the call with the
-    /// same error (after the texts before it, never sending those after it),
-    /// and a text over the token budget is windowed alone as `redact_text`
-    /// windows it. Packs and windows are also held under
-    /// [`MAX_CLASSIFY_REQUEST_BODY_BYTES`] of serialized body, which the
-    /// token budget alone does not guarantee.
-    ///
-    /// Requests stay sequential (`MAX_CONCURRENT_CLASSIFY_WINDOWS`), for the
-    /// reasons given there. Packing is not the #463 batching that was
-    /// reverted: that sent several full-budget windows in one request and
-    /// summed past the endpoint's limit; a pack is held to one window's
-    /// budget.
-    ///
-    /// The window cache still applies per text: a text this adapter has
-    /// already classified is not sent again, and every text a packed request
-    /// classifies is remembered under the same key a single-window
-    /// `redact_text` of it would use.
-    async fn redact_texts(
-        &self,
-        texts: &[&str],
-    ) -> Result<Vec<Option<SafePrivacyFilterRedaction>>, TraceContributionError> {
-        let Some(pack_max_tokens) = self.pack_max_tokens else {
-            let mut results = Vec::with_capacity(texts.len());
-            for text in texts {
-                results.push(self.redact_text(text).await?);
-            }
-            return Ok(results);
-        };
-        // A text over `max_input_bytes` fails the call with the error
-        // `redact_text` gives it -- but only after the texts before it, as
-        // when each text was its own request, so an earlier text's failure
-        // (and its transient/permanent typing) still wins.
-        let oversized = texts
-            .iter()
-            .position(|text| !text.trim().is_empty() && text.len() > self.max_input_bytes);
-        let classify = &texts[..oversized.unwrap_or(texts.len())];
-        let results = redact_items_batched(
-            "near-ai",
-            self,
-            classify,
-            pack_max_tokens,
-            self.max_input_tokens,
-            self.max_pack_input_json_bytes(),
-            MAX_CONCURRENT_CLASSIFY_WINDOWS,
-        )
-        .await?;
-        if let Some(index) = oversized {
-            return Err(TraceContributionError::RedactionFailed {
-                reason: format!(
-                    "near-ai privacy classifier input exceeded limit: input_len={} max_input_bytes={}",
-                    texts[index].len(),
-                    self.max_input_bytes
-                ),
-            });
-        }
-        Ok(results)
-    }
-}
-
-impl NearAiPrivacyFilterAdapter {
-    /// The escaped-input budget that keeps a request's whole serialized body
-    /// within [`MAX_CLASSIFY_REQUEST_BODY_BYTES`]: the body is the request
-    /// envelope (model, keys, the input's quotes) plus the input's
-    /// JSON-escaped bytes, and the envelope is measured, not guessed.
-    fn max_pack_input_json_bytes(&self) -> usize {
-        let envelope = serde_json::to_vec(&ClassifyRequest {
-            model: &self.model,
-            input: "",
-        })
-        .map(|body| body.len())
-        .unwrap_or(MAX_CLASSIFY_REQUEST_BODY_BYTES);
-        MAX_CLASSIFY_REQUEST_BODY_BYTES
-            .saturating_sub(envelope)
-            .max(1)
-    }
-}
-
-/// The window cache's key: SHA-256 of the exact text classified.
-fn window_cache_key(text: &str) -> [u8; 32] {
-    <sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()).into()
-}
-
-#[async_trait]
-impl WindowClassifier for NearAiPrivacyFilterAdapter {
-    async fn classify_window(
-        &self,
-        window: &str,
-    ) -> Result<Vec<ClassifySpan>, TraceContributionError> {
-        NearAiPrivacyFilterAdapter::classify_window(self, window).await
-    }
-
-    /// A pack's text never recurs -- its members are looked up and
-    /// remembered individually -- so it skips the window cache rather than
-    /// counting a certain miss against the hit rate.
-    async fn classify_pack(&self, pack: &str) -> Result<Vec<ClassifySpan>, TraceContributionError> {
-        self.post_classify(pack).await
-    }
-
-    fn cached_item_spans(&self, item: &str) -> Option<Vec<ClassifySpan>> {
-        self.cached_window(&window_cache_key(item))
-    }
-
-    fn remember_item_spans(&self, item: &str, spans: &[ClassifySpan]) {
-        self.remember_window(window_cache_key(item), spans);
     }
 }
 
@@ -737,19 +685,11 @@ impl NearAiPrivacyFilterAdapter {
         // Memoize on the window's content hash. The lock is taken only around
         // the map access and released before any await, so it never spans a
         // network round trip.
-        let key = window_cache_key(text);
+        let key: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()).into();
         if let Some(hit) = self.cached_window(&key) {
             return Ok(hit);
         }
-        let spans = self.post_classify(text).await?;
-        self.remember_window(key, &spans);
-        Ok(spans)
-    }
 
-    /// POST one request to the classifier, uncached, and return its raw
-    /// spans in the request text's codepoint coordinates. Retries transient
-    /// failures; fail-closed on everything else.
-    async fn post_classify(&self, text: &str) -> Result<Vec<ClassifySpan>, TraceContributionError> {
         let endpoint = format!("{}/privacy/classify", self.base_url.trim_end_matches('/'));
         let request_body = ClassifyRequest {
             model: &self.model,
@@ -854,64 +794,31 @@ impl NearAiPrivacyFilterAdapter {
                     .ok_or(TraceContributionError::RedactionFailed {
                         reason: "near-ai privacy classifier returned empty data array".to_string(),
                     })?;
-            verify_span_texts(text, &entry.spans)?;
-            return Ok(entry.spans);
+            // Verified before it is remembered: a refused response must
+            // never be served from the cache.
+            let spans = verify_span_texts(text, entry.spans)?;
+            self.remember_window(key, &spans);
+            return Ok(spans);
         }
     }
 }
 
-/// Hash-only label for a response whose span texts disagree with its offsets.
-const SPAN_TEXT_MISMATCH_LABEL: &str = "privacy_filter_span_text_mismatch";
-
-/// Fail closed unless every span's reported `text` is exactly the request
-/// input's codepoints `[start, end)`.
-///
-/// The endpoint reports, with each span, the text it covers (probed live on
-/// 2026-10-11 with a pack of ZWJ emoji, accented and CJK text, CRLF and blank
-/// lines: the codepoint slice equalled `text` on every span). An offset slip
-/// -- the right entity at shifted offsets -- passes every range check and
-/// redacts the wrong characters, leaving the PII in place and reporting
-/// success; with many fields packed into one request it would shift every
-/// later field. This check turns that into a refusal. A span with no `text`
-/// cannot be checked, so it refuses too.
-///
-/// Spans whose offsets are out of range are left for `apply_spans` /
-/// `split_pack_spans`, which refuse them with their own error. Neither the
-/// span text nor the input is ever logged: the failure carries the label and
-/// the input's hash-only fingerprint.
-fn verify_span_texts(input: &str, spans: &[ClassifySpan]) -> Result<(), TraceContributionError> {
-    if spans.is_empty() {
-        return Ok(());
-    }
-    let mut boundaries: Vec<usize> = input.char_indices().map(|(byte, _)| byte).collect();
-    boundaries.push(input.len());
-    let mismatches = spans
-        .iter()
-        .filter(|span| {
-            if span.start > span.end || span.end >= boundaries.len() {
-                return false;
-            }
-            let covered = &input[boundaries[span.start]..boundaries[span.end]];
-            span.text.as_deref() != Some(covered)
+impl NearAiPrivacyFilterAdapter {
+    /// The escaped-input budget that keeps a request's whole serialized body
+    /// within [`MAX_CLASSIFY_REQUEST_BODY_BYTES`]: the body is the request
+    /// envelope (model, keys, the input's quotes) plus the input's
+    /// JSON-escaped bytes, and the envelope is measured, not guessed.
+    fn max_input_json_bytes(&self) -> usize {
+        let envelope = serde_json::to_vec(&ClassifyRequest {
+            model: &self.model,
+            input: "",
         })
-        .count();
-    if mismatches == 0 {
-        return Ok(());
+        .map(|body| body.len())
+        .unwrap_or(MAX_CLASSIFY_REQUEST_BODY_BYTES);
+        MAX_CLASSIFY_REQUEST_BODY_BYTES
+            .saturating_sub(envelope)
+            .max(1)
     }
-    let diagnostics = classify_input_diagnostics(&[input]);
-    tracing::warn!(
-        classify_input = %diagnostics,
-        mismatched_spans = mismatches,
-        spans = spans.len(),
-        failure = SPAN_TEXT_MISMATCH_LABEL,
-        "near-ai privacy classify failed"
-    );
-    Err(TraceContributionError::RedactionFailed {
-        reason: format!(
-            "near-ai privacy classifier span offsets disagree with span text: {SPAN_TEXT_MISMATCH_LABEL} mismatched_spans={mismatches} spans={} {diagnostics}",
-            spans.len()
-        ),
-    })
 }
 
 /// Hash-only description of the input a failing classify request carried.
@@ -955,9 +862,190 @@ mod tests {
     // module because both backends window. The tests stayed here rather than
     // moving with them: they are written against this backend's token budget
     // and its measured endpoint behaviour.
-    use crate::privacy_filter_spans::{
-        chunk_byte_ranges, chunk_token_ranges, classifier_token_count,
-    };
+    use crate::privacy_filter_spans::{chunk_byte_ranges, classifier_token_count};
+
+    /// A span whose reported text is not the text at its offsets fails the
+    /// server's prose-PII rescrub closed, with the hash-only label, and
+    /// nothing the classifier would change is applied to the envelope.
+    #[tokio::test]
+    async fn a_span_text_mismatch_fails_the_rescrub_and_applies_nothing() {
+        use crate::trace_contribution::{
+            PiiClassifyPolicy, TraceContributionEnvelope, rescrub_envelope_prose_pii_with,
+        };
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/privacy/classify"))
+            .respond_with(|req: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                let input = body["input"].as_str().unwrap();
+                // Every "Ada" found, reported one codepoint late with the
+                // right text: an offset slip the range check cannot see.
+                let spans: Vec<serde_json::Value> = input
+                    .match_indices("Ada")
+                    .map(|(byte, _)| {
+                        let start = input[..byte].chars().count() + 1;
+                        serde_json::json!({
+                            "category": "private_person",
+                            "start": start,
+                            "end": start + 3,
+                            "score": 0.9,
+                            "text": "Ada",
+                        })
+                    })
+                    .collect();
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "data": [{ "spans": spans }] }))
+            })
+            .mount(&server)
+            .await;
+        let adapter = NearAiPrivacyFilterAdapter::new(
+            server.uri(),
+            "openai/privacy-filter",
+            "test-key",
+            Duration::from_secs(5),
+            1_000_000,
+        )
+        .unwrap();
+
+        let event = |content: &str| {
+            serde_json::json!({
+                "event_id": uuid::Uuid::new_v4(),
+                "event_type": "user_message",
+                "redacted_content": content,
+                "side_effect": "none",
+                "timestamp": "2026-10-11T00:00:00Z",
+            })
+        };
+        let mut envelope: TraceContributionEnvelope = serde_json::from_value(serde_json::json!({
+            "schema_version": "ironclaw.trace_contribution.v1",
+            "trace_id": uuid::Uuid::new_v4(),
+            "submission_id": uuid::Uuid::new_v4(),
+            "created_at": "2026-10-11T00:00:00Z",
+            "ironclaw": {"channel": "cli", "version": "1"},
+            "consent": {
+                "policy_version": "2026-04-24",
+                "scopes": ["debugging_evaluation"],
+                "message_text_included": true,
+                "tool_payloads_included": false,
+                "routing_metadata_included": false,
+                "correction_included": false,
+                "revocable": true
+            },
+            "contributor": {
+                "pseudonymous_contributor_id": "sha256:contributor",
+                "revocation_handle": uuid::Uuid::new_v4()
+            },
+            "events": [
+                event("nothing here"),
+                event("Ada reviewed the change"),
+                event("ran the tests"),
+            ],
+            "outcome": {"task_success": "unknown", "user_feedback": "none"},
+            "privacy": {
+                "redaction_hash": "sha256:placeholder",
+                "redaction_pipeline_version": "ironclaw-deterministic-secret-path-v3",
+                "residual_pii_risk": "low"
+            },
+            "replay": {"replayable": false},
+            "trace_card": {
+                "allowed_uses": ["debugging", "evaluation", "aggregate_analytics"],
+                "consent_scope": "debugging_evaluation",
+                "redaction_pipeline_version": "ironclaw-deterministic-secret-path-v3",
+                "retention_policy": "private_corpus_revocable",
+                "revocation_handle": uuid::Uuid::new_v4(),
+                "source_channel": "unknown"
+            },
+            "value": {"credit_points_pending": 0.0, "submission_score": 0.0},
+            "value_card": {
+                "limitations": [],
+                "score_version": "trace-value-scorecard-v1",
+                "scorecard": {
+                    "coverage_bonus": 0.0, "credit_points_estimate": 0.0,
+                    "dependability": 0.0, "difficulty": 0.0, "duplicate_penalty": 0.0,
+                    "novelty": 0.0, "online_score": 0.0, "privacy_risk": 0.0,
+                    "quality": 0.0, "replayability": 0.0, "schema_validity": 0.0,
+                    "user_correction_value": 0.0
+                }
+            }
+        }))
+        .expect("fixture envelope deserializes");
+        let before = serde_json::to_value(&envelope).unwrap();
+
+        let error =
+            rescrub_envelope_prose_pii_with(&adapter, &mut envelope, PiiClassifyPolicy::AllEvents)
+                .await
+                .expect_err("a span text mismatch must fail closed");
+        assert!(matches!(
+            error,
+            TraceContributionError::RedactionFailed { .. }
+        ));
+        assert!(error.to_string().contains(SPAN_TEXT_MISMATCH_LABEL));
+        assert!(!error.to_string().contains("Ada"), "never echo the text");
+
+        let after = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(after["events"], before["events"]);
+        for field in [
+            "redaction_counts",
+            "pii_labels_present",
+            "privacy_filter_summary",
+            "redaction_pipeline_version",
+            "residual_pii_risk",
+            "redaction_hash",
+        ] {
+            assert_eq!(
+                after["privacy"][field], before["privacy"][field],
+                "privacy.{field} must be untouched on failure"
+            );
+        }
+    }
+
+    #[test]
+    fn json_escaped_len_matches_serde_json() {
+        for text in [
+            "",
+            "plain ascii",
+            "quote \" backslash \\ slash /",
+            "\n\r\t\u{8}\u{c}",
+            "\u{0}\u{1}\u{1f}\u{7f}",
+            "Zo\u{eb} \u{674e}\u{5c0f}\u{9f8d} \u{1f600} \u{1f468}\u{200d}\u{1f469}",
+        ] {
+            assert_eq!(
+                json_escaped_len(text),
+                serde_json::to_string(text).unwrap().len() - 2,
+                "{text:?}"
+            );
+        }
+    }
+
+    /// A padded, escaped table costs few tokens and megabytes of body: its
+    /// windows are cut under the cap, cover it exactly, and ordinary text
+    /// keeps its token windows unchanged.
+    #[test]
+    fn windows_are_cut_under_the_body_cap_and_unchanged_otherwise() {
+        const CAP: usize = 200 * 1024;
+        let table: String = (0..3_000)
+            .map(|i| format!("| \\\"{i}\\\" |{}|{}|\n", " ".repeat(300), "=".repeat(300)))
+            .collect();
+        let windows = window_ranges(&table, MAX_CLASSIFY_INPUT_TOKENS, CAP);
+        assert!(windows.len() > 1);
+        assert!(
+            windows
+                .iter()
+                .all(|w| json_escaped_len(&table[w.clone()]) <= CAP),
+            "every window fits the body cap"
+        );
+        let covered: String = windows.iter().map(|w| &table[w.clone()]).collect();
+        assert_eq!(covered, table);
+
+        let prose = "An ordinary line of prose about a code review.\n".repeat(4_000);
+        assert_eq!(
+            window_ranges(&prose, MAX_CLASSIFY_INPUT_TOKENS, CAP),
+            chunk_token_ranges(&prose, MAX_CLASSIFY_INPUT_TOKENS)
+        );
+    }
 
     fn span(category: &str, start: usize, end: usize, score: f64) -> ClassifySpan {
         ClassifySpan {
@@ -965,32 +1053,6 @@ mod tests {
             start,
             end,
             score,
-            text: None,
-        }
-    }
-
-    /// Packing is opt-in: unset, blank or 0 keeps one text per request; a
-    /// value outside 1..=MAX_CLASSIFY_INPUT_TOKENS refuses, naming the
-    /// variable and nothing else.
-    #[test]
-    fn pack_max_tokens_is_off_unless_set_and_bounded() {
-        for off in [None, Some(""), Some("  "), Some("0")] {
-            assert_eq!(parse_pack_max_tokens(off).unwrap(), None, "{off:?}");
-        }
-        assert_eq!(parse_pack_max_tokens(Some("250")).unwrap(), Some(250));
-        assert_eq!(parse_pack_max_tokens(Some(" 1 ")).unwrap(), Some(1));
-        assert_eq!(
-            parse_pack_max_tokens(Some("32000")).unwrap(),
-            Some(MAX_CLASSIFY_INPUT_TOKENS)
-        );
-        for bad in ["32001", "-1", "abc", "1.5", "99999999999999999999"] {
-            match parse_pack_max_tokens(Some(bad)) {
-                Err(PrivacyFilterConfigError::InvalidEnv { var, reason }) => {
-                    assert_eq!(var, PACK_MAX_TOKENS_ENV, "{bad}");
-                    assert!(!reason.contains(bad), "the value is not echoed: {reason}");
-                }
-                other => panic!("{bad:?} must refuse, got {other:?}"),
-            }
         }
     }
 

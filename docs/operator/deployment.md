@@ -402,36 +402,7 @@ export TRACE_COMMONS_REQUIRE_PRIVACY_FILTER=1                 # refuse to boot w
 # export TRACE_NEAR_AI_PRIVACY_BASE_URL=https://privacy-filter.completions.near.ai/v1
 # export TRACE_NEAR_AI_PRIVACY_MODEL=openai/privacy-filter
 # export TRACE_NEAR_AI_PRIVACY_TIMEOUT_MS=10000
-# Leave UNSET (see below):
-# export TRACE_NEAR_AI_PRIVACY_PACK_MAX_TOKENS=0
 ```
-
-`TRACE_NEAR_AI_PRIVACY_PACK_MAX_TOKENS` packs several whole texts (events,
-structured-payload leaves and keys) into one `privacy/classify` request, up to
-that many o200k_base tokens per request, instead of one request per text.
-Unset, blank or `0` is the default: one text per request. Accepted values are
-1 to 32000. Anything else (a negative number, a decimal, text, or a number
-above 32000) refuses to build the adapter with an error that names the
-variable.
-
-**Leave it unset until a pack size is shown to keep recall.** A live shadow
-comparison on 30 real sessions (2026-10-11, counts only) at 32,000-token packs
-found that packed classification missed 115 of the 335 entities (34%) that
-classifying each text alone found, and partly missed 8 more. It also found 25
-that the per-text run did not.
-
-The setting changes how many requests are made, not what is classified. Every
-text is still sent, each span is mapped back to the text it falls in, and a
-text over the token budget or the 200 KiB request-body cap is still split on
-its own. It applies to the NEAR AI backend only; the self-hosted backend
-always sends one text per request.
-
-Two checks apply whether packing is on or off:
-
-- A request body is never larger than 200 KiB. NEAR AI answers a body of about
-  256 KiB with a permanent 413.
-- Every span's reported `text` must equal the text at its offsets. Otherwise
-  the call fails closed with `privacy_filter_span_text_mismatch`.
 
 Set `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER` on any deployment where prose-PII
 filtering is part of the controls. Without it an unset backend is not an
