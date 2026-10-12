@@ -683,7 +683,9 @@ async fn start_compare_app(
         "enclave_reference_compare",
     ));
     // baseline-old-path: the credit delta and the medium-risk rule of the
-    // old path. The candidate has them in its bundle.
+    // old path. The candidate has the credit delta in its bundle; the
+    // medium-risk setting reaches its receipt too (`accept_medium_risk`),
+    // where it admits only a found-and-removed Medium (issue #1344).
     state_mut.novelty_utility_credit_points_delta = LEGACY_NOVELTY_UTILITY_CREDIT_POINTS_DELTA;
     state_mut.accept_medium_risk_submissions = options.accept_medium_risk;
     state_mut.pipeline_service = Some(service.clone());
