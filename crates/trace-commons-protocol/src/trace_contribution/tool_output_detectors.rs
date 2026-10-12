@@ -184,21 +184,47 @@ fn git_author_findings(input: &str, findings: &mut Vec<Finding>) {
 
 // --- prompts, ssh targets and host names -----------------------------------
 
-/// A shell prompt: `user@host:cwd$`, `user@host cwd %`, `[user@host cwd]$`.
-/// The prompt terminator followed by a space or end of line is what makes
-/// this a prompt rather than an address or a package reference.
+/// A shell prompt at the start of a line: `user@host:cwd$`,
+/// `user@host cwd %`, `[user@host cwd]$`, optionally after a `(venv)`
+/// marker. The line anchor is what keeps `out = weights@inputs  # (B, D)`
+/// out; [`prompt_is_plausible`] then rejects a bare `a@b # comment`.
 static SHELL_PROMPT: LazyLock<Regex> = LazyLock::new(|| {
     regex(
-        r#"(?m)(?:^|\\n|[\s\[("'`])(?P<user>[a-z_][a-z0-9_.-]{0,31})@(?P<host>[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?)(?::[^\s$#%\]]*|[ \t]+[^\s$#%\]]+)?[ \t]*\]?[$#%](?:[ \t]|$)"#,
+        r#"(?m)(?:^|\\n)[ \t]*(?:\([^()\r\n]{1,40}\)[ \t]+)*(?P<open>\[)?(?P<user>[a-z_][a-z0-9_.-]{0,31})@(?P<host>[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?)(?P<cwd>:[^\s$#%\]]*|[ \t]+[^\s$#%\]]+)?(?P<gap>[ \t]*)(?P<close>\])?(?P<term>[$#%])(?:[ \t]|$)"#,
     )
 });
 
-/// The first `user@host` on a line that runs an ssh-family command.
-static SSH_TARGET: LazyLock<Regex> = LazyLock::new(|| {
+/// A prompt quoted mid-line (`the build fails on jdoe@devbox:~$ make`).
+/// Only the `:path` form, whose path starts at `~` or `/` and runs straight
+/// into the terminator, is distinctive enough without the line anchor.
+static INLINE_PROMPT: LazyLock<Regex> = LazyLock::new(|| {
     regex(
-        r#"(?m)\b(?:ssh|scp|sftp|rsync|mosh)\b[^\n]*?[\s'"=](?P<user>[a-z_][a-z0-9_.-]{0,31})@(?P<host>[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?)"#,
+        r#"(?m)[\s\[("'`](?P<user>[a-z_][a-z0-9_.-]{0,31})@(?P<host>[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?):[~/][^\s$#%\]]*\]?[$#%](?:[ \t]|$)"#,
     )
 });
+
+/// The target of an ssh-family command: the command word, then only
+/// options and plain arguments (no `@`, no command separator), then
+/// `user@host`. `npm install ssh2-sftp-client and typescript@5.6.2` has no
+/// such command word, and `ssh ...; pinned lodash@4.17.21` crosses a `;`.
+static SSH_TARGET: LazyLock<Regex> = LazyLock::new(|| {
+    regex(
+        r#"(?m)(?:^|[\s;&|(`'"])(?:ssh|scp|sftp|rsync|mosh)[ \t]+(?:[^\s@;&|,]+[ \t]+){0,12}?['"]?(?P<user>[a-z_][a-z0-9_.-]{0,31})@(?P<host>[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?)"#,
+    )
+});
+
+/// Rejects line-anchored matches that are code rather than a prompt: a
+/// terminator after two or more blanks (`a@b  # comment`), or a `#` with
+/// neither a working directory nor a closing bracket before it.
+fn prompt_is_plausible(captures: &regex::Captures<'_>) -> bool {
+    let gap = captures.name("gap").map_or(0, |gap| gap.len());
+    if gap >= 2 {
+        return false;
+    }
+    let has_cwd = captures.name("cwd").is_some() || captures.name("close").is_some();
+    let term = captures.name("term").map_or("", |term| term.as_str());
+    term != "#" || has_cwd
+}
 
 /// Suffixes reserved or conventionally used for names that only resolve
 /// inside one network (RFC 6762 `.local`, RFC 8375 `.home.arpa`, and the
@@ -342,13 +368,19 @@ fn is_private_suffix_host(host: &str) -> bool {
 }
 
 fn user_at_host_findings(input: &str, findings: &mut Vec<Finding>) {
-    for regex in [&*SHELL_PROMPT, &*SSH_TARGET] {
+    for regex in [&*SHELL_PROMPT, &*INLINE_PROMPT, &*SSH_TARGET] {
         for captures in regex.captures_iter(input) {
             let (Some(user), Some(host)) = (captures.name("user"), captures.name("host")) else {
                 continue;
             };
+            if std::ptr::eq(regex, &*SHELL_PROMPT) && !prompt_is_plausible(&captures) {
+                continue;
+            }
             let redact_host = match host_kind(host.as_str()) {
                 HostKind::Public => continue,
+                // `typescript@5.6.2`: an address host must be a whole IPv4
+                // address, or the `@` is a version pin.
+                HostKind::Address if host.as_str().parse::<Ipv4Addr>().is_err() => continue,
                 HostKind::Address => false,
                 HostKind::SingleLabel | HostKind::PrivateSuffix => true,
             };
@@ -400,11 +432,77 @@ fn private_hostname_findings(input: &str, findings: &mut Vec<Finding>) {
         if SHARED_INTERNAL_HOSTS.contains(&lowered.as_str()) {
             continue;
         }
+        if !in_host_context(input, start, &lowered) {
+            continue;
+        }
         findings.push(Finding {
             range: start..end,
             label: PRIVATE_HOSTNAME,
         });
     }
+}
+
+/// Words after which a private-suffix name is a host: a command that takes
+/// one, or a key that names one (`Host:`, `--hostname`, `"server": "..."`).
+const HOST_CUES: &[&str] = &[
+    "connect",
+    "dig",
+    "host",
+    "hostname",
+    "mosh",
+    "nc",
+    "nslookup",
+    "ping",
+    "ping6",
+    "rsync",
+    "scp",
+    "server",
+    "servername",
+    "sftp",
+    "ssh",
+    "telnet",
+    "traceroute",
+];
+
+/// An `/etc/hosts` row up to the name: an address, then other names.
+static HOSTS_FILE_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+    regex(
+        r"^[ \t]*(?:[0-9]{1,3}(?:\.[0-9]{1,3}){3}|[0-9A-Fa-f]*:[0-9A-Fa-f:]+)(?:[ \t]+[A-Za-z0-9.-]+)*[ \t]+$",
+    )
+});
+
+/// Whether a private-suffix name sits where only a host can.
+///
+/// `browser.storage.local`, `node.internal` and `cfg.local` are member
+/// accesses and module names, and code is most of what a file-read tool
+/// returns. So a bare `word.local` is never taken. A name qualifies by its
+/// place -- a URL authority, an `/etc/hosts` row, or after a [`HOST_CUES`]
+/// word -- or by its shape: a leftmost label with a hyphen or digit
+/// (`Janes-MacBook-Pro.local`, `build01.corp`), which identifiers cannot
+/// have or rarely do.
+fn in_host_context(input: &str, start: usize, lowered: &str) -> bool {
+    let leftmost = lowered.split('.').next().unwrap_or_default();
+    if leftmost
+        .bytes()
+        .any(|byte| byte == b'-' || byte.is_ascii_digit())
+    {
+        return true;
+    }
+    if input[..start].ends_with("//") {
+        return true;
+    }
+    let line_start = input[..start].rfind('\n').map_or(0, |at| at + 1);
+    let line = &input[line_start..start];
+    if HOSTS_FILE_PREFIX.is_match(line) {
+        return true;
+    }
+    let trimmed = line
+        .trim_end_matches([' ', '\t', '"', '\'', ':', '='])
+        .to_ascii_lowercase();
+    let word_start = trimmed
+        .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .map_or(0, |at| at + 1);
+    HOST_CUES.contains(&&trimmed[word_start..])
 }
 
 // --- ip_address ------------------------------------------------------------
@@ -466,8 +564,18 @@ fn ipv4_is_identifying(address: Ipv4Addr) -> bool {
 fn ipv4_findings(input: &str, findings: &mut Vec<Finding>) {
     for found in DOTTED_DIGITS.find_iter(input) {
         let (start, end) = (found.start(), found.end());
-        let text = found.as_str();
-        let parts: Vec<&str> = text.split('.').collect();
+        let full_end = end;
+        let mut text = found.as_str();
+        let mut parts: Vec<&str> = text.split('.').collect();
+        let mut end = end;
+        // BSD `netstat` and `tcpdump` write `address.port`
+        // (`192.168.1.23.52344`). Take the address and leave the port.
+        if parts.len() == 5 && parts[4].len() <= 5 && parts[4].parse::<u16>().is_ok() {
+            let port_len = parts[4].len() + 1;
+            end -= port_len;
+            text = &text[..text.len() - port_len];
+            parts.truncate(4);
+        }
         if parts.len() != 4
             || parts
                 .iter()
@@ -499,15 +607,19 @@ fn ipv4_findings(input: &str, findings: &mut Vec<Finding>) {
             Some(b'/') if byte_before(input, start - 1) != Some(b'/') => continue,
             _ => {}
         }
-        match byte_at(input, end) {
+        match byte_at(input, full_end) {
             Some(byte) if is_word_byte(byte) => continue,
             // `1.2.3.4-beta`, `1.2.3.4+build`.
             Some(b'-' | b'+')
-                if byte_at(input, end + 1).is_some_and(|next| next.is_ascii_alphanumeric()) =>
+                if byte_at(input, full_end + 1)
+                    .is_some_and(|next| next.is_ascii_alphanumeric()) =>
             {
                 continue;
             }
             _ => {}
+        }
+        if preceded_by_a_product_word(input, start) {
+            continue;
         }
         let window = input
             .get(start.saturating_sub(12)..start)
@@ -524,6 +636,84 @@ fn ipv4_findings(input: &str, findings: &mut Vec<Finding>) {
             label: IP_ADDRESS,
         });
     }
+}
+
+/// Words that make the dotted run after them an address: `inet`,
+/// `addr:`, `host=`, `from`, `via`, `Address:`, `--bind`.
+const NETWORK_CUES: &[&str] = &[
+    "addr",
+    "address",
+    "allow",
+    "at",
+    "bind",
+    "client",
+    "connect",
+    "connected",
+    "connecting",
+    "curl",
+    "deny",
+    "destination",
+    "dig",
+    "dns",
+    "dst",
+    "endpoint",
+    "from",
+    "gateway",
+    "gw",
+    "host",
+    "hostname",
+    "inet",
+    "ip",
+    "ipv4",
+    "listen",
+    "listening",
+    "nameserver",
+    "nc",
+    "nslookup",
+    "on",
+    "peer",
+    "ping",
+    "proxy",
+    "remote",
+    "resolver",
+    "router",
+    "server",
+    "source",
+    "src",
+    "ssh",
+    "target",
+    "telnet",
+    "to",
+    "traceroute",
+    "via",
+];
+
+/// Whether a word token sits right before `start` -- `openssl 3.0.13.1`,
+/// `postgres:16.4.2.1`, `v=2.3.45.6`, `Microsoft.NETCore.App 8.0.10.24`,
+/// `Fixed in 3.2.14.7` -- that is not a [`NETWORK_CUES`] word. A token
+/// with no letters (`0` in a `netstat` row, `->`, a list of addresses) says
+/// nothing either way and the run stays an address.
+fn preceded_by_a_product_word(input: &str, start: usize) -> bool {
+    let before = &input[..start];
+    let token_end = match before.as_bytes().last() {
+        Some(b' ' | b'\t') => before.trim_end_matches([' ', '\t']).len(),
+        Some(b':' | b'=') => before.len(),
+        _ => return false,
+    };
+    let head = &before[..token_end];
+    let token_start = head
+        .rfind(|c: char| c.is_whitespace())
+        .map_or(0, |at| at + 1);
+    let token = head[token_start..].trim_end_matches([':', '=', '"', '\'']);
+    if !token.bytes().any(|byte| byte.is_ascii_alphabetic()) {
+        return false;
+    }
+    let lowered = token.to_ascii_lowercase();
+    let last_word = lowered
+        .rsplit(|c: char| !c.is_ascii_alphanumeric())
+        .find(|word| !word.is_empty())
+        .unwrap_or_default();
+    !NETWORK_CUES.contains(&last_word)
 }
 
 /// Whether an IPv6 address is worth replacing: global unicast (2000::/3)
@@ -600,8 +790,21 @@ fn phone_findings(input: &str, findings: &mut Vec<Finding>) {
         if !(8..=15).contains(&digits) || (compact && digits < 10) {
             continue;
         }
+        // A written number opens with a country code of one to three digits
+        // (`+44 20 ...`). Four digits after `+` is a timezone offset
+        // (`+1000 1234 bytes`, a `git blame` line), not a country.
+        let country = text[1..].bytes().take_while(u8::is_ascii_digit).count();
+        if !compact && country > 3 {
+            continue;
+        }
+        // Right after a clock time, `+NN ...` is an offset and what follows
+        // it is a line number or a count.
+        if follows_clock_time(input, start) {
+            continue;
+        }
         match byte_before(input, start) {
-            Some(byte) if is_word_byte(byte) || byte == b'+' => continue,
+            // `seed=+12 345 678 90` is an argument, not a contact.
+            Some(byte) if is_word_byte(byte) || byte == b'+' || byte == b'=' => continue,
             // A diff line adding a number (`+1760176800`) is not a phone.
             None | Some(b'\n') if compact => continue,
             _ => {}
@@ -617,6 +820,14 @@ fn phone_findings(input: &str, findings: &mut Vec<Finding>) {
     for regex in [&*NANP, &*UK_MOBILE] {
         for found in regex.find_iter(input) {
             let (start, end) = (found.start(), found.end());
+            // `415-555-0132` and `415.555.0132` are also how ids, issue
+            // numbers and builds look; only the parenthesised form is a
+            // phone on its own. The others need a phone word nearby.
+            let parenthesised = found.as_str().starts_with('(');
+            let uk = found.as_str().starts_with("07");
+            if !parenthesised && !uk && !has_phone_cue(input, start) {
+                continue;
+            }
             if byte_before(input, start).is_some_and(|byte| {
                 is_word_byte(byte) || matches!(byte, b'.' | b'-' | b'+' | b'/' | b':')
             }) {
@@ -631,6 +842,32 @@ fn phone_findings(input: &str, findings: &mut Vec<Finding>) {
             });
         }
     }
+}
+
+/// Words that make a bare NANP-shaped number a phone number.
+const PHONE_CUES: &[&str] = &[
+    "phone", "tel", "mobile", "cell", "call", "sms", "fax", "contact", "whatsapp",
+];
+
+/// Whether a phone word sits on the same line, shortly before `start`.
+fn has_phone_cue(input: &str, start: usize) -> bool {
+    let line_start = input[..start].rfind('\n').map_or(0, |at| at + 1);
+    let from = start.saturating_sub(32).max(line_start);
+    let window = input
+        .get(from..start)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    PHONE_CUES.iter().any(|cue| window.contains(cue))
+}
+
+/// `HH:MM` or `HH:MM:SS` at the end of the text before a candidate.
+static CLOCK_TIME_END: LazyLock<Regex> =
+    LazyLock::new(|| regex(r"(?:^|[^0-9])[0-9]{1,2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]+)?)?$"));
+
+/// Whether a clock time, then blanks, sits just before `start`.
+fn follows_clock_time(input: &str, start: usize) -> bool {
+    let before = input[..start].trim_end_matches([' ', '\t']);
+    before.len() != start && CLOCK_TIME_END.is_match(before)
 }
 
 fn phone_end_is_clean(input: &str, end: usize) -> bool {
@@ -672,6 +909,10 @@ static LS_LONG_ROW: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 fn push_account(findings: &mut Vec<Finding>, name: regex::Match<'_>) {
+    // `ls -ln` prints ids, not names; an id identifies no one off-machine.
+    if name.as_str().bytes().all(|byte| byte.is_ascii_digit()) {
+        return;
+    }
     if !is_shared_account(name.as_str()) {
         findings.push(Finding {
             range: name.range(),
@@ -828,11 +1069,11 @@ mod tests {
     #[test]
     fn public_and_private_ipv4_addresses_are_replaced() {
         let (out, report) = redact(
-            "Connecting to 34.117.59.81:443 from 10.0.4.17 via 192.168.1.20 and 100.101.102.103, again 34.117.59.81",
+            "Connecting to 34.117.59.81:443 from 10.0.4.17 via 192.168.1.20, peer 100.101.102.103, again to 34.117.59.81",
         );
         assert_eq!(
             out,
-            "Connecting to <PRIVATE_IP_ADDRESS_1>:443 from <PRIVATE_IP_ADDRESS_2> via <PRIVATE_IP_ADDRESS_3> and <PRIVATE_IP_ADDRESS_4>, again <PRIVATE_IP_ADDRESS_1>"
+            "Connecting to <PRIVATE_IP_ADDRESS_1>:443 from <PRIVATE_IP_ADDRESS_2> via <PRIVATE_IP_ADDRESS_3>, peer <PRIVATE_IP_ADDRESS_4>, again to <PRIVATE_IP_ADDRESS_1>"
         );
         assert_eq!(count(&report, IP_ADDRESS), 5);
     }
@@ -910,11 +1151,11 @@ mod tests {
     #[test]
     fn private_suffix_hostnames_are_replaced() {
         let (out, report) = redact(
-            "ping Janes-MacBook-Pro.local; ssh build01.corp; curl http://grafana.internal:3000/ and nas.home.arpa, db.lan",
+            "ping printer.local; ssh build01.corp; curl http://grafana.internal:3000/ and Host: nas.home.arpa, hostname: db.lan",
         );
         assert_eq!(
             out,
-            "ping <PRIVATE_HOSTNAME_1>; ssh <PRIVATE_HOSTNAME_2>; curl http://<PRIVATE_HOSTNAME_3>:3000/ and <PRIVATE_HOSTNAME_4>, <PRIVATE_HOSTNAME_5>"
+            "ping <PRIVATE_HOSTNAME_1>; ssh <PRIVATE_HOSTNAME_2>; curl http://<PRIVATE_HOSTNAME_3>:3000/ and Host: <PRIVATE_HOSTNAME_4>, hostname: <PRIVATE_HOSTNAME_5>"
         );
         assert_eq!(count(&report, PRIVATE_HOSTNAME), 5);
     }
@@ -1011,13 +1252,13 @@ mod tests {
     #[test]
     fn e164_and_national_phone_numbers_are_replaced() {
         let (out, report) = redact(
-            "call +1 415 555 0132 or +44 20 7946 0958 or +14155550132, (415) 555-0132, 415-555-0132, 07700 900123",
+            "call +1 415 555 0132 or +44 20 7946 0958 or +14155550132, (415) 555-0132, 07700 900123\nphone: 415-555-0132\ntel 415.555.0133",
         );
         assert_eq!(
             out,
-            "call <PRIVATE_PHONE_NUMBER_1> or <PRIVATE_PHONE_NUMBER_2> or <PRIVATE_PHONE_NUMBER_3>, <PRIVATE_PHONE_NUMBER_4>, <PRIVATE_PHONE_NUMBER_5>, <PRIVATE_PHONE_NUMBER_6>"
+            "call <PRIVATE_PHONE_NUMBER_1> or <PRIVATE_PHONE_NUMBER_2> or <PRIVATE_PHONE_NUMBER_3>, <PRIVATE_PHONE_NUMBER_4>, <PRIVATE_PHONE_NUMBER_5>\nphone: <PRIVATE_PHONE_NUMBER_6>\ntel <PRIVATE_PHONE_NUMBER_7>"
         );
-        assert_eq!(count(&report, PHONE_NUMBER), 6);
+        assert_eq!(count(&report, PHONE_NUMBER), 7);
     }
 
     #[test]
@@ -1235,5 +1476,109 @@ mod tests {
                 "{label} counted again by the server pass"
             );
         }
+    }
+
+    // --- adversarial review of 70c1e3302 ----------------------------------
+
+    #[test]
+    fn review_timezone_offsets_and_seeds_are_not_phone_numbers() {
+        assert_untouched("at 12:34:56 +1000 1234) fn main() {}");
+        assert_untouched("+1000 1234 bytes");
+        assert_untouched("TZ offset +1000 12345");
+        assert_untouched(r#"{"tz": "+1000 1000"}"#);
+        assert_untouched("+1234 5678 9012");
+        assert_untouched("seed=+12 345 678 90");
+        assert_untouched("logged 12:34:56 +12 3456 7890");
+    }
+
+    #[test]
+    fn review_matrix_products_and_comments_are_not_prompts() {
+        assert_untouched("out = weights@inputs  # (B, D)");
+        assert_untouched("y = a@b # matmul");
+        assert_untouched("a@b # matmul");
+        assert_untouched("    scores@values  # (B, T, D)");
+    }
+
+    #[test]
+    fn review_member_accesses_are_not_hostnames() {
+        assert_untouched("await browser.storage.local;");
+        assert_untouched("require('node.internal')");
+        assert_untouched("for item.corp in items");
+        assert_untouched("x = cfg.local + user.local + node.local");
+    }
+
+    #[test]
+    fn review_hosts_file_lines_and_host_like_names_are_hostnames() {
+        let (out, report) =
+            redact("127.0.0.1\tlocalhost devbox.lan\nssh into Janes-MacBook-Pro.local");
+        assert_eq!(
+            out,
+            "127.0.0.1\tlocalhost <PRIVATE_HOSTNAME_1>\nssh into <PRIVATE_HOSTNAME_2>"
+        );
+        assert_eq!(count(&report, PRIVATE_HOSTNAME), 2);
+    }
+
+    #[test]
+    fn review_image_tags_and_product_versions_are_not_addresses() {
+        assert_untouched("image postgres:16.4.2.1");
+        assert_untouched("ghcr.io/org/app:1.12.3.4");
+        assert_untouched("Microsoft.NETCore.App 8.0.10.24 [/usr/share/dotnet]");
+        assert_untouched("openssl 3.0.13.1");
+        assert_untouched("CUDA 12.4.131.2");
+        assert_untouched("v=2.3.45.6");
+        assert_untouched("Fixed in 3.2.14.7");
+    }
+
+    #[test]
+    fn review_network_context_still_marks_an_address() {
+        let (out, report) = redact(
+            "inet addr:192.168.1.5\nhost=10.0.0.1\nAddress: 34.117.59.81\ndefault via 10.0.0.9 dev eth0\n34.117.59.82",
+        );
+        assert_eq!(
+            out,
+            "inet addr:<PRIVATE_IP_ADDRESS_1>\nhost=<PRIVATE_IP_ADDRESS_2>\nAddress: <PRIVATE_IP_ADDRESS_3>\ndefault via <PRIVATE_IP_ADDRESS_4> dev eth0\n<PRIVATE_IP_ADDRESS_5>"
+        );
+        assert_eq!(count(&report, IP_ADDRESS), 5);
+    }
+
+    #[test]
+    fn review_package_versions_on_an_ssh_line_are_not_accounts() {
+        assert_untouched("npm install ssh2-sftp-client and typescript@5.6.2");
+        assert_untouched("we use ssh for deploys; pinned lodash@4.17.21");
+        assert_untouched("ssh into the box, then npm i react@18.2.0");
+    }
+
+    #[test]
+    fn review_ssh_targets_with_options_and_rsync_are_still_covered() {
+        let (out, report) = redact("rsync -avz ./dist/ deploy@web-01.corp:/srv/");
+        assert_eq!(
+            out,
+            "rsync -avz ./dist/ <PRIVATE_OS_USERNAME_1>@<PRIVATE_HOSTNAME_1>:/srv/"
+        );
+        assert_eq!(count(&report, OS_USERNAME), 1);
+    }
+
+    #[test]
+    fn review_ids_shaped_like_nanp_numbers_need_a_phone_cue() {
+        assert_untouched("order id 415-555-0132");
+        assert_untouched("issue 202-310-2026");
+        assert_untouched("build 202.555.0199");
+    }
+
+    #[test]
+    fn review_numeric_ls_owners_are_not_accounts() {
+        assert_untouched("-rw-r--r--   1 501  20  1204 Oct 11 10:00 notes.txt");
+    }
+
+    #[test]
+    fn review_bsd_address_dot_port_forms_are_addresses() {
+        let (out, report) = redact(
+            "tcp4  0  0  192.168.1.23.52344  34.117.59.81.443  ESTABLISHED\nIP 192.168.1.23.52344 > 34.117.59.81.443: Flags",
+        );
+        assert_eq!(
+            out,
+            "tcp4  0  0  <PRIVATE_IP_ADDRESS_1>.52344  <PRIVATE_IP_ADDRESS_2>.443  ESTABLISHED\nIP <PRIVATE_IP_ADDRESS_1>.52344 > <PRIVATE_IP_ADDRESS_2>.443: Flags"
+        );
+        assert_eq!(count(&report, IP_ADDRESS), 4);
     }
 }
