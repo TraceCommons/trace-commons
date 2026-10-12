@@ -556,4 +556,16 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertNil(MenuBarTopEdgePin.pinnedOrigin(CGRect(x: 900, y: 400, width: 380, height: 470), top: top))
         XCTAssertNil(MenuBarTopEdgePin.pinnedOrigin(shrunk, top: nil))
     }
+
+    /// The pinned top is the menu bar's bottom edge on the window's screen,
+    /// never a top the window happened to have: a panel that shrank before
+    /// it became key no longer hangs below the bar.
+    func test_thePopoverPinsToTheMenuBarsBottomEdge() {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        // The menu bar shown: the visible frame stops under it.
+        XCTAssertEqual(MenuBarTopEdgePin.menuBarBottom(
+            screen: screen, visible: CGRect(x: 0, y: 0, width: 1512, height: 945), thickness: 24), 945)
+        // The menu bar hidden: the visible frame reaches the top.
+        XCTAssertEqual(MenuBarTopEdgePin.menuBarBottom(screen: screen, visible: screen, thickness: 24), 958)
+    }
 }

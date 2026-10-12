@@ -321,8 +321,10 @@ final class MonitorShellTests: XCTestCase {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         for needle in ["Button(action: openTraces)", "HomeStatTile(label: MonitorWords.waiting,",
                        "HomeStatTile(label: MonitorWords.contributed,", "HomeStatTile(label: HomeFormat.creditPendingWord,",
-                       // Ron's Missions card: his Drafts tag over the drafts.
-                       "GlassEyebrowCard(MonitorWords.missions, action: openMissionDrafts, chevron: true)",
+                       // Ron's Missions card: his Drafts tag over the drafts,
+                       // headed as the Private AI cards are (owner, 2026-10-11).
+                       "systemImage: Self.missionsIcon, title: MonitorWords.missions,",
+                       "subtitle: words?.missionsSubtitle, promo: promo, action: openMissionDrafts",
                        "GlassTag(words.draftsTag, tone: .ask)", "Text(words.noMissionDrafts)",
                        "Text(words.sources(draft.source_count))"] {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")

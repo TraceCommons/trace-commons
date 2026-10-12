@@ -385,15 +385,19 @@ struct SessionReviewCard: View {
         // one heading (owner, 2026-10-10: a less crowded inspector). They
         // describe the trace; nothing in them is needed before deciding.
         if let words, let review {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                GlassExpander(review.traceDetails, isOpen: $detailsOpen)
-                if detailsOpen {
-                    GlassKeyValueList(Self.rows(
-                        entry, summary, words: words, attestation: store.attestationValue(entry)))
-                    // The daemon's own line, which the deleted What's-in-it
-                    // tab drew. Absent draws nothing: no fact is invented.
-                    if let line = summary?.tokenDistributionSummary, !line.isEmpty {
-                        caption(line)
+            // On a quiet card, as the inspector's sections are (owner,
+            // 2026-10-11).
+            GlassCard(quiet: true) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    GlassExpander(review.traceDetails, isOpen: $detailsOpen)
+                    if detailsOpen {
+                        GlassKeyValueList(Self.rows(
+                            entry, summary, words: words, attestation: store.attestationValue(entry)))
+                        // The daemon's own line, which the deleted What's-in-it
+                        // tab drew. Absent draws nothing: no fact is invented.
+                        if let line = summary?.tokenDistributionSummary, !line.isEmpty {
+                            caption(line)
+                        }
                     }
                 }
             }

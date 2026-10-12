@@ -250,6 +250,9 @@ pub const MONITOR_PLACEHOLDERS: &[&str] = &[
 pub struct MonitorTreeCopy {
     /// The tree's accessible name.
     pub tree_label: &'static str,
+    /// The heading above the tree, beside its order control (owner,
+    /// 2026-10-11). DRAFT, NEEDS APPROVAL.
+    pub tree_title: &'static str,
     /// While the queue is first read.
     pub reading_queue: &'static str,
     /// A folder's Submit pill with nothing eligible, with `{count}`
@@ -541,6 +544,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
         optional_automation: "OPTIONAL AUTOMATION",
         tree: MonitorTreeCopy {
             tree_label: "Tools, folders and traces",
+            tree_title: "Watched Directories",
             reading_queue: "Reading local queue\u{2026}",
             submit: "Submit",
             submit_count: "Submit \u{00b7} {count}",
@@ -550,7 +554,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             reviewing: "Reviewing",
             review_tip: "Opens what would be sent. Nothing leaves until you contribute.",
             ignored_folder: "ignored \u{00b7} never queued",
-            ignore_folder: "Ignore folder",
+            ignore_folder: "Ignore Directory",
             watch_folder: "Watch this folder",
             watch_tool: "Watch {tool}",
             dismiss_session: "Dismiss trace",
@@ -921,10 +925,12 @@ pub struct MonitorEdgeRailCopy {
     /// The rail's accessible name, and the closed rail's handle's.
     pub rail_label: &'static str,
     pub handle_label: &'static str,
-    /// The icons this table names; the other three are Settings' names.
+    /// The parts of the Home peek this table names (owner, 2026-10-11: one
+    /// Home peek in place of the Waiting, Tools and Balance icons). The
+    /// icons themselves are named by the app's tabs (Home, Traces) and
+    /// Settings (Private AI, Compute).
     pub waiting: &'static str,
     pub balance: &'static str,
-    pub privacy: &'static str,
     /// The mark at the foot of the rail.
     pub open_app: &'static str,
     /// Each peek's link into the app, and its accessible name.
@@ -936,9 +942,8 @@ pub struct MonitorEdgeRailCopy {
     pub tools_empty: &'static str,
     /// The Compute peek before the core has reported.
     pub compute_unreported: &'static str,
-    /// The Privacy peek: its title, then what is on this Mac and what was
-    /// contributed.
-    pub privacy_title: &'static str,
+    /// The Traces peek: what is on this Mac and what was contributed, over
+    /// its map and graph.
     pub on_this_mac: &'static str,
     pub on_this_mac_line_one: &'static str,
     pub on_this_mac_line: &'static str,
@@ -1167,8 +1172,15 @@ pub struct MonitorHomeHistoryCopy {
     /// Home's way into the commons mission catalogue, which #1146 has no
     /// place for (its Missions card is the drafts).
     pub mission_catalogue: &'static str,
-    /// History's page description, under the breadcrumb.
+    /// History's page description, under the breadcrumb, and the History
+    /// card's subtitle on Home.
     pub history_description: &'static str,
+    /// The subtitles under Home's Missions, Insights and mission catalogue
+    /// card titles (owner, 2026-10-11: Home's cards are headed as the
+    /// Private AI cards are). DRAFT, NEEDS APPROVAL.
+    pub missions_subtitle: &'static str,
+    pub insights_subtitle: &'static str,
+    pub catalogue_subtitle: &'static str,
     /// The contribution list card's eyebrow and heading.
     pub submissions: &'static str,
     pub contribution_history: &'static str,
@@ -1430,6 +1442,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             sources: "{count} sources",
             mission_catalogue: "Mission catalogue",
             history_description: "What you have contributed, and what is still being reviewed.",
+            missions_subtitle: "Proposed runs waiting for your review.",
+            insights_subtitle: "Patterns in how you use your agents, read on this Mac.",
+            catalogue_subtitle: "What the commons is asking for.",
             submissions: "Submissions",
             contribution_history: "Contribution history",
             reading_history: "Reading local history\u{2026}",
@@ -1469,19 +1484,17 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         },
         edge_rail: MonitorEdgeRailCopy {
             setting_toggle: "Show the edge rail",
-            setting_caption: "Rest the pointer on the right edge of the screen to glance at sessions waiting, tools, balance, Private AI, compute and privacy.",
+            setting_caption: "Rest the pointer on the right edge of the screen to glance at Home, Private AI, your traces and compute.",
             rail_label: "Edge rail",
             handle_label: "Open the edge rail",
             waiting: "Waiting",
             balance: "Balance",
-            privacy: "Privacy",
             open_app: concat!("Open ", crate::app_name!()),
             open_section: "Open {section}",
             open_section_label: concat!("Open {section} in ", crate::app_name!()),
             review: "Review",
             tools_empty: "No tools found on this Mac yet.",
             compute_unreported: "Compute has not reported yet.",
-            privacy_title: "What is where, right now",
             on_this_mac: "On this Mac",
             on_this_mac_line_one: "1 session waiting here. Nothing leaves until you send it.",
             on_this_mac_line: "{count} sessions waiting here. Nothing leaves until you send it.",

@@ -120,9 +120,11 @@ struct InspectorHeader: View {
 }
 
 /// Ron's inspector `Section` (`waiting-page.tsx:78-97`): an expander
-/// heading over bare content, no card, 6 between them and the content
-/// inset 4. A collapsible one opens and closes; the others always show
-/// their content under an open heading that is not a control.
+/// heading over its content, 6 between them and the content inset 4, the
+/// two together on a quiet card (owner, 2026-10-11: the same container as
+/// the inspector's other text blocks, for contrast). A collapsible one
+/// opens and closes; the others always show their content under an open
+/// heading that is not a control.
 struct InspectorSection<Content: View>: View {
     let title: String
     let collapsible: Bool
@@ -136,19 +138,21 @@ struct InspectorSection<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            if collapsible {
-                GlassExpander(title, isOpen: $open)
-            } else {
-                GlassExpander(title, isOpen: .constant(true))
-                    .allowsHitTesting(false)
-                    .accessibilityRemoveTraits(.isButton)
-                    .accessibilityAddTraits(.isHeader)
-            }
-            if open || !collapsible {
-                content
-                    .padding(.horizontal, GlassTokens.Space.s2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        GlassCard(quiet: true) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                if collapsible {
+                    GlassExpander(title, isOpen: $open)
+                } else {
+                    GlassExpander(title, isOpen: .constant(true))
+                        .allowsHitTesting(false)
+                        .accessibilityRemoveTraits(.isButton)
+                        .accessibilityAddTraits(.isHeader)
+                }
+                if open || !collapsible {
+                    content
+                        .padding(.horizontal, GlassTokens.Space.s2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
     }

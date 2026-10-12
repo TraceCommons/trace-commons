@@ -374,6 +374,10 @@ public struct GlassMenuBarStrip: View {
         condition == .paused || condition == .unavailable
     }
 
+    /// The badge's height (and least width) and its figure's size.
+    static let badgeSize: CGFloat = 13
+    static let badgeGlyph: CGFloat = 8.5
+
     /// A strip bar: 2pt at least, 9pt at most, for a column's count.
     static func height(_ count: Int, max: Int) -> CGFloat {
         guard max > 0 else { return 2 }
@@ -396,18 +400,22 @@ public struct GlassMenuBarStrip: View {
                 .frame(height: 20, alignment: .center)
             }
         }
-        .padding(.horizontal, 4)
+        .padding(.horizontal, 6)
+        .frame(height: 20)
+        // A tinted capsule behind the bars, so they read over any wallpaper
+        // the menu bar shows through (owner, 2026-10-11).
+        .background(Capsule().fill(GlassTokens.Color.menuStripTint.color))
         .frame(height: 22)
         .overlay(alignment: .bottomTrailing) {
             let shownMark = Self.shownMark(mark, badge: badge, condition: condition)
             if let badge = Self.shownBadge(badge, condition: condition) {
+                // Smaller, with no edge (owner, 2026-10-11).
                 Text("\(badge)")
-                    .glassGlyph(10, weight: .bold)
+                    .glassGlyph(Self.badgeGlyph, weight: .bold)
                     .foregroundStyle(Color.white)
-                    .padding(.horizontal, 4)
-                    .frame(minWidth: 16, minHeight: 16)
+                    .padding(.horizontal, 3)
+                    .frame(minWidth: Self.badgeSize, minHeight: Self.badgeSize)
                     .background(Capsule().fill(GlassTokens.Color.menuModeNever.color))
-                    .overlay(Capsule().stroke(GlassTokens.Color.menuBadgeEdge.color, lineWidth: 1.5))
                     // The halo: the accent line colour, outside the badge's
                     // own edge, as `GlassStatusDot`'s ring sits outside it.
                     .overlay {
@@ -419,11 +427,10 @@ public struct GlassMenuBarStrip: View {
             } else if Self.showsAttention(condition) {
                 // The shipping mark's attention state, in the badge's place.
                 Text("!")
-                    .glassGlyph(10, weight: .bold)
+                    .glassGlyph(Self.badgeGlyph, weight: .bold)
                     .foregroundStyle(Color.white)
-                    .frame(minWidth: 16, minHeight: 16)
+                    .frame(minWidth: Self.badgeSize, minHeight: Self.badgeSize)
                     .background(Capsule().fill(GlassTokens.Color.menuModeNever.color))
-                    .overlay(Capsule().stroke(GlassTokens.Color.menuBadgeEdge.color, lineWidth: 1.5))
                     .offset(x: 6, y: 2)
             } else if shownMark == .news {
                 // The news ring, hollow, in the badge's slot.

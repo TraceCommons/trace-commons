@@ -118,8 +118,8 @@ public enum GlassTokens {
         public static let menuPillOff: GlassRGBA = GlassRGBA(0x5A5A5F, alpha: 1, light: GlassRGBA(0xAEAEB2, alpha: 1))
         /// Graph and strip bars while watching is paused.
         public static let menuBarsPaused: GlassRGBA = GlassRGBA(0x555555, alpha: 1, light: GlassRGBA(0xB4B4B8, alpha: 1))
-        /// The badge's cut-out edge against the menu bar.
-        public static let menuBadgeEdge: GlassRGBA = GlassRGBA(0x1E3222, alpha: 0.9, light: GlassRGBA(0xF2F2F4, alpha: 0.9))
+        /// The tinted capsule behind the menu-bar strip's bars, so they read over any wallpaper (owner, 2026-10-11).
+        public static let menuStripTint: GlassRGBA = GlassRGBA(0x000000, alpha: 0.32, light: GlassRGBA(0xFFFFFF, alpha: 0.6))
         public static let menuChipShared: GlassRGBA = GlassRGBA(0xC86BFA, alpha: 0.35, light: GlassRGBA(0x7A2CF5, alpha: 0.18))
         public static let menuChipKept: GlassRGBA = GlassRGBA(0x3AA0FF, alpha: 0.35, light: GlassRGBA(0x2F6BC4, alpha: 0.18))
         public static let menuNoProof: GlassRGBA = GlassRGBA(0xFF8A8A, alpha: 1, light: GlassRGBA(0xC62828, alpha: 1))
@@ -229,7 +229,7 @@ public enum GlassTokens {
             "menuModeNever": menuModeNever,
             "menuPillOff": menuPillOff,
             "menuBarsPaused": menuBarsPaused,
-            "menuBadgeEdge": menuBadgeEdge,
+            "menuStripTint": menuStripTint,
             "menuChipShared": menuChipShared,
             "menuChipKept": menuChipKept,
             "menuNoProof": menuNoProof,
@@ -466,7 +466,7 @@ public enum GlassTokens {
         public static let edgeRailTile: CGFloat = 44
         public static let edgeRailRuleWidth: CGFloat = 28
         public static let edgeRailPeekWidth: CGFloat = 380
-        public static let edgeRailOpenHeight: CGFloat = 560
+        public static let edgeRailOpenHeight: CGFloat = 680
         public static let edgeRailZoneWidth: CGFloat = 4
         public static let edgeRailZoneHeight: CGFloat = 240
         public static let edgeRailHandleWidth: CGFloat = 3

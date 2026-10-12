@@ -282,12 +282,13 @@ public struct GlassToolTile: View {
                 }
                     .frame(width: side, height: side)
                     .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(GlassColor.ink(0.1)))
-            // #1146 `ToolTile` marks a folder "dir" and a session "▤": a
-            // glyph, hidden from assistive tech with the rest of the tile.
+            // A folder is a white folder glyph (owner, 2026-10-11, in place
+            // of #1146's "dir"), a session "▤": hidden from assistive tech
+            // with the rest of the tile.
             case .folder:
-                Text(folderMark)
-                    .glassGlyph(large ? 11 : 9, weight: .bold)
-                    .foregroundStyle(GlassTokens.Color.tileFolderInk.color)
+                Image(systemName: "folder.fill")
+                    .glassGlyph(large ? 13 : 11, weight: .regular)
+                    .foregroundStyle(GlassColor.textPrimary)
                     .frame(width: side, height: side)
                     .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(GlassTokens.Color.tileFolder.color))
             case let .folderInitial(name):
