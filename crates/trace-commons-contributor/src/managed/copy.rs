@@ -56,6 +56,7 @@ pub fn copy() -> serde_json::Value {
             "launch_unknown": "Refresh, then try again.",
             "action_failed": "That didn't work. Try again.",
             "accounts_title": "Saved accounts",
+            "accounts_refresh_accessibility": "Refresh saved accounts",
             "state_starting": "Starting",
             "state_running": "Running",
             "state_exited": "Exited",
@@ -76,6 +77,17 @@ mod tests {
     fn key(prefix: &str, value: impl serde::Serialize) -> String {
         let value = serde_json::to_value(value).expect("enum serializes");
         format!("{prefix}_{}", value.as_str().expect("unit variant"))
+    }
+
+    /// The saved accounts' refresh icon says what it re-reads to assistive
+    /// tech, as the core's words rather than a shell's join.
+    #[test]
+    fn the_accounts_refresh_has_its_own_accessible_name() {
+        let copy = copy();
+        assert_eq!(
+            copy["accounts_refresh_accessibility"],
+            "Refresh saved accounts"
+        );
     }
 
     /// Every lifecycle and sign-in state a shell can be sent has a label,

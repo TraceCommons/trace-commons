@@ -1,0 +1,174 @@
+{
+  "type": "patterns",
+  "patterns": {
+    "feed": "saved",
+    "generation": 4783315849904727193,
+    "week_start": "2026-10-05",
+    "week_end": "2026-10-11",
+    "tz": 0,
+    "coverage": {
+      "known": 0,
+      "partial": 0,
+      "unknown": 0,
+      "reasons": {}
+    },
+    "sessions": 0,
+    "claude_sessions": 0,
+    "claude_only": false,
+    "long_context_threshold": 200000,
+    "cards": [
+      {
+        "kind": "repeated_reads",
+        "tokens": null,
+        "count": null,
+        "files": null,
+        "sessions": 0,
+        "basis": "estimate_from_result_size",
+        "inferred": false,
+        "weeks": [
+          {
+            "week_start": "2026-08-31",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-07",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-14",
+            "tokens": 0
+          },
+          {
+            "week_start": "2026-09-21",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-28",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-10-05",
+            "tokens": null
+          }
+        ],
+        "change": null,
+        "change_unavailable": "needs_counter_pass"
+      },
+      {
+        "kind": "retried_calls",
+        "tokens": null,
+        "count": null,
+        "files": null,
+        "sessions": 0,
+        "basis": "estimate_from_result_size",
+        "inferred": false,
+        "weeks": [
+          {
+            "week_start": "2026-08-31",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-07",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-14",
+            "tokens": 0
+          },
+          {
+            "week_start": "2026-09-21",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-28",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-10-05",
+            "tokens": null
+          }
+        ],
+        "change": null,
+        "change_unavailable": "needs_counter_pass"
+      },
+      {
+        "kind": "edit_fail_edit",
+        "tokens": null,
+        "count": null,
+        "files": null,
+        "sessions": 0,
+        "basis": "estimate_from_result_size",
+        "inferred": true,
+        "weeks": [
+          {
+            "week_start": "2026-08-31",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-07",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-14",
+            "tokens": 0
+          },
+          {
+            "week_start": "2026-09-21",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-28",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-10-05",
+            "tokens": null
+          }
+        ],
+        "change": null,
+        "change_unavailable": "needs_counter_pass"
+      },
+      {
+        "kind": "long_context",
+        "tokens": null,
+        "count": null,
+        "files": null,
+        "sessions": 0,
+        "basis": "from_counters",
+        "inferred": false,
+        "weeks": [
+          {
+            "week_start": "2026-08-31",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-07",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-14",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-21",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-28",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-10-05",
+            "tokens": null
+          }
+        ],
+        "change": null,
+        "change_unavailable": "needs_counter_pass"
+      }
+    ],
+    "reread_files": [],
+    "weeks": [
+      "2026-09-14"
+    ]
+  }
+}

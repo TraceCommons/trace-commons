@@ -19,6 +19,9 @@ public struct ContributorDisclosureCopy: Decodable, Equatable, Sendable {
         public let worked: String
         public let partly: String
         public let failed: String
+        /// The verdict's empty answer, offered to assistive tech, which
+        /// takes an answer back.
+        public let verdictNone: String
         public let verdictCaption: String
         public let correctionQuestion: String
         public let correctionPlaceholder: String
@@ -33,6 +36,7 @@ public struct ContributorDisclosureCopy: Decodable, Equatable, Sendable {
         enum CodingKeys: String, CodingKey {
             case verdictQuestion = "verdict_question"
             case worked, partly, failed
+            case verdictNone = "verdict_none"
             case verdictCaption = "verdict_caption"
             case correctionQuestion = "correction_question"
             case correctionPlaceholder = "correction_placeholder"
@@ -46,7 +50,7 @@ public struct ContributorDisclosureCopy: Decodable, Equatable, Sendable {
 
         var words: [String] {
             [
-                verdictQuestion, worked, partly, failed, verdictCaption, correctionQuestion,
+                verdictQuestion, worked, partly, failed, verdictNone, verdictCaption, correctionQuestion,
                 correctionPlaceholder, correctionCaption, correctionCredentialHeadline,
                 correctionCredentialBody, submitAllAs, submitAllAsTooltip,
             ]

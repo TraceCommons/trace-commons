@@ -19,7 +19,9 @@ public sealed class LocalInsights : ILocalInsights
         "insights_episode_not_found", "insights_episode_missing_members", "insights_episode_revision_conflict",
         "insights_episode_limit_exceeded", "insights_episode_revision_overflow", "insights_response_too_large",
         "insights_card_invalid_selection", "insights_card_snapshot_limit", "insights_card_snapshot_not_found",
-        "insights_card_episode_limit", "insights_card_episode_not_found"
+        "insights_card_episode_limit", "insights_card_episode_not_found",
+        // The analytics reads (Overview, Patterns, Sessions).
+        "insights_not_found", "insights_tz_invalid", "insights_weeks_invalid"
     };
     private static readonly SemaphoreSlim Calls = new(1, 1);
     private readonly string? _storeDirectory;

@@ -11,6 +11,7 @@ import Foundation
 import SwiftUI
 import TCBridge
 import TCShellCore
+import TCDesign
 import XCTest
 
 @testable import TraceCommonsApp
@@ -172,9 +173,11 @@ private final class HostedFunding {
 
     func press() async throws {
         try await draw()
-        // The real row has one action, bottom-leading inside the test's 24pt
-        // padding. Its 44pt label makes this point fall inside the native button.
-        let point = NSPoint(x: 75, y: 46)
+        // The real card has one action, on the right of its icon head and
+        // centred on its height (owner, 2026-10-10), inside the test's 24pt
+        // padding and the card's own: this point falls inside the button.
+        let bounds = hosting.bounds
+        let point = NSPoint(x: bounds.width - 24 - GlassTokens.Space.cardPaddingHorizontal - 30, y: bounds.height / 2)
         XCTAssertNotNil(hosting.hitTest(hosting.convert(point, from: nil)))
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
             let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point,

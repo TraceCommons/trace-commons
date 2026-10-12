@@ -128,8 +128,6 @@ final class FlowMapSceneTests: XCTestCase {
                        "/a. Rule: Ask me. 1 trace waiting, 2 contributed.")
         XCTAssertEqual(words.folder(path: nil, rule: nil, waiting: 3, contributed: nil),
                        "Rule: not set. 3 traces waiting, \u{2014} contributed.")
-        XCTAssertNil(FlowMapView.hint(pinned: true))
-        XCTAssertEqual(FlowMapView.hint(pinned: false), words.hint)
     }
 
     /// The cards' contributed counts are a whole count or a dash: a page

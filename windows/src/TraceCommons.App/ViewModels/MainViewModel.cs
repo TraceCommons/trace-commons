@@ -1393,7 +1393,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         catch (TcException exception) when (exception.IsRootsNotDeclared)
         {
             NeedsSessionRoots = true;
-            StatusText = "Trace Commons is not watching anything yet.";
+            StatusText = "Near.ai is not watching anything yet.";
             return;
         }
         catch (TcException)
@@ -1401,7 +1401,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // Deliberately not interpolating the exception message. It is a
             // fixed ABI label, but the UI string is more useful for saying
             // what to do about it.
-            StatusText = "Could not start. Another Trace Commons instance may already be running.";
+            StatusText = "Could not start. Another Near.ai instance may already be running.";
             return;
         }
 
@@ -1645,8 +1645,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public void ReportAlreadyRunning(bool withInvite)
     {
         StatusText = withInvite
-            ? "Trace Commons is already running. Open that window and paste your invite there."
-            : "Trace Commons is already running. Use the window that is already open.";
+            ? "Near.ai is already running. Open that window and paste your invite there."
+            : "Near.ai is already running. Use the window that is already open.";
     }
 
     /// <summary>

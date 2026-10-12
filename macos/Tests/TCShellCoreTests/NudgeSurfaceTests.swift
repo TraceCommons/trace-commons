@@ -105,7 +105,7 @@ final class NudgeSurfaceTests: XCTestCase {
     /// `reengage_due` is its own event, carrying the daemon's words.
     func testReengageDueParsesAsItsOwnEvent() {
         let frame = #"""
-            {"event":"reengage_due","data":{"kind":"idle_sessions","title":"Trace Commons",
+            {"event":"reengage_due","data":{"kind":"idle_sessions","title":"Near.ai",
              "body":"2 sessions from Codex have been idle for 3 days or more. Review them to send or keep.",
              "actions":[{"id":"review","label":"Review"},{"id":"not_now","label":"Not now"}]}}
             """#
@@ -113,7 +113,7 @@ final class NudgeSurfaceTests: XCTestCase {
             return XCTFail("not a re-engagement")
         }
         XCTAssertEqual(due.kind, "idle_sessions")
-        XCTAssertEqual(due.title, "Trace Commons")
+        XCTAssertEqual(due.title, "Near.ai")
         XCTAssertEqual(due.actions.map(\.label), ["Review", "Not now"])
         // Missing words are not a notification.
         XCTAssertEqual(
@@ -239,11 +239,11 @@ final class NudgeSurfaceTests: XCTestCase {
 
     func testAReengagementNotificationCarriesTheDaemonsWordsAndActions() throws {
         let due = DaemonData.ReengageDue(
-            kind: "idle_sessions", title: "Trace Commons", body: "Body.",
+            kind: "idle_sessions", title: "Near.ai", body: "Body.",
             actions: [.init(id: "review", label: "Review"), .init(id: "not_now", label: "Not now")])
         let note = try XCTUnwrap(NudgeSurface.notification(due))
         XCTAssertEqual(note.kind, .idleSessions)
-        XCTAssertEqual(note.title, "Trace Commons")
+        XCTAssertEqual(note.title, "Near.ai")
         XCTAssertEqual(note.body, "Body.")
         XCTAssertEqual(note.actions.map(\.intent), [.review(.idleSessions), .notNow(.idleSessions)])
         // A click on the notification itself is its first action that is
@@ -251,7 +251,7 @@ final class NudgeSurfaceTests: XCTestCase {
         XCTAssertEqual(note.defaultIntent, .review(.idleSessions))
 
         let verdicts = try XCTUnwrap(NudgeSurface.notification(.init(
-            kind: "verdicts_landed", title: "Trace Commons", body: "B",
+            kind: "verdicts_landed", title: "Near.ai", body: "B",
             actions: [.init(id: "see_history", label: "See history")])))
         XCTAssertEqual(verdicts.defaultIntent, .seeHistory)
         // A kind this build does not know, or no words, is not posted.

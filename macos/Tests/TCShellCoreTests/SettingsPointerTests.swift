@@ -1,45 +1,42 @@
 import XCTest
 
-/// Settings points at the model-calls destination; it does not hold the
-/// switch any more.
+/// The Private AI switch lives in one place: the Private AI section of
+/// Settings (owner, 2026-10-10), with the local tools and sign-in. It used
+/// to be on the Private AI tab, with a pointer here; it moved back, and the
+/// tab now carries a card that opens this section instead.
 ///
-/// The entry stays. A contributor who learned where the switch was should
-/// find a pointer there, not a hole -- which is why this reads the settings
-/// source for the pointer as well as for the absence of the control. The
-/// sentence is `settingsMoved` and it comes from the Rust like every other
-/// word on this surface; the label on the way out is `destination`, the same
-/// word the sidebar carries.
+/// Two switches for one thing is two places for them to disagree, so this
+/// reads both sources: the switch is drawn by the Settings panels, and the
+/// tab draws none.
 final class SettingsPointerTests: XCTestCase {
-    private static func settingsSource() throws -> String {
+    private static func source(_ path: String) throws -> String {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()  // TCShellCoreTests
             .deletingLastPathComponent()  // Tests
             .deletingLastPathComponent()  // macos
-            .appendingPathComponent("Sources/TraceCommonsApp/Views/Settings/PrivateAISection.swift")
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/" + path)
         return try String(contentsOf: url, encoding: .utf8)
     }
 
-    /// The pointer is there, and it is the Rust's sentence.
-    func testTheSettingsEntryShowsThePointerSentence() throws {
-        let source = try Self.settingsSource()
-        XCTAssertTrue(
-            source.contains("copy.settingsMoved"),
-            "the settings entry must show the sentence saying where the switch went")
-        XCTAssertTrue(
-            source.contains("OpenMonitor.request(.inference)"),
-            "the pointer must be a way to the destination, not only a sentence")
+    /// Settings draws the panels that hold the switch, and no pointer back.
+    func testTheSettingsEntryHoldsTheSwitch() throws {
+        let settings = try Self.source("Settings/PrivateAISection.swift")
+        XCTAssertTrue(settings.contains("PrivateAISettingsPanels(store: store)"),
+                      "the settings entry must draw the switch and the tools")
+        XCTAssertFalse(settings.contains("copy.settingsMoved"),
+                       "the settings entry must not say the switch moved away")
     }
 
-    /// The control itself is gone from here. Two switches for one thing is
-    /// two places for them to disagree, and the one that stays is the one on
-    /// the destination that also reports what actually happened.
-    func testTheSwitchIsNoLongerOnTheSettingsEntry() throws {
-        let source = try Self.settingsSource()
-        XCTAssertFalse(
-            source.contains("copy." + "settingsToggle"),
-            "the switch belongs on the model-calls destination, not on Settings")
-        XCTAssertFalse(
-            source.contains("model.apply" + "PrivateInference"),
-            "Settings must not write the setting; the destination does")
+    /// The switch is drawn once, by the Settings panels, and writes through
+    /// the data contract, never the model's direct write.
+    func testTheSwitchIsDrawnOnce() throws {
+        let account = try Self.source("Monitor/InferenceAccount.swift")
+        let panels = try XCTUnwrap(account.components(separatedBy: "struct PrivateAISettingsPanels").last)
+        let tab = try XCTUnwrap(account.components(separatedBy: "struct PrivateAISettingsPanels").first)
+        XCTAssertEqual(account.components(separatedBy: "PrivateAISwitchCard(").count - 1, 1)
+        XCTAssertTrue(panels.contains("PrivateAISwitchCard("))
+        XCTAssertFalse(tab.contains("PrivateAISwitchCard("), "the tab draws a second switch")
+        XCTAssertFalse(account.contains("model.apply" + "PrivateInference"),
+                       "the switch writes through the data contract")
     }
 }

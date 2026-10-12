@@ -15,7 +15,7 @@ PACKAGE_DIR="$PWD"
 # first, for comparing themes); TC_DEMO_SKIP_BUILD=1 launches it as it is.
 # Rebuilding the bundle under a running demo kills that demo, so a second
 # one runs from a copy outside .build.
-APP="${TC_DEMO_APP:-$PACKAGE_DIR/.build/TraceCommons.app}"
+APP="${TC_DEMO_APP:-$PACKAGE_DIR/.build/Near.ai.app}"
 
 # Short path on purpose: the control socket is <dir>/daemon.sock and the
 # daemon refuses a socket path over 104 bytes.

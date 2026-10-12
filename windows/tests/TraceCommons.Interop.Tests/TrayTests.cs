@@ -217,7 +217,7 @@ public class TrayModelTests
         // sentence that drops it lets a contributor believe approved
         // sessions are still going out.
         TrayModel model = TrayModel.Compute(0, isPaused: true, isHealthy: true);
-        Assert.Equal("Trace Commons — Paused. Nothing is being queued or sent.", model.Tooltip);
+        Assert.Equal("Near.ai — Paused. Nothing is being queued or sent.", model.Tooltip);
     }
 
     [Fact]
@@ -225,7 +225,7 @@ public class TrayModelTests
     {
         TrayModel model = TrayModel.Compute(0, isPaused: false, isHealthy: true);
         Assert.Equal(TrayIconState.Idle, model.State);
-        Assert.Equal("Trace Commons — Watching. Nothing waiting.", model.Tooltip);
+        Assert.Equal("Near.ai — Watching. Nothing waiting.", model.Tooltip);
     }
 
     [Fact]
@@ -233,14 +233,14 @@ public class TrayModelTests
     {
         TrayModel model = TrayModel.Compute(3, isPaused: false, isHealthy: true);
         Assert.Equal(3, model.DecisionsOwed);
-        Assert.Equal("Trace Commons — 3 traces waiting for review.", model.Tooltip);
+        Assert.Equal("Near.ai — 3 traces waiting for review.", model.Tooltip);
     }
 
     [Fact]
     public void OneDecisionIsSingular()
     {
         Assert.Equal(
-            "Trace Commons — 1 trace waiting for review.",
+            "Near.ai — 1 trace waiting for review.",
             TrayModel.Compute(1, isPaused: false, isHealthy: true).Tooltip);
     }
 
@@ -251,7 +251,7 @@ public class TrayModelTests
         // contributor approve three sessions believing the watcher is
         // running.
         Assert.Equal(
-            "Trace Commons — 3 traces waiting for review. Paused.",
+            "Near.ai — 3 traces waiting for review. Paused.",
             TrayModel.Compute(3, isPaused: true, isHealthy: true).Tooltip);
     }
 
@@ -259,7 +259,7 @@ public class TrayModelTests
     public void AttentionStillSaysWhenItIsAlsoUnhealthy()
     {
         Assert.Equal(
-            "Trace Commons — 2 traces waiting for review. Needs attention.",
+            "Near.ai — 2 traces waiting for review. Needs attention.",
             TrayModel.Compute(2, isPaused: false, isHealthy: false).Tooltip);
     }
 

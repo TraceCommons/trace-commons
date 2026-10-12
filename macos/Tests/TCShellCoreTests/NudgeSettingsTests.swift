@@ -12,7 +12,7 @@ final class NudgeSettingsTests: XCTestCase {
         "SETTING_SUGGESTIONS_HELP": "Worked out here.",
         "SETTING_MARK": "Show a ring",
         "SETTING_MARK_HELP": "Never while waiting.",
-        "SETTING_NOTIFY_MASTER": "Notifications from Trace Commons",
+        "SETTING_NOTIFY_MASTER": "Notifications from Near.ai",
         "SETTING_DIGEST": "Waiting and contributed sessions",
         "SETTING_DIGEST_HELP_INTERVAL": "At most one notification every {hours} hours.",
         "SETTING_DIGEST_HELP_EVENING": "At most one each evening.",
@@ -47,7 +47,7 @@ final class NudgeSettingsTests: XCTestCase {
             .notify("digest"), .notify("verdicts_landed"), .notify("idle_sessions"),
         ])
         XCTAssertEqual(rows.map(\.label), [
-            "Show suggestions", "Show a ring", "Notifications from Trace Commons",
+            "Show suggestions", "Show a ring", "Notifications from Near.ai",
             "Waiting and contributed sessions", "When sessions you sent are judged", "When sessions have been idle",
         ])
         XCTAssertEqual(rows.map(\.help), [

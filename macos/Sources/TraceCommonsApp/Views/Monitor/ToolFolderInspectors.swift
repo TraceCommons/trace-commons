@@ -115,32 +115,31 @@ struct FolderInspector: View {
                         caption(eligible)
                     }
                 }
-                // Ron's buttons wrap as his row does at this width: Submit
-                // all eligible on its own line, then Submit all as and
-                // Ignore, every label on one line. Ignore, the decline, is
-                // a link after the actions (Ron, 2026-10-09).
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                // Submit all eligible and Submit all as are one split
+                // button (owner, 2026-10-10): the action, and a chevron
+                // that opens Submit all as. Ignore, the decline, is a link
+                // after it (Ron, 2026-10-09).
+                HStack(spacing: GlassTokens.Space.s4) {
                     let submits = Self.offersSubmitAll(folder, store: store)
-                    if submits {
-                        Button(store.submittingFolder == folder.id
-                            ? words.tree.submitting : Self.submitAllTitle(offer.count, words: words))
-                        {
+                    let title = store.submittingFolder == folder.id
+                        ? words.tree.submitting : Self.submitAllTitle(offer.count, words: words)
+                    if submits, let outcome = store.disclosure?.outcome {
+                        GlassSplitButton(title, menuLabel: outcome.submitAllAs) {
                             Task { await store.contributeFolder(folder, verdict: nil) }
-                        }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                        .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
-                    }
-                    HStack(spacing: GlassTokens.Space.s4) {
-                        if submits, let outcome = store.disclosure?.outcome {
+                        } menu: {
                             Button(outcome.submitAllAs) { choosingVerdict = true }
-                                .buttonStyle(GlassButtonStyle(.glass))
                                 .help(outcome.submitAllAsTooltip)
                         }
-                        if let copy = ignoreCopy {
-                            Button(copy.button) { route(TracesTreeView.modeChange(folder, .ignore), .ignore) }
-                                .buttonStyle(GlassButtonStyle(.link))
-                                .help(copy.tooltip)
-                        }
+                        .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
+                    } else if submits {
+                        Button(title) { Task { await store.contributeFolder(folder, verdict: nil) } }
+                            .buttonStyle(GlassButtonStyle(.glass))
+                            .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
+                    }
+                    if let copy = ignoreCopy {
+                        Button(copy.button) { route(TracesTreeView.modeChange(folder, .ignore), .ignore) }
+                            .buttonStyle(GlassButtonStyle(.link))
+                            .help(copy.tooltip)
                     }
                 }
                 .lineLimit(1)

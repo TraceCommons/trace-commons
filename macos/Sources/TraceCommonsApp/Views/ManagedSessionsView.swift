@@ -51,42 +51,80 @@ struct ManagedSessionsSection: View {
 
     // MARK: Accounts
 
+    /// The accounts card under its icon (owner, 2026-10-10), laid out as
+    /// every icon card: the re-read icon after the title, where a launch
+    /// opens behind the info icon after the description, and Add and
+    /// Launch on the right of the head (Retry there while the list has not
+    /// been read). A failure, a missing terminal and the accounts sit under
+    /// the head.
+    @ViewBuilder
     private var accountsCard: some View {
-        // The header carries only the re-read link, as #1146's panels do;
-        // the two actions sit on their own row under the description, so
-        // no label is ever squeezed into breaking per syllable (V1).
-        GlassEyebrowCard(model.managedText("accounts_title"), accessory: {
-            if model.managedSnapshot != nil { refreshLink }
-        }) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                Text(model.managedText("description"))
+        let snapshot = model.managedSnapshot
+        let info = snapshot?.capabilities.terminalDestination.map {
+            model.managedText("terminal_scope").replacingOccurrences(of: "{destination}", with: $0)
+        }
+        let refresh: GlassCardRefresh? = snapshot == nil ? nil : .init(
+            model.managedText("accounts_refresh_accessibility"),
+            isDisabled: model.managedBusy, action: { model.refreshManagedSessions() })
+        // Nothing under the head: a head-only card, so its actions centre
+        // on the whole card rather than on a head above an empty body.
+        if Self.accountsBodyEmpty(snapshot, failing: model.managedErrorKey != nil) {
+            GlassIconCard(
+                systemImage: "person.crop.circle.badge.checkmark",
+                title: model.managedText("accounts_title"),
+                subtitle: [model.managedText("description")], info: info, refresh: refresh,
+                trailing: { AnyView(accountsAccessory(snapshot)) })
+        } else {
+            GlassIconCard(
+                systemImage: "person.crop.circle.badge.checkmark",
+                title: model.managedText("accounts_title"),
+                subtitle: [model.managedText("description")], info: info, refresh: refresh,
+                accessory: { AnyView(accountsAccessory(snapshot)) },
+                content: { AnyView(accountsBody(snapshot)) })
+        }
+    }
+
+    /// Whether the accounts card has nothing to draw under its head: the
+    /// list was read, nothing failed, there is a terminal, and no account.
+    static func accountsBodyEmpty(_ snapshot: ManagedSnapshot?, failing: Bool) -> Bool {
+        guard let snapshot else { return false }
+        return !failing && snapshot.capabilities.terminalDestination != nil && snapshot.accounts.isEmpty
+    }
+
+    /// Add and Launch once the list is read; Retry until then.
+    @ViewBuilder
+    private func accountsAccessory(_ snapshot: ManagedSnapshot?) -> some View {
+        if let snapshot {
+            accountActions(snapshot)
+        } else {
+            Button { model.refreshManagedSessions() } label: {
+                Label(model.managedText("retry"), systemImage: "arrow.clockwise").lineLimit(1)
+            }
+            .buttonStyle(GlassButtonStyle(.glass, small: true))
+            .fixedSize()
+        }
+    }
+
+    /// Under the head: connecting, a failure, a missing terminal, and the
+    /// accounts.
+    private func accountsBody(_ snapshot: ManagedSnapshot?) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            if snapshot == nil {
+                Text(model.managedText("connecting"))
                     .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let snapshot = model.managedSnapshot {
-                    accountActions(snapshot)
-                    actionFailure
-                    terminalLine(snapshot)
-                    if !snapshot.accounts.isEmpty {
-                        VStack(spacing: 0) {
-                            ForEach(Array(snapshot.accounts.enumerated()), id: \.element.id) { index, account in
-                                GlassTableRow(first: index == 0) { accountRow(account, snapshot: snapshot) }
-                            }
+                    .foregroundStyle(GlassColor.textTertiary)
+            }
+            actionFailure
+            if let snapshot {
+                if snapshot.capabilities.terminalDestination == nil {
+                    GlassNotice(tone: .ask, title: model.managedText("terminal_unavailable")) { EmptyView() }
+                }
+                if !snapshot.accounts.isEmpty {
+                    VStack(spacing: 0) {
+                        ForEach(Array(snapshot.accounts.enumerated()), id: \.element.id) { index, account in
+                            GlassTableRow(first: index == 0) { accountRow(account, snapshot: snapshot) }
                         }
                     }
-                } else {
-                    HStack(spacing: GlassTokens.Space.s4) {
-                        Text(model.managedText("connecting"))
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textTertiary)
-                        Spacer(minLength: 0)
-                        Button { model.refreshManagedSessions() } label: {
-                            Label(model.managedText("retry"), systemImage: "arrow.clockwise").lineLimit(1)
-                        }
-                        .buttonStyle(GlassButtonStyle(.glass, small: true))
-                        .fixedSize()
-                    }
-                    actionFailure
                 }
             }
         }
@@ -107,17 +145,11 @@ struct ManagedSessionsSection: View {
         }
     }
 
-    private var refreshLink: some View {
-        Button { model.refreshManagedSessions() } label: {
-            Text(model.managedText("refresh")).lineLimit(1)
-        }
-        .buttonStyle(GlassButtonStyle(.link))
-        .fixedSize()
-        .disabled(model.managedBusy)
-    }
-
     /// Add and Launch, each on one line at its own width: side by side when
-    /// they fit, stacked when the pane is too narrow, never wrapped.
+    /// they fit, stacked when the pane is too narrow, never wrapped. Launch
+    /// is left out while it could not be used -- no saved account, or no
+    /// terminal to launch in (owner, 2026-10-10) -- rather than drawn
+    /// disabled.
     private func accountActions(_ snapshot: ManagedSnapshot) -> some View {
         let add = Button { adding = true } label: {
             Text(model.managedText("add")).lineLimit(1)
@@ -129,24 +161,12 @@ struct ManagedSessionsSection: View {
         }
         .buttonStyle(GlassButtonStyle(.primary, small: true))
         .fixedSize()
-        .disabled(snapshot.accounts.isEmpty || !snapshot.capabilities.terminalLaunch)
+        let launchable = Self.offersLaunch(snapshot)
         return ViewThatFits(in: .horizontal) {
-            HStack(spacing: GlassTokens.Space.s3) { add; launch }
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) { add; launch }
+            HStack(spacing: GlassTokens.Space.s3) { add; if launchable { launch } }
+            VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) { add; if launchable { launch } }
         }
         .disabled(model.managedBusy)
-    }
-
-    @ViewBuilder
-    private func terminalLine(_ snapshot: ManagedSnapshot) -> some View {
-        if let destination = snapshot.capabilities.terminalDestination {
-            Text(model.managedText("terminal_scope").replacingOccurrences(of: "{destination}", with: destination))
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        } else {
-            GlassNotice(tone: .ask, title: model.managedText("terminal_unavailable")) { EmptyView() }
-        }
     }
 
     private func accountRow(_ account: ManagedAccount, snapshot: ManagedSnapshot) -> some View {
@@ -220,19 +240,23 @@ struct ManagedSessionsSection: View {
 
     // MARK: Sessions
 
+    /// The sessions card under its icon (owner, 2026-10-10): with none, the
+    /// empty line is the head's subtitle and the card is one row; otherwise
+    /// the sessions are listed under the head.
+    @ViewBuilder
     private func sessionsCard(_ snapshot: ManagedSnapshot) -> some View {
-        GlassEyebrowCard(model.managedText("title")) {
-            if snapshot.sessions.isEmpty {
-                Text(model.managedText("empty"))
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-            } else {
+        if snapshot.sessions.isEmpty {
+            GlassIconCard(
+                systemImage: "terminal", title: model.managedText("title"),
+                subtitle: [model.managedText("empty")], trailing: { EmptyView() })
+        } else {
+            GlassIconCard(systemImage: "terminal", title: model.managedText("title"), content: {
                 VStack(spacing: 0) {
                     ForEach(Array(snapshot.sessions.enumerated()), id: \.element.id) { index, session in
                         GlassTableRow(first: index == 0) { sessionRow(session) }
                     }
                 }
-            }
+            })
         }
     }
 
@@ -273,6 +297,14 @@ struct ManagedSessionsSection: View {
 }
 
 /// The "Change global settings" heading above the standard tool settings.
+extension ManagedSessionsSection {
+    /// Whether Launch is offered: a saved account to launch with and a
+    /// terminal to launch in.
+    static func offersLaunch(_ snapshot: ManagedSnapshot) -> Bool {
+        !snapshot.accounts.isEmpty && snapshot.capabilities.terminalLaunch
+    }
+}
+
 struct ManagedGlobalSettingsHeader: View {
     @EnvironmentObject private var model: AppModel
 

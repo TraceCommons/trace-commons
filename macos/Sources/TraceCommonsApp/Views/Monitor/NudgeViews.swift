@@ -75,7 +75,9 @@ struct TracesListControls: View {
             if let suggested = copy?[.listOrderSuggested], let queue = copy?[.listOrderQueue],
                let label = Self.orderLabel(copy)
             {
-                GlassSegmentedTabs(
+                // A dropdown on the default glass control, not a purple
+                // segmented pill (owner, 2026-10-10).
+                GlassPicker(
                     label,
                     selection: Binding(
                         get: { store.order },
@@ -83,11 +85,11 @@ struct TracesListControls: View {
                             guard let chosen, chosen != store.order else { return }
                             Task { await store.setOrder(chosen) }
                         }),
-                    segments: [
-                        GlassSegment(suggested, value: Optional(DaemonData.PendingOrder.suggested)),
-                        GlassSegment(queue, value: Optional(DaemonData.PendingOrder.queue)),
-                    ])
-                    .fixedSize()
+                    options: [
+                        GlassPickerOption(suggested, value: DaemonData.PendingOrder.suggested),
+                        GlassPickerOption(queue, value: DaemonData.PendingOrder.queue),
+                    ],
+                    placeholder: label)
             }
         }
     }

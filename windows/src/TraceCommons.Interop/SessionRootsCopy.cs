@@ -21,7 +21,7 @@ namespace TraceCommons.Interop;
 public static class SessionRootsCopy
 {
     /// <summary>The screen's heading.</summary>
-    public const string Title = "Which trace folders should Trace Commons watch?";
+    public const string Title = "Which trace folders should Near.ai watch?";
 
     /// <summary>
     /// The screen's body. Says plainly that nothing is watched until asked,
@@ -93,7 +93,7 @@ public static class SessionRootsCopy
             // would answer "no location for this agent" about a store holding
             // thousands of sessions, turning the one line that makes this a
             // consent prompt into a dead end.
-            return "Trace Commons has no location for this agent. Type the folder its traces are in.";
+            return "Near.ai has no location for this agent. Type the folder its traces are in.";
         }
 
         if (!candidate.Exists)

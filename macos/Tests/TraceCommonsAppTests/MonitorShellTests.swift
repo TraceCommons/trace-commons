@@ -63,15 +63,18 @@ final class MonitorShellTests: XCTestCase {
         let window = try Self.text("Views/MonitorWindowView.swift")
         for needle in [
             "GlassPane(padding: 0) {",
-            ".padding([.horizontal, .top], GlassTokens.Space.panePadding)",
+            // The inspector's side inset, every row and tab (owner, 2026-10-10).
+            "static let mainInset: CGFloat = GlassTokens.Space.inspectorPaddingHorizontal",
+            ".padding(.horizontal, MonitorWindowView.mainInset)\n                .padding(.top, GlassTokens.Space.panePadding)",
             ".padding(Self.contentInsets(shown))",
-            "EdgeInsets(top: 0, leading: GlassTokens.Space.treeInset, bottom: 0, trailing: GlassTokens.Space.treeInset)",
+            "top: 0, leading: side, bottom: tab == .traces ? 0 : GlassTokens.Space.panePadding, trailing: side)",
             "GlassHairline(GlassTokens.Color.rule.color)",
             ".transition(.move(edge: .bottom).combined(with: .opacity))",
             // The inspector's 16 by 18, on the column it scrolls.
             ".padding(GlassPaneInsets.inspector)",
             "GlassPane(padding: 0, isContent: true, edge: GlassTokens.Shadow.mapEdge) {",
-            "GlassMapField()",
+            // The field is the stage's, which lights it under the pointer.
+            "GlassMapStage(alignment: .topTrailing) {",
             ".padding(GlassTokens.Space.mapOverlayInset)",
             ".frame(width: Self.viewMenuWidth)",
             "static var viewMenuWidth: CGFloat { 250 }",
@@ -81,6 +84,22 @@ final class MonitorShellTests: XCTestCase {
         XCTAssertFalse(window.contains("RadialGradient("), "the map field is #1146's ellipse")
         let footer = try Self.text("Views/Monitor/MonitorShell.swift")
         XCTAssertFalse(footer.contains("GlassColor.hairline"), "the graph's rule is the shell's, at #1146's 0.12")
+    }
+
+    /// The tab rule runs to the pane's edges: the tabs sit `mainInset` in,
+    /// so the rule's bleed past them is `GlassRuleTabs.toPaneEdge`, which
+    /// outruns that inset (the pane clips it). A bleed of a fixed inset, as
+    /// the 12pt panePadding it was, falls short once the inset changes.
+    func test_theTabRuleBleedsPastTheMainInset() throws {
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(
+            window.contains("bleed: GlassRuleTabs<MonitorWindowView.Tab>.toPaneEdge)"),
+            "the tabs' bleed is not toPaneEdge")
+        XCTAssertFalse(window.contains("bleed: GlassTokens.Space.panePadding"), "the tabs' bleed is the old 12pt inset")
+        XCTAssertTrue(
+            window.contains("bleed: GlassRuleTabs<MonitorWindowView.Tab>.toPaneEdge)\n                    }\n                }\n                .padding(.horizontal, MonitorWindowView.mainInset)"),
+            "the tabs are not the ones inset by mainInset")
+        XCTAssertGreaterThanOrEqual(GlassRuleTabs<MonitorWindowView.Tab>.toPaneEdge, MonitorWindowView.mainInset)
     }
 
     func test_theViewMenuIsInTheToolbar() throws {
@@ -303,7 +322,7 @@ final class MonitorShellTests: XCTestCase {
         for needle in ["Button(action: openTraces)", "HomeStatTile(label: MonitorWords.waiting,",
                        "HomeStatTile(label: MonitorWords.contributed,", "HomeStatTile(label: HomeFormat.creditPendingWord,",
                        // Ron's Missions card: his Drafts tag over the drafts.
-                       "GlassEyebrowCard(MonitorWords.missions, action: openMissionDrafts)",
+                       "GlassEyebrowCard(MonitorWords.missions, action: openMissionDrafts, chevron: true)",
                        "GlassTag(words.draftsTag, tone: .ask)", "Text(words.noMissionDrafts)",
                        "Text(words.sources(draft.source_count))"] {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")

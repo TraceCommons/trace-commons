@@ -14,7 +14,13 @@
         "known": true,
         "priced_micros": 8400
       },
-      "proof": "verified"
+      "proof": "verified",
+      "tokens": {
+        "input": 1200,
+        "cache_read": 18000,
+        "cache_write": 0,
+        "output": 350
+      }
     },
     {
       "id": 413,
@@ -27,7 +33,13 @@
         "known": true,
         "priced_micros": 12300
       },
-      "proof": "gateway_only"
+      "proof": "gateway_only",
+      "tokens": {
+        "input": 900,
+        "cache_read": 0,
+        "cache_write": 2048,
+        "output": 410
+      }
     },
     {
       "id": 412,
@@ -40,7 +52,13 @@
         "known": false,
         "priced_micros": null
       },
-      "proof": "outside"
+      "proof": "outside",
+      "tokens": {
+        "input": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null
+      }
     },
     {
       "id": 411,
@@ -53,7 +71,13 @@
         "known": true,
         "priced_micros": 5100
       },
-      "proof": "pending"
+      "proof": "pending",
+      "tokens": {
+        "input": 640,
+        "cache_read": 12000,
+        "cache_write": null,
+        "output": 95
+      }
     },
     {
       "id": 410,
@@ -66,7 +90,13 @@
         "known": true,
         "priced_micros": 4900
       },
-      "proof": "failed"
+      "proof": "failed",
+      "tokens": {
+        "input": 300,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null
+      }
     }
   ],
   "next_cursor": null

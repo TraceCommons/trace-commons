@@ -69,7 +69,7 @@ public sealed class VerdictTests
         Assert.Equal("Partly", VerdictCopy.Partly);
         Assert.Equal("Failed", VerdictCopy.Failed);
         Assert.Equal(
-            "Optional. This is recorded as the trace outcome; the preview above does not show it.",
+            "Optional. Recorded with the trace; not shown in the preview.",
             VerdictCopy.Caption);
         Assert.Equal("Submit as...", VerdictCopy.SubmitAllAs);
         Assert.Equal(

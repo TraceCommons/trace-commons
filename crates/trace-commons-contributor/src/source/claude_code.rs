@@ -1359,6 +1359,39 @@ fn served_by_of(record: &Value, usage: &Value) -> Option<crate::source::ServedBy
         .and_then(|v| v.as_str())
         .filter(|m| !m.is_empty())?;
 
+    let stated = claude_stated_usage(usage)?;
+    Some(crate::source::ServedBy {
+        model: model.to_string(),
+        cache_read_tokens: stated.cache_read,
+        cache_write_5m_tokens: stated.cache_write_5m,
+        cache_write_1h_tokens: stated.cache_write_1h,
+    })
+}
+
+/// One Claude `message.usage` object whose every count was stated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClaudeStatedUsage {
+    pub(crate) input: u32,
+    pub(crate) output: u32,
+    pub(crate) cache_read: u32,
+    pub(crate) cache_write_5m: u32,
+    pub(crate) cache_write_1h: u32,
+}
+
+/// The one rule for reading a Claude `message.usage` object's counters. Every
+/// reader of Claude token counts goes through it: [`served_by_of`] for the
+/// pricing path, and the Insights usage evidence and per-turn series for the
+/// saved-analysis path. A parity test in `insights::turn_series` runs both
+/// over the same bytes.
+///
+/// `None` means the counters are unknown, never zero:
+///
+/// * a count the record did not state, or one outside `u32`;
+/// * cache-creation tokens with no 5m/1h breakdown, or one that does not add
+///   up to the total the record itself reports;
+/// * a non-standard service tier, fast mode, or US-pinned inference, each of
+///   which changes what the tokens are.
+pub(crate) fn claude_stated_usage(usage: &Value) -> Option<ClaudeStatedUsage> {
     // An absent field is the common case (older transcripts predate it) and
     // means the default: standard tier, standard speed, global inference.
     // A value that is present and not one this crate can price is a refusal.
@@ -1383,12 +1416,12 @@ fn served_by_of(record: &Value, usage: &Value) -> Option<crate::source::ServedBy
         u32::try_from(object.get(key)?.as_u64()?).ok()
     }
 
-    stated_count(usage, "input_tokens")?;
-    stated_count(usage, "output_tokens")?;
-    let cache_read_tokens = stated_count(usage, "cache_read_input_tokens")?;
+    let input = stated_count(usage, "input_tokens")?;
+    let output = stated_count(usage, "output_tokens")?;
+    let cache_read = stated_count(usage, "cache_read_input_tokens")?;
 
     let created = stated_count(usage, "cache_creation_input_tokens")?;
-    let (cache_write_5m_tokens, cache_write_1h_tokens) = if created == 0 {
+    let (cache_write_5m, cache_write_1h) = if created == 0 {
         (0, 0)
     } else {
         let split = usage.get("cache_creation")?;
@@ -1400,12 +1433,21 @@ fn served_by_of(record: &Value, usage: &Value) -> Option<crate::source::ServedBy
         (five_minute, one_hour)
     };
 
-    Some(crate::source::ServedBy {
-        model: model.to_string(),
-        cache_read_tokens,
-        cache_write_5m_tokens,
-        cache_write_1h_tokens,
+    Some(ClaudeStatedUsage {
+        input,
+        output,
+        cache_read,
+        cache_write_5m,
+        cache_write_1h,
     })
+}
+
+/// Record types that carry a conversation event: the user and assistant
+/// records this adapter maps. Every other type (summaries, snapshots,
+/// system notes) is metadata for timestamp coverage. Insights reads
+/// eligibility from here, never from a second copy.
+pub(crate) fn is_event_record_kind(kind: &str) -> bool {
+    matches!(kind, "user" | "assistant")
 }
 
 #[cfg(test)]

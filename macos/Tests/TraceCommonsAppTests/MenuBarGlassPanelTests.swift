@@ -279,6 +279,7 @@ final class MenuBarGlassPanelTests: XCTestCase {
         // No credit figure of any kind: no projected or pending credit.
         for forbidden in ["setProjectMode", "approve(", "applyPrivateInference(true)", "setPrivateAI(",
                           "setContributionOverride(", "clearContributionOverride(", ".disabled(true)",
+                          "setInsightsLedgerFeed(",
                           "creditPoints", "creditPending", "creditFinal", "creditRange", "commonsCreditSummary"] {
             XCTAssertFalse(source.contains(forbidden), "the popover contains \(forbidden)")
         }
@@ -538,5 +539,21 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertEqual(MenuWords.on, MonitorWords.table?.on)
         XCTAssertEqual(MenuBarGlassPanel.modeCaption, MonitorWords.table?.contributionMode)
         XCTAssertFalse(MenuWords.quit.isEmpty)
+    }
+
+    /// The popover keeps its top edge under the menu bar when a pill's
+    /// sub-list opens or closes: a resized window keeps its bottom edge,
+    /// so the pin moves it back to the top it opened at.
+    func test_thePopoverKeepsItsTopEdgeWhenItsHeightChanges() {
+        let top: CGFloat = 870
+        // Shrunk with its bottom edge kept: the top fell 120pt.
+        let shrunk = CGRect(x: 900, y: 400, width: 380, height: 350)
+        XCTAssertEqual(MenuBarTopEdgePin.pinnedOrigin(shrunk, top: top), CGPoint(x: 900, y: 520))
+        // Grown: the top is put back too, and the window extends downward.
+        let grown = CGRect(x: 900, y: 400, width: 380, height: 520)
+        XCTAssertEqual(MenuBarTopEdgePin.pinnedOrigin(grown, top: top), CGPoint(x: 900, y: 350))
+        // Already in place, or no top learned yet: nothing moves.
+        XCTAssertNil(MenuBarTopEdgePin.pinnedOrigin(CGRect(x: 900, y: 400, width: 380, height: 470), top: top))
+        XCTAssertNil(MenuBarTopEdgePin.pinnedOrigin(shrunk, top: nil))
     }
 }

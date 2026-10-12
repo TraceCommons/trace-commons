@@ -58,11 +58,23 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
     public var overrideCalls: [String] { lock.withLock { recordedOverrideCalls } }
     private var recordedOverrideCalls: [String] = []
 
+    /// Replies a test put in place of the recorded ones, by method.
+    private var replacedReplies: [String: String] = [:]
+
+    /// Answers `method` with `json` from now on, in place of the recorded
+    /// reply, so a test can show the daemon changing what it sends (a
+    /// ledger feed turned off). A test seam: no screen calls it.
+    public func replaceReply(_ method: String, with json: String) {
+        lock.withLock { replacedReplies[method] = json }
+    }
+
     /// The raw JSON this set answers `method` with: the IPC `result`
     /// object, or `nil` for a set where the core is down. `status` carries
     /// the override in force, as the daemon's `status_value` does.
     public func json(for method: String) -> String? {
-        guard set != .coreDown, let reply = SampleDaemonData.reply(method, in: set) else { return nil }
+        guard set != .coreDown else { return nil }
+        let replaced = lock.withLock { replacedReplies[method] }
+        guard let reply = replaced ?? SampleDaemonData.reply(method, in: set) else { return nil }
         guard method == "status" else { return reply }
         lock.lock()
         let active = contributionOverride
@@ -419,6 +431,14 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("get_settings", as: DaemonData.Settings.self)
     }
 
+    public func setInsightsRecapCard(_ on: Bool) async throws -> DaemonData.Settings {
+        try serve("get_settings", as: DaemonData.Settings.self)
+    }
+
+    public func setInsightsLedgerFeed(_ on: Bool) async throws -> DaemonData.Settings {
+        try serve("get_settings", as: DaemonData.Settings.self)
+    }
+
     // MARK: History and credit
 
     public func listHistory(limit: Int) async throws -> [DaemonData.HistoryRow] {
@@ -441,6 +461,22 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     public func inferenceCalls(limit: Int, cursor: String?) async throws -> DaemonData.InferenceCallPage {
         try serve("inference_calls", as: DaemonData.InferenceCallPage.self)
+    }
+
+    // MARK: Insights
+
+    public func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        // SAMPLE: no counter pass is recorded, so the window shows the
+        // saved-imports feed, as it would against a daemon that predates it.
+        throw DaemonDataError.notAvailableYet(method: "insights_week")
+    }
+
+    public func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        // SAMPLE: no glance is recorded (it needs a live IronWire ledger), so
+        // the popover draws none, as against a daemon that predates it.
+        throw DaemonDataError.notAvailableYet(method: "insights_glance")
     }
 
     // MARK: Network methods (C3, #1187): hand-written samples

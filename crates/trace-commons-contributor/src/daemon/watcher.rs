@@ -220,6 +220,9 @@ fn tick_over(
             visit_session(shared, &ctx, *source, session_ref, &mut out);
         }
     }
+    // Insights feed T, after the offers: a full pass only, and only while
+    // the contributor has switched it on.
+    counter_pass(shared, now, &discovered);
     // Only when every source listed cleanly: a source whose discovery failed
     // would otherwise lose its sessions from the count until it recovers.
     if discovered.len() == sources.len() {
@@ -233,6 +236,91 @@ fn tick_over(
     report_gate(shared, &ctx.gate, &report);
     record_gate_held(shared, &ctx, &report, held_by_project);
     Ok(report)
+}
+
+/// The Insights counter pass (feed T), gated on the `insights_counter_pass`
+/// setting (owner decision D4, open). Off, it returns before reading
+/// anything. On, it hands every Claude Code and Codex session this pass
+/// discovered to `insights_week`, which reads only quiet sessions whose rows
+/// are missing or stale, within a per-poll budget. It is not tied to
+/// eligibility: a session already offered, uploaded, kept or declined still
+/// counts for the contributor's own Insights, which never leave this machine.
+/// A folder that is Never is the exception, by its own rule or a global
+/// Never override (owner decision D4); see `insights_week`.
+fn counter_pass(
+    shared: &DaemonShared,
+    now: DateTime<Utc>,
+    discovered: &[(&dyn TraceSource, Vec<SessionRef>)],
+) {
+    let (enabled, quiescence_secs) = {
+        let s = shared.settings.lock().expect("settings lock");
+        (s.insights_counter_pass, s.quiescence_secs)
+    };
+    if !enabled {
+        return;
+    }
+    let mut origins: Vec<(&dyn TraceSource, &SessionRef, Observation)> = Vec::new();
+    let mut candidates = Vec::new();
+    for (source, refs) in discovered {
+        if !matches!(
+            source.name(),
+            crate::source::SOURCE_CLAUDE_CODE | crate::source::SOURCE_CODEX
+        ) {
+            continue;
+        }
+        for session_ref in refs {
+            let modified_at = match session_ref.group_modified_at {
+                Some(at) => at,
+                None => match std::fs::metadata(&session_ref.path).and_then(|m| m.modified()) {
+                    Ok(at) => DateTime::<Utc>::from(at),
+                    Err(_) => continue,
+                },
+            };
+            candidates.push(super::insights_week::CounterCandidate {
+                origin: origins.len(),
+                source: session_ref.source,
+                path: session_ref.path.clone(),
+                size_bytes: session_ref.size_bytes,
+                modified_at,
+                started_at: session_ref.started_at,
+                group_member_count: session_ref.group_member_count,
+            });
+            origins.push((
+                *source,
+                session_ref,
+                Observation {
+                    path: session_ref.path.clone(),
+                    size_bytes: session_ref.size_bytes,
+                    modified_at,
+                },
+            ));
+        }
+    }
+    let never_keys =
+        super::insights_week::never_folders(&shared.policy.lock().expect("policy lock"));
+    // Asked only for a session about to be read. The folder's resolved
+    // rule, the contribution override included (owner decision D4): a
+    // global Never leaves every folder out, as it does from sending.
+    let mut project_of = |candidate: &super::insights_week::CounterCandidate| {
+        let (source, session_ref, obs) = &origins[candidate.origin];
+        let cwd = resolve_cwd(shared, *source, session_ref, obs);
+        let (project_key, _) = project_for(cwd.as_deref());
+        let never = shared
+            .policy
+            .lock()
+            .expect("policy lock")
+            .resolve(&project_key)
+            == ProjectMode::Ignore;
+        (project_key, never)
+    };
+    // Failures are logged inside, by fixed label only.
+    let _ = shared.insights_counter.run_pass(
+        &candidates,
+        &never_keys,
+        now,
+        quiescence_secs,
+        &mut project_of,
+    );
 }
 
 /// Record what is on disk for the Flow 1 grant `grant`, per source: each
@@ -2559,6 +2647,113 @@ mod tests {
         assert_eq!(report.queued, 1, "{report:?}");
         assert_eq!(f.queue_len(), 1);
         assert_eq!(f.states(), vec![QueueState::Pending]);
+    }
+
+    /// Insights feed T (owner decision D4, open): with the setting on, a
+    /// full pass stores counter rows for quiet sessions, leaving out a Never
+    /// folder; with it off, nothing is read and no key is made.
+    #[tokio::test]
+    async fn the_counter_pass_runs_only_when_switched_on_and_skips_never_folders() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.write_session("quiet", "22222222-2222-2222-2222-222222222222", 0);
+        f.write_session("skip", "33333333-3333-3333-3333-333333333333", 0);
+        f.set_mode("skip", ProjectMode::Ignore);
+        let later = Utc::now() + chrono::Duration::hours(2);
+        let stored = |f: &WatcherFixture| {
+            f.shared.insights_counter.week_value(
+                true,
+                None,
+                chrono::FixedOffset::east_opt(0).unwrap(),
+                later,
+                &crate::daemon::insights_week::NeverFolders::NONE,
+                crate::daemon::insights_week::WeekOptions::default(),
+            )["sessions_stored"]
+                .clone()
+        };
+
+        f.settle(later).await;
+        assert!(
+            !f.shared
+                .store
+                .daemon_path(super::super::insights_week::COUNTER_ROWS_FILE)
+                .exists()
+        );
+        assert_eq!(stored(&f), 0);
+
+        f.shared.settings.lock().unwrap().insights_counter_pass = true;
+        tick(&f.shared, later).await.unwrap();
+        assert_eq!(stored(&f), 2, "the Never folder is left out");
+
+        // A folder set to Never later loses its rows on the next pass.
+        f.set_mode("quiet", ProjectMode::Ignore);
+        tick(&f.shared, later).await.unwrap();
+        assert_eq!(stored(&f), 1);
+    }
+
+    /// A global Never override leaves every folder out of the counter pass
+    /// (owner decision D4): one whose own rule is Ask, and one with no rule
+    /// at all. Their stored rows drop, and clearing the override reads them
+    /// again.
+    #[tokio::test]
+    async fn a_global_never_override_leaves_every_folder_out_of_the_counter_pass() {
+        let f = WatcherFixture::new();
+        f.write_session("ask", "11111111-1111-1111-1111-111111111111", 0);
+        f.write_session("unruled", "22222222-2222-2222-2222-222222222222", 0);
+        f.set_mode("ask", ProjectMode::NotifyOnly);
+        let later = Utc::now() + chrono::Duration::hours(2);
+        let stored = |f: &WatcherFixture| {
+            f.shared.insights_counter.week_value(
+                true,
+                None,
+                chrono::FixedOffset::east_opt(0).unwrap(),
+                later,
+                &crate::daemon::insights_week::NeverFolders::NONE,
+                crate::daemon::insights_week::WeekOptions::default(),
+            )["sessions_stored"]
+                .clone()
+        };
+        f.settle(later).await;
+        f.shared.settings.lock().unwrap().insights_counter_pass = true;
+        tick(&f.shared, later).await.unwrap();
+        assert_eq!(stored(&f), 2);
+
+        f.shared
+            .policy
+            .lock()
+            .unwrap()
+            .set_contribution_override(ProjectMode::Ignore, later, None)
+            .unwrap();
+        tick(&f.shared, later).await.unwrap();
+        assert_eq!(stored(&f), 0, "every folder is Never under the override");
+
+        assert!(
+            f.shared
+                .policy
+                .lock()
+                .unwrap()
+                .clear_contribution_override()
+        );
+        tick(&f.shared, later).await.unwrap();
+        assert_eq!(stored(&f), 2, "read again once the override is cleared");
+    }
+
+    /// A session still being written is not read by the counter pass.
+    #[tokio::test]
+    async fn the_counter_pass_waits_for_quiescence() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.shared.settings.lock().unwrap().insights_counter_pass = true;
+        tick(&f.shared, Utc::now()).await.unwrap();
+        let value = f.shared.insights_counter.week_value(
+            true,
+            None,
+            chrono::FixedOffset::east_opt(0).unwrap(),
+            Utc::now(),
+            &crate::daemon::insights_week::NeverFolders::NONE,
+            crate::daemon::insights_week::WeekOptions::default(),
+        );
+        assert_eq!(value["sessions_stored"], 0);
     }
 
     #[tokio::test]

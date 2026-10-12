@@ -314,6 +314,7 @@ public struct MonitorSessionReviewCopy: MonitorWordTable {
     public let outcomeUnavailable: String
     public let outcomeLoading: String
     public let lookInside: String
+    public let traceDetails: String
     public let enrollToApprove: String
     public let notEligible: String
     public let checkingEligibility: String
@@ -342,6 +343,7 @@ public struct MonitorSessionReviewCopy: MonitorWordTable {
         case outcomeUnavailable = "outcome_unavailable"
         case outcomeLoading = "outcome_loading"
         case lookInside = "look_inside"
+        case traceDetails = "trace_details"
         case enrollToApprove = "enroll_to_approve"
         case notEligible = "not_eligible"
         case checkingEligibility = "checking_eligibility"

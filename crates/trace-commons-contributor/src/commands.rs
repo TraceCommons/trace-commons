@@ -612,7 +612,7 @@ pub(crate) fn logout_summary_lines(inv: &LogoutInventory) -> Vec<String> {
             .unwrap_or_else(|| "unknown (unreadable state)".to_string())
     };
     vec![
-        "about to log out and delete this device's local Trace Commons state:".to_string(),
+        concat!("about to log out and delete this device's local ", crate::app_name!(), " state:").to_string(),
         format!(
             "  receipts   : {} receipt(s), the local record of what this device submitted",
             inv.receipts
@@ -1663,6 +1663,13 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
                 } else {
                     println!("{preview_prefix}refused ({reason_label}) session={session_ref}");
                 }
+            }
+            SubmitOutcome::Failed { reason_label }
+                if reason_label == submit::REASON_RATE_LIMITED =>
+            {
+                // Not a verdict on the session, and nothing was recorded for
+                // it, so running `submit` again sends it.
+                println!("{preview_prefix}{}", submit::RATE_LIMITED_CLI_LINE);
             }
             SubmitOutcome::Failed { reason_label } => {
                 println!("{preview_prefix}failed ({reason_label})");

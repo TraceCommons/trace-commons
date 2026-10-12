@@ -443,7 +443,7 @@ final class TracesStore {
             switch event {
             case .snapshot, .queueChanged, .statusChanged, .resyncRequired:
                 await load()
-            case .digestDue, .reengageDue, .previewReady, .inferenceCallAdded, .unknown:
+            case .digestDue, .reengageDue, .previewReady, .inferenceCallAdded, .usageChanged, .unknown:
                 break
             }
         }

@@ -62,3 +62,37 @@ snapshot lists start collapsed. Opening evidence clears any previous selected
 snapshot before lookup and scrolls the successful result into view; a failed
 lookup cannot retain an unrelated successful result. Schema-v1 summaries refuse
 unknown coverage units and unknown or missing required limitation labels.
+
+## Tabs
+
+The Insights control has tabs: **Overview**, **Patterns**, **Sessions** and
+**Analyze**, as on macOS. Analyze holds the whole screen described above.
+**Spend** sits beside the tabs, disabled, with its "Later" chip and no content.
+A tab reads its figures when it is shown, and the tab on screen reads again
+when the saved list changes.
+
+Overview reads `week_overview` and, for each card's drill-down, `card_inputs`;
+Patterns reads `patterns` and `pattern_sessions`; Sessions reads
+`session_drill` for one saved snapshot, the newest unless another is picked.
+All three count only the sessions you analyzed and saved (feed S) and say so
+with the core's feed lines; week-to-week change reads as the core's dash.
+Claude Code and Codex lines are never summed. An unknown figure is the dash,
+never zero, and a week or turn with no figure is a gap rather than a zero
+bar. Bars are plain rectangles. Files are named only by a letter and an
+extension. Codex sessions show that turn-by-turn usage is not recorded. No
+advice, what-if estimate, project name or cost is shown.
+
+Every word is the core's `ui_copy()` analytics table, read through the `copy`
+operation and marked DRAFT pending approval; the shell authors no sentence, so
+`ShellWordingTests` is unchanged. Every figure is the core's; the view model
+computes only a bar's length on screen. A failed or late read clears the
+tab's figures rather than keep stale ones.
+
+The view models are tested against the responses in
+`tests/fixtures/insights-analytics`, which the local service produced and the
+GTK tests read too. The WinUI markup (a `Pivot`) still requires Windows CI
+compilation and interactive qualification.
+
+The tray menu is a Win32 popup menu of text rows and has no room for a glance
+card, so this shell gets the news mark and tip through the nudge slice W2
+only.

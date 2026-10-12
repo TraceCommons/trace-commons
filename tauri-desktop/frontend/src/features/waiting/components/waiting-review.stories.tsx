@@ -45,7 +45,7 @@ const outcomeCopy = {
   worked: "Worked",
   partly: "Partly",
   failed: "Failed",
-  verdict_caption: "Optional. This is recorded as the trace outcome; the preview above does not show it.",
+  verdict_caption: "Optional. Recorded with the trace; not shown in the preview.",
   correction_question: "What did it get wrong?",
   correction_placeholder: "Optional",
   correction_caption: "Stored exactly as you write it. This correction is not scrubbed.",

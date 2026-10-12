@@ -245,6 +245,14 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("set_settings", params: ["local_notifications": on], as: DaemonData.Settings.self)
     }
 
+    public func setInsightsRecapCard(_ on: Bool) async throws -> DaemonData.Settings {
+        try await call("set_settings", params: ["insights_recap_card_enabled": on], as: DaemonData.Settings.self)
+    }
+
+    public func setInsightsLedgerFeed(_ on: Bool) async throws -> DaemonData.Settings {
+        try await call("set_settings", params: ["insights_ledger_feed": on], as: DaemonData.Settings.self)
+    }
+
     public func setDigestSchedule(_ schedule: DaemonData.DigestSchedule) async throws -> DaemonData.Settings {
         var value: [String: Any] = ["mode": schedule.mode]
         if let hour = schedule.hour { value["hour"] = hour }
@@ -275,6 +283,18 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         var params: [String: Any] = ["limit": limit]
         if let cursor { params["cursor"] = cursor }
         return try await call("inference_calls", params: params, as: DaemonData.InferenceCallPage.self)
+    }
+
+    // MARK: Insights
+
+    public func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek {
+        var params: [String: Any] = ["tz": TimeZone.current.secondsFromGMT()]
+        if let isoWeek { params["iso_week"] = isoWeek }
+        return try await call("insights_week", params: params, as: DaemonData.InsightsWeek.self)
+    }
+
+    public func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance {
+        try await call("insights_glance", params: ["tz": tzSeconds], as: DaemonData.InsightsGlance.self)
     }
 
     // MARK: Network methods (C3, #1187)

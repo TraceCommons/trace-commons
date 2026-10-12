@@ -168,7 +168,7 @@ final class MonitorNavigationTests: XCTestCase {
 
     func test_theInferenceStoreDropsAReadTheOldClientAnswersAfterAttach() async {
         // Four of its five reads reach the daemon (harnesses, calls,
-        // destinations and the Private AI switch, a live `get_settings`
+        // destinations, and the Private AI switch, a live `get_settings`
         // read); the summary is provisional.
         let entered = expectation(description: "every read reached the old daemon")
         entered.expectedFulfillmentCount = 4
@@ -611,10 +611,10 @@ final class MonitorNavigationTests: XCTestCase {
                        "open(MenuPanelData.manageRules(requiresOnboarding: model.requiresOnboarding))"] {
             XCTAssertTrue(panel.contains(needle), "the menu panel never opens \(needle)")
         }
+        // Settings' Private AI section holds the switch and the tools now
+        // (owner, 2026-10-10): no pointer back to the Monitor.
         let pointer = try Self.text("Views/Settings/PrivateAISection.swift")
-        // Outside the Settings modal (which closes itself and opens the
-        // Inference tab, `SettingsModalTests`), the pointer opens the Monitor.
-        XCTAssertTrue(pointer.contains("} else {\n                                OpenMonitor.request(.inference)\n"))
+        XCTAssertFalse(pointer.contains("OpenMonitor.request(.inference)"))
         // The Monitor consumes the destination on an always-present
         // container, initially too, per request rather than per value, and
         // lands Inference on its inspector.
@@ -676,7 +676,7 @@ final class MonitorNavigationTests: XCTestCase {
                                 case .awaiting, .open:
                                     EmptyView()
                                 }
-                                GlassSegmentedTabs(
+                                GlassRuleTabs(
                                     MonitorWords.table?.shell.tabsLabel ?? "",
                                     selection: Binding(
                                         get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
@@ -690,7 +690,7 @@ final class MonitorNavigationTests: XCTestCase {
         """), "before the core says, the pane waits")
         let pane = try XCTUnwrap(window.range(of: "private struct MonitorMainPane"))
         let map = try XCTUnwrap(window.range(of: "private struct MonitorMapPane"))
-        XCTAssertEqual(window[pane.lowerBound ..< map.lowerBound].components(separatedBy: "GlassSegmentedTabs(").count - 1, 1,
+        XCTAssertEqual(window[pane.lowerBound ..< map.lowerBound].components(separatedBy: "GlassRuleTabs(").count - 1, 1,
                        "a second tab strip in the main pane would escape the gate")
         // The main pane's content switches on the shown tab, never the
         // restored one, and the inspector reads the shown tab too.

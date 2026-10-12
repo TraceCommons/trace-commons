@@ -20,7 +20,13 @@ struct InferenceTabView: View {
     /// For the prompts (offers, undos, the first-contribution note), which
     /// head this page now that the inspector stays closed on it.
     let traces: TracesStore
+    /// Opens the Private AI section of Settings.
+    var onOpenSettings: () -> Void = {}
     @EnvironmentObject private var model: AppModel
+
+    /// The core's analytics words (`tc_insights_copy_json`), for each
+    /// call's ledger counters.
+    private static let insightsCopy = TCInsights.copy() ?? [:]
 
     var body: some View {
         // The Folders step scrolls itself, so the switch sits outside the
@@ -45,20 +51,25 @@ struct InferenceTabView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onAppear { model.refreshAll() }
+        // The settings refresh re-reads the ledger feed's switch; this
+        // re-reads the calls, so tokens the daemon stopped sending go too.
+        // Keyed on the switch: Settings is its own window, so this tab can
+        // stay in view while the feed is turned off there.
+        .task(id: model.daemonSettings?.insightsLedgerFeed) { await store.appeared() }
     }
 
     private var ledger: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                // The owner's order (2026-10-09), with the inspector closed on
-                // this tab: the prompts, then the Private AI summary the
-                // inspector used to hold, then the calls, then the managed
-                // cards, the tools, the switch, sign-in, balance and funding.
+                // The owner's order (2026-10-09, 2026-10-10), with the
+                // inspector closed on this tab: the prompts, then the Private
+                // AI summary the inspector used to hold, then the calls, then
+                // the managed cards, balance and funding, and last the card
+                // that opens Settings, where the tools and the connection are.
                 InspectorPrompts(store: traces)
-                PrivateAIInspectorView(
-                    store: store, destinationLabel: model.privateInferenceCopy?.destination)
+                PrivateAIInspectorView(store: store)
                 ledgerSections
-                InferenceAccountSection(store: store)
+                InferenceAccountSection(store: store, onOpenSettings: onOpenSettings)
             }
         }
         .scrollIndicators(.never)
@@ -80,7 +91,10 @@ struct InferenceTabView: View {
                         if let summary = store.summary, summary.readable, !summary.models.isEmpty {
                             models(summary)
                         }
-                        calls(page)
+                        // An empty ledger is said by the totals' zero; the
+                        // card is drawn only for calls to list (owner,
+                        // 2026-10-10: no card for one figure).
+                        if !page.calls.isEmpty { calls(page) }
                     } else {
                         unreadable
                     }
@@ -201,17 +215,9 @@ struct InferenceTabView: View {
 
     private func calls(_ page: DaemonData.InferenceCallPage) -> some View {
         GlassEyebrowCard(MonitorWords.calls) {
-            if page.calls.isEmpty {
-                // Readable and empty: the ledger answered, with nothing in
-                // its window. A zero, which is not the same as unknown.
-                Text("0")
-                    .glassType(GlassTokens.TypeScale.number)
-                    .foregroundStyle(GlassColor.textTertiary)
-            } else {
-                VStack(spacing: 0) {
-                    ForEach(Array(page.calls.enumerated()), id: \.element.id) { index, call in
-                        GlassTableRow(first: index == 0) { callRow(call) }
-                    }
+            VStack(spacing: 0) {
+                ForEach(Array(page.calls.enumerated()), id: \.element.id) { index, call in
+                    GlassTableRow(first: index == 0) { callRow(call) }
                 }
             }
         }
@@ -234,6 +240,18 @@ struct InferenceTabView: View {
                     .foregroundStyle(GlassColor.textTertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                // The ledger's own counters, only while the feed is on: each
+                // as the proxy reported it, never added together.
+                if let tokens = call.tokens {
+                    Text(InferenceTokenWords.line(tokens, copy: Self.insightsCopy))
+                        .glassType(GlassTokens.TypeScale.caption.monospaced)
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        // Read out in place of the line, so the combined row
+                        // says unknown where the line draws the dash.
+                        .accessibilityLabel(InferenceTokenWords.accessibilityLine(tokens, copy: Self.insightsCopy))
+                }
             }
             Spacer(minLength: GlassTokens.Space.s4)
             Text(Self.priced([call.cost]))
@@ -244,13 +262,12 @@ struct InferenceTabView: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// An unreadable ledger: the calls legend cell with a dash, one line
+    /// rather than a card around one figure (owner, 2026-10-10). Unknown,
+    /// never zero.
     private var unreadable: some View {
-        GlassEyebrowCard(MonitorWords.calls) {
-            Text("—")
-                .glassType(GlassTokens.TypeScale.number)
-                .foregroundStyle(GlassColor.textTertiary)
-                .accessibilityLabel(MonitorWords.unknown)
-        }
+        GlassLegendCell(MonitorWords.calls, value: "—", status: .shared)
+            .accessibilityValue(MonitorWords.unknown)
     }
 
     // MARK: Formatting
@@ -303,17 +320,17 @@ struct InferenceTabView: View {
     }
 }
 
-/// The Private AI summary at the top of the Inference tab's main pane
+/// The Private AI summary at the top of the Private AI tab's main pane
 /// (owner, 2026-10-09; it was the tab's inspector, as #1146's
 /// `inference-inspector.tsx` draws it, and the inspector now stays closed
-/// there). A 17pt bold title with "N of M tools connected" under it, the
-/// connected / not connected legend pair, and three rows -- the listener's
-/// state in the core's sentence (never the switch: what was asked for is
-/// not what happened), the credential's state, and which tools are
-/// connected. The balance card is the main pane's, further down.
+/// there). No title of its own: the tab names it (owner, 2026-10-10).
+/// Three rows -- the listener's state in the core's sentence (never the
+/// switch: what was asked for is not what happened), the credential's
+/// state, and which tools are connected -- then the connected / not
+/// connected legend pair under them. The balance card is the main pane's,
+/// further down.
 struct PrivateAIInspectorView: View {
     let store: InferenceStore
-    let destinationLabel: String?
     @EnvironmentObject private var model: AppModel
 
     /// The tools, from the one list the Local tools card and the Private AI
@@ -339,22 +356,8 @@ struct PrivateAIInspectorView: View {
     }
 
     var body: some View {
-        let copy = runningCopy
-        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(destinationLabel ?? MonitorWindowView.Tab.inference.title)
-                    .glassType(GlassTokens.TypeScale.heading.weight(.bold))
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .accessibilityAddTraits(.isHeader)
-                if let copy, let sub = Self.subLine(Self.rows(harnesses), copy: copy) {
-                    Text(sub)
-                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                        .foregroundStyle(GlassColor.textSecondary)
-                }
-            }
-            if let copy {
-                summary(copy)
-            }
+        if let copy = runningCopy {
+            summary(copy)
         }
     }
 
@@ -371,13 +374,6 @@ struct PrivateAIInspectorView: View {
             state: InferenceAccountSection.surfaceState(store.privateAI?.state), copy: copy,
             calls: model.privateInferenceCalls)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            // A list nobody could read is a dash in both cells, never zero.
-            // Always side by side, two equal columns, as #1146's
-            // `.tc-legend` grid is.
-            HStack(spacing: GlassTokens.Space.s3) {
-                GlassLegendCell(copy.inspectorConnected, value: counts.connected, status: .on)
-                GlassLegendCell(copy.inspectorNotConnected, value: counts.notConnected, status: .off)
-            }
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 // #1146: the Status dot is on while working, outside otherwise.
                 InspectorFactRow(label: copy.inspectorStatus, value: state.line,
@@ -388,15 +384,15 @@ struct PrivateAIInspectorView: View {
                 InspectorFactRow(label: copy.inspectorConnectedTools, value: Self.names(rows, copy: copy))
             }
             .padding(.horizontal, GlassTokens.Space.s2)
+            // Under the Connected tools row they count (owner, 2026-10-10).
+            // A list nobody could read is a dash in both cells, never zero.
+            // Always side by side, two equal columns, as #1146's
+            // `.tc-legend` grid is.
+            HStack(spacing: GlassTokens.Space.s3) {
+                GlassLegendCell(copy.inspectorConnected, value: counts.connected, status: .on)
+                GlassLegendCell(copy.inspectorNotConnected, value: counts.notConnected, status: .off)
+            }
         }
-    }
-
-    /// "N of M tools connected", or nil when the list was not read.
-    static func subLine(_ rows: [HarnessRow]?, copy: PrivateInferenceCopy) -> String? {
-        guard let rows else { return nil }
-        return copy.inspectorToolsConnected
-            .replacingOccurrences(of: "{connected}", with: String(rows.filter(\.connected).count))
-            .replacingOccurrences(of: "{total}", with: String(rows.count))
     }
 
     /// Connected and not connected, or a dash for each when the list was
@@ -449,6 +445,40 @@ private struct InspectorFactRow: View {
         }
         .glassType(GlassTokens.TypeScale.body)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// A call's four ledger counters, each with the core's label, in a fixed
+/// order: input, cache read, cache write, output. Never added together
+/// (on the OpenAI family, input already holds the cache reads). A counter
+/// the proxy did not report is the dash; a measured zero stays zero.
+enum InferenceTokenWords {
+    private static let labels = [
+        "metric_input_tokens", "analytics_series_cache_read", "analytics_series_cache_write",
+        "metric_output_tokens",
+    ]
+
+    private static func counters(_ tokens: DaemonData.InferenceCallTokens) -> [UInt32?] {
+        [tokens.input, tokens.cacheRead, tokens.cacheWrite, tokens.output]
+    }
+
+    static func line(_ tokens: DaemonData.InferenceCallTokens, copy: [String: String]) -> String {
+        pairs(tokens, copy: copy) { InsightsOverviewWords.figure(nil, copy: copy) }
+    }
+
+    /// The same pairs read out, with unknown where the line draws the dash.
+    static func accessibilityLine(_ tokens: DaemonData.InferenceCallTokens, copy: [String: String]) -> String {
+        pairs(tokens, copy: copy) { MonitorWords.unknown }
+    }
+
+    private static func pairs(
+        _ tokens: DaemonData.InferenceCallTokens, copy: [String: String], unknown: () -> String
+    ) -> String {
+        zip(labels, counters(tokens)).map { key, value in
+            let figure = value.map { InsightsOverviewWords.figure(UInt64($0), copy: copy) } ?? unknown()
+            return "\(InsightsOverviewWords.text(key, copy)) \(figure)"
+        }
+        .joined(separator: " · ")
     }
 }
 

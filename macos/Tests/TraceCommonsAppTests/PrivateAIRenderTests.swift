@@ -28,9 +28,12 @@ final class PrivateAIRenderTests: XCTestCase {
             ScrollView { InferenceAccountSection(store: store) }.environmentObject(model),
             size: CGSize(width: 360, height: 1400), to: directory.appendingPathComponent("private-ai-page.png"))
         try render(
-            PrivateAIInspectorView(store: store, destinationLabel: model.privateInferenceCopy?.destination)
+            PrivateAIInspectorView(store: store)
                 .environmentObject(model),
             size: CGSize(width: 300, height: 640), to: directory.appendingPathComponent("private-ai-inspector.png"))
+        try render(
+            ScrollView { PrivateAISettingsPanels(store: store) }.environmentObject(model),
+            size: CGSize(width: 520, height: 1400), to: directory.appendingPathComponent("private-ai-settings.png"))
     }
 
     @MainActor

@@ -9,14 +9,14 @@ import XCTest
 /// the request and place its id names.
 final class NudgeNotificationTests: XCTestCase {
     private static let idleFrame = #"""
-        {"event":"reengage_due","data":{"kind":"idle_sessions","title":"Trace Commons",
+        {"event":"reengage_due","data":{"kind":"idle_sessions","title":"Near.ai",
          "body":"2 sessions from Codex have been idle for 3 days or more. Review them to send or keep.",
          "actions":[{"id":"review","label":"Review"},{"id":"not_now","label":"Not now"}]}}
         """#
 
     private static var idle: DaemonData.ReengageDue {
         DaemonData.ReengageDue(
-            kind: "idle_sessions", title: "Trace Commons",
+            kind: "idle_sessions", title: "Near.ai",
             body: "2 sessions from Codex have been idle for 3 days or more. Review them to send or keep.",
             actions: [.init(id: "review", label: "Review"), .init(id: "not_now", label: "Not now")])
     }
@@ -31,7 +31,7 @@ final class NudgeNotificationTests: XCTestCase {
     /// set of buttons.
     func testAReengagementIsPostedInTheDaemonsWords() throws {
         let plan = try XCTUnwrap(Notifier.plan(Self.idle))
-        XCTAssertEqual(plan.title, "Trace Commons")
+        XCTAssertEqual(plan.title, "Near.ai")
         XCTAssertEqual(plan.body, Self.idle.body)
         XCTAssertEqual(plan.buttons.map(\.label), ["Review", "Not now"])
         XCTAssertEqual(plan.buttons.map(\.identifier), ["trace-commons.nudge.review", "trace-commons.nudge.not_now"])
@@ -61,7 +61,7 @@ final class NudgeNotificationTests: XCTestCase {
             actionIdentifier: "trace-commons.nudge.not_now", userInfo: [Notifier.kindKey: "verdicts_landed"]))
 
         let verdicts = try XCTUnwrap(Notifier.plan(.init(
-            kind: "verdicts_landed", title: "Trace Commons", body: "2 sessions accepted and 1 held for privacy review.",
+            kind: "verdicts_landed", title: "Near.ai", body: "2 sessions accepted and 1 held for privacy review.",
             actions: [.init(id: "see_history", label: "See history")])))
         XCTAssertEqual(Notifier.nudgeIntent(actionIdentifier: UNNotificationDefaultActionIdentifier, userInfo: verdicts.userInfo),
                        .seeHistory)
@@ -94,7 +94,7 @@ final class NudgeNotificationTests: XCTestCase {
 
         let idle = try XCTUnwrap(Notifier.plan(Self.idle))
         let verdicts = try XCTUnwrap(Notifier.plan(.init(
-            kind: "verdicts_landed", title: "Trace Commons", body: "B",
+            kind: "verdicts_landed", title: "Near.ai", body: "B",
             actions: [.init(id: "see_history", label: "See history")])))
         for plan in [idle, verdicts] {
             let registered = try XCTUnwrap(launch.first { $0.identifier == plan.categoryIdentifier })

@@ -14,10 +14,15 @@
 //!
 //! # PROVISIONAL: shape owned by Z7/Z8
 //!
-//! The server catalogue does not exist yet. Until Z7/Z8 publish one, the
-//! catalogue arrives as a parameter of the `mission_matches` IPC call, and
-//! this type is the minimum matching needs. Z7/Z8 own the shape; expect it to
-//! change, under a new `schema_version`. It is read leniently -- unknown
+//! The server publishes what to match on as an optional, versioned predicate
+//! on each activity mission
+//! (`trace_commons_protocol::activity_missions::MissionPredicateV1`). The
+//! daemon's scheduled refresh turns the missions carrying a version-1
+//! predicate into this catalogue for its mission slot
+//! (`daemon::activity_missions::contribution_catalogue`); the
+//! `mission_matches` IPC call still takes one as a parameter. This type is
+//! the minimum matching needs; expect it to change, under a new
+//! `schema_version`. It is read leniently -- unknown
 //! fields are ignored and every field but `schema_version` and `mission_id`
 //! has a default -- so a catalogue written for a later minor addition still
 //! loads. A catalogue whose `schema_version` is newer than this build knows

@@ -58,7 +58,7 @@ export function OnboardingPage({
     heading.focus();
   }, [onboarding.step]);
   const pageTitles = {
-    welcome: "Welcome to Trace Commons",
+    welcome: "Welcome to Near.ai",
     roots: "Choose source roots",
     connect: "Connect a commons",
     consent: "Choose your consent",

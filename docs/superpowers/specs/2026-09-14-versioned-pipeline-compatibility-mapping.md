@@ -44,6 +44,8 @@ inserts vectors while it scores. The new path splits that work.
 | random `entry_id` | Deterministic index key: tenant, index, revision, projection, model, chunk |
 | `NoveltyUtility` credit event when both floors pass | Score award of the configured delta for `trace_credit`. Settle records it as a `NoveltyUtility` ledger event, which does not settle. |
 | credit quality `q_micros` | Score evidence `credit_quality_micros` and `credit_quality_version`. No award. |
+| driver `skipped_duplicate` (duplicate score at or above `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS` while `..._SKIP_DUPLICATES`) | Not a shadow value: it decides what the contributor sees. The gate decision row records `credit_withheld_reason = skipped_duplicate` and no credit quality, and the `NoveltyUtility` leg is withheld under the same label. Score evidence is unchanged. |
+| driver `cached` (an earlier submission with the same canonical summary hash has a decision) | As `skipped_duplicate`, under `cached`. |
 | dedup penalty, contributor cap, `anomaly_withheld` | Shadow values on `main`. This contract does not store them. No award, and no effect on index membership. |
 | Review before Score | Unchanged. A Score failure does not change a Review outcome. |
 
@@ -76,6 +78,77 @@ values on `main`. They make no award and do not change index membership.
 This contract does not store them. The compatibility adapter adds fields
 for them when it records them.
 
+`main`'s perplexity-scoring driver has two duplicate short-circuits that are
+not shadow values, because the contributor status reads them: a
+`skipped_duplicate` or `cached` decision row shows 0.0 pending and "This trace
+duplicates an earlier submission under your account and earns no separate
+credit." A compatibility run applies both, in `main`'s order, when it writes
+its gate decision row at Settle, with `main`'s knobs
+(`TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES`, default true, and
+`TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS`, default
+900000), which ingest passes to the runtime as part of
+`PipelineNoveltyUtilityChecks::duplicate_controls`, read whether or not the
+driver itself is enabled, and refuses an assembly that does not hold:
+
+- the Review commit records `canonical_summary_for_embedding` of the approved
+  envelope and its hash on its current derived record (not on the submission
+  row, whose `canonical_summary_hash` stays NULL);
+- `skipped_duplicate` when `main`'s precheck duplicate score of that summary,
+  against the derived records of the tenant's submissions received earlier,
+  is at or above the threshold (an equal hash scores 1.0 and is checked
+  first, without reading any summary);
+- otherwise `cached` when a submission received earlier with the same
+  canonical summary hash (on its submission row or a derived record) has a
+  gate decision.
+
+The verdict is decided once per run, when Settle first persists its
+selection, before the index write that selection arms and before any leg can
+pay. A duplicate's selection records index membership `Exclude` under its
+label, whatever the Settle policy chose, and the persisted selection is the
+only place the verdict is read from afterwards: the Trace Credit leg's
+pre-dispatch check, the gate decision row and the committed Settle decision
+all take it from there. Nothing re-decides it, so a neighbour's later
+progress cannot withhold a dispatched leg, label a paid one, or remove an
+indexed run. A selection an earlier server persisted, before this rule,
+carries no verdict and reads as no duplicate.
+
+The verdict is a server runtime input (the duplicate controls), not bundle
+policy: the Settle policy and the bundle package, and so the package hash,
+are unchanged, and the server overrides only the membership its own
+selection records.
+
+A duplicate is not indexed, as on `main`, whose driver records a duplicate
+without scoring or indexing it: its run ends `excluded` with no index write,
+so a later trace's novelty and the index cardinality are what they would be
+had the duplicate never arrived, and an index rebuild from the authoritative
+commands (which reads only `included` runs) reproduces the live index without
+it. A duplicate row keeps the Score values and the outcome hash, records the
+label as `credit_withheld_reason`, and holds no credit quality; the Trace
+Credit leg is withheld under the same label, since `main` emits no
+`NoveltyUtility` event for a submission it did not score. The Score evidence
+is unchanged.
+
+Four differences from `main` follow:
+
+1. Candidates are limited to submissions received earlier, so two runs
+   settling in either order never withhold each other. `main`'s `cached` has
+   no time bound.
+2. A candidate counts only once its Review has committed, where `main` writes
+   its derived record at submit, so an earlier duplicate still in quarantine
+   is not seen.
+3. The direction is one-way. A later legacy submission is never `cached`
+   against an earlier pipeline one: `main`'s
+   `find_gate_decision_by_canonical_hash` reads only
+   `trace_submissions.canonical_summary_hash`, which stays NULL for a
+   pipeline submission. Withdrawal tombstones, which read that column too,
+   are unchanged.
+4. Legacy readers of derived records (`list_trace_derived_records`, the
+   reviewer metadata views, the ranker export's summary-hash dedupe) now see
+   a pipeline submission's canonical summary and hash. The ranker exports,
+   the benchmark export and process evaluation leave pipeline submissions
+   out (#1185, L1-2), so their dedupe never sees one. The vector index worker reads only `duplicate_precheck` records,
+   and the pipeline's are `summary` records, so it is unaffected.
+
 An empty Score award set is a completed decision. It is not an incomplete
 Score phase.
 
@@ -101,6 +174,10 @@ active index. It does not create a credit event.
 ## Privacy, rejection, and zero credit
 
 Admission and Review stay on the authority and privacy policies. A terminal Admission
-rejection has one outcome. A Review rejection has two. Score does not
+rejection has one outcome. A Review rejection has two. Admission does not
+reject on privacy risk: a High-risk receipt is quarantined for a human
+(`privacy_risk_high_review_required`, owner decision PC-D27, 2026-10-11),
+as a Medium one is (`privacy_review_required`), and only a reviewer's
+rejection ends it. Score does not
 run after those rejections. A clean fixture can receive a completed zero
 or positive Score. The report must keep those states distinct.

@@ -137,18 +137,33 @@ final class SettingsParityTests: XCTestCase {
                 confirmations: ["FolderPanel.choose()"],
                 accessibility: ["GlassToggleStyle(.settings)", ".accessibilityLabel(copy.portTitle)",
                                 ".accessibilityLabel(copy.folderTitle)", ".accessibilityElement(children: .combine)"]),
+        Section(glass: "Views/Settings/InsightsSettingsCard.swift",
+                bindings: ["settings.insightsCounterPass", "settings.insightsRecapCardEnabled", "lever.enabled",
+                           "model.setInsightsSwitch(.counterPass,", "model.setInsightsSwitch(.recapCard,",
+                           "lever.set(", "model.insightsSwitchBusy", "model.insightsSwitchRefusal", "lever.busy",
+                           "lever.refusal", "model.refreshSettings()", "lever.load()"],
+                copySources: ["TCInsights.copy()", "\"analytics_setting_counter_pass\"",
+                              "\"analytics_setting_recap_card\"", "\"analytics_setting_lever\"", "text(\"title\")"],
+                confirmations: [],
+                accessibility: ["GlassToggleStyle(.settings)"]),
         Section(glass: "Views/Settings/PrivateAISection.swift",
-                bindings: ["model.privateInferenceCopy", "OpenMonitor.request(.inference)",
-                           "model.routeDisclosureState", "model.routeDisclosureUnreadableCopy", "model.refreshRouteDisclosure()"],
-                copySources: ["copy.settingsTitle", "copy.settingsMoved", "copy.destination",
-                              "copy.route", "copy.localFilter", "witness.heading", "witness.addressLabel", "witness.signingLabel",
+                bindings: ["PrivateAISettingsPanels(store: store)", "store.attach(", "await store.run()",
+                           "model.routeDisclosureState", "model.routeDisclosureUnreadableCopy", "model.refreshRouteDisclosure()",
+                           // The Insights ledger feed's off switch (on by
+                           // default, owner ruling 2026-10-09; moved here
+                           // from Tools, Ron's #1287 review), after first run.
+                           "model.daemonSettings?.insightsLedgerFeed", "model.setInsightsLedgerFeed(",
+                           "model.insightsLedgerFeedBusy", "model.insightsLedgerFeedRefusal",
+                           "!model.requiresOnboarding"],
+                copySources: ["copy.route", "copy.localFilter", "witness.heading", "witness.addressLabel", "witness.signingLabel",
                               "witness.measurementsLabel", "witness.check", "witness.classifier", "witness.origin",
                               "copy.attestedBodies", "copy.receipts", "facts.url", "facts.signingAddress", "facts.pinnedMeasurements",
                               "disclosure.copy.title", "model.routeDisclosureUnreadableCopy?.title",
                               "model.routeDisclosureUnreadableCopy?.panel", "MonitorScreensCopy.decode(",
-                              "monitorScreensCopyJSON()"],
+                              "monitorScreensCopyJSON()",
+                              "TCInsights.copy()", "\"analytics_setting_ledger_feed\"", "\"analytics_feed_ledger\""],
                 confirmations: [],
-                accessibility: [".accessibilityElement(children: .combine)"]),
+                accessibility: [".accessibilityElement(children: .combine)", "GlassToggleStyle(.settings)"]),
         Section(glass: "Views/Settings/WitnessSection.swift",
                 bindings: ["model.witnessCopy", "= model.witnessState\n", "model.witnessStateCode", "model.witnessStatus?.refusal",
                            "model.witnessStatus?.pinnedMeasurementLine", "model.witnessLabel", "model.witnessBusy", "model.witnessCalls",
@@ -307,8 +322,10 @@ final class SettingsParityTests: XCTestCase {
                      "struct RouteDisclosureUnreadableGlassLine: View"] {
             XCTAssertEqual(source.components(separatedBy: name).count - 1, 1, "\(name) is not declared exactly once")
         }
-        XCTAssertTrue(source.contains("Button(copy.destination)"))
-        XCTAssertTrue(source.contains(".buttonStyle(GlassButtonStyle(.link))"))
+        // The panels are the section's own now (owner, 2026-10-10): no
+        // pointer back to the Monitor.
+        XCTAssertFalse(source.contains("Button(copy.destination)"))
+        XCTAssertTrue(source.contains("PrivateAISettingsPanels(store: store)"))
         for arm in ["case .shown(let disclosure):", "case .loading:", "case .unreadable:"] {
             XCTAssertEqual(source.components(separatedBy: arm).count - 1, 1, "\(arm) is not drawn exactly once")
         }
@@ -493,6 +510,6 @@ final class SettingsParityTests: XCTestCase {
             XCTAssertFalse(source.contains(".tcScreen()"), rel)
         }
         let modal = try Self.text("Views/Monitor/SettingsModal.swift")
-        XCTAssertTrue(modal.contains("GlassSettingsContent(navigation: navigation, section: item, onPrivateAI: onPrivateAI)"))
+        XCTAssertTrue(modal.contains("GlassSettingsContent(navigation: navigation, section: item)"))
     }
 }

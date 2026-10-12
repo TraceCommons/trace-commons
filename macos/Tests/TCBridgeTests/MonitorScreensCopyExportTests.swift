@@ -30,7 +30,7 @@ final class MonitorScreensCopyExportTests: XCTestCase {
         let link = rail.open(section: copy.settingsNav.tools)
         XCTAssertEqual(link.text, "Open " + copy.settingsNav.tools)
         XCTAssertTrue(link.label.hasPrefix(link.text))
-        XCTAssertTrue(link.label.hasSuffix("Trace Commons"))
+        XCTAssertTrue(link.label.hasSuffix("Near.ai"))
     }
 
     /// Ron's #1146 Settings modal over the Monitor (#1241 Task 10): its
