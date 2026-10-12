@@ -452,7 +452,7 @@ pub fn first_run_copy() -> FirstRunCopy {
         join: JoinCopy {
             title_light: "Get started on ",
             title_bold: "your terms",
-            body: "Start with an invite link, sign-up or sign-in with an existing account, or just click \"Skip\". You'll be able to setup or connect your account later.",
+            body: "Sign in with your NEAR AI account, or click \"Skip\". You can sign in later.",
             invite_eyebrow: "Invite link",
             invite_placeholder: "https://issuer.tracecommons.ai/onboard#…",
             look_up: "Look up",

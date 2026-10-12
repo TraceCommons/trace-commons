@@ -387,6 +387,10 @@ public struct GlassStepProgress: View {
         self.stateValues = stateValues
     }
 
+    /// The step dot's side, and its halo's: 3pt of ring all round.
+    static let dotSide: CGFloat = 14
+    static let haloSide: CGFloat = 20
+
     /// The accessibility value of the step at `index`.
     func value(at index: Int) -> String {
         guard let stateValues else { return "" }
@@ -405,14 +409,22 @@ public struct GlassStepProgress: View {
                         .accessibilityHidden(true)
                 }
                 VStack(spacing: GlassTokens.Space.s3) {
-                    Circle()
-                        .fill(index <= current ? GlassTokens.Color.purpleSoft.color : GlassTokens.Color.wellFill.color)
-                        .frame(width: 14, height: 14)
-                        .overlay {
-                            if index <= current {
-                                Circle().stroke(GlassTokens.Color.purpleSoft.color.opacity(0.25), lineWidth: 3).padding(-1.5)
-                            }
+                    // The halo is a filled 20pt disc behind the 14pt dot, both
+                    // centred by the ZStack, so the ring is concentric at any
+                    // scale; a stroke inset by a negative padding was not
+                    // (owner, 2026-10-12). The 14pt frame keeps the layout:
+                    // the halo overflows it by 3pt on each side.
+                    ZStack {
+                        if index <= current {
+                            Circle()
+                                .fill(GlassTokens.Color.purpleSoft.color.opacity(0.25))
+                                .frame(width: Self.haloSide, height: Self.haloSide)
                         }
+                        Circle()
+                            .fill(index <= current ? GlassTokens.Color.purpleSoft.color : GlassTokens.Color.wellFill.color)
+                            .frame(width: Self.dotSide, height: Self.dotSide)
+                    }
+                    .frame(width: Self.dotSide, height: Self.dotSide)
                     Text(label)
                         // #1146's step label tracks 0.06em, tighter than an eyebrow.
                         .glassType(GlassTokens.TypeScale.eyebrow.tracking(GlassTokens.TypeScale.eyebrow.size * 0.06))

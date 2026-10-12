@@ -941,13 +941,39 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertLessThan(frameCall.lowerBound, note.lowerBound)
         XCTAssertLessThan(note.lowerBound, content.lowerBound, "an argument of the frame, not content")
 
-        // The extra gap, a spacing token, above the invite card, and
-        // nowhere else.
+        // The extra gap, a spacing token, above the cards, and nowhere
+        // else. The near.ai card leads (owner, 2026-10-12); a held invite
+        // or passkey follows it.
         XCTAssertEqual(JoinScreenLayout.extraGap, GlassTokens.Space.s4)
         XCTAssertEqual(source.components(separatedBy: ".padding(.top, JoinScreenLayout.extraGap)").count - 1, 1)
-        let invite = try XCTUnwrap(source.range(of: "inviteCard\n                .padding(.top, JoinScreenLayout.extraGap)"))
-        let passkey = try XCTUnwrap(source.range(of: "passkeyCard\n            nearAICard"))
+        let near = try XCTUnwrap(source.range(of: "VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {\n                nearAICard"))
+        let invite = try XCTUnwrap(source.range(of: "if JoinScreenLayout.showsInviteCard(runner.state) {\n                    inviteCard"))
+        let passkey = try XCTUnwrap(source.range(of: "if JoinScreenLayout.showsPasskeyCard(runner.state) {\n                    passkeyCard"))
+        XCTAssertLessThan(near.lowerBound, invite.lowerBound)
         XCTAssertLessThan(invite.lowerBound, passkey.lowerBound)
+    }
+
+    /// Join offers near.ai alone (owner, 2026-10-12): a fresh run shows no
+    /// invite or passkey card; a held invite or passkey brings its card
+    /// back, so a held account is never hidden.
+    func test_joinShowsTheOtherCardsOnlyForWhatIsHeld() {
+        var state = FirstRunState()
+        XCTAssertFalse(JoinScreenLayout.showsInviteCard(state))
+        XCTAssertFalse(JoinScreenLayout.showsPasskeyCard(state))
+
+        state.invite = "https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6"
+        XCTAssertTrue(JoinScreenLayout.showsInviteCard(state))
+        state.invite = ""
+        state.enrolledInvite = "https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6"
+        XCTAssertTrue(JoinScreenLayout.showsInviteCard(state))
+
+        state = FirstRunState()
+        state.account = .passkeyChosen
+        XCTAssertTrue(JoinScreenLayout.showsPasskeyCard(state))
+        state.account = .passkey(name: "Work")
+        XCTAssertTrue(JoinScreenLayout.showsPasskeyCard(state))
+        state.account = .nearAI
+        XCTAssertFalse(JoinScreenLayout.showsPasskeyCard(state))
     }
 
     /// Every word on Join is the core's: the file holds no literal of two or

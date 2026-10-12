@@ -155,6 +155,19 @@ enum JoinScreenLayout {
         }
     }
 
+    /// Join offers near.ai alone (owner, 2026-10-12). The invite card is
+    /// drawn only while an invite is held -- one opened from a link, or
+    /// enrolled on an earlier run -- so what was joined is still shown.
+    static func showsInviteCard(_ state: FirstRunState) -> Bool {
+        holdsInvite(state)
+    }
+
+    /// The passkey card is drawn only while a passkey is held or chosen, so
+    /// it can be named or undone; Join never offers to make one.
+    static func showsPasskeyCard(_ state: FirstRunState) -> Bool {
+        passkeyDone(state) || passkeyChosen(state)
+    }
+
     /// An invite is held: pasted and found, or already enrolled.
     static func holdsInvite(_ state: FirstRunState) -> Bool {
         !state.invite.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.enrolledInvite != nil
@@ -467,10 +480,19 @@ struct JoinScreen: View {
         ) {
             title
         } content: {
-            inviteCard
-                .padding(.top, JoinScreenLayout.extraGap)
-            passkeyCard
-            nearAICard
+            // Join promotes the near.ai sign-in alone (owner, 2026-10-12).
+            // The invite and passkey cards come back only to show what is
+            // already held, so a held account is never hidden.
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+                nearAICard
+                if JoinScreenLayout.showsInviteCard(runner.state) {
+                    inviteCard
+                }
+                if JoinScreenLayout.showsPasskeyCard(runner.state) {
+                    passkeyCard
+                }
+            }
+            .padding(.top, JoinScreenLayout.extraGap)
             if let notice = JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy) {
                 GlassAlert(notice)
             }
