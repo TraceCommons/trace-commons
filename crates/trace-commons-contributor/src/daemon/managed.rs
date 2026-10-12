@@ -71,6 +71,11 @@ impl ManagedService {
         Ok((self.sessions.redeem(session_id, ticket)?, on_sign_in))
     }
 
+    #[cfg(test)]
+    pub(crate) fn route_count(&self) -> usize {
+        self.routes.len()
+    }
+
     /// Take the proxies whose sessions no longer run, or every proxy.
     fn take_routes(&mut self, all: bool) -> Vec<ManagedRoute> {
         let ids: Vec<Uuid> = self

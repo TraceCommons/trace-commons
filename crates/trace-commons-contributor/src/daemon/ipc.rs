@@ -13418,6 +13418,123 @@ mod tests {
         assert_eq!(body["defaults"], serde_json::json!([]));
     }
 
+    /// The daemon-hosted proxy for a session on the NEAR AI sign-in: the
+    /// launcher is told a loopback port and never the key, the key reaches
+    /// NEAR AI through the proxy, an exited session's proxy is shut down,
+    /// and a sign-out shuts down the rest.
+    #[tokio::test]
+    async fn managed_sign_in_redeem_hosts_the_proxy_and_ends_it() {
+        use axum::{Json, Router, extract::State, http::HeaderMap, routing::get};
+        type Seen = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+        async fn models(State(seen): State<Seen>, headers: HeaderMap) -> Json<serde_json::Value> {
+            if let Some(auth) = headers.get("authorization") {
+                seen.lock().unwrap().push(auth.to_str().unwrap().into());
+            }
+            Json(serde_json::json!({"data":[{"id":"fixture-model"}]}))
+        }
+        let seen: Seen = Default::default();
+        let app = Router::new()
+            .route("/v1/models", get(models))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        crate::managed::route::TEST_BASE_URL
+            .set(endpoint.clone())
+            .expect("only this test points routes at a fixture");
+
+        let s = shared();
+        s.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-route-fixture-key".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-rou".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        let cwd = tempfile::tempdir().unwrap();
+        let routes = |s: &DaemonShared| s.managed.lock().unwrap().as_ref().unwrap().route_count();
+        let launch = |tool: &str| {
+            let tool_id = if tool == "claude" {
+                crate::managed::ToolId::Claude
+            } else {
+                crate::managed::ToolId::Codex
+            };
+            serde_json::json!({
+                "request_id": uuid::Uuid::new_v4(),
+                "tool": tool,
+                "connection": "near_ai_signin",
+                "account_id": crate::managed::signin::account_id(tool_id),
+                "cwd": cwd.path(),
+                "expected_generation": 0,
+            })
+        };
+        let redeem = async |tool: &str| {
+            let prepared = handle_request_async(&s, &req("managed_launch_prepare", launch(tool)))
+                .await
+                .result
+                .expect("prepared");
+            handle_request_async(
+                &s,
+                &req(
+                    "managed_launch_redeem",
+                    serde_json::json!({"session_id": prepared["session_id"], "ticket": prepared["ticket"]}),
+                ),
+            )
+            .await
+            .result
+            .expect("redeemed")
+        };
+
+        let context = redeem("claude").await;
+        let port = context["route_port"].as_u64().expect("a loopback port");
+        assert!(port > 0);
+        assert!(
+            !context.to_string().contains("sk-route-fixture-key"),
+            "{context}"
+        );
+        assert_eq!(routes(&s), 1);
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|a| a == "Bearer sk-route-fixture-key"),
+            "the key reached NEAR AI through the proxy"
+        );
+
+        // The session runs, then exits: its proxy goes with it.
+        let report = |state: &str, exit: Option<i32>| {
+            serde_json::json!({
+                "session_id": context["session"]["id"],
+                "proof": context["proof"],
+                "state": state,
+                "process_id": 4242,
+                "process_identity": "4242:1",
+                "exit_code": exit,
+            })
+        };
+        let r =
+            handle_request_async(&s, &req("managed_session_report", report("running", None))).await;
+        assert!(r.error.is_none());
+        assert_eq!(routes(&s), 1);
+        let r = handle_request_async(
+            &s,
+            &req("managed_session_report", report("exited", Some(0))),
+        )
+        .await;
+        assert!(r.error.is_none());
+        assert_eq!(routes(&s), 0);
+
+        // A second session loses its proxy when the sign-in goes.
+        redeem("codex").await;
+        assert_eq!(routes(&s), 1);
+        s.settings.lock().unwrap().near_ai_inference = None;
+        crate::daemon::managed::close_routes_without_sign_in(&s).await;
+        assert_eq!(routes(&s), 0);
+        server.abort();
+    }
+
     /// A second credential in the same document as the privacy-filter one,
     /// and the same rule: presence crosses the socket, the value never does.
     #[test]
