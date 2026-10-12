@@ -4471,6 +4471,10 @@ impl AppState {
         let account_admission = admission::account_config_from_env(
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
+        admission::require_legacy_evidence_policy(
+            account_admission.is_some(),
+            admission.is_some(),
+        )?;
         let account_trust_shadow_policy =
             account_trust_growth_routes::shadow_policy_from_env()?.map(Arc::new);
         if let Some(account_config) = account_admission.as_ref() {

@@ -87,6 +87,12 @@ pub struct AccountAdmissionReservation {
     pub lease_id: Uuid,
     pub policy: BoundedPolicy,
     pub lease_seconds: i64,
+    /// The caller verified fresh NEAR AI admission evidence for this exact
+    /// account and body (`admission_evidence::verify_admission_evidence`).
+    /// A new reservation made on it debits no allowance and is recorded as
+    /// `authority_kind = 'attested'`. Ignored for a submission that already
+    /// has a row: the kind its first reservation recorded is kept.
+    pub attested: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -461,7 +467,7 @@ impl PgBackend {
         // Every submission ID binds once to an account and exact body, even
         // when a lease expires or the policy changes.
         let prior = tx.query_opt(
-            "SELECT account_id,body_hash,status,lease_expires_at > clock_timestamp() FROM trace_account_admission_submissions
+            "SELECT account_id,body_hash,status,lease_expires_at > clock_timestamp(),authority_kind FROM trace_account_admission_submissions
              WHERE tenant_id=$1 AND submission_id=$2 FOR UPDATE",
             &[&tenant, &r.submission_id],
         ).await.map_err(|_| database_refused())?;
@@ -478,7 +484,16 @@ impl PgBackend {
                 return Ok(AdmissionDecision::Busy.into());
             }
         }
-        let charged = authority != "invited";
+        // The admitting authority is fixed by the first reservation, like the
+        // account and body binding: a retry neither gains nor loses it.
+        let attested = match prior {
+            Some(ref prior) => prior.get::<_, String>(4) == "attested",
+            None => r.attested,
+        };
+        let authority_kind = if attested { "attested" } else { "account" };
+        // Attested uploads buy volume directly: no budget row is created or
+        // read, so neither the allowance nor its freeze rule below applies.
+        let charged = authority != "invited" && !attested;
         let allowance = if charged {
             account_effective_allowance(&tx, tenant, account, &r.policy, FrontierRead::Locked)
                 .await?
@@ -525,13 +540,19 @@ impl PgBackend {
             tx.execute("UPDATE trace_account_admission_submissions SET status='reserved',lease_id=$3,lease_expires_at=$4,last_cost_bound=$5,last_charged=$6,trust_version=$7,policy_version=$8,period_id=$9,earned_tier=$10,trust_evaluation_digest=$11 WHERE tenant_id=$1 AND submission_id=$2",
                 &[&tenant,&r.submission_id,&r.lease_id,&lease_expires,&r.policy.processing_cost_bound(),&charged,&version,&r.policy.version(),&period_id,&allowance.tier,&allowance.digest]).await.map_err(|_|database_refused())?;
         } else {
-            tx.execute("INSERT INTO trace_account_admission_submissions(tenant_id,submission_id,account_id,body_hash,authority_kind,trust_version,policy_version,period_id,status,lease_id,lease_expires_at,last_cost_bound,last_charged,earned_tier,trust_evaluation_digest) VALUES($1,$2,$3,$4,'account',$5,$6,$7,'reserved',$8,$9,$10,$11,$12,$13)",
-                &[&tenant,&r.submission_id,&account,&r.body_hash,&version,&r.policy.version(),&period_id,&r.lease_id,&lease_expires,&r.policy.processing_cost_bound(),&charged,&allowance.tier,&allowance.digest]).await.map_err(|_|database_refused())?;
+            tx.execute("INSERT INTO trace_account_admission_submissions(tenant_id,submission_id,account_id,body_hash,authority_kind,trust_version,policy_version,period_id,status,lease_id,lease_expires_at,last_cost_bound,last_charged,earned_tier,trust_evaluation_digest) VALUES($1,$2,$3,$4,$14,$5,$6,$7,'reserved',$8,$9,$10,$11,$12,$13)",
+                &[&tenant,&r.submission_id,&account,&r.body_hash,&version,&r.policy.version(),&period_id,&r.lease_id,&lease_expires,&r.policy.processing_cost_bound(),&charged,&allowance.tier,&allowance.digest,&authority_kind]).await.map_err(|_|database_refused())?;
         }
         tx.commit().await.map_err(|_| database_refused())?;
         Ok(AccountAdmissionResult {
             decision: AdmissionDecision::Reserved,
-            authority: Some(if charged { "bounded" } else { "invited" }),
+            authority: Some(if attested {
+                "attested"
+            } else if charged {
+                "bounded"
+            } else {
+                "invited"
+            }),
             retry_after_seconds: None,
             period_spend: None,
         })
