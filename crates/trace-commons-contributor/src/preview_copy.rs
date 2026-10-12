@@ -1171,8 +1171,15 @@ pub struct MonitorHomeHistoryCopy {
     /// Home's way into the commons mission catalogue, which #1146 has no
     /// place for (its Missions card is the drafts).
     pub mission_catalogue: &'static str,
-    /// History's page description, under the breadcrumb.
+    /// History's page description, under the breadcrumb, and the History
+    /// card's subtitle on Home.
     pub history_description: &'static str,
+    /// The subtitles under Home's Missions, Insights and mission catalogue
+    /// card titles (owner, 2026-10-11: Home's cards are headed as the
+    /// Private AI cards are). DRAFT, NEEDS APPROVAL.
+    pub missions_subtitle: &'static str,
+    pub insights_subtitle: &'static str,
+    pub catalogue_subtitle: &'static str,
     /// The contribution list card's eyebrow and heading.
     pub submissions: &'static str,
     pub contribution_history: &'static str,
@@ -1434,6 +1441,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             sources: "{count} sources",
             mission_catalogue: "Mission catalogue",
             history_description: "What you have contributed, and what is still being reviewed.",
+            missions_subtitle: "Proposed runs waiting for your review.",
+            insights_subtitle: "Patterns in how you use your agents, read on this Mac.",
+            catalogue_subtitle: "What the commons is asking for.",
             submissions: "Submissions",
             contribution_history: "Contribution history",
             reading_history: "Reading local history\u{2026}",

@@ -65,6 +65,7 @@ public struct GlassGallery: View {
             section("Navigation") { navigation }
             section("Indicators") { indicators }
             section("Patterns") { patterns }
+            section("Promo") { promo }
             section("Floating") { floatingLayer }
         }
         .padding(28)
@@ -410,6 +411,27 @@ public struct GlassGallery: View {
             )
             .frame(width: 380)
         }
+    }
+
+    /// The promotion treatments side by side (owner, 2026-10-11), each on
+    /// an icon card like Home's Missions card, with an ordinary icon card
+    /// beside them for comparison.
+    private var promo: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: GlassTokens.Space.cardGap)],
+                  alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            GlassIconCard(systemImage: "clock.arrow.circlepath", title: "card", subtitle: ["textSecondary"],
+                          interactive: true, trailing: { GlassChevron() })
+            ForEach(GlassPromoTreatment.allCases) { treatment in
+                GlassIconCard(systemImage: "sparkles", title: treatment.rawValue, subtitle: ["textSecondary"],
+                              interactive: true, promo: treatment, trailing: {
+                                  HStack(spacing: GlassTokens.Space.s5) {
+                                      GlassTag("tag", tone: .ask)
+                                      GlassChevron()
+                                  }
+                              })
+            }
+        }
+        .frame(maxWidth: 820, alignment: .leading)
     }
 
     private var patterns: some View {

@@ -689,6 +689,10 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let sources: String
     public let missionCatalogue: String
     public let historyDescription: String
+    /// Home's Missions, Insights and mission catalogue card subtitles.
+    public let missionsSubtitle: String
+    public let insightsSubtitle: String
+    public let catalogueSubtitle: String
     public let submissions: String
     public let contributionHistory: String
     public let readingHistory: String
@@ -718,6 +722,9 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case sources
         case missionCatalogue = "mission_catalogue"
         case historyDescription = "history_description"
+        case missionsSubtitle = "missions_subtitle"
+        case insightsSubtitle = "insights_subtitle"
+        case catalogueSubtitle = "catalogue_subtitle"
         case submissions
         case contributionHistory = "contribution_history"
         case readingHistory = "reading_history"
