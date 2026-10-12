@@ -191,13 +191,15 @@ final class LegacyMigrationOfferModelTests: XCTestCase {
     }
 
     /// A pooled invite cannot be told apart before the commons answers, so
-    /// it is offered the move and refused in the core's words. Nothing else
-    /// changes: the offer stays.
+    /// it is offered the move and refused in the core's words. The daemon
+    /// then stops offering it (a pooled tenant never links), but the card
+    /// and Settings stay drawn, without Move, so the refusal is read rather
+    /// than vanishing with the offer.
     func testAPooledInviteIsRefusedInTheCoresWords() async throws {
         let tenant = freshTenant()
         let daemon = MigrationDaemon(
             answers: [refusal("legacy_migration_tenant_pooled")],
-            statusJSON: statusJSON(tenant: tenant, offered: true))
+            statusJSON: statusJSON(tenant: tenant, offered: false))
         let model = AppModel()
         defer { model.shutdown() }
         model.setClientForTesting(DaemonClient(daemon: daemon))
@@ -208,7 +210,15 @@ final class LegacyMigrationOfferModelTests: XCTestCase {
             model.legacyMigrationRefusal,
             TCCoreCopy.legacyMigrationRefusalLine(label: "legacy_migration_tenant_pooled"))
         XCTAssertFalse(model.legacyMigrationInviteNeeded)
-        XCTAssertTrue(model.isLegacyMigrationOffered)
+        try await waitUntil { !model.isLegacyMigrationOffered }
+        XCTAssertTrue(model.isLegacyMigrationOfferDrawn, "the refusal stays readable")
+        XCTAssertTrue(model.showsLegacyMigrationOfferCard)
+        XCTAssertFalse(model.offersLegacyMigrationMove, "no Move the daemon no longer offers")
+
+        // Another identity on this Mac does not inherit the held refusal.
+        model.setStatusForTesting(try status(tenant: freshTenant(), offered: false))
+        XCTAssertFalse(model.isLegacyMigrationOfferDrawn)
+        XCTAssertFalse(model.showsLegacyMigrationOfferCard)
     }
 
     /// `legacy_migration_invite_needed`: the invite is asked for, and the

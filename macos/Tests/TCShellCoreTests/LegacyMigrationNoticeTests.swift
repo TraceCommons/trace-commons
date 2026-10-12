@@ -74,7 +74,8 @@ final class LegacyMigrationNoticeTests: XCTestCase {
     private let offer = """
     {"title":"Move to your NEAR AI account","body":"b","action":"Move","working":"w",
      "invite_prompt":"p","start_failed":"s","dismiss":"Dismiss","later":"l",
-     "passkey_waiting":"pw","passkey_failed":"pf","passkey_cancel":"Cancel"}
+     "passkey_waiting":"pw","passkey_failed":"pf","passkey_cancel":"Cancel",
+     "action_name_notice":"Move, card","action_name_settings":"Move, Settings"}
     """
 
     func testTheOfferDecodesWhole() throws {
@@ -88,6 +89,17 @@ final class LegacyMigrationNoticeTests: XCTestCase {
         XCTAssertEqual(decoded.passkeyWaiting, "pw")
         XCTAssertEqual(decoded.passkeyFailed, "pf")
         XCTAssertEqual(decoded.passkeyCancel, "Cancel")
+        XCTAssertEqual(decoded.actionNameNotice, "Move, card")
+        XCTAssertEqual(decoded.actionNameSettings, "Move, Settings")
+    }
+
+    /// The card's Move and the one in Settings look the same and are named
+    /// apart for a screen reader, each by the core's words for its place.
+    func testEachMoveButtonIsNamedForItsPlace() throws {
+        let decoded = try XCTUnwrap(LegacyMigrationOffer.decode(fromJSON: offer))
+        XCTAssertEqual(decoded.actionName(for: .notice), "Move, card")
+        XCTAssertEqual(decoded.actionName(for: .settings), "Move, Settings")
+        XCTAssertNotEqual(decoded.actionName(for: .notice), decoded.actionName(for: .settings))
     }
 
     /// Shown whole or not at all, as the notice is. A core older than the
