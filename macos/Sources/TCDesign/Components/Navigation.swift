@@ -94,9 +94,9 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                         if selected {
                             if floating {
                                 // #1146's floating selection: a brighter fill, no edge.
-                                Capsule().fill(GlassTokens.Color.controlSelectedFloating.color).glassPressedFill()
+                                Capsule().fill(GlassAccent.fill(GlassTokens.Color.controlSelectedFloating)).glassPressedFill()
                             } else {
-                                Capsule().fill(GlassTokens.Color.controlSelected.color)
+                                Capsule().fill(GlassAccent.fill(GlassTokens.Color.controlSelected))
                                     .glassPressedFill()
                                     .glassEdge(GlassTokens.Shadow.controlSelectedEdge, in: Capsule())
                             }
@@ -402,7 +402,7 @@ public struct GlassStepProgress: View {
             ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
                 if index > 0 {
                     Capsule()
-                        .fill(index <= current ? GlassTokens.Color.purpleSoft.color : GlassColor.ink(0.14))
+                        .fill(index <= current ? GlassAccent.fill(GlassTokens.Color.purpleSoft) : AnyShapeStyle(GlassColor.ink(0.14)))
                         .frame(height: 2)
                         .padding(.horizontal, 6)
                         .padding(.top, 6)
@@ -421,7 +421,7 @@ public struct GlassStepProgress: View {
                                 .frame(width: Self.haloSide, height: Self.haloSide)
                         }
                         Circle()
-                            .fill(index <= current ? GlassTokens.Color.purpleSoft.color : GlassTokens.Color.wellFill.color)
+                            .fill(index <= current ? GlassAccent.fill(GlassTokens.Color.purpleSoft) : AnyShapeStyle(GlassTokens.Color.wellFill.color))
                             .frame(width: Self.dotSide, height: Self.dotSide)
                     }
                     .frame(width: Self.dotSide, height: Self.dotSide)

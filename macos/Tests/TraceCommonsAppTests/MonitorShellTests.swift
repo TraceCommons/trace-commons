@@ -319,7 +319,7 @@ final class MonitorShellTests: XCTestCase {
 
     func test_homeLinksToTracesAndCountsThree() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        for needle in ["Button(action: openTraces)", "HomeStatTile(label: MonitorWords.waiting,",
+        for needle in ["HomeStatTile(label: MonitorWords.waiting,",
                        "HomeStatTile(label: MonitorWords.contributed,", "HomeStatTile(label: HomeFormat.creditPendingWord,",
                        // Ron's Missions card: his Drafts tag over the drafts,
                        // headed as the Private AI cards are (owner, 2026-10-11).

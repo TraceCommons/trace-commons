@@ -164,7 +164,7 @@ private struct HomeOverview: View {
                 // first-contribution note head the page, as they head the
                 // Traces tree.
                 InspectorPromptsHeader(traces: traces)
-                watching
+                // No Watching card (owner, 2026-10-12): the tiles lead.
                 stats
                 // The NEAR AI campaign, under the tiles (owner, 2026-10-12).
                 campaign
@@ -281,17 +281,18 @@ private struct HomeOverview: View {
             Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
                 GridRow {
                     HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
-                                 action: openTraces)
+                                 systemImage: HomeStatIcons.waiting, action: openTraces)
                     HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted),
-                                 action: openHistory)
+                                 systemImage: HomeStatIcons.contributed, action: openHistory)
                 }
                 GridRow {
                     HomeStatTile(label: HomeFormat.creditPendingWord,
                                  value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)),
                                  detail: delta?.text, detailInk: delta?.ink,
-                                 action: openPrivateAI)
+                                 systemImage: HomeStatIcons.credit, action: openPrivateAI)
                     HomeStatTile(label: words?.uncontributed ?? "", value: String(uncontributed.count),
-                                 detail: uncontributed.detail(words), action: openTraces)
+                                 detail: uncontributed.detail(words), systemImage: HomeStatIcons.uncontributed,
+                                 action: openTraces)
                 }
             }
             .fixedSize(horizontal: false, vertical: true)
@@ -302,42 +303,6 @@ private struct HomeOverview: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-    }
-
-    /// Ron's status card: the dot, the watching line in 600, and under it
-    /// the sessions waiting and how many are worth a second look, 12 apart.
-    /// The whole card is the way into the tree, a chevron at its end as the
-    /// other Home cards have (owner, 2026-10-08: no Open Traces link).
-    private var watching: some View {
-        Button(action: openTraces) {
-            GlassCard(interactive: true) {
-                HStack(spacing: GlassTokens.Space.s6) {
-                    // #1146 `home-view.tsx`: the dot is the two lines' sibling,
-                    // so the second line starts under the first line's words,
-                    // after the dot, never under the dot.
-                    VStack(alignment: .homeStatusText, spacing: GlassTokens.Space.s1) {
-                        HomeStatusLine(store: store)
-                            .glassType(GlassTokens.TypeScale.bodyStrong)
-                        // Ron's #1146 second line: sessions waiting and how many
-                        // are worth a second look. Only from the core's count:
-                        // an unknown count draws no line, never "nothing".
-                        if let line = HomeFormat.waitingLine(traces.decisionsOwed, sessions: traces.tree.allSessions) {
-                            Text(line)
-                                .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                                .foregroundStyle(GlassColor.textSecondary)
-                                .alignmentGuide(.homeStatusText) { $0[.leading] }
-                        }
-                    }
-                    Spacer(minLength: 0)
-                    GlassChevron()
-                }
-                .foregroundStyle(GlassColor.textPrimary)
-            }
-        }
-        .buttonStyle(GlassPressStyle())
-        // One element: the status lines, then what pressing it does.
-        .accessibilityElement(children: .combine)
-        .accessibilityHint(HomeFormat.openTracesWord)
     }
 
 
@@ -379,6 +344,14 @@ private struct HomeOverview: View {
         }
     }
 
+}
+
+/// Home's stat tile icons (owner, 2026-10-12).
+enum HomeStatIcons {
+    static let waiting = "hourglass"
+    static let contributed = "checkmark.seal.fill"
+    static let credit = "star.circle.fill"
+    static let uncontributed = "tray.full.fill"
 }
 
 /// The Home cards' icons, shared with the edge rail's Home peek.
@@ -760,7 +733,7 @@ private struct HistoryFilterPill: View {
             .fixedSize()
             .padding(.horizontal, GlassTokens.Space.s5)
             .padding(.vertical, 5)
-            .background(Capsule().fill(selected ? GlassTokens.Color.controlSelected.color : Color.clear))
+            .background(Capsule().fill(selected ? GlassAccent.fill(GlassTokens.Color.controlSelected) : AnyShapeStyle(Color.clear)))
             .contentShape(Capsule())
         }
         .buttonStyle(GlassPressStyle())
@@ -1378,6 +1351,8 @@ private struct HomeStatTile: View {
     /// size and estimate), in `detailInk` when it carries a tone.
     var detail: String? = nil
     var detailInk: GlassRGBA? = nil
+    /// The tile's icon (`HomeStatIcons`); nil draws none.
+    var systemImage: String? = nil
     /// Opens where the number lives, and the whole tile is the button;
     /// nil for a tile on the page its number lives on (History's).
     var action: (() -> Void)?
@@ -1386,11 +1361,11 @@ private struct HomeStatTile: View {
     var body: some View {
         if let action {
             Button(action: action) {
-                GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, interactive: true)
+                GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage, interactive: true)
             }
             .buttonStyle(GlassPressStyle())
         } else {
-            GlassStatCard(label, value: value, detail: detail, detailInk: detailInk)
+            GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage)
         }
     }
 }

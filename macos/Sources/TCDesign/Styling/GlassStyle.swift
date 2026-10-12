@@ -206,7 +206,7 @@ public enum GlassTier: Sendable, Equatable {
         case .control:
             shape.fill(GlassTokens.Gradient.controlFill.linear)
         case .controlSelected:
-            shape.fill(GlassTokens.Color.controlSelected.color)
+            shape.fill(GlassAccent.fill(GlassTokens.Color.controlSelected))
         case .popover:
             shape.fill(GlassTokens.Color.popoverFill.color)
         case .menu:

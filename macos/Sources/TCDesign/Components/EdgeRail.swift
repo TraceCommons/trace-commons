@@ -55,7 +55,7 @@ public struct GlassRailTile<Label: View>: View {
                 .frame(width: GlassTokens.Size.edgeRailTile, height: GlassTokens.Size.edgeRailTile)
                 .background {
                     if selected {
-                        Self.shape.fill(GlassTokens.Color.controlSelected.color)
+                        Self.shape.fill(GlassAccent.fill(GlassTokens.Color.controlSelected))
                             .glassPressedFill()
                             .glassEdge(GlassTokens.Shadow.controlSelectedEdge, in: Self.shape)
                     } else {

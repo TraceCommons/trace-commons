@@ -14,10 +14,19 @@ public struct GlassStatCard: View {
     /// (a gain in green, a loss in red); nil draws none.
     private let detail: String?
     private let detailInk: GlassRGBA?
+    /// A symbol on an accent tile at the card's top trailing corner (owner,
+    /// 2026-10-12: icons make the tiles more engaging); nil draws none.
+    private let systemImage: String?
+
+    /// The icon tile's side and its glyph's size.
+    static let iconSide: CGFloat = 26
+    static let iconGlyph: CGFloat = 12
 
     public init(
-        _ label: String, value: String, detail: String? = nil, detailInk: GlassRGBA? = nil, interactive: Bool = false
+        _ label: String, value: String, detail: String? = nil, detailInk: GlassRGBA? = nil,
+        systemImage: String? = nil, interactive: Bool = false
     ) {
+        self.systemImage = systemImage
         self.label = label
         self.value = value
         self.detail = detail
@@ -30,6 +39,27 @@ public struct GlassStatCard: View {
     static let valueType = GlassTokens.TypeScale.heading.weight(.bold)
 
     public var body: some View {
+        HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
+            figures
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .glassGlyph(Self.iconGlyph, weight: .semibold)
+                    .foregroundStyle(GlassTokens.Color.textOnSelected.color)
+                    .frame(width: Self.iconSide, height: Self.iconSide)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(GlassAccent.fill(GlassTokens.Color.controlSelected)))
+                    .accessibilityHidden(true)
+            }
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .glassTier(.card, hover: GlassCard<EmptyView>.hoverFill(interactive: interactive))
+        .accessibilityElement(children: .combine)
+    }
+
+    private var figures: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(label)
                 .glassType(GlassTokens.TypeScale.eyebrow)
@@ -51,12 +81,7 @@ public struct GlassStatCard: View {
                     .padding(.top, GlassTokens.Space.s1)
             }
         }
-        .frame(maxHeight: .infinity, alignment: .topLeading)
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassTier(.card, hover: GlassCard<EmptyView>.hoverFill(interactive: interactive))
-        .accessibilityElement(children: .combine)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
