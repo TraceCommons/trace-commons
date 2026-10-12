@@ -814,6 +814,7 @@ impl WorkerFixture {
         let PipelineReceiptResult::Created(_) = self
             .service
             .submit(PipelineReceiptRequest {
+                accept_medium_risk: false,
                 source_session: None,
                 tenant_id: tenant,
                 actor_principal_ref: &principal,

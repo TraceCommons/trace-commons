@@ -15200,6 +15200,7 @@ async fn route_pipeline_receipt(
             request_bytes: raw_body,
             server_envelope: envelope,
             residual_risk_basis,
+            accept_medium_risk: state.accept_medium_risk_submissions,
             limits: PipelineAdmissionLimits {
                 max_per_tenant_per_hour: state.submission_quota.max_per_tenant_per_hour,
                 max_per_principal_per_hour: state.submission_quota.max_per_principal_per_hour,

@@ -4038,6 +4038,7 @@ fn receipt<'a>(
     limits: PipelineAdmissionLimits,
 ) -> PipelineReceiptRequest<'a> {
     PipelineReceiptRequest {
+        accept_medium_risk: false,
         source_session: None,
         tenant_id: tenant,
         actor_principal_ref: "principal_sha256:test",
@@ -17810,6 +17811,7 @@ async fn submit_envelope_and_complete(
     let PipelineReceiptResult::Created(created) = submit_registered(
         service,
         PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: tenant,
             actor_principal_ref: principal,
@@ -18005,6 +18007,7 @@ async fn status_follows_outcomes() {
     let PipelineReceiptResult::Created(created) = submit_registered(
         &service,
         PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: &tenant,
             actor_principal_ref: principal,
@@ -18105,6 +18108,7 @@ async fn status_follows_outcomes() {
     let PipelineReceiptResult::Created(created_pending) = submit_registered(
         &pending_service,
         PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: &tenant_pending,
             actor_principal_ref: principal_pending,
@@ -18219,6 +18223,7 @@ async fn status_follows_outcomes() {
     let PipelineReceiptResult::Created(created_quarantine) = submit_registered(
         &quarantine_service,
         PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: &tenant_quarantine,
             actor_principal_ref: principal_quarantine,
@@ -18443,6 +18448,7 @@ async fn operational_summary_counts_runs_by_state_and_label() {
     let PipelineReceiptResult::Created(created_quarantine) = submit_registered(
         &quarantine_service,
         PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: &tenant,
             actor_principal_ref: principal_quarantine,
@@ -29642,6 +29648,7 @@ async fn receive_envelope(
     let PipelineReceiptResult::Created(created) = submit_registered(
         service,
         PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: tenant,
             actor_principal_ref: principal,
@@ -49843,5 +49850,348 @@ async fn a_cleared_privacy_pass_leaves_the_submission_received() {
         submission_status(&backend, &tenant, claimed.submission_id).await,
         "received",
         "a cleared pass must not quarantine the submission"
+    );
+}
+
+// Owner decision 2026-10-12 (issue #1344): pipeline Admission honours the
+// operator's accept-Medium setting (`TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS`,
+// `PipelineReceiptRequest::accept_medium_risk`), narrowly: only a Medium whose
+// basis is what redaction found and removed is admitted.
+
+/// A receipt at `risk` with `basis`, under the operator's accept-Medium
+/// setting `accept_medium_risk`, for a fresh tenant. Returns the tenant and
+/// the created run.
+async fn submit_with_accept_medium(
+    service: &PipelineService,
+    tenant_prefix: &str,
+    risk: ResidualPiiRisk,
+    basis: &[ResidualRiskCondition],
+    accept_medium_risk: bool,
+) -> (String, PipelineRunRecord) {
+    let tenant = format!("{tenant_prefix}-{}", uuid::Uuid::new_v4());
+    let mut env = envelope(uuid::Uuid::new_v4()).await;
+    env.privacy.residual_pii_risk = risk;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let request = PipelineReceiptRequest {
+        residual_risk_basis: basis,
+        accept_medium_risk,
+        ..receipt(&tenant, &key, &raw, &env, NO_LIMITS)
+    };
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(service, request).await.unwrap()
+    else {
+        panic!("the receipt creates a run")
+    };
+    (tenant, created)
+}
+
+/// The run's committed Admission outcome: its rule id and the privacy risk
+/// its evidence records.
+async fn admission_rule_and_evidence_risk(
+    service: &PipelineService,
+    tenant: &str,
+    run_id: uuid::Uuid,
+) -> (String, Option<String>) {
+    let outcome = service
+        .store()
+        .list_outcomes(tenant, run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Admission)
+        .expect("an Admission outcome is recorded");
+    let rule_id = outcome.evaluation["rule_id"]
+        .as_str()
+        .expect("the Admission evaluation has a rule id")
+        .to_string();
+    let risk = outcome.evidence["privacy_risk"]
+        .as_str()
+        .map(str::to_string);
+    (rule_id, risk)
+}
+
+/// Setting on: a Medium whose server-side basis is `found_and_removed` plus
+/// the consent flag is admitted under the distinct accept rule, its evidence
+/// still records Medium, the run goes through the privacy pass and Review
+/// as an ordinary admitted run and completes, the submission is `accepted`
+/// with its raw `medium` risk and basis kept, and it earns what an admitted
+/// Low run earns.
+#[tokio::test]
+async fn accept_medium_admits_a_found_and_removed_receipt_and_completes_it() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // A config that awards both instruments, so "credit" is not 0 on both
+    // sides of the comparison below.
+    let (service, _, adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        scored_config(false),
+        None,
+    )
+    .await;
+    let (tenant, created) = submit_with_accept_medium(
+        &service,
+        "accept-medium-removed",
+        ResidualPiiRisk::Medium,
+        &[
+            ResidualRiskCondition::FoundAndRemoved,
+            ResidualRiskCondition::ConsentContentFlag,
+        ],
+        true,
+    )
+    .await;
+    assert_eq!(created.admission_decision, "admit", "{created:?}");
+    assert_eq!(created.admission_reason, None, "{created:?}");
+    assert_eq!(
+        admission_rule_and_evidence_risk(&service, &tenant, created.run_id).await,
+        (
+            PIPELINE_ADMISSION_ACCEPT_FOUND_AND_REMOVED_RULE_ID.to_string(),
+            Some("medium".to_string())
+        ),
+        "the rule names the setting; the evidence keeps the Medium"
+    );
+
+    process_until_idle(&service, &tenant).await;
+    let done = service
+        .store()
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run still exists");
+    assert_eq!(done.state, PipelineRunState::Complete, "{done:?}");
+    assert_eq!(
+        done.privacy_pass_outcome,
+        Some(PrivacyPassOutcome::Cleared),
+        "{done:?}"
+    );
+    assert!(done.privacy_pass_approval_assessment_hash.is_none());
+    let (decision, rule_id) = review_decision_and_rule(&service, &tenant, created.run_id).await;
+    assert!(matches!(decision, ReviewDecision::Approved { .. }));
+    assert_eq!(rule_id, "minimal_review_passthrough_v1");
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "accepted"
+    );
+    assert_eq!(
+        stored_privacy_risk(&backend, &tenant, created.submission_id).await,
+        "medium",
+        "the row keeps the raw risk; only Admission's decision changed"
+    );
+    let mut basis = service
+        .store()
+        .load_submission_receipt_privacy(&tenant, created.submission_id)
+        .await
+        .unwrap()
+        .residual_risk_basis;
+    basis.sort();
+    assert_eq!(
+        basis,
+        vec![
+            "consent_content_flag".to_string(),
+            "found_and_removed".to_string()
+        ]
+    );
+
+    // Credit as for an admitted Low under the same bundle.
+    let (low_tenant, low) = submit_with_accept_medium(
+        &service,
+        "accept-medium-low-control",
+        ResidualPiiRisk::Low,
+        &[],
+        true,
+    )
+    .await;
+    assert_eq!(
+        admission_rule_and_evidence_risk(&service, &low_tenant, low.run_id).await,
+        ("minimal_admission_v1".to_string(), Some("low".to_string()))
+    );
+    process_until_idle(&service, &low_tenant).await;
+    assert_eq!(
+        submission_status(&backend, &low_tenant, low.submission_id).await,
+        "accepted"
+    );
+    let phases = outcome_phases(&service, &tenant, created.run_id).await;
+    assert!(phases.contains(&Phase::Score), "{phases:?}");
+    assert!(phases.contains(&Phase::Settle), "{phases:?}");
+    assert_eq!(
+        phases,
+        outcome_phases(&service, &low_tenant, low.run_id).await,
+        "the accepted Medium runs every phase an admitted Low does"
+    );
+    let credit_rows = count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await;
+    assert!(credit_rows > 0, "the accepted Medium earns credit");
+    assert_eq!(
+        credit_rows,
+        count_credit_ledger_rows_for_run(&backend, &low_tenant, low.run_id).await,
+        "the accepted Medium earns what an admitted Low earns"
+    );
+    let settled = |run_id: uuid::Uuid| {
+        let mut legs = adapters
+            .iter()
+            .flat_map(|adapter| adapter.requests())
+            .filter(|request| request.run_id() == run_id)
+            .map(|request| {
+                (
+                    request.instrument_id().as_str().to_string(),
+                    request.atomic_units(),
+                )
+            })
+            .collect::<Vec<_>>();
+        legs.sort_by(|a, b| a.0.cmp(&b.0));
+        legs
+    };
+    let medium_legs = settled(created.run_id);
+    assert!(!medium_legs.is_empty(), "the accepted Medium is settled");
+    assert_eq!(
+        medium_legs,
+        settled(low.run_id),
+        "every instrument settles the same amount as for an admitted Low"
+    );
+}
+
+/// Setting on: a High is still held for a human under
+/// `privacy_risk_high_review_required` (#1353), whatever else its basis
+/// holds.
+#[tokio::test]
+async fn accept_medium_still_holds_a_high_receipt() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let (tenant, created) = submit_with_accept_medium(
+        &service,
+        "accept-medium-high",
+        ResidualPiiRisk::High,
+        &[
+            ResidualRiskCondition::FoundAndRemoved,
+            ResidualRiskCondition::ResidualScanUnavailable,
+        ],
+        true,
+    )
+    .await;
+    assert_eq!(created.admission_decision, "quarantine");
+    assert_eq!(
+        created.admission_reason.as_deref(),
+        Some(HIGH_RISK_ADMISSION_REASON)
+    );
+    assert_eq!(
+        admission_rule_and_evidence_risk(&service, &tenant, created.run_id).await,
+        (
+            HIGH_RISK_ADMISSION_REASON.to_string(),
+            Some("high".to_string())
+        )
+    );
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "quarantined"
+    );
+}
+
+/// Setting off: a found-and-removed Medium is quarantined under
+/// `privacy_review_required`, exactly as before the setting reached the
+/// pipeline.
+#[tokio::test]
+async fn without_accept_medium_a_found_and_removed_receipt_is_quarantined() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let (tenant, created) = submit_with_accept_medium(
+        &service,
+        "accept-medium-off",
+        ResidualPiiRisk::Medium,
+        &[
+            ResidualRiskCondition::FoundAndRemoved,
+            ResidualRiskCondition::ConsentContentFlag,
+        ],
+        false,
+    )
+    .await;
+    assert_eq!(created.admission_decision, "quarantine");
+    assert_eq!(
+        created.admission_reason.as_deref(),
+        Some("privacy_review_required")
+    );
+    assert_eq!(
+        admission_rule_and_evidence_risk(&service, &tenant, created.run_id).await,
+        (
+            "privacy_review_required".to_string(),
+            Some("medium".to_string())
+        )
+    );
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "quarantined"
+    );
+}
+
+/// Setting on: a Medium with no basis (a declared Medium nothing was found
+/// for) is not "PII removed" and keeps its hold; a consent-flag-only Medium
+/// is admitted under the bundle's own rule, as it was without the setting.
+#[tokio::test]
+async fn accept_medium_leaves_a_declared_and_a_consent_flag_medium_as_they_were() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let (tenant, declared) = submit_with_accept_medium(
+        &service,
+        "accept-medium-declared",
+        ResidualPiiRisk::Medium,
+        &[],
+        true,
+    )
+    .await;
+    assert_eq!(declared.admission_decision, "quarantine");
+    assert_eq!(
+        declared.admission_reason.as_deref(),
+        Some("privacy_review_required")
+    );
+    assert_eq!(
+        submission_status(&backend, &tenant, declared.submission_id).await,
+        "quarantined"
+    );
+
+    let (tenant, consent) = submit_with_accept_medium(
+        &service,
+        "accept-medium-consent",
+        ResidualPiiRisk::Medium,
+        &[ResidualRiskCondition::ConsentContentFlag],
+        true,
+    )
+    .await;
+    assert_eq!(consent.admission_decision, "admit");
+    assert_eq!(
+        admission_rule_and_evidence_risk(&service, &tenant, consent.run_id).await,
+        ("minimal_admission_v1".to_string(), Some("low".to_string()))
+    );
+    process_until_idle(&service, &tenant).await;
+    assert_eq!(
+        submission_status(&backend, &tenant, consent.submission_id).await,
+        "accepted"
     );
 }
