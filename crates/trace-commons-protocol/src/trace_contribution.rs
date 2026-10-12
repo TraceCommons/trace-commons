@@ -4608,8 +4608,7 @@ impl DeterministicTraceRedactor {
         // Ahead of the email pass, so a `user@host.local` prompt or an
         // `Author: Name <addr>` line is labelled for what it is; the email
         // pass still takes the address itself. See `tool_output_detectors`.
-        let mut redacted =
-            tool_output_detectors::redact_identity_shapes(input, state, &mut report);
+        let mut redacted = tool_output_detectors::redact_identity_shapes(input, state, &mut report);
         redacted = self.redact_private_emails(&redacted, state, &mut report);
         redacted = self.redact_generic_paths(&redacted, state, &mut report);
         redacted = self.redact_known_paths(&redacted, state, &mut report);
@@ -6222,7 +6221,23 @@ fn resolve_post_scrub_risk(
 /// `privacy.redaction_counts`, because the report is an annotation on an
 /// accepted record. Dropping the count would trade one information loss for
 /// another.
-const NON_SEVERITY_REDACTION_LABELS: &[&str] = &["local_path"];
+///
+/// `ip_address`, `private_hostname` and `os_username` (#1362) join it for
+/// the same reason and on the same footing. They identify a machine, not a
+/// person: a prompt, an `ls -l` row or a `ping` carries them in the ordinary
+/// course of any terminal session, so as tier drivers they would rebuild
+/// the Medium-for-everyone floor #219a removed. The person-shaped labels
+/// from the same detectors -- `git_author` and `phone_number` -- are not
+/// listed and bear severity, like `private_email`. A classifier's
+/// `ip_address` span still bears severity through its namespaced
+/// `privacy_filter:ip_address` count, which this exact-match list does not
+/// name.
+const NON_SEVERITY_REDACTION_LABELS: &[&str] = &[
+    "local_path",
+    tool_output_detectors::IP_ADDRESS,
+    tool_output_detectors::PRIVATE_HOSTNAME,
+    tool_output_detectors::OS_USERNAME,
+];
 
 /// Whether a redaction label contributes to the residual-risk tier.
 ///
