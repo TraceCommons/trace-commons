@@ -925,10 +925,14 @@ pub struct MonitorEdgeRailCopy {
     /// The rail's accessible name, and the closed rail's handle's.
     pub rail_label: &'static str,
     pub handle_label: &'static str,
-    /// The icons this table names; the other three are Settings' names.
+    /// The icons this table names; Private AI and Compute are Settings'
+    /// names, and Traces is the tab's. Waiting and Balance head their parts
+    /// of the Overview peek (owner, 2026-10-11: one Overview in place of
+    /// the Waiting, Tools and Balance icons). Overview is DRAFT, NEEDS
+    /// APPROVAL.
+    pub overview: &'static str,
     pub waiting: &'static str,
     pub balance: &'static str,
-    pub privacy: &'static str,
     /// The mark at the foot of the rail.
     pub open_app: &'static str,
     /// Each peek's link into the app, and its accessible name.
@@ -940,8 +944,8 @@ pub struct MonitorEdgeRailCopy {
     pub tools_empty: &'static str,
     /// The Compute peek before the core has reported.
     pub compute_unreported: &'static str,
-    /// The Privacy peek: its title, then what is on this Mac and what was
-    /// contributed.
+    /// The Traces peek: its title, then what is on this Mac and what was
+    /// contributed, over its map and graph.
     pub privacy_title: &'static str,
     pub on_this_mac: &'static str,
     pub on_this_mac_line_one: &'static str,
@@ -1483,12 +1487,12 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         },
         edge_rail: MonitorEdgeRailCopy {
             setting_toggle: "Show the edge rail",
-            setting_caption: "Rest the pointer on the right edge of the screen to glance at sessions waiting, tools, balance, Private AI, compute and privacy.",
+            setting_caption: "Rest the pointer on the right edge of the screen to glance at an overview, Private AI, your traces and compute.",
             rail_label: "Edge rail",
             handle_label: "Open the edge rail",
+            overview: "Overview",
             waiting: "Waiting",
             balance: "Balance",
-            privacy: "Privacy",
             open_app: concat!("Open ", crate::app_name!()),
             open_section: "Open {section}",
             open_section_label: concat!("Open {section} in ", crate::app_name!()),

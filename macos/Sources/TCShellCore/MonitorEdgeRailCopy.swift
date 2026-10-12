@@ -3,16 +3,17 @@ import Foundation
 /// The edge rail's words (`preview_copy::MonitorEdgeRailCopy`): the
 /// optional rail on the right edge of the screen, its switch in Settings,
 /// its icons' names and its peeks. Tools, Private AI and Compute are named
-/// by `MonitorSettingsNavCopy`, as Settings names them. A singular is its
+/// by `MonitorSettingsNavCopy`, as Settings names them, and Traces by the
+/// tab's name. A singular is its
 /// own line; numbers are `{count}` holes and a section's name `{section}`.
 public struct MonitorEdgeRailCopy: MonitorWordTable {
     public let settingToggle: String
     public let settingCaption: String
     public let railLabel: String
     public let handleLabel: String
+    public let overview: String
     public let waiting: String
     public let balance: String
-    public let privacy: String
     public let openApp: String
     public let openSection: String
     public let openSectionLabel: String
@@ -33,9 +34,9 @@ public struct MonitorEdgeRailCopy: MonitorWordTable {
         case settingCaption = "setting_caption"
         case railLabel = "rail_label"
         case handleLabel = "handle_label"
+        case overview
         case waiting
         case balance
-        case privacy
         case openApp = "open_app"
         case openSection = "open_section"
         case openSectionLabel = "open_section_label"
@@ -60,12 +61,12 @@ public struct MonitorEdgeRailCopy: MonitorWordTable {
          openSectionLabel.replacingOccurrences(of: "{section}", with: section))
     }
 
-    /// The Privacy peek's line for sessions waiting on this Mac.
+    /// The Traces peek's line for sessions waiting on this Mac.
     public func onThisMac(count: Int) -> String {
         count == 1 ? onThisMacLineOne : onThisMacLine.replacingOccurrences(of: "{count}", with: String(count))
     }
 
-    /// The Privacy peek's line for contributions sent from this Mac.
+    /// The Traces peek's line for contributions sent from this Mac.
     public func inTheLibrary(count: Int) -> String {
         count == 1 ? inTheLibraryLineOne : inTheLibraryLine.replacingOccurrences(of: "{count}", with: String(count))
     }

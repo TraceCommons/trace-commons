@@ -90,48 +90,52 @@ final class EdgeRailController {
 @MainActor
 final class EdgeRailState {
     var open = false
-    var peek: EdgeRailPeek = .waiting
+    var peek: EdgeRailPeek = .overview
 }
 
-/// The rail's icons, top to bottom.
+/// The rail's icons, top to bottom (owner, 2026-10-11): an Overview that
+/// gathers what Waiting, Tools and Balance showed apart, then Private AI
+/// and Traces, each with a small map and graph, then Compute. The app's
+/// own tile closes the rail.
 enum EdgeRailPeek: CaseIterable, Identifiable {
-    case waiting, tools, balance, privateAI, compute, privacy
+    case overview, privateAI, traces, compute
 
     var id: Self { self }
 
     var symbol: String {
         switch self {
-        case .waiting: "tray"
-        case .tools: "terminal"
-        case .balance: "creditcard"
+        case .overview: "square.grid.2x2"
         case .privateAI: "key"
+        case .traces: "point.3.connected.trianglepath.dotted"
         case .compute: "cpu"
-        case .privacy: "lock"
         }
     }
 
     /// The icon's name: Settings' name for a section Settings has, the
-    /// rail's own for the rest.
-    func name(_ rail: MonitorEdgeRailCopy?, nav: MonitorSettingsNavCopy?) -> String {
+    /// Traces tab's for Traces, and the rail's own for the Overview.
+    func name(_ rail: MonitorEdgeRailCopy?, nav: MonitorSettingsNavCopy?, shell: MonitorShellCopy?) -> String {
         switch self {
-        case .waiting: rail?.waiting ?? ""
-        case .tools: nav?.tools ?? ""
-        case .balance: rail?.balance ?? ""
+        case .overview: rail?.overview ?? ""
         case .privateAI: nav?.privateAI ?? ""
+        case .traces: shell?.tabTraces ?? ""
         case .compute: nav?.compute ?? ""
-        case .privacy: rail?.privacy ?? ""
         }
     }
 
     /// Where the peek's link goes in the app.
     var destination: MonitorDestination {
         switch self {
-        case .waiting: .traces(entryId: nil)
-        case .tools: .settings(.tools)
-        case .balance, .privateAI: .inference
+        case .overview: .home(.overview)
+        case .privateAI: .inference
+        case .traces: .traces(entryId: nil)
         case .compute: .settings(.compute)
-        case .privacy: .settings(.watching)
         }
+    }
+
+    /// The peek's link words: the app's Home tab for the Overview, else
+    /// the section's own name.
+    func linkSection(_ rail: MonitorEdgeRailCopy?, nav: MonitorSettingsNavCopy?, shell: MonitorShellCopy?) -> String {
+        self == .overview ? shell?.tabHome ?? "" : name(rail, nav: nav, shell: shell)
     }
 }
 
