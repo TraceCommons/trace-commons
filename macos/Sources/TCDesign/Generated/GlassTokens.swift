@@ -73,8 +73,8 @@ public enum GlassTokens {
         public static var glassVeil: GlassRGBA { GlassTheme.pick(GlassRGBA(0x0C0E14, alpha: 0.28, light: GlassRGBA(0xFFFFFF, alpha: 0.3)), flat: GlassRGBA(0x070A1A, alpha: 0.68, light: GlassRGBA(0xE3E6EC, alpha: 0.66))) }
         /// The closed edge rail's handle, a 3 by 72 bar drawn straight on the desktop at the screen's right edge (Run 1 OS-level Explorations, 1b). Not text: it marks where to rest the pointer.
         public static let edgeRailHandle: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.28, light: GlassRGBA(0x1D1D1F, alpha: 0.28))
-        /// Painted over a pane's veil while its window is out of focus. Nothing in either theme (owner, 2026-10-12): the main window, the edge rail and the menu-bar popover read the same, focused or not.
-        public static let inactiveDim: GlassRGBA = GlassRGBA(0x000000, alpha: 0)
+        /// Painted over a pane's veil while its window is out of focus, so a background window reads darker, as the system's own windows do (owner, 2026-10-12). Classic paints nothing (alpha 0); the flat theme sets it.
+        public static var inactiveDim: GlassRGBA { GlassTheme.pick(GlassRGBA(0x000000, alpha: 0), flat: GlassRGBA(0x070A1A, alpha: 0.14, light: GlassRGBA(0x000000, alpha: 0.04))) }
         public static var wellFill: GlassRGBA { GlassTheme.pick(GlassRGBA(0x000000, alpha: 0.22, light: GlassRGBA(0x000000, alpha: 0.06)), flat: GlassRGBA(0x000000, alpha: 0.3, light: GlassRGBA(0xD5D9E2, alpha: 0.5))) }
         /// Hover on a glass, round, pill-icon, picker or toolbar button (#1146 --tc-control-hover). It replaces the control fill, as #1146's :hover background does (owner ruling, 2026-10-07: hover states from #1146). Light is the light control fill 8% darker, so a light control greys under the pointer as it did when this was drawn over the fill.
         public static var controlHover: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0xEBEBED, alpha: 0.84)), flat: GlassRGBA(0x000000, alpha: 0.44, light: GlassRGBA(0xEBEBED, alpha: 0.84))) }
