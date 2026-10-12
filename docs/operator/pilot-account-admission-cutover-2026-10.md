@@ -3,7 +3,7 @@
 This runbook turns on, in order, on the pilot (`tc-pilot-host`):
 
 1. the build that carries #1373 (attested uploads skip the allowance) and
-   migration V125;
+   #1379 (earned trust, growth left off), with migrations V125 and V126;
 2. the pooled-tenant markers for the two Devfolio tenants;
 3. legacy invite linking (`TRACE_COMMONS_LEGACY_INVITE_LINK_ENABLED`);
 4. account contribution admission (`TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED`)
@@ -12,7 +12,8 @@ This runbook turns on, in order, on the pilot (`tc-pilot-host`):
 It is a draft for the owner to execute, step by step, with a stop condition
 and a rollback on every step. Nothing in this file has been run against the
 pilot. Every command, path, variable and label below was checked against the
-repo at `origin/main` `6f6389129`; the source is named where it is not obvious.
+repo at `origin/main` `6f6389129`, and step 1 again at `84f0a4529` (the v0.14.0
+release, which adds #1379 and V126); the source is named where it is not obvious.
 
 Background to read first, not repeated here: [account trust](./account-trust.md),
 [legacy invite migration](./legacy-invite-migration.md),
@@ -102,7 +103,7 @@ TC_LIB=$(cat <<'LIB'
 set -euo pipefail
 pid()   { systemctl show -p MainPID --value trace-commons-ingest; }
 penv()  { local p; p=$(pid); [ -n "$p" ] && [ "$p" != 0 ] || { echo "STOP: ingest is not running" >&2; return 1; }; sudo cat "/proc/$p/environ" | tr '\0' '\n'; }
-names() { penv | cut -d= -f1 | grep -E '^(TRACE_COMMONS_(ACCOUNT_ADMISSION_|LEGACY_INVITE_LINK_|INGEST_ATTESTATION_|TENANT_TOKENS|INGEST_TOKEN|ADMISSION_)|DATABASE_URL$)' | sort || true; }
+names() { penv | cut -d= -f1 | grep -E '^(TRACE_COMMONS_(ACCOUNT_ADMISSION_|ACCOUNT_TRUST_|LEGACY_INVITE_LINK_|INGEST_ATTESTATION_|TENANT_TOKENS|INGEST_TOKEN|ADMISSION_)|DATABASE_URL$)' | sort || true; }
 ing_url() { penv | sed -n 's/^DATABASE_URL=//p'; }
 app_url() { sudo sed -n 's/^DATABASE_URL=//p' /etc/tracecommons/ingest.env | tr -d "\"'"; }
 # Line counts of ingest.log and ingest.err, each its own offset. The file is an
@@ -151,10 +152,11 @@ overrides `ingest.env`'s `DATABASE_URL`.
 
 - [ ] The owner has fixed `<BASE>`.
 - [ ] The commit to ship (`<SHA>`) contains #1373: `git merge-base --is-ancestor bb59d3039 <SHA>`.
-- [ ] `<SHA>` carries no migration other than V125 beyond the running build. If
-      the growth branch (V126) has landed in `<SHA>`, do not ship it with this
-      runbook: pick a `<SHA>` before it, or rewrite step 1 to cover V126 and
-      leave the scheduler and growth settings off.
+- [ ] `<SHA>` carries no migration other than V125 and V126 beyond the running
+      build (owner, 2026-10-12: ship `origin/main` with #1379, growth off).
+      Growth stays off because nothing sets `TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_*`
+      (`scheduler_config_from_env`, `account_trust_growth.rs`: absent means no
+      scheduler) and the admission policy in step 5 says `growth_rule` `none`.
 - [ ] `dig +short issuer.tracecommons.ai` resolves. Ingest fails closed at boot
       without the issuer keyset, and every step below restarts ingest.
 - [ ] Every restart is a short ingest outage. Pick a window; do not stack steps
@@ -198,11 +200,12 @@ Expected (facts measured 2026-10-11, build `6a5db334`):
   (a contributor static token must resolve to a live account at startup, or
   ingest refuses with `account_identity_unlinked`:
   `trace-commons-ingest.rs`, account-admission startup block). No
-  `TRACE_COMMONS_ACCOUNT_ADMISSION_*`, no `TRACE_COMMONS_LEGACY_INVITE_LINK_*`.
+  `TRACE_COMMONS_ACCOUNT_ADMISSION_*`, no `TRACE_COMMONS_ACCOUNT_TRUST_*`, no
+  `TRACE_COMMONS_LEGACY_INVITE_LINK_*`.
 - Provider signers: 5 keys; gateway signers: 1.
 - `current_user` is `app`. The migration list ends at V124
-  (`pipeline_default_routing`); `6a5db334..6f6389129` adds only V125
-  (`git diff --name-only 6a5db334 6f6389129 -- migrations`).
+  (`pipeline_default_routing`); `6a5db334..84f0a4529` adds V125 and V126
+  (`git diff --name-only 6a5db334 84f0a4529 -- migrations`).
 - `DropInPaths` and `EnvironmentFiles` are recorded for step 4 and 5. If a
   drop-in already sets any name that steps 4 or 5 will set, stop: a later
   `EnvironmentFile=` also beats `Environment=`, so resolve the conflict first.
@@ -211,7 +214,7 @@ Stop if: `build_commit` is not `6a5db334` (the scope below is wrong; redo the
 migration diff against what is live), the max migration is not 124, or any
 absent name above is present.
 
-## Step 1: deploy the build with #1373 and V125
+## Step 1: deploy the build with #1373 and #1379, and V125 and V126
 
 Source: `deployment.md`, "Redeploying the binary" (apply migrations as the
 migrator **before** installing the binary; the runtime role cannot run DDL, so a
@@ -226,13 +229,25 @@ git merge-base --is-ancestor bb59d3039 "$SHA" && echo "contains #1373"
 git diff --name-only 6a5db334 "$SHA" -- migrations
 ```
 
-Expected: `contains #1373`, and exactly one line,
-`migrations/V125__account_admission_attested_kind.sql`. Anything else: stop.
+Expected: `contains #1373`, and exactly two lines,
+`migrations/V125__account_admission_attested_kind.sql` and
+`migrations/V126__account_trust_live_attested.sql`. Anything else: stop.
 
 V125 only widens a CHECK (`authority_kind IN ('account','attested')`); it adds no
 table and no grant, and is idempotent (its own header). The running old binary
 ignores it (`deployment.md`: an older binary ignores migration versions it does
 not know).
+
+V126 is larger (its header lists five parts): a seventh trust fact kind,
+`attested_submission`; the V85 recorder and candidate functions replaced in
+place with the same signatures; column grants to
+`trace_account_admission_guard`; two nullable columns on
+`trace_account_trust_evaluations` (`attested_units`, `age_seconds`); and a new
+writer, `trace_record_account_trust_evaluation_v2`, with EXECUTE for
+`trace_account_trust_worker`. Apply it before the new binary starts, since
+contribution-status reads the new columns. The old binary keeps working on it:
+the replaced functions keep their signatures, and V86's shadow writer and
+V114's external writer are unchanged.
 
 ### 1b. Back up
 
@@ -245,7 +260,7 @@ gcloud sql backups create --instance "$SQL_INSTANCE" --project "$TC_PROJECT"
 Do not use `pg_dump` as `app`: under forced RLS it stops, or silently dumps
 zero tenant rows (`pilot-cutover-2026-09.md`, "Backups"). Record the backup id.
 
-### 1c. Apply V125 as `app`
+### 1c. Apply V125, then V126, as `app`
 
 ```bash
 git show "$SHA":migrations/V125__account_admission_attested_kind.sql > /tmp/V125.sql
@@ -278,6 +293,39 @@ Expected: `125|account_admission_attested_kind`, and a constraint definition
 reading `CHECK ((authority_kind = ANY (ARRAY['account'::text, 'attested'::text])))`.
 Stop if the transaction errors; it rolls back whole.
 
+Then V126, the same way, in its own transaction:
+
+```bash
+git show "$SHA":migrations/V126__account_trust_live_attested.sql > /tmp/V126.sql
+shasum -a 256 /tmp/V126.sql
+gcloud compute scp /tmp/V126.sql "$TC_HOST":/tmp/V126.sql --project "$TC_PROJECT" --zone "$TC_ZONE"
+tcrun <<'EOF'
+sha256sum /tmp/V126.sql        # must equal the shasum printed on the laptop
+APP=$(app_url)
+test "$(psql "$APP" -XAt -c "select count(*) from _trace_commons_migrations where version = 125")" = 1 \
+  || { echo "STOP: V125 is not recorded"; exit 1; }
+test "$(psql "$APP" -XAt -c "select count(*) from _trace_commons_migrations where version = 126")" = 0 \
+  || { echo "STOP: V126 already recorded"; exit 1; }
+psql "$APP" -X --single-transaction -v ON_ERROR_STOP=1 \
+  -f /tmp/V126.sql \
+  -c "INSERT INTO _trace_commons_migrations (version, name) VALUES (126, 'account_trust_live_attested')"
+psql "$APP" -XAt -c "select version, name from _trace_commons_migrations where version = 126"
+psql "$APP" -XAt -c "select count(*) from pg_proc where proname = 'trace_record_account_trust_evaluation_v2'"
+psql "$APP" -XAt -c "select string_agg(column_name, ',' order by column_name) from information_schema.columns where table_name = 'trace_account_trust_evaluations' and column_name in ('attested_units','age_seconds')"
+psql "$APP" -XAt -c "select has_function_privilege('trace_account_trust_worker', oid, 'EXECUTE') from pg_proc where proname = 'trace_record_account_trust_evaluation_v2'"
+rm -f /tmp/V126.sql
+EOF
+rm -f /tmp/V126.sql
+```
+
+The name `account_trust_live_attested` is the one in the `MIGRATIONS` table
+(`db/postgres.rs`). The two `BEGIN`s in the file open PL/pgSQL function
+bodies, not transactions, so `--single-transaction` holds.
+
+Expected: `126|account_trust_live_attested`, `1`, `age_seconds,attested_units`,
+and `t`. Stop if the transaction errors; it rolls back whole, and V125 stays
+applied, which the running binary tolerates.
+
 ### 1d. Build and publish
 
 From a clean checkout at `$SHA` (the build uploads the working tree;
@@ -299,8 +347,9 @@ pointers, so never run a bare `pull-and-install.sh` afterwards.
 
 ### 1e. Install ingest only
 
-The issuer is unchanged by #1373 (`deployment.md`: deploy ingest alone unless
-the issuer also changed). Copy the reviewed script from the laptop and run it
+The issuer is unchanged by #1373 and #1379: no issuer source changed in
+`6a5db334..84f0a4529` (`deployment.md`: deploy ingest alone unless the issuer
+also changed). Copy the reviewed script from the laptop and run it
 as a file; do not feed it to `bash -s`, because `gcloud` inside it could read
 the rest of the script from stdin:
 
@@ -338,9 +387,10 @@ Stop if: not `active`, `NRestarts` above 0, or `/health` shows another commit.
 
 ### Rollback, step 1
 
-Run the printed rollback line. V125 stays applied; the old binary ignores it
-and writes only `authority_kind = 'account'`, which the widened CHECK still
-admits. The schema rollback (a Cloud SQL restore) is not needed and loses every
+Run the printed rollback line. V125 and V126 stay applied. The old binary
+ignores V125 and writes only `authority_kind = 'account'`, which the widened
+CHECK still admits. It also runs on V126: the functions it calls keep their
+signatures, and it never writes the new fact kind or the new columns. The schema rollback (a Cloud SQL restore) is not needed and loses every
 write since the backup.
 
 ## Step 2: read-only pre-flight
@@ -741,12 +791,12 @@ The server side of the move needs linking on (step 4). The owner's tenant
 ## Step 7: growth (placeholder)
 
 Not part of this switch-on. `growth_rule` stays `"none"`, and nothing below is
-set. The earned-trust growth step is a separate, later change on its own
-branch, expected to bring: tier policy `tiered-v1`, migration V126, the
+set. The build and V126 from #1379 are already in place after step 1; what the
+growth step still brings is tier policy `tiered-v1`, the
 `TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_*` settings, and a scoped worker token.
 
-**PLACEHOLDER: fill in from the growth PR when it lands (#1379). No commands are
-given here on purpose.** Two things this runbook already fixes for it:
+**PLACEHOLDER: fill in from #1379 in a later change. No commands are given here
+on purpose.** Two things this runbook already fixes for it:
 
 - The policy version is frozen by the stored budget rows. Growth needs a
   version bump to `growth_rule: external` with its own `growth_policy_version`,
@@ -761,7 +811,7 @@ given here on purpose.** Two things this runbook already fixes for it:
 
 | Step | Undo | What stays |
 |---|---|---|
-| 1 | Reinstall `.bak-<stamp>`, restart | V125 (forward-only; harmless to the old binary), the backup, and `.bak-*` binaries |
+| 1 | Reinstall `.bak-<stamp>`, restart | V125 and V126 (forward-only; harmless to the old binary), the backup, and `.bak-*` binaries |
 | 3 | Optional `DELETE` of the marker | Markers; keep them once linking is on |
 | 4 | Remove drop-in, restart | Links, invite grants, `invited` authority, link audit rows. Switching off only returns 503 on the routes. |
 | 5 | Remove drop-in, restart | Budget rows (they freeze the policy per version), account-ledger submissions, source-session claims; a migrated device cannot fall back to its legacy key |
