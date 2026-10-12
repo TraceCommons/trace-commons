@@ -3415,6 +3415,49 @@ impl TenantCtx {
         &self.auth.principal_ref
     }
 
+    /// The principal account admission looks the caller up by: the
+    /// provisioned device principal for a device-key upload claim, and
+    /// `principal_ref()` for every other credential.
+    ///
+    /// NEAR and NEAR AI provisioning key the account, its admission anchor
+    /// and the ledger's live-device check by
+    /// `account_trust::device_principal_ref(tenant, device_key_id)`. A
+    /// signed upload claim's own principal hashes the claim's actor under the
+    /// `signed_claim` method instead, so it never matches a provisioned row;
+    /// looking it up refused every `nearai-` upload with
+    /// `account_trust_refused` (2026-10-12).
+    ///
+    /// Which device: the one whose key id is in the claim's actor. The issuer
+    /// writes that actor (`account_trust::device_claim_actor`) only after
+    /// verifying the device key's signature for this tenant, and refuses a
+    /// device-shaped actor on the workload path, so the actor's key id is
+    /// the authenticated device. The actor is recovered from `sub` and
+    /// accepted only if it re-derives this request's principal, so a claim
+    /// whose `principal_ref` and `sub` disagree falls back rather than
+    /// borrowing `sub`. `principal_ref()` itself is unchanged: it remains the
+    /// ownership key every submission row is written under.
+    fn account_principal_ref(&self) -> String {
+        self.device_principal_ref()
+            .unwrap_or_else(|| self.auth.principal_ref.clone())
+    }
+
+    fn device_principal_ref(&self) -> Option<String> {
+        let auth = &self.auth;
+        if auth.auth_method != TraceAuthMethod::SignedClaim {
+            return None;
+        }
+        let actor = auth.signed_claim_subject.as_deref()?;
+        if signed_claim_principal_refs(&auth.tenant_id, actor).0 != auth.principal_ref {
+            return None;
+        }
+        let device_key_id =
+            trace_commons_server::account_trust::device_claim_key_id(&auth.tenant_id, actor)?;
+        Some(trace_commons_server::account_trust::device_principal_ref(
+            &auth.tenant_id,
+            device_key_id,
+        ))
+    }
+
     fn tenant_storage_ref(&self) -> String {
         tenant_storage_ref(self.tenant_id())
     }
