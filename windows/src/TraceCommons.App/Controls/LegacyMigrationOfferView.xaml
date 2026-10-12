@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The offer to move a legacy invite identity to the contributor's NEAR AI
+    account. One control for two places: the card among the main window's
+    notices, which can be dismissed, and the Settings section, which cannot.
+
+    EVERY STRING HERE IS BOUND, from the Rust through
+    tc_legacy_migration_offer_json and the refusal lines the move returns.
+    Nothing on this card is written in markup or in C#.
+
+    Move is the one real action. Dismiss is a plain link beside it so that
+    putting the card away is not mistaken for the main choice.
+-->
+<UserControl
+    x:Class="TraceCommons.App.Controls.LegacyMigrationOfferView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Border Padding="14,12"
+            Background="{ThemeResource TcSurfaceCardBrush}"
+            BorderBrush="{ThemeResource TcHairlineBrush}"
+            BorderThickness="1"
+            CornerRadius="{StaticResource TcCardCornerRadius}">
+        <StackPanel Spacing="8">
+            <TextBlock Text="{x:Bind Offer.Title, Mode=OneWay}"
+                       Style="{StaticResource TcTitleCardTextStyle}"
+                       TextWrapping="Wrap" />
+            <TextBlock Text="{x:Bind Offer.Body, Mode=OneWay}"
+                       Style="{StaticResource TcCaptionTextStyle}"
+                       TextWrapping="Wrap" />
+
+            <StackPanel Spacing="4" Visibility="{x:Bind Offer.NeedsInvite, Mode=OneWay}">
+                <TextBlock Text="{x:Bind Offer.InvitePrompt, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <TextBox Text="{x:Bind Offer.Invite, Mode=TwoWay}"
+                         IsEnabled="{x:Bind Offer.CanMove, Mode=OneWay}"
+                         AutomationProperties.Name="{x:Bind Offer.InvitePrompt, Mode=OneWay}" />
+            </StackPanel>
+
+            <TextBlock Text="{x:Bind Offer.WorkingLine, Mode=OneWay}"
+                       Visibility="{x:Bind Offer.IsWorking, Mode=OneWay}"
+                       Style="{StaticResource TcCaptionTextStyle}"
+                       TextWrapping="Wrap" />
+            <TextBlock Text="{x:Bind Offer.Problem, Mode=OneWay}"
+                       Visibility="{x:Bind Offer.HasProblem, Mode=OneWay}"
+                       Style="{StaticResource TcCaptionTextStyle}"
+                       TextWrapping="Wrap" />
+
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <Button Content="{x:Bind Offer.Action, Mode=OneWay}"
+                        IsEnabled="{x:Bind Offer.CanMove, Mode=OneWay}"
+                        Style="{StaticResource TcSecondaryButtonStyle}"
+                        Click="OnMove" />
+                <Button Content="{x:Bind Offer.Cancel, Mode=OneWay}"
+                        Visibility="{x:Bind Offer.CanCancel, Mode=OneWay}"
+                        Style="{StaticResource TcSecondaryButtonStyle}"
+                        Click="OnCancel" />
+                <HyperlinkButton Content="{x:Bind Offer.Dismiss, Mode=OneWay}"
+                                 Visibility="{x:Bind ShowsDismiss, Mode=OneWay}"
+                                 IsEnabled="{x:Bind Offer.CanMove, Mode=OneWay}"
+                                 Click="OnDismiss" />
+            </StackPanel>
+            <TextBlock Text="{x:Bind Offer.Later, Mode=OneWay}"
+                       Visibility="{x:Bind ShowsDismiss, Mode=OneWay}"
+                       Style="{StaticResource TcCaptionTextStyle}"
+                       TextWrapping="Wrap" />
+        </StackPanel>
+    </Border>
+</UserControl>

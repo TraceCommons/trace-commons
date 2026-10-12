@@ -40,7 +40,8 @@ final class MonitorHomeInsightsTests: XCTestCase {
         // `HomeTabView.hostedHeading` (Ron's breadcrumb, #1241).
         XCTAssertEqual(home.components(separatedBy: #"Self.insightsCopy?["title"]"#).count - 1, 1)
         XCTAssertTrue(home.contains("case .missionDrafts: HomeFormat.cardHeading(MonitorWords.missions)"))
-        XCTAssertTrue(home.contains("hostedCard(catalogue, action: openMissions)"))
+        XCTAssertTrue(home.contains("systemImage: Self.catalogueIcon, title: catalogue,"))
+        XCTAssertTrue(home.contains("subtitle: words?.catalogueSubtitle, action: openMissions)"))
         XCTAssertNil(HomeFormat.cardHeading(nil))
         XCTAssertNil(HomeFormat.cardHeading(""))
         XCTAssertEqual(HomeFormat.cardHeading("Insights"), "Insights")

@@ -1852,6 +1852,39 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// "Dismiss all": records every notice above the tabs that has its own
+    /// acknowledgement as shown -- grant voids, arming rewordings and the
+    /// legacy-migration notice -- in one round trip each, then re-reads
+    /// status so the daemon's own lists decide what stays. It re-arms and
+    /// changes nothing else, exactly as each card's own acknowledgement.
+    /// The offer to move is put away as its own Dismiss does, and moves
+    /// nothing.
+    func acknowledgeAllNotices() {
+        let voids = status.grantVoids.map(\.id)
+        let rewordings = status.armingRewordings.map(\.id)
+        let legacy = legacyMigrationNotice != nil
+        firstRunNotice = nil
+        if showsLegacyMigrationOfferCard { dismissLegacyMigrationOffer() }
+        perform(
+            "acknowledge_all_notices",
+            work: { client in
+                if !voids.isEmpty { try client.acknowledgeGrantVoids(ids: voids) }
+                if !rewordings.isEmpty { try client.acknowledgeArmingRewordings(ids: rewordings) }
+                if legacy { try client.acknowledgeLegacyInviteMigration() }
+            }
+        ) { _ in
+            self.refreshStatus()
+            self.refreshAudit()
+        }
+    }
+
+    /// How many notices "Dismiss all" would acknowledge.
+    var acknowledgeableNoticeCount: Int {
+        status.grantVoids.count + status.armingRewordings.count
+            + (legacyMigrationNotice != nil ? 1 : 0) + (firstRunNotice != nil ? 1 : 0)
+            + (showsLegacyMigrationOfferCard ? 1 : 0)
+    }
+
     /// Projects whose "Ask me" the daemon refused, by project id, so
     /// the notice can show the Rust's refusal line. Cleared on a retry.
     @Published private(set) var askFirstRefused: Set<String> = []
@@ -1885,6 +1918,164 @@ final class AppModel: ObservableObject {
         ) { _ in
             self.refreshStatus()
         }
+    }
+
+    // MARK: - The offer to move a legacy invite identity
+
+    /// The offer's words, read across the ABI once
+    /// (`TCCoreCopy.legacyMigrationOfferJSON`). Nil when the export cannot
+    /// be read, and then no offer is drawn anywhere.
+    static let coreLegacyMigrationOffer: LegacyMigrationOffer? =
+        TCCoreCopy.legacyMigrationOfferJSON().flatMap(LegacyMigrationOffer.decode(fromJSON:))
+    var legacyMigrationOffer: LegacyMigrationOffer? { Self.coreLegacyMigrationOffer }
+    /// Words a refusal label (`TCCoreCopy.legacyMigrationRefusalLine`). The
+    /// ABI in the app; replaced only by tests.
+    var legacyMigrationRefusalWording: (String) -> String? = { TCCoreCopy.legacyMigrationRefusalLine(label: $0) }
+
+    /// Whether the daemon offers the move: a legacy invite identity, not yet
+    /// moved (`status.legacy_invite_migration.offered`). Settings draws the
+    /// offer while this holds; the card above the tabs also needs it not
+    /// dismissed (`showsLegacyMigrationOfferCard`).
+    var isLegacyMigrationOffered: Bool {
+        statusRead == .answered && status.legacyInviteMigration.offered && legacyMigrationOffer != nil
+    }
+
+    var showsLegacyMigrationOfferCard: Bool {
+        isLegacyMigrationOffered && !isLegacyMigrationOfferDismissed
+    }
+
+    /// Whether the card was dismissed on this Mac for this identity. A local
+    /// marker: no daemon record fits (`acknowledge_legacy_invite_migration`
+    /// is the notice after a move), and the card is this shell's alone.
+    /// Keyed by a digest of the tenant, so a different invite identity
+    /// enrolled later is offered the move afresh.
+    var isLegacyMigrationOfferDismissed: Bool {
+        guard let key = Self.legacyMigrationOfferDismissedKey(status.tenantID) else { return false }
+        return UserDefaults.standard.bool(forKey: key)
+    }
+
+    /// Puts the card away for good on this Mac. The offer stays in Settings.
+    /// Computed from `UserDefaults`, so the write is announced, as
+    /// `markOnboardingComplete` does.
+    func dismissLegacyMigrationOffer() {
+        guard let key = Self.legacyMigrationOfferDismissedKey(status.tenantID) else {
+            refreshStatus()
+            return
+        }
+        objectWillChange.send()
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
+    static func legacyMigrationOfferDismissedKey(_ tenantID: String?) -> String? {
+        guard let tenantID, !tenantID.isEmpty else { return nil }
+        let digest = SHA256.hash(data: Data(tenantID.utf8))
+        return "trace_commons.legacy_migration_offer_dismissed."
+            + digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The move is running. The offer shows its working line in place of
+    /// the button meanwhile.
+    @Published private(set) var legacyMigrationBusy = false
+    /// The core's sentence for the last refused move, or nil.
+    @Published private(set) var legacyMigrationRefusal: String?
+    /// The daemon could not tell which invite this device joined with
+    /// (`legacy_migration_invite_needed`): the offer asks for it, and the
+    /// next Move sends it. Stays until a move succeeds.
+    @Published private(set) var legacyMigrationInviteNeeded = false
+    /// The move could not be started at all (no daemon answer).
+    @Published private(set) var legacyMigrationStartFailed = false
+    /// The move is waiting on the passkey step in the browser.
+    @Published private(set) var legacyMigrationAwaitingPasskey = false
+    /// The passkey step ended without finishing; nothing was moved.
+    @Published private(set) var legacyMigrationPasskeyFailed = false
+    /// The passkey step: the first run's browser step (`nearAILogin`), where
+    /// the person creates or uses their passkey and the daemon keeps the
+    /// session the move provisions the account with. True once it finished.
+    /// Replaced only by tests.
+    var legacyMigrationPasskeyStep: (() async -> Bool)?
+    /// Ends the browser step the passkey step began (`cancelNearAILogin`).
+    /// Replaced only by tests.
+    var legacyMigrationPasskeyCancel: (() async -> Void)?
+    /// The running passkey step, so Cancel can stop it.
+    private var legacyMigrationPasskeyTask: Task<Bool, Never>?
+
+    /// Cancel while waiting on the passkey: stop waiting and end the
+    /// browser step. Nothing is moved, and the offer stays.
+    func cancelLegacyMigrationPasskey() {
+        guard let task = legacyMigrationPasskeyTask else { return }
+        task.cancel()
+        let cancel = legacyMigrationPasskeyCancel ?? { [weak self] in _ = await self?.cancelNearAILogin() }
+        Task { await cancel() }
+    }
+
+    /// Runs the passkey step once, as its own task so Cancel can stop it.
+    /// True when it finished; false when it failed, ran out of time or was
+    /// cancelled (then `legacyMigrationPasskeyFailed` stays false).
+    private func runLegacyMigrationPasskeyStep() async -> Bool {
+        let step = legacyMigrationPasskeyStep ?? { [weak self] in await self?.nearAILogin() ?? false }
+        legacyMigrationAwaitingPasskey = true
+        let task = Task { await step() }
+        legacyMigrationPasskeyTask = task
+        let finished = await task.value
+        legacyMigrationPasskeyTask = nil
+        legacyMigrationAwaitingPasskey = false
+        if !finished && !task.isCancelled { legacyMigrationPasskeyFailed = true }
+        return finished && !task.isCancelled
+    }
+
+    /// Move: `legacy_invite_migrate`, which the contributor chose. A refusal
+    /// changes nothing and is said in the core's words; on success status is
+    /// re-read, the daemon stops offering the move and its notice takes
+    /// over. `invite` is sent only once the daemon asked for it.
+    ///
+    /// The move leads with the passkey step (owner, 2026-10-11): when the
+    /// daemon has no session to provision the account with
+    /// (`legacy_migration_no_near_ai_session`), this runs the passkey step
+    /// and then the move again, once, without a second press. A step that
+    /// does not finish moves nothing.
+    func migrateLegacyInvite(invite: String? = nil) async {
+        guard let client, !legacyMigrationBusy else { return }
+        let pasted = invite?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sent = legacyMigrationInviteNeeded && !(pasted ?? "").isEmpty ? pasted : nil
+        legacyMigrationBusy = true
+        legacyMigrationRefusal = nil
+        legacyMigrationStartFailed = false
+        legacyMigrationPasskeyFailed = false
+        let move = {
+            await Task.detached(priority: .userInitiated) {
+                Result { try client.migrateLegacyInvite(invite: sent) }
+            }.value
+        }
+        var outcome = await move()
+        if case .failure(let failure as DaemonClient.Failure) = outcome,
+            failure.message == LegacyMigrationOffer.passkeyNeededLabel, self.client === client
+        {
+            guard await runLegacyMigrationPasskeyStep(), self.client === client else {
+                legacyMigrationBusy = false
+                refreshStatus()
+                return
+            }
+            outcome = await move()
+        }
+        legacyMigrationBusy = false
+        guard self.client === client else { return }
+        switch outcome {
+        case .success:
+            recordRead("legacy_invite_migrate", answered: true)
+            legacyMigrationInviteNeeded = false
+        case .failure(let failure as DaemonClient.Failure):
+            recordRead("legacy_invite_migrate", answered: false)
+            // `message` is a fixed `legacy_migration_*` label by contract.
+            if failure.message == LegacyMigrationOffer.inviteNeededLabel {
+                legacyMigrationInviteNeeded = true
+            }
+            legacyMigrationRefusal = legacyMigrationRefusalWording(failure.message)
+            if legacyMigrationRefusal == nil { legacyMigrationStartFailed = true }
+        case .failure:
+            recordRead("legacy_invite_migrate", answered: false)
+            legacyMigrationStartFailed = true
+        }
+        refreshStatus()
     }
 
     /// Void notices whose "Turn back on" the daemon refused, by notice id,

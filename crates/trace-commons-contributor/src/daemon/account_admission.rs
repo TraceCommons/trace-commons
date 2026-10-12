@@ -479,6 +479,25 @@ mod tests {
         "2026-09-26T12:00:00Z".parse().unwrap()
     }
 
+    /// A server running a `tiered-v1` policy adds the account's growth view
+    /// to the status body (spec rule 7). This client ignores the new fields
+    /// and reads the three it always read, so R3 lifts and holds as before.
+    #[test]
+    fn a_status_body_with_the_growth_view_still_parses() {
+        let grown = r#"{"authority":"bounded","policy_version":"earned-trust-live-2026-10-11.1","ready":false,"refusal_label":"account_limit_reached","retry_after_seconds":1800,"allowance_tier":1,"allowance_tier_changed_at":"2026-10-12T05:22:16Z","allowance_multiplier":2,"effective_allowance":200,"allowance_spent":200,"allowance_remaining":0,"period_resets_at":"2026-10-19T00:00:00Z","evaluated_at":"2026-10-12T05:22:16Z","next_tier":{"tier":2,"multiplier":4,"effective_allowance":400,"required":{"units":30,"active_weeks":4,"age_seconds":3628800,"attested_units":5},"current":{"units":12,"active_weeks":2,"age_seconds":1300000,"attested_units":1}}}"#;
+        let parsed: StatusBody = serde_json::from_str(grown).expect("growth fields are ignored");
+        assert_eq!(parsed.authority, "bounded");
+        assert!(!parsed.ready);
+        assert_eq!(parsed.retry_after_seconds, Some(1800));
+        let top = r#"{"authority":"bounded","policy_version":"v","ready":true,"refusal_label":null,"retry_after_seconds":null,"allowance_tier":3,"allowance_tier_changed_at":null,"allowance_multiplier":8,"effective_allowance":800,"allowance_spent":0,"allowance_remaining":800,"period_resets_at":null,"evaluated_at":null,"next_tier":null}"#;
+        let parsed: StatusBody = serde_json::from_str(top).expect("null growth fields parse");
+        assert!(parsed.ready);
+        let s = AccountAdmissionState::default();
+        let a = cfg("https://a.invalid", "nearai-1");
+        s.record(AnswerKey::of(&a), Some(parsed), now());
+        assert_eq!(s.current(Some(&a)), AccountAdmission::Advertised);
+    }
+
     /// Nothing read is no; a yes counts only for the ingest and account it
     /// was read for.
     #[test]

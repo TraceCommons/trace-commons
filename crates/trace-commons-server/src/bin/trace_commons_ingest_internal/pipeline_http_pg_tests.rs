@@ -2298,6 +2298,7 @@ async fn completed_run_of(
     let key = envelope.submission_id.to_string();
     let PipelineReceiptResult::Created(created) = service
         .submit(PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: tenant,
             actor_principal_ref: principal,
@@ -2383,6 +2384,7 @@ async fn an_account_withdrawal_follow_up_tombstones_a_run_with_no_index_work() {
     let PipelineReceiptResult::Created(created) = fixture
         .service
         .submit(PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: tenant,
             actor_principal_ref: &principal,
@@ -3598,6 +3600,7 @@ async fn the_revocation_worker_deletes_the_score_objects_of_a_withdrawn_run() {
     let key = envelope.submission_id.to_string();
     let PipelineReceiptResult::Created(created) = service
         .submit(PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: &tenant,
             actor_principal_ref: &principal,
@@ -3847,6 +3850,7 @@ async fn the_revocation_worker_deletes_every_object_of_a_withdrawn_complete_run(
     let key = envelope.submission_id.to_string();
     let PipelineReceiptResult::Created(created) = service
         .submit(PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: &tenant,
             actor_principal_ref: &principal,
@@ -5984,6 +5988,7 @@ async fn quarantined_pipeline_run(
     let key = envelope.submission_id.to_string();
     let PipelineReceiptResult::Created(created) = service
         .submit(PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: tenant,
             actor_principal_ref: principal,
@@ -6996,6 +7001,7 @@ async fn received_compatibility_run(
     let key = envelope.submission_id.to_string();
     let PipelineReceiptResult::Created(created) = service
         .submit(PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: tenant,
             actor_principal_ref: principal,
@@ -7849,6 +7855,7 @@ async fn a_status_request_for_several_compatibility_runs_matches_one_request_per
     let key = envelope.submission_id.to_string();
     let PipelineReceiptResult::Created(created) = service
         .submit(PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: &tenant,
             actor_principal_ref: &principal,
@@ -10483,6 +10490,7 @@ async fn a_retried_upload_of_a_pipeline_submission_never_reaches_mains_upsert() 
     let PipelineReceiptResult::Created(created) = fixture
         .service
         .submit(PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: &tenant,
             actor_principal_ref: &principal,
@@ -13635,6 +13643,7 @@ async fn serve_a_routed_tenant_end_to_end(mode: TenantPolicyMode) {
     let key = envelope.submission_id.to_string();
     let receipt = service
         .submit(PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: &tenant,
             actor_principal_ref: &principal,
@@ -16175,6 +16184,7 @@ async fn pipeline_review_queue_lists_an_escalated_run_with_its_hold_reason() {
     let PipelineReceiptResult::Created(created) = fixture
         .service
         .submit(PipelineReceiptRequest {
+            accept_medium_risk: false,
             source_session: None,
             tenant_id: &fixture.tenant,
             actor_principal_ref: "principal_sha256:escalated-queue",
@@ -16269,6 +16279,7 @@ async fn a_reviewer_assesses_an_admitted_run_the_privacy_pass_escalated() {
         let PipelineReceiptResult::Created(created) = fixture
             .service
             .submit(PipelineReceiptRequest {
+                accept_medium_risk: false,
                 source_session: None,
                 tenant_id: &fixture.tenant,
                 actor_principal_ref: "principal_sha256:escalated-assessment",
@@ -16420,4 +16431,184 @@ async fn a_reviewer_assesses_an_admitted_run_the_privacy_pass_escalated() {
         submission_status(rejected_run.submission_id).await,
         StorageTraceCorpusStatus::Rejected
     );
+}
+
+/// What `accept_medium_upload` observed of one upload.
+struct AcceptMediumUpload {
+    receipt_status: serde_json::Value,
+    run: trace_commons_server::versioned_pipeline::PipelineRunRecord,
+    basis: Vec<String>,
+    stored_risk: String,
+    row_status: String,
+    documents: serde_json::Value,
+    admission_rule_id: String,
+}
+
+/// Issue #1344, over HTTP: uploads a metadata-only trace whose tool name
+/// carries an email address, to a tenant routed to the compatibility
+/// pipeline, through a server whose operator setting
+/// `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS` is `accept_medium`. The
+/// server's own deterministic re-scrub removes the address, so the receipt
+/// is Medium with a basis of `found_and_removed`, the shape measured on the
+/// pilot (where the consent flag often joins it). When
+/// `wait_for_completion`, waits for the worker to complete the run.
+async fn accept_medium_upload(
+    accept_medium: bool,
+    wait_for_completion: bool,
+) -> Option<AcceptMediumUpload> {
+    let runtime = runtime_backend(4).await?;
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-accept-medium-{accept_medium}-{suffix}");
+    let token = format!("token-accept-medium-{accept_medium}-{suffix}");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(MarkerRedactingBoundary),
+    );
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        Some(artifacts.clone()),
+        false,
+        false,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.tokens = Arc::new(tokens);
+    state_mut.accept_medium_risk_submissions = accept_medium;
+    state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&runtime);
+    state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &[tenant.as_str()],
+    );
+    let (base, stop, server) = serve_pipeline_app(state).await;
+    let client = reqwest::Client::new();
+
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    envelope.trace_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    set_metadata_only_tool_name(&mut envelope, "contact jane.doe@example.com");
+    envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+    envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+    envelope.trace_card.allowed_uses =
+        vec![TraceAllowedUse::Evaluation, TraceAllowedUse::ModelTraining];
+    let body = serde_json::to_vec(&envelope).expect("envelope serialises");
+    let (status, receipt) = post_trace(&client, &base, &token, &body).await;
+    assert_eq!(status, 200, "{receipt}");
+    if wait_for_completion {
+        wait_for_run_state(&runtime, &tenant, envelope.submission_id, "complete").await;
+    }
+    let run = run_of_submission(&service, &runtime, &tenant, envelope.submission_id).await;
+    let receipt_privacy = service
+        .store()
+        .load_submission_receipt_privacy(&tenant, envelope.submission_id)
+        .await
+        .expect("read the receipt privacy");
+    let mut basis = receipt_privacy.residual_risk_basis;
+    basis.sort();
+    let row = owner
+        .get_trace_submission(&tenant, envelope.submission_id)
+        .await
+        .unwrap()
+        .expect("the submission row");
+    let admission = service
+        .store()
+        .list_outcomes(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Admission)
+        .expect("an Admission outcome");
+    let (status, documents) =
+        post_submission_status(&client, &base, &token, &[envelope.submission_id]).await;
+    assert_eq!(status, 200, "{documents}");
+    stop.send(()).expect("send shutdown");
+    join_within(server, 20, "accept-medium test server").await;
+    Some(AcceptMediumUpload {
+        receipt_status: receipt["status"].clone(),
+        run,
+        basis,
+        stored_risk: serde_json::to_value(receipt_privacy.residual_pii_risk)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string(),
+        row_status: serde_json::to_value(row.status)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string(),
+        documents,
+        admission_rule_id: admission.evaluation["rule_id"]
+            .as_str()
+            .expect("a rule id")
+            .to_string(),
+    })
+}
+
+/// Issue #1344 (owner decision 2026-10-12), end to end: with the operator's
+/// accept-Medium setting on, an upload the server's re-scrub found PII in
+/// and removed is admitted by the pipeline under
+/// `minimal_admission_v1_accept_found_and_removed`, completes like any
+/// admitted run, and the contributor sees it `accepted` with its credit.
+/// The stored risk stays `medium` and the basis stays what the re-scrub
+/// found.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accept_medium_setting_admits_a_found_and_removed_upload() {
+    let Some(upload) = accept_medium_upload(true, true).await else {
+        return;
+    };
+    assert_eq!(upload.receipt_status, "processing");
+    assert_eq!(
+        upload.basis,
+        vec!["found_and_removed".to_string()],
+        "the server re-scrub found and removed the address"
+    );
+    assert_eq!(upload.stored_risk, "medium");
+    assert_eq!(upload.run.admission_decision, "admit", "{:?}", upload.run);
+    assert_eq!(
+        upload.admission_rule_id,
+        trace_commons_server::versioned_pipeline::PIPELINE_ADMISSION_ACCEPT_FOUND_AND_REMOVED_RULE_ID
+    );
+    assert_eq!(upload.run.state, PipelineRunState::Complete);
+    assert_eq!(upload.row_status, "accepted");
+    let documents = upload.documents.as_array().expect("a document list");
+    assert_eq!(documents.len(), 1, "{documents:?}");
+    assert_eq!(documents[0]["status"], "accepted", "{documents:?}");
+    assert_eq!(
+        documents[0]["credit_points_ledger"].as_f64(),
+        Some(2.5),
+        "credit as for any admitted run: {documents:?}"
+    );
+}
+
+/// Issue #1344: with the setting off, the same upload is quarantined by
+/// Admission under `privacy_review_required`, as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_the_accept_medium_setting_a_found_and_removed_upload_is_quarantined() {
+    let Some(upload) = accept_medium_upload(false, false).await else {
+        return;
+    };
+    assert_eq!(upload.basis, vec!["found_and_removed".to_string()]);
+    assert_eq!(upload.stored_risk, "medium");
+    assert_eq!(upload.run.admission_decision, "quarantine");
+    assert_eq!(
+        upload.run.admission_reason.as_deref(),
+        Some("privacy_review_required")
+    );
+    assert_eq!(upload.admission_rule_id, "privacy_review_required");
+    assert_eq!(upload.row_status, "quarantined");
 }

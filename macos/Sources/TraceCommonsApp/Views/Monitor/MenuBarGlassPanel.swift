@@ -426,6 +426,9 @@ struct MenuBarGlassPanel: View {
                 }
             }
             hairline
+            // The main window, wherever it was left (owner feedback,
+            // 2026-10-11): closing it left no way back but the Dock.
+            Button(MenuWords.openApp) { open(nil) }
             Button(MenuWords.manageRules) { open(MenuPanelData.manageRules(requiresOnboarding: model.requiresOnboarding)) }
             Button(MenuWords.settings) {
                 NSApp.activate(ignoringOtherApps: true)
@@ -505,12 +508,15 @@ private struct PanelSurface: ViewModifier {
     }
 }
 
-/// Holds the `MenuBarExtra` window's top edge under the menu bar while the
-/// panel changes height. An `NSWindow` that is resized keeps its bottom
-/// edge, so opening a pill's sub-list grew the window upward into the menu
-/// bar, where AppKit pushed it back down, and closing it then dropped the
-/// top edge away from the menu bar. The top is the one the system gave the
-/// window when it opened (it becomes key on each opening).
+/// Holds the `MenuBarExtra` window's top edge under the menu bar. An
+/// `NSWindow` that is resized keeps its bottom edge, so opening a pill's
+/// sub-list grew the window upward into the menu bar, where AppKit pushed
+/// it back down, and a panel that shrank (its first read landing, a notice
+/// going) dropped its top edge away from the menu bar. Remembering the top
+/// the window had when it became key was not enough: a shrink before that
+/// left the panel hanging far below the bar (owner, 2026-10-11). The top is
+/// now the menu bar's bottom edge on the window's screen, whenever the
+/// window opens, moves or resizes.
 struct MenuBarTopEdgePin: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { Pin() }
 
@@ -523,35 +529,42 @@ struct MenuBarTopEdgePin: NSViewRepresentable {
         return CGPoint(x: frame.minX, y: top - frame.height)
     }
 
+    /// The menu bar's bottom edge on a screen: the top of its visible
+    /// frame, or, when the menu bar hides itself and the visible frame
+    /// reaches the top, the screen's top less the menu bar's thickness.
+    /// Pure, so tested.
+    static func menuBarBottom(screen: CGRect, visible: CGRect, thickness: CGFloat) -> CGFloat {
+        visible.maxY < screen.maxY - 0.5 ? visible.maxY : screen.maxY - thickness
+    }
+
     private final class Pin: NSView {
-        private var top: CGFloat?
         private var observers: [NSObjectProtocol] = []
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             observers.forEach(NotificationCenter.default.removeObserver)
             observers = []
-            top = nil
             guard let window else { return }
-            if window.isKeyWindow { top = window.frame.maxY }
+            pin(window)
             let center = NotificationCenter.default
-            observers.append(center.addObserver(
-                forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main
-            ) { [weak self, weak window] _ in
-                MainActor.assumeIsolated {
-                    guard let window else { return }
-                    self?.top = window.frame.maxY
-                }
-            })
-            observers.append(center.addObserver(
-                forName: NSWindow.didResizeNotification, object: window, queue: .main
-            ) { [weak self, weak window] _ in
-                MainActor.assumeIsolated {
-                    guard let self, let window, window.isVisible,
-                          let origin = MenuBarTopEdgePin.pinnedOrigin(window.frame, top: self.top) else { return }
-                    window.setFrameOrigin(origin)
-                }
-            })
+            for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResizeNotification,
+                         NSWindow.didMoveNotification, NSWindow.didChangeOcclusionStateNotification] {
+                observers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self, weak window] _ in
+                    MainActor.assumeIsolated {
+                        guard let self, let window, window.isVisible else { return }
+                        self.pin(window)
+                    }
+                })
+            }
+        }
+
+        private func pin(_ window: NSWindow) {
+            guard let screen = window.screen ?? NSScreen.main else { return }
+            let top = MenuBarTopEdgePin.menuBarBottom(
+                screen: screen.frame, visible: screen.visibleFrame, thickness: NSStatusBar.system.thickness)
+            if let origin = MenuBarTopEdgePin.pinnedOrigin(window.frame, top: top) {
+                window.setFrameOrigin(origin)
+            }
         }
 
         deinit {
@@ -707,6 +720,7 @@ enum MenuWords {
     static var kept: String { MonitorWords.table?.kept ?? "" }
     static var recentActivity: String { MonitorWords.table?.recentActivity ?? "" }
     static var flagged: String { MonitorWords.table?.flagged ?? "" }
+    static var openApp: String { MonitorWords.table?.openApp ?? "" }
     static var manageRules: String { MonitorWords.table?.manageRules ?? "" }
     static var settings: String { MonitorWords.table?.settings ?? "" }
     static var quit: String { MonitorWords.table?.quit ?? "" }

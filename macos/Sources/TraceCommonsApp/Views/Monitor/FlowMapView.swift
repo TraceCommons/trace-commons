@@ -41,7 +41,7 @@ struct FlowMapView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let fit = FlowMapGeometry(size: proxy.size, zoom: zoom, focus: focus)
+            let fit = FlowMapGeometry(size: proxy.size, zoom: zoom, focus: focus, design: scene.canvas)
             ZStack(alignment: .topLeading) {
                 TimelineView(.animation(minimumInterval: 1 / 30, paused: reduceMotion || !scene.flows || !state.isHealthy)) { timeline in
                     Canvas { context, _ in
@@ -141,7 +141,7 @@ struct FlowMapView: View {
             if active { ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassTokens.Color.blue.color.opacity(0.35), scale: fit.scale) }
         case .tool(let tool, let off):
             layer.fill(disc, with: .color(GlassColor.ink(0.12)))
-            mark(tool, centre: centre, side: 16 * fit.scale, in: &layer)
+            mark(tool, centre: centre, side: Self.markSide(node.radius) * fit.scale, in: &layer)
             if node.dashed {
                 // #1146's "Tool not watched": a dashed rim.
                 layer.stroke(disc, with: .color(GlassTokens.Color.statusOff.color),
@@ -162,7 +162,7 @@ struct FlowMapView: View {
             layer.stroke(disc, with: .color(rule.stroke.color), lineWidth: 2 * fit.scale)
         case .harness(let tool, _):
             layer.fill(disc, with: .color(GlassColor.ink(0.12)))
-            if let tool { mark(tool, centre: centre, side: 16 * fit.scale, in: &layer) }
+            if let tool { mark(tool, centre: centre, side: Self.markSide(node.radius) * fit.scale, in: &layer) }
         case .destination(let lamp):
             let lit = lamp == .answering || lamp == .running
             layer.fill(disc, with: .color(lit ? GlassTokens.Color.mapCredentialOn.color : GlassTokens.Color.mapNodeOff.color))
@@ -174,7 +174,7 @@ struct FlowMapView: View {
             }
             // A key, not a shield: the node is the credential, and no
             // protection is claimed for it. #1146's outlined, level key.
-            layer.stroke(Self.keyGlyph(centre: centre, scale: fit.scale), with: .color(GlassColor.textPrimary),
+            layer.stroke(Self.keyGlyph(centre: centre, scale: fit.scale * node.radius / 26), with: .color(GlassColor.textPrimary),
                          style: StrokeStyle(lineWidth: 2 * fit.scale, lineCap: .round, lineJoin: .round))
         }
 
@@ -187,6 +187,14 @@ struct FlowMapView: View {
         // and gaps scale together, so the two lines never meet.
         let type = Self.labelType(scale: fit.scale)
         let label = node.label.count > 18 ? node.label.prefix(17) + "…" : Substring(node.label)
+        if node.labelLeading {
+            // The compact maps' column: the label level with the node, on
+            // its leading side, so a tight column never stacks labels.
+            layer.draw(
+                Text(label).font(.system(size: type.labelSize, weight: .semibold)).foregroundStyle(GlassColor.textPrimary),
+                at: CGPoint(x: centre.x - radius - type.labelOffset * 0.6, y: centre.y), anchor: .trailing)
+            return
+        }
         layer.draw(
             Text(label).font(.system(size: type.labelSize, weight: .semibold)).foregroundStyle(GlassColor.textPrimary),
             at: CGPoint(x: centre.x, y: centre.y + radius + type.labelOffset))
@@ -206,6 +214,12 @@ struct FlowMapView: View {
                                               labelOffset: CGFloat, sublabelOffset: CGFloat) {
         let unit = max(scale, labelFloor)
         return (11 * unit, 10 * unit, 12 * unit, 26.5 * unit)
+    }
+
+    /// A tool's logo side for a disc of `radius` design units: 16 on
+    /// #1146's 13-unit disc, in proportion on the compact maps' larger ones.
+    static func markSide(_ radius: CGFloat) -> CGFloat {
+        radius * 16 / 13
     }
 
     /// The smallest factor the map's labels are drawn at.
@@ -368,8 +382,8 @@ struct FlowMapGeometry {
 
     static let focusScale: CGFloat = 1.6
 
-    init(size: CGSize, zoom: CGFloat, focus: CGPoint? = nil) {
-        let design = FlowMapScene.size
+    /// `design` is the scene's design space (`FlowMapScene.canvas`).
+    init(size: CGSize, zoom: CGFloat, focus: CGPoint? = nil, design: CGSize = FlowMapScene.size) {
         let fit = min(size.width / design.width, size.height / design.height)
         let centred = CGPoint(x: (size.width - design.width * fit) / 2, y: (size.height - design.height * fit) / 2)
         if let focus {

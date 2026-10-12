@@ -1180,6 +1180,7 @@ pub enum TraceTenantAccessGrantRole {
     RevocationWorker,
     CompetitionReadWorker,
     RegisterStatsWorker,
+    AccountTrustWorker,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

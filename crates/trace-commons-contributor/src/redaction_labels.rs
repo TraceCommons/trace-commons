@@ -250,11 +250,10 @@ mod tests {
         );
     }
 
-    /// `local_path` and `private_email` are the ONLY two labels that mint a
-    /// numbered placeholder (`apply_placeholder_regex` in
-    /// `trace-commons-protocol`), so they are the only two a distinct count
-    /// can ever be reported for. Every fixture with a non-empty distinct map
-    /// uses one of them.
+    /// Only placeholder-minting labels -- `local_path`, `private_email` and
+    /// the #1362 tool-output labels (`trace-commons-protocol`'s
+    /// `trace_contribution.rs`) -- can ever have a distinct count reported.
+    /// Every fixture with a non-empty distinct map uses one of them.
     #[test]
     fn distinct_is_omitted_when_every_occurrence_is_its_own_value() {
         // "3 private email (3 distinct)" says the same thing twice.

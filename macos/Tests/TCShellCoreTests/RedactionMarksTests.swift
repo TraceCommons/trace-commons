@@ -17,7 +17,8 @@ final class RedactionMarksTests: XCTestCase {
     }
 
     /// The numbered form is the only one that carries both a label and an
-    /// ordinal. `apply_placeholder_regex` mints it for exactly two labels.
+    /// ordinal. The placeholder map mints it for `local_path`,
+    /// `private_email` and the #1362 tool-output labels.
     func testANumberedPlaceholderIsNamedAndNumbered() {
         let found = RedactionMarks.scan("ran it in <PRIVATE_LOCAL_PATH_1> today")
         XCTAssertEqual(found.count, 1)

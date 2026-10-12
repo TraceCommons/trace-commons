@@ -1,16 +1,20 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Earned account trust (Flow 3), shadow only.
+//! Earned account trust (Flow 3).
 //!
 //! See `docs/superpowers/specs/2026-09-26-earned-account-trust-design.md`.
 //! This module runs the batch workers over the database seams: it records the
-//! hash-only facts the growth rule reads, stores shadow evaluations, and
-//! reproduces them for the explain route and drill. The rule itself is the
-//! pure `account_trust_rule`. Nothing here changes an allowance: the
-//! production admission policy still refuses any `growth_rule` other than
-//! `"none"` (`account_trust::parse_bounded_policy`), and the V86 write
-//! function refuses every evaluation mode but `shadow`.
+//! hash-only facts the growth rule reads, stores evaluations, and reproduces
+//! them for the explain route and drill. The rule itself is the pure
+//! `account_trust_rule`.
+//!
+//! A `shadow` evaluation never changes an allowance. An `applied` one is
+//! written only when the admission policy itself names `tiered-v1`, bound to
+//! the account's input generation in one snapshot
+//! (`Database::evaluate_and_record_applied_account_trust`); admission reads
+//! the latest fresh one through V114's read and falls to the base allowance
+//! when it is missing, stale or invalidated.
 
 use std::collections::BTreeMap;
 
@@ -127,9 +131,30 @@ pub fn database_error_label(error: &DatabaseError) -> &'static str {
 // Shadow evaluation, explain, and the reproduction drill.
 // ---------------------------------------------------------------------------
 
-/// The only mode this build writes. The V86 definer function refuses any
-/// other, so a shadow row can never be mistaken for an applied one.
+/// A candidate's evaluations. Admission never reads them.
 pub const SHADOW_MODE: &str = "shadow";
+/// The admission policy's evaluations: what admission reads (V86's CHECK,
+/// V114's read).
+pub const APPLIED_MODE: &str = "applied";
+
+/// Which evaluations a run writes or an explain reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvaluationMode {
+    /// Under the shadow candidate, at an `as_of` the caller may choose.
+    Shadow,
+    /// Under the admission policy's own `tiered-v1` rule, at the database's
+    /// transaction time, bound to the inputs it read.
+    Applied,
+}
+
+impl EvaluationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shadow => SHADOW_MODE,
+            Self::Applied => APPLIED_MODE,
+        }
+    }
+}
 
 /// A stable, hash-only name for an account, for operator surfaces:
 /// `sha256("trace-account-trust-ref.v1\n" || tenant_id || "\n" || account_id)`.
@@ -161,12 +186,17 @@ pub struct EvaluateSummary {
     pub limit_reached: bool,
 }
 
-/// Evaluates every open account in an anchored tenant that has facts, at
-/// `as_of`, and stores a shadow evaluation for each. Accounts with no facts
-/// get no row. Nothing reads these rows to set an allowance.
+/// Evaluates every open account in an anchored tenant that has facts and
+/// stores an evaluation for each. Accounts with no facts get no row.
+///
+/// `Shadow` evaluates at `as_of`, and nothing reads the rows to set an
+/// allowance. `Applied` ignores `as_of`: each account is evaluated at the
+/// database's transaction time in the snapshot it read its inputs from, and
+/// admission reads the row while it stays fresh and its inputs unchanged.
 pub async fn evaluate_account_trust(
     db: &dyn Database,
     policy: &GrowthPolicy,
+    mode: EvaluationMode,
     as_of: DateTime<Utc>,
     limit: Option<i64>,
 ) -> Result<EvaluateSummary, DatabaseError> {
@@ -174,7 +204,7 @@ pub async fn evaluate_account_trust(
         .unwrap_or(RECORD_FACTS_DEFAULT_LIMIT)
         .clamp(0, RECORD_FACTS_MAX_LIMIT);
     let mut summary = EvaluateSummary {
-        mode: SHADOW_MODE,
+        mode: mode.as_str(),
         growth_policy_version: policy.version().to_string(),
         ..EvaluateSummary::default()
     };
@@ -192,18 +222,26 @@ pub async fn evaluate_account_trust(
                 break 'pages;
             }
             summary.accounts_scanned += 1;
-            let outcome = async {
-                let facts = db.account_trust_evaluation_inputs(account).await?;
-                if facts.is_empty() {
-                    return Ok(None);
+            let outcome = match mode {
+                EvaluationMode::Applied => {
+                    db.evaluate_and_record_applied_account_trust(account, policy)
+                        .await
                 }
-                let evaluation = evaluate(policy, &facts, as_of);
-                let changed = db
-                    .record_account_trust_evaluation(account, SHADOW_MODE, &evaluation)
-                    .await?;
-                Ok::<_, DatabaseError>(Some((evaluation, changed)))
-            }
-            .await;
+                EvaluationMode::Shadow => {
+                    async {
+                        let facts = db.account_trust_evaluation_inputs(account).await?;
+                        if facts.is_empty() {
+                            return Ok(None);
+                        }
+                        let evaluation = evaluate(policy, &facts, as_of);
+                        let changed = db
+                            .record_account_trust_evaluation(account, SHADOW_MODE, &evaluation)
+                            .await?;
+                        Ok::<_, DatabaseError>(Some((evaluation, changed)))
+                    }
+                    .await
+                }
+            };
             match outcome {
                 Ok(None) => {}
                 Ok(Some((evaluation, changed))) => {
@@ -244,16 +282,17 @@ pub struct ExplainReport {
     pub reproduced: bool,
 }
 
-/// Recomputes the latest stored shadow evaluation of `account` under
+/// Recomputes the latest stored evaluation of `account` in `mode` under
 /// `policy` at its stored `as_of`. Counts, tier, digest and policy version
 /// only: never a submission ID or trace content.
 pub async fn explain_account_trust(
     db: &dyn Database,
     policy: &GrowthPolicy,
+    mode: EvaluationMode,
     account: &TrustAccount,
 ) -> Result<ExplainReport, DatabaseError> {
     let stored = db
-        .latest_account_trust_evaluation(account, policy.version(), SHADOW_MODE)
+        .latest_account_trust_evaluation(account, policy.version(), mode.as_str())
         .await?;
     let recomputed = match &stored {
         Some(stored) => {
@@ -265,7 +304,7 @@ pub async fn explain_account_trust(
     Ok(ExplainReport {
         account_ref: account_trust_ref(account),
         growth_policy_version: policy.version().to_string(),
-        mode: SHADOW_MODE,
+        mode: mode.as_str(),
         reproduced: stored.is_some() && stored == recomputed,
         stored,
         recomputed,
@@ -300,9 +339,10 @@ pub async fn find_account_by_ref(
 /// Hash-only evidence from one reproduction drill.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ReproductionDrillSummary {
+    pub mode: &'static str,
     pub growth_policy_version: String,
     pub accounts_scanned: u64,
-    /// Accounts with a stored shadow evaluation under this policy version.
+    /// Accounts with a stored evaluation in this mode and policy version.
     pub evaluations_checked: u64,
     pub reproduced: u64,
     pub not_reproduced: u64,
@@ -324,17 +364,19 @@ impl ReproductionDrillSummary {
     }
 }
 
-/// Recomputes the latest stored shadow evaluation of up to `limit` accounts
-/// and reports how many reproduce exactly.
+/// Recomputes the latest stored evaluation in `mode` of up to `limit`
+/// accounts and reports how many reproduce exactly.
 pub async fn account_trust_reproduction_drill(
     db: &dyn Database,
     policy: &GrowthPolicy,
+    mode: EvaluationMode,
     limit: Option<i64>,
 ) -> Result<ReproductionDrillSummary, DatabaseError> {
     let limit = limit
         .unwrap_or(RECORD_FACTS_MAX_LIMIT)
         .clamp(0, RECORD_FACTS_MAX_LIMIT);
     let mut summary = ReproductionDrillSummary {
+        mode: mode.as_str(),
         growth_policy_version: policy.version().to_string(),
         ..ReproductionDrillSummary::default()
     };
@@ -353,7 +395,7 @@ pub async fn account_trust_reproduction_drill(
                 break 'pages;
             }
             summary.accounts_scanned += 1;
-            match explain_account_trust(db, policy, account).await {
+            match explain_account_trust(db, policy, mode, account).await {
                 Ok(report) => {
                     let Some(stored) = report.stored.as_ref() else {
                         continue;
@@ -391,4 +433,180 @@ pub async fn account_trust_reproduction_drill(
     }
     summary.evidence_hash = format!("sha256:{}", hex::encode(hash.finalize()));
     Ok(summary)
+}
+
+// ---------------------------------------------------------------------------
+// The account's own growth view, for contribution-status (spec rule 7).
+// ---------------------------------------------------------------------------
+
+/// What contribution-status adds beside `authority:"bounded"` under a
+/// `tiered-v1` policy. Counts and times of the caller's own account only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GrowthStatusView {
+    pub allowance_tier: i32,
+    pub allowance_tier_changed_at: Option<DateTime<Utc>>,
+    pub allowance_multiplier: i64,
+    pub effective_allowance: i64,
+    pub allowance_spent: i64,
+    pub allowance_remaining: i64,
+    pub period_resets_at: Option<DateTime<Utc>>,
+    pub evaluated_at: Option<DateTime<Utc>>,
+    /// `None` at the top tier.
+    pub next_tier: Option<NextTierView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NextTierView {
+    pub tier: u32,
+    pub multiplier: i64,
+    pub effective_allowance: i64,
+    pub required: TierProgress,
+    /// The applied evaluation's counts, as of `evaluated_at`; `None` when no
+    /// evaluation applied.
+    pub current: Option<TierProgress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TierProgress {
+    pub units: i64,
+    pub active_weeks: i64,
+    pub age_seconds: Option<i64>,
+    pub attested_units: i64,
+}
+
+/// Combines the status read with the policy's tier table. A tier the table
+/// does not have reads as multiplier 1, as admission reads it at the base.
+pub fn growth_status_view(
+    policy: &GrowthPolicy,
+    status: &crate::admission_ledger::AccountGrowthStatus,
+) -> GrowthStatusView {
+    let tiers = policy.tiers();
+    let tier = u32::try_from(status.tier).unwrap_or(0);
+    let multiplier = tiers.get(tier as usize).map_or(1, |row| row.multiplier);
+    let evaluation = status.evaluation.as_ref();
+    let next_tier = tiers.get(tier as usize + 1).map(|next| NextTierView {
+        tier: tier + 1,
+        multiplier: next.multiplier,
+        effective_allowance: policy.effective_allowance(tier + 1),
+        required: TierProgress {
+            units: i64::from(next.units),
+            active_weeks: i64::from(next.active_weeks),
+            age_seconds: Some(next.age_seconds),
+            attested_units: i64::from(next.attested_units),
+        },
+        current: evaluation.map(|e| TierProgress {
+            units: i64::from(e.units),
+            active_weeks: i64::from(e.active_weeks),
+            age_seconds: e.age_seconds,
+            attested_units: i64::from(e.attested_units),
+        }),
+    });
+    GrowthStatusView {
+        allowance_tier: status.tier,
+        allowance_tier_changed_at: evaluation.and_then(|e| e.tier_changed_at),
+        allowance_multiplier: multiplier,
+        effective_allowance: status.effective_allowance,
+        allowance_spent: status.period_spend,
+        allowance_remaining: status
+            .effective_allowance
+            .saturating_sub(status.period_spend)
+            .max(0),
+        period_resets_at: status.period_resets_at,
+        evaluated_at: evaluation.map(|e| e.as_of),
+        next_tier,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::admission_ledger::{AccountGrowthStatus, AppliedEvaluationProgress};
+    use chrono::TimeZone;
+
+    fn policy() -> GrowthPolicy {
+        crate::account_trust_rule::parse_growth_policy(
+            &serde_json::json!({
+                "version": "view-v1",
+                "processing_cost_bound": 10,
+                "bounded_allowance": 10,
+                "period": {"mode": "fixed", "seconds": 3600},
+                "growth_rule": "tiered-v1",
+                "growth": {
+                    "window_seconds": 86400 * 84,
+                    "weekly_cap": 10,
+                    "q_min_micros": null,
+                    "penalty_cooldown_seconds": 0,
+                    "evaluation_max_age_seconds": 3600,
+                    "allowance_ceiling": 50,
+                    "evaluator_versions": ["gate-v1"],
+                    "dedup_signal_versions": ["events.v2+simhash.v2"],
+                    "tiers": [
+                        {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                        {"units": 2, "active_weeks": 1, "age_seconds": 0, "multiplier": 3},
+                        {"units": 5, "active_weeks": 2, "age_seconds": 1209600,
+                         "multiplier": 6, "attested_units": 1}
+                    ]
+                }
+            })
+            .to_string(),
+            &["view-v1"],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_view_prices_the_tier_and_shows_the_next_one() {
+        let at = Utc.timestamp_opt(1_790_000_000, 0).unwrap();
+        let status = AccountGrowthStatus {
+            tier: 1,
+            effective_allowance: 30,
+            period_spend: 40,
+            period_resets_at: Some(at),
+            evaluation: Some(AppliedEvaluationProgress {
+                as_of: at,
+                units: 3,
+                active_weeks: 1,
+                age_seconds: Some(86_400),
+                attested_units: 0,
+                tier_changed_at: Some(at),
+            }),
+        };
+        let view = growth_status_view(&policy(), &status);
+        assert_eq!(view.allowance_multiplier, 3);
+        assert_eq!(
+            view.allowance_remaining, 0,
+            "spend above the limit is 0 left"
+        );
+        assert_eq!(view.evaluated_at, Some(at));
+        let next = view.next_tier.expect("tier 2 exists");
+        assert_eq!(
+            (next.tier, next.multiplier, next.effective_allowance),
+            (2, 6, 50)
+        );
+        assert_eq!(next.required.attested_units, 1);
+        assert_eq!(next.current.unwrap().age_seconds, Some(86_400));
+        // At the top tier there is no next tier; with no evaluation, no counts.
+        let top = growth_status_view(
+            &policy(),
+            &AccountGrowthStatus {
+                tier: 2,
+                evaluation: None,
+                ..status.clone()
+            },
+        );
+        assert!(top.next_tier.is_none());
+        let none = growth_status_view(
+            &policy(),
+            &AccountGrowthStatus {
+                tier: 0,
+                effective_allowance: 10,
+                period_spend: 0,
+                evaluation: None,
+                ..status
+            },
+        );
+        assert_eq!(none.allowance_multiplier, 1);
+        assert!(none.next_tier.unwrap().current.is_none());
+        assert_eq!(none.allowance_tier_changed_at, None);
+    }
 }

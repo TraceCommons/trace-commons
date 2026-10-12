@@ -580,6 +580,55 @@ public struct GlassPicker<Value: Hashable>: View {
     }
 }
 
+/// A one-of-few choice behind an icon (owner, 2026-10-11): the round glass
+/// control with the icon, and a native menu of the options with a
+/// checkmark on the left of the chosen one. Icon-only, so `label` names it
+/// for assistive tech and in its tooltip; the chosen option is its value.
+public struct GlassIconMenu<Value: Hashable>: View {
+    private let label: String
+    private let icon: GlassIcon
+    @Binding private var selection: Value?
+    private let options: [GlassPickerOption<Value>]
+
+    public init(_ label: String, systemImage: String, selection: Binding<Value?>, options: [GlassPickerOption<Value>]) {
+        self.label = label
+        self.icon = .symbol(systemImage)
+        self._selection = selection
+        self.options = options
+    }
+
+    private var current: GlassPickerOption<Value>? {
+        options.first { $0.value == selection }
+    }
+
+    public var body: some View {
+        let side = GlassTokens.Size.controlLarge
+        Menu {
+            // An inline picker: the menu draws its items with the system's
+            // checkmark beside the chosen one, in the leading gutter.
+            Picker(label, selection: $selection) {
+                ForEach(options) { option in
+                    Text(option.title).tag(Optional(option.value))
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        } label: {
+            GlassIconView(icon: icon, symbolSize: 13, weight: .medium)
+                .foregroundStyle(GlassColor.textPrimary)
+                .frame(width: side, height: side)
+                .glassSurface(.control, radius: side / 2, hover: GlassTokens.Color.controlHover)
+        }
+        .menuStyle(.button)
+        .buttonStyle(GlassPressStyle())
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel(label)
+        .accessibilityValue(current?.title ?? "")
+        .help(label)
+    }
+}
+
 /// A glass pill with two parts (owner, 2026-10-10): the action on the
 /// left, and a chevron on the right that opens a menu of variants of it.
 /// The inline glass button's box, split by a hairline. The chevron is

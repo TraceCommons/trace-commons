@@ -118,13 +118,30 @@ private struct HomeOverview: View {
                 InspectorPromptsHeader(traces: traces)
                 watching
                 stats
-                // Ron's Missions card: the local drafts, under his Drafts tag.
-                GlassEyebrowCard(MonitorWords.missions, action: openMissionDrafts, chevron: true) {
+                // Ron's Missions card: the local drafts, under his Drafts
+                // tag, headed as the Private AI cards are and drawn as a
+                // promotion (owner, 2026-10-11).
+                homeCard(
+                    systemImage: Self.missionsIcon, title: MonitorWords.missions,
+                    subtitle: words?.missionsSubtitle, promo: promo, action: openMissionDrafts
+                ) {
                     if let words { GlassTag(words.draftsTag, tone: .ask).fixedSize() }
                 } content: {
                     drafts
                 }
-                GlassEyebrowCard(MonitorWords.history, action: openHistory, chevron: true) {
+                #if DEBUG
+                // For the designer's comparison: the treatments, by name.
+                .contextMenu {
+                    Picker(selection: $promoName) {
+                        ForEach(GlassPromoTreatment.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                    } label: { EmptyView() }
+                    .pickerStyle(.inline)
+                }
+                #endif
+                homeCard(
+                    systemImage: Self.historyIcon, title: MonitorWords.history,
+                    subtitle: words?.historyDescription, action: openHistory
+                ) {
                     // Ron's "X credit pending", under D6: only beside the
                     // commons' statement of what it waits on.
                     if let pending = HomeFormat.creditPendingAccessory(
@@ -140,10 +157,14 @@ private struct HomeOverview: View {
                 // What #1146 has no place for, after its cards: Insights,
                 // and the commons catalogue once the daemon answers it.
                 if let insightsHeading {
-                    hostedCard(insightsHeading, action: openInsights)
+                    hostedCard(
+                        systemImage: Self.insightsIcon, title: insightsHeading,
+                        subtitle: words?.insightsSubtitle, action: openInsights)
                 }
                 if store.missions != nil, let catalogue = words?.missionCatalogue {
-                    hostedCard(catalogue, action: openMissions)
+                    hostedCard(
+                        systemImage: Self.catalogueIcon, title: catalogue,
+                        subtitle: words?.catalogueSubtitle, action: openMissions)
                 }
             }
         }
@@ -151,10 +172,50 @@ private struct HomeOverview: View {
         .task { missionDrafts.preview() }
     }
 
-    /// A way into a screen #1146 has no place for: its heading and a
-    /// chevron, and nothing else (the screen holds its own words).
-    private func hostedCard(_ heading: String, action: @escaping () -> Void) -> some View {
-        GlassEyebrowCard(heading, action: action, chevron: true) {
+    /// The Home cards' icons, in the Private AI cards' place for them.
+    static let missionsIcon = "sparkles"
+    static let historyIcon = "clock.arrow.circlepath"
+    static let insightsIcon = "chart.xyaxis.line"
+    static let catalogueIcon = "list.bullet.rectangle"
+
+    /// The Missions card's promotion treatment: the stored one, which a
+    /// debug build's context menu changes for comparison.
+    @AppStorage(GlassPromoTreatment.defaultsKey) private var promoName = GlassPromoTreatment.stored.rawValue
+    private var promo: GlassPromoTreatment { GlassPromoTreatment(rawValue: promoName) ?? .stored }
+
+    /// A Home card that is a way into a screen, laid out as the Private AI
+    /// cards are (owner, 2026-10-11): the icon, the title over the core's
+    /// subtitle, the card's accessory and a chevron on the right, and the
+    /// card's rows under the head. The whole card opens the screen.
+    private func homeCard<Accessory: View, Content: View>(
+        systemImage: String, title: String, subtitle: String?, promo: GlassPromoTreatment? = nil,
+        action: @escaping () -> Void,
+        @ViewBuilder accessory: () -> Accessory, @ViewBuilder content: () -> Content
+    ) -> some View {
+        Button(action: action) {
+            GlassIconCard(
+                systemImage: systemImage, title: title, subtitle: subtitle.map { [$0] } ?? [],
+                interactive: true, promo: promo,
+                accessory: {
+                    HStack(spacing: GlassTokens.Space.s5) {
+                        accessory()
+                        GlassChevron()
+                    }
+                },
+                content: content)
+        }
+        .buttonStyle(GlassPressStyle())
+    }
+
+    /// A way into a screen #1146 has no place for: its icon, heading,
+    /// subtitle and a chevron, and nothing else (the screen holds its own
+    /// words).
+    private func hostedCard(
+        systemImage: String, title: String, subtitle: String?, action: @escaping () -> Void
+    ) -> some View {
+        homeCard(systemImage: systemImage, title: title, subtitle: subtitle, action: action) {
+            EmptyView()
+        } content: {
             EmptyView()
         }
     }

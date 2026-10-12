@@ -28,6 +28,7 @@ the link.
 | Setting gate floors or calibrating thresholds | [`./calibration.md`](./calibration.md) |
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
 | Cutting the pilot over from `5f239be4`/V74 to `main`/V91 (go/no-go, pre-checks, rollback, withdrawal tombstone repair) | [`./pilot-cutover-2026-09.md`](./pilot-cutover-2026-09.md) |
+| Switching on account admission (weekly allowance) and legacy invite linking on the pilot, with marking the Devfolio tenants, post-checks and rollback | [`./pilot-account-admission-cutover-2026-10.md`](./pilot-account-admission-cutover-2026-10.md) |
 | Running a versioned pipeline corpus locally | [`./pipeline-lab.md`](./pipeline-lab.md) |
 | Qualifying a versioned pipeline candidate locally | [`./pipeline-qualification.md`](./pipeline-qualification.md) |
 | Comparing the old gate path with the versioned pipeline | [`./pipeline-comparison.md`](./pipeline-comparison.md) |
@@ -193,6 +194,11 @@ Every runbook in this directory, with a one-line description.
   tenant-level link to a NEAR account (V81), the operator-set pooled-tenant
   marker, conflict resolution, readiness rules, and the cutover for shared
   event invites.
+- [`./pilot-account-admission-cutover-2026-10.md`](./pilot-account-admission-cutover-2026-10.md) — ordered switch-on
+  for the pilot: deploy the #1373 build and V125, mark the pooled Devfolio
+  tenants, enable invite linking, then account admission with a weekly
+  allowance; each step has commands, a stop condition and a rollback. Growth
+  is a placeholder.
 - [`./mission-insight-rewards.md`](./mission-insight-rewards.md): provision reward roles, pin program terms, reserve capacity, review claims, and inspect award history.
 - [`./mission-packages.md`](./mission-packages.md) — publish immutable
   executable mission packages, operate anonymous discovery, and interpret

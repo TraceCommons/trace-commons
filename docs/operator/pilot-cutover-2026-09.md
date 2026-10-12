@@ -498,7 +498,11 @@ the cutover itself.
      users.** Only clients built from `main` after #1021 send it. Every
      released client up to 0.12.6 omits it. Their new uploads on a
      `near-`/`nearai-` tenant would get `422 source_session_invalid`
-     (`reserve_account` in `admission.rs`).
+     (`reserve_account` in `admission.rs`). Since 2026-10-11 that holds only
+     for uploads with no admission evidence: one that offers evidence takes
+     the V59 evidence ledger, as with account admission off, and one whose
+     evidence verifies and has `source_session` debits no allowance. See
+     "Attested uploads" in [account trust](./account-trust.md).
    - `GRANT trace_account_admission_runtime TO trace_ingest_runtime;`. V90
      already gave that role `INSERT` on `trace_submission_sessions` and
      `trace_source_sessions`, which the source-session claim

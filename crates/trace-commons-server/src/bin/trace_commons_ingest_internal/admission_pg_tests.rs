@@ -640,10 +640,12 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         accepted, resumed,
         "expired legacy lease resumes with original headers"
     );
+    // Read per tenant, not from the database-wide singleton: other tests in
+    // this module charge the V59 ledger too, and libtest runs them in parallel.
     let legacy_charge_after_expiry: i64 = client
         .query_one(
-            "SELECT cost_bound_used FROM trace_admission_global_budget WHERE singleton",
-            &[],
+            "SELECT cost_bound_used FROM trace_admission_accounts WHERE tenant_id=$1",
+            &[&tenant],
         )
         .await
         .unwrap()
@@ -702,8 +704,8 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
     );
     let total_legacy_charge: i64 = client
         .query_one(
-            "SELECT cost_bound_used FROM trace_admission_global_budget WHERE singleton",
-            &[],
+            "SELECT cost_bound_used FROM trace_admission_accounts WHERE tenant_id=$1",
+            &[&tenant],
         )
         .await
         .unwrap()
@@ -749,7 +751,10 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         })
         .await
         .unwrap();
-    fresh_evidence.expires_at = Utc::now().timestamp() + 5;
+    // First use must land inside this window on a slow, parallel CI runner; a
+    // short one made the test fail at random. Expiry is exercised below by
+    // re-signing the same evidence into the past, not by waiting it out.
+    fresh_evidence.expires_at = Utc::now().timestamp() + 120;
     let fresh_signature = signer
         .sign_eip191(&fresh_evidence.signing_bytes().unwrap())
         .unwrap();
@@ -873,22 +878,53 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         )
         .await
         .unwrap();
+    // Fresh verified evidence admits without debiting the allowance (owner
+    // decision of 2026-10-11): no budget row, and the row records why.
     let charged: i64 = client
         .query_one(
-            "SELECT cost_used FROM trace_account_admission_budget WHERE tenant_id=$1",
+            "SELECT COALESCE(sum(cost_used),0)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1",
             &[&tenant],
         )
         .await
         .unwrap()
         .get(0);
+    assert_eq!(charged, 0, "an attested reservation debits nothing");
+    let (kind, last_charged, status): (String, bool, String) = {
+        let row = client
+            .query_one(
+                "SELECT authority_kind,last_charged,status FROM trace_account_admission_submissions WHERE tenant_id=$1 AND submission_id=$2",
+                &[&tenant, &fresh_envelope.submission_id],
+            )
+            .await
+            .unwrap();
+        (row.get(0), row.get(1), row.get(2))
+    };
     assert_eq!(
-        charged, 0,
-        "pre-processing release refunds even after revocation"
+        (kind.as_str(), last_charged, status.as_str()),
+        ("attested", false, "released"),
+        "pre-processing release succeeds even after revocation"
     );
-    // The exact signed evidence accepted above now expires. Released,
-    // completed, and crashed leases all retain account/body binding.
-    let wait = (fresh_evidence.expires_at - Utc::now().timestamp() + 1).max(0) as u64;
-    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+    // The signed evidence accepted above now expires: the same evidence,
+    // re-signed with a window that has already closed. Released, completed,
+    // and crashed leases all retain account/body binding.
+    let mut lapsed_evidence = fresh_evidence.clone();
+    lapsed_evidence.issued_at = Utc::now().timestamp() - 120;
+    lapsed_evidence.expires_at = Utc::now().timestamp() - 60;
+    offered.insert(
+        trace_commons_protocol::admission::EVIDENCE_HEADER,
+        serde_json::to_string(&lapsed_evidence)
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    offered.insert(
+        trace_commons_protocol::admission::SIGNATURE_HEADER,
+        signer
+            .sign_eip191(&lapsed_evidence.signing_bytes().unwrap())
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
     Arc::make_mut(&mut state).account_admission.as_mut().unwrap().policy = trace_commons_server::account_trust::parse_bounded_policy(
         r#"{"version":"account-retry-wave2","processing_cost_bound":10,"bounded_allowance":100,"period":{"mode":"lifetime"},"growth_rule":"none"}"#, &["account-retry-wave2"]).unwrap();
     let account_receipt = require_ok(
@@ -902,9 +938,13 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
     )
     .await;
     let spent = || async {
-        client.query_one("SELECT sum(cost_used)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1", &[&tenant]).await.unwrap().get::<_,i64>(0)
+        client.query_one("SELECT COALESCE(sum(cost_used),0)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1", &[&tenant]).await.unwrap().get::<_,i64>(0)
     };
-    assert_eq!(spent().await, 10, "released recovery charges once");
+    assert_eq!(
+        spent().await,
+        0,
+        "released attested recovery keeps its attested authority and debits nothing"
+    );
     assert_eq!(
         require_ok(
             post(
@@ -919,7 +959,7 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         account_receipt,
         "completed account retry accepts its original expired evidence"
     );
-    assert_eq!(spent().await, 10, "completed retry has zero debit");
+    assert_eq!(spent().await, 0, "completed retry has zero debit");
     assert_eq!(
         require_ok(
             post(
@@ -934,7 +974,7 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         account_receipt,
         "headerless completed retry remains valid"
     );
-    for (status, expected) in [("reserved", 20i64), ("processing", 30i64)] {
+    for status in ["reserved", "processing"] {
         client.execute("UPDATE trace_account_admission_submissions SET status=$3,lease_expires_at=clock_timestamp()-interval '1 second' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&fresh_envelope.submission_id,&status]).await.unwrap();
         assert_eq!(
             require_ok(
@@ -952,8 +992,8 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         );
         assert_eq!(
             spent().await,
-            expected,
-            "recovery retains old work charge and reserves once"
+            0,
+            "expired attested recovery reserves on its recorded authority, with no debit"
         );
     }
     let mut altered = fresh.envelope_bytes.clone();
@@ -1037,7 +1077,7 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
             "signed proof must retain account and exact body binding"
         );
     }
-    assert_eq!(spent().await, 30, "conflicts and bad proofs never debit");
+    assert_eq!(spent().await, 0, "conflicts and bad proofs never debit");
     offered.remove(trace_commons_protocol::admission::SIGNATURE_HEADER);
     assert!(
         admission::reserve(
@@ -2137,4 +2177,884 @@ async fn merge_completes_a_withdrawal_the_absorbed_account_made() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// The provider, witness and signer one attested upload needs, built the way
+/// `actual_postgres_challenge_witness_ingest_and_terminal_retry` builds them.
+struct AttestedUploads {
+    provider: ring::signature::Ed25519KeyPair,
+    provider_key: String,
+    signer: Arc<FixtureSigner>,
+    trust: AdmissionProviderTrust,
+    witness: witness_service::surface::WitnessService,
+}
+
+impl AttestedUploads {
+    fn new() -> Self {
+        use ring::signature::KeyPair as _;
+        let provider = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[9; 32]).unwrap();
+        let provider_key = hex::encode(provider.public_key().as_ref());
+        let signer = Arc::new(FixtureSigner::new("attested-allowance-witness"));
+        let trust = AdmissionProviderTrust::new(
+            [provider_key.clone()],
+            Vec::new(),
+            ["synthetic-model".into()],
+            1,
+        )
+        .unwrap();
+        let witness = witness_service::surface::WitnessService::new(
+            Arc::new(witness_service::DeterministicRedaction::new(Vec::new())),
+            signer.clone(),
+            Arc::new(FixtureEnclave(signer.address())),
+            1024 * 1024,
+        )
+        .with_contribution_redactor(Arc::new(
+            witness_service::PipelineContributionRedaction::deterministic_only(Vec::new()),
+        ))
+        .with_admission_provider_trust(trust.clone());
+        Self {
+            provider,
+            provider_key,
+            signer,
+            trust,
+            witness,
+        }
+    }
+
+    /// A fresh challenge, a provider receipt bound to it, and the witnessed
+    /// envelope with its four headers. Installs the witness pin on first use.
+    async fn upload(
+        &self,
+        state: &mut Arc<AppState>,
+        source: Option<trace_commons_protocol::trace_contribution::SourceSessionIdentity>,
+    ) -> (Vec<u8>, HeaderMap) {
+        use trace_commons_protocol::trace_contribution::{
+            RawTraceCaptureTurn, RawTraceContribution, TraceContributionEventType,
+        };
+        let challenge = require_ok(
+            post(
+                state.clone(),
+                "/v1/admission/challenge",
+                Vec::new(),
+                HeaderMap::new(),
+            )
+            .await,
+        )
+        .await;
+        let value: serde_json::Value = serde_json::from_slice(&challenge).unwrap();
+        let binding = AdmissionBinding::parse(value["binding"].as_str().unwrap()).unwrap();
+        let request_body = serde_json::json!({"model":"synthetic-model","metadata":{REQUEST_METADATA_KEY:binding.encode().unwrap()},"messages":[{"role":"user","content":"please summarize the successful build"}]}).to_string();
+        let response_body = "{\"answer\":\"build succeeded\"}";
+        let receipt_text = format!(
+            "synthetic-model:{}:{}",
+            hash_hex(request_body.as_bytes()),
+            hash_hex(response_body.as_bytes())
+        );
+        let receipt = trace_commons_server::near_attestation::receipt::ReceiptPayload {
+            text: receipt_text.clone(),
+            signature: hex::encode(self.provider.sign(receipt_text.as_bytes()).as_ref()),
+            signing_address: self.provider_key.clone(),
+            signing_algo: trace_commons_server::near_attestation::receipt::ReceiptAlgo::Ed25519,
+            signature_kind:
+                trace_commons_server::near_attestation::receipt::ReceiptSignatureKind::ProviderTee,
+        };
+        let mut raw = RawTraceContribution::from_capture_turns(
+            &[RawTraceCaptureTurn {
+                user_input: "summarize build".into(),
+                response: None,
+                tool_calls: Vec::new(),
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                state: Some("Completed".into()),
+            }],
+            RecordedTraceContributionOptions {
+                include_message_text: true,
+                pseudonymous_contributor_id: Some("sha256:synthetic-attested".into()),
+                ..Default::default()
+            },
+        );
+        raw.submission_id = Uuid::new_v4();
+        raw.trace_id = Uuid::new_v4();
+        raw.source_session = source;
+        raw.ironclaw
+            .feature_flags
+            .insert("agent".into(), "opencode".into());
+        let mut event = raw.events.last().unwrap().clone();
+        event.event_id = Uuid::new_v4();
+        event.event_type = TraceContributionEventType::HttpExchange;
+        event.content = Some(response_body.into());
+        event.structured_payload = serde_json::json!({"request":{"method":"POST","body":request_body},"response":{"status":200}});
+        raw.events = vec![event];
+        let (response, evidence, signature) = self
+            .witness
+            .witness_admission_contribution(witness_service::WitnessContributionRequest {
+                raw_contribution: raw,
+                granted: witness_service::GrantedConsent {
+                    scopes: vec![
+                        ConsentScope::DebuggingEvaluation,
+                        ConsentScope::ModelTraining,
+                    ],
+                    uses: vec![TraceAllowedUse::Debugging, TraceAllowedUse::Evaluation],
+                },
+                offered_receipt: Some(receipt),
+            })
+            .await
+            .unwrap();
+        if state.witness_bypass.is_none() {
+            Arc::make_mut(state).witness_bypass =
+                trace_commons_server::redaction_witness::config::witness_bypass_config_from_values(
+                    Some("true"),
+                    Some(&self.signer.address()),
+                    Some("synthetic-admission-measurement"),
+                    Some(&evidence.redaction_policy_version),
+                    None,
+                )
+                .unwrap();
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            trace_commons_server::redaction_witness::request::CERTIFICATE_HEADER,
+            serde_json::to_string(&witness_service::http::certificate_json(
+                &response.certificate,
+                response.residual_risk_verdict(),
+            ))
+            .unwrap()
+            .parse()
+            .unwrap(),
+        );
+        headers.insert(
+            trace_commons_server::redaction_witness::request::SIGNATURE_HEADER,
+            response.signature_hex.parse().unwrap(),
+        );
+        headers.insert(
+            trace_commons_protocol::admission::EVIDENCE_HEADER,
+            serde_json::to_string(&evidence).unwrap().parse().unwrap(),
+        );
+        headers.insert(
+            trace_commons_protocol::admission::SIGNATURE_HEADER,
+            signature.parse().unwrap(),
+        );
+        (response.envelope_bytes, headers)
+    }
+}
+
+fn fresh_source() -> trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+    trace_commons_protocol::trace_contribution::SourceSessionIdentity {
+        adapter: "opencode".into(),
+        native_id: format!("test-{}", Uuid::new_v4().simple()),
+    }
+}
+
+async fn error_label(response: axum::response::Response) -> (StatusCode, serde_json::Value) {
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default()["error"].clone(),
+    )
+}
+
+/// Owner decision of 2026-10-11: an upload whose NEAR AI admission evidence
+/// verifies is admitted without debiting the bounded account allowance, and
+/// one with no `source_session` takes the V59 evidence ledger it took before
+/// account admission existed. An unattested upload is capped exactly as
+/// before.
+///
+/// Connects as the owning role on purpose. The restricted-role grant matrix
+/// is the end-to-end test above; a second granting test in this file would
+/// race it on the tables' `relacl` (#833).
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn attested_uploads_are_not_capped_by_the_account_allowance() {
+    let db = admission_pg_admin().await;
+    let token = "admission-fixture-token";
+    let fresh_token = "attested-allowance-fresh-account";
+    let (tenant, anchor, _) = provision_synthetic_near_account(&db, &principal_for(token)).await;
+    let (fresh_tenant, _, _) =
+        provision_synthetic_near_account(&db, &principal_for(fresh_token)).await;
+    let (_temp, mut state, _) = anchor_state(
+        db.clone(),
+        &[
+            (tenant.as_str(), token),
+            (fresh_tenant.as_str(), fresh_token),
+        ],
+    );
+    let uploads = AttestedUploads::new();
+    {
+        let state = Arc::make_mut(&mut state);
+        state.require_db_mirror_writes = true;
+        state.accept_medium_risk_submissions = true;
+        state.admission = Some(admission::AdmissionConfig {
+            limits: AdmissionLimits {
+                window_attempts: 1,
+                account_cost_limit: 100,
+                // The V59 global budget is one row for the whole database,
+                // frozen at its first caller's limit; match the test above.
+                global_cost_limit: 1000,
+                processing_cost_bound: 10,
+                lease_seconds: 60,
+                challenge_ttl_seconds: 60,
+            },
+            providers: uploads.trust.clone(),
+        });
+        state.account_admission = Some(admission::AccountAdmissionConfig {
+            policy: trace_commons_server::account_trust::parse_bounded_policy(
+                r#"{"version":"attested-allowance","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
+                &["attested-allowance"],
+            )
+            .unwrap(),
+            lease_seconds: 60,
+            providers: Some(uploads.trust.clone()),
+        });
+    }
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let account_id: Uuid = client
+        .query_one(
+            "SELECT account_id FROM trace_accounts WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let spent = || async {
+        client
+            .query_one(
+                "SELECT COALESCE(sum(cost_used),0)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1",
+                &[&tenant],
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0)
+    };
+    let account_row = |submission: Uuid| {
+        let client = &client;
+        let tenant = &tenant;
+        async move {
+            client
+                .query_opt(
+                    "SELECT authority_kind,last_charged,status FROM trace_account_admission_submissions WHERE tenant_id=$1 AND submission_id=$2",
+                    &[tenant, &submission],
+                )
+                .await
+                .unwrap()
+                .map(|row| {
+                    (
+                        row.get::<_, String>(0),
+                        row.get::<_, bool>(1),
+                        row.get::<_, String>(2),
+                    )
+                })
+        }
+    };
+    let legacy_row = |submission: Uuid| {
+        let client = &client;
+        let tenant = &tenant;
+        async move {
+            client
+                .query_opt(
+                    "SELECT status FROM trace_admission_submissions WHERE tenant_id=$1 AND submission_id=$2",
+                    &[tenant, &submission],
+                )
+                .await
+                .unwrap()
+                .map(|row| row.get::<_, String>(0))
+        }
+    };
+    let submission_of = |bytes: &[u8]| {
+        serde_json::from_slice::<TraceContributionEnvelope>(bytes)
+            .unwrap()
+            .submission_id
+    };
+
+    // An unattested upload spends the whole allowance; the next is refused.
+    let mut unattested = sample_envelope().await;
+    make_metadata_only_low_risk(&mut unattested);
+    unattested.source_session = Some(fresh_source());
+    require_ok(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&unattested).unwrap(),
+            HeaderMap::new(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(spent().await, 10);
+    let mut over = sample_envelope().await;
+    make_metadata_only_low_risk(&mut over);
+    over.source_session = Some(fresh_source());
+    assert_eq!(
+        error_label(
+            post(
+                state.clone(),
+                "/v1/traces",
+                serde_json::to_vec(&over).unwrap(),
+                HeaderMap::new()
+            )
+            .await
+        )
+        .await,
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!("account_limit_reached")
+        ),
+        "an unattested upload past the allowance is refused as before"
+    );
+
+    // An attested upload past the exhausted allowance is admitted, recorded
+    // as attested, and debits nothing.
+    let (attested, attested_headers) = uploads.upload(&mut state, Some(fresh_source())).await;
+    let attested_receipt = require_ok(
+        post(
+            state.clone(),
+            "/v1/traces",
+            attested.clone(),
+            attested_headers.clone(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(spent().await, 10, "an attested upload debits nothing");
+    assert_eq!(
+        account_row(submission_of(&attested)).await,
+        Some(("attested".into(), false, "completed".into()))
+    );
+    assert_eq!(
+        require_ok(
+            post(
+                state.clone(),
+                "/v1/traces",
+                attested.clone(),
+                attested_headers.clone()
+            )
+            .await
+        )
+        .await,
+        attested_receipt,
+        "a completed attested retry is a receipt read"
+    );
+
+    // Offered evidence that does not verify is refused as before, and
+    // reserves nothing: no signature, a wrong signature, or no witness.
+    let (refused, refused_headers) = uploads.upload(&mut state, Some(fresh_source())).await;
+    let mut bad_signature = refused_headers.clone();
+    bad_signature.insert(
+        trace_commons_protocol::admission::SIGNATURE_HEADER,
+        HeaderValue::from_static("invalid"),
+    );
+    let mut partial = refused_headers.clone();
+    partial.remove(trace_commons_protocol::admission::SIGNATURE_HEADER);
+    let mut unwitnessed = refused_headers.clone();
+    unwitnessed.remove(trace_commons_server::redaction_witness::request::CERTIFICATE_HEADER);
+    for headers in [bad_signature, partial, unwitnessed] {
+        assert_eq!(
+            error_label(post(state.clone(), "/v1/traces", refused.clone(), headers).await).await,
+            (
+                StatusCode::FORBIDDEN,
+                serde_json::json!("admission_refused")
+            ),
+        );
+    }
+    assert_eq!(account_row(submission_of(&refused)).await, None);
+    assert_eq!(spent().await, 10);
+
+    // Release before processing, then a crashed (expired) lease: both
+    // recover without a debit, and the retry keeps the attested authority.
+    let (recovered, recovered_headers) = uploads.upload(&mut state, Some(fresh_source())).await;
+    let recovered_envelope: TraceContributionEnvelope = serde_json::from_slice(&recovered).unwrap();
+    let mut attempt = admission::reserve(
+        &state,
+        &authenticate_ctx(&state, &{
+            let mut auth = recovered_headers.clone();
+            auth.insert(
+                AUTHORIZATION,
+                HeaderValue::from_static("Bearer admission-fixture-token"),
+            );
+            auth
+        })
+        .unwrap(),
+        &recovered_headers,
+        &recovered,
+        &recovered_envelope,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        account_row(recovered_envelope.submission_id).await,
+        Some(("attested".into(), false, "reserved".into()))
+    );
+    attempt.finish(db.as_ref(), false).await.unwrap();
+    drop(attempt);
+    assert_eq!(
+        account_row(recovered_envelope.submission_id).await,
+        Some(("attested".into(), false, "released".into()))
+    );
+    assert_eq!(
+        spent().await,
+        10,
+        "releasing an attested lease refunds nothing"
+    );
+    client
+        .execute(
+            "UPDATE trace_account_admission_submissions SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE tenant_id=$1 AND submission_id=$2",
+            &[&tenant, &recovered_envelope.submission_id],
+        )
+        .await
+        .unwrap();
+    let recovered_receipt = require_ok(
+        post(
+            state.clone(),
+            "/v1/traces",
+            recovered.clone(),
+            recovered_headers.clone(),
+        )
+        .await,
+    )
+    .await;
+    client
+        .execute(
+            "UPDATE trace_account_admission_submissions SET status='reserved',lease_expires_at=clock_timestamp()-interval '1 second' WHERE tenant_id=$1 AND submission_id=$2",
+            &[&tenant, &recovered_envelope.submission_id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        require_ok(
+            post(
+                state.clone(),
+                "/v1/traces",
+                recovered.clone(),
+                HeaderMap::new()
+            )
+            .await
+        )
+        .await,
+        recovered_receipt,
+        "an expired attested lease recovers on the authority its row records"
+    );
+    assert_eq!(
+        account_row(recovered_envelope.submission_id).await,
+        Some(("attested".into(), false, "completed".into()))
+    );
+    assert_eq!(spent().await, 10, "attested recovery never debits");
+
+    // The freeze rule guards the allowance, which an attested upload does
+    // not touch: a budget row frozen by a policy mismatch refuses an
+    // unattested upload but not an attested one.
+    client
+        .execute(
+            "UPDATE trace_account_admission_budget SET cost_limit=cost_limit+1 WHERE tenant_id=$1 AND account_id=$2",
+            &[&tenant, &account_id],
+        )
+        .await
+        .unwrap();
+    let mut frozen = sample_envelope().await;
+    make_metadata_only_low_risk(&mut frozen);
+    frozen.source_session = Some(fresh_source());
+    assert_eq!(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&frozen).unwrap(),
+            HeaderMap::new()
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    let (thawed, thawed_headers) = uploads.upload(&mut state, Some(fresh_source())).await;
+    require_ok(post(state.clone(), "/v1/traces", thawed, thawed_headers).await).await;
+    client
+        .execute(
+            "UPDATE trace_account_admission_budget SET cost_limit=cost_limit-1 WHERE tenant_id=$1 AND account_id=$2",
+            &[&tenant, &account_id],
+        )
+        .await
+        .unwrap();
+
+    // No source_session: verified evidence takes the V59 ledger, exactly as
+    // with account admission off. Nothing is written to the account ledger.
+    let legacy_spent = || async {
+        client
+            .query_one(
+                "SELECT COALESCE(sum(cost_bound_used),0)::bigint FROM trace_admission_accounts WHERE tenant_id=$1 AND anchor_hash=$2",
+                &[&tenant, &anchor],
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0)
+    };
+    let (sourceless, sourceless_headers) = uploads.upload(&mut state, None).await;
+    let sourceless_receipt = require_ok(
+        post(
+            state.clone(),
+            "/v1/traces",
+            sourceless.clone(),
+            sourceless_headers.clone(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        legacy_row(submission_of(&sourceless)).await.as_deref(),
+        Some("completed")
+    );
+    assert_eq!(account_row(submission_of(&sourceless)).await, None);
+    assert_eq!(
+        legacy_spent().await,
+        10,
+        "the V59 ledger bounds it as today"
+    );
+    assert_eq!(spent().await, 10);
+    assert_eq!(
+        require_ok(
+            post(
+                state.clone(),
+                "/v1/traces",
+                sourceless.clone(),
+                HeaderMap::new()
+            )
+            .await
+        )
+        .await,
+        sourceless_receipt,
+        "a completed V59 retry is a receipt read after account admission too"
+    );
+
+    // No source_session and no evidence stays 422; no source_session and
+    // evidence that does not verify is refused and reserves nothing.
+    let mut bare = sample_envelope().await;
+    make_metadata_only_low_risk(&mut bare);
+    bare.source_session = None;
+    assert_eq!(
+        error_label(
+            post(
+                state.clone(),
+                "/v1/traces",
+                serde_json::to_vec(&bare).unwrap(),
+                HeaderMap::new()
+            )
+            .await
+        )
+        .await,
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::json!("source_session_invalid")
+        ),
+    );
+    let (sourceless_bad, mut sourceless_bad_headers) = uploads.upload(&mut state, None).await;
+    sourceless_bad_headers.insert(
+        trace_commons_protocol::admission::SIGNATURE_HEADER,
+        HeaderValue::from_static("invalid"),
+    );
+    assert_eq!(
+        error_label(
+            post(
+                state.clone(),
+                "/v1/traces",
+                sourceless_bad.clone(),
+                sourceless_bad_headers
+            )
+            .await
+        )
+        .await,
+        (
+            StatusCode::FORBIDDEN,
+            serde_json::json!("admission_refused")
+        ),
+    );
+    assert_eq!(legacy_row(submission_of(&sourceless_bad)).await, None);
+    assert_eq!(account_row(submission_of(&sourceless_bad)).await, None);
+
+    // contribution-status still reports the unattested allowance: a fresh
+    // account is ready, the exhausted one is not.
+    for (who, ready) in [(fresh_token, true), (token, false)] {
+        let mut request = axum::http::Request::builder()
+            .uri("/v1/account/contribution-status")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .headers_mut()
+            .extend(account_session_headers(&state, who).await);
+        let body = require_ok(app(state.clone()).oneshot(request).await.unwrap()).await;
+        let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status["authority"], "bounded");
+        assert_eq!(status["ready"], ready, "{who}");
+    }
+
+    // Account admission off: the same sourceless attested upload takes the
+    // same V59 path it always did.
+    Arc::make_mut(&mut state).account_admission = None;
+    let (off, off_headers) = uploads.upload(&mut state, None).await;
+    require_ok(post(state.clone(), "/v1/traces", off.clone(), off_headers).await).await;
+    assert_eq!(
+        legacy_row(submission_of(&off)).await.as_deref(),
+        Some("completed")
+    );
+    assert_eq!(account_row(submission_of(&off)).await, None);
+    assert_eq!(legacy_spent().await, 20);
+    assert_eq!(spent().await, 10);
+}
+
+/// Rule 7 of the earned-trust spec ("How admission reads trust"): under a
+/// `tiered-v1` admission policy, contribution-status adds the caller's own
+/// growth view beside `authority:"bounded"`. A fresh applied evaluation shows
+/// its tier, multiplier, the period's allowance, spend, remaining and reset,
+/// and the next tier's requirements against the evaluation's counts. A stale
+/// one shows tier 0 at the base allowance. `growth_rule:"none"` adds nothing:
+/// the body is exactly the five fields it always had. `ready` is unchanged.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn contribution_status_reports_the_accounts_own_growth() {
+    let db = admission_pg_admin().await;
+    let token = "growth-status-fixture-token";
+    let legacy_token = "growth-status-legacy-token";
+    let (tenant, _, _) = provision_synthetic_near_account(&db, &principal_for(token)).await;
+    let legacy_tenant = format!("tenant-{}", Uuid::new_v4());
+    let (_temp, mut state, _) = anchor_state(
+        db.clone(),
+        &[
+            (tenant.as_str(), token),
+            (legacy_tenant.as_str(), legacy_token),
+        ],
+    );
+    let version = format!(
+        "growth-status-{}",
+        &Uuid::new_v4().simple().to_string()[..12]
+    );
+    let tiered = serde_json::json!({
+        "version": version,
+        "processing_cost_bound": 10,
+        "bounded_allowance": 10,
+        "period": {"mode": "fixed", "seconds": 3600},
+        "growth_rule": "tiered-v1",
+        "growth": {
+            "window_seconds": 84 * 86400,
+            "weekly_cap": 10,
+            "q_min_micros": null,
+            "penalty_cooldown_seconds": 0,
+            "evaluation_max_age_seconds": 3600,
+            "allowance_ceiling": 60,
+            "evaluator_versions": ["gate-v1"],
+            "dedup_signal_versions": ["events.v2+simhash.v2"],
+            "tiers": [
+                {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                {"units": 2, "active_weeks": 1, "age_seconds": 0, "multiplier": 3},
+                {"units": 5, "active_weeks": 2, "age_seconds": 1209600, "multiplier": 6,
+                 "attested_units": 1}
+            ]
+        }
+    })
+    .to_string();
+    let set_policy = |state: &mut Arc<AppState>, json: &str, growth: bool| {
+        let state = Arc::make_mut(state);
+        state.account_admission = Some(admission::AccountAdmissionConfig {
+            policy: trace_commons_server::account_trust::parse_bounded_policy(
+                json,
+                &[version.as_str()],
+            )
+            .unwrap(),
+            lease_seconds: 60,
+            providers: None,
+        });
+        state.account_trust_applied_policy = growth.then(|| {
+            Arc::new(
+                trace_commons_server::account_trust_rule::parse_growth_policy(
+                    json,
+                    &[version.as_str()],
+                )
+                .unwrap(),
+            )
+        });
+    };
+    let status = |state: Arc<AppState>, who: &'static str| async move {
+        let mut request = axum::http::Request::builder()
+            .uri("/v1/account/contribution-status")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .headers_mut()
+            .extend(account_session_headers(&state, who).await);
+        let response = app(state).oneshot(request).await.unwrap();
+        let code = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        (code, bytes)
+    };
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let account_id: Uuid = client
+        .query_one(
+            "SELECT account_id FROM trace_accounts WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+
+    // growth_rule none: exactly the five fields, and no growth read.
+    let none = format!(
+        r#"{{"version":"{version}","processing_cost_bound":10,"bounded_allowance":10,"period":{{"mode":"fixed","seconds":3600}},"growth_rule":"none"}}"#
+    );
+    set_policy(&mut state, &none, false);
+    let (code, bytes) = status(state.clone(), token).await;
+    assert_eq!(code, StatusCode::OK);
+    let expected = serde_json::json!({
+        "authority": "bounded",
+        "policy_version": version,
+        "ready": true,
+        "refusal_label": null,
+        "retry_after_seconds": null,
+    });
+    assert_eq!(
+        std::str::from_utf8(&bytes).unwrap(),
+        expected.to_string(),
+        "growth_rule none answers byte for byte as before"
+    );
+
+    // tiered-v1 with no evaluation yet: tier 0 at the base allowance, no
+    // counts, and the next tier's requirements.
+    set_policy(&mut state, &tiered, true);
+    let (code, bytes) = status(state.clone(), token).await;
+    assert_eq!(code, StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["authority"], "bounded");
+    assert_eq!(body["ready"], true);
+    assert_eq!(body["allowance_tier"], 0);
+    assert_eq!(body["allowance_multiplier"], 1);
+    assert_eq!(body["effective_allowance"], 10);
+    assert_eq!(body["allowance_spent"], 0);
+    assert_eq!(body["allowance_remaining"], 10);
+    assert!(body["period_resets_at"].is_string(), "{body}");
+    assert!(body["evaluated_at"].is_null());
+    assert!(body["allowance_tier_changed_at"].is_null());
+    assert_eq!(body["next_tier"]["tier"], 1);
+    assert_eq!(body["next_tier"]["multiplier"], 3);
+    assert_eq!(body["next_tier"]["effective_allowance"], 30);
+    assert_eq!(
+        body["next_tier"]["required"],
+        serde_json::json!({"units": 2, "active_weeks": 1, "age_seconds": 0, "attested_units": 0})
+    );
+    assert!(body["next_tier"]["current"].is_null(), "{body}");
+
+    // A fresh applied evaluation at tier 1, and 10 already spent this period.
+    client
+        .query_one("SELECT trace_account_trust_enable_external_growth()", &[])
+        .await
+        .unwrap();
+    let generation: i64 = client
+        .query_one(
+            "SELECT generation FROM trace_account_trust_frontiers WHERE tenant_id=$1 AND account_id=$2",
+            &[&tenant, &account_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let as_of: DateTime<Utc> = client
+        .query_one(
+            "SELECT date_trunc('second', clock_timestamp()) - interval '60 seconds'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    client
+        .execute(
+            "INSERT INTO trace_account_trust_evaluations(tenant_id,evaluation_id,account_id,
+                growth_policy_version,mode,as_of,tier,previous_tier,effective_allowance,units,
+                units_capped,attested_units,active_weeks,age_weeks,age_seconds,netted_withdrawn,
+                netted_revoked,netted_quarantined,penalty_active,facts_digest,input_generation)
+             VALUES($1,$2,$3,$4,'applied',$5,1,0,30,3,0,1,1,0,86400,0,0,0,FALSE,$6,$7)",
+            &[
+                &tenant,
+                &Uuid::new_v4(),
+                &account_id,
+                &version,
+                &as_of,
+                &format!("sha256:{}", "4".repeat(64)),
+                &generation,
+            ],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO trace_account_admission_budget(tenant_id,account_id,period_id,
+                policy_version,cost_limit,cost_bound,cost_used)
+             VALUES($1,$2,$3 || ':fixed:3600:' ||
+                floor(extract(epoch FROM clock_timestamp()) / 3600)::bigint::text,$3,10,10,10)",
+            &[&tenant, &account_id, &version],
+        )
+        .await
+        .unwrap();
+    let (code, bytes) = status(state.clone(), token).await;
+    assert_eq!(code, StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["authority"], "bounded");
+    assert_eq!(body["ready"], true, "20 of 30 left");
+    assert_eq!(body["allowance_tier"], 1);
+    assert_eq!(body["allowance_multiplier"], 3);
+    assert_eq!(body["effective_allowance"], 30);
+    assert_eq!(body["allowance_spent"], 10);
+    assert_eq!(body["allowance_remaining"], 20);
+    let resets: DateTime<Utc> = body["period_resets_at"].as_str().unwrap().parse().unwrap();
+    assert_eq!(resets.timestamp() % 3600, 0, "a fixed-period boundary");
+    assert!(resets > Utc::now() && resets <= Utc::now() + chrono::Duration::seconds(3600));
+    let evaluated: DateTime<Utc> = body["evaluated_at"].as_str().unwrap().parse().unwrap();
+    assert_eq!(evaluated, as_of);
+    let changed: DateTime<Utc> = body["allowance_tier_changed_at"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(changed, as_of);
+    assert_eq!(body["next_tier"]["tier"], 2);
+    assert_eq!(body["next_tier"]["multiplier"], 6);
+    assert_eq!(body["next_tier"]["effective_allowance"], 60);
+    assert_eq!(
+        body["next_tier"]["required"],
+        serde_json::json!({"units": 5, "active_weeks": 2, "age_seconds": 1209600, "attested_units": 1})
+    );
+    assert_eq!(
+        body["next_tier"]["current"],
+        serde_json::json!({"units": 3, "active_weeks": 1, "age_seconds": 86400, "attested_units": 1})
+    );
+    // No raw identifier of the account or tenant in the body.
+    let text = std::str::from_utf8(&bytes).unwrap();
+    assert!(!text.contains(&tenant) && !text.contains(&account_id.to_string()));
+
+    // Stale: older than evaluation_max_age_seconds reads as tier 0, and the
+    // 10 already spent leaves nothing at the base allowance.
+    client
+        .execute(
+            "UPDATE trace_account_trust_evaluations SET as_of=as_of - interval '2 hours'
+              WHERE tenant_id=$1 AND account_id=$2",
+            &[&tenant, &account_id],
+        )
+        .await
+        .unwrap();
+    let (code, bytes) = status(state.clone(), token).await;
+    assert_eq!(code, StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["ready"], false);
+    assert_eq!(body["refusal_label"], "account_limit_reached");
+    assert_eq!(body["allowance_tier"], 0);
+    assert_eq!(body["allowance_multiplier"], 1);
+    assert_eq!(body["effective_allowance"], 10);
+    assert_eq!(body["allowance_spent"], 10);
+    assert_eq!(body["allowance_remaining"], 0);
+    assert!(body["evaluated_at"].is_null());
+    assert!(body["allowance_tier_changed_at"].is_null());
+    assert_eq!(body["next_tier"]["tier"], 1);
+    assert!(body["next_tier"]["current"].is_null());
+
+    // A legacy-namespace session is still refused before any read.
+    let (code, bytes) = status(state.clone(), legacy_token).await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "account_identity_unlinked");
 }

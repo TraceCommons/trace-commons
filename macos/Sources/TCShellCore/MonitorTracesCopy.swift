@@ -38,6 +38,8 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
     /// Ron's plain Dismiss (#1146): the undo bar's, the Dismiss-session
     /// confirmation's and the review card's. Not `dismiss` ("Not this one").
     public let dismissAction: String
+    /// Acknowledges every acknowledgeable notice above the tabs at once.
+    public let dismissAll: String
     /// The arming offer's eyebrow.
     public let optionalAutomation: String
     /// Ron's #1146 inspector words (#1241), by the part that shows them.
@@ -61,6 +63,7 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
         case coreUnreachable = "core_unreachable"
         case requestFailed = "request_failed"
         case dismissAction = "dismiss_action"
+        case dismissAll = "dismiss_all"
         case optionalAutomation = "optional_automation"
         case tree, counts, inspector
         case summaryPanel = "summary_panel"
@@ -74,7 +77,7 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
         "review", "tool", "folder", "started", "length", "prompts", "size", "sends", "marks", "unsure",
         "eligibility", "attestation", "held", "sample", "residual_risk", "personal_information",
         "second_look_waiting", "contribute", "keep", "dismiss", "undo_contribute", "undo_keep", "core_unreachable", "request_failed",
-        "dismiss_action", "optional_automation", "tree", "counts", "inspector", "summary_panel", "session_review",
+        "dismiss_action", "dismiss_all", "optional_automation", "tree", "counts", "inspector", "summary_panel", "session_review",
         "look_inside", "undo",
     ]
 
@@ -102,7 +105,7 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
             copy.residualRisk, copy.personalInformation, copy.secondLookWaiting,
             copy.contribute, copy.keep, copy.dismiss,
             copy.undoContribute, copy.undoKeep, copy.coreUnreachable, copy.requestFailed,
-            copy.dismissAction, copy.optionalAutomation,
+            copy.dismissAction, copy.dismissAll, copy.optionalAutomation,
         ]
         let tables: [Bool] = [
             copy.tree.isWhole, copy.counts.isWhole, copy.inspector.isWhole, copy.summaryPanel.isWhole,
@@ -145,6 +148,8 @@ extension MonitorWordTable {
 /// The Traces tree's rows and the Dismiss-session confirmation (`traces-tree.tsx`).
 public struct MonitorTreeCopy: MonitorWordTable {
     public let treeLabel: String
+    /// The heading above the tree, beside its order control.
+    public let treeTitle: String
     public let readingQueue: String
     public let submit: String
     public let submitCount: String
@@ -173,6 +178,7 @@ public struct MonitorTreeCopy: MonitorWordTable {
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case treeLabel = "tree_label"
+        case treeTitle = "tree_title"
         case readingQueue = "reading_queue"
         case submit
         case submitCount = "submit_count"
@@ -683,6 +689,10 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let sources: String
     public let missionCatalogue: String
     public let historyDescription: String
+    /// Home's Missions, Insights and mission catalogue card subtitles.
+    public let missionsSubtitle: String
+    public let insightsSubtitle: String
+    public let catalogueSubtitle: String
     public let submissions: String
     public let contributionHistory: String
     public let readingHistory: String
@@ -712,6 +722,9 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case sources
         case missionCatalogue = "mission_catalogue"
         case historyDescription = "history_description"
+        case missionsSubtitle = "missions_subtitle"
+        case insightsSubtitle = "insights_subtitle"
+        case catalogueSubtitle = "catalogue_subtitle"
         case submissions
         case contributionHistory = "contribution_history"
         case readingHistory = "reading_history"

@@ -316,10 +316,23 @@ pub const PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL: &str = "privacy_pass_revi
 /// admitted, so the policy would approve such a run; the server never calls
 /// it and records the rejection under this rule id instead.
 pub const PIPELINE_PRIVACY_PASS_REJECTED_RULE_ID: &str = "privacy_pass_human_review_rejected_v1";
-/// The ceiling on one privacy pass classifier call. A call that has not
-/// returned by then is a classifier failure
-/// (`privacy_classification_failed`).
+/// The default ceiling on one privacy pass classifier call. A call that has
+/// not returned by then is a classifier failure
+/// (`privacy_classification_failed`). An operator replaces it with
+/// `PipelineLeaseConfig::with_privacy_pass_max_timeout`
+/// (`TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS` in ingest).
 const PIPELINE_PRIVACY_PASS_MAX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
+/// The bounds an operator-set privacy pass ceiling must fall in: at least the
+/// commit margin's worth of classifier time, at most the two hours a lease
+/// may last.
+const PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_MIN: std::time::Duration =
+    std::time::Duration::from_secs(60);
+const PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_MAX: std::time::Duration =
+    std::time::Duration::from_secs(7200);
+/// Safe label for a privacy-pass ceiling outside
+/// `PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_MIN..=PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_MAX`.
+pub const PIPELINE_PRIVACY_PASS_TIMEOUT_INVALID_LABEL: &str =
+    "pipeline_privacy_pass_timeout_invalid";
 /// What a privacy pass keeps back from the Review lease cap for the work
 /// around its classifier call: loading the source, storing the output,
 /// the record transaction and the Review commit (decision P8).
@@ -899,6 +912,7 @@ pub struct PipelineLeaseConfig {
     review: Duration,
     score: Duration,
     settle: Duration,
+    privacy_pass_max_timeout: std::time::Duration,
 }
 
 impl PipelineLeaseConfig {
@@ -919,7 +933,35 @@ impl PipelineLeaseConfig {
             review,
             score,
             settle,
+            privacy_pass_max_timeout: PIPELINE_PRIVACY_PASS_MAX_TIMEOUT,
         })
+    }
+
+    /// Replaces the privacy pass's 900 s classifier ceiling (decision P8).
+    /// Refuses a value outside 60 s..=2 h with the safe label
+    /// `PIPELINE_PRIVACY_PASS_TIMEOUT_INVALID_LABEL`.
+    ///
+    /// It replaces the ceiling only: the pass is still bounded by
+    /// `review x PIPELINE_LEASE_RENEWAL_CAP_FACTOR - 60 s`
+    /// (`privacy_pass_timeout_for`), so a ceiling above that needs a longer
+    /// Review lease to take effect. A longer pass holds its Review lane
+    /// longer.
+    pub fn with_privacy_pass_max_timeout(
+        mut self,
+        ceiling: std::time::Duration,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            (PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_MIN..=PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_MAX)
+                .contains(&ceiling),
+            PIPELINE_PRIVACY_PASS_TIMEOUT_INVALID_LABEL
+        );
+        self.privacy_pass_max_timeout = ceiling;
+        Ok(self)
+    }
+
+    /// The privacy pass classifier ceiling: 900 s unless configured.
+    pub fn privacy_pass_max_timeout(&self) -> std::time::Duration {
+        self.privacy_pass_max_timeout
     }
 
     pub fn review(&self) -> Duration {
@@ -953,6 +995,7 @@ impl Default for PipelineLeaseConfig {
             review: Duration::seconds(PIPELINE_LEASE_DEFAULT_REVIEW_SECONDS),
             score: Duration::seconds(PIPELINE_LEASE_DEFAULT_SCORE_SECONDS),
             settle: Duration::seconds(PIPELINE_LEASE_DEFAULT_SETTLE_SECONDS),
+            privacy_pass_max_timeout: PIPELINE_PRIVACY_PASS_MAX_TIMEOUT,
         }
     }
 }
@@ -1017,6 +1060,48 @@ pub fn pipeline_privacy_risk(
     }
 }
 
+/// The Admission rule id a Medium receipt is admitted under when the
+/// operator accepts Medium risk (`admission_privacy_risk`). The receipt
+/// records it in place of the bundle's own `minimal_admission_v1`, so an
+/// operator can tell those admissions from a Low's. A label, nothing else.
+pub const PIPELINE_ADMISSION_ACCEPT_FOUND_AND_REMOVED_RULE_ID: &str =
+    "minimal_admission_v1_accept_found_and_removed";
+
+/// The privacy risk the receipt hands Admission, and whether the operator's
+/// accept-Medium setting lowered it. `accept_medium_risk` is ingest's
+/// `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS`.
+///
+/// Owner decision 2026-10-12 ("once PII is removed, accept", applied to
+/// Admission): with the setting on, a Medium whose basis records only what
+/// redaction found and removed -- `FoundAndRemoved`, with or without
+/// `ConsentContentFlag` -- is handed to Admission as Low, so the bundle's
+/// Admission policy admits it, unchanged. Everything else is exactly
+/// `pipeline_privacy_risk`: with the setting off, a Medium of any other
+/// basis (an empty one, a declared Medium nothing was found for), and every
+/// High (a key finding, a coverage gap, a survivor, a residual scan that
+/// could not run) keep their hold. The Review-start privacy pass never
+/// calls this: it compares on `pipeline_privacy_risk`, so the receipt it
+/// compares against stays Medium and a pass High still escalates.
+pub fn admission_privacy_risk(
+    risk: &ResidualPiiRisk,
+    basis: &[ResidualRiskCondition],
+    accept_medium_risk: bool,
+) -> (PrivacyRisk, bool) {
+    let mapped = pipeline_privacy_risk(risk, basis);
+    let found_and_removed_only = basis.contains(&ResidualRiskCondition::FoundAndRemoved)
+        && basis.iter().all(|condition| {
+            matches!(
+                condition,
+                ResidualRiskCondition::FoundAndRemoved | ResidualRiskCondition::ConsentContentFlag
+            )
+        });
+    if accept_medium_risk && mapped == PrivacyRisk::Medium && found_and_removed_only {
+        (PrivacyRisk::Low, true)
+    } else {
+        (mapped, false)
+    }
+}
+
 /// The Review-start privacy pass's outcome (decision P3, as amended by the
 /// owner decision of 2026-10-10, "once PII removed we should go to
 /// accepted"). `receipt_risk` and `pass_risk` are both on Admission's scale
@@ -1035,6 +1120,10 @@ pub fn pipeline_privacy_risk(
 /// 2026-10-11), so the pass cannot escalate it (its risk is not above the
 /// receipt's) and returns `Cleared`; that run, like a Medium receipt
 /// Admission quarantined, keeps Admission's hold whatever the pass clears.
+/// A found-and-removed Medium Admission admitted under the operator's
+/// accept-Medium setting (`admission_privacy_risk`) is still Medium here,
+/// so a pass Medium clears it like any admitted run and only a pass High
+/// escalates it.
 pub fn privacy_pass_outcome(
     receipt_risk: PrivacyRisk,
     pass_risk: PrivacyRisk,
@@ -8972,6 +9061,15 @@ pub struct PipelineReceiptRequest<'a> {
     pub server_envelope: &'a TraceContributionEnvelope,
     pub residual_risk_basis: &'a [ResidualRiskCondition],
     pub limits: PipelineAdmissionLimits,
+    /// The operator's `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS`, as
+    /// ingest holds it (`AppState::accept_medium_risk_submissions`). When
+    /// `true`, a Medium receipt whose basis records only what redaction
+    /// found and removed (`admission_privacy_risk`) is admitted, the narrow
+    /// pipeline reading of the setting `main`'s legacy path applies to every
+    /// Medium. When `false`, Admission sees exactly
+    /// `pipeline_privacy_risk`. The bundle's Admission policy never reads
+    /// it.
+    pub accept_medium_risk: bool,
     /// The source session `main`'s admission claimed for this upload, as
     /// `(account_id, session_digest)`: the final receipt transaction locks
     /// it and refuses the receipt when it is withdrawn (Zaki review 1,
@@ -9098,7 +9196,8 @@ pub struct PipelineServiceBuilder {
     unqualified_routing: bool,
     index_rebuild_fence_margin: std::time::Duration,
     index_write_fence_margin: std::time::Duration,
-    privacy_pass_timeout_ceiling: std::time::Duration,
+    /// A test's override of the lease config's privacy pass ceiling.
+    privacy_pass_timeout_ceiling: Option<std::time::Duration>,
 }
 
 impl PipelineServiceBuilder {
@@ -9136,7 +9235,7 @@ impl PipelineServiceBuilder {
             index_write_fence_margin: std::time::Duration::from_secs(
                 PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS.unsigned_abs(),
             ),
-            privacy_pass_timeout_ceiling: PIPELINE_PRIVACY_PASS_MAX_TIMEOUT,
+            privacy_pass_timeout_ceiling: None,
         }
     }
 
@@ -9261,12 +9360,13 @@ impl PipelineServiceBuilder {
         self
     }
 
-    /// Replaces the privacy pass's 900 s ceiling
-    /// (`PIPELINE_PRIVACY_PASS_MAX_TIMEOUT`, decision P8). For tests only: a
-    /// short ceiling lets a test see a classifier call time out.
+    /// Replaces the privacy pass's ceiling, unbounded, over the lease
+    /// config's (`PipelineLeaseConfig::privacy_pass_max_timeout`, decision
+    /// P8). For tests only: a short ceiling lets a test see a classifier call
+    /// time out. Operators set the lease config's instead.
     #[doc(hidden)]
     pub fn with_privacy_pass_timeout_ceiling(mut self, ceiling: std::time::Duration) -> Self {
-        self.privacy_pass_timeout_ceiling = ceiling;
+        self.privacy_pass_timeout_ceiling = Some(ceiling);
         self
     }
 
@@ -9355,7 +9455,8 @@ impl PipelineServiceBuilder {
             self.privacy
                 .as_ref()
                 .is_some_and(|privacy| privacy.classifies_prose_pii()),
-            self.privacy_pass_timeout_ceiling,
+            self.privacy_pass_timeout_ceiling
+                .unwrap_or(self.lease_config.privacy_pass_max_timeout()),
         )?;
         let service = PipelineService {
             store: PgPipelineStore::new(self.backend.clone()),
@@ -10479,6 +10580,7 @@ impl PipelineService {
             server_envelope: &envelope,
             residual_risk_basis: &residual_risk_basis,
             limits: request.limits,
+            accept_medium_risk: request.accept_medium_risk,
         };
         let envelope = request.server_envelope;
 
@@ -10570,9 +10672,10 @@ impl PipelineService {
         // any other Reject, never `MinimalAdmissionPolicy`'s permanent
         // `authority_missing` error (SYS-003, reserved for the missing-
         // source case this receipt already handled).
-        let privacy_risk = pipeline_privacy_risk(
+        let (privacy_risk, accepted_medium) = admission_privacy_risk(
             &envelope.privacy.residual_pii_risk,
             request.residual_risk_basis,
+            request.accept_medium_risk,
         );
         let admission_input = AdmissionInput {
             run_id,
@@ -10595,11 +10698,19 @@ impl PipelineService {
             quota_available: true,
             privacy_risk,
         };
-        let admission = bundle
+        let mut admission = bundle
             .admission
             .execute(&admission_input)
             .await
             .map_err(|error| anyhow::anyhow!(error.label().to_string()))?;
+        if accepted_medium && matches!(admission.decision, AdmissionDecision::Admit) {
+            // The policy saw Low; the evidence records the Medium the
+            // receipt mapped, and the rule names the setting that admitted
+            // it, so the stored outcome stays truthful.
+            admission.evidence.privacy_risk = Some(PrivacyRisk::Medium);
+            admission.evaluation.rule_id =
+                PIPELINE_ADMISSION_ACCEPT_FOUND_AND_REMOVED_RULE_ID.to_string();
+        }
         let stored = StoredPhaseResult::from_result(Phase::Admission, &admission)?;
 
         // 7. The final transaction.
@@ -17629,6 +17740,77 @@ mod tests {
         );
     }
 
+    /// Owner decision 2026-10-12: with the operator's accept-Medium setting
+    /// on, a Medium whose basis is only what redaction found and removed
+    /// (with or without the consent flag) reaches Admission as Low and is
+    /// marked as lowered. A declared Medium with no basis, any other basis
+    /// condition, every High, and every case with the setting off map
+    /// exactly as `pipeline_privacy_risk`.
+    #[test]
+    fn admission_privacy_risk_accepts_only_a_found_and_removed_medium() {
+        use ResidualRiskCondition::{
+            ConsentContentFlag, CoverageIncomplete, FoundAndRemoved, KeyFinding, ResidualSurvivor,
+        };
+        let medium = ResidualPiiRisk::Medium;
+        for basis in [
+            &[FoundAndRemoved][..],
+            &[FoundAndRemoved, ConsentContentFlag][..],
+            &[ConsentContentFlag, FoundAndRemoved][..],
+        ] {
+            assert_eq!(
+                admission_privacy_risk(&medium, basis, true),
+                (PrivacyRisk::Low, true),
+                "{basis:?}"
+            );
+            assert_eq!(
+                admission_privacy_risk(&medium, basis, false),
+                (PrivacyRisk::Medium, false),
+                "{basis:?}"
+            );
+        }
+        // Already Low on Admission's scale: not lowered by the setting.
+        assert_eq!(
+            admission_privacy_risk(&medium, &[ConsentContentFlag], true),
+            (PrivacyRisk::Low, false)
+        );
+        // A declared Medium nothing was found for keeps its hold.
+        assert_eq!(
+            admission_privacy_risk(&medium, &[], true),
+            (PrivacyRisk::Medium, false)
+        );
+        for basis in [
+            &[FoundAndRemoved, KeyFinding][..],
+            &[FoundAndRemoved, CoverageIncomplete][..],
+            &[FoundAndRemoved, ResidualSurvivor][..],
+            &[
+                FoundAndRemoved,
+                ResidualRiskCondition::ResidualScanUnavailable,
+            ][..],
+        ] {
+            assert_eq!(
+                admission_privacy_risk(&medium, basis, true),
+                (PrivacyRisk::Medium, false),
+                "{basis:?}"
+            );
+        }
+        for basis in [
+            &[][..],
+            &[FoundAndRemoved][..],
+            &[FoundAndRemoved, ConsentContentFlag][..],
+            &[ResidualRiskCondition::ResidualScanUnavailable][..],
+        ] {
+            assert_eq!(
+                admission_privacy_risk(&ResidualPiiRisk::High, basis, true),
+                (PrivacyRisk::High, false),
+                "{basis:?}"
+            );
+        }
+        assert_eq!(
+            admission_privacy_risk(&ResidualPiiRisk::Low, &[FoundAndRemoved], true),
+            (PrivacyRisk::Low, false)
+        );
+    }
+
     /// Decision P3 as amended 2026-10-10: only a High pass risk above the
     /// receipt's escalates; a Medium pass risk (PII found and removed, or a
     /// consent flag) clears, whatever the receipt's risk was.
@@ -17669,6 +17851,60 @@ mod tests {
     /// classifier 60 s refuses the build. A boundary that classifies nothing
     /// is bounded by the ceiling only, never by a short test lease, and
     /// never by a negative value.
+    /// The ceiling is an operator setting carried on the lease config
+    /// (`TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS`), bounded
+    /// to 60..=7200 s, and it only replaces the 900 s ceiling: the Review
+    /// lease bound still applies, so raising it alone does not lengthen a
+    /// pass under the default 5-minute Review lease.
+    #[test]
+    fn privacy_pass_ceiling_is_configurable_and_still_lease_bound() {
+        let seconds = std::time::Duration::from_secs;
+        let defaults = PipelineLeaseConfig::default();
+        assert_eq!(defaults.privacy_pass_max_timeout(), seconds(900));
+
+        let raised = defaults
+            .with_privacy_pass_max_timeout(seconds(3600))
+            .expect("3600 s is in range");
+        assert_eq!(raised.privacy_pass_max_timeout(), seconds(3600));
+        // Default Review lease 300 s: 300 x 4 - 60 = 1140 s, not 3600.
+        assert_eq!(
+            privacy_pass_timeout_for(raised.review(), true, raised.privacy_pass_max_timeout())
+                .unwrap(),
+            seconds(1140)
+        );
+        // A 20-minute Review lease leaves 4740 s, so the 3600 s ceiling binds.
+        let long_review =
+            PipelineLeaseConfig::new(Duration::seconds(1200), defaults.score(), defaults.settle())
+                .unwrap()
+                .with_privacy_pass_max_timeout(seconds(3600))
+                .unwrap();
+        assert_eq!(
+            privacy_pass_timeout_for(
+                long_review.review(),
+                true,
+                long_review.privacy_pass_max_timeout()
+            )
+            .unwrap(),
+            seconds(3600)
+        );
+        // Lowering it binds under the default lease too.
+        let lowered = defaults.with_privacy_pass_max_timeout(seconds(60)).unwrap();
+        assert_eq!(
+            privacy_pass_timeout_for(lowered.review(), true, lowered.privacy_pass_max_timeout())
+                .unwrap(),
+            seconds(60)
+        );
+        for bad in [0, 59, 7201, 86_400] {
+            let error = defaults
+                .with_privacy_pass_max_timeout(seconds(bad))
+                .expect_err("out of range is refused");
+            assert_eq!(
+                error.to_string(),
+                PIPELINE_PRIVACY_PASS_TIMEOUT_INVALID_LABEL
+            );
+        }
+    }
+
     #[test]
     fn privacy_pass_timeout_fits_inside_the_review_lease_cap() {
         let ceiling = PIPELINE_PRIVACY_PASS_MAX_TIMEOUT;

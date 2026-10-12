@@ -1800,6 +1800,24 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "pipeline_default_routing",
         include_str!("../../../../migrations/V124__pipeline_default_routing.sql"),
     ),
+    // V125 (owner decision 2026-10-11): an account reservation admitted on
+    // verified NEAR AI evidence is recorded as authority_kind 'attested' and
+    // debits no allowance. Widens the V77 CHECK only; no grant changes.
+    (
+        125,
+        "account_admission_attested_kind",
+        include_str!("../../../../migrations/V125__account_admission_attested_kind.sql"),
+    ),
+    // V126 (decided 2026-10-11): earned trust goes live with attested
+    // inference. The attested_submission fact kind verified from V76's
+    // witness evidence, first-in-cluster for it, an attested_units count on
+    // evaluations, and the writer the in-process evaluator uses for shadow
+    // and applied rows, bound to V114's input generation.
+    (
+        126,
+        "account_trust_live_attested",
+        include_str!("../../../../migrations/V126__account_trust_live_attested.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus
@@ -1903,6 +1921,14 @@ impl Database for PgBackend {
         evaluation: &crate::account_trust_rule::Evaluation,
     ) -> Result<bool, DatabaseError> {
         PgBackend::record_account_trust_evaluation(self, account, mode, evaluation).await
+    }
+
+    async fn evaluate_and_record_applied_account_trust(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        policy: &crate::account_trust_rule::GrowthPolicy,
+    ) -> Result<Option<(crate::account_trust_rule::Evaluation, bool)>, DatabaseError> {
+        PgBackend::evaluate_and_record_applied_account_trust(self, account, policy).await
     }
 
     async fn latest_account_trust_evaluation(
@@ -2065,6 +2091,10 @@ impl Database for PgBackend {
 
     async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
         PgBackend::external_account_trust_runtime_ready(self).await
+    }
+
+    async fn tiered_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        PgBackend::tiered_account_trust_runtime_ready(self).await
     }
 
     async fn enable_external_account_trust_growth(&self) -> Result<(), DatabaseError> {

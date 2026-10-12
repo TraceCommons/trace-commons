@@ -189,7 +189,10 @@ The
 template also enables `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS=true` so
 message-text/tool-payload pilot traces accepted by server-side re-scrub do not
 all sit in manual quarantine; high residual-risk secret-like traces still
-quarantine. The production Pages site serves browser traffic through same-origin
+quarantine. On a tenant routed to the versioned pipeline the setting is
+narrower: Admission admits a Medium only when its server-side basis is
+`found_and_removed` (alone or with `consent_content_flag`); see
+[`pipeline-activation.md`](pipeline-activation.md#admission-and-trace_commons_accept_medium_risk_submissions). The production Pages site serves browser traffic through same-origin
 `/api/v1/community/*`, then proxies to the ingest host. Deploy the static
 Pages site from [`../../community/`](../../community/) after the ingest host is
 reachable; details live in

@@ -351,6 +351,67 @@ final class FlowMapSceneTests: XCTestCase {
         XCTAssertTrue(scene.nodes.dropFirst().allSatisfy { $0.detail == "—" })
     }
 
+    // MARK: Compact (the edge rail's maps)
+
+    /// The compact Traces map keeps the tools' words and states, drops the
+    /// folders, labels the column beside itself, and joins this computer to
+    /// the commons once, in the strongest style a tool's arc had.
+    func test_theCompactTracesMapFlowsToolsThroughThisComputer() async throws {
+        let armed = try await tree(.armedFolder)
+        let full = FlowMapScene.traces(armed, gate: try await gate(.armedFolder))
+        let compact = full.compact()
+        XCTAssertEqual(compact.canvas, FlowMapScene.compactSize)
+        XCTAssertFalse(compact.nodes.contains { $0.id.hasPrefix("folder:") })
+        XCTAssertTrue(compact.overflows.isEmpty)
+        let tools = compact.nodes.filter { $0.id.hasPrefix("tool:") }
+        XCTAssertFalse(tools.isEmpty)
+        XCTAssertTrue(tools.allSatisfy(\.labelLeading))
+        for tool in tools {
+            let original = try XCTUnwrap(full.nodes.first { $0.id == tool.id })
+            XCTAssertEqual(tool.label, original.label)
+            XCTAssertEqual(tool.detail, original.detail)
+            XCTAssertEqual(tool.kind, original.kind)
+        }
+        // One arc per tool to this computer, then one to the commons.
+        XCTAssertEqual(compact.arcs.count, tools.count + 1)
+        XCTAssertEqual(compact.flows, full.flows)
+        XCTAssertEqual(compact.nodes.first?.id, "hub")
+        XCTAssertEqual(compact.nodes.last?.id, "library")
+        // Every node sits inside the compact design space.
+        for node in compact.nodes {
+            XCTAssertTrue(CGRect(origin: .zero, size: compact.canvas).contains(node.at), node.id)
+        }
+    }
+
+    /// Nothing armed and nothing sent: no arc reaches the commons.
+    func test_theCompactTracesMapDrawsNoCommonsLinkWithNothingToCarry() async throws {
+        let full = FlowMapScene.traces(try await tree(.normalDay), gate: try await gate(.normalDay))
+        XCTAssertFalse(full.arcs.contains { $0.to == FlowMapScene.libraryPoint })
+        let compact = full.compact()
+        XCTAssertEqual(compact.arcs.count, compact.nodes.filter { $0.id.hasPrefix("tool:") }.count)
+    }
+
+    /// The compact Private AI map keeps each tool's arc style, in order.
+    func test_theCompactPrivateAIMapKeepsEachToolsStyle() async throws {
+        let harnesses = try await SampleDaemonClient(.normalDay).harnessList()
+        let full = FlowMapScene.privateAI(
+            harnesses, destinationLabel: "D", privateAI: "running", sentence: { _ in nil },
+            state: { $0.id == harnesses.harnesses.first?.id ? .answering : .notConnected })
+        let compact = full.compact()
+        XCTAssertEqual(compact.canvas, FlowMapScene.compactSize)
+        XCTAssertEqual(compact.arcs.map(\.style), full.arcs.map(\.style))
+        XCTAssertEqual(compact.nodes.map(\.id), full.nodes.map(\.id))
+        XCTAssertEqual(compact.nodes.first?.sublabel, full.nodes.first?.sublabel)
+        XCTAssertTrue(compact.nodes.dropFirst().allSatisfy(\.labelLeading))
+        XCTAssertEqual(compact.flows, full.flows)
+    }
+
+    /// The tools' logos keep #1146's proportion on the larger compact discs.
+    func test_aToolsMarkScalesWithItsDisc() {
+        XCTAssertEqual(FlowMapView.markSide(13), 16)
+        XCTAssertGreaterThan(FlowMapView.markSide(17), 16)
+    }
+
     /// The destination paints from the core's Private AI state, and unknown
     /// is kept apart from off.
     func test_theDestinationPaintsFromThePrivateAIState() {

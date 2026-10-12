@@ -6183,6 +6183,12 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         "competition-read-worker-token-a",
         TokenRole::CompetitionReadWorker,
     );
+    insert_token(
+        &mut tokens,
+        "tenant-a",
+        "account-trust-worker-token-a",
+        TokenRole::AccountTrustWorker,
+    );
     insert_token(&mut tokens, "tenant-b", "token-b", TokenRole::Contributor);
     insert_token(
         &mut tokens,
@@ -6329,6 +6335,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         admission: None,
         account_admission: None,
         account_trust_shadow_policy: None,
+        account_trust_applied_policy: None,
+        account_trust_scheduler: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -10497,8 +10505,16 @@ fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
 /// silently accepted value. Uses the real variable names -- no other test in
 /// this suite reads them, so setting and clearing them here does not race
 /// another test's env state.
+/// Serialises the two tests that set the variables
+/// `parse_pipeline_lease_config_from_env` reads: each asserts on the whole
+/// config, so one's setting must not leak into the other's read.
+static PIPELINE_LEASE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
+    let _guard = PIPELINE_LEASE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // SAFETY: env mutation in tests is OK here -- these three variables are
     // read only by `parse_pipeline_lease_config_from_env`, which nothing
     // else in this suite calls concurrently.
@@ -10549,6 +10565,52 @@ fn pipeline_lease_config_env_refuses_an_out_of_range_or_unparsable_value() {
         std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE);
         std::env::remove_var(TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE);
     }
+}
+
+/// `TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS` replaces the
+/// privacy pass's 900 s ceiling: unset keeps it, 60..=7200 sets it, and
+/// anything else refuses startup with the safe label. The Review lease bound
+/// still applies on top of it (`privacy_pass_timeout_for`). Only this test
+/// reads the variable, so setting it does not race another test.
+#[test]
+fn pipeline_privacy_pass_timeout_env_sets_the_ceiling_or_refuses() {
+    let _guard = PIPELINE_LEASE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: env mutation in tests is OK here -- this variable is read only
+    // by `parse_pipeline_lease_config_from_env`, and the lease variables are
+    // left unset, as `pipeline_lease_config_env_...` leaves them.
+    unsafe { std::env::remove_var(TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS) };
+    let defaults = parse_pipeline_lease_config_from_env().expect("defaults parse");
+    assert_eq!(
+        defaults.privacy_pass_max_timeout(),
+        std::time::Duration::from_secs(900)
+    );
+
+    unsafe {
+        std::env::set_var(
+            TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS,
+            "3600",
+        )
+    };
+    let configured = parse_pipeline_lease_config_from_env().expect("3600 s is in range");
+    assert_eq!(
+        configured.privacy_pass_max_timeout(),
+        std::time::Duration::from_secs(3600)
+    );
+    assert_eq!(configured.review(), PipelineLeaseConfig::default().review());
+
+    for bad in ["59", "7201", "-1", "ten minutes", "1e3"] {
+        unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS, bad) };
+        let error = parse_pipeline_lease_config_from_env()
+            .expect_err("an out-of-range or unparsable ceiling refuses startup");
+        assert_eq!(
+            error.to_string(),
+            trace_commons_server::versioned_pipeline::PIPELINE_PRIVACY_PASS_TIMEOUT_INVALID_LABEL,
+            "{bad}"
+        );
+    }
+    unsafe { std::env::remove_var(TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS) };
 }
 
 /// Ruling T15-10: `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF` is
@@ -29602,6 +29664,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         admission: None,
         account_admission: None,
         account_trust_shadow_policy: None,
+        account_trust_applied_policy: None,
+        account_trust_scheduler: None,
         benchmark_registry_scheduler: None,
         benchmark_pipeline_scheduler: None,
         credit_cycle_scheduler: None,
@@ -29879,29 +29943,43 @@ async fn rollback_drill_without_db_mirror_returns_operator_error() {
     );
 }
 
-/// Earned-trust worker routes (decision 7 of the earned-trust spec): admin
-/// only during shadow, and fail closed without a DB mirror.
+/// Earned-trust worker routes (decision 7 of the earned-trust spec):
+/// recording and evaluation take an admin token or the scoped
+/// `account_trust_worker` token; explain and the drill stay admin-only. All
+/// fail closed without a DB mirror.
 #[tokio::test]
-async fn account_trust_worker_routes_require_admin_and_a_db_mirror() {
+async fn account_trust_worker_routes_take_the_scoped_token_and_a_db_mirror() {
     use axum::body::Body;
     use tower::ServiceExt;
 
     let good_ref = format!("sha256:{}", "a".repeat(64));
     let explain = format!("/v1/admin/account-trust/explain?account_ref={good_ref}");
-    for (method, uri, body) in [
-        ("POST", "/v1/admin/record-account-trust-facts?limit=5", None),
-        ("POST", "/v1/admin/evaluate-account-trust?limit=5", None),
-        ("GET", explain.as_str(), None),
+    for (method, uri, body, scoped_expected) in [
+        (
+            "POST",
+            "/v1/admin/record-account-trust-facts?limit=5",
+            None,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "POST",
+            "/v1/admin/evaluate-account-trust?limit=5",
+            None,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        ("GET", explain.as_str(), None, StatusCode::FORBIDDEN),
         (
             "POST",
             "/v1/admin/account-trust-drill",
             Some(serde_json::json!({"purpose": "earned trust drill"})),
+            StatusCode::FORBIDDEN,
         ),
     ] {
         for (token, expected) in [
             ("Bearer token-a", StatusCode::FORBIDDEN),
             ("Bearer review-token-a", StatusCode::FORBIDDEN),
             ("Bearer utility-worker-token-a", StatusCode::FORBIDDEN),
+            ("Bearer account-trust-worker-token-a", scoped_expected),
             ("Bearer admin-token-a", StatusCode::SERVICE_UNAVAILABLE),
         ] {
             let temp = tempfile::tempdir().expect("temp dir");
@@ -29926,18 +30004,92 @@ async fn account_trust_worker_routes_require_admin_and_a_db_mirror() {
     }
 }
 
-/// Shadow only: the evaluator refuses any mode but `shadow`, and explain
-/// takes only a hash-shaped account ref. Both are refused before any
-/// database is touched.
+/// The scoped token opens only the two earned-trust worker routes: every
+/// other admin or worker route refuses it.
 #[tokio::test]
-async fn account_trust_evaluator_is_shadow_only_and_explain_takes_a_hash() {
+async fn the_account_trust_worker_token_is_refused_outside_its_routes() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    for (method, uri, body) in [
+        ("POST", "/v1/admin/recompute-contributor-caps", None),
+        (
+            "POST",
+            "/v1/admin/rollback-drill",
+            Some(serde_json::json!({"purpose": "scoped token probe"})),
+        ),
+        (
+            "POST",
+            "/v1/workers/retention-maintenance",
+            Some(serde_json::json!({"purpose": "scoped token probe"})),
+        ),
+        (
+            "POST",
+            "/v1/workers/revocation-propagation",
+            Some(serde_json::json!({"purpose": "scoped token probe"})),
+        ),
+        ("GET", "/v1/review/quarantine", None),
+    ] {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = test_state(temp.path().to_path_buf());
+        let mut request = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(AUTHORIZATION, "Bearer account-trust-worker-token-a");
+        let body = match &body {
+            Some(json) => {
+                request = request.header(CONTENT_TYPE, "application/json");
+                Body::from(json.to_string())
+            }
+            None => Body::empty(),
+        };
+        let response = app(state)
+            .oneshot(request.body(body).expect("request builds"))
+            .await
+            .expect("route responds");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+    }
+}
+
+/// The evaluator takes `shadow` (the default) or `applied` (alias
+/// `production`), refuses `applied` without a `tiered-v1` admission policy
+/// and refuses an `as_of` with it; explain takes only a hash-shaped account
+/// ref. All are refused before any database is touched.
+#[tokio::test]
+async fn account_trust_evaluator_modes_are_checked_and_explain_takes_a_hash() {
     use axum::body::Body;
     use tower::ServiceExt;
 
     for (method, uri, expected) in [
         (
             "POST",
+            "/v1/admin/evaluate-account-trust?mode=bogus".to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "POST",
+            format!(
+                "/v1/admin/evaluate-account-trust?mode=applied&as_of={}",
+                "2026-10-01T00:00:00Z"
+            ),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "POST",
             "/v1/admin/evaluate-account-trust?mode=applied".to_string(),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "POST",
+            "/v1/admin/evaluate-account-trust?mode=production".to_string(),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            "GET",
+            format!(
+                "/v1/admin/account-trust/explain?account_ref=sha256:{}&mode=bogus",
+                "a".repeat(64)
+            ),
             StatusCode::BAD_REQUEST,
         ),
         (
@@ -30092,11 +30244,8 @@ async fn account_trust_shadow_routes_record_evaluate_explain_and_drill() {
     Arc::get_mut(&mut state)
         .expect("unique state")
         .account_trust_shadow_policy = Some(Arc::new(
-        trace_commons_server::account_trust_rule::parse_shadow_growth_policy(
-            &policy,
-            &[version.as_str()],
-        )
-        .expect("policy"),
+        trace_commons_server::account_trust_rule::parse_growth_policy(&policy, &[version.as_str()])
+            .expect("policy"),
     ));
     let call = |method: &'static str, uri: String, body: Option<serde_json::Value>| {
         let state = state.clone();
@@ -30213,6 +30362,50 @@ async fn account_trust_shadow_routes_record_evaluate_explain_and_drill() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// The scheduler's tick runs the same handlers under the scoped token:
+/// record, then evaluate every configured policy. A token without the role
+/// is refused by the handlers themselves. Self-skips without a database.
+#[tokio::test]
+async fn account_trust_scheduler_tick_records_and_evaluates_under_the_scoped_token() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let version = format!("tick-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let policy = tiered_admission_policy(&version, 172800);
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(backend.clone() as Arc<dyn Database>),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::get_mut(&mut state)
+        .expect("unique state")
+        .account_trust_shadow_policy = Some(Arc::new(
+        trace_commons_server::account_trust_rule::parse_growth_policy(&policy, &[version.as_str()])
+            .expect("policy"),
+    ));
+    let config = |token: &str| {
+        account_trust_growth_routes::AccountTrustSchedulerConfig::new(token.to_string(), 3600, 1000)
+    };
+    let summary = account_trust_growth_routes::run_scheduler_tick(
+        state.clone(),
+        &config("account-trust-worker-token-a"),
+    )
+    .await
+    .expect("tick under the scoped token");
+    assert!(summary.record_passes >= 1);
+    assert_eq!(summary.facts_failed, 0);
+    assert_eq!(summary.evaluation_failed, 0);
+    let refused = account_trust_growth_routes::run_scheduler_tick(state, &config("token-a"))
+        .await
+        .expect_err("a contributor token runs nothing");
+    assert_eq!(refused.0, StatusCode::FORBIDDEN);
+}
+
 #[test]
 fn account_trust_shadow_policy_is_optional_but_never_silently_malformed() {
     let policy = serde_json::json!({
@@ -30257,9 +30450,180 @@ fn account_trust_shadow_policy_is_optional_but_never_silently_malformed() {
         read(None, Some("shadow-v1")).is_err(),
         "a version with no policy is a half-configured control"
     );
-    // The production admission policy parser never accepts it.
+    // A shadow candidate is never read by admission: only the admission
+    // policy's own JSON reaches the admission parser, which reads tiered-v1
+    // as an applied growth rule.
+    assert_eq!(
+        trace_commons_server::account_trust::parse_bounded_policy(&policy, &["shadow-v1"])
+            .unwrap()
+            .external_growth()
+            .map(|growth| growth.source),
+        Some(trace_commons_server::account_trust::GrowthSource::TieredV1)
+    );
+}
+
+fn tiered_admission_policy(version: &str, max_age_seconds: i64) -> String {
+    serde_json::json!({
+        "version": version,
+        "processing_cost_bound": 1,
+        "bounded_allowance": 100,
+        "period": {"mode": "fixed", "seconds": 604800},
+        "growth_rule": "tiered-v1",
+        "growth": {
+            "window_seconds": 7257600,
+            "weekly_cap": 10,
+            "q_min_micros": null,
+            "penalty_cooldown_seconds": 7776000,
+            "evaluation_max_age_seconds": max_age_seconds,
+            "allowance_ceiling": 800,
+            "evaluator_versions": ["gate-v1"],
+            "dedup_signal_versions": ["events.v2+simhash.v2"],
+            "tiers": [
+                {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                {"units": 10, "active_weeks": 2, "age_seconds": 1209600, "multiplier": 2}
+            ]
+        }
+    })
+    .to_string()
+}
+
+/// The applied policy is the admission policy's own `tiered-v1` growth rule,
+/// read from the same variables admission accepted; `none` and `external`
+/// have none.
+#[test]
+fn the_applied_policy_is_read_only_from_a_tiered_admission_policy() {
+    let tiered = tiered_admission_policy("live-v1", 172800);
+    let none = r#"{"version":"live-v1","processing_cost_bound":1,"bounded_allowance":100,"period":{"mode":"lifetime"},"growth_rule":"none"}"#;
+    let config = |json: &str| admission::AccountAdmissionConfig {
+        policy: trace_commons_server::account_trust::parse_bounded_policy(json, &["live-v1"])
+            .unwrap(),
+        lease_seconds: 60,
+        providers: None,
+    };
+    let read = |json: String| {
+        move |key: &str| match key {
+            "TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON" => Ok(json.clone()),
+            "TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION" => Ok("live-v1".to_string()),
+            _ => Err(std::env::VarError::NotPresent),
+        }
+    };
+    let applied = account_trust_growth_routes::applied_policy_from_values(
+        Some(&config(&tiered)),
+        read(tiered.clone()),
+    )
+    .unwrap()
+    .expect("tiered-v1 has an applied policy");
+    assert_eq!(applied.version(), "live-v1");
+    assert_eq!(applied.effective_allowance(1), 200);
     assert!(
-        trace_commons_server::account_trust::parse_bounded_policy(&policy, &["shadow-v1"]).is_err()
+        account_trust_growth_routes::applied_policy_from_values(
+            Some(&config(none)),
+            read(none.to_string())
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        account_trust_growth_routes::applied_policy_from_values(None, read(tiered.clone()))
+            .unwrap()
+            .is_none(),
+        "account admission off"
+    );
+}
+
+/// The scheduler fails closed at startup: a token that is not admin or
+/// `account_trust_worker`, no DB mirror, no policy to evaluate, or an
+/// interval that would let evaluations go stale between ticks.
+#[tokio::test]
+async fn account_trust_scheduler_validation_fails_closed() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let policy = |max_age: i64| {
+        Arc::new(
+            trace_commons_server::account_trust_rule::parse_growth_policy(
+                &tiered_admission_policy("live-v1", max_age),
+                &["live-v1"],
+            )
+            .unwrap(),
+        )
+    };
+    let backend: Arc<dyn Database> = Arc::new(PerUserTestDeviceKeyDb::new());
+    let with = |db: bool, applied: Option<i64>| {
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            db.then(|| backend.clone()),
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        Arc::get_mut(&mut state)
+            .expect("unique state")
+            .account_trust_applied_policy = applied.map(policy);
+        state
+    };
+    let config = |token: &str, interval: u64| {
+        account_trust_growth_routes::AccountTrustSchedulerConfig::new(
+            token.to_string(),
+            interval,
+            1000,
+        )
+    };
+    let validate = |state: Arc<AppState>, config| async move {
+        account_trust_growth_routes::validate_scheduler_config(state.as_ref(), Some(&config)).await
+    };
+    assert!(
+        validate(
+            with(true, Some(172800)),
+            config("account-trust-worker-token-a", 21600)
+        )
+        .await
+        .is_ok()
+    );
+    assert!(
+        validate(with(true, Some(172800)), config("admin-token-a", 21600))
+            .await
+            .is_ok()
+    );
+    for (state, config, label) in [
+        (
+            with(true, Some(172800)),
+            config("utility-worker-token-a", 21600),
+            "wrong role",
+        ),
+        (
+            with(true, Some(172800)),
+            config("token-a", 21600),
+            "contributor",
+        ),
+        (
+            with(true, Some(172800)),
+            config("no-such-token", 21600),
+            "unknown",
+        ),
+        (
+            with(false, Some(172800)),
+            config("account-trust-worker-token-a", 21600),
+            "no DB mirror",
+        ),
+        (
+            with(true, None),
+            config("account-trust-worker-token-a", 21600),
+            "nothing to evaluate",
+        ),
+        (
+            with(true, Some(21600)),
+            config("account-trust-worker-token-a", 21600),
+            "interval not shorter than the max age",
+        ),
+    ] {
+        assert!(validate(state, config).await.is_err(), "{label}");
+    }
+    assert!(
+        account_trust_growth_routes::validate_scheduler_config(with(true, None).as_ref(), None)
+            .await
+            .is_ok(),
+        "no scheduler configured is not an error"
     );
 }
 
@@ -89780,6 +90144,7 @@ fn near_ai_spans(input: &str, needles: &[String]) -> Vec<serde_json::Value> {
                 "start": start,
                 "end": end,
                 "score": 0.99,
+                "text": needle,
             }));
             from = byte + needle.len();
         }
@@ -93956,7 +94321,7 @@ fn every_driver_registers_a_distinct_name() {
     }
     assert_eq!(
         seen.len(),
-        13,
+        14,
         "every spawned driver loop must register; got {seen:?}"
     );
 }

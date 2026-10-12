@@ -1938,6 +1938,12 @@ plus those 60 seconds.
   (30 minutes).
 - `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE` -- whole seconds, default 300
   (5 minutes).
+- `TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS` -- whole seconds,
+  60 to 7200, default 900. This is the ceiling on the Review-start privacy
+  pass classifier call, and the Review lease bound still applies on top of it.
+  A value outside the range refuses startup with
+  `pipeline_privacy_pass_timeout_invalid`. See "Timeout" under "The privacy
+  pass at the start of Review".
 
 Each variable is optional; an unset variable keeps its phase's default.
 Each configured value must be between 1 second and 2 hours (7200 seconds)
@@ -2046,6 +2052,59 @@ hash of the raw request, so a retry of the same bytes replays the same run
 and calls neither half of the boundary again. `approved_content_hash` is the
 hash of the approved content, which Review derives from the privacy pass's
 output.
+
+### Admission and `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS`
+
+The receipt maps the envelope's residual risk onto Admission's scale: a
+`medium` whose only basis is `consent_content_flag` is Low, any other
+`medium` is Medium, `high` is High. The bundle's Admission policy admits
+Low, quarantines Medium as `privacy_review_required`, and quarantines High
+as `privacy_risk_high_review_required`.
+
+`TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS` governs both paths. The
+legacy path accepts every Medium under it. The pipeline honours it
+narrowly (owner decision 2026-10-12, issue #1344, "once PII is removed,
+accept"): with the setting on, a receipt whose risk is Medium and whose
+basis is `found_and_removed`, alone or with `consent_content_flag`, is
+handed to Admission as Low, and Admission admits it. That is the receipt
+whose PII the server's own re-scrub found and removed. Nothing else
+changes:
+
+- A Medium with any other basis, including an empty one (a declared
+  `medium` the server found nothing for), is still quarantined
+  `privacy_review_required`.
+- A basis with `key_finding`, `coverage_incomplete`, `residual_survivor`
+  or `residual_scan_unavailable` is High and is still quarantined
+  `privacy_risk_high_review_required`.
+- With the setting off, a found-and-removed Medium is quarantined
+  `privacy_review_required`, as before.
+
+The bundle and its Admission policy do not change, and neither do the
+qualification fixtures: the setting is read per receipt from the process
+(`accept_medium_risk` on the receipt request), and the qualification
+harness never sets it. An admission under the setting is recorded so an
+operator can tell it from a Low's: the Admission outcome's
+`evaluation.rule_id` is `minimal_admission_v1_accept_found_and_removed`
+(a Low's is `minimal_admission_v1`), and its `evidence.privacy_risk` is
+`medium`, the risk the receipt mapped, not the Low the policy was handed.
+To count them:
+
+```sql
+SELECT count(*) FROM phase_outcomes
+ WHERE phase = 'admission'
+   AND evaluation->>'rule_id' = 'minimal_admission_v1_accept_found_and_removed';
+```
+
+Run it in a tenant transaction (RLS is forced on `phase_outcomes`).
+
+The submission row keeps the truth: `privacy_risk` stays `medium`, and
+`residual_risk_basis` and the redaction counts stay what the re-scrub
+found. Only Admission's decision changes. From there the run is an
+ordinary admitted run: the privacy pass at the start of Review compares
+its risk with the receipt's Medium (not with the Low Admission was
+handed), so a pass-time Medium clears it and only a pass-time High
+escalates it; it is reviewed, scored and settled like an admitted Low, and
+the contributor sees it `accepted` with its credit.
 
 A new pipeline receipt appends `main`'s `submitted` audit event after the
 receipt commits. The event holds the uploader's principal reference, as
@@ -2161,7 +2220,10 @@ risk back to the submission row, and the run goes on to the Review policy,
 so a run Admission admitted ends `accepted` on the redacted content, with
 its gate decision row and credit like any accepted run. A run Admission
 quarantined at Medium escalates at High only, and otherwise keeps
-Admission's hold. A pass-time High (what redaction did not resolve: a key
+Admission's hold. A Medium Admission admitted under
+`TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS` (above) is still Medium on
+this comparison, so it too escalates at High only, and otherwise goes on
+as an admitted run. A pass-time High (what redaction did not resolve: a key
 finding, a coverage gap, a survivor, a residual scan that could not run) is
 held for a human, never rejected by the pass. A receipt-time High is held
 for a human too, never rejected (owner decision PC-D27, 2026-10-11, as
@@ -2226,6 +2288,22 @@ prose PII, a Review lease under 30 s leaves less than 60 s for the
 classifier, and the pipeline service refuses to build with
 `pipeline_lease_config_invalid`. A boundary that does not classify is
 bounded by the 900 s alone.
+
+`TRACE_COMMONS_PIPELINE_PRIVACY_PASS_MAX_TIMEOUT_SECONDS` replaces the 900 s
+in that formula. Set it in whole seconds, from 60 to 7200; unset keeps
+900. Any other value refuses ingest startup with the safe label
+`pipeline_privacy_pass_timeout_invalid`.
+
+The setting replaces the ceiling only. The Review lease bound still applies,
+so the variable takes effect only up to `Review lease x 4 - 60 s`. To raise
+the timeout, raise `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW` as well, so
+that `lease x 4 - 60 s` is at least the new ceiling. At the default 300 s
+Review lease the bound is 1140 s. A 3600 s ceiling therefore needs a Review
+lease of at least 915 s; set 1200 s for margin.
+
+A longer pass holds its Review lane for longer. With worker concurrency 2,
+two slow traces can hold both lanes for the full timeout, which stalls
+Review for every tenant.
 
 **`redaction_hash` stays the receipt's.** The pass writes the submission's
 risk, basis, redaction counts and redaction pipeline version, and leaves its
