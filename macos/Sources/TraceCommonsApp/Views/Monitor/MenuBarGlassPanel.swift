@@ -142,11 +142,10 @@ struct MenuBarGlassPanel: View {
         }
     }
 
-    /// The core's roll-up, never one worked out here from the folders.
-    private var rollup: MenuPanelData.ModeRollup {
-        guard !store.stale else { return .none }
-        return MenuPanelData.rollup(store.status?.contributionMode)
-    }
+    /// The core's roll-up (`store.status?.contributionMode`), never one
+    /// worked out here from the folders; a dash only while there is no
+    /// current status, whatever the other reads did.
+    private var rollup: MenuPanelData.ModeRollup { store.modeRollup }
 
     /// The pill's words, from the core (`tc_contribution_mode_copy_json`).
     private static let modeCopy = ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON())
@@ -319,25 +318,26 @@ struct MenuBarGlassPanel: View {
 
     // MARK: Legend and graph
 
+    /// Shared and kept, each from its own read (`store.sharedCount`,
+    /// `store.keptCount`). A count that is not current is the core's
+    /// unknown word, never the last count and never a bare dash.
+    private var sharedValue: String { MenuPanelData.countWord(store.sharedCount, unknown: MonitorWords.unknown) }
+    private var keptValue: String { MenuPanelData.countWord(store.keptCount, unknown: MonitorWords.unknown) }
+
     private var legend: some View {
-        let columns = store.columns
-        // Stale data is a dash, never the last counts.
-        let stale = store.stale
-        return HStack(spacing: GlassTokens.Space.s3) {
-            GlassLegendCell(MenuWords.shared, value: stale ? "—" : String(columns.reduce(0) { $0 + $1.up }), status: .shared)
-            GlassLegendCell(MenuWords.kept, value: stale ? "—" : String(columns.reduce(0) { $0 + $1.down }), status: .kept)
+        HStack(spacing: GlassTokens.Space.s3) {
+            GlassLegendCell(MenuWords.shared, value: sharedValue, status: .shared)
+            GlassLegendCell(MenuWords.kept, value: keptValue, status: .kept)
         }
     }
 
     private var graph: some View {
-        let columns = store.columns
         let start = Calendar.current.date(byAdding: .day, value: -(MenuPanelData.days - 1), to: Date()) ?? Date()
-        let stale = store.stale
         return GlassDayGraph(
-            columns: columns, paused: paused || stale,
-            summary: "\(FlowMapScene.pair(MenuWords.shared, stale ? nil : columns.reduce(0) { $0 + $1.up })) · \(FlowMapScene.pair(MenuWords.kept, stale ? nil : columns.reduce(0) { $0 + $1.down }))",
-            sharedChip: stale ? "—" : String(columns.reduce(0) { $0 + $1.up }),
-            keptChip: stale ? "—" : String(columns.reduce(0) { $0 + $1.down }),
+            columns: store.columns, paused: paused || !store.columnsCurrent,
+            summary: "\(MenuWords.shared) \(sharedValue) · \(MenuWords.kept) \(keptValue)",
+            sharedChip: sharedValue,
+            keptChip: keptValue,
             leading: start.formatted(.dateTime.month(.abbreviated).day()),
             trailing: Date().formatted(.dateTime.month(.abbreviated).day()))
     }
@@ -383,8 +383,11 @@ struct MenuBarGlassPanel: View {
 
     @ViewBuilder
     private var recent: some View {
+        // Each source only while its own read is current.
         let rows = MenuPanelData.recent(
-            pending: store.pending, history: store.history, calls: store.calls,
+            pending: store.current(.pending) ? store.pending : [],
+            history: store.current(.history) ? store.history : [],
+            calls: store.current(.calls) ? store.calls : [],
             statusLabel: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) })
         if !rows.isEmpty && !store.stale {
             VStack(alignment: .leading, spacing: 0) {
@@ -420,7 +423,7 @@ struct MenuBarGlassPanel: View {
             hairline
             Button { open(.traces(entryId: nil)) } label: {
                 HStack {
-                    Text(FlowMapScene.dotPair(MenuWords.flagged, store.stale ? nil : MenuPanelData.flagged(store.pending)))
+                    Text("\(MenuWords.flagged) · \(MenuPanelData.countWord(store.flaggedCount, unknown: MonitorWords.unknown))")
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
                 }
@@ -687,9 +690,12 @@ struct MenuBarStripLabel: View {
 
     var body: some View {
         let available = model.startup == .running && !store.stale
+        // The strip draws the columns, so it is unavailable when either read
+        // behind them did not answer, never the last bars as current.
         let condition = MenuPanelStatus.condition(
             decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
-            paused: model.status.paused, available: model.startup == .running, stale: store.stale)
+            paused: model.status.paused, available: model.startup == .running,
+            stale: store.stale || !store.columnsCurrent)
         let badge = MenuPanelStatus.badge(model.decisionsOwed)
         // The mark's words, only while the strip draws the mark: the badge
         // and condition come from a different read than the nudge, and a
