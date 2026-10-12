@@ -2799,3 +2799,262 @@ async fn attested_uploads_are_not_capped_by_the_account_allowance() {
     assert_eq!(legacy_spent().await, 20);
     assert_eq!(spent().await, 10);
 }
+
+/// Rule 7 of the earned-trust spec ("How admission reads trust"): under a
+/// `tiered-v1` admission policy, contribution-status adds the caller's own
+/// growth view beside `authority:"bounded"`. A fresh applied evaluation shows
+/// its tier, multiplier, the period's allowance, spend, remaining and reset,
+/// and the next tier's requirements against the evaluation's counts. A stale
+/// one shows tier 0 at the base allowance. `growth_rule:"none"` adds nothing:
+/// the body is exactly the five fields it always had. `ready` is unchanged.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn contribution_status_reports_the_accounts_own_growth() {
+    let db = admission_pg_admin().await;
+    let token = "growth-status-fixture-token";
+    let legacy_token = "growth-status-legacy-token";
+    let (tenant, _, _) = provision_synthetic_near_account(&db, &principal_for(token)).await;
+    let legacy_tenant = format!("tenant-{}", Uuid::new_v4());
+    let (_temp, mut state, _) = anchor_state(
+        db.clone(),
+        &[
+            (tenant.as_str(), token),
+            (legacy_tenant.as_str(), legacy_token),
+        ],
+    );
+    let version = format!(
+        "growth-status-{}",
+        &Uuid::new_v4().simple().to_string()[..12]
+    );
+    let tiered = serde_json::json!({
+        "version": version,
+        "processing_cost_bound": 10,
+        "bounded_allowance": 10,
+        "period": {"mode": "fixed", "seconds": 3600},
+        "growth_rule": "tiered-v1",
+        "growth": {
+            "window_seconds": 84 * 86400,
+            "weekly_cap": 10,
+            "q_min_micros": null,
+            "penalty_cooldown_seconds": 0,
+            "evaluation_max_age_seconds": 3600,
+            "allowance_ceiling": 60,
+            "evaluator_versions": ["gate-v1"],
+            "dedup_signal_versions": ["events.v2+simhash.v2"],
+            "tiers": [
+                {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                {"units": 2, "active_weeks": 1, "age_seconds": 0, "multiplier": 3},
+                {"units": 5, "active_weeks": 2, "age_seconds": 1209600, "multiplier": 6,
+                 "attested_units": 1}
+            ]
+        }
+    })
+    .to_string();
+    let set_policy = |state: &mut Arc<AppState>, json: &str, growth: bool| {
+        let state = Arc::make_mut(state);
+        state.account_admission = Some(admission::AccountAdmissionConfig {
+            policy: trace_commons_server::account_trust::parse_bounded_policy(
+                json,
+                &[version.as_str()],
+            )
+            .unwrap(),
+            lease_seconds: 60,
+            providers: None,
+        });
+        state.account_trust_applied_policy = growth.then(|| {
+            Arc::new(
+                trace_commons_server::account_trust_rule::parse_growth_policy(
+                    json,
+                    &[version.as_str()],
+                )
+                .unwrap(),
+            )
+        });
+    };
+    let status = |state: Arc<AppState>, who: &'static str| async move {
+        let mut request = axum::http::Request::builder()
+            .uri("/v1/account/contribution-status")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .headers_mut()
+            .extend(account_session_headers(&state, who).await);
+        let response = app(state).oneshot(request).await.unwrap();
+        let code = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        (code, bytes)
+    };
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let account_id: Uuid = client
+        .query_one(
+            "SELECT account_id FROM trace_accounts WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+
+    // growth_rule none: exactly the five fields, and no growth read.
+    let none = format!(
+        r#"{{"version":"{version}","processing_cost_bound":10,"bounded_allowance":10,"period":{{"mode":"fixed","seconds":3600}},"growth_rule":"none"}}"#
+    );
+    set_policy(&mut state, &none, false);
+    let (code, bytes) = status(state.clone(), token).await;
+    assert_eq!(code, StatusCode::OK);
+    let expected = serde_json::json!({
+        "authority": "bounded",
+        "policy_version": version,
+        "ready": true,
+        "refusal_label": null,
+        "retry_after_seconds": null,
+    });
+    assert_eq!(
+        std::str::from_utf8(&bytes).unwrap(),
+        expected.to_string(),
+        "growth_rule none answers byte for byte as before"
+    );
+
+    // tiered-v1 with no evaluation yet: tier 0 at the base allowance, no
+    // counts, and the next tier's requirements.
+    set_policy(&mut state, &tiered, true);
+    let (code, bytes) = status(state.clone(), token).await;
+    assert_eq!(code, StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["authority"], "bounded");
+    assert_eq!(body["ready"], true);
+    assert_eq!(body["allowance_tier"], 0);
+    assert_eq!(body["allowance_multiplier"], 1);
+    assert_eq!(body["effective_allowance"], 10);
+    assert_eq!(body["allowance_spent"], 0);
+    assert_eq!(body["allowance_remaining"], 10);
+    assert!(body["period_resets_at"].is_string(), "{body}");
+    assert!(body["evaluated_at"].is_null());
+    assert!(body["allowance_tier_changed_at"].is_null());
+    assert_eq!(body["next_tier"]["tier"], 1);
+    assert_eq!(body["next_tier"]["multiplier"], 3);
+    assert_eq!(body["next_tier"]["effective_allowance"], 30);
+    assert_eq!(
+        body["next_tier"]["required"],
+        serde_json::json!({"units": 2, "active_weeks": 1, "age_seconds": 0, "attested_units": 0})
+    );
+    assert!(body["next_tier"]["current"].is_null(), "{body}");
+
+    // A fresh applied evaluation at tier 1, and 10 already spent this period.
+    client
+        .query_one("SELECT trace_account_trust_enable_external_growth()", &[])
+        .await
+        .unwrap();
+    let generation: i64 = client
+        .query_one(
+            "SELECT generation FROM trace_account_trust_frontiers WHERE tenant_id=$1 AND account_id=$2",
+            &[&tenant, &account_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let as_of: DateTime<Utc> = client
+        .query_one(
+            "SELECT date_trunc('second', clock_timestamp()) - interval '60 seconds'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    client
+        .execute(
+            "INSERT INTO trace_account_trust_evaluations(tenant_id,evaluation_id,account_id,
+                growth_policy_version,mode,as_of,tier,previous_tier,effective_allowance,units,
+                units_capped,attested_units,active_weeks,age_weeks,age_seconds,netted_withdrawn,
+                netted_revoked,netted_quarantined,penalty_active,facts_digest,input_generation)
+             VALUES($1,$2,$3,$4,'applied',$5,1,0,30,3,0,1,1,0,86400,0,0,0,FALSE,$6,$7)",
+            &[
+                &tenant,
+                &Uuid::new_v4(),
+                &account_id,
+                &version,
+                &as_of,
+                &format!("sha256:{}", "4".repeat(64)),
+                &generation,
+            ],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO trace_account_admission_budget(tenant_id,account_id,period_id,
+                policy_version,cost_limit,cost_bound,cost_used)
+             VALUES($1,$2,$3 || ':fixed:3600:' ||
+                floor(extract(epoch FROM clock_timestamp()) / 3600)::bigint::text,$3,10,10,10)",
+            &[&tenant, &account_id, &version],
+        )
+        .await
+        .unwrap();
+    let (code, bytes) = status(state.clone(), token).await;
+    assert_eq!(code, StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["authority"], "bounded");
+    assert_eq!(body["ready"], true, "20 of 30 left");
+    assert_eq!(body["allowance_tier"], 1);
+    assert_eq!(body["allowance_multiplier"], 3);
+    assert_eq!(body["effective_allowance"], 30);
+    assert_eq!(body["allowance_spent"], 10);
+    assert_eq!(body["allowance_remaining"], 20);
+    let resets: DateTime<Utc> = body["period_resets_at"].as_str().unwrap().parse().unwrap();
+    assert_eq!(resets.timestamp() % 3600, 0, "a fixed-period boundary");
+    assert!(resets > Utc::now() && resets <= Utc::now() + chrono::Duration::seconds(3600));
+    let evaluated: DateTime<Utc> = body["evaluated_at"].as_str().unwrap().parse().unwrap();
+    assert_eq!(evaluated, as_of);
+    let changed: DateTime<Utc> = body["allowance_tier_changed_at"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(changed, as_of);
+    assert_eq!(body["next_tier"]["tier"], 2);
+    assert_eq!(body["next_tier"]["multiplier"], 6);
+    assert_eq!(body["next_tier"]["effective_allowance"], 60);
+    assert_eq!(
+        body["next_tier"]["required"],
+        serde_json::json!({"units": 5, "active_weeks": 2, "age_seconds": 1209600, "attested_units": 1})
+    );
+    assert_eq!(
+        body["next_tier"]["current"],
+        serde_json::json!({"units": 3, "active_weeks": 1, "age_seconds": 86400, "attested_units": 1})
+    );
+    // No raw identifier of the account or tenant in the body.
+    let text = std::str::from_utf8(&bytes).unwrap();
+    assert!(!text.contains(&tenant) && !text.contains(&account_id.to_string()));
+
+    // Stale: older than evaluation_max_age_seconds reads as tier 0, and the
+    // 10 already spent leaves nothing at the base allowance.
+    client
+        .execute(
+            "UPDATE trace_account_trust_evaluations SET as_of=as_of - interval '2 hours'
+              WHERE tenant_id=$1 AND account_id=$2",
+            &[&tenant, &account_id],
+        )
+        .await
+        .unwrap();
+    let (code, bytes) = status(state.clone(), token).await;
+    assert_eq!(code, StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["ready"], false);
+    assert_eq!(body["refusal_label"], "account_limit_reached");
+    assert_eq!(body["allowance_tier"], 0);
+    assert_eq!(body["allowance_multiplier"], 1);
+    assert_eq!(body["effective_allowance"], 10);
+    assert_eq!(body["allowance_spent"], 10);
+    assert_eq!(body["allowance_remaining"], 0);
+    assert!(body["evaluated_at"].is_null());
+    assert!(body["allowance_tier_changed_at"].is_null());
+    assert_eq!(body["next_tier"]["tier"], 1);
+    assert!(body["next_tier"]["current"].is_null());
+
+    // A legacy-namespace session is still refused before any read.
+    let (code, bytes) = status(state.clone(), legacy_token).await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "account_identity_unlinked");
+}

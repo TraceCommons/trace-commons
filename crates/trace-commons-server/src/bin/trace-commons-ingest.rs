@@ -1445,6 +1445,10 @@ pub async fn run_ingest(
         &state,
         state.revocation_propagation_scheduler.clone(),
     );
+    account_trust_growth_routes::spawn_scheduler_task(
+        &state,
+        state.account_trust_scheduler.clone(),
+    );
     spawn_community_snapshot_invalidation_scheduler_task(
         &state,
         state.community_snapshot_invalidation_scheduler.clone(),
@@ -1522,6 +1526,11 @@ async fn finish_ingest_startup(
     validate_trace_revocation_propagation_scheduler_config(
         state.as_ref(),
         state.revocation_propagation_scheduler.as_ref(),
+    )
+    .await?;
+    account_trust_growth_routes::validate_scheduler_config(
+        state.as_ref(),
+        state.account_trust_scheduler.as_ref(),
     )
     .await?;
     validate_community_snapshot_invalidation_scheduler_config(
@@ -1965,6 +1974,13 @@ struct AppState {
     /// read by admission; see `account_trust_growth_routes`.
     account_trust_shadow_policy:
         Option<Arc<trace_commons_server::account_trust_rule::GrowthPolicy>>,
+    /// The admission policy's own growth rule when it names `tiered-v1`:
+    /// what the evaluator's `applied` mode runs and admission reads.
+    account_trust_applied_policy:
+        Option<Arc<trace_commons_server::account_trust_rule::GrowthPolicy>>,
+    /// Unattended fact recording and evaluation under the scoped
+    /// `account_trust_worker` token.
+    account_trust_scheduler: Option<account_trust_growth_routes::AccountTrustSchedulerConfig>,
     benchmark_registry_scheduler: Option<TraceBenchmarkRegistrySchedulerConfig>,
     benchmark_pipeline_scheduler: Option<TraceBenchmarkPipelineSchedulerConfig>,
     credit_cycle_scheduler: Option<TraceCreditCycleSchedulerConfig>,
@@ -3672,6 +3688,9 @@ enum TokenRole {
     RevocationWorker,
     CompetitionReadWorker,
     RegisterStatsWorker,
+    /// Earned account trust: records facts and runs the evaluator, nothing
+    /// else (spec decision 7's scoped worker bearer).
+    AccountTrustWorker,
 }
 
 impl TokenRole {
@@ -3694,6 +3713,7 @@ impl TokenRole {
                 Ok(Self::CompetitionReadWorker)
             }
             "register_stats_worker" | "register-stats-worker" => Ok(Self::RegisterStatsWorker),
+            "account_trust_worker" | "account-trust-worker" => Ok(Self::AccountTrustWorker),
             other => anyhow::bail!("unknown Trace Commons token role: {other}"),
         }
     }
@@ -3728,6 +3748,7 @@ impl TokenRole {
             Self::RevocationWorker => "revocation_worker",
             Self::CompetitionReadWorker => "competition_read_worker",
             Self::RegisterStatsWorker => "register_stats_worker",
+            Self::AccountTrustWorker => "account_trust_worker",
         }
     }
 }
@@ -4477,6 +4498,10 @@ impl AppState {
         )?;
         let account_trust_shadow_policy =
             account_trust_growth_routes::shadow_policy_from_env()?.map(Arc::new);
+        let account_trust_applied_policy =
+            account_trust_growth_routes::applied_policy_from_env(account_admission.as_ref())?
+                .map(Arc::new);
+        let account_trust_scheduler = account_trust_growth_routes::scheduler_config_from_env()?;
         if let Some(account_config) = account_admission.as_ref() {
             let db = db_mirror
                 .as_ref()
@@ -4502,6 +4527,16 @@ impl AppState {
                     .map_err(|_| anyhow::anyhow!("external_account_trust_readiness_unavailable"))?
             {
                 anyhow::bail!("external_account_trust_contract_not_ready");
+            }
+            // tiered-v1 is evaluated by this process, so this login must also
+            // hold the recorder's and the V126 writer's seams.
+            if account_trust_applied_policy.is_some()
+                && !db
+                    .tiered_account_trust_runtime_ready()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("tiered_account_trust_readiness_unavailable"))?
+            {
+                anyhow::bail!("tiered_account_trust_contract_not_ready");
             }
             // Static contributor credentials are not necessarily represented
             // by a device row. Validate the local replica's inventory as well.
@@ -4872,6 +4907,8 @@ impl AppState {
             admission,
             account_admission,
             account_trust_shadow_policy,
+            account_trust_applied_policy,
+            account_trust_scheduler,
             benchmark_registry_scheduler,
             benchmark_pipeline_scheduler,
             credit_cycle_scheduler,
@@ -10892,6 +10929,7 @@ const CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME: &str = "credit_settlement_schedul
 const PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME: &str = "process_evaluation_scheduler";
 const REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME: &str = "revocation_propagation_scheduler";
 const UNBOUND_ACCOUNT_REAPER_DRIVER_NAME: &str = "unbound_account_reaper";
+const ACCOUNT_TRUST_SCHEDULER_DRIVER_NAME: &str = "account_trust_scheduler";
 
 /// Every driver the liveness registry knows about. The distinctness test
 /// reads this; keep it in sync when adding a driver.
@@ -10909,6 +10947,7 @@ const ALL_DRIVER_NAMES: &[&str] = &[
     PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME,
     REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME,
     UNBOUND_ACCOUNT_REAPER_DRIVER_NAME,
+    ACCOUNT_TRUST_SCHEDULER_DRIVER_NAME,
 ];
 
 /// Run `tick` forever on `interval`, recording liveness and emitting the
@@ -61352,6 +61391,7 @@ fn trace_tenant_access_grant_role_for_token(role: TokenRole) -> StorageTraceTena
             StorageTraceTenantAccessGrantRole::CompetitionReadWorker
         }
         TokenRole::RegisterStatsWorker => StorageTraceTenantAccessGrantRole::RegisterStatsWorker,
+        TokenRole::AccountTrustWorker => StorageTraceTenantAccessGrantRole::AccountTrustWorker,
     }
 }
 
@@ -62377,6 +62417,17 @@ fn require_register_stats_operator(auth: &TenantAuth) -> ApiResult<()> {
         Err(api_error(
             StatusCode::FORBIDDEN,
             "admin or register stats worker token required",
+        ))
+    }
+}
+
+fn require_account_trust_operator(auth: &TenantAuth) -> ApiResult<()> {
+    if auth.role.can_admin() || auth.role == TokenRole::AccountTrustWorker {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "admin or account trust worker token required",
         ))
     }
 }

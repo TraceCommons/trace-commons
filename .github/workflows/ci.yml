@@ -104,6 +104,7 @@ jobs:
         admission_test_tokens
         admission_test_account_trust
         admission_test_account_trust_growth
+        admission_test_account_trust_live
         admission_test_account_trust_route
         admission_test_witness_evidence
         admission_test_source_sessions
@@ -262,6 +263,15 @@ jobs:
         run: cargo test -p trace-commons-server --test account_trust_growth_pg
         env:
           TRACE_COMMONS_ACCOUNT_TRUST_GROWTH_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_growth
+      # Earned account trust, live (V126): the attested_submission fact, the
+      # guard's witness column grants, and a tiered-v1 admission policy whose
+      # applied evaluation raises the allowance and falls back to the base
+      # when stale or invalidated. Turns external growth on, which nothing
+      # turns off, so it has a database of its own.
+      - name: account_trust_live_pg
+        run: cargo test -p trace-commons-server --test account_trust_live_pg
+        env:
+          TRACE_COMMONS_ACCOUNT_TRUST_LIVE_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_live
       # V101: the unbound-account reaper, run as a login holding only
       # trace_unbound_account_reaper, with a control that a superuser-owned
       # function would fail.

@@ -1811,7 +1811,7 @@ async fn fact_keys(backend: &PgBackend, tenant: &str, account: Uuid) -> Vec<(Str
 
 #[tokio::test]
 async fn merge_carries_trust_facts_once_and_does_not_double_count_a_week() {
-    use trace_commons_server::account_trust_rule::{evaluate, parse_shadow_growth_policy};
+    use trace_commons_server::account_trust_rule::{evaluate, parse_growth_policy};
     let Some(backend) = postgres_backend().await else {
         return;
     };
@@ -1921,7 +1921,7 @@ async fn merge_carries_trust_facts_once_and_does_not_double_count_a_week() {
 
     // Two contributions in one week, weekly cap 1: the union counts the week
     // once and caps it, rather than adding each account's allowance of it.
-    let policy = parse_shadow_growth_policy(
+    let policy = parse_growth_policy(
         &serde_json::json!({
             "version": "merge-test-v1",
             "processing_cost_bound": 1,

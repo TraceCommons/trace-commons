@@ -926,7 +926,7 @@ fn shadow_policy() -> trace_commons_server::account_trust_rule::GrowthPolicy {
             ]
         }
     });
-    trace_commons_server::account_trust_rule::parse_shadow_growth_policy(
+    trace_commons_server::account_trust_rule::parse_growth_policy(
         &json.to_string(),
         &["growth-shadow-test-v1"],
     )
@@ -1049,8 +1049,9 @@ async fn first_in_cluster_is_answered_across_tenants_as_a_boolean_only() {
 #[tokio::test]
 async fn shadow_evaluations_are_stored_audited_and_reproduced() {
     use trace_commons_server::account_trust_growth::{
-        account_trust_ref, account_trust_reproduction_drill, evaluate_account_trust,
-        explain_account_trust, find_account_by_ref, record_account_trust_facts,
+        EvaluationMode, account_trust_ref, account_trust_reproduction_drill,
+        evaluate_account_trust, explain_account_trust, find_account_by_ref,
+        record_account_trust_facts,
     };
     let Some(fx) = fixture().await else {
         return;
@@ -1080,7 +1081,7 @@ async fn shadow_evaluations_are_stored_audited_and_reproduced() {
     record_account_trust_facts(db, None, false).await.unwrap();
 
     let as_of = at(1_000);
-    let summary = evaluate_account_trust(db, &policy, as_of, None)
+    let summary = evaluate_account_trust(db, &policy, EvaluationMode::Shadow, as_of, None)
         .await
         .unwrap();
     assert_eq!(summary.failed, 0);
@@ -1136,7 +1137,7 @@ async fn shadow_evaluations_are_stored_audited_and_reproduced() {
     assert!(!metadata.to_string().contains(&owner));
 
     // Re-running at the same as_of changes nothing and audits nothing.
-    evaluate_account_trust(db, &policy, as_of, None)
+    evaluate_account_trust(db, &policy, EvaluationMode::Shadow, as_of, None)
         .await
         .unwrap();
     assert_eq!(audit(admin, &tenant).await.len(), 1);
@@ -1151,7 +1152,9 @@ async fn shadow_evaluations_are_stored_audited_and_reproduced() {
         .unwrap()
         .unwrap();
     assert_eq!(found, trust);
-    let report = explain_account_trust(db, &policy, &trust).await.unwrap();
+    let report = explain_account_trust(db, &policy, EvaluationMode::Shadow, &trust)
+        .await
+        .unwrap();
     assert!(report.reproduced);
     assert_eq!(report.stored.as_ref().unwrap().tier, 1);
     let rendered = serde_json::to_string(&report).unwrap();
@@ -1159,7 +1162,7 @@ async fn shadow_evaluations_are_stored_audited_and_reproduced() {
     assert!(!rendered.contains(&account.to_string()));
     assert!(!rendered.contains(&tenant));
     assert!(
-        account_trust_reproduction_drill(db, &policy, None)
+        account_trust_reproduction_drill(db, &policy, EvaluationMode::Shadow, None)
             .await
             .unwrap()
             .passed()
@@ -1186,25 +1189,27 @@ async fn shadow_evaluations_are_stored_audited_and_reproduced() {
         )
         .await
         .unwrap();
-    let drifted = explain_account_trust(db, &policy, &trust).await.unwrap();
+    let drifted = explain_account_trust(db, &policy, EvaluationMode::Shadow, &trust)
+        .await
+        .unwrap();
     assert!(!drifted.reproduced);
     assert_ne!(
         drifted.stored.as_ref().unwrap().facts_digest,
         drifted.recomputed.as_ref().unwrap().facts_digest
     );
-    let drill = account_trust_reproduction_drill(db, &policy, None)
+    let drill = account_trust_reproduction_drill(db, &policy, EvaluationMode::Shadow, None)
         .await
         .unwrap();
     assert!(drill.not_reproduced >= 1);
     assert!(!drill.passed());
     // Re-evaluating records the drop (1 -> 0) and reproduces again.
-    evaluate_account_trust(db, &policy, at(1_001), None)
+    evaluate_account_trust(db, &policy, EvaluationMode::Shadow, at(1_001), None)
         .await
         .unwrap();
     let changes = audit(admin, &tenant).await;
     assert_eq!(changes.len(), 2);
     assert!(
-        explain_account_trust(db, &policy, &trust)
+        explain_account_trust(db, &policy, EvaluationMode::Shadow, &trust)
             .await
             .unwrap()
             .reproduced
