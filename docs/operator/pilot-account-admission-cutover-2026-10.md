@@ -745,7 +745,7 @@ set. The earned-trust growth step is a separate, later change on its own
 branch, expected to bring: tier policy `tiered-v1`, migration V126, the
 `TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_*` settings, and a scoped worker token.
 
-**PLACEHOLDER: fill in from the growth PR when it lands (#TBD). No commands are
+**PLACEHOLDER: fill in from the growth PR when it lands (#1379). No commands are
 given here on purpose.** Two things this runbook already fixes for it:
 
 - The policy version is frozen by the stored budget rows. Growth needs a
