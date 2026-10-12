@@ -751,7 +751,10 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         })
         .await
         .unwrap();
-    fresh_evidence.expires_at = Utc::now().timestamp() + 5;
+    // First use must land inside this window on a slow, parallel CI runner; a
+    // short one made the test fail at random. Expiry is exercised below by
+    // re-signing the same evidence into the past, not by waiting it out.
+    fresh_evidence.expires_at = Utc::now().timestamp() + 120;
     let fresh_signature = signer
         .sign_eip191(&fresh_evidence.signing_bytes().unwrap())
         .unwrap();
@@ -901,10 +904,27 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         ("attested", false, "released"),
         "pre-processing release succeeds even after revocation"
     );
-    // The exact signed evidence accepted above now expires. Released,
-    // completed, and crashed leases all retain account/body binding.
-    let wait = (fresh_evidence.expires_at - Utc::now().timestamp() + 1).max(0) as u64;
-    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+    // The signed evidence accepted above now expires: the same evidence,
+    // re-signed with a window that has already closed. Released, completed,
+    // and crashed leases all retain account/body binding.
+    let mut lapsed_evidence = fresh_evidence.clone();
+    lapsed_evidence.issued_at = Utc::now().timestamp() - 120;
+    lapsed_evidence.expires_at = Utc::now().timestamp() - 60;
+    offered.insert(
+        trace_commons_protocol::admission::EVIDENCE_HEADER,
+        serde_json::to_string(&lapsed_evidence)
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    offered.insert(
+        trace_commons_protocol::admission::SIGNATURE_HEADER,
+        signer
+            .sign_eip191(&lapsed_evidence.signing_bytes().unwrap())
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
     Arc::make_mut(&mut state).account_admission.as_mut().unwrap().policy = trace_commons_server::account_trust::parse_bounded_policy(
         r#"{"version":"account-retry-wave2","processing_cost_bound":10,"bounded_allowance":100,"period":{"mode":"lifetime"},"growth_rule":"none"}"#, &["account-retry-wave2"]).unwrap();
     let account_receipt = require_ok(
