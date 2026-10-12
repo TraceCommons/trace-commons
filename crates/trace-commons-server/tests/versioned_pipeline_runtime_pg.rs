@@ -49923,10 +49923,12 @@ async fn accept_medium_admits_a_found_and_removed_receipt_and_completes_it() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
+    // A config that awards both instruments, so "credit" is not 0 on both
+    // sides of the comparison below.
+    let (service, _, adapters) = test_service(
         backend.clone(),
         artifact_store(&dir),
-        minimal_config(false),
+        scored_config(false),
         None,
     )
     .await;
@@ -50025,6 +50027,28 @@ async fn accept_medium_admits_a_found_and_removed_receipt_and_completes_it() {
         credit_rows,
         count_credit_ledger_rows_for_run(&backend, &low_tenant, low.run_id).await,
         "the accepted Medium earns what an admitted Low earns"
+    );
+    let settled = |run_id: uuid::Uuid| {
+        let mut legs = adapters
+            .iter()
+            .flat_map(|adapter| adapter.requests())
+            .filter(|request| request.run_id() == run_id)
+            .map(|request| {
+                (
+                    request.instrument_id().as_str().to_string(),
+                    request.atomic_units(),
+                )
+            })
+            .collect::<Vec<_>>();
+        legs.sort_by(|a, b| a.0.cmp(&b.0));
+        legs
+    };
+    let medium_legs = settled(created.run_id);
+    assert!(!medium_legs.is_empty(), "the accepted Medium is settled");
+    assert_eq!(
+        medium_legs,
+        settled(low.run_id),
+        "every instrument settles the same amount as for an admitted Low"
     );
 }
 
