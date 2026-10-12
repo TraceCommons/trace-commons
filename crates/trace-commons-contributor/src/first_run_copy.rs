@@ -130,9 +130,8 @@ pub struct FrameCopy {
 pub struct JoinCopy {
     pub title_light: &'static str,
     pub title_bold: &'static str,
-    /// One paragraph (owner ruling, 2026-10-08): the "later" sentence is
-    /// back in it. The button it names reads "Skip" whenever no account
-    /// was signed into on Join.
+    /// One paragraph (owner ruling, 2026-10-08). Sign-in is required
+    /// (owner, 2026-10-12): Join has no Skip, so the body names none.
     pub body: &'static str,
     pub invite_eyebrow: &'static str,
     pub invite_placeholder: &'static str,
@@ -179,8 +178,11 @@ pub struct JoinCopy {
     pub unknown: &'static str,
     pub signed_in: &'static str,
     pub no_sharing: &'static str,
+    /// Unread by the macOS shell since sign-in became required (owner,
+    /// 2026-10-12): Join has no Skip. Kept so the wire table is unchanged.
     pub skip_note: &'static str,
-    /// Approved 2026-10-08 (button rule).
+    /// Approved 2026-10-08 (button rule). Unread since 2026-10-12, as
+    /// `skip_note`.
     pub skip: &'static str,
     /// After the passkey verification is cancelled (`ftux-page.tsx`).
     pub signed_out: &'static str,
@@ -452,7 +454,7 @@ pub fn first_run_copy() -> FirstRunCopy {
         join: JoinCopy {
             title_light: "Get started on ",
             title_bold: "your terms",
-            body: "Sign in with your NEAR AI account, or click \"Skip\". You can sign in later.",
+            body: "Sign in with your NEAR AI account to get started.",
             invite_eyebrow: "Invite link",
             invite_placeholder: "https://issuer.tracecommons.ai/onboard#…",
             look_up: "Look up",
@@ -467,7 +469,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             passkey_create: "Create passkey",
             passkey_done: "Done",
             passkey_chosen: "You'll create your passkey once watching starts.",
-            passkey_unavailable: "Couldn't start passkey setup, so no account was made. Try again, or skip and just watch.",
+            passkey_unavailable: "Couldn't start passkey setup, so no account was made. Try again, or sign in with NEAR AI.",
             near_ai_eyebrow: "Sign in with near.ai",
             near_ai_text: "Use the login you already have. Credits land in that account.",
             near_ai_sign_in: "Sign in",
@@ -592,7 +594,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             welcome_sign_in: "Sign in",
             other_options: "Other options",
             refused: "The passkey step didn't go through. Try again, or close this and choose another way to join.",
-            bound_elsewhere: "This passkey's account wasn't created with a passkey, and adding a Mac to it with a passkey isn't possible yet, so you were signed out here. Close this to choose another way to join, or to watch only.",
+            bound_elsewhere: "This passkey's account wasn't created with a passkey, and adding a Mac to it with a passkey isn't possible yet, so you were signed out here. Close this to choose another way to join.",
             near_ai_mismatch: "This Mac is signed in to a different near.ai account from the one this passkey's account uses, so this Mac wasn't added to it, and you were signed out here. Sign in to near.ai with the account you use on your other Mac and try again, or close this to choose another way to join.",
         },
         private_ai: PrivateAiCopy {
@@ -935,7 +937,9 @@ mod tests {
             crate::onboarding_copy::WATCHER_START_FAILED
         );
         assert!(!join.passkey_unavailable.contains("folder"));
-        assert!(join.passkey_unavailable.contains("skip and just watch"));
+        // Owner, 2026-10-12: sign-in required, so nothing offers watching only.
+        assert!(!join.passkey_unavailable.contains("watch"));
+        assert!(join.passkey_unavailable.contains("NEAR AI"));
     }
 
     /// A new passkey creates an account of its own, so Join says why it is

@@ -335,10 +335,10 @@ final class MonitorShellTests: XCTestCase {
 
     // MARK: Inference
 
-    func test_theInferenceInspectorSummarises() {
-        // A list nobody could read is a dash in both legend cells, never zero.
-        XCTAssertEqual(PrivateAIInspectorView.counts(nil).connected, "—")
-        XCTAssertEqual(PrivateAIInspectorView.counts(nil).notConnected, "—")
+    func test_theInferenceInspectorSummarises() throws {
+        // The connected / not connected pair is gone (owner, 2026-10-12).
+        let views = try Self.text("Views/Monitor/InferenceViews.swift")
+        XCTAssertFalse(views.contains("static func counts("), "the summary counts the tools again")
     }
 
     private static func text(_ path: String) throws -> String {

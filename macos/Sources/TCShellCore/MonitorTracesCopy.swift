@@ -151,6 +151,14 @@ public struct MonitorTreeCopy: MonitorWordTable {
     /// The heading above the tree, beside its order control.
     public let treeTitle: String
     public let readingQueue: String
+    /// The Traces search: the button's name, the field's prompt, the clear
+    /// button's name, and the line when nothing matches.
+    public let search: String
+    public let searchPrompt: String
+    public let searchClear: String
+    public let searchNone: String
+    /// The History icon button's name, beside the order control.
+    public let openHistory: String
     public let submit: String
     public let submitCount: String
     public let submitting: String
@@ -180,6 +188,11 @@ public struct MonitorTreeCopy: MonitorWordTable {
         case treeLabel = "tree_label"
         case treeTitle = "tree_title"
         case readingQueue = "reading_queue"
+        case search
+        case searchPrompt = "search_prompt"
+        case searchClear = "search_clear"
+        case searchNone = "search_none"
+        case openHistory = "open_history"
         case submit
         case submitCount = "submit_count"
         case submitting
@@ -693,6 +706,19 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let missionsSubtitle: String
     public let insightsSubtitle: String
     public let catalogueSubtitle: String
+    /// Home's Uncontributed tile, Credit tile delta, Insights promotion and
+    /// NEAR AI campaign card (owner, 2026-10-12).
+    public let uncontributed: String
+    public let uncontributedSize: String
+    public let uncontributedEstimate: String
+    public let creditDelta: String
+    public let creditDeltaNone: String
+    public let insightsToday: String
+    public let insightsTeaser: String
+    public let campaignEyebrow: String
+    public let campaignTitle: String
+    public let campaignBody: String
+    public let campaignAction: String
     public let submissions: String
     public let contributionHistory: String
     public let readingHistory: String
@@ -725,6 +751,17 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case missionsSubtitle = "missions_subtitle"
         case insightsSubtitle = "insights_subtitle"
         case catalogueSubtitle = "catalogue_subtitle"
+        case uncontributed
+        case uncontributedSize = "uncontributed_size"
+        case uncontributedEstimate = "uncontributed_estimate"
+        case creditDelta = "credit_delta"
+        case creditDeltaNone = "credit_delta_none"
+        case insightsToday = "insights_today"
+        case insightsTeaser = "insights_teaser"
+        case campaignEyebrow = "campaign_eyebrow"
+        case campaignTitle = "campaign_title"
+        case campaignBody = "campaign_body"
+        case campaignAction = "campaign_action"
         case submissions
         case contributionHistory = "contribution_history"
         case readingHistory = "reading_history"

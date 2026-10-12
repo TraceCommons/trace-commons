@@ -148,9 +148,10 @@ final class MonitorNavigationTests: XCTestCase {
     /// A daemon restart while Home is reading: the old client's answers
     /// arrive after the new one was attached, and must not be drawn as its.
     func test_theHomeStoreDropsAReadTheOldClientAnswersAfterAttach() async {
-        // Five of Home's six reads reach the daemon; missions is provisional.
+        // Six of Home's seven reads reach the daemon (the Insights glance
+        // joined them, owner 2026-10-12); missions is provisional.
         let entered = expectation(description: "every read reached the old daemon")
-        entered.expectedFulfillmentCount = 5
+        entered.expectedFulfillmentCount = 6
         let gate = GatedTransport(.normalDay, entered: entered)
         let store = HomeStore(client: LiveDaemonClient(transport: gate))
         let loading = Task { await store.load() }
@@ -518,14 +519,19 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertEqual(session, .session(entryID: "entry-7"))
         XCTAssertTrue(inspector)
 
+        // History lives on Traces (owner, 2026-10-12).
         land(.home(.history))
+        XCTAssertEqual(tab, .traces)
+        XCTAssertNotEqual(page, .history)
+
+        land(.home(.missions))
         XCTAssertEqual(tab, .home)
-        XCTAssertEqual(page, .history)
+        XCTAssertEqual(page, .missions)
 
         // Settings is the Monitor's modal: the tabs stay as they were.
         land(.settings(.compute))
         XCTAssertEqual(tab, .home)
-        XCTAssertEqual(page, .history)
+        XCTAssertEqual(page, .missions)
     }
 
     func test_onlySettingsDestinationsNameASettingsSection() {

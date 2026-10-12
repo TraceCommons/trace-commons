@@ -858,7 +858,8 @@ final class TracesFolderFirstTreeTests: XCTestCase {
                      "requestSource(", "store.setSource(", "SourceChange"] {
             XCTAssertFalse(body.contains(gone), "the tree still draws \(gone)")
         }
-        XCTAssertTrue(body.contains("ForEach(store.tree.folders)"))
+        // The folders as the search narrows them (owner, 2026-10-12).
+        XCTAssertTrue(body.contains("ForEach(store.shownTree.folders)"))
     }
 
     /// Every session row shows its own tool's tile, and names the tool to

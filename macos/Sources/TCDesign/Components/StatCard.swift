@@ -10,10 +10,18 @@ public struct GlassStatCard: View {
     /// A card that acts (it sits in a button): it lifts under the pointer,
     /// as an interactive `GlassCard` does.
     private let interactive: Bool
+    /// A caption under the value, in `detailInk` when it carries a tone
+    /// (a gain in green, a loss in red); nil draws none.
+    private let detail: String?
+    private let detailInk: GlassRGBA?
 
-    public init(_ label: String, value: String, interactive: Bool = false) {
+    public init(
+        _ label: String, value: String, detail: String? = nil, detailInk: GlassRGBA? = nil, interactive: Bool = false
+    ) {
         self.label = label
         self.value = value
+        self.detail = detail
+        self.detailInk = detailInk
         self.interactive = interactive
     }
 
@@ -35,7 +43,15 @@ public struct GlassStatCard: View {
                 .foregroundStyle(GlassColor.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            if let detail {
+                Text(detail)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(detailInk?.color ?? GlassColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, GlassTokens.Space.s1)
+            }
         }
+        .frame(maxHeight: .infinity, alignment: .topLeading)
         .padding(.vertical, 10)
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, alignment: .leading)

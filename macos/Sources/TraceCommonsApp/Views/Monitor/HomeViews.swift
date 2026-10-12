@@ -33,6 +33,9 @@ struct HomeTabView: View {
     var openTraces: () -> Void = {}
     /// The pending-credit tile: switches the window to the Private AI tab.
     var openPrivateAI: () -> Void = {}
+    /// The Contributed tile: History, which lives on the Traces tab (owner,
+    /// 2026-10-12).
+    var openHistory: () -> Void = {}
     /// The hosted Insights and Mission drafts screens' inputs, from
     /// `TraceCommonsAppMain`.
     let insightsStoreSelection: InsightsStoreSelection
@@ -66,7 +69,7 @@ struct HomeTabView: View {
                 openPrivateAI: openPrivateAI,
                 insightsHeading: Self.hostedHeading(.insights, missionDrafts: missionDrafts),
                 missionDrafts: missionDrafts,
-                openHistory: { page = .history }, openMissionDrafts: { page = .missionDrafts },
+                openHistory: openHistory, openMissionDrafts: { page = .missionDrafts },
                 openInsights: { page = .insights }, openMissions: { page = .missions })
         case .history:
             HistoryPage(store: store, statusLabel: statusLabel, selection: $selection, back: { page = .overview })
@@ -80,6 +83,19 @@ struct HomeTabView: View {
         case .missionDrafts:
             MissionDraftsView(model: missionDrafts)
         }
+    }
+}
+
+/// History on the Traces tab (owner, 2026-10-12): the same page Home
+/// hosted, with its breadcrumb back to the tree.
+struct TracesHistoryPage: View {
+    let store: HomeStore
+    let statusLabel: (String?) -> String?
+    @Binding var selection: String
+    let back: () -> Void
+
+    var body: some View {
+        HistoryPage(store: store, statusLabel: statusLabel, selection: $selection, back: back)
     }
 }
 
@@ -112,6 +128,34 @@ private struct HomeOverview: View {
 
     private var words: MonitorHomeHistoryCopy? { MonitorWords.table?.homeHistory }
 
+    /// The glance, unless its last read failed: a stale day is not drawn
+    /// as today's.
+    private var freshGlance: DaemonData.InsightsGlance? {
+        SummaryFacts.fresh(store.glance, unless: store.failures["insights_glance"])
+    }
+
+    /// Home's NEAR AI campaign card (owner, 2026-10-12): drawn as a
+    /// promotion, opening Private AI. PLACEHOLDER words from the core until
+    /// a campaign source exists.
+    @ViewBuilder
+    private var campaign: some View {
+        if let words {
+            homeCard(
+                systemImage: Self.campaignIcon, title: words.campaignTitle,
+                subtitle: words.campaignBody, promo: promo, action: openPrivateAI
+            ) {
+                GlassTag(words.campaignEyebrow, tone: .accent).fixedSize()
+            } content: {
+                HStack(spacing: GlassTokens.Space.s2) {
+                    Text(words.campaignAction)
+                    Image(systemName: "arrow.right").glassGlyph(11, weight: .semibold)
+                }
+                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                .foregroundStyle(GlassTokens.Color.purpleText.color)
+            }
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -122,6 +166,8 @@ private struct HomeOverview: View {
                 InspectorPromptsHeader(traces: traces)
                 watching
                 stats
+                // The NEAR AI campaign, under the tiles (owner, 2026-10-12).
+                campaign
                 // Ron's Missions card: the local drafts, under his Drafts
                 // tag, headed as the Private AI cards are and drawn as a
                 // promotion (owner, 2026-10-11).
@@ -142,28 +188,19 @@ private struct HomeOverview: View {
                     .pickerStyle(.inline)
                 }
                 #endif
-                homeCard(
-                    systemImage: Self.historyIcon, title: MonitorWords.history,
-                    subtitle: words?.historyDescription, action: openHistory
-                ) {
-                    // Ron's "X credit pending", under D6: only beside the
-                    // commons' statement of what it waits on.
-                    if let pending = HomeFormat.creditPendingAccessory(
-                        freshRollup?.creditPending, condition: HomeFormat.pendingCondition(freshCredit)) {
-                        Text(pending)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize()
-                    }
-                } content: {
-                    recent
-                }
                 // What #1146 has no place for, after its cards: Insights,
                 // and the commons catalogue once the daemon answers it.
+                // Insights as a promotion, with today's figures at the top
+                // level (owner, 2026-10-12: an upsell, not a bare way in).
                 if let insightsHeading {
-                    hostedCard(
+                    homeCard(
                         systemImage: Self.insightsIcon, title: insightsHeading,
-                        subtitle: words?.insightsSubtitle, action: openInsights)
+                        subtitle: words?.insightsSubtitle, promo: promo, action: openInsights
+                    ) {
+                        EmptyView()
+                    } content: {
+                        HomeInsightsVisual(glance: freshGlance, words: words)
+                    }
                 }
                 if store.missions != nil, let catalogue = words?.missionCatalogue {
                     hostedCard(
@@ -181,6 +218,7 @@ private struct HomeOverview: View {
     static let historyIcon = HomeOverviewIcons.history
     static let insightsIcon = HomeOverviewIcons.insights
     static let catalogueIcon = HomeOverviewIcons.catalogue
+    static let campaignIcon = "sparkle"
 
     /// The Missions card's promotion treatment: the stored one, which a
     /// debug build's context menu changes for comparison.
@@ -235,15 +273,26 @@ private struct HomeOverview: View {
     /// opens Private AI.
     private var stats: some View {
         let condition = HomeFormat.pendingCondition(freshCredit)
+        let uncontributed = HomeUncontributed(traces.tree.allSessions)
+        let delta = HomeFormat.creditDelta(store.creditTotals.delta(on: .now), words: words)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
-                HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
-                             action: openTraces)
-                HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted),
-                             action: openHistory)
-                HomeStatTile(label: HomeFormat.creditPendingWord,
-                             value: HomeFormat.pendingFigure(freshRollup?.creditPending, condition: condition),
-                             action: openPrivateAI)
+            // Two by two (owner, 2026-10-12): Waiting and Contributed, then
+            // Credit and Uncontributed.
+            Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
+                GridRow {
+                    HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
+                                 action: openTraces)
+                    HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted),
+                                 action: openHistory)
+                }
+                GridRow {
+                    HomeStatTile(label: HomeFormat.creditPendingWord,
+                                 value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)),
+                                 detail: delta?.text, detailInk: delta?.ink,
+                                 action: openPrivateAI)
+                    HomeStatTile(label: words?.uncontributed ?? "", value: String(uncontributed.count),
+                                 detail: uncontributed.detail(words), action: openTraces)
+                }
             }
             .fixedSize(horizontal: false, vertical: true)
             if let condition {
@@ -330,36 +379,6 @@ private struct HomeOverview: View {
         }
     }
 
-    /// Ron's History card body: the two newest contributions, each its
-    /// folder over its day and tool with its toned status tag.
-    @ViewBuilder
-    private var recent: some View {
-        let rows = Array((store.history ?? []).prefix(2))
-        if store.history == nil {
-            Text("—").glassType(GlassTokens.TypeScale.label).foregroundStyle(GlassColor.textTertiary)
-        } else if rows.isEmpty {
-            Text(MonitorWords.table?.shell.nothingContributed ?? "0")
-                .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                .foregroundStyle(GlassColor.textSecondary)
-        } else {
-            HomeCardRows(rows) { row in
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(row.projectLabel ?? "—")
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .lineLimit(1)
-                    Text(HomeFormat.meta(row, compact: true))
-                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .lineLimit(1)
-                }
-            } tag: { row in
-                if let tag = HomeFormat.statusWord(row.status, label: statusLabel) {
-                    GlassTag(tag, tone: HomeFormat.tone(row.status)).fixedSize()
-                }
-            }
-        }
-    }
 }
 
 /// The Home cards' icons, shared with the edge rail's Home peek.
@@ -1355,6 +1374,10 @@ private struct HistoryPeriodCard: View {
 private struct HomeStatTile: View {
     let label: String
     let value: String
+    /// A line under the value (the credit's change, the uncontributed
+    /// size and estimate), in `detailInk` when it carries a tone.
+    var detail: String? = nil
+    var detailInk: GlassRGBA? = nil
     /// Opens where the number lives, and the whole tile is the button;
     /// nil for a tile on the page its number lives on (History's).
     var action: (() -> Void)?
@@ -1363,12 +1386,46 @@ private struct HomeStatTile: View {
     var body: some View {
         if let action {
             Button(action: action) {
-                GlassStatCard(label, value: value, interactive: true)
+                GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, interactive: true)
             }
             .buttonStyle(GlassPressStyle())
         } else {
-            GlassStatCard(label, value: value)
+            GlassStatCard(label, value: value, detail: detail, detailInk: detailInk)
         }
+    }
+}
+
+/// What waits on this Mac, not yet contributed (owner, 2026-10-12): the
+/// sessions in the queue that have not gone, their size, and the credit the
+/// core estimates for them. Only estimates the core says to draw are added
+/// up; with none, no estimate is shown, never zero.
+struct HomeUncontributed: Equatable {
+    let count: Int
+    let bytes: Int64
+    let low: Double?
+    let high: Double?
+
+    /// States that have left, or are leaving, this Mac.
+    static let gone: Set<String> = ["uploading", "uploaded"]
+
+    init(_ sessions: [DaemonData.QueueEntry]) {
+        let waiting = sessions.filter { !Self.gone.contains($0.state) }
+        count = waiting.count
+        bytes = waiting.reduce(Int64(0)) { $0 + Int64($1.sizeBytes ?? 0) }
+        let drawn = waiting.compactMap(\.creditEstimate).filter { $0.drawn == true }
+        low = drawn.isEmpty ? nil : drawn.reduce(0) { $0 + $1.low }
+        high = drawn.isEmpty ? nil : drawn.reduce(0) { $0 + $1.high }
+    }
+
+    /// The size on this Mac, then the estimate when there is one.
+    func detail(_ words: MonitorHomeHistoryCopy?) -> String? {
+        guard let words, count > 0 else { return nil }
+        let size = FirstRunCopy.fill(words.uncontributedSize,
+                                     ["size": ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)])
+        guard let low, let high else { return size }
+        let estimate = FirstRunCopy.fill(words.uncontributedEstimate,
+                                         ["min": HomeFormat.points(low), "max": HomeFormat.points(high)])
+        return size + "\n" + estimate
     }
 }
 
@@ -1385,6 +1442,23 @@ enum HomeFormat {
     /// A count, or a dash when the core did not say. Zero is a number.
     static func count(_ value: Int?) -> String {
         value.map(String.init) ?? "—"
+    }
+
+    /// Home's Credit tile value: total credit, or a dash when unknown.
+    static func creditTotal(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return value.formatted(.number.precision(.fractionLength(0...1)))
+    }
+
+    /// The Credit tile's change since the last day this Mac saw: signed, in
+    /// the status green for a gain and red for a loss (owner, 2026-10-12);
+    /// nil while there is no earlier day to compare with.
+    static func creditDelta(_ delta: Double?, words: MonitorHomeHistoryCopy?) -> (text: String, ink: GlassRGBA?)? {
+        guard let delta, let words else { return nil }
+        if abs(delta) < 0.05 { return (words.creditDeltaNone, nil) }
+        let figure = delta.formatted(.number.precision(.fractionLength(0...1)).sign(strategy: .always()))
+        let ink = delta > 0 ? GlassTokens.Color.statusOnText : GlassTokens.Color.statusOutsideText
+        return (FirstRunCopy.fill(words.creditDelta, ["amount": figure]), ink)
     }
 
     static func points(_ value: Double?) -> String {

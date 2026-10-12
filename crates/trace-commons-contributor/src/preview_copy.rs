@@ -255,6 +255,16 @@ pub struct MonitorTreeCopy {
     pub tree_title: &'static str,
     /// While the queue is first read.
     pub reading_queue: &'static str,
+    /// The Traces search (owner, 2026-10-12): the icon button's name, the
+    /// field's prompt, its clear button's name, and the line shown when
+    /// nothing matches. DRAFT, NEEDS APPROVAL.
+    pub search: &'static str,
+    pub search_prompt: &'static str,
+    pub search_clear: &'static str,
+    pub search_none: &'static str,
+    /// The History icon button beside the order control, which opens
+    /// History on the Traces tab (owner, 2026-10-12). DRAFT, NEEDS APPROVAL.
+    pub open_history: &'static str,
     /// A folder's Submit pill with nothing eligible, with `{count}`
     /// eligible, and while it sends.
     pub submit: &'static str,
@@ -546,6 +556,11 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             tree_label: "Tools, folders and traces",
             tree_title: "Watched Directories",
             reading_queue: "Reading local queue\u{2026}",
+            search: "Search",
+            search_prompt: "Search traces",
+            search_clear: "Clear search",
+            search_none: "No traces match your search.",
+            open_history: "History",
             submit: "Submit",
             submit_count: "Submit \u{00b7} {count}",
             submitting: "Submitting\u{2026}",
@@ -1170,6 +1185,27 @@ pub struct MonitorHomeHistoryCopy {
     pub missions_subtitle: &'static str,
     pub insights_subtitle: &'static str,
     pub catalogue_subtitle: &'static str,
+    /// Home's Uncontributed tile (owner, 2026-10-12): its label, the size
+    /// of what waits on this Mac, and the estimated credit it could earn.
+    /// DRAFT, NEEDS APPROVAL.
+    pub uncontributed: &'static str,
+    pub uncontributed_size: &'static str,
+    pub uncontributed_estimate: &'static str,
+    /// Home's Credit tile: the change in total credit since the last day
+    /// this Mac saw, `{amount}` signed; and no change. DRAFT, NEEDS APPROVAL.
+    pub credit_delta: &'static str,
+    pub credit_delta_none: &'static str,
+    /// Home's Insights promotion: today's routed tokens, and its line while
+    /// no figures are read. DRAFT, NEEDS APPROVAL.
+    pub insights_today: &'static str,
+    pub insights_teaser: &'static str,
+    /// Home's NEAR AI campaign card, under the stat tiles. PLACEHOLDER copy
+    /// until a campaign source exists (owner, 2026-10-12). DRAFT, NEEDS
+    /// APPROVAL.
+    pub campaign_eyebrow: &'static str,
+    pub campaign_title: &'static str,
+    pub campaign_body: &'static str,
+    pub campaign_action: &'static str,
     /// The contribution list card's eyebrow and heading.
     pub submissions: &'static str,
     pub contribution_history: &'static str,
@@ -1434,6 +1470,17 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             missions_subtitle: "Proposed runs waiting for your review.",
             insights_subtitle: "Patterns in how you use your agents, read on this Mac.",
             catalogue_subtitle: "What the commons is asking for.",
+            uncontributed: "Uncontributed",
+            uncontributed_size: "{size} on this Mac",
+            uncontributed_estimate: "Could earn {min}\u{2013}{max}",
+            credit_delta: "{amount} since yesterday",
+            credit_delta_none: "No change since yesterday",
+            insights_today: "{total} tokens today",
+            insights_teaser: "See where your agents spend their tokens.",
+            campaign_eyebrow: "New on NEAR AI",
+            campaign_title: "A new model just launched",
+            campaign_body: "Placeholder campaign copy: try the newest model in Private AI.",
+            campaign_action: "Try it",
             submissions: "Submissions",
             contribution_history: "Contribution history",
             reading_history: "Reading local history\u{2026}",

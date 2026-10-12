@@ -26,7 +26,9 @@ final class HomeViewTests: XCTestCase {
             "store: store, traces: traces, statusLabel: statusLabel, openTraces: openTraces, ",
             // Ron's Missions is the drafts; the catalogue and Insights sit
             // after his cards.
-            "openHistory: { page = .history }, openMissionDrafts: { page = .missionDrafts }, ",
+            // History lives on Traces (owner, 2026-10-12); Home's way in is
+            // the Contributed tile.
+            "openHistory: openHistory, openMissionDrafts: { page = .missionDrafts }, ",
             "openInsights: { page = .insights }, openMissions: { page = .missions })",
         ] {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")
@@ -72,10 +74,16 @@ final class HomeViewTests: XCTestCase {
     /// opens where its number lives (owner, 2026-10-12).
     func test_homeStatCardsKeepD6() throws {
         let home = try Self.flat("Views/Monitor/HomeViews.swift")
+        // Credit is the total with its change since the last day this Mac
+        // saw (owner, 2026-10-12); the pending condition still sits under
+        // the tiles.
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: HomeFormat.creditPendingWord, "
-                + "value: HomeFormat.pendingFigure(freshRollup?.creditPending, condition: condition), "
-                + "action: openPrivateAI)"))
+                + "value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)), "
+                + "detail: delta?.text, detailInk: delta?.ink, action: openPrivateAI)"))
+        XCTAssertTrue(home.contains(
+            "HomeStatTile(label: words?.uncontributed ?? \"\", value: String(uncontributed.count), "
+                + "detail: uncontributed.detail(words), action: openTraces)"))
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted), "
                 + "action: openHistory)"))

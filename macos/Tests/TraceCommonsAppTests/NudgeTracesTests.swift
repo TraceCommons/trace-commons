@@ -221,9 +221,27 @@ final class NudgeTracesTests: XCTestCase {
         var page = HomeTabView.Page.overview
         var selection: MonitorSelection?
         var inspector = false
-        MonitorWindowView.land(.idleSessions, tab: &tab, homePage: &page, selection: &selection, showsInspector: &inspector)
+        var tracesPage = TracesPage.history
+        MonitorWindowView.land(.idleSessions, tab: &tab, homePage: &page, tracesPage: &tracesPage,
+                               selection: &selection, showsInspector: &inspector)
         XCTAssertEqual(tab, .traces)
+        XCTAssertEqual(tracesPage, .tree, "the idle sessions are on the tree, not History")
         XCTAssertNil(selection)
+    }
+
+    /// History lives on Traces (owner, 2026-10-12): a History destination
+    /// opens it there.
+    func test_theHistoryDestinationOpensHistoryOnTraces() {
+        var tab = MonitorWindowView.Tab.home
+        var page = HomeTabView.Page.overview
+        var tracesPage = TracesPage.tree
+        var selection: MonitorSelection?
+        var inspector = false
+        MonitorWindowView.land(.home(.history), tab: &tab, homePage: &page, tracesPage: &tracesPage,
+                               selection: &selection, showsInspector: &inspector)
+        XCTAssertEqual(tab, .traces)
+        XCTAssertEqual(tracesPage, .history)
+        XCTAssertEqual(page, .overview)
     }
 
     /// The filtered list opens the folders it lists.

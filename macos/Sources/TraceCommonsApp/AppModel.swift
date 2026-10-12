@@ -2431,16 +2431,16 @@ final class AppModel: ObservableObject {
     /// `enroll`'s floor-only default happened to leave in place -- see the
     /// coordinator's atomicity note.
     ///
-    /// Watching only finishes too (Review Focus 5 of #1030's port): with no
-    /// enrollment there is no tenant, so its marker is
-    /// `isWatchOnlyComplete`. It counts only while the daemon holds no
-    /// enrollment; an enrolled person confirms on Start whatever an earlier
-    /// watch-only run wrote. Before the first status arrives `loggedIn`
-    /// reads false, so that marker alone decides until then: the main
-    /// window may show its content, then switch back into the first run.
+    /// The app needs a NEAR AI login (owner, 2026-10-12: sign-in
+    /// required): while the daemon holds no enrollment the first run is
+    /// required, whatever an earlier watch-only run wrote
+    /// (`isWatchOnlyComplete` no longer opens the app), so a sign-out sends
+    /// the person back to sign in. Before the first status arrives
+    /// `loggedIn` reads false, so onboarding reads required until then;
+    /// the hosts wait on `onboardingKnown` before acting on it.
     var requiresOnboarding: Bool {
         if startup == .needsRoots { return true }
-        return status.loggedIn ? !isOnboardingComplete : !isWatchOnlyComplete
+        return !status.loggedIn || !isOnboardingComplete
     }
 
     /// Whether a watch-only first run was finished against this config

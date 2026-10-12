@@ -88,6 +88,8 @@ struct MonitorWindowView: View {
     @SceneStorage("monitor.selection") private var selection: MonitorSelection?
     /// Home's page: the overview or History, restored per window.
     @SceneStorage("monitor.homePage") private var homePage: HomeTabView.Page = .overview
+    /// The Traces tab's page: the tree, or History (owner, 2026-10-12).
+    @SceneStorage("monitor.tracesPage") private var tracesPage: TracesPage = .tree
     /// The opened History row's submission id; empty for none. Its details
     /// are the inspector's while History is shown.
     @SceneStorage("monitor.selectedHistory") private var selectedHistory = ""
@@ -186,8 +188,9 @@ struct MonitorWindowView: View {
                 showsIgnored: $showsIgnored,
                 breadcrumb: Self.breadcrumb(
                     tab: Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding), homePage: homePage,
+                    tracesPage: tracesPage,
                     hosted: { HomeTabView.hostedHeading($0, missionDrafts: missionDrafts) },
-                    back: { homePage = .overview }),
+                    back: { homePage = .overview }, backToTraces: { tracesPage = .tree }),
                 onSettings: {
                     navigation.requestSettings()
                     openWindow(id: WindowID.settings)
@@ -195,13 +198,27 @@ struct MonitorWindowView: View {
             ) {
                 switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {
                 case .traces:
-                    TracesTreeView(
-                        store: traces,
-                        selection: Binding(
-                            get: { selection },
-                            set: { Self.select($0, selection: &selection, showsInspector: &showsInspector) })
-                    ) { entryId in
-                        Self.select(.session(entryID: entryId), selection: &selection, showsInspector: &showsInspector)
+                    switch tracesPage {
+                    case .tree:
+                        TracesTreeView(
+                            store: traces,
+                            selection: Binding(
+                                get: { selection },
+                                set: { Self.select($0, selection: &selection, showsInspector: &showsInspector) }),
+                            onReview: { entryId in
+                                Self.select(.session(entryID: entryId), selection: &selection, showsInspector: &showsInspector)
+                            },
+                            openHistory: { tracesPage = .history })
+                    case .history:
+                        // Opening a row shows its details in the inspector,
+                        // and opens it (Ron's inspector auto-open).
+                        TracesHistoryPage(
+                            store: home,
+                            statusLabel: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) },
+                            selection: Binding(
+                                get: { selectedHistory },
+                                set: { Self.openHistory($0, selected: &selectedHistory, showsInspector: &showsInspector) }),
+                            back: { tracesPage = .tree })
                     }
                 case .inference:
                     InferenceTabView(store: inference, traces: traces) {
@@ -220,6 +237,10 @@ struct MonitorWindowView: View {
                             set: { Self.openHistory($0, selected: &selectedHistory, showsInspector: &showsInspector) }),
                         openTraces: { tab = .traces },
                         openPrivateAI: { tab = .inference },
+                        openHistory: {
+                            tab = .traces
+                            tracesPage = .history
+                        },
                         insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts)
                 }
             } footer: {
@@ -354,7 +375,7 @@ struct MonitorWindowView: View {
               LaunchRouting.monitorConsumes(destination, requiresOnboarding: model.requiresOnboarding,
                                             onboardingKnown: model.onboardingKnown)
         else { return }
-        Self.land(destination, tab: &tab, homePage: &homePage,
+        Self.land(destination, tab: &tab, homePage: &homePage, tracesPage: &tracesPage,
                   selection: &selection, showsInspector: &showsInspector)
         navigation.pending = nil
         if destination == .idleSessions {
@@ -412,14 +433,13 @@ struct MonitorWindowView: View {
                 // the top of the inspector, as Ron's shell mounts
                 // `WaitingPrompts`: it still offers the Traces selection's
                 // Contribute.
-                if Self.promptsInInspector(shownTab) {
+                if Self.promptsInInspector(shownTab, tracesPage: tracesPage) {
                     InspectorPromptsHeader(traces: traces)
                 }
                 // An opened History row is the inspector's selection while
                 // History is shown; otherwise the Traces selection's card,
                 // as Ron mounts `WaitingPage`.
-                if shownTab == .home,
-                   let row = HistorySelection.opened(selectedHistory, onHistory: homePage == .history, in: home.history) {
+                if let row = HistorySelection.opened(selectedHistory, onHistory: historyShown, in: home.history) {
                     HistoryInspectorPane(row: row)
                 } else {
                     TracesInspectorHost(traces: traces, home: home, selection: selection)
@@ -433,7 +453,17 @@ struct MonitorWindowView: View {
     /// offers the Traces selection's Contribute, so its Undo and the core's
     /// health must be there too. Traces draws them above its tree, and
     /// Inference, whose inspector stays closed, at the top of its page.
-    static func promptsInInspector(_ tab: Tab) -> Bool { tab == .home }
+    /// History on Traces is drawn like Home's was: no tree, so the prompts
+    /// go to the inspector (owner, 2026-10-12: History moved to Traces).
+    static func promptsInInspector(_ tab: Tab, tracesPage: TracesPage = .tree) -> Bool {
+        tab == .home || (tab == .traces && tracesPage == .history)
+    }
+
+    /// Whether History is the page on screen: on Traces now, or on Home
+    /// for a window restored to it from before the move.
+    static func showsHistory(_ tab: Tab, homePage: HomeTabView.Page, tracesPage: TracesPage) -> Bool {
+        (tab == .traces && tracesPage == .history) || (tab == .home && homePage == .history)
+    }
 
     /// Whether the inspector may open on what is shown: on Traces, and on
     /// Home's History, whose opened row is the inspector's. Never on Home's
@@ -447,6 +477,11 @@ struct MonitorWindowView: View {
         }
     }
 
+    /// History is the page on screen (`showsHistory`).
+    private var historyShown: Bool {
+        Self.showsHistory(shownTab, homePage: homePage, tracesPage: tracesPage)
+    }
+
     private var inspectorAvailable: Bool {
         Self.inspectorAvailable(shownTab, homePage: homePage)
     }
@@ -457,7 +492,8 @@ struct MonitorWindowView: View {
         InspectorDemand.keys(model: model, traces: traces, selection: selection)
             // Offers ask for the inspector only where it draws them and
             // may open: on Home's page they head the main pane.
-            .union(Self.promptsInInspector(shownTab) && inspectorAvailable ? InspectorDemand.offerKeys(model: model) : [])
+            .union(Self.promptsInInspector(shownTab, tracesPage: tracesPage) && inspectorAvailable
+                ? InspectorDemand.offerKeys(model: model) : [])
     }
 
     /// The tab on screen (`shownTab(_:requiresOnboarding:)`).
@@ -506,9 +542,14 @@ struct MonitorWindowView: View {
     /// (`hosted`); without it the crumb ends at Home, never a word of this
     /// shell's own.
     static func breadcrumb(
-        tab: Tab, homePage: HomeTabView.Page, hosted: (HomeTabView.Page) -> String? = { _ in nil },
-        back: @escaping () -> Void
+        tab: Tab, homePage: HomeTabView.Page, tracesPage: TracesPage = .tree,
+        hosted: (HomeTabView.Page) -> String? = { _ in nil },
+        back: @escaping () -> Void, backToTraces: @escaping () -> Void = {}
     ) -> [GlassCrumb]? {
+        // History on Traces: Traces to go back to (owner, 2026-10-12).
+        if tab == .traces, tracesPage == .history {
+            return [GlassCrumb(Tab.traces.title, action: backToTraces), GlassCrumb(MonitorWords.history)]
+        }
         guard tab == .home else { return nil }
         switch homePage {
         case .overview: return nil
@@ -528,7 +569,20 @@ struct MonitorWindowView: View {
         _ destination: MonitorDestination, tab: inout Tab, homePage: inout HomeTabView.Page,
         selection: inout MonitorSelection?, showsInspector: inout Bool
     ) {
+        var tracesPage = TracesPage.tree
+        land(destination, tab: &tab, homePage: &homePage, tracesPage: &tracesPage,
+             selection: &selection, showsInspector: &showsInspector)
+    }
+
+    static func land(
+        _ destination: MonitorDestination, tab: inout Tab, homePage: inout HomeTabView.Page,
+        tracesPage: inout TracesPage, selection: inout MonitorSelection?, showsInspector: inout Bool
+    ) {
         switch destination {
+        case .home(.history):
+            // History lives on Traces now (owner, 2026-10-12).
+            tab = .traces
+            tracesPage = .history
         case .home(let page):
             tab = .home
             homePage = page
@@ -538,10 +592,12 @@ struct MonitorWindowView: View {
             tab = .inference
         case .traces(let entryId):
             tab = .traces
+            tracesPage = .tree
             if let entryId { select(.session(entryID: entryId), selection: &selection, showsInspector: &showsInspector) }
         case .idleSessions:
             // The store narrows the list (`consumePending`).
             tab = .traces
+            tracesPage = .tree
         case .settings:
             break
         }
@@ -742,8 +798,13 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                     // 8pt under the tabs and under the breadcrumb (#1146
                     // `mb-2`, `pb-2`).
                     if let breadcrumb {
-                        GlassBreadcrumb(breadcrumb, backLabel: MonitorWords.table?.shell.backToHome ?? MonitorWindowView.Tab.home.title,
-                                        onBack: breadcrumb.first?.action)
+                        // Back names Home's trail by the core's "Back to
+                        // Home"; Traces' History trail by its first crumb.
+                        GlassBreadcrumb(
+                            breadcrumb,
+                            backLabel: breadcrumb.first?.title == MonitorWindowView.Tab.home.title
+                                ? (MonitorWords.table?.shell.backToHome ?? MonitorWindowView.Tab.home.title) : "",
+                            onBack: breadcrumb.first?.action)
                             .padding(.horizontal, MonitorWindowView.mainInset)
                             .padding(.top, GlassTokens.Space.s4)
                     }
