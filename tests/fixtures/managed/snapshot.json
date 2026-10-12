@@ -123,7 +123,7 @@
     "auth_unavailable": "Unavailable",
     "start_claude": "Start Claude Code",
     "start_codex": "Start Codex",
-    "sign_in_scope": "Uses your NEAR AI sign-in. Runs in Terminal, in the folder you choose.",
+    "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
     "sign_in_needed": "Sign in to NEAR AI to start a session.",
     "sign_in_near_ai": "Sign in",
     "sign_in_near_ai_accessibility": "Sign in to NEAR AI"

@@ -65,6 +65,11 @@ final class ManagedSessionsTests: XCTestCase {
     }
 
     func testTheSignInSurfacePicksCoreKeys() {
+        let line = "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose."
+        XCTAssertEqual(ManagedSurface.signInScope(line, destination: "Terminal", fallback: "your terminal"),
+                       "Uses your NEAR AI sign-in. Runs in Terminal, in the folder you choose.")
+        XCTAssertEqual(ManagedSurface.signInScope(line, destination: nil, fallback: "your terminal"),
+                       "Uses your NEAR AI sign-in. Runs in your terminal, in the folder you choose.")
         XCTAssertEqual(ManagedSurface.startKey("claude"), "start_claude")
         XCTAssertEqual(ManagedSurface.startKey("codex"), "start_codex")
         XCTAssertNil(ManagedSurface.startKey("future_tool"))

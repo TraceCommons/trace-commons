@@ -7,8 +7,10 @@
 //! 2026-10-12, awaiting owner approval:
 //! - `start_claude` "Start Claude Code" -- proposed 2026-10-12, awaiting owner approval
 //! - `start_codex` "Start Codex" -- proposed 2026-10-12, awaiting owner approval
-//! - `sign_in_scope` "Uses your NEAR AI sign-in. Runs in Terminal, in the
-//!   folder you choose." -- proposed 2026-10-12, awaiting owner approval
+//! - `sign_in_scope` "Uses your NEAR AI sign-in. Runs in {destination}, in the
+//!   folder you choose." -- proposed 2026-10-12, awaiting owner approval.
+//!   Shells fill `{destination}` from `capabilities.terminal_destination`,
+//!   as for `launch_scope`, so Windows never reads "Terminal".
 //! - `sign_in_needed` "Sign in to NEAR AI to start a session." -- proposed
 //!   2026-10-12, awaiting owner approval. Also the line a shell shows for
 //!   the refusal `managed-near-ai-sign-in-required`.
@@ -82,7 +84,7 @@ pub fn copy() -> serde_json::Value {
             "auth_unavailable": "Unavailable",
             "start_claude": "Start Claude Code",
             "start_codex": "Start Codex",
-            "sign_in_scope": "Uses your NEAR AI sign-in. Runs in Terminal, in the folder you choose.",
+            "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
             "sign_in_needed": "Sign in to NEAR AI to start a session.",
             "sign_in_near_ai": "Sign in",
             "sign_in_near_ai_accessibility": "Sign in to NEAR AI"
@@ -118,7 +120,7 @@ mod tests {
         assert_eq!(copy["start_codex"], "Start Codex");
         assert_eq!(
             copy["sign_in_scope"],
-            "Uses your NEAR AI sign-in. Runs in Terminal, in the folder you choose."
+            "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose."
         );
         assert_eq!(
             copy["sign_in_needed"],

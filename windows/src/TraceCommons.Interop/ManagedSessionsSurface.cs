@@ -79,6 +79,14 @@ public static class ManagedSignIn
     public static string[] ConnectionOptions(bool signedIn) =>
         signedIn ? ["subscription", "api_key"] : ["subscription", "api_key", "near_ai"];
 
+    /// <summary>
+    /// The sign-in line with <c>{destination}</c> filled from the terminal the
+    /// daemon reports, as the launch line does; <paramref name="fallback"/>
+    /// (the core's "your terminal") when it reports none.
+    /// </summary>
+    public static string Scope(string template, string? destination, string fallback) =>
+        template.Replace("{destination}", destination ?? fallback);
+
     /// <summary>The line for a failed managed action: the sign-in prompt
     /// when the daemon refused for want of a NEAR AI sign-in.</summary>
     public static string ErrorKey(string? code) =>

@@ -66,7 +66,12 @@ struct ManagedSessionsSection: View {
         GlassIconCard(
             systemImage: "sparkles",
             title: model.managedText("near_ai"),
-            subtitle: [model.managedText(signedIn ? "sign_in_scope" : "sign_in_needed")],
+            subtitle: [signedIn
+                ? ManagedSurface.signInScope(
+                    model.managedText("sign_in_scope"),
+                    destination: snapshot.capabilities.terminalDestination,
+                    fallback: model.managedText("terminal"))
+                : model.managedText("sign_in_needed")],
             trailing: { AnyView(signInActions(snapshot)) })
     }
 

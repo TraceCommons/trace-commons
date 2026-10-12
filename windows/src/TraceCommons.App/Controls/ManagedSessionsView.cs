@@ -147,7 +147,10 @@ public sealed class ManagedSessionsView : UserControl
         var section = new StackPanel { Spacing = 6 };
         section.Children.Add(new TextBlock { Text = T("near_ai"), FontSize = 20 });
         bool signedIn = _snapshot.NearAiSignedIn;
-        section.Children.Add(new TextBlock { Text = T(signedIn ? "sign_in_scope" : "sign_in_needed"), TextWrapping = TextWrapping.Wrap });
+        string line = signedIn
+            ? ManagedSignIn.Scope(T("sign_in_scope"), _snapshot.Capabilities.TerminalDestination, T("terminal"))
+            : T("sign_in_needed");
+        section.Children.Add(new TextBlock { Text = line, TextWrapping = TextWrapping.Wrap });
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         if (signedIn)
         {

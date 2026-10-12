@@ -98,6 +98,13 @@ public enum ManagedSurface {
         signedIn ? ["subscription", "api_key"] : ["subscription", "api_key", "near_ai"]
     }
 
+    /// The sign-in card's line with `{destination}` filled from the
+    /// terminal the daemon reports, as the launch line does; `fallback`
+    /// (the core's "your terminal") when it reports none.
+    public static func signInScope(_ template: String, destination: String?, fallback: String) -> String {
+        template.replacingOccurrences(of: "{destination}", with: destination ?? fallback)
+    }
+
     /// The tool's name key, or nil for a tool this shell does not know.
     public static func toolKey(_ tool: String) -> String? {
         ["claude", "codex"].contains(tool) ? tool : nil
