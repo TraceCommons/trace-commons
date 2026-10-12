@@ -481,6 +481,14 @@ fn ipv4_findings(input: &str, findings: &mut Vec<Finding>) {
         if parts.iter().all(|part| part.len() == 1) {
             continue;
         }
+        // Ending in `.0` is a network, not a host -- `35.235.240.0/20` in a
+        // firewall rule -- and it is also the commonest four-part version
+        // shape (`4.12.7.0`). A version arrives with no context at all when
+        // it is a whole typed leaf such as a harness version, which the
+        // residual scan reads, so this cannot rest on the cues below.
+        if text.ends_with(".0") {
+            continue;
+        }
         let Ok(address) = text.parse::<Ipv4Addr>() else {
             continue;
         };
@@ -496,14 +504,6 @@ fn ipv4_findings(input: &str, findings: &mut Vec<Finding>) {
             // `1.2.3.4-beta`, `1.2.3.4+build`.
             Some(b'-' | b'+')
                 if byte_at(input, end + 1).is_some_and(|next| next.is_ascii_alphanumeric()) =>
-            {
-                continue;
-            }
-            // A network in CIDR notation (`35.235.240.0/20`): a block in a
-            // firewall rule or a provider's published range, not a host.
-            Some(b'/')
-                if text.ends_with(".0")
-                    && byte_at(input, end + 1).is_some_and(|next| next.is_ascii_digit()) =>
             {
                 continue;
             }
@@ -864,6 +864,7 @@ mod tests {
         assert_untouched(r#"{ "current": "1.2.3", "offered": "2.0.0.1" }"#);
         // Measured on this repository's source: a published provider range.
         assert_untouched(r#"IAP_RANGE="35.235.240.0/20""#);
+        assert_untouched("4.12.7.0");
     }
 
     #[test]
@@ -1167,10 +1168,17 @@ mod tests {
     #[tokio::test]
     async fn a_redacted_envelope_leaves_no_residual_finding_for_the_new_labels() {
         let redactor = redactor();
-        let envelope = redactor
-            .redact_trace(tool_heavy_raw())
-            .await
-            .expect("redacts");
+        let mut raw = tool_heavy_raw();
+        // Four-part harness versions are whole typed leaves with no context
+        // around them; the residual scan reads them all the same.
+        raw.ironclaw.version = "4.12.7.0".to_string();
+        raw.ironclaw.engine_version = Some("1.12.0.0".to_string());
+        let envelope = redactor.redact_trace(raw).await.expect("redacts");
+        assert_eq!(envelope.ironclaw.version, "4.12.7.0");
+        assert_eq!(
+            envelope.ironclaw.engine_version.as_deref(),
+            Some("1.12.0.0")
+        );
         for label in NEW_LABELS {
             assert!(
                 envelope
