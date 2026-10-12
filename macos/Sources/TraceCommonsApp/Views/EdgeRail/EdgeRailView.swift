@@ -141,11 +141,10 @@ private struct EdgeRailTile: View {
             case .symbol(let name):
                 Image(systemName: name).glassGlyph(17, weight: .regular)
             case .traceMark:
-                // In its colours, or in the selection's ink on the selected
-                // tile, where the gradient would not read on the fill.
-                // The mark fills about 60% of its square: 30pt draws it the
+                // Solid, in the tile's own ink (owner, 2026-10-12): white
+                // in the dark theme, selected or not. The mark fills about 60% of its square: 30pt draws it the
                 // size of the tiles' 17pt glyphs.
-                GlassTraceMark(ink: selected ? GlassTokens.Color.textOnSelected.color : nil)
+                GlassTraceMark(ink: selected ? GlassTokens.Color.textOnSelected.color : GlassColor.textPrimary)
                     .frame(width: 30, height: 30)
             }
         }

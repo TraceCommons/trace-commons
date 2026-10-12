@@ -495,7 +495,9 @@ private struct OverrideConfirmation: View {
 }
 
 /// The popover's own glass, only where nothing else provides a material.
-/// Inside `MenuBarExtra` it pins the window's top edge instead.
+/// Inside `MenuBarExtra` the system window's material stays under it, with
+/// the app's pane tint over it so the popover reads as the app's panes do
+/// (owner, 2026-10-12), and the window's top edge is pinned.
 private struct PanelSurface: ViewModifier {
     let owns: Bool
 
@@ -503,7 +505,12 @@ private struct PanelSurface: ViewModifier {
         if owns {
             content.glassSurface(.popover, radius: GlassTokens.Radius.menuPanel, floating: true)
         } else {
-            content.background(MenuBarTopEdgePin().frame(width: 0, height: 0))
+            content
+                .background {
+                    // Full bleed: the window clips it to its own corners.
+                    GlassPaneTint().ignoresSafeArea()
+                }
+                .background(MenuBarTopEdgePin().frame(width: 0, height: 0))
         }
     }
 }

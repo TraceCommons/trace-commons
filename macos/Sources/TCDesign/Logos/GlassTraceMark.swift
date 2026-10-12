@@ -10,8 +10,8 @@ import SwiftUI
 /// (`traceLive*`), ending in a soft glow on the current step; the unvisited
 /// nodes, the possible next steps, take the brand purple.
 ///
-/// `ink` draws it in one colour instead, the unvisited nodes faded, for a
-/// ground the gradient would not read on (a selected rail tile).
+/// `ink` draws it solid in one colour instead, every node at full strength
+/// (the edge rail's icon, owner 2026-10-12).
 public struct GlassTraceMark: View {
     private let ink: Color?
 
@@ -73,7 +73,7 @@ public struct GlassTraceMark: View {
             var rest = Path()
             Self.unvisited.forEach { rest.addEllipse(in: Self.circle($0, Self.nodeRadius)) }
             if let ink {
-                context.fill(rest, with: .color(ink.opacity(0.45)))
+                context.fill(rest, with: .color(ink))
                 context.fill(Self.trace, with: .color(ink))
                 return
             }
