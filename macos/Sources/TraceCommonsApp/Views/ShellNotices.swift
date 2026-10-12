@@ -14,9 +14,44 @@ import TCShellCore
 /// not drawn: a card with no words is worse than none.
 struct ShellNotices: View {
     @EnvironmentObject private var model: AppModel
+    /// The stack's own height, measured, so the scroll view below is only
+    /// as tall as the notices up to `maxHeight`.
+    @State private var contentHeight: CGFloat = 0
+
+    /// The most room the notices take above the tabs. There is one arming
+    /// rewording per armed folder, so a contributor with dozens of folders
+    /// got dozens of cards in an unscrolled stack: they pushed the tabs and
+    /// the pane below out of the window (owner feedback, 2026-10-11).
+    /// Past this height the notices scroll and the tabs stay put.
+    static let maxHeight: CGFloat = 320
 
     var body: some View {
+        ScrollView(.vertical) {
+            notices
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(key: ShellNoticesHeightKey.self, value: proxy.size.height)
+                    }
+                }
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(height: min(contentHeight, Self.maxHeight))
+        .onPreferenceChange(ShellNoticesHeightKey.self) { contentHeight = $0 }
+    }
+
+    private var notices: some View {
         VStack(spacing: GlassTokens.Space.s2) {
+            // Two or more cards that each take a "Got it" get one press for
+            // all of them (owner feedback, 2026-10-11). The word is the
+            // core's; with no word, no button.
+            if model.acknowledgeableNoticeCount > 1, let dismissAll = ActionNoticeWords.coreDismissAllWord {
+                HStack {
+                    Spacer()
+                    Button(dismissAll) { model.acknowledgeAllNotices() }
+                        .buttonStyle(GlassButtonStyle(.link))
+                        .lineLimit(1)
+                }
+            }
             if model.isAttachedDaemon { AttachedDaemonNotice() }
             // Above the shell for the same reason: a void changes what the
             // contributor agreed to, and they are told wherever they are.
@@ -60,6 +95,13 @@ struct ShellNotices: View {
                 onAcknowledge: { model.acknowledgeLegacyInviteMigration() }
             )
         }
+    }
+}
+
+private struct ShellNoticesHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 

@@ -426,6 +426,9 @@ struct MenuBarGlassPanel: View {
                 }
             }
             hairline
+            // The main window, wherever it was left (owner feedback,
+            // 2026-10-11): closing it left no way back but the Dock.
+            Button(MenuWords.openApp) { open(nil) }
             Button(MenuWords.manageRules) { open(MenuPanelData.manageRules(requiresOnboarding: model.requiresOnboarding)) }
             Button(MenuWords.settings) {
                 NSApp.activate(ignoringOtherApps: true)
@@ -707,6 +710,7 @@ enum MenuWords {
     static var kept: String { MonitorWords.table?.kept ?? "" }
     static var recentActivity: String { MonitorWords.table?.recentActivity ?? "" }
     static var flagged: String { MonitorWords.table?.flagged ?? "" }
+    static var openApp: String { MonitorWords.table?.openApp ?? "" }
     static var manageRules: String { MonitorWords.table?.manageRules ?? "" }
     static var settings: String { MonitorWords.table?.settings ?? "" }
     static var quit: String { MonitorWords.table?.quit ?? "" }

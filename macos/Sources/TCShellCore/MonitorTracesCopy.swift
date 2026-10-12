@@ -38,6 +38,8 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
     /// Ron's plain Dismiss (#1146): the undo bar's, the Dismiss-session
     /// confirmation's and the review card's. Not `dismiss` ("Not this one").
     public let dismissAction: String
+    /// Acknowledges every acknowledgeable notice above the tabs at once.
+    public let dismissAll: String
     /// The arming offer's eyebrow.
     public let optionalAutomation: String
     /// Ron's #1146 inspector words (#1241), by the part that shows them.
@@ -61,6 +63,7 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
         case coreUnreachable = "core_unreachable"
         case requestFailed = "request_failed"
         case dismissAction = "dismiss_action"
+        case dismissAll = "dismiss_all"
         case optionalAutomation = "optional_automation"
         case tree, counts, inspector
         case summaryPanel = "summary_panel"
@@ -74,7 +77,7 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
         "review", "tool", "folder", "started", "length", "prompts", "size", "sends", "marks", "unsure",
         "eligibility", "attestation", "held", "sample", "residual_risk", "personal_information",
         "second_look_waiting", "contribute", "keep", "dismiss", "undo_contribute", "undo_keep", "core_unreachable", "request_failed",
-        "dismiss_action", "optional_automation", "tree", "counts", "inspector", "summary_panel", "session_review",
+        "dismiss_action", "dismiss_all", "optional_automation", "tree", "counts", "inspector", "summary_panel", "session_review",
         "look_inside", "undo",
     ]
 
@@ -102,7 +105,7 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
             copy.residualRisk, copy.personalInformation, copy.secondLookWaiting,
             copy.contribute, copy.keep, copy.dismiss,
             copy.undoContribute, copy.undoKeep, copy.coreUnreachable, copy.requestFailed,
-            copy.dismissAction, copy.optionalAutomation,
+            copy.dismissAction, copy.dismissAll, copy.optionalAutomation,
         ]
         let tables: [Bool] = [
             copy.tree.isWhole, copy.counts.isWhole, copy.inspector.isWhole, copy.summaryPanel.isWhole,
