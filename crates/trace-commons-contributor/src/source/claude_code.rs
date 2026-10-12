@@ -942,6 +942,7 @@ fn load_group(parent: &Path, budget: u64) -> anyhow::Result<SessionTranscript> {
             success: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         });
     }
     for (index, (_, bytes)) in members.iter().enumerate() {
@@ -963,6 +964,7 @@ fn load_group(parent: &Path, budget: u64) -> anyhow::Result<SessionTranscript> {
             success: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         });
         let member = parse_session(bytes);
         unparseable += member.unparseable;
@@ -1089,7 +1091,20 @@ fn parse_session(bytes: &[u8]) -> ParsedSession {
                 map_assistant_record(&record, record_timestamp, &mut events);
             }
             other => {
-                events.push(SessionEvent::opaque(other, record_timestamp));
+                let mut event = SessionEvent::opaque(other, record_timestamp);
+                // A file changed outside the model. Named for the on-device
+                // detectors only; the opaque marker is all that is sent.
+                if other == "attachment"
+                    && record.pointer("/attachment/type").and_then(Value::as_str)
+                        == Some("edited_text_file")
+                {
+                    event.edited_outside_model = record
+                        .pointer("/attachment/filename")
+                        .and_then(Value::as_str)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_string);
+                }
+                events.push(event);
             }
         }
     }
@@ -1209,6 +1224,7 @@ fn map_user_record(
                             success: block.get("is_error").and_then(|v| v.as_bool()).map(|e| !e),
                             model: None,
                             exit_code,
+                            edited_outside_model: None,
                         });
                     }
                     _ => {}
@@ -1227,6 +1243,7 @@ fn map_user_record(
                     success: None,
                     model: None,
                     exit_code: None,
+                    edited_outside_model: None,
                 });
             }
         }
@@ -1314,6 +1331,7 @@ fn map_assistant_record(
                     success: None,
                     model: model.clone(),
                     exit_code: None,
+                    edited_outside_model: None,
                 });
                 texts.clear();
             }
@@ -1348,6 +1366,7 @@ fn map_assistant_record(
                     success: None,
                     model: model.clone(),
                     exit_code: None,
+                    edited_outside_model: None,
                 });
             }
             Some("thinking") => {
@@ -1368,6 +1387,7 @@ fn map_assistant_record(
                             success: None,
                             model: model.clone(),
                             exit_code: None,
+                            edited_outside_model: None,
                         });
                     }
                 }
@@ -3254,6 +3274,29 @@ mod tests {
                 (None, Some(false)),
             ]
         );
+    }
+
+    /// Claude Code notes a file changed outside the model with an
+    /// `edited_text_file` attachment. The adapter names the file for the
+    /// on-device detectors and still emits only the opaque marker it always
+    /// did, so nothing new reaches an envelope.
+    #[test]
+    fn a_file_edited_outside_the_model_is_named_for_the_device_only() {
+        let parsed = parse_session(&jsonl(&[
+            json!({"type": "attachment", "attachment": {
+                "type": "edited_text_file", "filename": "/w/src/lib.rs", "snippet": "fn x"}}),
+            json!({"type": "attachment", "attachment": {"type": "date", "date": "today"}}),
+        ]));
+        assert_eq!(
+            parsed.events[0].edited_outside_model.as_deref(),
+            Some("/w/src/lib.rs")
+        );
+        assert_eq!(
+            parsed.events[0].structured,
+            json!({"record_type": "attachment"})
+        );
+        assert_eq!(parsed.events[0].content, None);
+        assert_eq!(parsed.events[1].edited_outside_model, None);
     }
 
     #[test]

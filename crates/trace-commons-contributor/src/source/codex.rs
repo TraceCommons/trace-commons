@@ -616,6 +616,7 @@ fn map_response_item(
                 success: None,
                 model: (role == "assistant").then(|| model.clone()).flatten(),
                 exit_code: None,
+                edited_outside_model: None,
             });
         }
         "function_call" | "custom_tool_call" => {
@@ -646,6 +647,7 @@ fn map_response_item(
                 success: None,
                 model: model.clone(),
                 exit_code: None,
+                edited_outside_model: None,
             });
         }
         "function_call_output" | "custom_tool_call_output" => {
@@ -713,6 +715,7 @@ fn map_response_item(
                     success: None,
                     model: model.clone(),
                     exit_code: None,
+                    edited_outside_model: None,
                 });
             }
         }

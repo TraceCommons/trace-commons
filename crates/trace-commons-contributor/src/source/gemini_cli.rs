@@ -302,6 +302,7 @@ fn map_gemini_message(message: &Value, model: &mut Option<String>, events: &mut 
                 success: None,
                 model: turn_model.clone(),
                 exit_code: None,
+                edited_outside_model: None,
             });
         }
     }
@@ -330,6 +331,7 @@ fn map_gemini_message(message: &Value, model: &mut Option<String>, events: &mut 
             success: None,
             model: turn_model.clone(),
             exit_code: None,
+            edited_outside_model: None,
         });
     }
 
@@ -357,6 +359,7 @@ fn map_gemini_message(message: &Value, model: &mut Option<String>, events: &mut 
             success: None,
             model: turn_model.clone(),
             exit_code: None,
+            edited_outside_model: None,
         });
         // `resultDisplay` is the rendered-for-a-terminal form of the same
         // answer; `result` is the answer. Only one of them is carried.
@@ -428,6 +431,7 @@ fn load_session(path: &Path, cwd: Option<String>) -> anyhow::Result<SessionTrans
                 success: None,
                 model: None,
                 exit_code: None,
+                edited_outside_model: None,
             }),
             "gemini" => map_gemini_message(message, &mut model, &mut events),
             other => events.push(SessionEvent::opaque(

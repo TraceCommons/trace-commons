@@ -355,6 +355,7 @@ fn map_message(message: &Value, model: &mut Option<String>, events: &mut Vec<Ses
                     success: None,
                     model: turn_model.clone(),
                     exit_code: None,
+                    edited_outside_model: None,
                 });
             }
             "thinking" => {
@@ -376,6 +377,7 @@ fn map_message(message: &Value, model: &mut Option<String>, events: &mut Vec<Ses
                     success: None,
                     model: turn_model.clone(),
                     exit_code: None,
+                    edited_outside_model: None,
                 });
             }
             "tool_use" => events.push(SessionEvent {
@@ -396,6 +398,7 @@ fn map_message(message: &Value, model: &mut Option<String>, events: &mut Vec<Ses
                 success: None,
                 model: turn_model.clone(),
                 exit_code: None,
+                edited_outside_model: None,
             }),
             // Only an explicit `is_error` is a verdict. Absent means the
             // harness said nothing, which is not success.

@@ -169,6 +169,7 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                     success: None,
                     model: None,
                     exit_code: None,
+                    edited_outside_model: None,
                 });
             }
             "system" => {
@@ -192,6 +193,7 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                     success: None,
                     model: None,
                     exit_code: None,
+                    edited_outside_model: None,
                 });
             }
             "user" | "reasoning" => {
@@ -212,6 +214,7 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                     success: None,
                     model: None,
                     exit_code: None,
+                    edited_outside_model: None,
                 });
             }
             "assistant" => {
@@ -253,6 +256,7 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                                 success: None,
                                 model: None,
                                 exit_code: None,
+                                edited_outside_model: None,
                             });
                         }
                     }
@@ -276,6 +280,7 @@ pub(crate) fn parse_trajectory(bytes: &[u8]) -> Result<ParsedTrajectory> {
                             success: None,
                             model: None,
                             exit_code: None,
+                            edited_outside_model: None,
                         });
                     }
                 }

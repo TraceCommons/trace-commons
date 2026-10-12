@@ -324,6 +324,12 @@ pub struct SessionEvent {
     /// harness's own structured field or fixed header. `None` means none was
     /// recorded, never zero.
     pub exit_code: Option<i32>,
+    /// A file the transcript says changed outside the model -- by the
+    /// person, or by a linter or formatter on their side -- named as the
+    /// transcript wrote it. Read only by the on-device failure detectors
+    /// (`insights::failure_signals`): `envelope::raw_event_for` never copies
+    /// it, so it never reaches an envelope.
+    pub edited_outside_model: Option<String>,
 }
 
 /// Common event shapes without inferred provenance, usage, or outcomes.

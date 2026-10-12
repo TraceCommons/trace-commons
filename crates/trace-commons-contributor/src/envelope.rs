@@ -1175,6 +1175,28 @@ mod tests {
         assert_eq!(raw.events[2].exit_code, None);
     }
 
+    /// A file the transcript says changed outside the model is for the
+    /// on-device detectors only: the raw event is the same with or without
+    /// it, whatever kind of event carries it.
+    #[test]
+    fn an_outside_edit_never_reaches_the_raw_event() {
+        let now = chrono::Utc::now();
+        for base in [
+            crate::source::SessionEvent::opaque("attachment", Some(now)),
+            crate::source::SessionEvent::user("hi", Some(now)),
+        ] {
+            let marked = crate::source::SessionEvent {
+                edited_outside_model: Some("/Users/testuser/code/myproj/src/lib.rs".into()),
+                ..base.clone()
+            };
+            let mut plain = raw_event_for(&base, now);
+            let mut with = raw_event_for(&marked, now);
+            plain.event_id = uuid::Uuid::nil();
+            with.event_id = uuid::Uuid::nil();
+            assert_eq!(with, plain);
+        }
+    }
+
     #[tokio::test]
     async fn native_identity_survives_envelope_and_redaction() {
         let mut transcript = fixture_transcript();
@@ -1222,6 +1244,7 @@ mod tests {
                 success: call_success,
                 model: None,
                 exit_code: None,
+                edited_outside_model: None,
             },
             crate::source::SessionEvent {
                 served_by: None,
@@ -1235,6 +1258,7 @@ mod tests {
                 success: result_success,
                 model: None,
                 exit_code: None,
+                edited_outside_model: None,
             },
         ];
         t
@@ -1594,6 +1618,7 @@ mod tests {
             success: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         });
         let cfg = test_config();
         let redactor = near_ai_redactor(base);
@@ -1670,6 +1695,7 @@ mod tests {
             success: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         });
         let cfg = test_config();
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -1704,6 +1730,7 @@ mod tests {
             success: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         });
         let cfg = test_config();
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -1744,6 +1771,7 @@ mod tests {
             success: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         });
         let cfg = test_config();
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -1776,6 +1804,7 @@ mod tests {
             success: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         });
         let big = build_raw_contribution(&t, &cfg, chrono::Utc::now());
         assert!(raw_contribution_size_ok(&big).is_err());
@@ -1808,6 +1837,7 @@ mod tests {
                 success: None,
                 model: None,
                 exit_code: None,
+                edited_outside_model: None,
             },
             crate::source::SessionEvent {
                 served_by: None,
@@ -1821,6 +1851,7 @@ mod tests {
                 success: None,
                 model: None,
                 exit_code: None,
+                edited_outside_model: None,
             },
         ];
 
@@ -1898,6 +1929,7 @@ mod tests {
             success: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -1931,6 +1963,7 @@ mod tests {
             success: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -1956,6 +1989,7 @@ mod tests {
             success: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -1978,6 +2012,7 @@ mod tests {
             success: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         };
         let raw = super::raw_event_for(&event, chrono::Utc::now());
         assert_eq!(
@@ -2104,6 +2139,7 @@ mod tests {
             success: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -2132,6 +2168,7 @@ mod tests {
             success: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -2440,6 +2477,7 @@ mod tests {
             success: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -2470,6 +2508,7 @@ mod tests {
             success: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         }];
 
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
@@ -2616,6 +2655,7 @@ mod tests {
             }),
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         };
         let listed = crate::source::SessionEvent {
             served_by: Some(crate::source::ServedBy {
@@ -2653,6 +2693,7 @@ mod tests {
             served_by: None,
             model: None,
             exit_code: None,
+            edited_outside_model: None,
         };
         let mapped = raw_events_for(&[event], chrono::Utc::now());
         assert_eq!(
