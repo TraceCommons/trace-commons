@@ -244,7 +244,7 @@ struct LegacyMigrationOfferCard: View {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                     Text(offer.body).fixedSize(horizontal: false, vertical: true)
                     Text(offer.later).fixedSize(horizontal: false, vertical: true)
-                    LegacyMigrationMoveControls(offer: offer, onDismiss: onDismiss)
+                    LegacyMigrationMoveControls(offer: offer, placement: .notice, onDismiss: onDismiss)
                 }
             }
             .accessibilityElement(children: .contain)
@@ -260,6 +260,8 @@ struct LegacyMigrationOfferCard: View {
 struct LegacyMigrationMoveControls: View {
     @EnvironmentObject private var model: AppModel
     let offer: LegacyMigrationOffer
+    /// The card or Settings: names the Move button apart from the other's.
+    let placement: LegacyMigrationOffer.Placement
     /// The card's dismiss. Nil in Settings, where the offer stays for as
     /// long as the daemon makes it.
     var onDismiss: (() -> Void)? = nil
@@ -287,10 +289,13 @@ struct LegacyMigrationMoveControls: View {
                     Text(offer.working)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityAddTraits(.updatesFrequently)
-                } else if Self.canMove(inviteNeeded: model.legacyMigrationInviteNeeded, invite: invite) {
+                } else if model.offersLegacyMigrationMove,
+                    Self.canMove(inviteNeeded: model.legacyMigrationInviteNeeded, invite: invite)
+                {
                     Button(offer.action) { Task { await model.migrateLegacyInvite(invite: invite) } }
                         .buttonStyle(GlassButtonStyle(.primary))
                         .lineLimit(1)
+                        .accessibilityLabel(offer.actionName(for: placement))
                 }
                 // Puts the card away and moves nothing.
                 if let onDismiss {

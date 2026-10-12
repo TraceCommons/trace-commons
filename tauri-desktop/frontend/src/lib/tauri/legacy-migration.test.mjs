@@ -5,6 +5,7 @@ import {
   parseLegacyMigrationOffer,
   parseLegacyMigrationResult,
   parseLegacyMigrationStatus,
+  legacyMigrationPanelState,
 } from "./legacy-migration.ts";
 
 test("a core too old to report the move offers nothing and shows nothing", () => {
@@ -78,4 +79,34 @@ test("a refusal is an answer with the core's sentence, and asking for the invite
   );
   assert.throws(() => parseLegacyMigrationResult({ refused: "x" }));
   assert.throws(() => parseLegacyMigrationResult({}));
+});
+
+test("a refusal stays readable after the core stops offering the move", () => {
+  const pooled = {
+    kind: "refused",
+    label: "legacy_migration_tenant_pooled",
+    line: "shared",
+  };
+  // The core withdraws the offer after a pooled refusal; the panel stays
+  // to say why, without a Move the core no longer offers.
+  assert.deepEqual(legacyMigrationPanelState(false, pooled), {
+    drawn: true,
+    move: false,
+  });
+  assert.deepEqual(legacyMigrationPanelState(true, pooled), {
+    drawn: true,
+    move: true,
+  });
+  assert.deepEqual(legacyMigrationPanelState(true, null), {
+    drawn: true,
+    move: true,
+  });
+  assert.deepEqual(legacyMigrationPanelState(false, null), {
+    drawn: false,
+    move: false,
+  });
+  assert.deepEqual(legacyMigrationPanelState(false, { kind: "migrated" }), {
+    drawn: false,
+    move: false,
+  });
 });

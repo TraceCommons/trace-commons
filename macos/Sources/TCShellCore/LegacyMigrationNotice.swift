@@ -77,6 +77,24 @@ public struct LegacyMigrationOffer: Decodable, Equatable, Sendable {
     public let passkeyFailed: String
     /// Stops waiting on the passkey step.
     public let passkeyCancel: String
+    /// The accessible name of `action` on the card in the notices.
+    public let actionNameNotice: String
+    /// The accessible name of `action` in Settings.
+    public let actionNameSettings: String
+
+    /// Where a Move button is drawn. The two look the same and are named
+    /// apart for a screen reader (`docs/ui-copy-guide.md` 5).
+    public enum Placement: Sendable {
+        case notice, settings
+    }
+
+    /// The core's accessible name for the Move button at `placement`.
+    public func actionName(for placement: Placement) -> String {
+        switch placement {
+        case .notice: actionNameNotice
+        case .settings: actionNameSettings
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
         case title, body, action, working, dismiss, later
@@ -85,13 +103,16 @@ public struct LegacyMigrationOffer: Decodable, Equatable, Sendable {
         case passkeyWaiting = "passkey_waiting"
         case passkeyFailed = "passkey_failed"
         case passkeyCancel = "passkey_cancel"
+        case actionNameNotice = "action_name_notice"
+        case actionNameSettings = "action_name_settings"
     }
 
     /// The payload fields this shell decodes, by wire name. Compared against
     /// the live export by `TCBridgeTests`.
     public static let consumedFields = [
         "title", "body", "action", "working", "invite_prompt", "start_failed", "dismiss", "later",
-        "passkey_waiting", "passkey_failed", "passkey_cancel",
+        "passkey_waiting", "passkey_failed", "passkey_cancel", "action_name_notice",
+        "action_name_settings",
     ]
 
     /// The daemon's refusal label that asks for the invite, so the shell
@@ -114,7 +135,7 @@ public struct LegacyMigrationOffer: Decodable, Equatable, Sendable {
         let words = [
             offer.title, offer.body, offer.action, offer.working, offer.invitePrompt,
             offer.startFailed, offer.dismiss, offer.later, offer.passkeyWaiting, offer.passkeyFailed,
-            offer.passkeyCancel,
+            offer.passkeyCancel, offer.actionNameNotice, offer.actionNameSettings,
         ]
         return words.contains(where: \.isEmpty) ? nil : offer
     }
