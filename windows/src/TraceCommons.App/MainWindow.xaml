@@ -668,6 +668,18 @@
             </Border>
 
             <!--
+                The offer to move a legacy invite identity to the
+                contributor's NEAR AI account, among the notices for the same
+                reason the notice after the move sits here. It can be put away
+                for good on this device; Settings keeps the move. Every string
+                is bound, from the Rust.
+            -->
+            <controls:LegacyMigrationOfferView Offer="{x:Bind ViewModel.LegacyOffer}"
+                                               ShowsDismiss="True"
+                                               Margin="0,0,0,8"
+                                               Visibility="{x:Bind ViewModel.LegacyOffer.ShowsCard, Mode=OneWay}" />
+
+            <!--
                 The offer to answer model calls on this computer.
 
                 Shown once, on the screen this window opens on. Both answers
