@@ -119,7 +119,8 @@ final class HoverStateTests: XCTestCase {
         let controls = try XCTUnwrap(sources["Controls.swift"])
         // A control with a fill takes the hover in its place; the toolbar
         // glyph has no fill, so its hover is a fill of its own.
-        for name in ["struct GlassRoundButton", "struct GlassPillIconButton", "struct GlassPickerPill", "struct GlassFolderButton"] {
+        for name in ["struct GlassRoundButton", "struct GlassPillIconButton", "struct GlassPickerPill", "struct GlassFolderButton",
+                     "struct GlassIconMenu"] {
             let body = try XCTUnwrap(controls.range(of: name).map { String(controls[$0.lowerBound...].prefix(2000)) })
             XCTAssertTrue(body.contains("hover: GlassTokens.Color.controlHover"), "\(name) has no hover")
         }

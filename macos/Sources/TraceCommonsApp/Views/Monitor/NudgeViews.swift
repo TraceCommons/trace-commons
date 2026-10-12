@@ -56,15 +56,26 @@ struct NudgeGlassCard: View {
     }
 }
 
-/// Above the Traces tree: the idle filter while it is on, with its way out,
-/// and the order control. Each is drawn only with the core's words for it.
-/// Suggested first is selected until another order is chosen.
+/// Above the Traces tree: its heading, the idle filter while it is on, with
+/// its way out, and the order control. Each is drawn only with the core's
+/// words for it. Suggested first is selected until another order is chosen.
 struct TracesListControls: View {
     let store: TracesStore
+
+    /// The order control's icon (owner, 2026-10-11: an icon, not the
+    /// chosen order's words).
+    static let orderIcon = "line.3.horizontal.decrease"
 
     var body: some View {
         let copy = store.nudgeCopy
         HStack(spacing: GlassTokens.Space.s4) {
+            if let title = store.words?.tree.treeTitle {
+                Text(title)
+                    .glassType(GlassTokens.TypeScale.title)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .lineLimit(1)
+                    .accessibilityAddTraits(.isHeader)
+            }
             if store.idleOnly, let label = copy?[.listFilterIdle], let clear = copy?[.listFilterClear] {
                 GlassTag(label, tone: .accent)
                 Button(clear) { Task { await store.showIdleOnly(false) } }
@@ -75,10 +86,12 @@ struct TracesListControls: View {
             if let suggested = copy?[.listOrderSuggested], let queue = copy?[.listOrderQueue],
                let label = Self.orderLabel(copy)
             {
-                // A dropdown on the default glass control, not a purple
+                // An icon on the round glass control whose menu checks the
+                // chosen order (owner, 2026-10-11), never a purple
                 // segmented pill (owner, 2026-10-10).
-                GlassPicker(
+                GlassIconMenu(
                     label,
+                    systemImage: Self.orderIcon,
                     selection: Binding(
                         get: { store.order },
                         set: { chosen in
@@ -88,8 +101,7 @@ struct TracesListControls: View {
                     options: [
                         GlassPickerOption(suggested, value: DaemonData.PendingOrder.suggested),
                         GlassPickerOption(queue, value: DaemonData.PendingOrder.queue),
-                    ],
-                    placeholder: label)
+                    ])
             }
         }
     }

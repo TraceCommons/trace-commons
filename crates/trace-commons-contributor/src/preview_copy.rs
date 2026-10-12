@@ -250,6 +250,9 @@ pub const MONITOR_PLACEHOLDERS: &[&str] = &[
 pub struct MonitorTreeCopy {
     /// The tree's accessible name.
     pub tree_label: &'static str,
+    /// The heading above the tree, beside its order control (owner,
+    /// 2026-10-11). DRAFT, NEEDS APPROVAL.
+    pub tree_title: &'static str,
     /// While the queue is first read.
     pub reading_queue: &'static str,
     /// A folder's Submit pill with nothing eligible, with `{count}`
@@ -541,6 +544,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
         optional_automation: "OPTIONAL AUTOMATION",
         tree: MonitorTreeCopy {
             tree_label: "Tools, folders and traces",
+            tree_title: "Waiting traces",
             reading_queue: "Reading local queue\u{2026}",
             submit: "Submit",
             submit_count: "Submit \u{00b7} {count}",

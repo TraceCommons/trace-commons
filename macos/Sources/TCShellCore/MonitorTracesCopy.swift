@@ -148,6 +148,8 @@ extension MonitorWordTable {
 /// The Traces tree's rows and the Dismiss-session confirmation (`traces-tree.tsx`).
 public struct MonitorTreeCopy: MonitorWordTable {
     public let treeLabel: String
+    /// The heading above the tree, beside its order control.
+    public let treeTitle: String
     public let readingQueue: String
     public let submit: String
     public let submitCount: String
@@ -176,6 +178,7 @@ public struct MonitorTreeCopy: MonitorWordTable {
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case treeLabel = "tree_label"
+        case treeTitle = "tree_title"
         case readingQueue = "reading_queue"
         case submit
         case submitCount = "submit_count"
