@@ -4,8 +4,8 @@ import TCDesign
 import TCShellCore
 
 /// Saved model accounts and managed sessions, in the glass design (#1146):
-/// two eyebrow cards, accounts then sessions. Drawn in the Monitor's
-/// Inference tab and on the legacy model-calls screen.
+/// the NEAR AI sign-in card, then accounts, then sessions. Drawn in the
+/// Monitor's Inference tab and on the legacy model-calls screen.
 ///
 /// Every word comes from the shared table (`managed/copy.rs`) through
 /// `AppModel.managedText`; no raw state, auth value or daemon code is drawn.
@@ -17,9 +17,13 @@ struct ManagedSessionsSection: View {
     @State private var removing: ManagedAccount?
     /// The account whose row menu is open.
     @State private var menuFor: String?
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            if let snapshot = model.managedSnapshot {
+                signInCard(snapshot)
+            }
             accountsCard
             if let snapshot = model.managedSnapshot {
                 sessionsCard(snapshot)
@@ -46,6 +50,80 @@ struct ManagedSessionsSection: View {
                 model.refreshManagedSessions()
                 try? await Task.sleep(for: .seconds(10))
             }
+        }
+    }
+
+    // MARK: NEAR AI sign-in
+
+    /// Sessions on the NEAR AI sign-in, first (owner, 2026-10-12): with a
+    /// sign-in, Start Claude Code and Start Codex, each a folder choice and
+    /// a launch, with no saved account; without one, the line that asks for
+    /// it and the button that begins it. Nothing here is saved: the entries
+    /// come and go with the sign-in.
+    @ViewBuilder
+    private func signInCard(_ snapshot: ManagedSnapshot) -> some View {
+        let signedIn = snapshot.nearAiSignedIn
+        GlassIconCard(
+            systemImage: "sparkles",
+            title: model.managedText("near_ai"),
+            subtitle: [signedIn
+                ? ManagedSurface.signInScope(
+                    model.managedText("sign_in_scope"),
+                    destination: snapshot.capabilities.terminalDestination,
+                    fallback: model.managedText("terminal"))
+                : model.managedText("sign_in_needed")],
+            trailing: { AnyView(signInActions(snapshot)) })
+    }
+
+    /// The Start buttons, side by side when they fit and stacked when not;
+    /// left out while there is no terminal to start in, which the accounts
+    /// card says. Signed out, the sign-in button.
+    @ViewBuilder
+    private func signInActions(_ snapshot: ManagedSnapshot) -> some View {
+        if snapshot.nearAiSignedIn {
+            if snapshot.capabilities.terminalLaunch {
+                let buttons = ForEach(ManagedSurface.signInTools.filter { snapshot.signInEntry($0) != nil }, id: \.self) { tool in
+                    Button { start(tool) } label: {
+                        Text(ManagedSurface.startKey(tool).map(model.managedText) ?? "").lineLimit(1)
+                    }
+                    .buttonStyle(GlassButtonStyle(.primary, small: true))
+                    .fixedSize()
+                }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: GlassTokens.Space.s3) { buttons }
+                    VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) { buttons }
+                }
+                .disabled(model.managedBusy)
+            }
+        } else {
+            Button { signIn() } label: {
+                Text(model.managedText("sign_in_near_ai")).lineLimit(1)
+            }
+            .buttonStyle(GlassButtonStyle(.primary, small: true))
+            .fixedSize()
+            .accessibilityLabel(model.managedText("sign_in_near_ai_accessibility"))
+            .disabled(model.credentialBusy)
+        }
+    }
+
+    /// The folder chooser the launch sheet uses, then the launch.
+    private func start(_ tool: String) {
+        guard !model.managedBusy, let path = FolderPanel.choose(),
+              let params = model.managedSnapshot?.signInLaunchParams(tool: tool, cwd: path, requestID: UUID().uuidString)
+        else { return }
+        model.managedAction("managed_launch_prepare", params: params, openTerminal: true)
+    }
+
+    /// The NEAR AI sign-in, begun as Settings > Private AI begins it.
+    private func signIn() {
+        Task {
+            guard let url = await model.startNearAiCredential(provider: "near") else { return }
+            let accepted = await withCheckedContinuation { continuation in
+                openURL(url) { continuation.resume(returning: $0) }
+            }
+            // A browser that never opened leaves a ceremony nobody can
+            // finish, so it is stopped rather than left to time out.
+            if !accepted { model.cancelNearAiCredential() }
         }
     }
 
@@ -412,7 +490,8 @@ struct ManagedAccountSheet: View {
                     ManagedField(label: model.managedText("connection")) {
                         GlassSelect(
                             model.managedText("connection"), selection: $connection,
-                            options: ["subscription", "api_key", "near_ai"].map { GlassPickerOption(model.managedText($0), value: $0) })
+                            options: ManagedSurface.connectionOptions(signedIn: model.managedSnapshot?.nearAiSignedIn == true)
+                                .map { GlassPickerOption(model.managedText($0), value: $0) })
                     }
                 }
                 GlassTextField(model.managedText("label"), text: $label, prompt: model.managedText("label_placeholder"))

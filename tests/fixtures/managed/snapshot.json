@@ -16,6 +16,24 @@
       "auth_state": "ready"
     }
   ],
+  "sign_in_accounts": [
+    {
+      "id": "6e656172-2d61-4900-8000-000000000001",
+      "tool": "claude",
+      "connection": "near_ai_signin",
+      "label": "NEAR AI",
+      "auth_state": "ready",
+      "verified_at": null
+    },
+    {
+      "id": "6e656172-2d61-4900-8000-000000000002",
+      "tool": "codex",
+      "connection": "near_ai_signin",
+      "label": "NEAR AI",
+      "auth_state": "ready",
+      "verified_at": null
+    }
+  ],
   "sessions": [
     {
       "id": "00000000-0000-0000-0000-000000000003",
@@ -37,7 +55,8 @@
   "capabilities": {
     "managed_launch": true,
     "terminal_launch": true,
-    "terminal_destination": "Terminal"
+    "terminal_destination": "Terminal",
+    "near_ai_signin": true
   },
   "copy": {
     "title": "Managed sessions",
@@ -101,6 +120,12 @@
     "auth_sign_in_required": "Needs sign-in",
     "auth_checking": "Checking",
     "auth_ready": "Ready",
-    "auth_unavailable": "Unavailable"
+    "auth_unavailable": "Unavailable",
+    "start_claude": "Start Claude Code",
+    "start_codex": "Start Codex",
+    "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
+    "sign_in_needed": "Sign in to NEAR AI to start a session.",
+    "sign_in_near_ai": "Sign in",
+    "sign_in_near_ai_accessibility": "Sign in to NEAR AI"
   }
 }

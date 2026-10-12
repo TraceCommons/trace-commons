@@ -12,8 +12,17 @@ pub struct ManagedRoute {
     home: PathBuf,
 }
 
+/// A test build's NEAR AI endpoint, so a daemon-level test can start a
+/// route against a local fixture. Absent from every other build.
+#[cfg(test)]
+pub(crate) static TEST_BASE_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 impl ManagedRoute {
     pub async fn start(store: &ConfigStore, id: Uuid, key: ApiKey) -> Result<Self, ManagedError> {
+        #[cfg(test)]
+        if let Some(base_url) = TEST_BASE_URL.get() {
+            return Self::start_at(store, id, key, base_url).await;
+        }
         Self::start_at(store, id, key, "https://cloud-api.near.ai/v1").await
     }
 

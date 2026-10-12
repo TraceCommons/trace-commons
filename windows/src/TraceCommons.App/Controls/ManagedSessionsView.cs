@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using TraceCommons.Interop;
 
@@ -20,10 +21,20 @@ public sealed class ManagedSessionsView : UserControl
     private ManagedSnapshot? _snapshot;
     private bool _busy;
     private bool _reading;
+    /// <summary>Begins the NEAR AI sign-in as the Private AI page does; null
+    /// where this view is hosted without one.</summary>
+    private readonly Func<Task>? _signIn;
 
-    public ManagedSessionsView(DaemonHost host)
+    /// <summary>A managed action the daemon refused, with its label.</summary>
+    private sealed class Refused(string code) : Exception
+    {
+        public string Code { get; } = code;
+    }
+
+    public ManagedSessionsView(DaemonHost host, Func<Task>? signIn = null)
     {
         _host = host;
+        _signIn = signIn;
         Content = _root;
         Loaded += async (_, _) => { await RefreshAsync(); _timer.Start(); };
         Unloaded += (_, _) => _timer.Stop();
@@ -35,7 +46,8 @@ public sealed class ManagedSessionsView : UserControl
     private async Task<JsonElement> CallAsync(string method, object parameters)
     {
         var response = await _host.CallAsync(method, JsonSerializer.Serialize(parameters));
-        if (response.IsError || response.Result is null) throw new InvalidOperationException();
+        if (response.IsError) throw new Refused(response.Error!.Message);
+        if (response.Result is null) throw new InvalidOperationException();
         return response.Result.Value.Clone();
     }
 
@@ -68,6 +80,7 @@ public sealed class ManagedSessionsView : UserControl
         _busy = true;
         _error.Text = string.Empty;
         try { await action(); }
+        catch (Refused refused) { _error.Text = T(ManagedSignIn.ErrorKey(refused.Code)); }
         catch { _error.Text = T("action_failed"); }
         finally { _busy = false; await RefreshAsync(); }
     }
@@ -76,6 +89,7 @@ public sealed class ManagedSessionsView : UserControl
     {
         if (_snapshot is null) return;
         _root.Children.Clear();
+        RenderSignIn();
         _root.Children.Add(new TextBlock { Text = T("title"), FontSize = 22 });
         _root.Children.Add(new TextBlock { Text = T("description"), TextWrapping = TextWrapping.Wrap });
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
@@ -121,6 +135,63 @@ public sealed class ManagedSessionsView : UserControl
         _root.Children.Add(new TextBlock { Text = T("global_scope"), TextWrapping = TextWrapping.Wrap });
     }
 
+    /// <summary>
+    /// Sessions on the NEAR AI sign-in, first (owner, 2026-10-12), as on
+    /// macOS: with a sign-in, Start Claude Code and Start Codex, each a folder
+    /// choice and a launch, with no saved account; without one, the line that
+    /// asks for it and the button that begins it. Nothing here is saved.
+    /// </summary>
+    private void RenderSignIn()
+    {
+        if (_snapshot is null) return;
+        var section = new StackPanel { Spacing = 6 };
+        section.Children.Add(new TextBlock { Text = T("near_ai"), FontSize = 20 });
+        bool signedIn = _snapshot.NearAiSignedIn;
+        string line = signedIn
+            ? ManagedSignIn.Scope(T("sign_in_scope"), _snapshot.Capabilities.TerminalDestination, T("terminal"))
+            : T("sign_in_needed");
+        section.Children.Add(new TextBlock { Text = line, TextWrapping = TextWrapping.Wrap });
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        if (signedIn)
+        {
+            // Left out while there is no terminal to start in; the line
+            // under the accounts' actions says so.
+            if (_snapshot.Capabilities.TerminalLaunch)
+            {
+                foreach (string tool in ManagedSignIn.Tools)
+                {
+                    if (_snapshot.SignInEntry(tool) is null || ManagedSignIn.StartKey(tool) is not string key) continue;
+                    actions.Children.Add(Button(key, () => StartAsync(tool)));
+                }
+            }
+        }
+        else if (_signIn is not null)
+        {
+            var signIn = Button("sign_in_near_ai", _signIn);
+            AutomationProperties.SetName(signIn, T("sign_in_near_ai_accessibility"));
+            actions.Children.Add(signIn);
+        }
+        if (actions.Children.Count > 0) section.Children.Add(actions);
+        _root.Children.Add(section);
+    }
+
+    /// <summary>The folder picker the launch dialog uses, then the launch.</summary>
+    private async Task StartAsync(string tool)
+    {
+        if (await PickFolderAsync() is not string path) return;
+        if (_snapshot?.SignInLaunchParams(tool, path, Guid.NewGuid().ToString()) is not { } request) return;
+        await OpenAsync(await CallAsync("managed_launch_prepare", request));
+    }
+
+    private async Task<string?> PickFolderAsync()
+    {
+        var picker = new Windows.Storage.Pickers.FolderPicker();
+        picker.FileTypeFilter.Add("*");
+        var handle = Microsoft.UI.Win32Interop.GetWindowFromWindowId(XamlRoot.ContentIslandEnvironment.AppWindowId);
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, handle);
+        return (await picker.PickSingleFolderAsync())?.Path;
+    }
+
     private ContentDialog Dialog(string title, UIElement content, string primary) => new() {
         XamlRoot = XamlRoot, Title = T(title), Content = content,
         PrimaryButtonText = T(primary), CloseButtonText = T("cancel")
@@ -140,7 +211,7 @@ public sealed class ManagedSessionsView : UserControl
 
     private async Task AddAsync()
     {
-        string[] tools = ["claude", "codex"], connections = ["subscription", "api_key", "near_ai"];
+        string[] tools = ["claude", "codex"], connections = ManagedSignIn.ConnectionOptions(_snapshot?.NearAiSignedIn == true);
         var tool = new ComboBox { Header = T("tool"), ItemsSource = tools.Select(T).ToArray(), SelectedIndex = 0 };
         var connection = new ComboBox { Header = T("connection"), ItemsSource = connections.Select(T).ToArray(), SelectedIndex = 0 };
         var label = new TextBox { Header = T("label") };
@@ -169,12 +240,7 @@ public sealed class ManagedSessionsView : UserControl
         form.Children.Add(account); form.Children.Add(project);
         var choose = new Button { Content = T("choose_folder") };
         choose.Click += async (_, _) => {
-            var picker = new Windows.Storage.Pickers.FolderPicker();
-            picker.FileTypeFilter.Add("*");
-            var handle = Microsoft.UI.Win32Interop.GetWindowFromWindowId(XamlRoot.ContentIslandEnvironment.AppWindowId);
-            WinRT.Interop.InitializeWithWindow.Initialize(picker, handle);
-            var selectedFolder = await picker.PickSingleFolderAsync();
-            if (selectedFolder is not null) project.Text = selectedFolder.Path;
+            if (await PickFolderAsync() is string path) project.Text = path;
         };
         form.Children.Add(choose);
         form.Children.Add(new TextBlock { Text = T("launch_scope").Replace("{destination}", _snapshot.Capabilities.TerminalDestination ?? T("terminal")), TextWrapping = TextWrapping.Wrap });

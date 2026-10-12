@@ -160,6 +160,10 @@ impl AccountStore {
         if label.is_empty() || label.len() > 128 || label.chars().any(char::is_control) {
             return Err(ManagedError::InvalidRequest);
         }
+        // Sign-in entries derive from the sign-in and are never saved.
+        if connection == ConnectionKind::NearAiSignIn {
+            return Err(ManagedError::InvalidRequest);
+        }
         let account = AccountView {
             id: AccountId(Uuid::new_v4()),
             tool,

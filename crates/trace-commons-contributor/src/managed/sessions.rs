@@ -10,6 +10,22 @@ use uuid::Uuid;
 
 const FILE: &str = "managed-sessions.json";
 
+/// How long a redeemed session may go unheard before it is no longer taken
+/// to be running. The launcher reports every 5 seconds, so this is nine
+/// missed reports; it is also inside the 120-second launch ticket.
+pub const LEASE: Duration = Duration::seconds(45);
+
+/// The state a session reaches when its lease runs out. A session on the
+/// NEAR AI sign-in has lost its daemon-hosted proxy by then, so it has
+/// ended whatever its tool is doing; any other session is unknown.
+fn lapsed(connection: ConnectionKind) -> SessionState {
+    if connection == ConnectionKind::NearAiSignIn {
+        SessionState::Failed
+    } else {
+        SessionState::Unknown
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchPurpose {
@@ -86,6 +102,11 @@ impl std::fmt::Debug for PreparedLaunch {
 pub struct LaunchContext {
     pub session: SessionView,
     pub proof: String,
+    /// The loopback port of a proxy the daemon hosts for this session. Set
+    /// only for a session on the NEAR AI sign-in, whose credential never
+    /// leaves the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_port: Option<u16>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -154,10 +175,11 @@ impl SessionRegistry {
         // A recovered PID alone is not evidence that the same native tool lives.
         for entry in &mut data.entries {
             if entry.view.state.holds_profile() {
+                // A restarted daemon hosts no proxy for a sign-in session.
                 entry.view.state = if entry.proof_hash.is_none() {
                     SessionState::Failed
                 } else {
-                    SessionState::Unknown
+                    lapsed(entry.view.connection)
                 };
             }
             entry.ticket_hash = None;
@@ -201,7 +223,19 @@ impl SessionRegistry {
 
     pub fn views(&mut self) -> Result<Vec<SessionView>, ManagedError> {
         self.reconcile_receipts()?;
-        let now = Utc::now();
+        self.sweep(Utc::now())?;
+        Ok(self
+            .data
+            .entries
+            .iter()
+            .filter(|e| !e.dismissed)
+            .map(|e| e.view.clone())
+            .collect())
+    }
+
+    /// Fail unredeemed launches whose ticket expired, and lapse redeemed
+    /// sessions unheard for longer than [`LEASE`], as of `now`.
+    pub fn sweep(&mut self, now: DateTime<Utc>) -> Result<(), ManagedError> {
         let mut next = self.data.clone();
         let mut changed = false;
         for entry in &mut next.entries {
@@ -216,22 +250,37 @@ impl SessionRegistry {
                 entry.view.state,
                 SessionState::Starting | SessionState::Running
             ) && entry.proof_hash.is_some()
-                && now.signed_duration_since(entry.last_seen) > Duration::seconds(45)
+                && now.signed_duration_since(entry.last_seen) > LEASE
             {
-                entry.view.state = SessionState::Unknown;
+                entry.view.state = lapsed(entry.view.connection);
                 changed = true;
             }
         }
         if changed {
             self.commit(next)?;
         }
-        Ok(self
-            .data
-            .entries
-            .iter()
-            .filter(|e| !e.dismissed)
-            .map(|e| e.view.clone())
-            .collect())
+        Ok(())
+    }
+
+    /// The NEAR AI sign-in is gone: every session on it has lost its proxy,
+    /// so none is running any more. Failed, the state for a session that
+    /// ended without an exit code from its tool.
+    pub fn end_sign_in_sessions(&mut self) -> Result<(), ManagedError> {
+        let mut next = self.data.clone();
+        let mut changed = false;
+        for entry in &mut next.entries {
+            if entry.view.connection == ConnectionKind::NearAiSignIn
+                && entry.view.state.holds_profile()
+            {
+                entry.view.state = SessionState::Failed;
+                entry.ticket_hash = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.commit(next)?;
+        }
+        Ok(())
     }
 
     pub fn holds_profile(&self, id: AccountId) -> bool {
@@ -358,7 +407,11 @@ impl SessionRegistry {
         entry.last_seen = Utc::now();
         let session = entry.view.clone();
         self.commit(next)?;
-        Ok(LaunchContext { session, proof })
+        Ok(LaunchContext {
+            session,
+            proof,
+            route_port: None,
+        })
     }
 
     pub fn report(&mut self, report: LifecycleReport) -> Result<(), ManagedError> {
@@ -372,7 +425,16 @@ impl SessionRegistry {
             return Err(ManagedError::Conflict);
         }
         if !entry.view.state.holds_profile() {
-            return if report.state == entry.view.state && report.exit_code == entry.view.exit_code {
+            // The daemon ended a sign-in session (sign-out, lapsed lease)
+            // before its launcher said how it ended. The launcher's final
+            // word is accepted and changes nothing, so its persisted exit
+            // receipt never blocks the registry from opening.
+            let ended_by_daemon = entry.view.connection == ConnectionKind::NearAiSignIn
+                && entry.view.state == SessionState::Failed
+                && matches!(report.state, SessionState::Exited | SessionState::Failed);
+            return if ended_by_daemon
+                || (report.state == entry.view.state && report.exit_code == entry.view.exit_code)
+            {
                 Ok(())
             } else {
                 Err(ManagedError::Conflict)
@@ -405,6 +467,26 @@ impl SessionRegistry {
         entry.view.state = report.state;
         entry.view.exit_code = report.exit_code;
         entry.last_seen = Utc::now();
+        self.commit(next)
+    }
+
+    /// The connection and state of a session, without consuming anything.
+    pub fn describe(&self, id: Uuid) -> Option<(ConnectionKind, SessionState)> {
+        self.data
+            .entries
+            .iter()
+            .find(|e| e.view.id == id)
+            .map(|e| (e.view.connection, e.view.state))
+    }
+
+    /// Fail a session that was never redeemed, for the ticket holder only.
+    pub fn fail_unredeemed(&mut self, session_id: Uuid, ticket: &str) -> Result<(), ManagedError> {
+        self.validate_ticket(session_id, ticket)?;
+        let mut next = self.data.clone();
+        if let Some(entry) = next.entries.iter_mut().find(|e| e.view.id == session_id) {
+            entry.view.state = SessionState::Failed;
+            entry.ticket_hash = None;
+        }
         self.commit(next)
     }
 
