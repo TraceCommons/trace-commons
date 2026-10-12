@@ -23,5 +23,53 @@ public sealed class ManagedSessionsTests
         Assert.Equal("Work", snapshot.Sessions[0].AccountLabel);
         Assert.False(snapshot.Capabilities.TerminalLaunch);
         Assert.Equal(2UL, snapshot.Generations["codex"]);
+        Assert.False(snapshot.NearAiSignedIn);
+        Assert.Null(snapshot.SignInLaunchParams("claude", "C:\\p", "r"));
+    }
+
+    private const string SignedIn = """
+    {"revision":1,"accounts":[],"sign_in_accounts":[{"id":"c","tool":"claude","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready"},{"id":"x","tool":"codex","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready"}],"sessions":[],"generations":{"claude":4},"capabilities":{"managed_launch":true,"near_ai_signin":true,"terminal_launch":true},"copy":{}}
+    """;
+
+    [Fact]
+    public void SignInEntriesLaunchWithNoSavedAccount()
+    {
+        var snapshot = ManagedSnapshot.Parse(SignedIn);
+        Assert.NotNull(snapshot);
+        Assert.True(snapshot.NearAiSignedIn);
+        Assert.Equal("x", snapshot.SignInEntry("codex")?.Id);
+        var request = snapshot.SignInLaunchParams("claude", "C:\\p", "r");
+        Assert.NotNull(request);
+        Assert.Equal("near_ai_signin", request["connection"]);
+        Assert.Equal("c", request["account_id"]);
+        Assert.Equal("claude", request["tool"]);
+        Assert.Equal("C:\\p", request["cwd"]);
+        Assert.Equal("r", request["request_id"]);
+        Assert.Equal("coding", request["purpose"]);
+        Assert.Equal(4UL, request["expected_generation"]);
+        Assert.Equal(false, request["save_default"]);
+        Assert.Null(snapshot.SignInLaunchParams("future_tool", "C:\\p", "r"));
+    }
+
+    [Fact]
+    public void SignInEntriesAreIgnoredWithoutTheCapability()
+    {
+        var snapshot = ManagedSnapshot.Parse(SignedIn.Replace("\"near_ai_signin\":true", "\"near_ai_signin\":false"));
+        Assert.NotNull(snapshot);
+        Assert.False(snapshot.NearAiSignedIn);
+        Assert.Null(snapshot.SignInEntry("claude"));
+    }
+
+    [Fact]
+    public void SignInSurfacePicksCoreKeys()
+    {
+        Assert.Equal("start_claude", ManagedSignIn.StartKey("claude"));
+        Assert.Equal("start_codex", ManagedSignIn.StartKey("codex"));
+        Assert.Null(ManagedSignIn.StartKey("future_tool"));
+        Assert.Equal(["subscription", "api_key"], ManagedSignIn.ConnectionOptions(true));
+        Assert.Equal(["subscription", "api_key", "near_ai"], ManagedSignIn.ConnectionOptions(false));
+        Assert.Equal("sign_in_needed", ManagedSignIn.ErrorKey("managed-near-ai-sign-in-required"));
+        Assert.Equal("action_failed", ManagedSignIn.ErrorKey("managed-conflict"));
+        Assert.Equal("action_failed", ManagedSignIn.ErrorKey(null));
     }
 }
