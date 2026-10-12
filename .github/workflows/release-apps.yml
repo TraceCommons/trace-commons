@@ -524,8 +524,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $paths = @(Get-Content -Path $env:APP_SIGN_LIST | Where-Object { $_.Trim() -ne "" })
-          if ($paths.Count -ne 4) {
-            throw "expected exactly 4 app binaries staged for signing, found $($paths.Count): $($paths -join ', ')"
+          # Five: the staging step's allowlist, which includes near-ai.exe.
+          if ($paths.Count -ne 5) {
+            throw "expected exactly 5 app binaries staged for signing, found $($paths.Count): $($paths -join ', ')"
           }
           foreach ($p in $paths) {
             if (-not (Test-Path $p -PathType Leaf)) { throw "staged path is not a file: $p" }
@@ -553,7 +554,7 @@ jobs:
       # unsigned build output. The Authenticode signature travels inside the .exe,
       # so provenance on the exe covers what a contributor executes; the zip is
       # only transport. The same reasoning extends to the app: provenance names
-      # the four binaries we built and signed, not the Microsoft runtime files
+      # the five binaries we built and signed, not the Microsoft runtime files
       # the publish tree carries alongside them.
       - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         with:
@@ -563,6 +564,7 @@ jobs:
             app-publish/TraceCommons.dll
             app-publish/TraceCommons.Interop.dll
             app-publish/trace_commons_contributor_ffi.dll
+            app-publish/near-ai.exe
 
       - name: Package
         shell: pwsh
