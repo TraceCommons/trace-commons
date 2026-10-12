@@ -68,10 +68,11 @@ public struct GlassPromoCard<Content: View>: View {
         self.content = content()
     }
 
-    /// How strongly the brand colours are laid over the card. Lower in
-    /// light mode, where the tint sits under dark text.
+    /// How strongly the brand colours are laid over the card. A little
+    /// lower in light mode, where the tint sits under dark text, but not so
+    /// low it reads pastel on the grey pane (owner, 2026-10-12).
     static func strength(_ scheme: ColorScheme) -> Double {
-        scheme == .dark ? 1 : 0.55
+        scheme == .dark ? 1 : 0.85
     }
 
     public var body: some View {
