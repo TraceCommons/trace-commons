@@ -30,7 +30,7 @@ const EVALUATION_INPUTS_SQL: &str =
 
 const RECORD_EVALUATION_SQL: &str =
     "SELECT trace_record_account_trust_evaluation_v2($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-    $11,$12,$13,$14,$15,$16,$17,$18,$19)";
+    $11,$12,$13,$14,$15,$16,$17,$18,$19,$20)";
 
 fn evaluation_fact(row: &tokio_postgres::Row) -> EvaluationFact {
     EvaluationFact {
@@ -75,6 +75,7 @@ async fn record_evaluation_in(
                 &count(evaluation.attested_units),
                 &count(evaluation.active_weeks),
                 &count(evaluation.age_weeks),
+                &evaluation.age_seconds,
                 &count(evaluation.netted_withdrawn),
                 &count(evaluation.netted_revoked),
                 &count(evaluation.netted_quarantined),
@@ -271,7 +272,7 @@ impl PgBackend {
             AND has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_input_generation(text,uuid)'),'EXECUTE')
             AND NOT has_table_privilege(current_user,'public.trace_account_trust_evaluations','INSERT,UPDATE,DELETE')
             AND NOT has_table_privilege(current_user,'public.trace_account_trust_facts','INSERT,UPDATE,DELETE')
-            FROM (SELECT to_regprocedure('public.trace_record_account_trust_evaluation_v2(text,uuid,uuid,text,text,timestamp with time zone,integer,bigint,integer,integer,integer,integer,integer,integer,integer,integer,boolean,text,bigint)') AS oid) w
+            FROM (SELECT to_regprocedure('public.trace_record_account_trust_evaluation_v2(text,uuid,uuid,text,text,timestamp with time zone,integer,bigint,integer,integer,integer,integer,integer,bigint,integer,integer,integer,boolean,text,bigint)') AS oid) w
             LEFT JOIN pg_proc f ON f.oid=w.oid"#,
                 &[],
             )
@@ -297,7 +298,8 @@ impl PgBackend {
                 "SELECT growth_policy_version, as_of, tier, effective_allowance, units,
                         units_capped, active_weeks, age_weeks, netted_withdrawn, netted_revoked,
                         netted_quarantined, penalty_active, facts_digest,
-                        COALESCE(attested_units, 0)
+                        COALESCE(attested_units, 0),
+                        COALESCE(age_seconds, age_weeks::bigint * 604800)
                    FROM trace_account_trust_evaluations
                   WHERE tenant_id=$1 AND account_id=$2 AND growth_policy_version=$3 AND mode=$4
                     AND units IS NOT NULL AND units_capped IS NOT NULL
@@ -318,6 +320,7 @@ impl PgBackend {
             units: count(row.get(4)),
             units_capped: count(row.get(5)),
             attested_units: count(row.get(13)),
+            age_seconds: row.get(14),
             active_weeks: count(row.get(6)),
             age_weeks: count(row.get(7)),
             netted_withdrawn: count(row.get(8)),

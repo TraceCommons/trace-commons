@@ -398,6 +398,16 @@ latest one:
    The client's `StatusBody` does not deny unknown fields
    (`crates/trace-commons-contributor/src/daemon/account_admission.rs:131`),
    so current clients ignore them.
+   > **Implemented 2026-10-11** ("yes add the status fields to the growth
+   > PR"). Under `tiered-v1`, a `bounded` account's status also carries
+   > `allowance_multiplier`, `effective_allowance`, `allowance_spent`,
+   > `allowance_remaining`, `period_resets_at`, `evaluated_at` and
+   > `next_tier` (requirements against the evaluation's counts). The fields
+   > are always present there, at tier 0 with the base allowance when no
+   > fresh applied evaluation applies, and absent under `none`, `external`
+   > or invited authority. Evaluations now store `age_seconds` (V126) so
+   > the age requirement can be shown in its own unit. Contract:
+   > `docs/operator/account-trust.md`, "Contribution-status growth fields".
 
 The evaluation is materialised rather than computed inline for three reasons:
 the reservation path stays a handful of indexed reads; the runtime role

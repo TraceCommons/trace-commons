@@ -434,3 +434,179 @@ pub async fn account_trust_reproduction_drill(
     summary.evidence_hash = format!("sha256:{}", hex::encode(hash.finalize()));
     Ok(summary)
 }
+
+// ---------------------------------------------------------------------------
+// The account's own growth view, for contribution-status (spec rule 7).
+// ---------------------------------------------------------------------------
+
+/// What contribution-status adds beside `authority:"bounded"` under a
+/// `tiered-v1` policy. Counts and times of the caller's own account only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GrowthStatusView {
+    pub allowance_tier: i32,
+    pub allowance_tier_changed_at: Option<DateTime<Utc>>,
+    pub allowance_multiplier: i64,
+    pub effective_allowance: i64,
+    pub allowance_spent: i64,
+    pub allowance_remaining: i64,
+    pub period_resets_at: Option<DateTime<Utc>>,
+    pub evaluated_at: Option<DateTime<Utc>>,
+    /// `None` at the top tier.
+    pub next_tier: Option<NextTierView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NextTierView {
+    pub tier: u32,
+    pub multiplier: i64,
+    pub effective_allowance: i64,
+    pub required: TierProgress,
+    /// The applied evaluation's counts, as of `evaluated_at`; `None` when no
+    /// evaluation applied.
+    pub current: Option<TierProgress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TierProgress {
+    pub units: i64,
+    pub active_weeks: i64,
+    pub age_seconds: Option<i64>,
+    pub attested_units: i64,
+}
+
+/// Combines the status read with the policy's tier table. A tier the table
+/// does not have reads as multiplier 1, as admission reads it at the base.
+pub fn growth_status_view(
+    policy: &GrowthPolicy,
+    status: &crate::admission_ledger::AccountGrowthStatus,
+) -> GrowthStatusView {
+    let tiers = policy.tiers();
+    let tier = u32::try_from(status.tier).unwrap_or(0);
+    let multiplier = tiers.get(tier as usize).map_or(1, |row| row.multiplier);
+    let evaluation = status.evaluation.as_ref();
+    let next_tier = tiers.get(tier as usize + 1).map(|next| NextTierView {
+        tier: tier + 1,
+        multiplier: next.multiplier,
+        effective_allowance: policy.effective_allowance(tier + 1),
+        required: TierProgress {
+            units: i64::from(next.units),
+            active_weeks: i64::from(next.active_weeks),
+            age_seconds: Some(next.age_seconds),
+            attested_units: i64::from(next.attested_units),
+        },
+        current: evaluation.map(|e| TierProgress {
+            units: i64::from(e.units),
+            active_weeks: i64::from(e.active_weeks),
+            age_seconds: e.age_seconds,
+            attested_units: i64::from(e.attested_units),
+        }),
+    });
+    GrowthStatusView {
+        allowance_tier: status.tier,
+        allowance_tier_changed_at: evaluation.and_then(|e| e.tier_changed_at),
+        allowance_multiplier: multiplier,
+        effective_allowance: status.effective_allowance,
+        allowance_spent: status.period_spend,
+        allowance_remaining: status
+            .effective_allowance
+            .saturating_sub(status.period_spend)
+            .max(0),
+        period_resets_at: status.period_resets_at,
+        evaluated_at: evaluation.map(|e| e.as_of),
+        next_tier,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::admission_ledger::{AccountGrowthStatus, AppliedEvaluationProgress};
+    use chrono::TimeZone;
+
+    fn policy() -> GrowthPolicy {
+        crate::account_trust_rule::parse_growth_policy(
+            &serde_json::json!({
+                "version": "view-v1",
+                "processing_cost_bound": 10,
+                "bounded_allowance": 10,
+                "period": {"mode": "fixed", "seconds": 3600},
+                "growth_rule": "tiered-v1",
+                "growth": {
+                    "window_seconds": 86400 * 84,
+                    "weekly_cap": 10,
+                    "q_min_micros": null,
+                    "penalty_cooldown_seconds": 0,
+                    "evaluation_max_age_seconds": 3600,
+                    "allowance_ceiling": 50,
+                    "evaluator_versions": ["gate-v1"],
+                    "dedup_signal_versions": ["events.v2+simhash.v2"],
+                    "tiers": [
+                        {"units": 0, "active_weeks": 0, "age_seconds": 0, "multiplier": 1},
+                        {"units": 2, "active_weeks": 1, "age_seconds": 0, "multiplier": 3},
+                        {"units": 5, "active_weeks": 2, "age_seconds": 1209600,
+                         "multiplier": 6, "attested_units": 1}
+                    ]
+                }
+            })
+            .to_string(),
+            &["view-v1"],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_view_prices_the_tier_and_shows_the_next_one() {
+        let at = Utc.timestamp_opt(1_790_000_000, 0).unwrap();
+        let status = AccountGrowthStatus {
+            tier: 1,
+            effective_allowance: 30,
+            period_spend: 40,
+            period_resets_at: Some(at),
+            evaluation: Some(AppliedEvaluationProgress {
+                as_of: at,
+                units: 3,
+                active_weeks: 1,
+                age_seconds: Some(86_400),
+                attested_units: 0,
+                tier_changed_at: Some(at),
+            }),
+        };
+        let view = growth_status_view(&policy(), &status);
+        assert_eq!(view.allowance_multiplier, 3);
+        assert_eq!(
+            view.allowance_remaining, 0,
+            "spend above the limit is 0 left"
+        );
+        assert_eq!(view.evaluated_at, Some(at));
+        let next = view.next_tier.expect("tier 2 exists");
+        assert_eq!(
+            (next.tier, next.multiplier, next.effective_allowance),
+            (2, 6, 50)
+        );
+        assert_eq!(next.required.attested_units, 1);
+        assert_eq!(next.current.unwrap().age_seconds, Some(86_400));
+        // At the top tier there is no next tier; with no evaluation, no counts.
+        let top = growth_status_view(
+            &policy(),
+            &AccountGrowthStatus {
+                tier: 2,
+                evaluation: None,
+                ..status.clone()
+            },
+        );
+        assert!(top.next_tier.is_none());
+        let none = growth_status_view(
+            &policy(),
+            &AccountGrowthStatus {
+                tier: 0,
+                effective_allowance: 10,
+                period_spend: 0,
+                evaluation: None,
+                ..status
+            },
+        );
+        assert_eq!(none.allowance_multiplier, 1);
+        assert!(none.next_tier.unwrap().current.is_none());
+        assert_eq!(none.allowance_tier_changed_at, None);
+    }
+}

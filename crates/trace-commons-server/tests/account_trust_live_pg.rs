@@ -651,6 +651,7 @@ async fn an_applied_evaluation_grows_the_allowance_and_falls_back_to_the_base() 
                 lease_id: Uuid::new_v4(),
                 policy,
                 lease_seconds: 60,
+                attested: false,
             };
             let decision = ingest
                 .reserve_account_admission(&request)
@@ -839,7 +840,7 @@ async fn an_applied_evaluation_grows_the_allowance_and_falls_back_to_the_base() 
         .await
         .unwrap();
     let write = "SELECT trace_record_account_trust_evaluation_v2($1,$2,$3,$4,'applied',
-        transaction_timestamp(),1,50,2,0,2,1,0,0,0,0,FALSE,$5,$6)";
+        transaction_timestamp(),1,50,2,0,2,1,0,0,0,0,0,FALSE,$5,$6)";
     let digest = format!("sha256:{}", "7".repeat(64));
     client
         .batch_execute(&format!(

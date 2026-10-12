@@ -44,7 +44,10 @@ use or version. Revoking the grant still removes invited admission authority.
 
 `GET /v1/account/contribution-status` is an authenticated, `no-store` advisory
 read. Its safe fields are `authority`, `policy_version`, `ready`, optional
-`refusal_label`, and optional `retry_after_seconds`. A request still reserves
+`refusal_label`, and optional `retry_after_seconds`. Under a `tiered-v1`
+policy a `bounded` account also gets its own growth view (see
+[the growth fields](#contribution-status-growth-fields)); under `none`,
+`external` or `invited` authority the body is exactly these five fields. A request still reserves
 atomically at submit time; a status read does not guarantee a slot. Account
 allowance exhaustion returns HTTP 429 with `account_limit_reached`; a live
 device or account revocation returns 403, and in-progress and body-conflict
@@ -408,6 +411,48 @@ H='Authorization: Bearer <account_trust_worker token>'
 curl -fsS -X POST -H "$H" 'http://127.0.0.1:3907/v1/admin/record-account-trust-facts?limit=10000'
 curl -fsS -X POST -H "$H" 'http://127.0.0.1:3907/v1/admin/evaluate-account-trust?limit=10000&mode=applied'
 ```
+
+### Contribution-status growth fields
+
+Under a `tiered-v1` admission policy, `GET /v1/account/contribution-status`
+adds these fields beside `authority:"bounded"` (spec rule 7). They describe
+only the caller's own account, read through its tenant-scoped session; they
+carry no identifier and nothing about another account. `ready`,
+`refusal_label` and `retry_after_seconds` mean exactly what they meant before.
+The fields are always present for a `bounded` account under `tiered-v1`, and
+never otherwise: with no fresh applied evaluation, the account is shown at
+tier 0 with the base allowance, `evaluated_at` null and no current counts.
+An `invited` account has no cumulative cap and gets none of them.
+
+| Field | Meaning |
+|---|---|
+| `allowance_tier` | The tier admission applies now: a fresh, generation-current applied evaluation's tier, else 0. |
+| `allowance_tier_changed_at` | When the account last reached a different tier under this policy (RFC3339), or null. |
+| `allowance_multiplier` | That tier's multiplier. |
+| `effective_allowance` | `min(bounded_allowance * multiplier, allowance_ceiling)`, in processing-cost units. |
+| `allowance_spent` | Spend in the current period, across policy versions sharing it. |
+| `allowance_remaining` | `effective_allowance - allowance_spent`, never below 0. |
+| `period_resets_at` | The fixed period's next boundary (RFC3339); null for a lifetime period. |
+| `evaluated_at` | The applied evaluation's `as_of`, or null when none applies. |
+| `next_tier` | Null at the top tier; else `tier`, `multiplier`, `effective_allowance`, `required` and `current`, each of the last two `{units, active_weeks, age_seconds, attested_units}`. `required` is the policy's; `current` is the evaluation's counts as of `evaluated_at` (null when no evaluation applies). |
+
+Example, tier 1 of a 3x/6x table with 10 spent of 30:
+
+```json
+{"authority":"bounded","policy_version":"growth-status-7becbe75e1f9","ready":true,
+ "refusal_label":null,"retry_after_seconds":null,"allowance_tier":1,
+ "allowance_tier_changed_at":"2026-10-12T05:22:16Z","allowance_multiplier":3,
+ "effective_allowance":30,"allowance_spent":10,"allowance_remaining":20,
+ "period_resets_at":"2026-10-12T06:00:00Z","evaluated_at":"2026-10-12T05:22:16Z",
+ "next_tier":{"tier":2,"multiplier":6,"effective_allowance":60,
+  "required":{"units":5,"active_weeks":2,"age_seconds":1209600,"attested_units":1},
+  "current":{"units":3,"active_weeks":1,"age_seconds":86400,"attested_units":1}}}
+```
+
+The counts are a progress display, not a promise: a later fact, gate change
+or a stale evaluation can move the tier back to 0 before the next run. The
+contributor client reads only `authority`, `ready` and `retry_after_seconds`
+and ignores the rest.
 
 ### Rollback
 

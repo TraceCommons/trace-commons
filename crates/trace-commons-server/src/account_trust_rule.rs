@@ -287,6 +287,9 @@ pub struct Evaluation {
     pub attested_units: u32,
     pub active_weeks: u32,
     pub age_weeks: u32,
+    /// Seconds since the first acceptance: what a tier's `age_seconds`
+    /// requirement is compared with.
+    pub age_seconds: i64,
     pub netted_withdrawn: u32,
     pub netted_revoked: u32,
     pub netted_quarantined: u32,
@@ -438,6 +441,7 @@ pub fn evaluate(
         attested_units,
         active_weeks,
         age_weeks: u32::try_from(age_seconds / WEEK_SECONDS).unwrap_or(u32::MAX),
+        age_seconds,
         netted_withdrawn,
         netted_revoked,
         netted_quarantined,

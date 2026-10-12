@@ -20,8 +20,11 @@
 -- 3. trace_account_trust_evaluation_inputs answers first_in_cluster for an
 --    attested fact as for a gate fact: an attested unit must still be the
 --    earliest member of its dedup cluster.
--- 4. trace_account_trust_evaluations.attested_units, nullable: rows written
---    before this migration had no attested facts to count.
+-- 4. trace_account_trust_evaluations.attested_units and age_seconds,
+--    nullable: rows written before this migration had no attested facts to
+--    count, and stored age only in whole weeks. age_seconds is what a tier's
+--    age requirement is compared with; contribution-status reports it to the
+--    account itself as progress toward the next tier.
 -- 5. trace_record_account_trust_evaluation_v2: the one writer the in-process
 --    evaluator uses, for `shadow` and `applied` rows. An applied row carries
 --    the account's input generation and is written under V114's rules
@@ -290,7 +293,8 @@ REVOKE trace_account_admission_guard FROM CURRENT_USER;
 
 -- 4. The attested count on an evaluation.
 ALTER TABLE trace_account_trust_evaluations
-    ADD COLUMN attested_units INTEGER CHECK (attested_units >= 0);
+    ADD COLUMN attested_units INTEGER CHECK (attested_units >= 0),
+    ADD COLUMN age_seconds BIGINT CHECK (age_seconds >= 0);
 
 -- 5. The writer for shadow and applied rows.
 GRANT trace_account_trust_evaluation_guard TO CURRENT_USER;
@@ -298,7 +302,7 @@ CREATE FUNCTION trace_record_account_trust_evaluation_v2(
     p_tenant TEXT, p_evaluation UUID, p_account UUID, p_policy_version TEXT, p_mode TEXT,
     p_as_of TIMESTAMPTZ, p_tier INTEGER, p_effective_allowance BIGINT, p_units INTEGER,
     p_units_capped INTEGER, p_attested_units INTEGER, p_active_weeks INTEGER,
-    p_age_weeks INTEGER, p_netted_withdrawn INTEGER, p_netted_revoked INTEGER,
+    p_age_weeks INTEGER, p_age_seconds BIGINT, p_netted_withdrawn INTEGER, p_netted_revoked INTEGER,
     p_netted_quarantined INTEGER, p_penalty_active BOOLEAN, p_digest TEXT,
     p_expected_generation BIGINT)
 RETURNS BOOLEAN
@@ -345,11 +349,11 @@ BEGIN
      LIMIT 1;
     INSERT INTO public.trace_account_trust_evaluations(tenant_id, evaluation_id, account_id,
         growth_policy_version, mode, as_of, tier, previous_tier, effective_allowance, units,
-        units_capped, attested_units, active_weeks, age_weeks, netted_withdrawn,
+        units_capped, attested_units, active_weeks, age_weeks, age_seconds, netted_withdrawn,
         netted_revoked, netted_quarantined, penalty_active, facts_digest, input_generation)
     VALUES (p_tenant, p_evaluation, p_account, p_policy_version, p_mode, p_as_of, p_tier,
         v_previous, p_effective_allowance, p_units, p_units_capped, p_attested_units,
-        p_active_weeks, p_age_weeks, p_netted_withdrawn, p_netted_revoked,
+        p_active_weeks, p_age_weeks, p_age_seconds, p_netted_withdrawn, p_netted_revoked,
         p_netted_quarantined, p_penalty_active, p_digest, v_generation);
     IF p_tier IS DISTINCT FROM COALESCE(v_previous, 0) THEN
         INSERT INTO public.trace_account_audit(tenant_id, action, actor_ref, outcome, safe_metadata)
@@ -366,16 +370,16 @@ BEGIN
 END $$;
 GRANT CREATE ON SCHEMA public TO trace_account_trust_evaluation_guard;
 ALTER FUNCTION trace_record_account_trust_evaluation_v2(TEXT,UUID,UUID,TEXT,TEXT,TIMESTAMPTZ,
-    INTEGER,BIGINT,INTEGER,INTEGER,INTEGER,INTEGER,INTEGER,INTEGER,INTEGER,INTEGER,BOOLEAN,
-    TEXT,BIGINT)
+    INTEGER,BIGINT,INTEGER,INTEGER,INTEGER,INTEGER,INTEGER,BIGINT,INTEGER,INTEGER,INTEGER,
+    BOOLEAN,TEXT,BIGINT)
     OWNER TO trace_account_trust_evaluation_guard;
 REVOKE CREATE ON SCHEMA public FROM trace_account_trust_evaluation_guard;
 REVOKE ALL ON FUNCTION trace_record_account_trust_evaluation_v2(TEXT,UUID,UUID,TEXT,TEXT,
-    TIMESTAMPTZ,INTEGER,BIGINT,INTEGER,INTEGER,INTEGER,INTEGER,INTEGER,INTEGER,INTEGER,
-    INTEGER,BOOLEAN,TEXT,BIGINT) FROM PUBLIC;
+    TIMESTAMPTZ,INTEGER,BIGINT,INTEGER,INTEGER,INTEGER,INTEGER,INTEGER,BIGINT,INTEGER,
+    INTEGER,INTEGER,BOOLEAN,TEXT,BIGINT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION trace_record_account_trust_evaluation_v2(TEXT,UUID,UUID,TEXT,TEXT,
-    TIMESTAMPTZ,INTEGER,BIGINT,INTEGER,INTEGER,INTEGER,INTEGER,INTEGER,INTEGER,INTEGER,
-    INTEGER,BOOLEAN,TEXT,BIGINT) TO trace_account_trust_worker;
+    TIMESTAMPTZ,INTEGER,BIGINT,INTEGER,INTEGER,INTEGER,INTEGER,INTEGER,BIGINT,INTEGER,
+    INTEGER,INTEGER,BOOLEAN,TEXT,BIGINT) TO trace_account_trust_worker;
 GRANT EXECUTE ON FUNCTION trace_account_trust_input_generation(TEXT,UUID)
     TO trace_account_trust_worker;
 REVOKE trace_account_trust_evaluation_guard FROM CURRENT_USER;
