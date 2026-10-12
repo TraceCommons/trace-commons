@@ -22,7 +22,7 @@ struct CredentialSection: View {
     /// Whether the section draws its own title. Inside #1146's connection
     /// panel it does not: the panel's title is the heading.
     var titled = true
-    @State private var ownProvider = "github"
+    @State private var ownProvider = "near"
     /// Where the provider choice lives when the caller holds it. `nil` -- every
     /// production caller -- keeps it in this view's own state.
     ///
@@ -45,9 +45,9 @@ struct CredentialSection: View {
 
     static func providerOptions(_ copy: PrivateInferenceCopy) -> [ProviderOption] {
         [
+            ProviderOption(tag: "near", title: copy.credentialProviderNear),
             ProviderOption(tag: "github", title: copy.credentialProviderGithub),
             ProviderOption(tag: "google", title: copy.credentialProviderGoogle),
-            ProviderOption(tag: "near", title: copy.credentialProviderNear),
         ]
     }
 

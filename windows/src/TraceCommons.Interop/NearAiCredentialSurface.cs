@@ -80,9 +80,9 @@ public static class NearAiCredentialSurface
 
     public static ProviderChoice[] Providers(PrivateInferenceCopy copy) =>
     [
+        new(ProviderNear, copy.CredentialProviderNear),
         new(ProviderGithub, copy.CredentialProviderGithub),
         new(ProviderGoogle, copy.CredentialProviderGoogle),
-        new(ProviderNear, copy.CredentialProviderNear),
     ];
 
     public static bool IsProvider(string? provider) =>
