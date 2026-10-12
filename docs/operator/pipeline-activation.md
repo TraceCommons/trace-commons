@@ -2053,6 +2053,59 @@ and calls neither half of the boundary again. `approved_content_hash` is the
 hash of the approved content, which Review derives from the privacy pass's
 output.
 
+### Admission and `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS`
+
+The receipt maps the envelope's residual risk onto Admission's scale: a
+`medium` whose only basis is `consent_content_flag` is Low, any other
+`medium` is Medium, `high` is High. The bundle's Admission policy admits
+Low, quarantines Medium as `privacy_review_required`, and quarantines High
+as `privacy_risk_high_review_required`.
+
+`TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS` governs both paths. The
+legacy path accepts every Medium under it. The pipeline honours it
+narrowly (owner decision 2026-10-12, issue #1344, "once PII is removed,
+accept"): with the setting on, a receipt whose risk is Medium and whose
+basis is `found_and_removed`, alone or with `consent_content_flag`, is
+handed to Admission as Low, and Admission admits it. That is the receipt
+whose PII the server's own re-scrub found and removed. Nothing else
+changes:
+
+- A Medium with any other basis, including an empty one (a declared
+  `medium` the server found nothing for), is still quarantined
+  `privacy_review_required`.
+- A basis with `key_finding`, `coverage_incomplete`, `residual_survivor`
+  or `residual_scan_unavailable` is High and is still quarantined
+  `privacy_risk_high_review_required`.
+- With the setting off, a found-and-removed Medium is quarantined
+  `privacy_review_required`, as before.
+
+The bundle and its Admission policy do not change, and neither do the
+qualification fixtures: the setting is read per receipt from the process
+(`accept_medium_risk` on the receipt request), and the qualification
+harness never sets it. An admission under the setting is recorded so an
+operator can tell it from a Low's: the Admission outcome's
+`evaluation.rule_id` is `minimal_admission_v1_accept_found_and_removed`
+(a Low's is `minimal_admission_v1`), and its `evidence.privacy_risk` is
+`medium`, the risk the receipt mapped, not the Low the policy was handed.
+To count them:
+
+```sql
+SELECT count(*) FROM phase_outcomes
+ WHERE phase = 'admission'
+   AND evaluation->>'rule_id' = 'minimal_admission_v1_accept_found_and_removed';
+```
+
+Run it in a tenant transaction (RLS is forced on `phase_outcomes`).
+
+The submission row keeps the truth: `privacy_risk` stays `medium`, and
+`residual_risk_basis` and the redaction counts stay what the re-scrub
+found. Only Admission's decision changes. From there the run is an
+ordinary admitted run: the privacy pass at the start of Review compares
+its risk with the receipt's Medium (not with the Low Admission was
+handed), so a pass-time Medium clears it and only a pass-time High
+escalates it; it is reviewed, scored and settled like an admitted Low, and
+the contributor sees it `accepted` with its credit.
+
 A new pipeline receipt appends `main`'s `submitted` audit event after the
 receipt commits. The event holds the uploader's principal reference, as
 `main`'s event does. An admitted receipt's event has no status, and its audit
@@ -2167,7 +2220,10 @@ risk back to the submission row, and the run goes on to the Review policy,
 so a run Admission admitted ends `accepted` on the redacted content, with
 its gate decision row and credit like any accepted run. A run Admission
 quarantined at Medium escalates at High only, and otherwise keeps
-Admission's hold. A pass-time High (what redaction did not resolve: a key
+Admission's hold. A Medium Admission admitted under
+`TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS` (above) is still Medium on
+this comparison, so it too escalates at High only, and otherwise goes on
+as an admitted run. A pass-time High (what redaction did not resolve: a key
 finding, a coverage gap, a survivor, a residual scan that could not run) is
 held for a human, never rejected by the pass. A receipt-time High is held
 for a human too, never rejected (owner decision PC-D27, 2026-10-11, as

@@ -215,6 +215,14 @@ code and reads no environment variable). The pipeline
 quarantines the same trace for review. The owner ruled that this is
 intended.
 
+The same setting reaches the pipeline's Admission too, narrowly (owner
+decision 2026-10-12, issue #1344): a `medium` trace whose basis is
+`found_and_removed`, alone or with `consent_content_flag`, is admitted
+under the rule `minimal_admission_v1_accept_found_and_removed`. Both sides
+then admit it and the pair is `equal`, so the rule is not used for it. The
+rule still permits the pairs the pipeline still quarantines: a declared
+`medium` with an empty basis, such as the `--self-test` pair.
+
 The rule permits a pair only when all of these are true:
 
 - The field is `admission`.
@@ -563,8 +571,11 @@ What a passing report does not show:
   - The baseline accepts medium-risk submissions, as
     `deploy/pilot-gcp/ingest.env.template` sets it. The default of `main`
     is to quarantine them (`TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS`
-    not set). The rule `medium_risk_privacy_review` permits the resulting
-    `admission` difference.
+    not set). The setting reaches the candidate too: the pipeline admits a
+    `medium` whose basis is only `found_and_removed` (with or without
+    `consent_content_flag`), so those pairs are `equal`. The rule
+    `medium_risk_privacy_review` permits the `admission` difference of any
+    other `medium` pair.
 
   A deployment that sets other values has a different old path, and the
   report says nothing about it.

@@ -49905,7 +49905,9 @@ async fn admission_rule_and_evidence_risk(
         .as_str()
         .expect("the Admission evaluation has a rule id")
         .to_string();
-    let risk = outcome.evidence["privacy_risk"].as_str().map(str::to_string);
+    let risk = outcome.evidence["privacy_risk"]
+        .as_str()
+        .map(str::to_string);
     (rule_id, risk)
 }
 
