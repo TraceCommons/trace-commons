@@ -22,13 +22,11 @@ final class ChartSeriesContrastTests: XCTestCase {
         try assertClearsTheFloor(in: "flatDark", opacity: GlassTokens.Opacity.chartSeriesReduced)
     }
 
-    /// The floor bites. In Dark the series it replaced, accentText at 0.55,
-    /// still fails it. In Light it no longer does: the Light veil went from
-    /// 55% to 82% (owner, 2026-10-11) and 0.55 now reaches about 3.05:1, so
-    /// Light is held to a lighter step instead.
-    func test_theFloorBites() throws {
-        XCTAssertLessThan(try Self.worstRatio("flatDark", opacity: 0.55), Self.floor, "flatDark")
-        XCTAssertLessThan(try Self.worstRatio("flatLight", opacity: 0.45), Self.floor, "flatLight")
+    /// The series it replaced, accentText at 0.55, did not: the floor bites.
+    func test_theFormerOpacityFailsTheFloor() throws {
+        for theme in ["flatLight", "flatDark"] {
+            XCTAssertLessThan(try Self.worstRatio(theme, opacity: 0.55), Self.floor, theme)
+        }
     }
 
     /// Still a lighter step: the reduced series stays apart from the
