@@ -59,9 +59,35 @@ Version 1:
   and with them "never fits everything", are enforced by the protocol
   (`MissionPredicateV1`), and the daemon feeds the matcher only predicates
   that passed them.
-- `TRACE_COMMONS_ACTIVITY_MISSIONS_POLICY_JSON` accepts only version 1. A
+- `TRACE_COMMONS_ACTIVITY_MISSIONS_POLICY_JSON` accepts versions 1 and 2. A
   malformed block, or any other version, fails startup like the rest of the
   policy.
+
+Version 2 (outcome-aware, from the frontier failure missions design,
+slice F3) adds to version 1's fields, all optional but for `version` and
+`min_sessions`:
+
+```json
+{"version":2,"outcomes":["failure"],"failure_modes":["looping_or_repetition"],"models":"frontier","min_tier":"e2","with_correction":true,"min_sessions":1}
+```
+
+- `outcomes` are `TaskSuccess` values and `failure_modes` are
+  `TraceFailureMode` values, both snake_case, "any of", at most 32, no
+  duplicates; the free-form `other` failure mode is refused.
+- `models` is the string `"frontier"` or a list of model labels (version 1's
+  label rules). `"frontier"` means the policy's new optional top-level
+  `frontier_models` list (a non-empty label list, bounded like a version-1
+  list), and a policy using it without that list is refused.
+- `min_tier` is `e0`, `e1` or `e2` (E3 is server-side); `with_correction` is
+  a bool.
+- Every version-1 rule carries over: bounds, charset, no duplicates, unknown
+  fields refused, a title of at most 200 characters, and at least one
+  restricting field (a non-empty list, `models`, `min_tier`, or
+  `with_correction: true`). The version is per mission, so the policy stays
+  one document; a policy without version-2 missions or `frontier_models`
+  keeps its digest.
+- A client that does not yet match outcomes skips version-2 missions, as it
+  does a mission without a predicate. The contributor daemon does so now.
 - The block is digest-covered. Every predicate block serializes as key-sorted
   JSON, and a mission without one serializes exactly as before the field
   existed, so no predicate-free policy digest moved.

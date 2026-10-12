@@ -538,12 +538,12 @@ fn parsed(raw: serde_json::Value) -> trace_commons_protocol::activity_missions::
 fn the_mission_slot_takes_only_missions_with_a_supported_predicate() {
     use crate::daemon::activity_missions::contribution_catalogue;
     let today = Utc::now().date_naive();
-    let v2 = serde_json::json!({"version":2,"tools":["codex"],"repo_size":"large"});
+    let v3 = serde_json::json!({"version":3,"tools":["codex"],"repo_size":"large"});
     let raw = contribution_catalogue(
         &parsed(predicate_catalogue(&[
             serde_json::Value::Null,
             claude_rust(),
-            v2,
+            v3,
         ])),
         today,
     )
@@ -581,6 +581,28 @@ fn the_mission_slot_takes_only_missions_with_a_supported_predicate() {
         contribution_catalogue(&catalogue, today - chrono::Duration::days(2)),
         None
     );
+}
+
+/// A version-2 (outcome-aware) mission is valid and published, but this
+/// client cannot match outcomes yet: it is skipped, never matched and never
+/// read as a version-1 mission with fewer criteria.
+#[test]
+fn the_mission_slot_skips_v2_missions() {
+    use crate::daemon::activity_missions::contribution_catalogue;
+    let today = Utc::now().date_naive();
+    // Carries a V1 field set a careless reader could match on.
+    let v2 = serde_json::json!({"version":2,"tools":["claude-code"],"languages":["rust"],"outcomes":["failure"],"min_sessions":1});
+    let only_v2 = parsed(predicate_catalogue(std::slice::from_ref(&v2)));
+    assert_eq!(contribution_catalogue(&only_v2, today), None);
+
+    let raw = contribution_catalogue(
+        &parsed(predicate_catalogue(&[v2, claude_rust()])),
+        today,
+    )
+    .expect("the V1 mission remains");
+    let missions = raw["missions"].as_array().unwrap();
+    assert_eq!(missions.len(), 1);
+    assert_eq!(missions[0]["mission_id"], "m-1");
 }
 
 /// The refresh is due at once, then every [`MISSION_SLOT_REFRESH`] after
