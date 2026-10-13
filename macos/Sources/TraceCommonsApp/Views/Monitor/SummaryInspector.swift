@@ -364,7 +364,7 @@ enum SummaryFacts {
         let history = wholeHistory(history)
         let ranked = folders.map { folder -> (TracesTree.FolderNode, Int?) in
             (folder, history.map { rows in
-                rows.filter { $0.projectId == folder.id && contributedStatuses.contains($0.status ?? "") }.count
+                rows.filter { $0.projectId == folder.id && contributedStatuses.contains($0.bucketOrStatus ?? "") }.count
             })
         }
         .filter { $0.0.sessions.count + ($0.1 ?? 0) > 0 }
@@ -396,7 +396,7 @@ enum SummaryFacts {
         var waiting: [String: Int] = [:]
         for session in sessions { waiting[session.declaredSource ?? session.source, default: 0] += 1 }
         var contributed: [String: Int] = [:]
-        for row in history ?? [] where contributedStatuses.contains(row.status ?? "") {
+        for row in history ?? [] where contributedStatuses.contains(row.bucketOrStatus ?? "") {
             guard let source = row.source else { continue }
             contributed[source, default: 0] += 1
         }

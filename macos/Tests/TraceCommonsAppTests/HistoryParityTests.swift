@@ -150,7 +150,7 @@ final class HistoryParityTests: XCTestCase {
             "SessionContributionOverview(record: record, detail: detail, copy: copy)",
             Self.withdrawCall,
             "SkillLearningView(record: record, copy: skillCopy)",
-            "SkillLearningGate.offersLearning(detail, recordStatus: record.status, withdrawalCompleted: withdrawalCompleted)",
+            "SkillLearningGate.offersLearning(detail, recordStatus: record.bucketOrStatus, withdrawalCompleted: withdrawalCompleted)",
             "Text(copy.publicationAfterAcceptance)",
             "PublicRunEditor(record: record, detail: detail, copy: copy)", "TCPublicRun.validateEditorJSON(json)",
             "model.publishPublicRun(record, draft: draft)", "model.unpublishPublicRun(record)",
@@ -309,7 +309,7 @@ final class HistoryParityTests: XCTestCase {
             "if HistorySelection.tagsStatus(record: record, "
                 + "detail: record.flatMap { model.sessionDetails[$0.submissionID] }), "
                 + "let tag = HomeFormat.statusWord(status, label: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) }) "
-                + "{ GlassTag(tag, tone: HomeFormat.tone(status))",
+                + "{ GlassTag(tag, tone: HomeFormat.tone(record?.bucketOrStatus ?? row.bucketOrStatus))",
             // The folder and day only while no record resolves: the session
             // detail's own heading carries them otherwise.
             "if record == nil { Text(row.projectLabel ?? \"—\")",
@@ -344,7 +344,7 @@ final class HistoryParityTests: XCTestCase {
             "Text(words.homeHistory.held(quarantined))",
             "Text(words.heldExplanation)", "Text(HistoryLegacyWords.typicalWait)",
             // Every record the app holds, not the list's capped page.
-            "ForEach(HeldExplanations.lines(in: model.history.filter { $0.status == \"quarantined\" }.map(\\.explanations)), "
+            "ForEach(HeldExplanations.lines(in: model.history.filter { $0.bucketOrStatus == \"quarantined\" }.map(\\.explanations)), "
                 + "id: \\.self)",
             "Text(WithdrawalCopy.noBulkAction)",
             // The daemon's view on every visit, on the always-present container.
@@ -379,7 +379,7 @@ final class HistoryParityTests: XCTestCase {
             "Withdraw sits after the detail's reading/failed/read states, outside them")
         XCTAssertTrue(source.contains(
             "static func withdrawalStatus(_ record: HistoryRecord, detail: SessionDetail?) -> String {\n"
-                + "        detail?.contributionStatus ?? record.status\n"))
+                + "        detail?.contributionStatus ?? record.bucketOrStatus\n"))
     }
 
     // MARK: - History in the left pane (Task 8 of the #1146 port)
@@ -672,6 +672,56 @@ final class HistoryParityTests: XCTestCase {
         XCTAssertFalse(labels.values.contains(where: \.isEmpty))
         XCTAssertTrue(Self.flat(try Self.text("Views/Monitor/HomeViews.swift")).contains(
             "HistoryFolders.folders( HistoryList.rows(rows, filter: shownFilter),"), "rows grouped by project")
+    }
+
+    /// The filter and its counts read the daemon's bucket (#1284): a
+    /// `processing` receipt is `submitted`, while its status word stays the
+    /// raw one. A row from a daemon that sends no bucket reads its raw
+    /// status, so the unbucketed `processing` in the test above matches no
+    /// filter: no mapping of our own.
+    func test_aProcessingRowCountsAndFiltersAsSubmittedByItsBucket() throws {
+        let json = #"[{"submission_id":"p","status":"processing","bucket":"submitted"},"#
+            + #"{"submission_id":"s","status":"submitted","bucket":"submitted"},"#
+            + #"{"submission_id":"a","status":"accepted","bucket":"accepted"},"#
+            + #"{"submission_id":"old","status":"processing"}]"#
+        let rows = try DaemonDataDecoding.decoder().decode([DaemonData.HistoryRow].self, from: Data(json.utf8))
+        XCTAssertEqual(rows.map(\.bucketOrStatus), ["submitted", "submitted", "accepted", "processing"])
+        XCTAssertEqual(rows[0].status, "processing", "the raw status is kept for the status word")
+        let counts = HistoryList.counts(rows)
+        XCTAssertEqual(counts[.all], 4)
+        XCTAssertEqual(counts[.submitted], 2)
+        XCTAssertEqual(counts[.accepted], 1)
+        XCTAssertEqual(HistoryList.rows(rows, filter: .submitted).map(\.submissionId), ["p", "s"])
+        XCTAssertEqual(HomeFormat.tone(rows[0].bucketOrStatus), .ask)
+        XCTAssertEqual(TracesGraphModel.contributedStatuses.contains(rows[0].bucketOrStatus ?? ""), true)
+    }
+
+    /// Withdraw is offered on a `processing` record by its bucket, at the
+    /// same stage as `submitted` (#1284). With no bucket (an older daemon)
+    /// the raw `processing` is not on the allowlist and offers none.
+    func test_aProcessingRecordOffersWithdrawByItsBucket() throws {
+        var processing = Self.record("processing")
+        processing.bucket = "submitted"
+        XCTAssertEqual(SessionDetailView.withdrawalStatus(processing, detail: nil), "submitted")
+        XCTAssertEqual(HistoryList.rowWithdraw(record: processing, detail: nil, result: nil, account: .signedIn), .withdraw)
+        XCTAssertFalse(ContributionStatusPresentation.isTerminal(processing.bucketOrStatus))
+        XCTAssertFalse(SkillLearningGate.withdrawalCompleted(recordStatus: processing.bucketOrStatus, withdrawal: nil))
+        XCTAssertEqual(WithdrawalCopy.Stage(status: SessionDetailView.withdrawalStatus(processing, detail: nil)),
+                       .notInTheCommons)
+
+        let older = Self.record("processing")
+        XCTAssertNil(older.bucket)
+        XCTAssertEqual(SessionDetailView.withdrawalStatus(older, detail: nil), "processing")
+        XCTAssertEqual(HistoryList.rowWithdraw(record: older, detail: nil, result: nil, account: .signedIn), .none)
+
+        // The daemon's reply decodes the bucket, and its absence.
+        let row = #"{"submission_id":"p","submitted_at":"2026-10-12T00:00:00Z","project_label":"a","#
+            + #""source":"claude_code","status":"processing","consent_scopes":[],"credit_points_pending":0,"#
+            + #""explanations":[]"#
+        let decoded = try DaemonDecoding.decoder().decode(
+            [HistoryRecord].self, from: Data("[\(row),\"bucket\":\"submitted\"},\(row)}]".utf8))
+        XCTAssertEqual(decoded.map(\.bucket), ["submitted", nil])
+        XCTAssertEqual(decoded.map(\.bucketOrStatus), ["submitted", "processing"])
     }
 
     /// The record by period, which Home's summary inspector drew until Ron's

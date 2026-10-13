@@ -339,7 +339,7 @@ struct FolderInspector: View {
     static func shared(_ folder: TracesTree.FolderNode, history: [DaemonData.HistoryRow]?) -> String {
         guard let rows = SummaryFacts.wholeHistory(history) else { return "—" }
         return String(rows.filter {
-            $0.projectId == folder.id && SummaryFacts.contributedStatuses.contains($0.status ?? "")
+            $0.projectId == folder.id && SummaryFacts.contributedStatuses.contains($0.bucketOrStatus ?? "")
         }.count)
     }
 

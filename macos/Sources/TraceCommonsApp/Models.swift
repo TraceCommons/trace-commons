@@ -555,8 +555,17 @@ struct HistoryRecord: Decodable, Identifiable, Equatable {
     let creditPointsFinal: Double?
     let explanations: [String]
     let lastRefreshedAt: Date?
+    /// The daemon's bucket for `status` (#1284): `submitted` for a
+    /// `processing` receipt, otherwise `status` itself. `nil` from a daemon
+    /// older than the field. A `var` so fixtures' memberwise inits may omit it.
+    var bucket: String? = nil
 
     var id: String { submissionID }
+
+    /// What to offer Withdraw on, count and filter by: `bucket`, else the
+    /// raw `status`. No mapping of our own when an older daemon sends no
+    /// bucket: a `processing` row then fails closed.
+    var bucketOrStatus: String { bucket ?? status }
 
     enum CodingKeys: String, CodingKey {
         case submissionID = "submission_id"
@@ -570,6 +579,7 @@ struct HistoryRecord: Decodable, Identifiable, Equatable {
         case creditPointsFinal = "credit_points_final"
         case explanations
         case lastRefreshedAt = "last_refreshed_at"
+        case bucket
     }
 }
 
@@ -1029,7 +1039,8 @@ extension HistoryRecord {
             creditPointsPending: try c.decode(Double.self, forKey: .creditPointsPending),
             creditPointsFinal: try c.decodeIfPresent(Double.self, forKey: .creditPointsFinal),
             explanations: try c.decode([String].self, forKey: .explanations),
-            lastRefreshedAt: try c.decodeIfPresent(Date.self, forKey: .lastRefreshedAt)
+            lastRefreshedAt: try c.decodeIfPresent(Date.self, forKey: .lastRefreshedAt),
+            bucket: try c.decodeIfPresent(String.self, forKey: .bucket)
         )
     }
 }

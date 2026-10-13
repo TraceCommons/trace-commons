@@ -86,7 +86,7 @@ struct FlowMapScene: Equatable {
                 self = .unread
                 return
             }
-            let stand = history.filter { TracesGraphModel.contributedStatuses.contains($0.status ?? "") }
+            let stand = history.filter { TracesGraphModel.contributedStatuses.contains($0.bucketOrStatus ?? "") }
             total = stand.count
             for row in stand {
                 if let tool = row.source.flatMap(SourceKind.init(rawValue:)) { byTool[tool, default: 0] += 1 }

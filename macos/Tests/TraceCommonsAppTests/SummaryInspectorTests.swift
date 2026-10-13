@@ -147,7 +147,7 @@ final class SummaryInspectorTests: XCTestCase {
     func test_aCappedHistoryCountsNoContributed() throws {
         let words = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
         let counts = words.counts
-        let fields: [String: Any] = ["project_id": "p1", "source": "claude-code", "status": "accepted"]
+        let fields: [String: Any] = ["project_id": "p1", "source": "claude-code", "status": "accepted", "bucket": "accepted"]
         let session = try recordedEntry(["project_id": "p1", "source": "claude-code", "declared_source": "claude-code"])
         let folder = TracesTree.FolderNode(id: "p1", label: "api", mode: nil, sessions: [session])
         let contributed = { (n: String) in FirstRunCopy.fill(counts.contributedCount, ["count": n]) }
@@ -168,9 +168,36 @@ final class SummaryInspectorTests: XCTestCase {
 
         // A capped page ranks on waiting alone: a tool with only capped
         // history and nothing waiting is not a top tool.
-        let elsewhere = try historyRows(HomeStore.historyLimit, ["source": "codex", "status": "accepted"])
+        let elsewhere = try historyRows(HomeStore.historyLimit, ["source": "codex", "status": "accepted", "bucket": "accepted"])
         let ranked = SummaryFacts.topTools(sessions: [session], history: elsewhere, counts: counts)
         XCTAssertEqual(ranked.map(\.id), [session.declaredSource ?? session.source])
+    }
+
+    /// A `processing` receipt counts as contributed under the daemon's
+    /// bucket (#1284). From a daemon that sends no bucket it reads its raw
+    /// status, which is not one the summary counts: no mapping here.
+    func test_aProcessingRowCountsAsContributedByItsBucket() throws {
+        let words = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
+        let counts = words.counts
+        let contributed = { (n: String) in FirstRunCopy.fill(counts.contributedCount, ["count": n]) }
+        let session = try recordedEntry(["project_id": "p1", "source": "claude-code", "declared_source": "claude-code"])
+        let folder = TracesTree.FolderNode(id: "p1", label: "api", mode: nil, sessions: [session])
+        let fields: [String: Any] = ["project_id": "p1", "source": "claude-code", "status": "processing"]
+
+        var bucketed = fields
+        bucketed["bucket"] = "submitted"
+        let rows = try historyRows(2, bucketed)
+        let project = try XCTUnwrap(SummaryFacts.topProjects(folders: [folder], history: rows, counts: counts).first)
+        XCTAssertTrue(project.sub.contains(contributed("2")), project.sub)
+        let tool = try XCTUnwrap(SummaryFacts.topTools(sessions: [session], history: rows, counts: counts).first)
+        XCTAssertTrue(tool.sub.contains(contributed("2")), tool.sub)
+
+        var unbucketed = fields
+        unbucketed["bucket"] = NSNull()
+        let older = try historyRows(2, unbucketed)
+        XCTAssertNil(older[0].bucket)
+        let olderProject = try XCTUnwrap(SummaryFacts.topProjects(folders: [folder], history: older, counts: counts).first)
+        XCTAssertTrue(olderProject.sub.contains(contributed("0")), olderProject.sub)
     }
 
     /// A `witness_capacity` the daemon reported but this build cannot read
@@ -223,7 +250,7 @@ final class SummaryInspectorTests: XCTestCase {
     func test_aFailedReadIsNotShownAsCurrent() throws {
         let words = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
         let counts = words.counts
-        let fields: [String: Any] = ["project_id": "p1", "source": "claude-code", "status": "accepted"]
+        let fields: [String: Any] = ["project_id": "p1", "source": "claude-code", "status": "accepted", "bucket": "accepted"]
         let session = try recordedEntry(["project_id": "p1", "source": "claude-code", "declared_source": "claude-code"])
         let folder = TracesTree.FolderNode(id: "p1", label: "api", mode: nil, sessions: [session])
         let contributed = { (n: String) in FirstRunCopy.fill(counts.contributedCount, ["count": n]) }

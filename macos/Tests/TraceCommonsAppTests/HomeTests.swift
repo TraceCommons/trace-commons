@@ -38,9 +38,12 @@ final class HomeTests: XCTestCase {
         XCTAssertNil(HomeFormat.historyStatusLabel(copy: nil, nil))
     }
 
-    /// An unknown or missing status is neutral, never a failure tone.
+    /// An unknown or missing status is neutral, never a failure tone. The
+    /// tone is asked of the row's bucket, so `processing` reads `.ask` only
+    /// as the daemon's `submitted` (#1284); no mapping of its own here.
     func test_unknownStatusToneIsNeutral() {
-        XCTAssertEqual(HomeFormat.tone("processing"), .ask)
+        XCTAssertEqual(HomeFormat.tone("submitted"), .ask)
+        XCTAssertEqual(HomeFormat.tone("processing"), .neutral)
         XCTAssertEqual(HomeFormat.tone(nil), .neutral)
         XCTAssertEqual(HomeFormat.tone("future_state"), .neutral)
     }

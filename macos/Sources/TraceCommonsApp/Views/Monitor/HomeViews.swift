@@ -344,7 +344,7 @@ private struct HomeOverview: View {
                 }
             } tag: { row in
                 if let tag = HomeFormat.statusWord(row.status, label: statusLabel) {
-                    GlassTag(tag, tone: HomeFormat.tone(row.status)).fixedSize()
+                    GlassTag(tag, tone: HomeFormat.tone(row.bucketOrStatus)).fixedSize()
                 }
             }
         }
@@ -691,7 +691,7 @@ private struct HistoryPage: View {
                         .foregroundStyle(GlassColor.textSecondary)
                     Group {
                         Text(HistoryLegacyWords.typicalWait)
-                        ForEach(HeldExplanations.lines(in: model.history.filter { $0.status == "quarantined" }.map(\.explanations)),
+                        ForEach(HeldExplanations.lines(in: model.history.filter { $0.bucketOrStatus == "quarantined" }.map(\.explanations)),
                                 id: \.self) { line in
                             Text(line)
                         }
@@ -899,7 +899,7 @@ private struct HistoryListRow: View {
                         .foregroundStyle(GlassColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    GlassTag(word, tone: HomeFormat.tone(row.status)).fixedSize()
+                    GlassTag(word, tone: HomeFormat.tone(row.bucketOrStatus)).fixedSize()
                 }
             }
             explanations
@@ -1087,8 +1087,9 @@ private struct HistoryStats: View {
 }
 
 /// The list's rules, in Ron's terms (`history-view-model.ts`): the filter is
-/// an exact status match counted over every row read, and its labels are
-/// the core's (`historyUi`; "all" from the public-run copy).
+/// an exact match on the daemon's bucket (#1284) counted over every row
+/// read, and its labels are the core's (`historyUi`; "all" from the
+/// public-run copy).
 enum HistoryList {
     enum Filter: String, CaseIterable, Hashable {
         case all
@@ -1104,7 +1105,7 @@ enum HistoryList {
     static func counts(_ rows: [DaemonData.HistoryRow]) -> [Filter: Int] {
         var counts: [Filter: Int] = [.all: rows.count]
         for row in rows {
-            if let status = row.status, let filter = Filter(rawValue: status), filter != .all {
+            if let bucket = row.bucketOrStatus, let filter = Filter(rawValue: bucket), filter != .all {
                 counts[filter, default: 0] += 1
             }
         }
@@ -1112,7 +1113,7 @@ enum HistoryList {
     }
 
     static func rows(_ rows: [DaemonData.HistoryRow], filter: Filter) -> [DaemonData.HistoryRow] {
-        filter == .all ? rows : rows.filter { $0.status == filter.rawValue }
+        filter == .all ? rows : rows.filter { $0.bucketOrStatus == filter.rawValue }
     }
 
     /// A filter's label from the core (Ron's #1146 `history-filter.tsx`
@@ -1533,11 +1534,12 @@ enum HomeFormat {
     }
 
     /// Accepted reads as done; held for review and submitted as waiting;
-    /// withdrawn as neutral. Held is never drawn as rejected.
-    static func tone(_ status: String?) -> GlassTag.Tone {
-        switch status {
+    /// withdrawn as neutral. Held is never drawn as rejected. Asked of the
+    /// row's bucket, so `processing` is the daemon's to map (#1284).
+    static func tone(_ bucket: String?) -> GlassTag.Tone {
+        switch bucket {
         case "accepted": .on
-        case "submitted", "processing", "quarantined": .ask
+        case "submitted", "quarantined": .ask
         default: .neutral
         }
     }

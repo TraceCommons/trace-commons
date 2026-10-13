@@ -261,6 +261,7 @@ final class GlassParityRoundOneTests: XCTestCase {
         let capped = try (0..<HomeStore.historyLimit).map { index -> DaemonData.HistoryRow in
             var row = first
             row["status"] = "accepted"
+            row["bucket"] = "accepted"
             row["submission_id"] = "row-\(index)"
             row["session_hash"] = "sha256:row-\(index)"
             return try DaemonDataDecoding.decoder().decode(

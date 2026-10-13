@@ -218,7 +218,7 @@ final class ComputeSkillsParityTests: XCTestCase {
     /// ask the gate, and the inspector reads the detail before drawing.
     func test_bothSurfacesAskTheSameGate() throws {
         let legacy = try Self.text("Views/SessionDetailView.swift")
-        XCTAssertTrue(legacy.contains("SkillLearningGate.offersLearning(detail, recordStatus: record.status,"))
+        XCTAssertTrue(legacy.contains("SkillLearningGate.offersLearning(detail, recordStatus: record.bucketOrStatus,"))
         XCTAssertTrue(legacy.contains("SkillLearningGate.showsInstalledSurface(detail,"))
         XCTAssertFalse(legacy.contains("detail.taskSuccess != nil"))
         // The inspector draws the session detail, so it asks the gate

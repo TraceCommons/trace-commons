@@ -123,7 +123,7 @@ enum TracesGraphModel {
 
     /// When each contribution left, for one tool or all of them.
     static func sharedTimes(_ rows: [DaemonData.HistoryRow], tool: SourceKind?) -> [Date] {
-        rows.filter { contributedStatuses.contains($0.status ?? "") }
+        rows.filter { contributedStatuses.contains($0.bucketOrStatus ?? "") }
             .filter { tool == nil || $0.source.flatMap(SourceKind.init(rawValue:)) == tool }
             .compactMap(\.submittedAt)
     }

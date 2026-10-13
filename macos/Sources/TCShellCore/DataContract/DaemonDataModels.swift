@@ -1155,8 +1155,17 @@ extension DaemonData {
         public let approvedUnattended: Bool?
         /// `worked` / `partly` / `failed`, or `nil` when none was given.
         public let approvedVerdict: String?
+        /// The status the daemon counts, filters and withdraws this row
+        /// under (#1284): `submitted` for a `processing` receipt, otherwise
+        /// `status` itself. `nil` from a daemon older than the field.
+        public let bucket: String?
 
         public var id: String { submissionId }
+
+        /// What to offer Withdraw on, count and filter by: `bucket`, else
+        /// the raw `status`. No mapping of our own when an older daemon
+        /// sends no bucket: a `processing` row then fails closed.
+        public var bucketOrStatus: String? { bucket ?? status }
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case submissionId = "submission_id"
@@ -1173,6 +1182,7 @@ extension DaemonData {
             case uploadedBytes = "uploaded_bytes"
             case approvedUnattended = "approved_unattended"
             case approvedVerdict = "approved_verdict"
+            case bucket
         }
 
         /// Render `.notRecorded` as "not recorded", never as "you approved".

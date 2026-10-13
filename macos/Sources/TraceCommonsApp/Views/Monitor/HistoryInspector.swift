@@ -78,7 +78,7 @@ struct HistoryDetailInspector: View {
                 .fixedSize(horizontal: false, vertical: true)
             if HistorySelection.tagsStatus(record: record, detail: record.flatMap { model.sessionDetails[$0.submissionID] }),
                let tag = HomeFormat.statusWord(status, label: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) }) {
-                GlassTag(tag, tone: HomeFormat.tone(status))
+                GlassTag(tag, tone: HomeFormat.tone(record?.bucketOrStatus ?? row.bucketOrStatus))
                     .fixedSize()
             }
         }

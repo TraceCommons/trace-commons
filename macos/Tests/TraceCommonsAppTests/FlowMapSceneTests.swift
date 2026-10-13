@@ -143,6 +143,7 @@ final class FlowMapSceneTests: XCTestCase {
             try (0..<count).map { index in
                 var row = first
                 row["status"] = "accepted"
+                row["bucket"] = "accepted"
                 row["source"] = "claude-code"
                 row["project_id"] = "p1"
                 row["submission_id"] = "row-\(index)"

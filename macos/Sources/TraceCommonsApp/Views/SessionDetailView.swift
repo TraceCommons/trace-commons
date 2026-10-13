@@ -34,11 +34,11 @@ struct SessionDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear {
             model.loadSessionDetail(record)
-            if ContributionStatusPresentation.isTerminal(record.status) {
+            if ContributionStatusPresentation.isTerminal(record.bucketOrStatus) {
                 model.ensureLocalInstalledSkillStatus(for: record)
             }
         }
-        .onChange(of: record.status) { _, status in
+        .onChange(of: record.bucketOrStatus) { _, status in
             if ContributionStatusPresentation.isTerminal(status) {
                 model.ensureLocalInstalledSkillStatus(for: record)
             }
@@ -98,11 +98,12 @@ struct SessionDetailView: View {
     }
 
     /// The status Withdraw asks about: the detail's when it has been read,
-    /// else the app's own record's. Withdraw stands on the record, as the
-    /// legacy row offered it, so reading the detail, or failing to, never
-    /// hides it or its outcome. An unknown status still offers none.
+    /// else the app's own record's bucket (#1284). Withdraw stands on the
+    /// record, as the legacy row offered it, so reading the detail, or
+    /// failing to, never hides it or its outcome. An unknown status still
+    /// offers none.
     static func withdrawalStatus(_ record: HistoryRecord, detail: SessionDetail?) -> String {
-        detail?.contributionStatus ?? record.status
+        detail?.contributionStatus ?? record.bucketOrStatus
     }
 
     @ViewBuilder
@@ -114,7 +115,7 @@ struct SessionDetailView: View {
                 if let skillCopy = model.skillLearningCopy {
                     SkillLearningView(record: record, copy: skillCopy)
                 }
-            } else if SkillLearningGate.offersInstallStatusRetry(state, detail: detail, recordStatus: record.status) {
+            } else if SkillLearningGate.offersInstallStatusRetry(state, detail: detail, recordStatus: record.bucketOrStatus) {
                 GlassCard {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                         Button(copy.retryRead) {
@@ -137,13 +138,13 @@ struct SessionDetailView: View {
     @ViewBuilder
     private func detailContent(_ detail: SessionDetail, copy: PublicRunCopy) -> some View {
         let contributionIsWithdrawn = SkillLearningGate.contributionIsWithdrawn(
-            detail, recordStatus: record.status, withdrawalCompleted: withdrawalCompleted)
+            detail, recordStatus: record.bucketOrStatus, withdrawalCompleted: withdrawalCompleted)
         let contributionIsActive = SkillLearningGate.contributionIsActive(
-            detail, recordStatus: record.status, withdrawalCompleted: withdrawalCompleted)
+            detail, recordStatus: record.bucketOrStatus, withdrawalCompleted: withdrawalCompleted)
 
         SessionContributionOverview(record: record, detail: detail, copy: copy)
 
-        if SkillLearningGate.offersLearning(detail, recordStatus: record.status, withdrawalCompleted: withdrawalCompleted),
+        if SkillLearningGate.offersLearning(detail, recordStatus: record.bucketOrStatus, withdrawalCompleted: withdrawalCompleted),
            let skillCopy = model.skillLearningCopy {
             SkillLearningView(record: record, copy: skillCopy)
         }
@@ -160,7 +161,7 @@ struct SessionDetailView: View {
 
     private var withdrawalCompleted: Bool {
         SkillLearningGate.withdrawalCompleted(
-            recordStatus: record.status, withdrawal: model.withdrawals[record.submissionID])
+            recordStatus: record.bucketOrStatus, withdrawal: model.withdrawals[record.submissionID])
     }
 
 }
