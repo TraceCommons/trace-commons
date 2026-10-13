@@ -40,8 +40,10 @@ struct HomeInsightsGraphic: View {
 
     /// The most tools drawn: the graphic stays a glance.
     static let toolLimit = 4
-    static let barWidth: CGFloat = 22
-    static let maxBarHeight: CGFloat = 92
+    /// Taller than the card, anchored below its bottom edge, so the card's
+    /// border cuts the bars off (owner, 2026-10-12).
+    static let barWidth: CGFloat = 30
+    static let maxBarHeight: CGFloat = 190
 
     static func bars(_ glance: DaemonData.InsightsGlance?) -> [(tool: String, tokens: UInt64)] {
         guard let glance, glance.enabled, glance.readable != false else { return [] }
@@ -60,23 +62,27 @@ struct HomeInsightsGraphic: View {
         } else {
             let ink = GlassTokens.Color.heroInk.color
             let most = Double(bars.first?.tokens ?? 1)
-            HStack(alignment: .bottom, spacing: 12) {
+            HStack(alignment: .bottom, spacing: 14) {
                 ForEach(bars, id: \.tool) { bar in
+                    // The tool's name over its bar: the bar's foot is
+                    // past the card's edge.
                     VStack(spacing: GlassTokens.Space.s2) {
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(LinearGradient(colors: [ink.opacity(0.95), ink.opacity(0.45)],
-                                                 startPoint: .top, endPoint: .bottom))
-                            .frame(width: Self.barWidth,
-                                   height: max(8, Self.maxBarHeight * Double(bar.tokens) / most))
                         Text(InferenceTabView.toolName(bar.tool))
                             .glassType(GlassTokens.TypeScale.micro)
                             .foregroundStyle(ink.opacity(0.85))
                             .lineLimit(1)
                             .frame(width: Self.barWidth + 22)
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(LinearGradient(colors: [ink.opacity(0.95), ink.opacity(0.45)],
+                                                 startPoint: .top, endPoint: .bottom))
+                            .frame(width: Self.barWidth,
+                                   height: max(8, Self.maxBarHeight * Double(bar.tokens) / most))
                     }
                 }
             }
             .shadow(color: .black.opacity(0.2), radius: 12, y: 8)
+            .frame(maxHeight: .infinity, alignment: .bottom)
+            .offset(x: 30, y: 40)
         }
     }
 }

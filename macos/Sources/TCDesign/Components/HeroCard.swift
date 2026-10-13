@@ -37,9 +37,10 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     }
 
     /// The card's least height, and how much of its width the words take:
-    /// the rest is the graphic's.
+    /// the rest is the graphic's. The words set the card's height, so a
+    /// longer title or a wrapped line never pushes the action off the card.
     static var minHeight: CGFloat { 156 }
-    static var textShare: CGFloat { 0.62 }
+    static var graphicReserve: CGFloat { 150 }
     /// The title's face: larger and heavier than a card title, as a hero's
     /// is (the references' display type, on the system face).
     static var titleType: GlassTypeStyle { GlassTokens.TypeScale.display.weight(.heavy) }
@@ -47,18 +48,16 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     public var body: some View {
         let shape = RoundedRectangle(cornerRadius: GlassTier.card.radius, style: .continuous)
         Button(action: action) {
-            GeometryReader { proxy in
-                ZStack(alignment: .topLeading) {
+            words
+                .padding(.trailing, Self.graphicReserve)
+                .frame(maxWidth: .infinity, minHeight: Self.minHeight, alignment: .leading)
+                .background(alignment: .trailing) {
+                    // Behind the words, sized to the card, past its edges.
                     graphic
-                        .frame(width: proxy.size.width * (1 - Self.textShare) + 40, height: proxy.size.height)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .offset(x: 24)
+                        .frame(width: Self.graphicReserve + 60)
+                        .frame(maxHeight: .infinity)
                         .accessibilityHidden(true)
-                    words
-                        .frame(width: proxy.size.width * Self.textShare, alignment: .leading)
                 }
-            }
-            .frame(minHeight: Self.minHeight)
             .background {
                 ZStack {
                     shape.fill(gradient.linear)
@@ -123,6 +122,9 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
 
 /// A hero's graphic built from a symbol: the symbol large and bright,
 /// tilted, with two smaller echoes of `accent` around it, all in heroInk.
+/// It is larger than the card is tall and set past its trailing and
+/// bottom edges, so the card's border cuts it off (owner, 2026-10-12, as
+/// the reference does).
 public struct GlassHeroSymbol: View {
     private let systemImage: String
     private let accent: String
@@ -136,19 +138,26 @@ public struct GlassHeroSymbol: View {
         let ink = GlassTokens.Color.heroInk.color
         ZStack {
             Image(systemName: systemImage)
-                .glassGlyph(108, weight: .bold)
+                .glassGlyph(Self.symbolSize, weight: .bold)
                 .foregroundStyle(LinearGradient(
                     colors: [ink.opacity(0.95), ink.opacity(0.35)], startPoint: .top, endPoint: .bottom))
                 .rotationEffect(.degrees(-12))
                 .shadow(color: .black.opacity(0.25), radius: 18, y: 10)
             Image(systemName: accent)
-                .glassGlyph(30, weight: .semibold)
+                .glassGlyph(34, weight: .semibold)
                 .foregroundStyle(ink.opacity(0.8))
-                .offset(x: -70, y: -46)
+                .offset(x: -120, y: -78)
             Image(systemName: accent)
-                .glassGlyph(16, weight: .semibold)
+                .glassGlyph(18, weight: .semibold)
                 .foregroundStyle(ink.opacity(0.6))
-                .offset(x: 58, y: 52)
+                .offset(x: -132, y: 34)
         }
+        // Past the card's trailing and bottom edges.
+        .offset(Self.bleed)
     }
+
+    /// The main symbol's size, past the card's height, and how far the
+    /// whole graphic is pushed past its trailing and bottom edges.
+    static var symbolSize: CGFloat { 190 }
+    static var bleed: CGSize { CGSize(width: 46, height: 34) }
 }

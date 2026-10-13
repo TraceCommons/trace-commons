@@ -65,6 +65,16 @@ struct FlowMapView: View {
             .overlay(alignment: .bottomTrailing) {
                 if zoomable { zoomControls.padding(GlassTokens.Space.mapOverlayInset) }
             }
+            // The legend stays at the window's foot, whatever the map's
+            // zoom or focus (owner, 2026-10-12): it is not drawn in the
+            // map's own space, which scales and moves.
+            .overlay(alignment: .bottomLeading) {
+                if !legend.isEmpty {
+                    legendView
+                        .padding(GlassTokens.Space.mapOverlayInset)
+                        .accessibilityHidden(true)
+                }
+            }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityName)
@@ -121,7 +131,6 @@ struct FlowMapView: View {
                 at: fit.point(overflow.at))
         }
 
-        if !legend.isEmpty { drawLegend(in: &context, fit: fit) }
     }
 
     private func drawNode(_ node: FlowMapScene.Node, in context: inout GraphicsContext, fit: FlowMapGeometry) {
@@ -256,32 +265,31 @@ struct FlowMapView: View {
         }
     }
 
-    private func drawLegend(in context: inout GraphicsContext, fit: FlowMapGeometry) {
-        var x: CGFloat = 24
-        for mode in legend {
-            let rule = Self.rule(mode)
-            let centre = fit.point(CGPoint(x: x, y: 730))
-            let r = 5 * fit.scale
-            let disc = Path(ellipseIn: CGRect(x: centre.x - r, y: centre.y - r, width: r * 2, height: r * 2))
-            context.fill(disc, with: .color(rule.fill.color))
-            context.stroke(disc, with: .color(rule.stroke.color), lineWidth: 1.5 * fit.scale)
-            let text = context.resolve(
-                Text(ProjectCopy.modeChoiceLabel(mode)).font(GlassTokens.TypeScale.micro.font.weight(.regular))
-                    .foregroundStyle(GlassColor.textTertiary))
-            let size = text.measure(in: CGSize(width: 400, height: 40))
-            context.draw(text, at: CGPoint(x: centre.x + r + 4, y: centre.y), anchor: .leading)
-            x += (r * 2 + 4 + size.width + 14) / fit.scale
+    /// The rule legend, then #1146's last item: a tool that is not watched,
+    /// a dashed ring. Fixed in size, at the map's foot.
+    private var legendView: some View {
+        HStack(spacing: GlassTokens.Space.s5) {
+            ForEach(legend, id: \.self) { mode in
+                let rule = Self.rule(mode)
+                legendItem(ProjectCopy.modeChoiceLabel(mode)) {
+                    Circle().fill(rule.fill.color).overlay(Circle().stroke(rule.stroke.color, lineWidth: 1.5))
+                }
+            }
+            if let word = FlowMapScene.words?.legendNotWatched {
+                legendItem(word) {
+                    Circle().stroke(GlassTokens.Color.statusOff.color, style: StrokeStyle(lineWidth: 1.5, dash: [2, 2]))
+                }
+            }
         }
-        // #1146's last item: a tool that is not watched, a dashed ring.
-        if let word = FlowMapScene.words?.legendNotWatched {
-            let centre = fit.point(CGPoint(x: x, y: 730))
-            let r = 5 * fit.scale
-            let disc = Path(ellipseIn: CGRect(x: centre.x - r, y: centre.y - r, width: r * 2, height: r * 2))
-            context.stroke(disc, with: .color(GlassTokens.Color.statusOff.color),
-                           style: StrokeStyle(lineWidth: 1.5 * fit.scale, dash: [2 * fit.scale, 2 * fit.scale]))
-            context.draw(
-                Text(word).font(GlassTokens.TypeScale.micro.font.weight(.regular)).foregroundStyle(GlassColor.textTertiary),
-                at: CGPoint(x: centre.x + r + 4, y: centre.y), anchor: .leading)
+        .fixedSize()
+    }
+
+    private func legendItem(_ word: String, @ViewBuilder dot: () -> some View) -> some View {
+        HStack(spacing: GlassTokens.Space.s2) {
+            dot().frame(width: 10, height: 10)
+            Text(word)
+                .glassType(GlassTokens.TypeScale.micro.weight(.regular))
+                .foregroundStyle(GlassColor.textTertiary)
         }
     }
 
