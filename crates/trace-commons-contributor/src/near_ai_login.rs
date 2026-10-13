@@ -52,8 +52,12 @@ pub(crate) const SIGN_IN_UNFINISHED: &str =
 pub(crate) const SIGN_IN_UNAVAILABLE: &str = "Couldn't start NEAR AI sign-in. Try again shortly.";
 /// Enrolled, and the consent answers could not be recorded.
 pub(crate) const CONSENT_NOT_SAVED: &str = "Enrolled, but your consent choices weren't saved. Run `trace-commons-contributor consent scopes` to choose them.";
-/// `--allowed-hosts` on the NEAR AI route, which cannot carry it.
-pub(crate) const ALLOWED_HOSTS_REFUSED: &str = "--allowed-hosts works only with --grant or --invite. For NEAR AI sign-in, set TRACE_COMMONS_ALLOWED_HOSTS.";
+/// `--allowed-hosts` on the NEAR AI route, which cannot carry it: the
+/// sign-in's host list comes from TRACE_COMMONS_ALLOWED_HOSTS in the
+/// environment of whichever process answers it (a running daemon, or this
+/// one).
+pub(crate) const ALLOWED_HOSTS_REFUSED: &str =
+    "--allowed-hosts works only with --grant or --invite.";
 
 /// How long to wait on the browser, as the macOS first run does.
 pub(crate) const BROWSER_WAIT: Duration = Duration::from_secs(600);

@@ -73,9 +73,10 @@ it.
    on this machine. If you are already signed in to NEAR AI here (for
    example in the desktop app), the browser step is skipped. When the
    daemon is running, `login` goes through it, so the app and the CLI share
-   one sign-in and one enrollment. Restrict the hosts the sign-in may reach
-   with `TRACE_COMMONS_ALLOWED_HOSTS`; `--allowed-hosts` applies to the
-   invite and grant routes only.
+   one sign-in and one enrollment. `--allowed-hosts` applies to the invite
+   and grant routes only; the sign-in reads `TRACE_COMMONS_ALLOWED_HOSTS`
+   from the environment of whichever process runs it (the daemon when one is
+   running, otherwise `login` itself).
 
    Other ways to enroll:
 

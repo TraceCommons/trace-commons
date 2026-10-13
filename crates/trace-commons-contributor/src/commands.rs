@@ -2845,6 +2845,47 @@ mod login_route_tests {
         }
     }
 
+    /// A real `/v1/onboard` responder on an ephemeral `127.0.0.1` port.
+    async fn spawn_onboard_mock() -> String {
+        use axum::{Json, Router, routing::post};
+        let router = Router::new().route(
+            "/v1/onboard",
+            post(|| async move {
+                Json(serde_json::json!({
+                    "schema_version": "trace_commons.onboard_response.v1",
+                    "tenant_id": "tenant-mock",
+                    "ingest_url": "https://ingest.invalid",
+                    "issuer_url": "https://issuer.invalid",
+                    "audience": "trace-commons-upload",
+                    "device_key_id": "sha256:mockdevice",
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// The invite route still enrolls, from the flag or the environment,
+    /// with the same consent recording as before, and the NEAR AI sign-in
+    /// is never started.
+    #[tokio::test]
+    async fn an_invite_still_enrolls_through_the_invite_route() {
+        let base = spawn_onboard_mock().await;
+        let invite = format!("{base}/onboard#SOME-CODE");
+        for (flag, env) in [(Some(invite.as_str()), None), (None, Some(invite.as_str()))] {
+            let (_d, store) = store();
+            login_with(&store, None, flag, env, None, None, true, &mut never)
+                .await
+                .unwrap();
+            let cfg = store.load_config().unwrap().expect("enrolled");
+            assert_eq!(cfg.tenant_id, "tenant-mock", "{flag:?} {env:?}");
+            assert_eq!(cfg.consent_scopes, vec!["debugging_evaluation"]);
+            assert_eq!(cfg.consent_scopes_chosen, Some(false));
+        }
+    }
+
     #[tokio::test]
     async fn an_enrolled_device_says_so_and_does_not_sign_in() {
         let (_d, store) = store();
