@@ -661,7 +661,7 @@ pub fn withdraw_canonical_body(reach: &str) -> Option<&'static str> {
 }
 
 /// What this machine can honestly say about how far a trace got, read off
-/// the history record's `status`. Not the server's tier: this is the weaker
+/// the history record's status bucket. Not the server's tier: this is the weaker
 /// thing the client knows before it asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WithdrawStage {

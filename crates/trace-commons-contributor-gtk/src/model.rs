@@ -823,8 +823,15 @@ pub struct HistoryRecord {
     pub project_id: String,
     #[serde(default)]
     pub project_label: String,
+    /// The raw receipt status. Only the label reads it; every decision
+    /// reads [`HistoryRecord::bucket`].
     #[serde(default)]
     pub status: String,
+    /// The daemon's bucket for `status` (#1284): `processing` is
+    /// `submitted`, every other status is itself. The daemon owns that rule
+    /// so no shell keeps a copy. Empty from a daemon older than the field.
+    #[serde(default)]
+    pub bucket: String,
     #[serde(default)]
     pub credit_points_pending: f32,
     #[serde(default)]
@@ -834,6 +841,22 @@ pub struct HistoryRecord {
     /// address".
     #[serde(default)]
     pub explanations: Vec<String>,
+}
+
+impl HistoryRecord {
+    /// What Withdraw, counts and filters read: the daemon's `bucket`, or the
+    /// raw `status` from a daemon that predates it.
+    ///
+    /// The fallback deliberately does not map `processing` itself: that rule
+    /// is the daemon's, and an older daemon's `processing` row reads as a
+    /// status this build does not recognise -- closed, no Withdraw.
+    pub fn bucket(&self) -> &str {
+        if self.bucket.is_empty() {
+            &self.status
+        } else {
+            &self.bucket
+        }
+    }
 }
 
 /// `history_rollup`.
@@ -1687,6 +1710,28 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(r.project_id, "proj_a");
+    }
+
+    #[test]
+    fn a_history_record_reads_the_daemons_bucket_over_its_raw_status() {
+        let r: HistoryRecord = serde_json::from_value(serde_json::json!({
+            "submission_id": "s1", "status": "processing", "bucket": "submitted"
+        }))
+        .unwrap();
+        assert_eq!(r.status, "processing");
+        assert_eq!(r.bucket(), "submitted");
+    }
+
+    #[test]
+    fn a_history_record_with_no_bucket_falls_back_to_its_raw_status() {
+        // An older daemon sends no `bucket`. The fallback is the status as
+        // sent -- `processing` included, which this shell does not map.
+        let r: HistoryRecord = serde_json::from_value(serde_json::json!({
+            "submission_id": "s1", "status": "processing"
+        }))
+        .unwrap();
+        assert_eq!(r.bucket, "");
+        assert_eq!(r.bucket(), "processing");
     }
 
     #[test]

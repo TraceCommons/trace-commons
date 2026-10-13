@@ -696,7 +696,9 @@ const WITHDRAWABLE_STATUSES: [&str; 6] = [
 
 /// Whether a record gets a withdraw button.
 ///
-/// Only a record in one of [`WITHDRAWABLE_STATUSES`] does. The other
+/// Only a record whose [`HistoryRecord::bucket`] is one of
+/// [`WITHDRAWABLE_STATUSES`] does -- the bucket, not the raw status, so a
+/// `processing` receipt is offered Withdraw exactly as `submitted` is. The other
 /// statuses the core names -- withdrawn, revoked, purged, expired -- are
 /// closed: an already-withdrawn record stays on the list reading as
 /// withdrawn rather than being dropped or re-labelled. A status this build
@@ -707,7 +709,7 @@ const WITHDRAWABLE_STATUSES: [&str; 6] = [
 /// so the button would have nothing to send and would fail for a reason the
 /// contributor could do nothing about.
 fn offers_withdrawal(record: &HistoryRecord) -> bool {
-    WITHDRAWABLE_STATUSES.contains(&record.status.as_str()) && !record.submission_id.is_empty()
+    WITHDRAWABLE_STATUSES.contains(&record.bucket()) && !record.submission_id.is_empty()
 }
 
 /// The withdraw button, or -- once an attempt has been made -- what that
@@ -770,10 +772,12 @@ fn withdraw_control(app: &Rc<App>, record: &HistoryRecord) -> gtk::Box {
     button.add_css_class("tc-quiet");
     button.set_halign(gtk::Align::Start);
     let app = Rc::clone(app);
-    let status = record.status.clone();
+    // The bucket, like `offers_withdrawal`: a `processing` row is confirmed
+    // as the `submitted` row it is.
+    let bucket = record.bucket().to_string();
     let submission_id = record.submission_id.clone();
     button.connect_clicked(move |_| {
-        confirm_withdrawal(&app, &submission_id, &status);
+        confirm_withdrawal(&app, &submission_id, &bucket);
     });
     row.append(&button);
     row
@@ -784,10 +788,10 @@ fn withdraw_control(app: &Rc<App>, record: &HistoryRecord) -> gtk::Box {
 ///
 /// The tier is computed by the server *during* the withdrawal, so it cannot
 /// be stated here. `copy::withdraw_confirmation` decides what may honestly
-/// be said from a local `status`; this function only lays it out, and the
-/// body carrying the cannot-be-recalled clause is the one weighted.
-fn confirm_withdrawal(app: &Rc<App>, submission_id: &str, status: &str) {
-    let confirmation = copy::withdraw_confirmation(copy::WithdrawStage::of_status(status));
+/// be said from a local status bucket; this function only lays it out, and
+/// the body carrying the cannot-be-recalled clause is the one weighted.
+fn confirm_withdrawal(app: &Rc<App>, submission_id: &str, bucket: &str) {
+    let confirmation = copy::withdraw_confirmation(copy::WithdrawStage::of_status(bucket));
 
     let dialog = adw::MessageDialog::new(Some(&app.window), Some(confirmation.question), None);
     let body = gtk::Box::new(gtk::Orientation::Vertical, space::S);
@@ -1386,6 +1390,7 @@ mod tests {
             project_id: String::new(),
             project_label: String::new(),
             status: status.to_string(),
+            bucket: String::new(),
             credit_points_pending: 0.0,
             credit_points_final: None,
             explanations: vec![],
@@ -1418,6 +1423,42 @@ mod tests {
                 "{status} cannot be withdrawn"
             );
         }
+    }
+
+    fn bucketed(status: &str, bucket: &str) -> HistoryRecord {
+        HistoryRecord {
+            bucket: bucket.to_string(),
+            ..record(status, "sub-1")
+        }
+    }
+
+    #[test]
+    fn a_processing_record_bucketed_submitted_is_withdrawn_as_submitted() {
+        // #1284: `processing` is "uploaded, no verdict yet". The daemon says
+        // so through `bucket`, and this shell reads only that.
+        let processing = bucketed("processing", "submitted");
+        assert!(offers_withdrawal(&processing));
+        assert_eq!(
+            copy::WithdrawStage::of_status(processing.bucket()),
+            copy::WithdrawStage::of_status("submitted")
+        );
+        // The chip still reads the raw status.
+        assert_eq!(status_word(&processing.status), status_word("processing"));
+    }
+
+    #[test]
+    fn withdrawal_reads_the_bucket_not_the_raw_status() {
+        // A closed bucket is closed whatever the raw status says.
+        assert!(!offers_withdrawal(&bucketed("submitted", "withdrawn")));
+    }
+
+    #[test]
+    fn a_record_with_no_bucket_falls_back_to_its_status_and_fails_closed() {
+        // An older daemon sends no `bucket`: the raw status decides, and
+        // this shell keeps no processing-to-submitted rule of its own, so a
+        // bare `processing` stays closed.
+        assert!(offers_withdrawal(&record("submitted", "sub-1")));
+        assert!(!offers_withdrawal(&record("processing", "sub-1")));
     }
 
     #[test]
@@ -1503,6 +1544,7 @@ mod tests {
             project_id: String::new(),
             project_label: String::new(),
             status: "accepted".to_string(),
+            bucket: String::new(),
             credit_points_pending: 0.0,
             credit_points_final: Some(12.5),
             explanations: vec![],
@@ -1522,6 +1564,7 @@ mod tests {
             project_id: String::new(),
             project_label: String::new(),
             status: "submitted".to_string(),
+            bucket: String::new(),
             credit_points_pending: 3.0,
             credit_points_final: None,
             explanations: vec![],
