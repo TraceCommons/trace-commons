@@ -666,7 +666,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `managed_terminal` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -684,6 +684,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `nudge_opened` | `kind` (**required**: `idle_sessions`, `review_backlog` or `verdicts_landed`); `subject` (reserved, as above) | `opened: true` | sent only from the suggestion's own action, never for being shown; for `verdicts_landed` it acknowledges the news; local only; publishes `status_changed`; see "`status.nudge`" below |
 | `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
 | `set_menu_bar_mark_enabled` | `on` (**required**, boolean) | `menu_bar_mark_enabled` | the menu-bar news mark and halo switch; writes `menu_bar_mark_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
+| `set_managed_terminal` | `terminal` (**required**: `terminal`, `ghostty` or `iterm2`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in on macOS; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
 | `set_notifications_enabled` | `on` (**required**, boolean) | `notifications_enabled` | "Notifications from Trace Commons", the master switch; writes `notifications_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
 | `set_notify_kind` | `kind` (**required**: `digest`, `idle_sessions`, `verdicts_landed`, `weekly_recap` or `insights_tip`), `on` (**required**, boolean) | `kind`, `on` | one notification kind's switch; writes `notify.<kind>` through `set_settings`; answering `verdicts_landed` or `idle_sessions` ends that kind's one-time offer; publishes `status_changed` when it changes; see "Notification settings" below |
 | `subscribe` | `accepts[]` (optional: opt-in event names) | `subscribed: true`, plus `accepts[]` when the request carried `accepts`; then a `snapshot` event | see "Opt-in events" below |
@@ -4715,7 +4716,7 @@ Takes a JSON object whose top-level keys must come from
 `verdicts_offer_pending`, `idle_offer_pending`,
 `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`,
 `insights_context_threshold`, `insights_counter_pass`,
-`insights_recap_card_enabled` --
+`insights_recap_card_enabled`, `managed_terminal` --
 a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
@@ -4754,6 +4755,20 @@ and a change by either route publishes `status_changed`, because
 `verdicts_offer_pending` and `idle_offer_pending` are the notification
 settings; see ["Notification settings"](#notification-settings) for their
 defaults and refusals.
+
+`managed_terminal` (string, default `terminal`) is the terminal app a
+managed session opens in on macOS: `terminal`, `ghostty` or `iterm2`, and
+nothing else. Any other value, `null` included, is `bad_params` /
+`settings-invalid-value`; no app name, path or command is ever accepted. A
+settings file holding a value this build does not know loads it as
+unrecognized: `managed_snapshot` then reports no `terminal_current` and no
+`terminal_destination`, a launch is refused, and nothing falls back to
+Terminal. `set_managed_terminal` writes the same setting. Windows and Linux
+ignore it. The managed snapshot's `capabilities` carries
+`terminal_current` (the chosen id, or `null`), `terminal_choices`
+(`[{id, name}]` of the apps installed on this Mac; empty elsewhere) and
+`terminal_destination` (the chosen app's name). A launch whose chosen app
+is not installed is refused with `managed-terminal-not-installed`.
 
 #### Notification settings
 

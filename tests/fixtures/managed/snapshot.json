@@ -56,6 +56,17 @@
     "managed_launch": true,
     "terminal_launch": true,
     "terminal_destination": "Terminal",
+    "terminal_current": "terminal",
+    "terminal_choices": [
+      {
+        "id": "terminal",
+        "name": "Terminal"
+      },
+      {
+        "id": "ghostty",
+        "name": "Ghostty"
+      }
+    ],
     "near_ai_signin": true
   },
   "copy": {
@@ -126,6 +137,8 @@
     "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
     "sign_in_needed": "Sign in to NEAR AI to start a session.",
     "sign_in_near_ai": "Sign in",
-    "sign_in_near_ai_accessibility": "Sign in to NEAR AI"
+    "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
+    "terminal_choice": "Open sessions in",
+    "terminal_not_installed": "{terminal} isn't installed. Choose another terminal in Settings."
   }
 }

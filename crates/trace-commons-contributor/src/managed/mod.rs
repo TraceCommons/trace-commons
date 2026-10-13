@@ -100,6 +100,8 @@ pub enum ManagedError {
     LaunchUnknown,
     #[error("invalid managed request")]
     InvalidRequest,
+    #[error("the chosen terminal app is not installed")]
+    TerminalNotInstalled,
 }
 
 pub mod copy;

@@ -16,6 +16,15 @@
 //!   sign-in.
 //! - `sign_in_near_ai_accessibility` "Sign in to NEAR AI" -- its accessible
 //!   name.
+//!
+//! The terminal choice on macOS. Proposed 2026-10-13, pending approval:
+//! - `terminal_choice` "Open sessions in" -- the Settings picker's label,
+//!   and its accessible name. Its options are the app names the snapshot
+//!   sends in `capabilities.terminal_choices`.
+//! - `terminal_not_installed` "{terminal} isn't installed. Choose another
+//!   terminal in Settings." The line a shell shows for the refusal
+//!   `managed-terminal-not-installed`; it fills `{terminal}` from
+//!   `capabilities.terminal_destination`.
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "Managed sessions",
@@ -85,7 +94,9 @@ pub fn copy() -> serde_json::Value {
             "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
             "sign_in_needed": "Sign in to NEAR AI to start a session.",
             "sign_in_near_ai": "Sign in",
-            "sign_in_near_ai_accessibility": "Sign in to NEAR AI"
+            "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
+            "terminal_choice": "Open sessions in",
+            "terminal_not_installed": "{terminal} isn't installed. Choose another terminal in Settings."
     }"#).expect("static managed copy is valid JSON")
 }
 
@@ -126,6 +137,17 @@ mod tests {
         );
         assert_eq!(copy["sign_in_near_ai"], "Sign in");
         assert_eq!(copy["sign_in_near_ai_accessibility"], "Sign in to NEAR AI");
+    }
+
+    /// The terminal choice reads these words, exactly as proposed.
+    #[test]
+    fn the_terminal_choice_has_its_words() {
+        let copy = copy();
+        assert_eq!(copy["terminal_choice"], "Open sessions in");
+        assert_eq!(
+            copy["terminal_not_installed"],
+            "{terminal} isn't installed. Choose another terminal in Settings."
+        );
     }
 
     /// Every lifecycle and sign-in state a shell can be sent has a label,
