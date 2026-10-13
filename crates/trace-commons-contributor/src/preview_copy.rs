@@ -10,8 +10,9 @@ pub const REDACTION_CATEGORY_SENSITIVE_FIELD: &str =
     "Fields whose name marks them sensitive, like password or authorization.";
 pub const REDACTION_CATEGORY_TOOL_SENSITIVE_FIELD: &str =
     "Tool-call arguments whose name marks them sensitive.";
-pub const REDACTION_CATEGORY_RESIDUAL: &str = "Scrubbing found this but could not remove it. It is usually a \
-     credential you typed into a correction, which is kept on purpose, or text in a place scrubbing does not reach.";
+pub const REDACTION_CATEGORY_RESIDUAL: &str = "Still in this trace: scrubbing found it but could not take it out. \
+     It is usually a credential you typed into a correction, which is kept on purpose, or text in a place \
+     scrubbing does not reach.";
 pub const REDACTION_CATEGORY_UNKNOWN: &str =
     "Removed by a pattern this version has no description for.";
 
