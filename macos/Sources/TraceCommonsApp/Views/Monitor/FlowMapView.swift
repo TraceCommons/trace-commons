@@ -143,7 +143,7 @@ struct FlowMapView: View {
             layer.fill(disc, with: .color(GlassColor.ink(0.12)))
             mark(tool, centre: centre, side: 16 * fit.scale, in: &layer)
             if node.dashed {
-                // #1146's "Tool not watched": a dashed rim.
+                // The legend's "Not watched" (#1146's "Tool not watched"): a dashed rim.
                 layer.stroke(disc, with: .color(GlassTokens.Color.statusOff.color),
                              style: StrokeStyle(lineWidth: 1.5 * fit.scale, dash: [2 * fit.scale, 2 * fit.scale]))
             }

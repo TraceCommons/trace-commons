@@ -245,7 +245,7 @@ struct TracesTreeView: View {
     /// The route every folder mode change takes, from the tree's switch and
     /// menu and from the Folder inspector's picker alike. Arming always asks
     /// first, in the core's words; ignoring asks when it would clear waiting
-    /// sessions, with their count; Ask me is a direct call. With no words
+    /// sessions, with their count; Ask is a direct call. With no words
     /// from the core a change that needs them is not made: the confirmation
     /// is never shown without what it says.
     static func modeChange(_ folder: TracesTree.FolderNode, _ mode: ProjectMode) -> ModeChange {

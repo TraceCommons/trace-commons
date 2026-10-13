@@ -967,7 +967,7 @@ final class TracesFolderFirstTreeTests: XCTestCase {
 
     /// An ignored folder is drawn while the View menu's "Show ignored
     /// folders" asks for it (Ron's shell; hidden by default), drawn off and
-    /// saying the core's "ignored" line, with a switch back to Ask me and
+    /// saying the core's "ignored" line, with a switch back to Ask and
     /// no Submit. It resolves as a selection, so its inspector can show its
     /// rule.
     func test_ignoredFoldersStayInTheTree() throws {
@@ -988,9 +988,9 @@ final class TracesFolderFirstTreeTests: XCTestCase {
 
         let labels = try XCTUnwrap(TracesStore.disclosureCopy).folderModeLabels
         XCTAssertEqual(TracesTreeView.folderSub(folder, words: words, modeLabels: labels), words.tree.ignoredFolder)
-        // Back to Ask me (the Folder inspector's picker) is a direct write.
+        // Back to Ask (the Folder inspector's picker) is a direct write.
         guard case .apply = TracesTreeView.modeChange(folder, .ask) else {
-            return XCTFail("switching an ignored folder back to Ask me is a direct write")
+            return XCTFail("switching an ignored folder back to Ask is a direct write")
         }
         let store = TracesStore(client: SampleDaemonClient(.normalDay))
         XCTAssertFalse(FolderInspector.offersSubmitAll(folder, store: store))

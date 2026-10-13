@@ -71,7 +71,7 @@ final class GlassParityRoundOneTests: XCTestCase {
     /// The Traces legend and the credential node take the core's words.
     func test_theMapWordsAreTheCores() throws {
         let words = try XCTUnwrap(FlowMapScene.words)
-        XCTAssertEqual(words.legendNotWatched, "Tool not watched")
+        XCTAssertEqual(words.legendNotWatched, "Not watched")
         XCTAssertEqual(words.credential, "NEAR AI credential")
         XCTAssertEqual(words.noneFound, "No configured tools found.")
         let empty = FlowMapScene.privateAI(

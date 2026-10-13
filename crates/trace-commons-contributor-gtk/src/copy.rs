@@ -1648,7 +1648,7 @@ pub const ONBOARD_WATCH_UNKNOWN_LABEL: &str = "Traces with no project";
 /// might try to fix.
 ///
 /// It replaces the state line rather than adding a third: "you'll always be
-/// asked" already says what `Ask me` says.
+/// asked" already says what `Ask` says.
 pub const ONBOARD_WATCH_UNKNOWN_NOTE: &str = concat!(
     app_name!(),
     " can't tell which folder these ran in, so they can never be contributed automatically. \

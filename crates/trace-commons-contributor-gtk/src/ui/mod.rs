@@ -1109,7 +1109,7 @@ impl App {
         label
     }
 
-    /// "Ask me": Settings' call, unchanged -- `set_project_mode` with
+    /// "Ask": Settings' call, unchanged -- `set_project_mode` with
     /// this project's id and `notify_only`. It also answers a rewording
     /// notice. A refusal changes nothing; the core's refusal line says so.
     fn ask_first_button(

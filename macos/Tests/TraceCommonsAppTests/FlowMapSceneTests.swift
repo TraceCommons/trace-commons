@@ -124,8 +124,8 @@ final class FlowMapSceneTests: XCTestCase {
         // Unset is never said as off; unknown is said as neither.
         XCTAssertEqual(words.tool(.unknown, waiting: 0), words.toolNothingWaiting)
         XCTAssertNotEqual(words.tool(.unset, waiting: 0), words.toolOff)
-        XCTAssertEqual(words.folder(path: "/a", rule: "Ask me", waiting: 1, contributed: 2),
-                       "/a. Rule: Ask me. 1 trace waiting, 2 contributed.")
+        XCTAssertEqual(words.folder(path: "/a", rule: "Ask", waiting: 1, contributed: 2),
+                       "/a. Rule: Ask. 1 trace waiting, 2 contributed.")
         XCTAssertEqual(words.folder(path: nil, rule: nil, waiting: 3, contributed: nil),
                        "Rule: not set. 3 traces waiting, \u{2014} contributed.")
     }

@@ -217,7 +217,7 @@ pub struct MonitorTracesCopy {
 //   [`MonitorShellCopy`], and the words that carry his Home and History
 //   structure (headings, project groups, community and credit record) are
 //   [`MonitorHomeHistoryCopy`].
-// - No "Share automatically": the folder rule is Ask me / Automatic /
+// - No "Share automatically": the folder rule is Ask / Automatic /
 //   Never, from `project_copy::FOLDER_MODE_LABELS`.
 
 /// Every placeholder the monitor tables use, each written `{name}`:
@@ -1009,7 +1009,7 @@ pub struct MonitorFlowMapCopy {
     pub hub: &'static str,
     /// The library's card: `{label}` is the traces contributed. Approved
     /// 2026-10-07 (owner wording after the #1273 review): folders set to
-    /// Never do not wait, so it names Ask me rather than "every other".
+    /// Never do not wait, so it names Ask rather than "every other".
     pub library: &'static str,
     /// A tool's card title: `{label}` is its folders.
     pub tool_title: &'static str,
@@ -1031,7 +1031,8 @@ pub struct MonitorFlowMapCopy {
     pub connected: &'static str,
     pub connected_line: &'static str,
     /// The Traces legend's last item: a tool that is not watched, drawn
-    /// dashed.
+    /// dashed. "Not watched", without "Tool" (owner, 2026-10-12). DRAFT,
+    /// NEEDS APPROVAL.
     pub legend_not_watched: &'static str,
     /// The Private AI destination's label: the credential the tools'
     /// calls are answered with.
@@ -1444,7 +1445,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             tools: "{count} tools",
             hub: "Traces are collected here. {label} waiting for you; {count} contributed.",
             library: "{label} contributed from this machine. Folders set to contribute \
-                automatically send scrubbed traces here; folders set to Ask me wait for you.",
+                automatically send scrubbed traces here; folders set to Ask wait for you.",
             tool_title: "{tool} \u{00b7} {label}",
             tool_watched: "Watched: new traces are collected on this computer.",
             tool_waiting: "{count} waiting for you.",
@@ -1456,7 +1457,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             folder_counts: "{label} waiting, {count} contributed.",
             connected: "{label} connected.",
             connected_line: "{label} connected",
-            legend_not_watched: "Tool not watched",
+            legend_not_watched: "Not watched",
             credential: "NEAR AI credential",
             none_found: "No configured tools found.",
         },
@@ -1471,7 +1472,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             insights_subtitle: "Patterns in how you use your agents, read on this Mac.",
             catalogue_subtitle: "What the commons is asking for.",
             uncontributed: "Uncontributed",
-            uncontributed_size: "{size} on this Mac",
+            uncontributed_size: "{size}",
             uncontributed_estimate: "Could earn {min}\u{2013}{max}",
             credit_delta: "{amount} since yesterday",
             credit_delta_none: "No change since yesterday",
@@ -1632,7 +1633,7 @@ mod tests {
     }
 
     /// Ron's #1146 inspector words (#1241): every one is there, and none of
-    /// them offers "Share automatically" -- the folder rule is Ask me /
+    /// them offers "Share automatically" -- the folder rule is Ask /
     /// Automatic / Never (`project_copy::contribution_mode_copy`).
     #[test]
     fn rons_inspector_words_are_whole_and_never_say_share_automatically() {
@@ -1910,7 +1911,7 @@ mod tests {
         assert_eq!(
             map.library,
             "{label} contributed from this machine. Folders set to contribute automatically \
-             send scrubbed traces here; folders set to Ask me wait for you."
+             send scrubbed traces here; folders set to Ask wait for you."
         );
         // Watched sessions are queued unscrubbed until preview, and the
         // tools record them: the hub and a watched tool claim neither.

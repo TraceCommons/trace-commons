@@ -132,7 +132,7 @@ final class LiveDaemonClientTests: XCTestCase {
     }
 
     /// The pill's override writes (#1208): `confirm` goes only with Auto
-    /// contribute, only as `true`; Ask me and Never carry the mode alone;
+    /// contribute, only as `true`; Ask and Never carry the mode alone;
     /// clear carries nothing. Each reply decodes as the daemon sends it.
     func testTheContributionOverrideSendsConfirmOnlyForAutoContribute() async throws {
         let transport = ScriptedTransport { method, _ in

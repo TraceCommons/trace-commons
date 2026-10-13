@@ -5,7 +5,7 @@
 //! The strings are Ron's, verbatim, with these departures:
 //!
 //! - No "Share automatically". The Sharing and per-folder rule choices are
-//!   `project_copy::contribution_mode_copy` (Ask me / Automatic / Never),
+//!   `project_copy::contribution_mode_copy` (Ask / Automatic / Never),
 //!   and a shell renders those.
 //! - No data-use scope title or description. Those are the core's consent
 //!   table, `daemon::enroll::consent_options`, which carries each scope's
@@ -333,7 +333,7 @@ pub struct UsesCopy {
     /// 2026-10-08: the owner's example wording.
     pub more_about: &'static str,
     pub start: &'static str,
-    /// Start finished on Ask me because the Automatic grant was refused.
+    /// Start finished on Ask because the Automatic grant was refused.
     pub sharing_refused: &'static str,
     /// Start stopped before anything it sends was saved: the data uses.
     pub scopes_failed: &'static str,
@@ -564,7 +564,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             sharing_unavailable: "Sharing copy unavailable. Starting is disabled.",
             more_about: "More about {title}",
             start: "Start sharing",
-            sharing_refused: "Setup finished, but Automatic wasn't turned on. Sharing is on Ask me.",
+            sharing_refused: "Setup finished, but Automatic wasn't turned on. Sharing is on Ask.",
             scopes_failed: "How your traces may be used couldn't be saved. Setup hasn't finished; try Start sharing again.",
             rules_failed: "A folder rule or past-trace choice couldn't be saved. Setup hasn't finished; try Start sharing again.",
             private_ai_failed: "The Private AI setting couldn't be saved. Setup hasn't finished; try Start sharing again.",
@@ -880,7 +880,7 @@ mod tests {
     #[test]
     fn start_failures_say_what_happened() {
         let uses = first_run_copy().uses;
-        assert!(uses.sharing_refused.contains("Ask me"));
+        assert!(uses.sharing_refused.contains("on Ask."));
         assert!(uses.sharing_refused.contains("Automatic"));
         for line in [
             uses.sharing_refused,

@@ -2585,7 +2585,7 @@ impl Queue {
 ///   watcher never approves one unattended, so uncounted it would sit
 ///   unseen until it expired.
 ///
-/// A folder in `NotifyOnly` ("Ask me") always counts every `Pending` entry:
+/// A folder in `NotifyOnly` ("Ask") always counts every `Pending` entry:
 /// that is the ordinary Ask-me case the badge exists for.
 ///
 /// An `Ignore`d folder counts nothing but a `held_for_review` or
@@ -2611,7 +2611,7 @@ pub fn decisions_owed(queue: &Queue, policy: &ProjectPolicy, scrub_check: ScrubC
 }
 
 /// K7's suggestion count, "unpurposed traces": `Pending` entries in a folder
-/// whose mode resolves to `NotifyOnly` ("Ask me") that have been previewed
+/// whose mode resolves to `NotifyOnly` ("Ask") that have been previewed
 /// at least once. One function so `status` and `list_projects` can never
 /// report two different numbers. Three conditions, all required:
 ///
@@ -2757,7 +2757,7 @@ pub fn sort_suggested(entries: &mut Vec<&QueueEntry>, inputs: &SuggestedOrderInp
 ///
 /// - it is `Pending`. Kept and dismissed sessions are `Refused`, and every
 ///   other state has been decided already;
-/// - its project's mode resolves to `NotifyOnly` (Ask me). Never folders
+/// - its project's mode resolves to `NotifyOnly` (Ask). Never folders
 ///   are out, and so are armed ones, which send on their own;
 /// - it is not [`QueueEntry::returned_from_keep`]: the person kept it once,
 ///   read conservatively as kept;
@@ -5376,7 +5376,7 @@ mod tests {
     /// `Pending` entry in it needs a person, so it counts.
     #[test]
     fn decisions_owed_counts_an_ask_me_pending() {
-        let policy = ProjectPolicy::new(); // unset project keys resolve NotifyOnly ("Ask me")
+        let policy = ProjectPolicy::new(); // unset project keys resolve NotifyOnly ("Ask")
         let q = queue_of(vec![entry_in("/w/ask-me", QueueState::Pending)]);
         assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 1);
     }

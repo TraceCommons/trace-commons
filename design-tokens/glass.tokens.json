@@ -28,7 +28,7 @@
     "textOnStatus": { "hex": "#0c0c0e" },
     "textOnSelected": { "hex": "#f2f2f4", "note": "Text on a selected fill (controlSelected): textPrimary in classic, white in the flat theme, whose selected fill is the brand purple.", "light": { "hex": "#1d1d1f" } },
     "statusOn": { "hex": "#3ddc84", "note": "Watching, share automatically, automatic, always on. Glyph and label only.", "light": { "hex": "#1a8f4c" } },
-    "statusAsk": { "hex": "#f5c142", "note": "Ask me, worth a second look.", "light": { "hex": "#a8690f" } },
+    "statusAsk": { "hex": "#f5c142", "note": "Ask, worth a second look.", "light": { "hex": "#a8690f" } },
     "statusOff": { "hex": "#a9a9b0", "note": "Never, not used. Never for text.", "light": { "hex": "#8a8a90" } },
     "statusOutside": { "hex": "#ff6b6b", "note": "Leaves for an outside model, no proof.", "light": { "hex": "#d0342c" } },
     "statusOnText": { "hex": "#3ddc84", "note": "statusOn as text (a pill label, the submit-done label): 4.5:1 or more on every light ground and on its own tint. Dark is statusOn.", "light": { "hex": "#11613a" } },

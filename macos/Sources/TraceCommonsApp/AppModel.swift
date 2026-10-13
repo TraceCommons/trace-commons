@@ -962,7 +962,7 @@ final class AppModel: ObservableObject {
     /// out of it, which is why it has one.
     @Published var lastActionNotice: String?
     /// What a finished first run must still say -- Automatic was refused, so
-    /// sharing is on Ask me -- shown above every section once the first-run
+    /// sharing is on Ask -- shown above every section once the first-run
     /// host has gone (`FirstRunDaemon.firstRunFinished`). The core's
     /// sentence; dismissed by the person.
     @Published var firstRunNotice: String?
@@ -1885,11 +1885,11 @@ final class AppModel: ObservableObject {
             + (showsLegacyMigrationOfferCard ? 1 : 0)
     }
 
-    /// Projects whose "Ask me" the daemon refused, by project id, so
+    /// Projects whose "Ask" the daemon refused, by project id, so
     /// the notice can show the Rust's refusal line. Cleared on a retry.
     @Published private(set) var askFirstRefused: Set<String> = []
 
-    /// "Ask me" on a rewording or held-folder notice. The same call as
+    /// "Ask" on a rewording or held-folder notice. The same call as
     /// Settings -- `set_project_mode` with the project's id and
     /// `notify_only` -- which also answers a rewording notice. A refusal
     /// changes nothing; the notice stays and says so.

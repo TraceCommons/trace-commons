@@ -127,7 +127,7 @@ enum UsesScreenLayout {
     }
 
     /// The rest of the path's words, behind the Sharing line's info button:
-    /// Ask me's detail; Automatic's detail, then the scrub's scope and
+    /// Ask's detail; Automatic's detail, then the scrub's scope and
     /// limit. Nil whenever the line is a fallback.
     static func sharingDetail(path: SharingPath, grant: AutomaticGrantCopy?) -> String? {
         grant.flatMap { split(path: path, grant: $0)?.detail }
@@ -153,7 +153,7 @@ enum UsesScreenLayout {
         FirstRunCopy.fill(uses.moreAbout, ["title": title])
     }
 
-    /// The picker's options, named by the contribution mode table (Ask me,
+    /// The picker's options, named by the contribution mode table (Ask,
     /// Automatic), and Automatic only for an account that can choose it.
     static func sharingOptions(
         for state: FirstRunState, modes: ContributionModeCopy?
@@ -194,7 +194,7 @@ enum UsesScreenLayout {
     }
 
     /// What a finished first run must still say once the first-run host has
-    /// gone: Automatic was refused, so sharing is on Ask me. Shown by the
+    /// gone: Automatic was refused, so sharing is on Ask. Shown by the
     /// shell notices (`AppModel.firstRunNotice`), not by this screen.
     static func finishedNotice(_ refusal: FirstRunFailure?, uses: FirstRunCopy.Uses) -> String? {
         if case .grantRefused? = refusal { return uses.sharingRefused }
@@ -211,7 +211,7 @@ enum UsesScreenLayout {
 
     /// After a Start: the failure to show, and a refusal decided before it
     /// that is still to be shown. A Start that failed keeps the refusal for
-    /// the retry, which goes through on Ask me; one that succeeded shows it.
+    /// the retry, which goes through on Ask; one that succeeded shows it.
     static func afterStart(
         failure: FirstRunFailure?, pending: FirstRunFailure?
     ) -> (shown: FirstRunFailure?, pending: FirstRunFailure?) {
@@ -224,7 +224,7 @@ enum UsesScreenLayout {
 /// Each returns the refusal still to be shown after a later Start.
 @MainActor
 enum UsesStart {
-    /// Start without the disclosures (Ask me, watching only). It carries an
+    /// Start without the disclosures (Ask, watching only). It carries an
     /// earlier refusal; it cannot grant, since only `finish` marks the
     /// grant ready.
     static func plainStart(runner: FirstRunRunner, pending: FirstRunFailure?) async -> FirstRunFailure? {
@@ -233,7 +233,7 @@ enum UsesStart {
     }
 
     /// Both disclosures seen: the core's answer decides the state Start
-    /// commits (Automatic with `grantReady`, or Ask me with the refusal),
+    /// commits (Automatic with `grantReady`, or Ask with the refusal),
     /// then Start runs.
     static func finish(
         runner: FirstRunRunner, request: Flow1GrantRequest?, pending: FirstRunFailure?
@@ -512,11 +512,11 @@ struct UsesScreen: View {
     }
 
     /// Both disclosures seen: the core decides the grant, then Start runs.
-    /// A not-ready answer finishes on Ask me; its failure is shown after
+    /// A not-ready answer finishes on Ask; its failure is shown after
     /// the commit, which clears failures when it begins.
     private func finish(_ flow: SharingDisclosureFlow) {
         // The Private AI path saw the witness disclosure and asks for no
-        // grant: Start as on Ask me.
+        // grant: Start as on Ask.
         if flow.witnessOnly {
             Task { pendingRefusal = await UsesStart.plainStart(runner: runner, pending: pendingRefusal) }
             return

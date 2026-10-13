@@ -79,7 +79,8 @@ final class HomeViewTests: XCTestCase {
                 + "detail: delta?.text, detailInk: delta?.ink, systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: words?.uncontributed ?? \"\", value: String(uncontributed.count), "
-                + "detail: uncontributed.detail(words), systemImage: HomeStatIcons.uncontributed, action: openTraces)"))
+                + "detail: uncontributed.detail(words), systemImage: HomeStatIcons.uncontributed, "
+                + "valueAccessory: uncontributed.size(words), action: openTraces)"))
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted), "
                 + "systemImage: HomeStatIcons.contributed, action: openHistory)"))

@@ -292,6 +292,7 @@ private struct HomeOverview: View {
                                  systemImage: HomeStatIcons.credit, action: openPrivateAI)
                     HomeStatTile(label: words?.uncontributed ?? "", value: String(uncontributed.count),
                                  detail: uncontributed.detail(words), systemImage: HomeStatIcons.uncontributed,
+                                 valueAccessory: uncontributed.size(words),
                                  action: openTraces)
                 }
             }
@@ -349,9 +350,10 @@ private struct HomeOverview: View {
 /// Home's stat tile icons (owner, 2026-10-12).
 enum HomeStatIcons {
     static let waiting = "hourglass"
-    static let contributed = "checkmark.seal.fill"
-    static let credit = "star.circle.fill"
-    static let uncontributed = "tray.full.fill"
+    static let contributed = "checkmark.seal"
+    static let credit = "dollarsign.circle"
+    /// Held on this Mac, not yet shared: local and private.
+    static let uncontributed = "lock.laptopcomputer"
 }
 
 /// The Home cards' icons, shared with the edge rail's Home peek.
@@ -1353,6 +1355,8 @@ private struct HomeStatTile: View {
     var detailInk: GlassRGBA? = nil
     /// The tile's icon (`HomeStatIcons`); nil draws none.
     var systemImage: String? = nil
+    /// A quieter figure beside the value; nil draws none.
+    var valueAccessory: String? = nil
     /// Opens where the number lives, and the whole tile is the button;
     /// nil for a tile on the page its number lives on (History's).
     var action: (() -> Void)?
@@ -1361,11 +1365,13 @@ private struct HomeStatTile: View {
     var body: some View {
         if let action {
             Button(action: action) {
-                GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage, interactive: true)
+                GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
+                              valueAccessory: valueAccessory, interactive: true)
             }
             .buttonStyle(GlassPressStyle())
         } else {
-            GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage)
+            GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
+                          valueAccessory: valueAccessory)
         }
     }
 }
@@ -1392,15 +1398,18 @@ struct HomeUncontributed: Equatable {
         high = drawn.isEmpty ? nil : drawn.reduce(0) { $0 + $1.high }
     }
 
-    /// The size on this Mac, then the estimate when there is one.
-    func detail(_ words: MonitorHomeHistoryCopy?) -> String? {
+    /// The size of what waits, drawn beside the count (owner, 2026-10-12).
+    func size(_ words: MonitorHomeHistoryCopy?) -> String? {
         guard let words, count > 0 else { return nil }
-        let size = FirstRunCopy.fill(words.uncontributedSize,
-                                     ["size": ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)])
-        guard let low, let high else { return size }
-        let estimate = FirstRunCopy.fill(words.uncontributedEstimate,
-                                         ["min": HomeFormat.points(low), "max": HomeFormat.points(high)])
-        return size + "\n" + estimate
+        return FirstRunCopy.fill(words.uncontributedSize,
+                                 ["size": ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)])
+    }
+
+    /// The estimate, under the count, when there is one.
+    func detail(_ words: MonitorHomeHistoryCopy?) -> String? {
+        guard let words, count > 0, let low, let high else { return nil }
+        return FirstRunCopy.fill(words.uncontributedEstimate,
+                                 ["min": HomeFormat.points(low), "max": HomeFormat.points(high)])
     }
 }
 

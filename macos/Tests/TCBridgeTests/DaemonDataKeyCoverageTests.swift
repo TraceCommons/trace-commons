@@ -339,7 +339,7 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         }
     }
 
-    /// #1208 against the real daemon on a temp store: Ask me and Never set
+    /// #1208 against the real daemon on a temp store: Ask and Never set
     /// the override and `status` says so, clear restores it, every key of
     /// each reply (and of `status` while an override is in force) is
     /// declared, and Automatic on a store that is not enrolled is

@@ -119,7 +119,7 @@ final class ToolFolderInspectorTests: XCTestCase {
     }
 
     /// Automatic always goes through the arming confirmation, in the core's
-    /// words; Never asks first when sessions are waiting; Ask me is a
+    /// words; Never asks first when sessions are waiting; Ask is a
     /// direct write. The inspector's picker takes the same route as the
     /// tree's switch and menu, and writes only through it.
     func test_automaticGoesThroughTheArmingConfirmation() throws {
@@ -141,7 +141,7 @@ final class ToolFolderInspectorTests: XCTestCase {
         let empty = TracesTree.FolderNode(id: "p2", label: "docs", mode: .ask, offerableModes: [.ask, .ignore], sessions: [])
         guard case .apply = TracesTreeView.modeChange(empty, .ignore) else { return XCTFail("nothing to clear: direct") }
         let armed = TracesTree.FolderNode(id: "p3", label: "web", mode: .autoUpload, sessions: [])
-        guard case .apply = TracesTreeView.modeChange(armed, .ask) else { return XCTFail("Ask me is direct") }
+        guard case .apply = TracesTreeView.modeChange(armed, .ask) else { return XCTFail("Ask is direct") }
         guard case .noop = TracesTreeView.modeChange(folder, .ask) else { return XCTFail("the same mode is no change") }
 
         let source = try TracesParityTests.text("Views/Monitor/ToolFolderInspectors.swift")

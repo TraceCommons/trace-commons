@@ -3507,7 +3507,7 @@ mod tests {
     /// Kristi's #1300 review, finding 2 ("policy/queue evidence"): an older
     /// install that only ever watched -- no folder answered, nothing
     /// contributed -- has no policy file, so the policy marker cannot speak
-    /// for it. Unlisted folders resolve to Ask me, so its queue still holds
+    /// for it. Unlisted folders resolve to Ask, so its queue still holds
     /// idle candidates. The state file its daemon wrote while watching is
     /// the evidence: it gets the upgrade and both offers.
     #[test]

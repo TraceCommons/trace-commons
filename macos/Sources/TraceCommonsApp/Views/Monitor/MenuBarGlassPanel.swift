@@ -201,7 +201,7 @@ struct MenuBarGlassPanel: View {
     /// the override line shows while one is in force. Choosing an override
     /// shows its core confirmation in place of the choices; only its
     /// confirm button writes. Choosing Mixed clears an override: after the
-    /// core's clear confirmation when the override is Ask me or Never and a
+    /// core's clear confirmation when the override is Ask or Never and a
     /// folder's own setting is Automatic, since clearing would resume
     /// unattended sending there; otherwise at once
     /// (`MenuPanelStore.chooseMixed`). While the core is down,

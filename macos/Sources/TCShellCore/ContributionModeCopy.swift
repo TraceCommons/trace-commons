@@ -15,7 +15,7 @@ public struct ContributionModeCopy: Decodable, Equatable, Sendable {
 
     public let title: String
     public let mixed: String
-    /// Ask me, Automatic, Never, in that order.
+    /// Ask, Automatic, Never, in that order.
     public let choices: [Choice]
     /// Said while a contribution override is in force.
     public let overrideActive: String

@@ -46,7 +46,7 @@ public enum GlassTokens {
         public static var textOnSelected: GlassRGBA { GlassTheme.pick(GlassRGBA(0xF2F2F4, alpha: 1, light: GlassRGBA(0x1D1D1F, alpha: 1)), flat: GlassRGBA(0xFFFFFF, alpha: 1)) }
         /// Watching, share automatically, automatic, always on. Glyph and label only.
         public static var statusOn: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1)), flat: GlassRGBA(0x30D158, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1))) }
-        /// Ask me, worth a second look.
+        /// Ask, worth a second look.
         public static var statusAsk: GlassRGBA { GlassTheme.pick(GlassRGBA(0xF5C142, alpha: 1, light: GlassRGBA(0xA8690F, alpha: 1)), flat: GlassRGBA(0xFFC75C, alpha: 1, light: GlassRGBA(0xA8690F, alpha: 1))) }
         /// Never, not used. Never for text.
         public static let statusOff: GlassRGBA = GlassRGBA(0xA9A9B0, alpha: 1, light: GlassRGBA(0x8A8A90, alpha: 1))

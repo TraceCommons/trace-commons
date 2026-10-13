@@ -14,19 +14,22 @@ public struct GlassStatCard: View {
     /// (a gain in green, a loss in red); nil draws none.
     private let detail: String?
     private let detailInk: GlassRGBA?
-    /// A symbol on an accent tile at the card's top trailing corner (owner,
-    /// 2026-10-12: icons make the tiles more engaging); nil draws none.
+    /// A symbol on the card's trailing side, in the accent, with no
+    /// container (owner, 2026-10-12); nil draws none.
     private let systemImage: String?
+    /// A figure beside the value, quieter than it (the size of what waits);
+    /// nil draws none.
+    private let valueAccessory: String?
 
-    /// The icon tile's side and its glyph's size.
-    static let iconSide: CGFloat = 26
-    static let iconGlyph: CGFloat = 12
+    /// The icon's size.
+    static let iconGlyph: CGFloat = 18
 
     public init(
         _ label: String, value: String, detail: String? = nil, detailInk: GlassRGBA? = nil,
-        systemImage: String? = nil, interactive: Bool = false
+        systemImage: String? = nil, valueAccessory: String? = nil, interactive: Bool = false
     ) {
         self.systemImage = systemImage
+        self.valueAccessory = valueAccessory
         self.label = label
         self.value = value
         self.detail = detail
@@ -39,16 +42,12 @@ public struct GlassStatCard: View {
     static let valueType = GlassTokens.TypeScale.heading.weight(.bold)
 
     public var body: some View {
-        HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
+        HStack(alignment: .center, spacing: GlassTokens.Space.s3) {
             figures
             if let systemImage {
                 Image(systemName: systemImage)
-                    .glassGlyph(Self.iconGlyph, weight: .semibold)
-                    .foregroundStyle(GlassTokens.Color.textOnSelected.color)
-                    .frame(width: Self.iconSide, height: Self.iconSide)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(GlassTokens.Color.controlSelected.color))
+                    .glassGlyph(Self.iconGlyph, weight: .regular)
+                    .foregroundStyle(GlassTokens.Color.purpleSoft.color)
                     .accessibilityHidden(true)
             }
         }
@@ -67,12 +66,21 @@ public struct GlassStatCard: View {
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Text(value)
-                .glassType(Self.valueType)
-                .monospacedDigit()
-                .foregroundStyle(GlassColor.textPrimary)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                Text(value)
+                    .glassType(Self.valueType)
+                    .monospacedDigit()
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let valueAccessory {
+                    Text(valueAccessory)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .lineLimit(1)
+                }
+            }
             if let detail {
                 Text(detail)
                     .glassType(GlassTokens.TypeScale.caption)
