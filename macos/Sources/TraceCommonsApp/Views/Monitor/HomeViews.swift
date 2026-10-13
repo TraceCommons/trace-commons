@@ -142,7 +142,7 @@ private struct HomeOverview: View {
         if let words {
             // A hero promotion (owner, 2026-10-12).
             GlassHeroCard(
-                gradient: GlassTokens.Gradient.heroCampaign, eyebrow: words.campaignEyebrow,
+                gradient: GlassTokens.Gradient.heroCampaign, showsLockup: true,
                 title: words.campaignTitle, subtitle: words.campaignBody,
                 actionTitle: words.campaignAction, action: openPrivateAI
             ) {
@@ -166,10 +166,10 @@ private struct HomeOverview: View {
                 // The NEAR AI campaign, under the tiles (owner, 2026-10-12).
                 campaign
                 // Ron's Missions card, as a hero promotion (owner,
-                // 2026-10-12): his Drafts tag as the eyebrow, the drafts'
-                // line under the subtitle, and Review drafts.
+                // 2026-10-12): the drafts' line under the subtitle, and
+                // Review drafts; no pill.
                 GlassHeroCard(
-                    gradient: GlassTokens.Gradient.heroMissions, eyebrow: words?.draftsTag,
+                    gradient: GlassTokens.Gradient.heroMissions,
                     title: MonitorWords.missions, subtitle: words?.missionsSubtitle,
                     actionTitle: words?.missionsAction, action: openMissionDrafts
                 ) {

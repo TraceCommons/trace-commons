@@ -58,7 +58,7 @@ struct HomeInsightsGraphic: View {
     var body: some View {
         let bars = Self.bars(glance)
         if bars.isEmpty {
-            GlassHeroSymbol("chart.bar.xaxis", accent: "sparkle")
+            GlassHeroSymbol("chart.bar.xaxis")
         } else {
             let ink = GlassTokens.Color.heroInk.color
             let most = Double(bars.first?.tokens ?? 1)

@@ -118,4 +118,12 @@ final class GlassBrandMarkTests: XCTestCase {
             XCTAssertLessThan(ink.light.alpha, 0.5)
         }
     }
+
+    /// The NEAR AI lockup's outlines parse, and fill its 730 by 138 box.
+    func test_theLockupParsesAndKeepsItsShape() throws {
+        let unit = try XCTUnwrap(GlassNearAILockup.unit)
+        let bounds = unit.boundingRect
+        XCTAssertEqual(bounds.height, 1, accuracy: 0.02)
+        XCTAssertEqual(bounds.width, GlassNearAILockup.aspect, accuracy: 0.05)
+    }
 }

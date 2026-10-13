@@ -322,9 +322,9 @@ final class MonitorShellTests: XCTestCase {
         for needle in ["HomeStatTile(label: MonitorWords.waiting,",
                        "HomeStatTile(label: MonitorWords.contributed,", "HomeStatTile(label: HomeFormat.creditPendingWord,",
                        // Ron's Missions card as a hero promotion (owner,
-                       // 2026-10-12): his Drafts tag as its eyebrow, the
-                       // drafts' line, and Review drafts.
-                       "gradient: GlassTokens.Gradient.heroMissions, eyebrow: words?.draftsTag,",
+                       // 2026-10-12): the drafts' line and Review drafts, no
+                       // pill.
+                       "gradient: GlassTokens.Gradient.heroMissions,",
                        "title: MonitorWords.missions, subtitle: words?.missionsSubtitle,",
                        "actionTitle: words?.missionsAction, action: openMissionDrafts",
                        "Text(words.noMissionDrafts)"] {

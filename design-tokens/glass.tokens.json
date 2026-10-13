@@ -119,18 +119,18 @@
   "gradient": {
     "heroCampaign": {
       "angle": 120,
-      "note": "Home's hero promotions (owner, 2026-10-12): a saturated ground under white text and a graphic on the right, the same in both appearances. The darker stop sits under the text on the left and holds white at 7.5:1 or more; the lighter runs under the graphic. Campaign: indigo to violet.",
+      "note": "Home's hero promotions (owner, 2026-10-12): a saturated ground under white text and a graphic on the right, the same in both appearances. The darker stop sits under the text on the left and holds white at 7:1 or more; the lighter runs under the graphic. Campaign (NEAR AI's own): a deep NEAR blue to the brand blue #0091fd, which alone holds white at only 3.25:1.",
       "stops": [
-        { "hex": "#1e1470", "at": 0 },
-        { "hex": "#5b2bd6", "at": 1 }
+        { "hex": "#0057b0", "at": 0 },
+        { "hex": "#0091fd", "at": 1 }
       ]
     },
     "heroMissions": {
       "angle": 120,
-      "note": "Missions: deep red to orange.",
+      "note": "Missions: indigo to violet, the purple (owner, 2026-10-12).",
       "stops": [
-        { "hex": "#a4200f", "at": 0 },
-        { "hex": "#e2531a", "at": 1 }
+        { "hex": "#1e1470", "at": 0 },
+        { "hex": "#5b2bd6", "at": 1 }
       ]
     },
     "heroInsights": {

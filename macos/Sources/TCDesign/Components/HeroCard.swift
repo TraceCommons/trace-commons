@@ -11,7 +11,9 @@ import SwiftUI
 /// the action. The graphic is decoration and hidden from assistive tech.
 public struct GlassHeroCard<Graphic: View, Content: View>: View {
     private let gradient: GlassGradient
-    private let eyebrow: String?
+    /// The NEAR AI lockup over the title (owner, 2026-10-12: on NEAR AI's
+    /// own promotion); no pill eyebrow.
+    private let showsLockup: Bool
     private let title: String
     private let subtitle: String?
     private let actionTitle: String?
@@ -22,12 +24,12 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(
-        gradient: GlassGradient, eyebrow: String? = nil, title: String, subtitle: String? = nil,
+        gradient: GlassGradient, showsLockup: Bool = false, title: String, subtitle: String? = nil,
         actionTitle: String? = nil, action: @escaping () -> Void,
         @ViewBuilder graphic: () -> Graphic, @ViewBuilder content: () -> Content
     ) {
         self.gradient = gradient
-        self.eyebrow = eyebrow
+        self.showsLockup = showsLockup
         self.title = title
         self.subtitle = subtitle
         self.actionTitle = actionTitle
@@ -41,6 +43,8 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     /// longer title or a wrapped line never pushes the action off the card.
     static var minHeight: CGFloat { 156 }
     static var graphicReserve: CGFloat { 150 }
+    /// The lockup's height over the title.
+    static var lockupHeight: CGFloat { 16 }
     /// The title's face: larger and heavier than a card title, as a hero's
     /// is (the references' display type, on the system face).
     static var titleType: GlassTypeStyle { GlassTokens.TypeScale.display.weight(.heavy) }
@@ -84,13 +88,10 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
 
     private var words: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            if let eyebrow {
-                Text(eyebrow)
-                    .glassType(GlassTokens.TypeScale.eyebrow)
+            if showsLockup {
+                GlassNearAILockupView(height: Self.lockupHeight)
                     .foregroundStyle(GlassTokens.Color.heroInk.color)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(GlassTokens.Color.heroInk.color.opacity(0.18)))
+                    .padding(.bottom, GlassTokens.Space.s1)
             }
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 Text(title)
@@ -121,17 +122,15 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
 }
 
 /// A hero's graphic built from a symbol: the symbol large and bright,
-/// tilted, with two smaller echoes of `accent` around it, all in heroInk.
+/// tilted, in heroInk, alone (owner, 2026-10-12: no sparkles around it).
 /// It is larger than the card is tall and set past its trailing and
 /// bottom edges, so the card's border cuts it off (owner, 2026-10-12, as
 /// the reference does).
 public struct GlassHeroSymbol: View {
     private let systemImage: String
-    private let accent: String
 
-    public init(_ systemImage: String, accent: String = "sparkle") {
+    public init(_ systemImage: String) {
         self.systemImage = systemImage
-        self.accent = accent
     }
 
     public var body: some View {
@@ -143,14 +142,6 @@ public struct GlassHeroSymbol: View {
                     colors: [ink.opacity(0.95), ink.opacity(0.35)], startPoint: .top, endPoint: .bottom))
                 .rotationEffect(.degrees(-12))
                 .shadow(color: .black.opacity(0.25), radius: 18, y: 10)
-            Image(systemName: accent)
-                .glassGlyph(34, weight: .semibold)
-                .foregroundStyle(ink.opacity(0.8))
-                .offset(x: -120, y: -78)
-            Image(systemName: accent)
-                .glassGlyph(18, weight: .semibold)
-                .foregroundStyle(ink.opacity(0.6))
-                .offset(x: -132, y: 34)
         }
         // Past the card's trailing and bottom edges.
         .offset(Self.bleed)
