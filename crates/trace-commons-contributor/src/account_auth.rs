@@ -331,7 +331,7 @@ async fn await_loopback_code(listener: tokio::net::TcpListener) -> Result<String
 
 /// Best-effort: hand the URL to the platform's browser opener. A failure here
 /// is not fatal — the caller prints the URL, which is the headless path.
-fn try_open_browser(url: &str) -> bool {
+pub(crate) fn try_open_browser(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     let attempt = std::process::Command::new("open").arg(url).status();
     #[cfg(target_os = "linux")]

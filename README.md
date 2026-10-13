@@ -271,6 +271,11 @@ cargo build --release --bin trace-commons-contributor
 ./target/release/trace-commons-contributor login
 ```
 
+`login` opens near.ai in your browser to sign in, then enrolls this device;
+no invite is needed. With an invite, run `login --invite <link>` or set
+`TRACE_COMMONS_INVITE`. `login --key-id` prints the device key id for an
+instance-signed grant.
+
 [releases]: https://github.com/TraceCommons/trace-commons/releases/tag/contributor-v0.4.6
 
 See [`crates/trace-commons-contributor/README.md`](crates/trace-commons-contributor/README.md)

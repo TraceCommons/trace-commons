@@ -59,30 +59,40 @@ it.
 
 ## Quickstart
 
-1. Run `login` with no `--grant` to print this device's key id:
+1. Sign in with NEAR AI and enroll this device. No invite needed:
 
    ```bash
    trace-commons-contributor login
-   # device_key_id: <hex>
-   # give this to your instance to mint an enrollment grant, then re-run `login --grant <grant>`
+   # Opening near.ai in your browser to sign in.
+   # If it doesn't open, go to: http://127.0.0.1:<port>/...
+   # Have an invite? Run `trace-commons-contributor login --invite <link>`.
+   # Signed in. This device is enrolled.
    ```
 
-2. Give that `device_key_id` to whoever operates your Trace Commons
-   instance. They mint an enrollment grant (see "mint-grant" below) and
-   hand you back a base64 blob.
+   The sign-in finishes on a loopback address, so complete it in a browser
+   on this machine. If you are already signed in to NEAR AI here (for
+   example in the desktop app), the browser step is skipped. When the
+   daemon is running, `login` goes through it, so the app and the CLI share
+   one sign-in and one enrollment. Restrict the hosts the sign-in may reach
+   with `TRACE_COMMONS_ALLOWED_HOSTS`; `--allowed-hosts` applies to the
+   invite and grant routes only.
 
-3. Enroll with the grant:
+   Other ways to enroll:
 
-   ```bash
-   trace-commons-contributor login --grant <base64-grant>
-   ```
+   - With an invite link: `trace-commons-contributor login --invite <link>`,
+     or set `TRACE_COMMONS_INVITE` to keep the link out of your shell history.
+   - With an instance-signed grant: run `trace-commons-contributor login
+     --key-id` to print this device's key id, give it to whoever operates your
+     Trace Commons instance (they mint a grant, see "mint-grant" below), then
+     run `trace-commons-contributor login --grant <base64-grant>`. Pass
+     `--allowed-hosts <csv>` to pin which hosts this device will ever talk to;
+     it persists into the config so every later command enforces it too.
 
-   This saves your instance's `issuer_url`, `ingest_url`, `tenant_id`, and
-   `device_key_id` to local config. Pass `--allowed-hosts <csv>` to pin
-   which hosts this device will ever talk to; it persists into the config
-   so every later command enforces it too.
+   `submit` on a machine that is not enrolled yet runs the same NEAR AI
+   sign-in first when it is run in a terminal; otherwise it stops and says
+   to run `login`.
 
-4. See what would be submitted, then submit:
+2. See what would be submitted, then submit:
 
    ```bash
    trace-commons-contributor list
@@ -476,7 +486,7 @@ the redactor and mapper produce from message content.
 
 | Command | What it does |
 |---|---|
-| `login [--grant <b64>] [--allowed-hosts <csv>]` | Without `--grant`, prints this device's key id to hand to an instance operator. With `--grant`, redeems an enrollment grant and saves local config. |
+| `login [--invite <link> \| --grant <b64> \| --key-id] [--allowed-hosts <csv>] [--scopes <csv> \| --default]` | With no `--invite` or `--grant`, signs in with NEAR AI in the browser and enrolls this device (no invite needed; skips the browser when a NEAR AI sign-in is already kept). With `--invite` (or `TRACE_COMMONS_INVITE`), redeems an invite link. With `--grant`, redeems an enrollment grant. `--key-id` prints this device's key id to hand to an instance operator and enrolls nothing. `--allowed-hosts` applies to `--invite` and `--grant` only. Refuses on a device that is already enrolled. |
 | `list [--trajectory <path>]` | Lists discoverable local sessions from all sources (no network). Trajectory sessions appear when `--trajectory` names a file or directory, and — without it — from the working directory's `*.trajectory.json(l)` files and the trajectory staging folder that `import-antigravity` writes to. |
 | `submit [--all] [--since <dur>] [--project <path>] [--source claude-code\|codex\|trajectory] [--trajectory <path>] [--no-reasoning] [--remediate-quarantined] [--yes] [--dry-run] [--pii-filter near-ai]` | Redacts and uploads selected sessions. `--trajectory` names a Letta Trajectory v1 file or directory. `--no-reasoning` excludes model reasoning, which is otherwise included. `--remediate-quarantined` re-uploads sessions whose local receipt is `quarantined`, keeping the same `submission_id` so the server can supersede the stored envelope. `--dry-run` runs the full pipeline (parse, redact, canary check, sizing) without uploading. `--all` widens selection to every session but still asks for confirmation. `--yes` skips confirmation; the existing `--json --all` mode remains non-interactive. |
 | `import-antigravity [--project <path>\|--all]` | Imports conversations from a running Antigravity IDE instance and stages them for `submit`. Requires Antigravity to be running, since its conversations are only readable through the local API it serves. `--project` scopes to one workspace (default: the current directory); `--all` takes every conversation the running instance exposes. |
