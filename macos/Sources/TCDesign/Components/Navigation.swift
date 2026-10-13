@@ -233,40 +233,22 @@ public struct GlassRuleTabs<Value: Hashable>: View {
         .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
     }
 
-    /// The gradient halo's strength: the flat tab ember halo's 30%.
-    static var gradientHaloOpacity: Double { 0.3 }
-
     /// The halo behind the title and the ember line on the rule, sized to
     /// the tab they sit under.
     private var emberGlow: some View {
         GeometryReader { proxy in
             let width = proxy.size.width
-            // The line takes the gradient's darker stop in the flat theme.
-            let ember = GlassAccent.isGradient ? GlassAccent.deep.color : GlassTokens.Color.tabEmber.color
+            let ember = GlassTokens.Color.tabEmber.color
             let halo = GlassTokens.Color.tabEmberHalo.color
             ZStack(alignment: .bottom) {
                 // Brightest at the rule under the title's middle, gone by
                 // `haloHeight` up and by the tab's sides: the ellipse is
                 // centred on the frame's foot and reaches half its height and
                 // width, so it is clear before any edge.
-                // In the flat theme the halo is the accent gradient, run
-                // upright: its darker stop at the rule, its lighter at the
-                // top (owner, 2026-10-12), faded by the same ellipse.
-                if GlassAccent.isGradient {
-                    LinearGradient(
-                        colors: [GlassAccent.bright.color, GlassAccent.deep.color],
-                        startPoint: .top, endPoint: .bottom)
-                        .opacity(Self.gradientHaloOpacity)
-                        .mask(EllipticalGradient(
-                            colors: [.white, .white.opacity(0)],
-                            center: .bottom, startRadiusFraction: 0, endRadiusFraction: 0.5))
-                        .frame(width: width * 1.1, height: Self.haloHeight * 2)
-                } else {
-                    EllipticalGradient(
-                        colors: [halo, halo.opacity(0)],
-                        center: .bottom, startRadiusFraction: 0, endRadiusFraction: 0.5)
-                        .frame(width: width * 1.1, height: Self.haloHeight * 2)
-                }
+                EllipticalGradient(
+                    colors: [halo, halo.opacity(0)],
+                    center: .bottom, startRadiusFraction: 0, endRadiusFraction: 0.5)
+                    .frame(width: width * 1.1, height: Self.haloHeight * 2)
                 LinearGradient(
                     colors: [ember.opacity(0), ember, ember.opacity(0)],
                     startPoint: .leading, endPoint: .trailing)
