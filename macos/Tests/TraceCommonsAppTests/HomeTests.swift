@@ -118,8 +118,6 @@ final class HomeTests: XCTestCase {
         let unknown = await store(.normalDay)
         XCTAssertNil(HomeFormat.pendingCondition(unknown.credit))
         XCTAssertNil(HomeFormat.pendingCondition(nil))
-        // Credit is never shown without the core's not-currency sentence.
-        XCTAssertFalse(MonitorWords.creditNotCurrency.isEmpty)
     }
 
     /// Not recorded is never said as approved; armed uses the core's label

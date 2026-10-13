@@ -235,12 +235,6 @@ private struct HomeOverview: View {
                              value: HomeFormat.pendingFigure(freshRollup?.creditPending, condition: condition))
             }
             .fixedSize(horizontal: false, vertical: true)
-            if let condition {
-                Text(condition)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
     }
 
@@ -1076,12 +1070,6 @@ private struct HistoryStats: View {
                 HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined))
             }
             .fixedSize(horizontal: false, vertical: true)
-            if let condition = HomeFormat.pendingCondition(credit) {
-                Text(condition)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
     }
 }
@@ -1253,16 +1241,15 @@ struct HistoryCommunityCard: View {
 
 /// The credit record (Ron's `CreditRecordPanel`): what credit is, then the
 /// final figure and the one still being scored, or his chip before the
-/// first sync. Pending credit is a figure only with the commons' statement
-/// of its condition beside it (D6); without that statement it is a dash: a
-/// bare number would read as owed.
+/// first sync. Pending credit is a figure only when the commons has stated
+/// its condition (D6); without that statement it is a dash: a bare number
+/// would read as owed. The statement itself is not drawn (owner, 2026-10-13).
 struct HistoryCreditCard: View {
     let store: HomeStore
 
     var body: some View {
         // A failed read is a dash, never the earlier figures or sentence.
         let credit = SummaryFacts.fresh(store.credit, unless: store.failures["commons_credit_summary"])
-        let condition = HomeFormat.pendingCondition(credit)
         let rollup = SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])
         let words = MonitorWords.table?.homeHistory
         GlassEyebrowCard(words?.creditRecord ?? MonitorWords.credit) {
@@ -1288,18 +1275,6 @@ struct HistoryCreditCard: View {
                     .padding(.top, GlassTokens.Space.s7)
                     .overlay(alignment: .top) { GlassHairline(GlassColor.hairline) }
                 }
-                if let condition {
-                    Text(condition)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                // Credit is a record, not currency: the core's sentence,
-                // beside every figure.
-                Text(MonitorWords.creditNotCurrency)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -1556,7 +1531,6 @@ extension MonitorWords {
     static var held: String { table?.held ?? "" }
     static var heldForReview: String { table?.heldForReview ?? "" }
     static var heldExplanation: String { table?.heldExplanation ?? "" }
-    static var creditNotCurrency: String { table?.creditNotCurrency ?? "" }
     static var signedOut: String { table?.signedOut ?? "" }
     static var withdrawn: String { table?.withdrawn ?? "" }
     static var credit: String { table?.credit ?? "" }

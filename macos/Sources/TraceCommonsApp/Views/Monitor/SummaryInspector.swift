@@ -105,25 +105,14 @@ struct SummaryInspector: View {
         }
     }
 
-    /// Pending credit, as a figure only beside the commons' condition for
-    /// it (D6); a dash otherwise.
+    /// Pending credit, as a figure only when the commons has stated its
+    /// condition (D6); a dash otherwise. The statement is not drawn.
     private var pending: some View {
         let pending = SummaryFacts.pending(rollup: rollup, credit: credit)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
             // On the decision lines' text column, not a right-aligned
             // label column of its own.
             SummaryDecisionLine(glyph: nil, tone: nil, text: MonitorWords.pending + " " + pending.value)
-            if let condition = pending.condition {
-                Group {
-                    Text(condition)
-                    // Credit is a record, not currency: the core's
-                    // sentence, beside every figure.
-                    Text(MonitorWords.creditNotCurrency)
-                }
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
         }
     }
 
