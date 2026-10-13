@@ -205,7 +205,7 @@ private struct GlassButtonBody: View {
             // No fill to darken: the text takes the press instead, and the
             // pointer underlines it.
             box
-                .foregroundStyle(GlassColor.accentText)
+                .foregroundStyle(GlassTokens.Color.linkText.color)
                 .underline(hovering && isEnabled)
                 .glassPressedFill()
         }

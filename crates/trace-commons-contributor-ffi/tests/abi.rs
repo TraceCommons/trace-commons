@@ -5245,7 +5245,7 @@ fn the_residual_secret_line_crosses_the_abi_with_its_sites() {
     );
     assert_eq!(
         take_owned(unsafe { tc_residual_secret_line_text(1, std::ptr::null()) }),
-        "A secret found here is still in what would be sent"
+        "1 secret is still in this trace"
     );
     let not_a_list = cstr_str(r#"{"a":1}"#);
     assert_eq!(

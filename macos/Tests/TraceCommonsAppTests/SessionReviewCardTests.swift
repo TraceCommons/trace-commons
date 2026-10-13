@@ -200,7 +200,9 @@ final class SessionReviewCardTests: XCTestCase {
         XCTAssertTrue(card.contains(": Self.coreDownHelp)"))
     }
 
-    /// Native's Keep stays on the card, and its Undo stays in the prompts.
+    /// Keep and its Undo still work in the store, and Undo stays in the
+    /// prompts; the card itself offers neither Keep nor Dismiss (owner,
+    /// 2026-10-12).
     func test_keepAndUndoKeepRemain() async throws {
         let store = TracesStore(client: SampleDaemonClient(.normalDay))
         await store.load()
@@ -212,9 +214,9 @@ final class SessionReviewCardTests: XCTestCase {
         XCTAssertNil(store.actionError?.error)
 
         let card = try Self.text(Self.card)
-        for needle in ["Button(words.keep) { act(.keep, entry) }", "Button(words.dismissAction) { act(.dismiss, entry) }",
-                       "Button(review.lookInside) {"] {
-            XCTAssertTrue(card.contains(needle), "the card lacks \(needle)")
+        XCTAssertTrue(card.contains("Button(review.lookInside) {"), "the card lacks Look inside")
+        for gone in ["Button(words.keep)", "Button(words.dismissAction)"] {
+            XCTAssertFalse(card.contains(gone), "the card still offers \(gone)")
         }
         let prompts = try Self.text("Views/Monitor/InspectorPrompts.swift")
         XCTAssertTrue(prompts.contains("store.perform(.undoKeep, on: kept)"))
@@ -264,36 +266,27 @@ final class SessionReviewCardTests: XCTestCase {
         let kept = try XCTUnwrap(card.range(of: "keptLines(entry)\n"))
         XCTAssertLessThan(preview.lowerBound, kept.lowerBound)
         XCTAssertFalse(card.contains("Text(summary?.title ?? TracesTreeView.when(entry))"), "the old title heads the card")
-        // One line, left-aligned: Contribute first, then Dismiss and Look
-        // inside as links (Ron, 2026-10-09), none wrapping or shortened;
-        // only when Contribute's label is too long for the line does Look
-        // inside move down a line. Keep sits under.
+        // One line, left-aligned: Contribute first, then Look inside as a
+        // link (owner, 2026-10-12: no Dismiss or Keep on the card), neither
+        // wrapping or shortened; only when Contribute's label is too long
+        // for the line does Look inside move down.
         let actions = try XCTUnwrap(card.range(of: "private func actions("))
         let body = String(card[actions.lowerBound...])
         let flat = body.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         XCTAssertTrue(flat.contains(
-            "ViewThatFits(in: .horizontal) { HStack(spacing: GlassTokens.Space.s4) {"
-                + " contribute(entry, words) dismiss(entry, words) lookInside(entry, review) }"),
+            "ViewThatFits(in: .horizontal) { HStack(spacing: GlassTokens.Space.s5) {"
+                + " contribute(entry, words) lookInside(entry, review) }"),
             "the one-line row comes first, Contribute leading")
         XCTAssertTrue(flat.contains(
-            "HStack(spacing: GlassTokens.Space.s4) { contribute(entry, words) dismiss(entry, words) }"
-                + " lookInside(entry, review) }"),
+            "VStack(alignment: .leading, spacing: GlassTokens.Space.s3) { contribute(entry, words) lookInside(entry, review) }"),
             "the two-line form keeps Contribute first and moves Look inside down")
-        XCTAssertTrue(flat.contains(
-            "Button(words.dismissAction) { act(.dismiss, entry) } .buttonStyle(GlassButtonStyle(.link))"),
-            "Dismiss is a link after the action")
         XCTAssertTrue(flat.contains(".frame(maxWidth: .infinity, alignment: .leading) .disabled(busy)"),
                       "the buttons are left-aligned")
-        let oneLine = try XCTUnwrap(body.range(of: "HStack(spacing: GlassTokens.Space.s4) {\n                        contribute"))
-        let twoLines = try XCTUnwrap(body.range(of: "VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {\n                        HStack"))
-        XCTAssertLessThan(oneLine.lowerBound, twoLines.lowerBound, "ViewThatFits tries the one line first")
-        let fits = try XCTUnwrap(body.range(of: "ViewThatFits("))
-        let keep = try XCTUnwrap(body.range(of: "Button(words.keep)"))
-        XCTAssertLessThan(fits.lowerBound, keep.lowerBound, "Keep sits under the row")
         // A refusal is said under the buttons, never above them.
+        let fits = try XCTUnwrap(body.range(of: "ViewThatFits("))
         let refusal = try XCTUnwrap(body.range(of: "TracesRefusal(store: store, entryId: entry.entryId)"))
-        XCTAssertLessThan(keep.lowerBound, refusal.lowerBound, "the refusal sits above the buttons")
-        for button in ["Button(review.lookInside)", "Button(words.dismissAction)", "Button(Self.contributeLabel("] {
+        XCTAssertLessThan(fits.lowerBound, refusal.lowerBound, "the refusal sits above the buttons")
+        for button in ["Button(review.lookInside)", "Button(Self.contributeLabel("] {
             let start = try XCTUnwrap(body.range(of: button))
             let tail = body[start.upperBound...].prefix(600)
             XCTAssertTrue(tail.contains(".lineLimit(1)") && tail.contains(".fixedSize()"), "\(button) can wrap or clip")

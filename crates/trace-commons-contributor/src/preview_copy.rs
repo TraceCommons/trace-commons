@@ -10,8 +10,8 @@ pub const REDACTION_CATEGORY_SENSITIVE_FIELD: &str =
     "Fields whose name marks them sensitive, like password or authorization.";
 pub const REDACTION_CATEGORY_TOOL_SENSITIVE_FIELD: &str =
     "Tool-call arguments whose name marks them sensitive.";
-pub const REDACTION_CATEGORY_RESIDUAL: &str = "Found, and still in what would be sent. Either a credential inside a correction \
-     you wrote, which is kept on purpose, or a field scrubbing does not reach.";
+pub const REDACTION_CATEGORY_RESIDUAL: &str = "Scrubbing found this but could not remove it. It is usually a \
+     credential you typed into a correction, which is kept on purpose, or text in a place scrubbing does not reach.";
 pub const REDACTION_CATEGORY_UNKNOWN: &str =
     "Removed by a pattern this version has no description for.";
 
@@ -25,16 +25,26 @@ pub fn redaction_row_counts(occurrences: u32, distinct: u32) -> String {
 
 /// A detection that survived scrubbing remains in the outgoing envelope.
 /// `count` measures detection sites, not the number of secret values.
+///
+/// Plain words (owner, 2026-10-12): the schema paths in `sites` name
+/// fields, not places a person can find, so they are left to Look inside.
+/// A scan that could not run at all is said as that, never as a count: the
+/// fail-closed survivor at [`crate::envelope::RESIDUAL_SCAN_UNAVAILABLE_SITE`]
+/// is not a secret anyone found.
 pub fn residual_secret_line(count: u32, sites: &[String]) -> String {
-    let head = if count == 1 {
-        "A secret found here is still in what would be sent".to_string()
-    } else {
-        format!("Secrets found in {count} places are still in what would be sent")
-    };
-    if sites.is_empty() {
-        return head;
+    let unchecked = !sites.is_empty()
+        && sites
+            .iter()
+            .all(|site| site == crate::envelope::RESIDUAL_SCAN_UNAVAILABLE_SITE);
+    if unchecked {
+        return "This trace could not be checked for leftover secrets, so treat it as holding one."
+            .to_string();
     }
-    format!("{head} ({})", sites.join(", "))
+    if count == 1 {
+        "1 secret is still in this trace".to_string()
+    } else {
+        format!("{count} secrets are still in this trace")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -638,7 +648,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             redactions_unavailable: "Redaction summary unavailable. Contribution is disabled.",
             removed: "Removed",
             nothing_removed: "Nothing matched for removal.",
-            still_present: "Found, and still in what would be sent",
+            still_present: "Not removed",
             residual_unavailable: "Residual secret warning unavailable. Contribution is disabled.",
             residual_loading: "Loading residual secret warning\u{2026}",
             consent_scopes: "Consent scopes",

@@ -22,6 +22,8 @@ public enum GlassTokens {
         public static var purpleSoft: GlassRGBA { GlassTheme.pick(GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1)), flat: GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x1F7AA8, alpha: 1))) }
         /// Accent text and tertiary links.
         public static var purpleText: GlassRGBA { GlassTheme.pick(GlassRGBA(0xC9B3FF, alpha: 1, light: GlassRGBA(0x5B10CC, alpha: 1)), flat: GlassRGBA(0xE1D5FF, alpha: 1, light: GlassRGBA(0x0C3F5C, alpha: 1))) }
+        /// Every text link (GlassButtonStyle.link). Classic keeps the accent text; the flat theme matches the primary button's accent so a link reads as an action (owner, 2026-10-12: the light purple was not noticeable enough): the button's blue in Light (5.5:1 on the pane) and its violet raised to read on the dark pane (6:1 on the navy).
+        public static var linkText: GlassRGBA { GlassTheme.pick(GlassRGBA(0xC9B3FF, alpha: 1, light: GlassRGBA(0x5B10CC, alpha: 1)), flat: GlassRGBA(0xA07CFF, alpha: 1, light: GlassRGBA(0x15608A, alpha: 1))) }
         /// Toggles on, the kept data series, selection.
         public static let blue: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1))
         /// The far stop of a promotion card's tint (Home's Missions card): blue, or the light theme's amber.
@@ -189,6 +191,7 @@ public enum GlassTokens {
             "traceLiveEnd": traceLiveEnd,
             "purpleSoft": purpleSoft,
             "purpleText": purpleText,
+            "linkText": linkText,
             "blue": blue,
             "promoTintEnd": promoTintEnd,
             "textPrimary": textPrimary,

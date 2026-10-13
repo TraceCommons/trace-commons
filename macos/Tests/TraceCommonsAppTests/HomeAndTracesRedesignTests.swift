@@ -114,3 +114,22 @@ final class HomeAndTracesRedesignTests: XCTestCase {
         XCTAssertNil(none.low, "no drawn estimate is no estimate, never zero")
     }
 }
+
+/// The opening prompt, split into what was typed and what a tool wrapped
+/// in a tag (owner, 2026-10-12).
+final class PromptQuoteTests: XCTestCase {
+    func test_typedTextAndTaggedBlocksAreSplit() {
+        let prompt = #"<pasted_content id="2cfe">Use the MCP to import</pasted_content> then rebuild"#
+        XCTAssertEqual(PromptQuote.parts(prompt), [
+            .tagged(name: "pasted_content", body: "Use the MCP to import"),
+            .typed("then rebuild"),
+        ])
+        XCTAssertEqual(PromptQuote.parts("rebuild and launch"), [.typed("rebuild and launch")])
+        // A tag left open runs to the end, as a prompt cut short leaves it.
+        XCTAssertEqual(PromptQuote.parts("look <pasted_content id=\"x\">half a paste"), [
+            .typed("look"), .tagged(name: "pasted_content", body: "half a paste"),
+        ])
+        XCTAssertEqual(PromptQuote.words("pasted_content"), "Pasted content")
+        XCTAssertEqual(PromptQuote.icon("pasted_content"), "doc.on.clipboard")
+    }
+}

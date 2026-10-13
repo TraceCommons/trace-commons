@@ -168,38 +168,53 @@ struct SessionReviewCard: View {
                     .foregroundStyle(GlassColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            GlassCard(quiet: true) {
-                Text(summary.openingPrompt.flatMap { $0.isEmpty ? nil : $0 } ?? review.noOpeningPrompt)
-                    .glassType(GlassTokens.TypeScale.body)
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .lineLimit(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            if let measures = Self.measures(summary, review) {
-                line(measures)
+            // The opening prompt as a quotation, and what the person pasted
+            // set apart from what they typed (owner, 2026-10-12).
+            VStack(alignment: .leading, spacing: Self.lineGap) {
+                GlassCard(quiet: true) {
+                    PromptQuote(
+                        prompt: summary.openingPrompt.flatMap { $0.isEmpty ? nil : $0 },
+                        empty: review.noOpeningPrompt)
+                }
+                if let measures = Self.measures(summary, review) {
+                    Text(measures)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textTertiary)
+                }
             }
             redactions(summary, review)
+            // What scrubbing found and could not remove: one warning, the
+            // core's plain line over its plain explanation (owner,
+            // 2026-10-12), in place of a dotted line and a notice saying it
+            // twice.
             if let survivor = TracesStore.survivorLine(summary) {
-                GlassStatusLabel(survivor, status: .ask)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityLabel(survivor)
-            } else if RedactionLabels.survivorTotal(summary.redactions ?? [:]) > 0 {
-                caption(review.residualUnavailable, outside: true)
-            }
-            // Residual risk and the consent scopes are each a titled line
-            // whose text is behind its "i" (owner, 2026-10-12: move the
-            // longer strings into info tooltips). The gate statement is not
-            // repeated here (owner, 2026-10-10): the scrubbing caveat over
-            // the buttons says the same, and the Look inside sheet keeps the
-            // statement in full.
-            let risk = summary.residualRisk.flatMap { $0.isEmpty ? nil : $0 }
-            let scopes = summary.consentScopes.flatMap { $0.isEmpty ? nil : $0 }
-            if risk != nil || scopes != nil || TracesStore.eligibility(entry) != nil {
-                VStack(alignment: .leading, spacing: Self.lineGap) {
-                    if let words, let risk { infoLine(words.residualRisk, info: risk) }
-                    if let scopes { infoLine(review.consentScopes, info: scopes.joined(separator: " · ")) }
-                    eligibility(entry, review)
+                GlassNotice(tone: .outside, title: survivor) {
+                    if let why = Self.redactionRows(summary)?.stillPresent.first?.description, !why.isEmpty {
+                        Text(why)
+                    }
                 }
+                .accessibilityElement(children: .combine)
+            } else if RedactionLabels.survivorTotal(summary.redactions ?? [:]) > 0 {
+                GlassNotice(tone: .outside) { Text(review.residualUnavailable) }
+            }
+            // Residual risk and the consent scopes, each a titled section
+            // with its words in full (owner, 2026-10-12: not behind an "i").
+            // A scope is named by the core's title for it, never its id. The
+            // gate statement is not repeated here (owner, 2026-10-10): the
+            // scrubbing caveat over the buttons says the same, and the Look
+            // inside sheet keeps the statement in full.
+            if let words, let risk = summary.residualRisk.flatMap({ $0.isEmpty ? nil : $0 }) {
+                section(words.residualRisk) { line(risk) }
+            }
+            if let scopes = summary.consentScopes.flatMap({ $0.isEmpty ? nil : $0 }) {
+                section(review.consentScopes) {
+                    ForEach(scopes, id: \.self) { scope in
+                        bullet(store.disclosure?.consentScopeTitles?[scope] ?? scope)
+                    }
+                }
+            }
+            if TracesStore.eligibility(entry) != nil {
+                eligibility(entry, review)
             }
             if let outcome {
                 verdict(outcome)
@@ -242,32 +257,23 @@ struct SessionReviewCard: View {
     @ViewBuilder
     private func redactions(_ summary: DaemonData.PreviewSummary, _ review: MonitorSessionReviewCopy) -> some View {
         if let rows = Self.redactionRows(summary) {
-            VStack(alignment: .leading, spacing: Self.lineGap) {
-                sectionTitle(review.removed)
+            // The title over a bulleted list (owner, 2026-10-12): each row
+            // its count and kind in the title face, what it covered in the
+            // reading face. What the category is goes behind the row's
+            // tooltip and accessibility hint (owner, 2026-10-10). What was
+            // left in is the warning under it (`preview`).
+            section(review.removed) {
                 if rows.removed.isEmpty {
                     line(review.nothingRemoved)
                 } else {
-                    // The count and what it covered; what the category is
-                    // goes behind the line's tooltip and accessibility hint
-                    // (owner, 2026-10-10: a less verbose card). What was
-                    // left in keeps its full line below.
                     ForEach(rows.removed, id: \.family) { row in
-                        Self.redactionLine(row, describe: false)
-                            .glassType(Self.lineType)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .help(row.description)
-                            .accessibilityHint(row.description)
-                    }
-                }
-            }
-            if !rows.stillPresent.isEmpty {
-                GlassNotice(tone: .outside, title: review.stillPresent) {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                        ForEach(rows.stillPresent, id: \.family) { row in
-                            Self.redactionLine(row)
+                        bulletRow {
+                            Self.redactionLine(row, describe: false)
+                                .glassType(Self.lineType)
+                                .foregroundStyle(GlassColor.textSecondary)
                         }
+                        .help(row.description)
+                        .accessibilityHint(row.description)
                     }
                 }
             }
@@ -361,17 +367,17 @@ struct SessionReviewCard: View {
         // read as "nothing matched".
         if let redactions = summary?.redactions {
             let removed = RedactionLabels.removedTotal(redactions)
-            GlassStatusLabel(
-                ScrubbingCaveat.rowLine(redactionCount: removed),
-                status: ScrubbingCaveat.status(redactionCount: removed))
-                .fixedSize(horizontal: false, vertical: true)
+            // An information notice rather than a dotted line (owner,
+            // 2026-10-12).
+            GlassNotice(tone: ScrubbingCaveat.status(redactionCount: removed) == .ask ? .ask : .off) {
+                Text(ScrubbingCaveat.rowLine(redactionCount: removed))
+            }
         }
         // A load-time fact on the entry, so it is said before the preview
         // is in: a trimmed conversation never reaches a decision unsaid.
         if let line = SubagentCopy.line(count: entry.subagentCount ?? 0, dropped: entry.subagentsDropped ?? 0) {
             if (entry.subagentsDropped ?? 0) > 0 {
-                GlassStatusLabel(line, status: .ask)
-                    .fixedSize(horizontal: false, vertical: true)
+                GlassNotice(tone: .ask) { Text(line) }
             } else {
                 self.line(line)
             }
@@ -421,25 +427,17 @@ struct SessionReviewCard: View {
         let busy = store.acting.contains(entry.entryId)
         ScrubbingCaveatAtCommit()
         if let words, let review {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: GlassTokens.Space.s4) {
-                        contribute(entry, words)
-                        dismiss(entry, words)
-                        lookInside(entry, review)
-                    }
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                        HStack(spacing: GlassTokens.Space.s4) {
-                            contribute(entry, words)
-                            dismiss(entry, words)
-                        }
-                        lookInside(entry, review)
-                    }
+            // Contribute and Look inside (owner, 2026-10-12: no Dismiss or
+            // Keep on the card; Dismiss stays on the tree row's menu).
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: GlassTokens.Space.s5) {
+                    contribute(entry, words)
+                    lookInside(entry, review)
                 }
-                Button(words.keep) { act(.keep, entry) }
-                    .buttonStyle(GlassButtonStyle(.link))
-                    .lineLimit(1)
-                    .fixedSize()
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    contribute(entry, words)
+                    lookInside(entry, review)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .disabled(busy)
@@ -467,13 +465,6 @@ struct SessionReviewCard: View {
         .buttonStyle(GlassButtonStyle(.link))
         .lineLimit(1)
         .fixedSize()
-    }
-
-    private func dismiss(_ entry: DaemonData.QueueEntry, _ words: MonitorTracesCopy) -> some View {
-        Button(words.dismissAction) { act(.dismiss, entry) }
-            .buttonStyle(GlassButtonStyle(.link))
-            .lineLimit(1)
-            .fixedSize()
     }
 
     private func contribute(_ entry: DaemonData.QueueEntry, _ words: MonitorTracesCopy) -> some View {
@@ -593,13 +584,13 @@ struct SessionReviewCard: View {
     static func redactionLine(_ row: RedactionSummaryRow, describe: Bool = true) -> Text {
         var tail = !describe || row.description.isEmpty ? "" : ": " + row.description
         if !row.detail.isEmpty { tail += " (" + row.detail.joined(separator: ", ") + ")" }
-        return Text(row.countLine).bold().foregroundColor(GlassColor.textPrimary) + Text(tail)
+        return Text(row.countLine).fontWeight(.semibold).foregroundColor(GlassColor.textPrimary) + Text(tail)
     }
 
     // MARK: The card's type and rhythm (owner, 2026-10-12)
 
     /// Between the card's groups, and between the lines of one group.
-    static let groupGap = GlassTokens.Space.s6
+    static let groupGap = GlassTokens.Space.s8
     static let lineGap = GlassTokens.Space.s3
     /// Every reading line on the card: one face, so nothing reads as a
     /// smaller aside unless it is one.
@@ -610,6 +601,32 @@ struct SessionReviewCard: View {
 
     static func moreAbout(_ title: String) -> String {
         moreAboutTemplate.map { FirstRunCopy.fill($0, ["title": title]) } ?? title
+    }
+
+    /// A titled group: the title, then its lines.
+    private func section(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: Self.lineGap) {
+            sectionTitle(title)
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) { content() }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// A bulleted line in the reading face.
+    private func bullet(_ text: String) -> some View {
+        bulletRow { line(text) }
+    }
+
+    private func bulletRow(@ViewBuilder _ content: () -> some View) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+            Text("\u{2022}")
+                .glassType(Self.lineType)
+                .foregroundStyle(GlassColor.textTertiary)
+                .accessibilityHidden(true)
+            content()
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     /// A group's title: label, semibold, primary.
