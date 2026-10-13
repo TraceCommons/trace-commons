@@ -49,6 +49,12 @@ pub(crate) const UNENROLLED_HINT: &str = "This device isn't enrolled. Run `trace
 pub(crate) const SIGN_IN_UNFINISHED: &str =
     "Sign-in didn't finish. Run `trace-commons-contributor login` to try again.";
 /// The browser sign-in could not be started.
+/// A commons without the NEAR AI login path. The app's line for this offers
+/// a wallet, which the CLI has no route to.
+pub(crate) const COMMONS_UNSUPPORTED: &str =
+    "This commons doesn't offer NEAR AI sign-in. Use an invite instead.";
+/// `login --json` with neither a grant nor an invite.
+pub(crate) const JSON_REFUSED: &str = "--json can't start a browser sign-in. Pass --invite <link>, or run `trace-commons-contributor login` without --json.";
 pub(crate) const SIGN_IN_UNAVAILABLE: &str = "Couldn't start NEAR AI sign-in. Try again shortly.";
 /// Enrolled, and the consent answers could not be recorded.
 pub(crate) const CONSENT_NOT_SAVED: &str = "Enrolled, but your consent choices weren't saved. Run `trace-commons-contributor consent scopes` to choose them.";
@@ -186,11 +192,13 @@ pub(crate) fn sign_in_and_enroll(ports: Ports<'_>, consent: &Consent) -> Result<
     let enrolled = call("near_ai_account_enroll", serde_json::json!({}))?;
     if let Some(error) = enrolled.error {
         let label = error.message.as_str();
-        let line = crate::private_inference_copy::near_ai_enroll_line(label);
         if label == crate::private_inference_copy::NEAR_AI_ENROLL_COMMONS_UNSUPPORTED {
-            bail!("{line}\n{INVITE_HINT}")
+            bail!("{COMMONS_UNSUPPORTED}\n{INVITE_HINT}")
         }
-        bail!("{line}")
+        bail!(
+            "{}",
+            crate::private_inference_copy::near_ai_enroll_line(label)
+        )
     }
 
     let saved = answered(call(
@@ -516,10 +524,9 @@ mod tests {
         ]);
         let o = drive(script, &floor());
         let error = format!("{:#}", o.result.unwrap_err());
-        assert!(
-            error.contains(crate::private_inference_copy::NEAR_AI_ENROLL_COMMONS_UNSUPPORTED_LINE),
-            "{error}"
-        );
+        assert!(error.contains(COMMONS_UNSUPPORTED), "{error}");
+        // The app's line offers a wallet, which the CLI has no route to.
+        assert!(!error.contains("wallet"), "{error}");
         assert!(error.contains(INVITE_HINT), "{error}");
         assert!(!o.script.methods().contains(&"set_consent_scopes"));
         assert!(!o.out.contains(DONE));

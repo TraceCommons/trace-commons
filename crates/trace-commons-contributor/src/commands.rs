@@ -248,6 +248,21 @@ pub(crate) fn login_route(
     }
 }
 
+/// Refuse `login --json` when it would take the NEAR AI route: a `--json`
+/// caller parses stdout and has nobody at a browser, which is why
+/// `submit --json` never starts a sign-in either.
+pub(crate) fn refuse_json_sign_in(
+    json: bool,
+    grant_b64: Option<&str>,
+    invite: Option<&str>,
+    env_invite: Option<&str>,
+) -> Result<()> {
+    if json && login_route(grant_b64, invite, env_invite) == LoginRoute::NearAi {
+        anyhow::bail!(crate::near_ai_login::JSON_REFUSED);
+    }
+    Ok(())
+}
+
 /// Print this device's key id, for an instance operator to mint a grant
 /// against (`login --key-id`). Enrolls nothing.
 pub fn key_id(store: &ConfigStore) -> Result<()> {
@@ -2778,6 +2793,19 @@ mod login_route_tests {
             login_route(None, None, Some("env")),
             LoginRoute::Invite("env".into())
         );
+    }
+
+    /// A `--json` caller parses stdout and has nobody at a browser, so it
+    /// never starts the NEAR AI sign-in, as `submit --json` never does.
+    /// A grant or an invite still enrolls.
+    #[test]
+    fn json_login_refuses_only_the_near_ai_route() {
+        let error = refuse_json_sign_in(true, None, None, None).unwrap_err();
+        assert_eq!(error.to_string(), crate::near_ai_login::JSON_REFUSED);
+        assert!(refuse_json_sign_in(true, Some("g"), None, None).is_ok());
+        assert!(refuse_json_sign_in(true, None, Some("flag"), None).is_ok());
+        assert!(refuse_json_sign_in(true, None, None, Some("env")).is_ok());
+        assert!(refuse_json_sign_in(false, None, None, None).is_ok());
     }
 
     #[tokio::test]

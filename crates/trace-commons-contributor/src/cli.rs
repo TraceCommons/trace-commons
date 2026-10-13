@@ -573,6 +573,12 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             scopes,
             default_consent,
         } => {
+            commands::refuse_json_sign_in(
+                cli.json,
+                grant.as_deref(),
+                invite.as_deref(),
+                std::env::var("TRACE_COMMONS_INVITE").ok().as_deref(),
+            )?;
             commands::login(
                 &store,
                 grant.as_deref(),
