@@ -310,7 +310,8 @@ final class SessionReviewCardTests: XCTestCase {
         let body = String(card[kept.lowerBound..<actions.lowerBound])
         XCTAssertTrue(body.contains("if let line = summary?.tokenDistributionSummary, !line.isEmpty"),
                       "the card's kept facts lack the token distribution line")
-        XCTAssertTrue(body.contains("caption(line)"), "the token distribution line is not drawn as a caption")
+        // In the card's one reading face (owner, 2026-10-12).
+        XCTAssertTrue(body.contains("self.line(line)"), "the token distribution line is not drawn as a card line")
         let sheet = try Self.text("Views/PreviewSheet.swift")
         XCTAssertFalse(sheet.contains("tokenDistributionSummary"), "Look inside still draws the token distribution")
     }
