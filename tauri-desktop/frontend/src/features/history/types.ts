@@ -5,6 +5,8 @@ export type HistoryRecord = {
   project_label: string;
   source: string;
   status: string;
+  /** The daemon's `status_bucket` of `status`; absent from older daemons. */
+  bucket?: string;
   credit_points_pending: number;
   credit_points_final: number | null;
   explanations: string[];

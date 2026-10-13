@@ -1,7 +1,8 @@
 import { Button } from "@/components/ui/button";
 import { isTauriRuntime } from "../../../lib/tauri/core-api";
 import {
-  canWithdrawStatus,
+  canWithdrawBucket,
+  historyRecordBucket,
   historyStatusLabel,
   type SharedHistoryStatusCopy,
 } from "../withdrawal-eligibility.ts";
@@ -58,8 +59,9 @@ export function HistoryRow({
     month: "short",
     day: "numeric",
   });
-  const status = historyStatusLabel(record.status, statusCopy);
-  const canWithdraw = canWithdrawStatus(record.status);
+  const bucket = historyRecordBucket(record);
+  const status = historyStatusLabel(bucket, statusCopy);
+  const canWithdraw = canWithdrawBucket(bucket);
   const creditLine = historyCreditLine(
     record.credit_points_final,
     record.credit_points_pending,

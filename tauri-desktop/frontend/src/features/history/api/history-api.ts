@@ -37,6 +37,9 @@ function parseRecord(value: unknown): HistoryRecord {
     project_label: stringField(item, "project_label"),
     source: stringField(item, "source"),
     status: stringField(item, "status"),
+    ...(item.bucket === undefined
+      ? {}
+      : { bucket: stringField(item, "bucket") }),
     credit_points_pending: numberField(item, "credit_points_pending"),
     credit_points_final:
       item.credit_points_final === null

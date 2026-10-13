@@ -108,15 +108,17 @@ test("a row with no credit states nothing rather than a zero", () => {
   assert.equal(historyCreditLine(null, Number.NaN), null);
 });
 
-test("a processing record counts and filters as waiting to be scored", () => {
+test("a processing record counts and filters by the daemon's bucket", () => {
   // `processing` is the versioned pipeline's receipt status: uploaded, no
-  // verdict reported, so it shares the `submitted` bucket.
+  // verdict reported. The daemon files it with `submitted` in the row's
+  // `bucket`, and the count and filter read that.
   const withProcessing = [
-    ...records,
+    ...records.map((record) => ({ ...record, bucket: record.status })),
     {
       project_id: "opaque-a",
       project_label: "API",
       status: "processing",
+      bucket: "submitted",
       explanations: [],
     },
   ];
@@ -130,4 +132,29 @@ test("a processing record counts and filters as waiting to be scored", () => {
     filterHistory(withProcessing, "submitted").map(({ status }) => status),
     ["submitted", "processing"],
   );
+});
+
+test("a row without a bucket counts and filters as its own status", () => {
+  // A daemon from before `bucket`: the shell does not map `processing`
+  // itself, so the row is counted under `all` and no filter but `all`.
+  const withProcessing = [
+    ...records,
+    {
+      project_id: "opaque-a",
+      project_label: "API",
+      status: "processing",
+      explanations: [],
+    },
+  ];
+  assert.deepEqual(countHistory(withProcessing), {
+    all: 5,
+    accepted: 1,
+    submitted: 1,
+    quarantined: 2,
+  });
+  assert.deepEqual(
+    filterHistory(withProcessing, "submitted").map(({ status }) => status),
+    ["submitted"],
+  );
+  assert.equal(filterHistory(withProcessing, "all").length, 5);
 });

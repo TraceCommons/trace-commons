@@ -1,7 +1,10 @@
 import { Button } from "@/components/ui/button";
 import { ResponsiveOverlay } from "../../../components/responsive-overlay";
 import { useWithdrawalConfirmationPrompt } from "../../../lib/tauri/use-contributor-copy";
-import { canWithdrawStatus } from "../withdrawal-eligibility.ts";
+import {
+  canWithdrawBucket,
+  historyRecordBucket,
+} from "../withdrawal-eligibility.ts";
 import type { HistoryRecord, WithdrawalResult } from "../types";
 
 const reachCopy: Record<
@@ -40,7 +43,10 @@ export function WithdrawalControl({
   onCancel: () => void;
 }) {
   const confirmation = useWithdrawalConfirmationPrompt(confirming);
-  if (record.status !== "withdrawn" && !canWithdrawStatus(record.status))
+  if (
+    record.status !== "withdrawn" &&
+    !canWithdrawBucket(historyRecordBucket(record))
+  )
     return null;
   if (confirming)
     return (

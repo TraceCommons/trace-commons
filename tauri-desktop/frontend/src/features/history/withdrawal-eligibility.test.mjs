@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  canWithdrawStatus,
+  canWithdrawBucket,
+  historyRecordBucket,
   historyStatusLabel,
 } from "./withdrawal-eligibility.ts";
 
@@ -55,7 +56,7 @@ test("an unrecognised status reads with the contributor core's label", () => {
       status,
     );
     // And it is terminal: no Withdraw beside it.
-    assert.equal(canWithdrawStatus(status), false, status);
+    assert.equal(canWithdrawBucket(status), false, status);
   }
 });
 
@@ -76,7 +77,7 @@ test("every withdrawable status has a label", () => {
     "rejected",
     "awaiting_pii_backstop",
   ]) {
-    assert.equal(canWithdrawStatus(status), true, status);
+    assert.equal(canWithdrawBucket(status), true, status);
     assert.notEqual(
       historyStatusLabel(status, sharedHistoryCopy),
       sharedHistoryCopy.status_unavailable,
@@ -88,25 +89,29 @@ test("every withdrawable status has a label", () => {
 test("a submission held on the privacy backstop can be withdrawn", () => {
   // The server's withdraw handler has no status gate: any owned submission
   // that is not accepted withdraws as `not_distributed`.
-  assert.equal(canWithdrawStatus("awaiting_pii_backstop"), true);
+  assert.equal(canWithdrawBucket("awaiting_pii_backstop"), true);
   // macOS's allowlist (ContributionStatusPresentation.openValues).
   for (const status of ["accepted", "submitted", "quarantined", "received", "rejected"]) {
-    assert.equal(canWithdrawStatus(status), true, status);
+    assert.equal(canWithdrawBucket(status), true, status);
   }
   for (const status of ["withdrawn", "revoked", "purged", "expired", "unknown"]) {
-    assert.equal(canWithdrawStatus(status), false, status);
+    assert.equal(canWithdrawBucket(status), false, status);
   }
 });
 
-test("a processing receipt reads and withdraws as waiting to be scored", () => {
+test("a processing receipt reads and withdraws by the daemon's bucket", () => {
   // `processing` is the versioned pipeline's receipt status: uploaded, no
-  // verdict reported. It is `submitted` in every respect a row shows.
-  assert.equal(historyStatusLabel("processing"), null);
+  // verdict reported. The daemon files it with `submitted` and says so in
+  // the row's `bucket`; the shell reads that rather than mapping it.
+  const row = { status: "processing", bucket: "submitted" };
+  const bucket = historyRecordBucket(row);
+  assert.equal(bucket, "submitted");
+  assert.equal(historyStatusLabel(bucket), null);
   assert.equal(
-    historyStatusLabel("processing", sharedHistoryCopy),
+    historyStatusLabel(bucket, sharedHistoryCopy),
     "Waiting to be scored",
   );
-  assert.equal(canWithdrawStatus("processing"), true);
+  assert.equal(canWithdrawBucket(bucket), true);
 });
 
 test("processing uses the submitted bucket's shared label", () => {
@@ -118,5 +123,33 @@ test("processing uses the submitted bucket's shared label", () => {
       processing: "Receipt only",
     },
   };
-  assert.equal(historyStatusLabel("processing", renamed), "Awaiting scoring");
+  const row = { status: "processing", bucket: "submitted" };
+  assert.equal(
+    historyStatusLabel(historyRecordBucket(row), renamed),
+    "Awaiting scoring",
+  );
+});
+
+test("a row from a daemon without buckets reads as its own status", () => {
+  // No mapping of the shell's own: without `bucket` the raw status is the
+  // bucket, `processing` included.
+  for (const status of ["accepted", "submitted", "quarantined", "processing"]) {
+    assert.equal(historyRecordBucket({ status }), status, status);
+  }
+  const renamed = {
+    ...sharedHistoryCopy,
+    status_labels: {
+      ...sharedHistoryCopy.status_labels,
+      submitted: "Awaiting scoring",
+      processing: "Receipt only",
+    },
+  };
+  assert.equal(
+    historyStatusLabel(historyRecordBucket({ status: "processing" }), renamed),
+    "Receipt only",
+  );
+  assert.equal(
+    canWithdrawBucket(historyRecordBucket({ status: "processing" })),
+    false,
+  );
 });
