@@ -34,6 +34,17 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// A terminal app a managed session can open in, as the daemon names it:
+/// its wire id and the app's own name.
+public struct ManagedTerminalChoice: Decodable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public let name: String
+    public init(id: String, name: String) {
+        self.id = id
+        self.name = name
+    }
+}
+
 public struct ManagedSnapshot: Decodable, Equatable, Sendable {
     public struct Capabilities: Decodable, Equatable, Sendable {
         public let managedLaunch: Bool
@@ -42,9 +53,16 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         /// Whether the daemon holds a NEAR AI sign-in. A bool, never the
         /// credential; absent from an older daemon, which reads as no.
         public let nearAiSignin: Bool?
+        /// The chosen terminal's id; nil from an older daemon, or for a
+        /// stored choice the daemon does not know.
+        public let terminalCurrent: String?
+        /// The terminal apps installed on this Mac; absent from an older
+        /// daemon.
+        public let terminalChoices: [ManagedTerminalChoice]?
         enum CodingKeys: String, CodingKey {
             case managedLaunch = "managed_launch", terminalLaunch = "terminal_launch", terminalDestination = "terminal_destination"
             case nearAiSignin = "near_ai_signin"
+            case terminalCurrent = "terminal_current", terminalChoices = "terminal_choices"
         }
     }
     public let copy: [String: String]?
@@ -119,7 +137,17 @@ public enum ManagedSurface {
         // No NEAR AI sign-in: the line that asks for one.
         let signInNeeded = "managed-near-ai-sign-in-required"
         if code == signInNeeded || message == signInNeeded { return "sign_in_needed" }
+        // The chosen terminal app is not installed: the line that says so
+        // and points at Settings.
+        let notInstalled = "managed-terminal-not-installed"
+        if code == notInstalled || message == notInstalled { return "terminal_not_installed" }
         return "action_failed"
+    }
+
+    /// A line with `{terminal}` filled from the terminal the daemon
+    /// reports; `fallback` (the core's "your terminal") when it reports none.
+    public static func fillTerminal(_ template: String, terminal: String?, fallback: String) -> String {
+        template.replacingOccurrences(of: "{terminal}", with: terminal ?? fallback)
     }
 }
 
@@ -136,6 +164,10 @@ public extension ManagedSnapshot {
 
     /// Whether the daemon holds a NEAR AI sign-in.
     var nearAiSignedIn: Bool { capabilities.nearAiSignin == true }
+
+    /// The terminal apps a picker offers: the installed ones, none from an
+    /// older daemon.
+    var terminalChoices: [ManagedTerminalChoice] { capabilities.terminalChoices ?? [] }
 
     /// The tool's NEAR AI sign-in entry, only while signed in.
     func signInEntry(_ tool: String) -> ManagedAccount? {

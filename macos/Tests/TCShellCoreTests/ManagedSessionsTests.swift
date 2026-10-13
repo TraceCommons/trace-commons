@@ -13,6 +13,36 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(snapshot.capabilities.terminalDestination, "Terminal")
     }
 
+    func testSnapshotCarriesTheTerminalChoiceAndTheInstalledApps() throws {
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":2,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Ghostty","terminal_current":"ghostty","terminal_choices":[{"id":"terminal","name":"Terminal"},{"id":"ghostty","name":"Ghostty"}]}}"#.utf8))
+        XCTAssertEqual(snapshot.capabilities.terminalDestination, "Ghostty")
+        XCTAssertEqual(snapshot.capabilities.terminalCurrent, "ghostty")
+        XCTAssertEqual(snapshot.terminalChoices, [ManagedTerminalChoice(id: "terminal", name: "Terminal"), ManagedTerminalChoice(id: "ghostty", name: "Ghostty")])
+    }
+
+    func testAnOlderSnapshotOffersNoTerminalChoice() throws {
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":1,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Terminal"}}"#.utf8))
+        XCTAssertNil(snapshot.capabilities.terminalCurrent)
+        XCTAssertEqual(snapshot.terminalChoices, [])
+    }
+
+    func testTheFixtureCarriesTheTerminalFields() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json")))
+        XCTAssertEqual(snapshot.capabilities.terminalCurrent, "terminal")
+        XCTAssertEqual(snapshot.terminalChoices.map(\.name), ["Terminal", "Ghostty"])
+        XCTAssertEqual(snapshot.copy?["terminal_choice"], "Open sessions in")
+    }
+
+    func testAMissingTerminalHasItsOwnLine() {
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-terminal-not-installed", message: "managed-terminal-not-installed"), "terminal_not_installed")
+        let line = "{terminal} isn't installed. Choose another terminal in Settings."
+        XCTAssertEqual(ManagedSurface.fillTerminal(line, terminal: "Ghostty", fallback: "your terminal"),
+                       "Ghostty isn't installed. Choose another terminal in Settings.")
+        XCTAssertEqual(ManagedSurface.fillTerminal(line, terminal: nil, fallback: "your terminal"),
+                       "your terminal isn't installed. Choose another terminal in Settings.")
+    }
+
     func testSurfaceNeverPicksARawValueOrDaemonCode() {
         XCTAssertEqual(ManagedSurface.stateKey("running"), "state_running")
         XCTAssertEqual(ManagedSurface.stateKey("future_state"), "state_unknown")
