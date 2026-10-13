@@ -2,8 +2,9 @@ import SwiftUI
 
 /// A hero promotion (owner, 2026-10-12): a saturated gradient ground, a
 /// large graphic overlaid on the right and running off the card's edge,
-/// and on the left an eyebrow, a bold title, a line under it, the caller's
-/// content, and a white pill naming the action. The same in both
+/// and on the left a bold title, a line under it, the caller's content,
+/// and a white pill naming the action (no eyebrow, no logo: owner,
+/// 2026-10-12). The same in both
 /// appearances: the ground is its own, and every word on it is `heroInk`.
 ///
 /// The whole card is one button (the pill draws the action, it is not a
@@ -11,9 +12,6 @@ import SwiftUI
 /// the action. The graphic is decoration and hidden from assistive tech.
 public struct GlassHeroCard<Graphic: View, Content: View>: View {
     private let gradient: GlassGradient
-    /// The NEAR AI lockup over the title (owner, 2026-10-12: on NEAR AI's
-    /// own promotion); no pill eyebrow.
-    private let showsLockup: Bool
     private let title: String
     private let subtitle: String?
     private let actionTitle: String?
@@ -24,12 +22,11 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(
-        gradient: GlassGradient, showsLockup: Bool = false, title: String, subtitle: String? = nil,
+        gradient: GlassGradient, title: String, subtitle: String? = nil,
         actionTitle: String? = nil, action: @escaping () -> Void,
         @ViewBuilder graphic: () -> Graphic, @ViewBuilder content: () -> Content
     ) {
         self.gradient = gradient
-        self.showsLockup = showsLockup
         self.title = title
         self.subtitle = subtitle
         self.actionTitle = actionTitle
@@ -43,8 +40,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     /// longer title or a wrapped line never pushes the action off the card.
     static var minHeight: CGFloat { 156 }
     static var graphicReserve: CGFloat { 150 }
-    /// The lockup's height over the title.
-    static var lockupHeight: CGFloat { 16 }
+
     /// The title's face: larger and heavier than a card title, as a hero's
     /// is (the references' display type, on the system face).
     static var titleType: GlassTypeStyle { GlassTokens.TypeScale.display.weight(.heavy) }
@@ -88,11 +84,6 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
 
     private var words: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            if showsLockup {
-                GlassNearAILockupView(height: Self.lockupHeight)
-                    .foregroundStyle(GlassTokens.Color.heroInk.color)
-                    .padding(.bottom, GlassTokens.Space.s1)
-            }
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 Text(title)
                     .glassType(Self.titleType)

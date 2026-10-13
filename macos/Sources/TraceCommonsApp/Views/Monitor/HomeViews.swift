@@ -142,7 +142,7 @@ private struct HomeOverview: View {
         if let words {
             // A hero promotion (owner, 2026-10-12).
             GlassHeroCard(
-                gradient: GlassTokens.Gradient.heroCampaign, showsLockup: true,
+                gradient: GlassTokens.Gradient.heroCampaign,
                 title: words.campaignTitle, subtitle: words.campaignBody,
                 actionTitle: words.campaignAction, action: openPrivateAI
             ) {
