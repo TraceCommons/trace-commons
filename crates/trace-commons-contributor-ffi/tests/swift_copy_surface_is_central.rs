@@ -384,6 +384,8 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
             consent::AUTO_NO_REVIEW,
             consent::AUTO_PATTERNS_ONLY_SCOPE,
             consent::AUTO_PATTERNS_ONLY_LIMIT,
+            consent::AUTO_SUMMARY_PATTERNS_ONLY,
+            consent::AUTO_SUMMARY_MODEL,
             consent::AUTO_RAW_SEND_BOTH_ENCLAVES,
             consent::AUTO_PROJECT_DISCLOSURE_UNAVAILABLE,
             consent::AUTO_SCOPE_REQUIRED,

@@ -85,9 +85,10 @@ final class HomeViewTests: XCTestCase {
             "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted), "
                 + "systemImage: HomeStatIcons.contributed, action: openHistory)"))
         // The credit summary after a failed read is no summary (D6 then
-        // shows a dash and no condition), never the earlier sentence.
+        // shows a dash). The condition gates the figure but is not drawn
+        // (owner, 2026-10-13).
         XCTAssertTrue(home.contains("let condition = HomeFormat.pendingCondition(freshCredit)"))
-        XCTAssertTrue(home.contains("if let condition { Text(condition)"))
+        XCTAssertFalse(home.contains("Text(condition)"))
         XCTAssertEqual(HomeFormat.pendingFigure(3, credit: nil), "—")
         XCTAssertEqual(HomeFormat.pendingFigure(nil, credit: nil), "—")
         let reply = try XCTUnwrap(SampleDaemonData.reply("commons_credit_summary", in: .normalDay))

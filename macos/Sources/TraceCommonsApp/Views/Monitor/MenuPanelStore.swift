@@ -26,10 +26,17 @@ final class MenuPanelStore {
     private(set) var kept: [DaemonData.QueueEntry] = []
     private(set) var history: [DaemonData.HistoryRow] = []
     private(set) var calls: [DaemonData.InferenceCall] = []
-    /// True until a load has read everything, and again whenever a read
-    /// fails, there is no client, or the client's event stream ends: what
-    /// is held is no longer current.
+    /// True until a load has read `status`, and again whenever that read
+    /// fails, there is no client, or the client's event stream ends: the
+    /// panel cannot vouch for anything it holds. Every value is gated on it.
     private(set) var stale = true
+    /// The other reads that failed on the last load. Each gates only the
+    /// values drawn from it (`current(_:)`): a failed history read leaves
+    /// the mode and the waiting count drawn, and its own values unknown.
+    private(set) var unreadable: Set<MenuPanelData.Read> = []
+    /// How long `run` waits before re-reading and re-subscribing after the
+    /// event stream ends, so a daemon that is truly gone is not hot-looped.
+    var resubscribeDelay: Duration = .seconds(5)
     /// Today's routed calls per tool (`insights_glance`). Read on its own:
     /// no answer here ever stales the popover, since the glance is off by
     /// default and an older daemon does not serve it.
@@ -124,7 +131,10 @@ final class MenuPanelStore {
     func chooseMixed() async {
         guard canChooseOverride, status?.contributionOverride != nil else { return }
         overrideRefusal = nil
-        guard MenuPanelData.clearNeedsConfirmation(projects, override: status?.contributionOverride?.mode) else {
+        // A folder list that did not answer on the last read is unknown,
+        // which needs the confirmation (fail closed), never the last list.
+        let folders = current(.projects) ? projects : nil
+        guard MenuPanelData.clearNeedsConfirmation(folders, override: status?.contributionOverride?.mode) else {
             await writeOverride { _ = try await $0.clearContributionOverride() }
             return
         }
@@ -182,9 +192,27 @@ final class MenuPanelStore {
         return ""
     }
 
+    /// Reads, then follows the client's events until the task is cancelled
+    /// (the label's `.task(id:)` cancels it when the client changes). A
+    /// stream that ends marks the data stale and, after `resubscribeDelay`,
+    /// is read and opened again: it used to end `run` for good, which left
+    /// the panel stale against a daemon that was answering, until a new
+    /// client was attached.
     func run() async {
-        await load()
-        guard let client else { return }
+        while !Task.isCancelled {
+            await load()
+            guard let client else { return }
+            await follow(client)
+            if Task.isCancelled { return }
+            // The stream ended: the daemon went away, or the stream could
+            // not be opened. Stale until a read says otherwise.
+            stale = true
+            do { try await Task.sleep(for: resubscribeDelay) } catch { return }
+        }
+    }
+
+    /// Re-reads on each event until the client's stream ends.
+    private func follow(_ client: any DaemonDataClient) async {
         for await event in client.events() {
             if Task.isCancelled { break }
             switch event {
@@ -196,37 +224,39 @@ final class MenuPanelStore {
                 await loadGlance()
             }
         }
-        // The stream ended: the daemon went away.
-        if !Task.isCancelled { stale = true }
     }
 
-    /// Reads everything. A failed read marks the data stale rather than
-    /// keeping the last value as if it were current; a method the daemon
-    /// does not have yet is not a failure.
+    /// Reads everything. A failed read marks its own data unknown rather
+    /// than keeping the last value as if it were current; only a failed
+    /// `status` read makes the whole panel stale. A method the daemon does
+    /// not have yet is not a failure.
     func load() async {
         guard let client else {
             stale = true
             glance = .unavailable
             return
         }
-        var failed = false
-        func read<T>(_ call: () async throws -> T) async -> T? {
+        var failed: Set<MenuPanelData.Read> = []
+        func read<T>(_ which: MenuPanelData.Read, _ call: () async throws -> T) async -> T? {
             do { return try await call() } catch DaemonDataError.notAvailableYet {
                 return nil
             } catch {
-                failed = true
+                failed.insert(which)
                 return nil
             }
         }
-        if let value = await read({ try await client.status() }) { status = value }
-        if let value = await read({ try await client.listProjects() }) { projects = value.projects }
-        if let value = await read({ try await client.listPending(projectId: nil) }) { pending = value }
-        if let value = await read({ try await client.listKept() }) { kept = value }
-        if let value = await read({ try await client.listHistory(limit: HomeStore.historyLimit) }) { history = value }
-        if let value = await read({ try await client.inferenceCalls(limit: 20, cursor: nil) }) {
+        if let value = await read(.status, { try await client.status() }) { status = value }
+        if let value = await read(.projects, { try await client.listProjects() }) { projects = value.projects }
+        if let value = await read(.pending, { try await client.listPending(projectId: nil) }) { pending = value }
+        if let value = await read(.kept, { try await client.listKept() }) { kept = value }
+        if let value = await read(.history, { try await client.listHistory(limit: HomeStore.historyLimit) }) {
+            history = value
+        }
+        if let value = await read(.calls, { try await client.inferenceCalls(limit: 20, cursor: nil) }) {
             calls = value.readable ? value.calls : []
         }
-        stale = failed
+        unreadable = failed
+        stale = failed.contains(.status)
         await loadGlance()
     }
 
@@ -255,6 +285,40 @@ final class MenuPanelStore {
             await loadGlance()
         }
     }
+
+    // MARK: What each value is drawn from
+
+    /// Whether one read's data is current: the status is (the panel is not
+    /// stale) and that read answered last time. Each value is gated on its
+    /// own read, so one read that fails never blanks another's value.
+    func current(_ read: MenuPanelData.Read) -> Bool {
+        !stale && !unreadable.contains(read)
+    }
+
+    /// The mode pill's roll-up, from `status`; `none` (a dash) while there
+    /// is no current status.
+    var modeRollup: MenuPanelData.ModeRollup {
+        stale ? .none : MenuPanelData.rollup(status?.contributionMode)
+    }
+
+    /// Shared in the graph's days, from `list_history`; nil when unknown.
+    var sharedCount: Int? {
+        current(.history) ? columns.reduce(0) { $0 + $1.up } : nil
+    }
+
+    /// Kept in the graph's days, from `list_kept`; nil when unknown.
+    var keptCount: Int? {
+        current(.kept) ? columns.reduce(0) { $0 + $1.down } : nil
+    }
+
+    /// "Worth a second look", from `list_pending`; nil when unknown.
+    var flaggedCount: Int? {
+        current(.pending) ? MenuPanelData.flagged(pending) : nil
+    }
+
+    /// Whether the graph's bars are current: both of the reads they are
+    /// drawn from answered. Otherwise they are drawn grey, as when paused.
+    var columnsCurrent: Bool { current(.history) && current(.kept) }
 
     /// The graph's columns: contributed (shared) and kept, per day.
     var columns: [GlassDayColumn] {
@@ -306,6 +370,12 @@ enum MenuPanelData {
         requiresOnboarding ? nil : .settings(.watchedFolders)
     }
 
+    /// The daemon reads the panel makes on each load, each gating only the
+    /// values drawn from it (`MenuPanelStore.current(_:)`).
+    enum Read: Hashable, Sendable {
+        case status, projects, pending, kept, history, calls
+    }
+
     /// The roll-up of every listed folder's mode, for the mode pill.
     enum ModeRollup: Equatable {
         case ask, armed, never
@@ -326,6 +396,13 @@ enum MenuPanelData {
         case "mixed": .mixed
         default: .none
         }
+    }
+
+    /// A count the panel draws: the number, or the core's word for a value
+    /// it did not report (`MonitorWords.unknown`), never a bare dash that
+    /// reads as a broken panel.
+    static func countWord(_ count: Int?, unknown: String) -> String {
+        count.map(String.init) ?? unknown
     }
 
     /// The pill's value: the core's label for its mode, its Mixed word,

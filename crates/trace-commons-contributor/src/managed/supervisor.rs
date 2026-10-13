@@ -111,35 +111,17 @@ async fn run_native(
                 SecretStore::new(store).get(account.id)?,
             )
             .await?;
-            let base = format!("http://127.0.0.1:{}", proxy.port());
-            match row.tool {
-                super::ToolId::Claude => {
-                    command
-                        .env("ANTHROPIC_BASE_URL", format!("{base}/anthropic"))
-                        .env("ANTHROPIC_AUTH_TOKEN", "managed-local-session");
-                }
-                super::ToolId::Codex => {
-                    command
-                        .env("NEAR_AI_SESSION_API_KEY", "managed-local-session")
-                        .args([
-                            "-c",
-                            "model_provider=\"near_ai_managed\"",
-                            "-c",
-                            "model_providers.near_ai_managed.name=\"NEAR AI\"",
-                            "-c",
-                        ])
-                        .arg(format!(
-                            "model_providers.near_ai_managed.base_url=\"{base}/openai/v1\""
-                        ))
-                        .args([
-                            "-c",
-                            "model_providers.near_ai_managed.env_key=\"NEAR_AI_SESSION_API_KEY\"",
-                            "-c",
-                            "model_providers.near_ai_managed.wire_api=\"responses\"",
-                        ]);
-                }
-            }
+            near_ai_route(&mut command, row.tool, proxy.port());
             route = Some(proxy);
+        }
+        // The daemon holds the sign-in and hosts this session's proxy. This
+        // process learns its port and never the credential; no port, no run.
+        ConnectionKind::NearAiSignIn => {
+            near_ai_route(
+                &mut command,
+                row.tool,
+                context.route_port.ok_or(ManagedError::LaunchUnknown)?,
+            );
         }
     }
     // Signals were registered before ticket redemption. A terminal closed
@@ -248,6 +230,39 @@ async fn run_native(
         );
     }
     Ok(code)
+}
+
+/// Point the tool at a session's local NEAR AI proxy. The tool gets the
+/// loopback URL and a placeholder token, never a credential.
+fn near_ai_route(command: &mut std::process::Command, tool: super::ToolId, port: u16) {
+    let base = format!("http://127.0.0.1:{port}");
+    match tool {
+        super::ToolId::Claude => {
+            command
+                .env("ANTHROPIC_BASE_URL", format!("{base}/anthropic"))
+                .env("ANTHROPIC_AUTH_TOKEN", "managed-local-session");
+        }
+        super::ToolId::Codex => {
+            command
+                .env("NEAR_AI_SESSION_API_KEY", "managed-local-session")
+                .args([
+                    "-c",
+                    "model_provider=\"near_ai_managed\"",
+                    "-c",
+                    "model_providers.near_ai_managed.name=\"NEAR AI\"",
+                    "-c",
+                ])
+                .arg(format!(
+                    "model_providers.near_ai_managed.base_url=\"{base}/openai/v1\""
+                ))
+                .args([
+                    "-c",
+                    "model_providers.near_ai_managed.env_key=\"NEAR_AI_SESSION_API_KEY\"",
+                    "-c",
+                    "model_providers.near_ai_managed.wire_api=\"responses\"",
+                ]);
+        }
+    }
 }
 
 #[cfg(unix)]

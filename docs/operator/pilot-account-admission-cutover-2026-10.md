@@ -385,6 +385,19 @@ privacy-filter line is present; names identical to step 0.
 
 Stop if: not `active`, `NRestarts` above 0, or `/health` shows another commit.
 
+### 1g. Re-arm the versioned pipeline
+
+Step 1 deploys a new code revision. Until the pipeline is re-armed on it, every
+tenant routed to the pipeline is refused new uploads with `503`
+`pipeline_bundle_not_qualified`, and default routing is disarmed. 1f's log scan
+shows it at start as `pipeline_active_bundle_not_qualified` and `pipeline
+default routing is not armed` (WARN). Follow
+[deployment.md](deployment.md), "Then: re-arm the versioned pipeline", before
+step 2. Every later step that installs a new ingest binary needs the same.
+
+Stop if: the re-arm fails. Contain the routed tenants or roll back the binary
+(below); do not leave the pilot with intake closed.
+
 ### Rollback, step 1
 
 Run the printed rollback line. V125 and V126 stay applied. The old binary

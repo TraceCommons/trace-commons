@@ -554,6 +554,10 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
     proxy_cleanup_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut token_cleanup_tick = tokio::time::interval(std::time::Duration::from_secs(300));
     token_cleanup_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Lapsed managed sessions on the NEAR AI sign-in lose their proxy within
+    // the lease plus one of these ticks.
+    let mut managed_lease_tick = tokio::time::interval(std::time::Duration::from_secs(15));
+    managed_lease_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut token_cleanup_tasks = tokio::task::JoinSet::new();
     // The published estimate table's fetch schedule (OWNER DECISION E11).
     // A local of this loop, so nothing that answers a request can reach it.
@@ -596,6 +600,9 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 });
             }
             _ = token_cleanup_tasks.join_next(), if !token_cleanup_tasks.is_empty() => {}
+            _ = managed_lease_tick.tick() => {
+                managed::sweep(shared, Utc::now()).await;
+            }
             _ = ticker.tick() => {
                 let tick_started = std::time::Instant::now();
                 let now = Utc::now();

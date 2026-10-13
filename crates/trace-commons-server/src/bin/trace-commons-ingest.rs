@@ -3415,6 +3415,49 @@ impl TenantCtx {
         &self.auth.principal_ref
     }
 
+    /// The principal account admission looks the caller up by: the
+    /// provisioned device principal for a device-key upload claim, and
+    /// `principal_ref()` for every other credential.
+    ///
+    /// NEAR and NEAR AI provisioning key the account, its admission anchor
+    /// and the ledger's live-device check by
+    /// `account_trust::device_principal_ref(tenant, device_key_id)`. A
+    /// signed upload claim's own principal hashes the claim's actor under the
+    /// `signed_claim` method instead, so it never matches a provisioned row;
+    /// looking it up refused every `nearai-` upload with
+    /// `account_trust_refused` (2026-10-12).
+    ///
+    /// Which device: the one whose key id is in the claim's actor. The issuer
+    /// writes that actor (`account_trust::device_claim_actor`) only after
+    /// verifying the device key's signature for this tenant, and refuses a
+    /// device-shaped actor on the workload path, so the actor's key id is
+    /// the authenticated device. The actor is recovered from `sub` and
+    /// accepted only if it re-derives this request's principal, so a claim
+    /// whose `principal_ref` and `sub` disagree falls back rather than
+    /// borrowing `sub`. `principal_ref()` itself is unchanged: it remains the
+    /// ownership key every submission row is written under.
+    fn account_principal_ref(&self) -> String {
+        self.device_principal_ref()
+            .unwrap_or_else(|| self.auth.principal_ref.clone())
+    }
+
+    fn device_principal_ref(&self) -> Option<String> {
+        let auth = &self.auth;
+        if auth.auth_method != TraceAuthMethod::SignedClaim {
+            return None;
+        }
+        let actor = auth.signed_claim_subject.as_deref()?;
+        if signed_claim_principal_refs(&auth.tenant_id, actor).0 != auth.principal_ref {
+            return None;
+        }
+        let device_key_id =
+            trace_commons_server::account_trust::device_claim_key_id(&auth.tenant_id, actor)?;
+        Some(trace_commons_server::account_trust::device_principal_ref(
+            &auth.tenant_id,
+            device_key_id,
+        ))
+    }
+
     fn tenant_storage_ref(&self) -> String {
         tenant_storage_ref(self.tenant_id())
     }
@@ -78384,11 +78427,36 @@ struct ApiError {
     blockers: Option<Vec<String>>,
 }
 
+/// The label an error response is logged under: the response's own label
+/// when it is label-shaped, `unlabelled` otherwise. A few callers build their
+/// message with `format!`, and the log line must stay hash-only, so anything
+/// that is not a short fixed-vocabulary token is never written out.
+fn api_error_log_label(message: &str) -> &str {
+    let label_shaped = !message.is_empty()
+        && message.len() <= 64
+        && message.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b':' | b'.' | b'-')
+        });
+    if label_shaped { message } else { "unlabelled" }
+}
+
+/// One line per error response, so an operator can see which refusal a
+/// client received without the request body or any identifier.
+fn log_api_error(status: StatusCode, message: &str) {
+    tracing::info!(
+        status = status.as_u16(),
+        api_error = api_error_log_label(message),
+        "Trace Commons request answered with an error"
+    );
+}
+
 fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
+    let message = message.into();
+    log_api_error(status, &message);
     (
         status,
         Json(ApiError {
-            error: message.into(),
+            error: message,
             retry_after_seconds: None,
             blockers: None,
         }),
@@ -78400,10 +78468,12 @@ fn api_error_with_retry(
     message: impl Into<String>,
     retry_after_seconds: Option<i64>,
 ) -> (StatusCode, Json<ApiError>) {
+    let message = message.into();
+    log_api_error(status, &message);
     (
         status,
         Json(ApiError {
-            error: message.into(),
+            error: message,
             retry_after_seconds,
             blockers: None,
         }),

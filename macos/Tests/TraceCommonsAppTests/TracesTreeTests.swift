@@ -483,12 +483,40 @@ final class TracesRowWordsTests: XCTestCase {
             fromJSON: TCCoreCopy.automaticGrantCopyJSON(disclosure: "patterns_only")))
         XCTAssertEqual(store.disclosureLines(armed.disclosure), words.lines)
         let view = TracesTreeView(store: store, selection: .constant(nil))
-        XCTAssertEqual(view.folderNotes(armed), words.lines)
+        // The row draws the one sentence, never the long lines; those sit
+        // behind the info button with the core's "More about" label.
+        XCTAssertEqual(view.folderNotes(armed), [words.summary])
+        for line in words.lines { XCTAssertFalse(view.folderNotes(armed).contains(line)) }
+        let info = try XCTUnwrap(view.folderInfo(armed))
+        XCTAssertEqual(info.line, words.summary)
+        XCTAssertEqual(info.text, words.lines.joined(separator: "\n\n"))
+        XCTAssertEqual(
+            info.label,
+            FolderInspector.moreAboutLabel(try XCTUnwrap(store.words).inspector.contributionRule))
+        for folder in folders where folder.mode != .autoUpload {
+            XCTAssertNil(view.folderInfo(folder), folder.label)
+        }
         for folder in folders where folder.mode != .autoUpload {
             XCTAssertNil(folder.disclosure, folder.label)
             XCTAssertTrue(view.folderNotes(folder).isEmpty, folder.label)
         }
         XCTAssertTrue(store.disclosureLines("scrubbed").isEmpty)
+        // The Contribution rule card says the one sentence, and the long
+        // form is the info button's text, not drawn beside it (owner,
+        // 2026-10-12).
+        let card = try XCTUnwrap(store.armedDisclosure(armed.disclosure))
+        XCTAssertEqual(card.summary, words.summary)
+        XCTAssertEqual(card.lines, words.lines)
+        XCTAssertFalse(card.lines.contains(card.summary))
+        XCTAssertNil(store.armedDisclosure("scrubbed"))
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/ToolFolderInspectors.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(source.contains("caption(copy.summary)"))
+        XCTAssertTrue(source.contains("GlassInfoButton(label, text: copy.lines.joined("))
+        XCTAssertFalse(source.contains("store.disclosureLines("))
     }
 
     /// A held session says the core's word for it, so the amber flag is

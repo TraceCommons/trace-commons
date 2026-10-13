@@ -105,18 +105,13 @@ struct SummaryInspector: View {
         }
     }
 
-    /// Pending credit, as a figure only beside the commons' condition for
-    /// it (D6); a dash otherwise.
+    /// Pending credit, as a figure only when the commons has stated its
+    /// condition (D6); a dash otherwise. The statement is not drawn.
     private var pending: some View {
         let pending = SummaryFacts.pending(rollup: rollup, credit: credit)
-        let line = MonitorWords.pending + " " + pending.value
-        // A glyph of its own, and the condition with the credit-not-currency
-        // sentence behind an "i" rather than under the line (owner,
-        // 2026-10-12). The figure is still shown only with its condition
-        // (D6): `pending.value` is a dash without one.
-        return SummaryDecisionLine(
-            glyph: Self.pendingGlyph, tone: nil, text: line,
-            info: pending.condition.map { $0 + "\n\n" + MonitorWords.creditNotCurrency })
+        // Its own glyph (owner, 2026-10-12), on the decision lines' text
+        // column; the condition is not drawn (#1401).
+        return SummaryDecisionLine(glyph: Self.pendingGlyph, tone: nil, text: MonitorWords.pending + " " + pending.value)
     }
 
     /// The pending line's glyph: credit on its way.
@@ -177,8 +172,6 @@ private struct SummaryDecisionLine: View {
     let glyph: String?
     let tone: GlassStatus?
     let text: String
-    /// Longer text behind an "i" after the line; nil draws none.
-    var info: String? = nil
 
     var body: some View {
         // Ron's `DecisionLine`: the glyph in a 20 column, 10 before the line.
@@ -198,9 +191,6 @@ private struct SummaryDecisionLine: View {
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
-            if let info {
-                GlassInfoButton(SessionReviewCard.moreAbout(text), text: info)
-            }
         }
     }
 }
