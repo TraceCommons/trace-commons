@@ -14450,7 +14450,13 @@ mod tests {
             approved_verdict: None,
             uploaded_bytes: None,
         };
-        let statuses = [STATUS_PROCESSING, "submitted", "accepted", "withdrawn", "revoked"];
+        let statuses = [
+            STATUS_PROCESSING,
+            "submitted",
+            "accepted",
+            "withdrawn",
+            "revoked",
+        ];
         let records: Vec<_> = statuses.iter().map(|s| record(s)).collect();
         HistoryCache::save(&s.store, &records).unwrap();
 
