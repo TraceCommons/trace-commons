@@ -61,13 +61,35 @@ public sealed class HistoryRecord
     public string? SessionHash { get; set; }
 
     /// <summary>
-    /// One of <c>submitted</c>, <c>accepted</c>, <c>quarantined</c>, or the
-    /// locally stamped <c>withdrawn</c>. Any other value is a status this
-    /// build has no stable name for and reads as the core's "Status
-    /// unavailable", with no Withdraw offered.
+    /// The raw status, for the status word only. Withdraw, counts and filters
+    /// read <see cref="BucketOrStatus"/> instead.
     /// </summary>
     [JsonPropertyName("status")]
     public string Status { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The status the daemon counts, selects and withdraws this row under
+    /// (<c>daemon::history::status_bucket</c>, #1284): <c>submitted</c> for a
+    /// <c>processing</c> row, the status itself for every other.
+    /// </summary>
+    /// <remarks>
+    /// Null from a daemon older than the field. See
+    /// <see cref="BucketOrStatus"/> for what stands in for it then.
+    /// </remarks>
+    [JsonPropertyName("bucket")]
+    public string? Bucket { get; set; }
+
+    /// <summary>
+    /// <see cref="Bucket"/>, or the raw <see cref="Status"/> where an older
+    /// daemon sent none. Every Withdraw decision on a row reads this.
+    /// </summary>
+    /// <remarks>
+    /// The fallback deliberately does not map <c>processing</c> itself: that
+    /// rule has one copy, in the daemon. A <c>processing</c> row from an
+    /// older daemon therefore reads as a status this build does not offer
+    /// Withdraw on, which is failing closed.
+    /// </remarks>
+    public string BucketOrStatus => Bucket ?? Status;
 
     [JsonPropertyName("consent_scopes")]
     public List<string> ConsentScopes { get; set; } = new();

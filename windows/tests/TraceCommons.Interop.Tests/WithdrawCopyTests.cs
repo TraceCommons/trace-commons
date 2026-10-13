@@ -753,10 +753,69 @@ public sealed class HistoryCopyTests
         Assert.Equal("quarantined", record.Status);
         Assert.Null(record.CreditPointsFinal);
         Assert.Equal("credit 1.5, still being scored", HistoryCopy.CreditLine(record.CreditPointsFinal, record.CreditPointsPending));
-        Assert.True(WithdrawCopy.OffersWithdrawal(record.Status, record.SubmissionId));
+        Assert.True(WithdrawCopy.OffersWithdrawal(record.BucketOrStatus, record.SubmissionId));
 
         // A held record maps to the not-in-the-commons stage: the server's own
         // rule is that it resolves to `not_distributed` exactly.
-        Assert.Equal(WithdrawStage.NotInTheCommons, WithdrawStageExtensions.StageOf(record.Status));
+        Assert.Equal(WithdrawStage.NotInTheCommons, WithdrawStageExtensions.StageOf(record.BucketOrStatus));
+    }
+
+    private static HistoryRecord ParseRow(string fields)
+    {
+        HistoryList? page = DaemonResponse.Parse(
+            "{\"id\":1,\"result\":{\"history\":[{\"submission_id\":\"sub-1\","
+            + "\"project_label\":\"myproj\"," + fields + "}]}}").ResultAs<HistoryList>();
+        Assert.NotNull(page);
+        return Assert.Single(page!.History);
+    }
+
+    [Fact]
+    public void AProcessingRowIsOfferedAndStagedAsItsSubmittedBucket()
+    {
+        // #1284: the versioned pipeline's `processing` receipt is "uploaded,
+        // no verdict yet", and the daemon reports it under the `submitted`
+        // bucket. Withdraw and the confirmation's stage read that bucket.
+        HistoryRecord record = ParseRow("\"status\":\"processing\",\"bucket\":\"submitted\"");
+
+        Assert.Equal("submitted", record.Bucket);
+        Assert.Equal("submitted", record.BucketOrStatus);
+        Assert.True(WithdrawCopy.OffersWithdrawal(record.BucketOrStatus, record.SubmissionId));
+        Assert.Equal(
+            WithdrawStage.NotInTheCommons,
+            WithdrawStageExtensions.StageOf(record.BucketOrStatus));
+
+        // The raw status survives, and the word is still read off it.
+        Assert.Equal("processing", record.Status);
+        Assert.Equal(HistoryCopy.WaitingToBeScored, HistoryCopy.StatusWord(record.Status));
+    }
+
+    [Fact]
+    public void ARowWithNoBucketFallsBackToItsRawStatus()
+    {
+        // An older daemon sends no `bucket`. Its status stands in, as is.
+        HistoryRecord submitted = ParseRow("\"status\":\"submitted\"");
+        Assert.Null(submitted.Bucket);
+        Assert.Equal("submitted", submitted.BucketOrStatus);
+        Assert.True(WithdrawCopy.OffersWithdrawal(submitted.BucketOrStatus, submitted.SubmissionId));
+
+        // And the fallback does not map `processing` itself: that rule lives
+        // in the daemon only, so without its bucket the row fails closed.
+        HistoryRecord processing = ParseRow("\"status\":\"processing\"");
+        Assert.Equal("processing", processing.BucketOrStatus);
+        Assert.False(WithdrawCopy.OffersWithdrawal(processing.BucketOrStatus, processing.SubmissionId));
+        Assert.Equal(WithdrawStage.Unknown, WithdrawStageExtensions.StageOf(processing.BucketOrStatus));
+    }
+
+    [Fact]
+    public void TheBucketDecidesWhereItDisagreesWithTheStatus()
+    {
+        // Whatever the daemon's rule says wins over this shell's reading of
+        // the raw status, in both directions.
+        HistoryRecord closed = ParseRow("\"status\":\"accepted\",\"bucket\":\"withdrawn\"");
+        Assert.False(WithdrawCopy.OffersWithdrawal(closed.BucketOrStatus, closed.SubmissionId));
+
+        HistoryRecord held = ParseRow("\"status\":\"something-new\",\"bucket\":\"quarantined\"");
+        Assert.True(WithdrawCopy.OffersWithdrawal(held.BucketOrStatus, held.SubmissionId));
+        Assert.Equal(WithdrawStage.NotInTheCommons, WithdrawStageExtensions.StageOf(held.BucketOrStatus));
     }
 }

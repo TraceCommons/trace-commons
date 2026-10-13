@@ -311,6 +311,10 @@ public static class WithdrawCopy
     /// gets no button either -- <c>withdraw</c> takes exactly that id and
     /// nothing else, so the button would have nothing to send and would fail
     /// for a reason the contributor could do nothing about.
+    ///
+    /// A history row passes its <see cref="HistoryRecord.BucketOrStatus"/>,
+    /// not its raw status: <c>processing</c> is absent from the list above on
+    /// purpose, and reaches it as the daemon's <c>submitted</c> bucket.
     /// </remarks>
     public static bool OffersWithdrawal(string? status, string? submissionId) =>
         (status is null || Array.IndexOf(WithdrawableStatuses, status) >= 0)
@@ -399,6 +403,8 @@ public sealed class WithdrawConfirmation
 
 /// <summary>
 /// Reads a local history status as the stage this machine may speak about.
+/// A history row passes its <see cref="HistoryRecord.BucketOrStatus"/>, so a
+/// <c>processing</c> row is staged as <c>submitted</c>.
 /// </summary>
 public static class WithdrawStageExtensions
 {

@@ -125,20 +125,22 @@ public sealed class HistoryRecordViewModel
     /// contributor's own act rather than as a refusal or a success.
     /// </summary>
     public bool IsWithdrawn =>
-        string.Equals(_record.Status, HistoryCopy.StatusWithdrawn, StringComparison.Ordinal);
+        string.Equals(_record.BucketOrStatus, HistoryCopy.StatusWithdrawn, StringComparison.Ordinal);
 
     public bool IsHeld =>
-        string.Equals(_record.Status, HistoryCopy.StatusQuarantined, StringComparison.Ordinal);
+        string.Equals(_record.BucketOrStatus, HistoryCopy.StatusQuarantined, StringComparison.Ordinal);
 
     public bool IsAccepted =>
-        string.Equals(_record.Status, HistoryCopy.StatusAccepted, StringComparison.Ordinal);
+        string.Equals(_record.BucketOrStatus, HistoryCopy.StatusAccepted, StringComparison.Ordinal);
 
     /// <summary>
     /// Everything else, including a status this build has no name for.
     ///
     /// The four flags are exhaustive and mutually exclusive on purpose: the
     /// chip is drawn from them, and a status from a newer server must land in
-    /// the neutral "waiting" chip rather than in no chip at all. A record with
+    /// the neutral "waiting" chip rather than in no chip at all. They read the
+    /// bucket rather than the raw status, so a <c>processing</c> row is
+    /// classed by the daemon's rule, not one of this shell's. A record with
     /// no chip would read as a record with no state.
     /// </summary>
     public bool IsWaiting => !IsAccepted && !IsHeld && !IsWithdrawn;
@@ -180,7 +182,7 @@ public sealed class HistoryRecordViewModel
     /// record does not get one.
     /// </summary>
     public bool OffersWithdrawal =>
-        WithdrawCopy.OffersWithdrawal(_record.Status, _record.SubmissionId)
+        WithdrawCopy.OffersWithdrawal(_record.BucketOrStatus, _record.SubmissionId)
         && _attempt?.State != WithdrawalState.InFlight
         && _attempt?.State != WithdrawalState.Done;
 
@@ -225,8 +227,8 @@ public sealed class HistoryRecordViewModel
     public string WithdrawCreditNote => WithdrawCopy.CreditNote;
 
     /// <summary>
-    /// The stage the confirmation is keyed on, read off the local status --
+    /// The stage the confirmation is keyed on, read off the local bucket --
     /// which is the weaker thing this machine knows before it asks.
     /// </summary>
-    public WithdrawStage Stage => WithdrawStageExtensions.StageOf(_record.Status);
+    public WithdrawStage Stage => WithdrawStageExtensions.StageOf(_record.BucketOrStatus);
 }
