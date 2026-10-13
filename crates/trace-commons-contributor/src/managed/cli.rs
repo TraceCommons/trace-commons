@@ -15,12 +15,13 @@ use uuid::Uuid;
 pub struct LaunchArgs {
     #[arg(value_enum)]
     pub tool: ToolId,
+    /// Exact saved account name or ID; uses that account's backend.
     #[arg(long)]
-    /// Saved account name or ID. Omit to use NEAR AI.
     pub account: Option<String>,
+    /// Explicit backend filter. With --account, must match that account's backend.
     #[arg(long, value_enum)]
-    /// Explicit backend filter; otherwise an omitted account uses NEAR AI.
     pub connection: Option<ConnectionKind>,
+    /// Project folder (defaults to the current directory).
     #[arg(long)]
     pub cwd: Option<PathBuf>,
 }
@@ -28,6 +29,12 @@ pub struct LaunchArgs {
 #[derive(Subcommand)]
 pub enum AccountCommand {
     /// Show every saved account, backend, readiness, default, and launch command.
+    ///
+    /// Use an exact name or the displayed ID with launch --account. Example commands
+    /// use IDs so duplicate names remain unambiguous. NEAR AI DEFAULT marks the
+    /// account used when launch omits --account and --connection.
+    ///
+    /// --json emits the account array with a launch_default boolean on each row.
     List,
     /// Save a named account, then sign in using the native tool.
     Add {
@@ -59,6 +66,10 @@ pub enum AccountCommand {
         tool: ToolId,
     },
     /// Choose the NEAR AI default for future launches of a tool.
+    ///
+    /// Accepts an exact saved name or ID. Only NEAR AI accounts can be selected;
+    /// use launch --account for subscription or direct API-key accounts.
+    /// This does not change any running session. Run near-ai accounts list to see all choices.
     Select {
         account: String,
         #[arg(long, value_enum)]
