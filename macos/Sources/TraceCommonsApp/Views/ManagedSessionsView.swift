@@ -177,10 +177,12 @@ struct ManagedSessionsSection: View {
             .disabled(model.managedBusy)
             .popover(isPresented: open, arrowEdge: .bottom) {
                 GlassMenu(onDismiss: { menuFor = nil }) {
-                    GlassMenuItem(model.managedText("use_default")) {
-                        menuFor = nil
-                        let generation = snapshot.generations[account.tool] ?? 0
-                        model.managedAction("managed_select", params: ["selection": ["tool": account.tool, "connection": account.connection, "account_id": account.id, "generation": generation], "expected_generation": generation])
+                    if account.connection == "near_ai" {
+                        GlassMenuItem(model.managedText("use_default")) {
+                            menuFor = nil
+                            let generation = snapshot.generations[account.tool] ?? 0
+                            model.managedAction("managed_select", params: ["selection": ["tool": account.tool, "connection": account.connection, "account_id": account.id, "generation": generation], "expected_generation": generation])
+                        }
                     }
                     GlassMenuItem(model.managedText("rename_short")) {
                         menuFor = nil
@@ -395,8 +397,15 @@ struct ManagedAccountSheet: View {
 struct ManagedLaunchSheet: View {
     let onClose: () -> Void
     @EnvironmentObject private var model: AppModel
+    @State private var tool = "claude"
     @State private var accountID = ""
     @State private var project: URL?
+
+    private var selectedAccount: ManagedAccount? {
+        guard let snapshot = model.managedSnapshot else { return nil }
+        if accountID.isEmpty { return snapshot.defaultLaunchAccount(for: tool) }
+        return snapshot.accounts.first { $0.id == accountID && $0.tool == tool }
+    }
 
     var body: some View {
         GlassModal(
@@ -405,17 +414,24 @@ struct ManagedLaunchSheet: View {
                 .cancel(model.managedText("cancel"), action: onClose),
                 GlassModalAction(
                     model.managedText("launch_short"), isDefault: true,
-                    isEnabled: !accountID.isEmpty && project != nil && !model.managedBusy, id: "launch", action: launch),
+                    isEnabled: selectedAccount != nil && project != nil && !model.managedBusy, id: "launch", action: launch),
             ],
             busy: model.managedBusy,
             onCancel: onClose
         ) {
             GlassModalBody {
+                ManagedField(label: model.managedText("tool")) {
+                    GlassPicker(model.managedText("tool"),
+                        selection: Binding(get: { tool }, set: { tool = $0 ?? "claude"; accountID = "" }),
+                        options: ["claude", "codex"].map { GlassPickerOption(model.managedText($0), value: $0) },
+                        placeholder: model.managedText("tool"))
+                }
+                ManagedNote(text: model.managedText("launch_default_scope"))
                 ManagedField(label: model.managedText("saved_account")) {
                     GlassPicker(
                         model.managedText("saved_account"),
-                        selection: Binding(get: { accountID.isEmpty ? nil : accountID }, set: { accountID = $0 ?? "" }),
-                        options: (model.managedSnapshot?.accounts ?? []).map { account in
+                        selection: Binding(get: { selectedAccount?.id }, set: { accountID = $0 ?? "" }),
+                        options: (model.managedSnapshot?.accounts ?? []).filter { $0.tool == tool }.map { account in
                             GlassPickerOption(
                                 [ManagedWords.tool(account.tool, model: model), account.label, model.managedText(account.connection)]
                                     .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),
@@ -441,7 +457,7 @@ struct ManagedLaunchSheet: View {
     }
 
     private func launch() {
-        guard !model.managedBusy, let snapshot = model.managedSnapshot, let account = snapshot.accounts.first(where: { $0.id == accountID }), let project else { return }
+        guard !model.managedBusy, let snapshot = model.managedSnapshot, let account = selectedAccount, let project else { return }
         model.managedAction("managed_launch_prepare", params: ["request_id": UUID().uuidString, "purpose": "coding", "tool": account.tool, "connection": account.connection, "account_id": account.id, "cwd": project.path, "expected_generation": snapshot.generations[account.tool] ?? 0, "save_default": false], openTerminal: true)
         onClose()
     }

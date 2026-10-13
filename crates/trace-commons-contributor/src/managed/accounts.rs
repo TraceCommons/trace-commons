@@ -230,3 +230,51 @@ impl AccountStore {
         Ok(())
     }
 }
+
+/// Resolve an explicit account or a backend's default. Implicit launches always
+/// use NEAR AI; readiness is checked by the supervisor, never by falling back.
+pub fn resolve_launch_account(
+    accounts: &[AccountView],
+    defaults: &[Selection],
+    tool: ToolId,
+    name: Option<&str>,
+    connection: Option<ConnectionKind>,
+) -> Result<AccountView, ManagedError> {
+    let connection = if name.is_none() {
+        Some(connection.unwrap_or(ConnectionKind::NearAi))
+    } else {
+        connection
+    };
+    let candidates: Vec<_> = accounts
+        .iter()
+        .filter(|a| a.tool == tool && connection.is_none_or(|c| a.connection == c))
+        .collect();
+    if let Some(name) = name {
+        let matches: Vec<_> = candidates
+            .into_iter()
+            .filter(|a| a.id.to_string() == name || a.label == name)
+            .collect();
+        return match matches.as_slice() {
+            [a] => Ok((*a).clone()),
+            [] => Err(ManagedError::NotFound),
+            _ => Err(ManagedError::AmbiguousAccount),
+        };
+    }
+    if let Some(selection) = defaults
+        .iter()
+        .find(|s| s.tool == tool && connection.is_none_or(|c| s.connection == c))
+    {
+        return accounts
+            .iter()
+            .find(|a| {
+                a.id == selection.account_id && a.tool == tool && Some(a.connection) == connection
+            })
+            .cloned()
+            .ok_or(ManagedError::NotFound);
+    }
+    match candidates.as_slice() {
+        [account] => Ok((*account).clone()),
+        [] => Err(ManagedError::NotFound),
+        _ => Err(ManagedError::AmbiguousAccount),
+    }
+}

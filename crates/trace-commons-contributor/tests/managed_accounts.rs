@@ -200,3 +200,138 @@ fn cli_requires_a_new_choice_after_default_removal() {
     assert!(resolve(&snapshot, ToolId::Claude, None, None).is_err());
     assert!(resolve(&snapshot, ToolId::Claude, Some("Remaining"), None).is_ok());
 }
+
+#[test]
+fn implicit_launch_uses_near_ai_even_with_a_subscription_default() {
+    use trace_commons_contributor::managed::cli::{Snapshot, resolve};
+    let near = uuid::Uuid::new_v4();
+    let personal = uuid::Uuid::new_v4();
+    let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+        "accounts": [
+            {"id":personal,"tool":"claude","connection":"subscription","label":"Personal","auth_state":"ready","verified_at":null},
+            {"id":near,"tool":"claude","connection":"near_ai","label":"NEAR AI","auth_state":"ready","verified_at":null}
+        ],
+        "defaults":[{"tool":"claude","connection":"subscription","account_id":personal,"generation":1}],
+        "generations":{"claude":1}
+    })).unwrap();
+    assert_eq!(
+        resolve(&snapshot, ToolId::Claude, None, None).unwrap().id.0,
+        near
+    );
+    assert_eq!(
+        resolve(&snapshot, ToolId::Claude, Some("Personal"), None)
+            .unwrap()
+            .id
+            .0,
+        personal
+    );
+    assert!(resolve(&snapshot, ToolId::Codex, None, None).is_err());
+}
+
+#[test]
+fn near_ai_default_is_required_only_when_multiple_accounts_exist() {
+    use trace_commons_contributor::managed::cli::{Snapshot, resolve};
+    let first = uuid::Uuid::new_v4();
+    let second = uuid::Uuid::new_v4();
+    let mut snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+        "accounts": [
+            {"id":first,"tool":"codex","connection":"near_ai","label":"One","auth_state":"unavailable","verified_at":null},
+            {"id":second,"tool":"codex","connection":"near_ai","label":"Two","auth_state":"ready","verified_at":null}
+        ], "defaults":[], "generations":{}
+    })).unwrap();
+    assert_eq!(
+        resolve(&snapshot, ToolId::Codex, None, None),
+        Err(ManagedError::AmbiguousAccount)
+    );
+    snapshot.defaults.push(Selection {
+        tool: ToolId::Codex,
+        connection: ConnectionKind::NearAi,
+        account_id: snapshot.accounts[0].id,
+        generation: Generation(0),
+    });
+    // An unavailable chosen account must not silently route to another account.
+    assert_eq!(
+        resolve(&snapshot, ToolId::Codex, None, None).unwrap().id.0,
+        first
+    );
+    assert_eq!(
+        resolve(&snapshot, ToolId::Codex, Some("Two"), None)
+            .unwrap()
+            .id
+            .0,
+        second
+    );
+    snapshot.defaults.clear();
+    snapshot.accounts.remove(1);
+    assert_eq!(
+        resolve(&snapshot, ToolId::Codex, None, None).unwrap().id.0,
+        first
+    );
+}
+
+#[test]
+fn account_list_exposes_all_choices_and_unambiguous_commands_without_label_execution() {
+    use trace_commons_contributor::managed::cli::{Snapshot, format_accounts};
+    let first = uuid::Uuid::new_v4();
+    let second = uuid::Uuid::new_v4();
+    let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+        "accounts":[
+            {"id":first,"tool":"claude","connection":"near_ai","label":"Shared $(touch /tmp/never)","auth_state":"ready","verified_at":null},
+            {"id":second,"tool":"claude","connection":"subscription","label":"Shared $(touch /tmp/never)","auth_state":"sign_in_required","verified_at":null}
+        ],"defaults":[],"generations":{}
+    })).unwrap();
+    let output = format_accounts(&snapshot, false).unwrap();
+    assert!(output.contains("NEAR AI | Ready | yes"));
+    assert!(output.contains("Subscription | Needs sign-in"));
+    let commands: Vec<_> = output
+        .lines()
+        .filter(|line| line.starts_with("  near-ai launch"))
+        .collect();
+    assert_eq!(
+        commands,
+        vec![
+            format!("  near-ai launch claude --account {first}"),
+            format!("  near-ai launch claude --account {second}")
+        ]
+    );
+    let rows: serde_json::Value =
+        serde_json::from_str(&format_accounts(&snapshot, true).unwrap()).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+    assert_eq!(rows[0]["launch_default"], true);
+    assert_eq!(rows[1]["launch_default"], false);
+    assert_eq!(rows[0]["id"], first.to_string());
+}
+
+#[test]
+fn no_near_ai_account_never_uses_a_saved_subscription_default() {
+    use trace_commons_contributor::managed::cli::{Snapshot, resolve};
+    let id = uuid::Uuid::new_v4();
+    let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+        "accounts":[{"id":id,"tool":"claude","connection":"subscription","label":"Personal","auth_state":"ready","verified_at":null}],
+        "defaults":[{"tool":"claude","connection":"subscription","account_id":id,"generation":0}], "generations":{}
+    })).unwrap();
+    assert_eq!(
+        resolve(&snapshot, ToolId::Claude, None, None),
+        Err(ManagedError::NotFound)
+    );
+    assert_eq!(
+        resolve(
+            &snapshot,
+            ToolId::Claude,
+            Some("Personal"),
+            Some(ConnectionKind::NearAi)
+        ),
+        Err(ManagedError::NotFound)
+    );
+    assert_eq!(
+        resolve(&snapshot, ToolId::Claude, Some(&id.to_string()), None)
+            .unwrap()
+            .id
+            .0,
+        id
+    );
+    assert_eq!(
+        resolve(&snapshot, ToolId::Codex, Some(&id.to_string()), None),
+        Err(ManagedError::NotFound)
+    );
+}

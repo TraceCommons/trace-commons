@@ -47,6 +47,12 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
     public let revision: UInt64
     public let accounts: [ManagedAccount]
     public let defaults: [ManagedSelection]
+    // Optional for compatibility with older daemons. Never infer a subscription default.
+    public let launchDefaults: [String: String]?
+    enum CodingKeys: String, CodingKey {
+        case copy, revision, accounts, defaults, generations, sessions, capabilities
+        case launchDefaults = "launch_defaults"
+    }
     public let generations: [String: UInt64]
     public let sessions: [ManagedSession]
     public let capabilities: Capabilities
@@ -93,7 +99,12 @@ public extension ManagedSnapshot {
         sessions.contains { $0.accountID == account.id && $0.holdsAccount }
     }
 
+    func defaultLaunchAccount(for tool: String) -> ManagedAccount? {
+        guard let id = launchDefaults?[tool] else { return nil }
+        return accounts.first { $0.id == id && $0.tool == tool && $0.connection == "near_ai" }
+    }
+
     func isDefault(_ account: ManagedAccount) -> Bool {
-        defaults.contains { $0.accountID == account.id }
+        defaultLaunchAccount(for: account.tool)?.id == account.id
     }
 }

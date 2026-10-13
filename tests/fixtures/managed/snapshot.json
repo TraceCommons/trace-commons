@@ -14,6 +14,13 @@
       "connection": "subscription",
       "label": "Work",
       "auth_state": "ready"
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000004",
+      "tool": "claude",
+      "connection": "near_ai",
+      "label": "NEAR AI",
+      "auth_state": "ready"
     }
   ],
   "sessions": [
@@ -62,7 +69,7 @@
     "remove": "Remove",
     "remove_description": "Its saved sign-in and profile are deleted from this computer.",
     "manage": "More",
-    "default": "Default",
+    "default": "NEAR AI default",
     "use_default": "Make default",
     "rename_short": "Rename",
     "reconnect": "Sign in",
@@ -85,6 +92,7 @@
     "project_placeholder": "No folder chosen",
     "choose_folder": "Choose folder",
     "launch_scope": "Opens in {destination}.",
+    "launch_default_scope": "Uses your NEAR AI default. Choose another saved account to change the backend. If no default is available, choose an account or add NEAR AI from Add account.",
     "launch_short": "Launch",
     "terminal": "your terminal",
     "global_title": "Standard settings",
@@ -101,5 +109,8 @@
     "auth_checking": "Checking",
     "auth_ready": "Ready",
     "auth_unavailable": "Unavailable"
+  },
+  "launch_defaults": {
+    "claude": "00000000-0000-0000-0000-000000000004"
   }
 }

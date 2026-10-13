@@ -270,3 +270,33 @@ fn dismissing_a_row_does_not_make_its_launch_request_replayable() {
         json!([])
     );
 }
+
+#[test]
+fn snapshot_exposes_effective_near_ai_defaults_and_requires_ambiguous_choice() {
+    let home = tempfile::tempdir().unwrap();
+    let daemon = DaemonShared::load(ConfigStore::open(home.path().to_path_buf()).unwrap()).unwrap();
+    let first = call(
+        &daemon,
+        "managed_account_add",
+        json!({"tool":"claude","connection":"near_ai","label":"One"}),
+    );
+    assert_eq!(
+        call(&daemon, "managed_snapshot", json!({}))["launch_defaults"]["claude"],
+        first["id"]
+    );
+    let second = call(
+        &daemon,
+        "managed_account_add",
+        json!({"tool":"claude","connection":"near_ai","label":"Two"}),
+    );
+    assert!(call(&daemon, "managed_snapshot", json!({}))["launch_defaults"]["claude"].is_null());
+    call(
+        &daemon,
+        "managed_select",
+        json!({"selection":{"tool":"claude","connection":"near_ai","account_id":second["id"],"generation":0},"expected_generation":0}),
+    );
+    assert_eq!(
+        call(&daemon, "managed_snapshot", json!({}))["launch_defaults"]["claude"],
+        second["id"]
+    );
+}

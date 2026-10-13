@@ -47,8 +47,24 @@ impl ManagedService {
         match request.method.as_str() {
             "managed_snapshot" => {
                 let sessions = self.sessions.views()?;
+                let accounts = self.accounts.list();
+                let defaults: Vec<_> = [ToolId::Claude, ToolId::Codex]
+                    .into_iter()
+                    .filter_map(|tool| self.accounts.selection(tool))
+                    .collect();
+                let launch_defaults: std::collections::BTreeMap<_, _> =
+                    [ToolId::Claude, ToolId::Codex]
+                        .into_iter()
+                        .filter_map(|tool| {
+                            crate::managed::accounts::resolve_launch_account(
+                                &accounts, &defaults, tool, None, None,
+                            )
+                            .ok()
+                            .map(|account| (tool, account.id))
+                        })
+                        .collect();
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"revision":self.sessions.revision(),"accounts":self.accounts.list(),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex)},"defaults":([self.accounts.selection(ToolId::Claude),self.accounts.selection(ToolId::Codex)].into_iter().flatten().collect::<Vec<_>>()),"sessions":sessions,"capabilities":{"managed_launch":true,"terminal_launch":crate::managed::terminal::destination().is_some(),"terminal_destination":crate::managed::terminal::destination()}}),
+                    json!({"copy":crate::managed::copy::copy(),"revision":self.sessions.revision(),"accounts":accounts,"launch_defaults":launch_defaults,"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex)},"defaults":([self.accounts.selection(ToolId::Claude),self.accounts.selection(ToolId::Codex)].into_iter().flatten().collect::<Vec<_>>()),"sessions":sessions,"capabilities":{"managed_launch":true,"terminal_launch":crate::managed::terminal::destination().is_some(),"terminal_destination":crate::managed::terminal::destination()}}),
                 )
             }
             "managed_account_add" => {
