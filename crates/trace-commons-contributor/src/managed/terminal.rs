@@ -75,9 +75,10 @@ impl TerminalApp {
         let literal = applescript_literal(command);
         let id = self.bundle_id();
         match self {
+            // Unchanged from before the choice existed.
             TerminalApp::Terminal => vec![
-                format!("tell application id \"{id}\" to do script \"{literal}\""),
-                format!("tell application id \"{id}\" to activate"),
+                format!("tell application \"Terminal\" to do script \"{literal}\""),
+                "tell application \"Terminal\" to activate".into(),
             ],
             TerminalApp::Ghostty => vec![
                 format!("tell application id \"{id}\""),
@@ -468,7 +469,7 @@ mod tests {
             let line = holding[0];
             // The fixed template, then one literal running to the line's end.
             let fixed = match app {
-                TerminalApp::Terminal => "tell application id \"com.apple.Terminal\" to do script ",
+                TerminalApp::Terminal => "tell application \"Terminal\" to do script ",
                 TerminalApp::Ghostty => "set command of sessionConfiguration to ",
                 TerminalApp::Iterm2 => "create window with default profile command ",
             };
@@ -491,8 +492,8 @@ mod tests {
         assert_eq!(
             lines(TerminalApp::Terminal),
             [
-                "tell application id \"com.apple.Terminal\" to do script \"'/x/near-ai' redeem-launch\"",
-                "tell application id \"com.apple.Terminal\" to activate",
+                "tell application \"Terminal\" to do script \"'/x/near-ai' redeem-launch\"",
+                "tell application \"Terminal\" to activate",
             ]
         );
         assert_eq!(
