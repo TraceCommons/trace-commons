@@ -35,6 +35,9 @@
     "statusAskText": { "hex": "#f5c142", "note": "statusAsk as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusAsk.", "light": { "hex": "#7a4a06" } },
     "statusOutsideText": { "hex": "#ff9494", "note": "statusOutside as text: 4.5:1 or more on every light ground and on its own tint. Dark is lighter than statusOutside: on tintOutside over every card stop on paneOpaque it clears 4.73:1, where #ff6b6b was 3.61.", "light": { "hex": "#a3221c" } },
     "destructiveText": { "hex": "#ff8a8a", "note": "The destructive button's label (GlassButtonKind.destructive): the outside red lifted so it clears 4.5:1 on the glass control fill over the pane (5.0; statusOutsideText there is 4.1). The same values as menuNoProof. #1146 has no destructive button.", "light": { "hex": "#c62828" } },
+    "heroInk": { "hex": "#ffffff", "note": "Text and graphics on a hero promotion's ground, in both appearances." },
+    "heroButtonFill": { "hex": "#ffffff", "note": "A hero promotion's call to action: a white pill (owner, 2026-10-12)." },
+    "heroButtonInk": { "hex": "#16161a", "note": "The label on heroButtonFill: 18:1." },
     "badgeFillSubtle": { "hex": "#ffffff", "alpha": 0.16, "note": "A count badge that is not owed a decision (a tab's count): ink at 16%. The flat Light theme draws it in the well's slate, as the legend pills are.", "light": { "hex": "#000000", "alpha": 0.16 } },
     "badgeFill": { "hex": "#ff6b6b", "note": "The decisions-owed badge behind textOnStatus. Dark is statusOutside; light is lighter so the dark count clears 4.5:1 (4.86), and the fill 3:1 on the pane.", "light": { "hex": "#e04a42" } },
     "dataShared": { "hex": "#8a3dff", "light": { "hex": "#7a2cf5" } },
@@ -114,6 +117,30 @@
     "ink": { "hex": "#ffffff", "note": "Overlay strokes and fills over a surface: white on dark, black on light. Used at an alpha.", "light": { "hex": "#000000" } }
   },
   "gradient": {
+    "heroCampaign": {
+      "angle": 120,
+      "note": "Home's hero promotions (owner, 2026-10-12): a saturated ground under white text and a graphic on the right, the same in both appearances. The darker stop sits under the text on the left and holds white at 7.5:1 or more; the lighter runs under the graphic. Campaign: indigo to violet.",
+      "stops": [
+        { "hex": "#1e1470", "at": 0 },
+        { "hex": "#5b2bd6", "at": 1 }
+      ]
+    },
+    "heroMissions": {
+      "angle": 120,
+      "note": "Missions: deep red to orange.",
+      "stops": [
+        { "hex": "#a4200f", "at": 0 },
+        { "hex": "#e2531a", "at": 1 }
+      ]
+    },
+    "heroInsights": {
+      "angle": 120,
+      "note": "Insights: deep sea blue to the accent blue.",
+      "stops": [
+        { "hex": "#073b55", "at": 0 },
+        { "hex": "#1f7aa8", "at": 1 }
+      ]
+    },
     "paneFill": { "angle": 160, "stops": [
       { "hex": "#ffffff", "alpha": 0.1, "at": 0, "light": { "hex": "#ffffff", "alpha": 0.55 } },
       { "hex": "#ffffff", "alpha": 0.05, "at": 0.4, "light": { "hex": "#ffffff", "alpha": 0.35 } },

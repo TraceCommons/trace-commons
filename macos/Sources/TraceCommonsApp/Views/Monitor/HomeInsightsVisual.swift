@@ -3,18 +3,45 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-/// Home's Insights promotion body (owner, 2026-10-12): today's routed
-/// tokens as the headline, then a bar per tool, longest first, so the card
-/// shows the analytics before it is opened. Without a readable glance it
-/// says what opening it shows. Figures are the daemon's; a tool whose
-/// tokens are unknown draws no bar.
+/// Home's Insights hero, its words (owner, 2026-10-12): today's routed
+/// tokens as a display figure, or, without a readable glance, the line
+/// that says what opening it shows. In the hero's ink.
 struct HomeInsightsVisual: View {
     let glance: DaemonData.InsightsGlance?
     let words: MonitorHomeHistoryCopy?
 
-    private static let copy = TCInsights.copy() ?? [:]
-    /// The most tools drawn: the card stays a glance.
-    static let toolLimit = 3
+    static let copy = TCInsights.copy() ?? [:]
+
+    var body: some View {
+        let bars = HomeInsightsGraphic.bars(glance)
+        if bars.isEmpty {
+            if let teaser = words?.insightsTeaser {
+                Text(teaser)
+                    .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                    .foregroundStyle(GlassTokens.Color.heroInk.color.opacity(0.92))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else if let today = words?.insightsToday {
+            let total = bars.reduce(UInt64(0)) { $0 + $1.tokens }
+            Text(FirstRunCopy.fill(today, ["total": InsightsOverviewWords.figure(total, copy: Self.copy)]))
+                .glassType(GlassTokens.TypeScale.heading.weight(.bold))
+                .monospacedDigit()
+                .foregroundStyle(GlassTokens.Color.heroInk.color)
+        }
+    }
+}
+
+/// Home's Insights hero, its graphic: today's tokens per tool as bars, the
+/// longest first, in the hero's ink with each tool's name under its bar.
+/// Without a readable glance, a chart symbol. Figures are the daemon's; a
+/// tool whose tokens are unknown draws no bar.
+struct HomeInsightsGraphic: View {
+    let glance: DaemonData.InsightsGlance?
+
+    /// The most tools drawn: the graphic stays a glance.
+    static let toolLimit = 4
+    static let barWidth: CGFloat = 22
+    static let maxBarHeight: CGFloat = 92
 
     static func bars(_ glance: DaemonData.InsightsGlance?) -> [(tool: String, tokens: UInt64)] {
         guard let glance, glance.enabled, glance.readable != false else { return [] }
@@ -29,43 +56,27 @@ struct HomeInsightsVisual: View {
     var body: some View {
         let bars = Self.bars(glance)
         if bars.isEmpty {
-            if let teaser = words?.insightsTeaser {
-                Text(teaser)
-                    .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                    .foregroundStyle(GlassColor.textSecondary)
-            }
+            GlassHeroSymbol("chart.bar.xaxis", accent: "sparkle")
         } else {
-            let total = bars.reduce(UInt64(0)) { $0 + $1.tokens }
+            let ink = GlassTokens.Color.heroInk.color
             let most = Double(bars.first?.tokens ?? 1)
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                if let today = words?.insightsToday {
-                    Text(FirstRunCopy.fill(today, ["total": InsightsOverviewWords.figure(total, copy: Self.copy)]))
-                        .glassType(GlassTokens.TypeScale.heading.weight(.bold))
-                        .monospacedDigit()
-                        .foregroundStyle(GlassColor.textPrimary)
-                }
+            HStack(alignment: .bottom, spacing: 12) {
                 ForEach(bars, id: \.tool) { bar in
-                    HStack(spacing: GlassTokens.Space.s3) {
+                    VStack(spacing: GlassTokens.Space.s2) {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(LinearGradient(colors: [ink.opacity(0.95), ink.opacity(0.45)],
+                                                 startPoint: .top, endPoint: .bottom))
+                            .frame(width: Self.barWidth,
+                                   height: max(8, Self.maxBarHeight * Double(bar.tokens) / most))
                         Text(InferenceTabView.toolName(bar.tool))
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .frame(width: 84, alignment: .leading)
+                            .glassType(GlassTokens.TypeScale.micro)
+                            .foregroundStyle(ink.opacity(0.85))
                             .lineLimit(1)
-                        GeometryReader { proxy in
-                            Capsule()
-                                .fill(GlassTokens.Color.purpleSoft.color)
-                                .frame(width: max(4, proxy.size.width * Double(bar.tokens) / most))
-                        }
-                        .frame(height: 6)
-                        Text(InsightsOverviewWords.figure(bar.tokens, copy: Self.copy))
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .monospacedDigit()
-                            .foregroundStyle(GlassColor.textTertiary)
-                            .fixedSize()
+                            .frame(width: Self.barWidth + 22)
                     }
-                    .accessibilityElement(children: .combine)
                 }
             }
+            .shadow(color: .black.opacity(0.2), radius: 12, y: 8)
         }
     }
 }

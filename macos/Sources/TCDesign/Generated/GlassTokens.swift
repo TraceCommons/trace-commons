@@ -60,6 +60,12 @@ public enum GlassTokens {
         public static var statusOutsideText: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFF9494, alpha: 1, light: GlassRGBA(0xA3221C, alpha: 1)), flat: GlassRGBA(0xFFD3D3, alpha: 1, light: GlassRGBA(0x771814, alpha: 1))) }
         /// The destructive button's label (GlassButtonKind.destructive): the outside red lifted so it clears 4.5:1 on the glass control fill over the pane (5.0; statusOutsideText there is 4.1). The same values as menuNoProof. #1146 has no destructive button.
         public static var destructiveText: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFF8A8A, alpha: 1, light: GlassRGBA(0xC62828, alpha: 1)), flat: GlassRGBA(0xFFD0D0, alpha: 1, light: GlassRGBA(0x791313, alpha: 1))) }
+        /// Text and graphics on a hero promotion's ground, in both appearances.
+        public static let heroInk: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 1)
+        /// A hero promotion's call to action: a white pill (owner, 2026-10-12).
+        public static let heroButtonFill: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 1)
+        /// The label on heroButtonFill: 18:1.
+        public static let heroButtonInk: GlassRGBA = GlassRGBA(0x16161A, alpha: 1)
         /// A count badge that is not owed a decision (a tab's count): ink at 16%. The flat Light theme draws it in the well's slate, as the legend pills are.
         public static var badgeFillSubtle: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0x000000, alpha: 0.16)), flat: GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0x8A93A5, alpha: 0.28))) }
         /// The decisions-owed badge behind textOnStatus. Dark is statusOutside; light is lighter so the dark count clears 4.5:1 (4.86), and the fill 3:1 on the pane.
@@ -204,6 +210,9 @@ public enum GlassTokens {
             "statusAskText": statusAskText,
             "statusOutsideText": statusOutsideText,
             "destructiveText": destructiveText,
+            "heroInk": heroInk,
+            "heroButtonFill": heroButtonFill,
+            "heroButtonInk": heroButtonInk,
             "badgeFillSubtle": badgeFillSubtle,
             "badgeFill": badgeFill,
             "dataShared": dataShared,
@@ -285,6 +294,12 @@ public enum GlassTokens {
     }
 
     public enum Gradient {
+        /// Home's hero promotions (owner, 2026-10-12): a saturated ground under white text and a graphic on the right, the same in both appearances. The darker stop sits under the text on the left and holds white at 7.5:1 or more; the lighter runs under the graphic. Campaign: indigo to violet.
+        public static let heroCampaign: GlassGradient = GlassGradient(angle: 120, stops: [GlassStop(0x1E1470, alpha: 1, at: 0), GlassStop(0x5B2BD6, alpha: 1, at: 1)])
+        /// Missions: deep red to orange.
+        public static let heroMissions: GlassGradient = GlassGradient(angle: 120, stops: [GlassStop(0xA4200F, alpha: 1, at: 0), GlassStop(0xE2531A, alpha: 1, at: 1)])
+        /// Insights: deep sea blue to the accent blue.
+        public static let heroInsights: GlassGradient = GlassGradient(angle: 120, stops: [GlassStop(0x073B55, alpha: 1, at: 0), GlassStop(0x1F7AA8, alpha: 1, at: 1)])
         public static var paneFill: GlassGradient { GlassTheme.pick(GlassGradient(angle: 160, stops: [GlassStop(0xFFFFFF, alpha: 0.1, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.55)), GlassStop(0xFFFFFF, alpha: 0.05, at: 0.4, light: GlassRGBA(0xFFFFFF, alpha: 0.35)), GlassStop(0xFFFFFF, alpha: 0.03, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.25))]), flat: GlassGradient(angle: 160, stops: [GlassStop(0xFFFFFF, alpha: 0.04, at: 0, light: GlassRGBA(0xF4F6F9, alpha: 0.08)), GlassStop(0xFFFFFF, alpha: 0.04, at: 0.4, light: GlassRGBA(0xF4F6F9, alpha: 0.08)), GlassStop(0xFFFFFF, alpha: 0.04, at: 1, light: GlassRGBA(0xF4F6F9, alpha: 0.08))])) }
         public static var cardFill: GlassGradient { GlassTheme.pick(GlassGradient(angle: 180, stops: [GlassStop(0xFFFFFF, alpha: 0.085, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.72)), GlassStop(0xFFFFFF, alpha: 0.045, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.52))]), flat: GlassGradient(angle: 180, stops: [GlassStop(0x0D1124, alpha: 0.35, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.35)), GlassStop(0x0D1124, alpha: 0.35, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.35))])) }
         public static var cardFillQuiet: GlassGradient { GlassTheme.pick(GlassGradient(angle: 180, stops: [GlassStop(0xFFFFFF, alpha: 0.075, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.6)), GlassStop(0xFFFFFF, alpha: 0.04, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.42))]), flat: GlassGradient(angle: 180, stops: [GlassStop(0x0D1124, alpha: 0.28, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.29)), GlassStop(0x0D1124, alpha: 0.28, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.29))])) }
@@ -298,6 +313,9 @@ public enum GlassTokens {
 
         /// Every gradient token by its JSON name.
         public static var all: [String: GlassGradient] { [
+            "heroCampaign": heroCampaign,
+            "heroMissions": heroMissions,
+            "heroInsights": heroInsights,
             "paneFill": paneFill,
             "cardFill": cardFill,
             "cardFillQuiet": cardFillQuiet,

@@ -719,6 +719,8 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let campaignTitle: String
     public let campaignBody: String
     public let campaignAction: String
+    public let missionsAction: String
+    public let insightsAction: String
     public let submissions: String
     public let contributionHistory: String
     public let readingHistory: String
@@ -762,6 +764,8 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case campaignTitle = "campaign_title"
         case campaignBody = "campaign_body"
         case campaignAction = "campaign_action"
+        case missionsAction = "missions_action"
+        case insightsAction = "insights_action"
         case submissions
         case contributionHistory = "contribution_history"
         case readingHistory = "reading_history"

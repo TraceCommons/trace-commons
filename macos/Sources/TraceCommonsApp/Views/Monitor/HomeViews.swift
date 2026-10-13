@@ -140,18 +140,15 @@ private struct HomeOverview: View {
     @ViewBuilder
     private var campaign: some View {
         if let words {
-            homeCard(
-                systemImage: Self.campaignIcon, title: words.campaignTitle,
-                subtitle: words.campaignBody, promo: promo, action: openPrivateAI
+            // A hero promotion (owner, 2026-10-12).
+            GlassHeroCard(
+                gradient: GlassTokens.Gradient.heroCampaign, eyebrow: words.campaignEyebrow,
+                title: words.campaignTitle, subtitle: words.campaignBody,
+                actionTitle: words.campaignAction, action: openPrivateAI
             ) {
-                GlassTag(words.campaignEyebrow, tone: .accent).fixedSize()
+                GlassHeroSymbol(Self.campaignHeroSymbol)
             } content: {
-                HStack(spacing: GlassTokens.Space.s2) {
-                    Text(words.campaignAction)
-                    Image(systemName: "arrow.right").glassGlyph(11, weight: .semibold)
-                }
-                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                .foregroundStyle(GlassTokens.Color.purpleText.color)
+                EmptyView()
             }
         }
     }
@@ -168,36 +165,29 @@ private struct HomeOverview: View {
                 stats
                 // The NEAR AI campaign, under the tiles (owner, 2026-10-12).
                 campaign
-                // Ron's Missions card: the local drafts, under his Drafts
-                // tag, headed as the Private AI cards are and drawn as a
-                // promotion (owner, 2026-10-11).
-                homeCard(
-                    systemImage: Self.missionsIcon, title: MonitorWords.missions,
-                    subtitle: words?.missionsSubtitle, promo: promo, action: openMissionDrafts
+                // Ron's Missions card, as a hero promotion (owner,
+                // 2026-10-12): his Drafts tag as the eyebrow, the drafts'
+                // line under the subtitle, and Review drafts.
+                GlassHeroCard(
+                    gradient: GlassTokens.Gradient.heroMissions, eyebrow: words?.draftsTag,
+                    title: MonitorWords.missions, subtitle: words?.missionsSubtitle,
+                    actionTitle: words?.missionsAction, action: openMissionDrafts
                 ) {
-                    if let words { GlassTag(words.draftsTag, tone: .ask).fixedSize() }
+                    GlassHeroSymbol(Self.missionsHeroSymbol)
                 } content: {
                     drafts
                 }
-                #if DEBUG
-                // For the designer's comparison: the treatments, by name.
-                .contextMenu {
-                    Picker(selection: $promoName) {
-                        ForEach(GlassPromoTreatment.allCases) { Text($0.rawValue).tag($0.rawValue) }
-                    } label: { EmptyView() }
-                    .pickerStyle(.inline)
-                }
-                #endif
                 // What #1146 has no place for, after its cards: Insights,
                 // and the commons catalogue once the daemon answers it.
-                // Insights as a promotion, with today's figures at the top
-                // level (owner, 2026-10-12: an upsell, not a bare way in).
+                // Insights as a hero promotion, today's figures in its words
+                // and its graphic (owner, 2026-10-12: an upsell, not a bare
+                // way in).
                 if let insightsHeading {
-                    homeCard(
-                        systemImage: Self.insightsIcon, title: insightsHeading,
-                        subtitle: words?.insightsSubtitle, promo: promo, action: openInsights
+                    GlassHeroCard(
+                        gradient: GlassTokens.Gradient.heroInsights, title: insightsHeading,
+                        subtitle: words?.insightsSubtitle, actionTitle: words?.insightsAction, action: openInsights
                     ) {
-                        EmptyView()
+                        HomeInsightsGraphic(glance: freshGlance)
                     } content: {
                         HomeInsightsVisual(glance: freshGlance, words: words)
                     }
@@ -218,12 +208,9 @@ private struct HomeOverview: View {
     static let historyIcon = HomeOverviewIcons.history
     static let insightsIcon = HomeOverviewIcons.insights
     static let catalogueIcon = HomeOverviewIcons.catalogue
-    static let campaignIcon = "sparkle"
-
-    /// The Missions card's promotion treatment: the stored one, which a
-    /// debug build's context menu changes for comparison.
-    @AppStorage(GlassPromoTreatment.defaultsKey) private var promoName = GlassPromoTreatment.stored.rawValue
-    private var promo: GlassPromoTreatment { GlassPromoTreatment(rawValue: promoName) ?? .stored }
+    /// The hero promotions' graphics.
+    static let campaignHeroSymbol = "cpu"
+    static let missionsHeroSymbol = "scope"
 
     /// A Home card that is a way into a screen, laid out as the Private AI
     /// cards are (owner, 2026-10-11): the icon, the title over the core's
@@ -307,42 +294,26 @@ private struct HomeOverview: View {
     }
 
 
-    /// Ron's Missions card body: up to two drafts, each its id over its
-    /// source count with its status tag, a hairline between them; or his
-    /// empty line. A dash before the inbox has answered: an unread inbox is
-    /// never drawn as an empty one.
+    /// The Missions hero's line: the newest draft and how many there are,
+    /// or Ron's empty line; a dash before the inbox has answered, never an
+    /// empty inbox. In the hero's ink.
     @ViewBuilder
     private var drafts: some View {
-        if let summary = missionDrafts.summary, let words {
-            if summary.isEmpty {
-                Text(words.noMissionDrafts)
-                    .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                    .foregroundStyle(GlassColor.textSecondary)
-            } else {
-                HomeCardRows(Array(summary.prefix(2))) { draft in
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(draft.id)
-                            .glassType(GlassTokens.TypeScale.bodyStrong)
-                            .foregroundStyle(GlassColor.textPrimary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Text(words.sources(draft.source_count))
-                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                            .foregroundStyle(GlassColor.textSecondary)
-                    }
-                } tag: { draft in
-                    // The drafts screen's own word for the status, from the
-                    // core; never the raw token.
-                    let word = missionDrafts.text(draft.status)
-                    if !word.isEmpty { GlassTag(word).fixedSize() }
+        Group {
+            if let summary = missionDrafts.summary, let words {
+                if let first = summary.first {
+                    Text(summary.count > 1 ? "\(first.id) · +\(summary.count - 1)" : first.id)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } else {
+                    Text(words.noMissionDrafts)
                 }
+            } else {
+                Text("—").accessibilityLabel(MonitorWords.unknown)
             }
-        } else {
-            Text("—")
-                .glassType(GlassTokens.TypeScale.label)
-                .foregroundStyle(GlassColor.textTertiary)
-                .accessibilityLabel(MonitorWords.unknown)
         }
+        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+        .foregroundStyle(GlassTokens.Color.heroInk.color.opacity(0.92))
     }
 
 }

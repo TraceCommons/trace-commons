@@ -1207,6 +1207,10 @@ pub struct MonitorHomeHistoryCopy {
     pub campaign_title: &'static str,
     pub campaign_body: &'static str,
     pub campaign_action: &'static str,
+    /// The hero promotions' calls to action on Missions and Insights
+    /// (owner, 2026-10-12). DRAFT, NEEDS APPROVAL.
+    pub missions_action: &'static str,
+    pub insights_action: &'static str,
     /// The contribution list card's eyebrow and heading.
     pub submissions: &'static str,
     pub contribution_history: &'static str,
@@ -1482,6 +1486,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             campaign_title: "A new model just launched",
             campaign_body: "Placeholder campaign copy: try the newest model in Private AI.",
             campaign_action: "Try it",
+            missions_action: "Review drafts",
+            insights_action: "See insights",
             submissions: "Submissions",
             contribution_history: "Contribution history",
             reading_history: "Reading local history\u{2026}",
