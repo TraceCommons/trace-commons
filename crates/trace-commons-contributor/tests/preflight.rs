@@ -677,9 +677,18 @@ fn unenrolled_real_submit_still_requires_login() {
     let output = run_submit(config_dir.path(), &trajectory, false, false);
     let stderr = String::from_utf8(output.stderr).unwrap();
 
+    // No terminal (stdin is closed for `output()`), so no sign-in starts:
+    // the refusal names both ways to enroll.
     assert!(!output.status.success());
     assert!(
-        stderr.contains("not logged in; run `login` first"),
+        stderr.contains(
+            "This device isn't enrolled. Run `trace-commons-contributor login` to sign in \
+             with NEAR AI, or pass an invite with `--invite <link>`."
+        ),
+        "stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("near.ai in your browser"),
         "stderr={stderr}"
     );
 }

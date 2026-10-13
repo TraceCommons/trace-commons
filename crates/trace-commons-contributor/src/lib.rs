@@ -38,6 +38,7 @@ pub mod mission_attempt;
 pub mod mission_catalog;
 pub mod mission_draft;
 pub mod mission_draft_service;
+pub(crate) mod near_ai_login;
 pub mod nudge_copy;
 pub mod nudge_render;
 pub mod onboarding_copy;
