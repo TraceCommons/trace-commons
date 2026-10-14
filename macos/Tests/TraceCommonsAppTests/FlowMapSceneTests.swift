@@ -247,15 +247,15 @@ final class FlowMapSceneTests: XCTestCase {
         }
     }
 
-    /// Folders past the first four are counted, not drawn.
+    /// Folders past the most a tool shows are counted, not drawn.
     func test_extraFoldersAreCounted() {
-        let folders = (0 ..< 6).map {
+        let folders = (0 ..< 9).map {
             TracesTree.FolderNode(id: "f\($0)", label: "f\($0)", mode: .ask, sessions: [])
         }
         let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: folders)], unplaced: [])
         let scene = FlowMapScene.traces(tree, gate: .init(state: .loading))
         XCTAssertEqual(scene.nodes.filter { if case .folder = $0.kind { true } else { false } }.count, FlowMapScene.foldersShown)
-        XCTAssertEqual(scene.overflows.map(\.count), [2])
+        XCTAssertEqual(scene.overflows.map(\.count), [3])
     }
 
     /// P13: a tool that has contributed is joined to the commons by a

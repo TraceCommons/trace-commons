@@ -58,6 +58,16 @@ struct FlowMapScene: Equatable {
         /// A second line under the label (#1146: the credential's tools).
         var sublabel: String? = nil
 
+        /// Whether the label sits to the left of the node, on its line,
+        /// rather than under it: folders and the Private AI tools, the
+        /// nodes that come in long lists (owner, 2026-10-14).
+        var labelBeside: Bool {
+            switch kind {
+            case .folder, .harness: true
+            default: false
+            }
+        }
+
         var cardTitle: String { title ?? label }
     }
 
@@ -182,20 +192,49 @@ struct FlowMapScene: Equatable {
     static let hubPoint = hub(in: size)
     static let libraryPoint = library(in: size)
 
-    /// The columns, left to right: folders, tools, this computer, and the
-    /// commons above it. Folders sit far enough in that a 14-character name
-    /// is not cut by the pane's edge.
-    static func folderX(_ space: CGSize) -> CGFloat { max(70, space.width * 0.15) }
-    static func toolX(_ space: CGSize) -> CGFloat { space.width * 0.38 }
+    /// The columns, left to right: folders (their names to the left of
+    /// their dots, so the column sits far enough in for a 14-character
+    /// name), tools, this computer, and the commons above it.
+    static func folderX(_ space: CGSize) -> CGFloat { max(124, space.width * 0.3) }
+    static func toolX(_ space: CGSize) -> CGFloat { space.width * 0.5 }
     static func hub(in space: CGSize) -> CGPoint {
         let band = band(space)
-        return CGPoint(x: space.width * 0.64, y: (band.lowerBound + band.upperBound) / 2)
+        return CGPoint(x: space.width * 0.72, y: (band.lowerBound + band.upperBound) / 2)
     }
     static func library(in space: CGSize) -> CGPoint {
-        CGPoint(x: space.width * 0.84, y: band(space).lowerBound + space.height * 0.06)
+        CGPoint(x: space.width * 0.84, y: band(space).lowerBound + space.height * 0.04)
     }
-    /// Folders drawn under one tool; the rest are counted.
-    static let foldersShown = 4
+
+    /// A folder line's least and most height, and the room left between
+    /// tools and under a "+N".
+    static let folderStepRange: ClosedRange<CGFloat> = 22 ... 34
+    static let toolGap: CGFloat = 0.9
+    static let overflowLine: CGFloat = 0.7
+
+    /// How many folders each tool shows: the most, up to `foldersShown`,
+    /// that let every tool's folders fit the band at the least line
+    /// height; the rest are counted as "+N" (owner, 2026-10-14: a loaded
+    /// map must not run off the pane).
+    static func folderCap(_ tools: [TracesTree.ToolNode], band: ClosedRange<CGFloat>) -> Int {
+        let length = band.upperBound - band.lowerBound
+        for cap in stride(from: foldersShown, to: 1, by: -1)
+        where units(tools, cap: cap) * folderStepRange.lowerBound <= length {
+            return cap
+        }
+        return 1
+    }
+
+    /// The lines a tool takes at `cap` folders: its folders (one at
+    /// least), a "+N" when some are not shown, and the gap after it.
+    static func units(_ tool: TracesTree.ToolNode, cap: Int) -> CGFloat {
+        CGFloat(max(1, min(tool.folders.count, cap))) + (tool.folders.count > cap ? overflowLine : 0) + toolGap
+    }
+
+    static func units(_ tools: [TracesTree.ToolNode], cap: Int) -> CGFloat {
+        tools.reduce(0) { $0 + units($1, cap: cap) }
+    }
+    /// The most folders drawn beside one tool; the rest are counted.
+    static let foldersShown = 6
 
     /// What decides whether sessions move to the commons, as the core
     /// reports it. Anything unread is closed: a missing signal never draws
@@ -262,17 +301,23 @@ struct FlowMapScene: Equatable {
         let hubPoint = hub(in: space)
         let libraryPoint = library(in: space)
         let folderX = folderX(space)
-        // Each tool's room in the band is in proportion to the folders it
-        // shows, so a tool with four folders never crowds its neighbour.
+        // Each tool's room in the band is in proportion to the lines it
+        // takes, so a tool with many folders never crowds its neighbour,
+        // and the folders shown are as many as fit (`folderCap`).
+        let band = band(space)
+        let cap = folderCap(tools.map(\.tool), band: band)
         let slots = stack(
-            tools.map { CGFloat(max(1, min($0.tool.folders.count, foldersShown))) + 0.6 },
-            in: band(space), maxStep: 80, minStep: 30)
+            tools.map { units($0.tool, cap: cap) }, in: band,
+            maxStep: folderStepRange.upperBound, minStep: folderStepRange.lowerBound)
+        let lineStep = slots.first.map { $0.room / units(tools[0].tool, cap: cap) } ?? folderStepRange.upperBound
         var flowing = false
 
         for (index, (tool, watched)) in tools.enumerated() {
-            let at = CGPoint(x: toolX(space), y: slots[index].y)
-            let shownCount = CGFloat(max(1, min(tool.folders.count, foldersShown)))
-            let folderGap: CGFloat = min(46, slots[index].room / (shownCount + 0.6))
+            // The tool on its folders' middle line, the gap after them.
+            let shownCount = CGFloat(max(1, min(tool.folders.count, cap)))
+            let top = slots[index].y - slots[index].room / 2 + lineStep / 2
+            let at = CGPoint(x: toolX(space), y: top + (shownCount - 1) * lineStep / 2)
+            let folderGap = lineStep
             let off = tool.mode == .off
             let faded = selectedTool != nil && selectedTool != tool.id
             let toolDim = (off ? 0.4 : 1) * (faded ? 0.3 : 1)
@@ -293,7 +338,7 @@ struct FlowMapScene: Equatable {
                 from: at, control1: CGPoint(x: midX, y: at.y), control2: CGPoint(x: midX, y: hubPoint.y),
                 to: CGPoint(x: hubPoint.x - 16, y: hubPoint.y), style: .quiet, dim: toolDim))
 
-            let shown = Array(tool.folders.prefix(foldersShown))
+            let shown = Array(tool.folders.prefix(cap))
             for (folderIndex, folder) in shown.enumerated() {
                 let point = CGPoint(x: folderX, y: at.y + (CGFloat(folderIndex) - CGFloat(shown.count - 1) / 2) * folderGap)
                 let bend = (at.x + point.x) / 2
@@ -308,7 +353,10 @@ struct FlowMapScene: Equatable {
             }
             if tool.folders.count > shown.count {
                 scene.overflows.append(Overflow(
-                    at: CGPoint(x: folderX, y: at.y + (CGFloat(shown.count) - CGFloat(shown.count - 1) / 2) * folderGap),
+                    // Under the last name, in the names' column.
+                    at: CGPoint(
+                        x: folderX - 24,
+                        y: at.y + (CGFloat(shown.count - 1) / 2 + overflowLine + 0.15) * folderGap),
                     count: tool.folders.count - shown.count))
             }
             scene.nodes.append(Node(
@@ -373,12 +421,15 @@ struct FlowMapScene: Equatable {
     static let destinationPoint = destination(in: size)
 
     /// The destination, right of centre on the band's middle; the tools in
-    /// a column to its left.
+    /// a column to its left, their names to the left of their icons.
     static func destination(in space: CGSize) -> CGPoint {
         let band = band(space)
-        return CGPoint(x: space.width * 0.64, y: (band.lowerBound + band.upperBound) / 2)
+        return CGPoint(x: space.width * 0.68, y: (band.lowerBound + band.upperBound) / 2)
     }
-    static func harnessX(_ space: CGSize) -> CGFloat { max(80, space.width * 0.22) }
+    static func harnessX(_ space: CGSize) -> CGFloat { max(150, space.width * 0.36) }
+
+    /// A tool line's least and most height in the Private AI map.
+    static let harnessStepRange: ClosedRange<CGFloat> = 30 ... 72
 
     /// Each tool that can send model calls here, joined to the destination,
     /// drawn from the core's state for it (`HarnessState`), never from
@@ -406,12 +457,20 @@ struct FlowMapScene: Equatable {
         let destinationPoint = destination(in: space)
         let x = harnessX(space)
         // Evenly down the band, no further apart than reads as one group,
-        // centred on the destination.
-        let slots = stack(Array(repeating: 1, count: rows.count), in: band(space), maxStep: 120)
+        // centred on the destination; as many as fit at the least line
+        // height, the rest counted as "+N" under them.
+        let band = band(space)
+        let fit = max(1, Int((band.upperBound - band.lowerBound) / harnessStepRange.lowerBound))
+        let shown = rows.count > fit ? Array(rows.prefix(fit - 1)) : rows
+        let weights = Array(repeating: CGFloat(1), count: shown.count) + (shown.count < rows.count ? [0.7] : [])
+        let slots = stack(weights, in: band, maxStep: harnessStepRange.upperBound, minStep: harnessStepRange.lowerBound)
+        if shown.count < rows.count, let last = slots.last {
+            scene.overflows.append(Overflow(at: CGPoint(x: x - 24, y: last.y), count: rows.count - shown.count))
+        }
         var anyAnswering = false
         var connected = 0
 
-        for (index, row) in rows.enumerated() {
+        for (index, row) in shown.enumerated() {
             let y = slots[index].y
             let style: Arc.Style
             switch state(row) {
@@ -437,6 +496,19 @@ struct FlowMapScene: Equatable {
                 id: "harness:\(row.id)", kind: .harness(glassTool(harness: row.id), installed: row.installed),
                 at: CGPoint(x: x, y: y), radius: 13, label: row.name, detail: sentence(row) ?? "—",
                 dim: row.installed ? 1 : 0.5))
+        }
+        // The tools counted as "+N" still count: the credential says how
+        // many are connected and whether any is answered, drawn or not.
+        for row in rows.dropFirst(shown.count) {
+            switch state(row) {
+            case .answering:
+                anyAnswering = true
+                connected += 1
+            case .connectedNoCalls, .activityShared:
+                connected += 1
+            case .notConnected, .unknown:
+                break
+            }
         }
         let lamp = lamp(privateAI, answering: anyAnswering)
         // #1146's credential card: how many tools are connected, in a

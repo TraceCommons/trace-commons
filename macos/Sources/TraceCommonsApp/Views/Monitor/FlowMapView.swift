@@ -197,11 +197,20 @@ struct FlowMapView: View {
         let type = Self.labelType(scale: fit.scale)
         // Folder names are cut (they are the person's, and run long); the
         // map's own words and the tools' names are drawn whole.
-        let label: String
-        if case .folder = node.kind { label = Self.shortLabel(node.label) } else { label = node.label }
-        layer.draw(
-            Text(label).font(.system(size: type.labelSize, weight: .semibold)).foregroundStyle(GlassColor.textPrimary),
-            at: CGPoint(x: centre.x, y: centre.y + radius + type.labelOffset))
+        if node.labelBeside {
+            // A folder's name sits to the left of its dot, on its line, so a
+            // folder takes one line of height and a long list stays legible
+            // (owner, 2026-10-14: the map under load).
+            let text = if case .folder = node.kind { Self.shortLabel(node.label) } else { node.label }
+            layer.draw(
+                Text(text).font(.system(size: type.labelSize, weight: .semibold))
+                    .foregroundStyle(GlassColor.textPrimary),
+                at: CGPoint(x: centre.x - radius - 6 * max(fit.scale, Self.labelFloor), y: centre.y), anchor: .trailing)
+        } else {
+            layer.draw(
+                Text(node.label).font(.system(size: type.labelSize, weight: .semibold)).foregroundStyle(GlassColor.textPrimary),
+                at: CGPoint(x: centre.x, y: centre.y + radius + type.labelOffset))
+        }
         if let sublabel = node.sublabel {
             layer.draw(
                 Text(sublabel).font(.system(size: type.sublabelSize))
