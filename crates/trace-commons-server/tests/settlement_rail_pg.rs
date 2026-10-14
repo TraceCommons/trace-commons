@@ -467,6 +467,8 @@ async fn a_batch_pays_out_on_exactly_one_path() {
     let near = near().await;
     let t = tenant();
     let rate = ConversionRate::parse("1/1").unwrap();
+    // The first batch seeds the tenant row the recipient references.
+    let b1 = seed_batch(&pg, &t, 5).await;
     bind_near_ai_recipient(&pg.runtime, &t, NearAiOrgId::from_uuid(near.org), "owner")
         .await
         .unwrap();
@@ -488,7 +490,6 @@ async fn a_batch_pays_out_on_exactly_one_path() {
         }
     };
     // Rail first: the NEAR receipt path is refused.
-    let b1 = seed_batch(&pg, &t, 5).await;
     enqueue_batch(&pg.runtime, &t, b1, &near.rail, &rate)
         .await
         .unwrap();
