@@ -4910,18 +4910,25 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
                 // unnormalized is one no session looks up, and under an
                 // "Automatic" override that miss reads as `AutoUpload`.
                 let raw = key_param.unwrap_or_default();
-                let admitted = normalize_policy_key(raw).filter(|key| {
-                    project_key_is_admissible(key, &known)
-                        // A key the daemon already holds stays settable
-                        // when its directory is gone, so the normalized
-                        // form names nothing on disk. It is still stored
-                        // normalized: that is the spelling sessions use.
-                        || known.iter().any(|k| k == raw)
-                });
-                match admitted {
-                    Some(key) => key,
-                    None => {
-                        return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_KEY_UNRECOGNIZED);
+                if !project_key_is_admissible(raw, &known) {
+                    return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_KEY_UNRECOGNIZED);
+                }
+                if known.iter().any(|k| k == raw) {
+                    // A key the daemon already holds is already the spelling
+                    // something looks it up by, and it may not normalize at
+                    // all: its directory can be gone, or (on Windows) a
+                    // `/tmp/...` key is not even absolute.
+                    raw.to_string()
+                } else {
+                    match normalize_policy_key(raw) {
+                        Some(key) => key,
+                        None => {
+                            return Response::err(
+                                req.id,
+                                ERR_BAD_PARAMS,
+                                ERR_PROJECT_KEY_UNRECOGNIZED,
+                            );
+                        }
                     }
                 }
             }
@@ -13032,6 +13039,103 @@ mod tests {
             s.policy.lock().unwrap().resolve(&watcher_key),
             ProjectMode::Ignore
         );
+    }
+
+    /// A key the daemon already holds stays settable even when it is not a
+    /// key normalization can produce at all. On Windows `/tmp/armedproj` --
+    /// the shape a dozen tests here seed -- is not absolute, so normalizing
+    /// it yields nothing; the known-key rule must still answer for it.
+    /// Reproduced on every platform with a key that is relative everywhere.
+    #[test]
+    fn a_known_key_that_does_not_normalize_stays_settable() {
+        let s = shared();
+        let odd = "legacy-relative/oldproj";
+        seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                project_key: odd.to_string(),
+                project_label: "oldproj".to_string(),
+                ..queue_entry_fixture()
+            },
+        );
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": odd, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(s.policy.lock().unwrap().resolve(odd), ProjectMode::Ignore);
+    }
+
+    /// A real directory named through a symlink (`/tmp` is
+    /// `/private/tmp` on macOS) or an 8.3 short name on Windows is not
+    /// spelled the way normalization spells it. It is still a real
+    /// directory, so it is admitted, and stored normalized.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_named_through_a_symlink_is_admitted_and_stored_normalized() {
+        let s = shared();
+        let real = tmp_project_dir("Linked");
+        let link_parent = tempfile::tempdir().unwrap();
+        let link = link_parent.path().join("via-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let spelled = link.to_string_lossy().into_owned();
+        let key = crate::daemon::policy::project_key_for(Some(&real));
+        assert_ne!(
+            spelled, key,
+            "the test needs two spellings to mean anything"
+        );
+        assert!(
+            crate::daemon::policy::project_key_is_admissible(&spelled, &[]),
+            "a real directory is admissible however it is spelled"
+        );
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": spelled, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let policy = s.policy.lock().unwrap();
+        assert_eq!(policy.resolve(&key), ProjectMode::Ignore);
+        assert_eq!(policy.projects.keys().collect::<Vec<_>>(), vec![&key]);
+    }
+
+    /// Fail closed: a path naming no directory is refused however spelled.
+    #[test]
+    fn a_path_naming_no_directory_is_still_refused() {
+        let s = shared();
+        let gone = tmp_project_dir("Gone");
+        std::fs::remove_dir(&gone).unwrap();
+        assert!(!crate::daemon::policy::project_key_is_admissible(
+            &gone,
+            &[]
+        ));
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": gone, "mode": "ignore"}),
+            ),
+        );
+        assert_eq!(r.error.unwrap().message, ERR_PROJECT_KEY_UNRECOGNIZED);
+        assert!(s.policy.lock().unwrap().projects.is_empty());
+
+        // Nor does a missing path inside a repository pass on the strength
+        // of the root it would normalize to.
+        let repo = tmp_project_dir("Repo");
+        std::fs::create_dir(std::path::Path::new(&repo).join(".git")).unwrap();
+        let missing = std::path::Path::new(&repo)
+            .join("not-there")
+            .to_string_lossy()
+            .into_owned();
+        assert!(!crate::daemon::policy::project_key_is_admissible(
+            &missing,
+            &[]
+        ));
     }
 
     /// The sentinel is not a path and must not be normalized out of

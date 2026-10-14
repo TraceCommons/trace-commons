@@ -1720,11 +1720,13 @@ pub const ERR_PROJECT_KEY_UNRECOGNIZED: &str = "project-key-unrecognized";
 /// bounds the length independently at the render sinks, since a filesystem
 /// limit is not a promise this crate makes.
 ///
-/// "Canonicalizes to itself" means the key is its own normalized form
-/// ([`normalize_policy_key`]) and names an existing directory. That is the
-/// watcher's spelling, folded on macOS and Windows, so the folded form of a
-/// mixed-case directory is admissible there and the on-disk spelling is not
-/// (#992): `set_project_mode` normalizes a caller's key before asking.
+/// "Canonicalizes to itself" is now read as: the key's normalized form
+/// ([`normalize_policy_key`]) names an existing directory. The key itself
+/// need not already be in that form -- a mixed-case spelling, a path through
+/// a symlink, a Windows 8.3 short name or `\\?\` prefix all name a real
+/// directory -- and `set_project_mode` stores the normalized form, which is
+/// the spelling sessions are looked up by (#992). A path naming no
+/// directory is refused, however it is spelled.
 pub fn project_key_is_admissible(project_key: &str, known_keys: &[String]) -> bool {
     if project_key == UNKNOWN_PROJECT_KEY {
         return true;
@@ -1736,7 +1738,12 @@ pub fn project_key_is_admissible(project_key: &str, known_keys: &[String]) -> bo
     if !path.is_absolute() {
         return false;
     }
-    normalize_policy_key(project_key).as_deref() == Some(project_key) && path.is_dir()
+    // Both: the key as given must be a real directory, or a missing path
+    // inside a repository would pass on the strength of its root, which is
+    // what normalization walks it to.
+    path.is_dir()
+        && normalize_policy_key(project_key)
+            .is_some_and(|normalized| std::path::Path::new(&normalized).is_dir())
 }
 
 /// The policy key for a caller-supplied project key: the unknown bucket's
