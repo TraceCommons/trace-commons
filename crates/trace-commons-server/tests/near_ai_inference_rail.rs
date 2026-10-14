@@ -135,9 +135,9 @@ async fn first_and_second_deliveries_add_to_the_absolute_ceiling() {
 #[tokio::test]
 async fn a_write_that_landed_behind_a_timeout_is_found_and_never_repeated() {
     let h = harness().await;
-    let rail = h.rail_with(WRITE_KEY, UA, Duration::from_millis(300), false);
+    let rail = h.rail_with(WRITE_KEY, UA, Duration::from_millis(1000), false);
     let delivery = h.delivery(7 * DOLLAR, None);
-    h.state.lock().unwrap().stall_after_commit = Some(Duration::from_secs(2));
+    h.state.lock().unwrap().stall_after_commit = Some(Duration::from_secs(4));
     let err = rail.deliver(&delivery).await.unwrap_err();
     assert_eq!(err.kind, RailErrorKind::Retry);
     assert_eq!(err.label, "near_ai_admin_ambiguous");
@@ -343,4 +343,21 @@ async fn history_is_read_across_pages() {
     assert_eq!(h.patch_calls(), 120);
     let state = h.state.lock().unwrap();
     assert_eq!(state.rows.get(&h.org).unwrap().len(), 120);
+}
+
+#[tokio::test]
+async fn a_write_that_committed_behind_a_bad_gateway_is_not_repeated() {
+    let h = harness().await;
+    let rail = h.rail();
+    let delivery = h.delivery(2 * DOLLAR, None);
+    h.state.lock().unwrap().bad_gateway_after_commit = true;
+    let err = rail.deliver(&delivery).await.unwrap_err();
+    assert_eq!(
+        (err.kind, err.label),
+        (RailErrorKind::Retry, "near_ai_admin_unavailable")
+    );
+    let again = rail.deliver(&delivery).await.unwrap();
+    assert!(again.receipt.replayed);
+    assert_eq!(h.patch_calls(), 1);
+    assert_eq!(h.active_amount(), Some((2 * DOLLAR) as i64));
 }

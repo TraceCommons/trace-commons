@@ -66,8 +66,10 @@ fn parse_units(text: &str) -> Result<u128, StoreError> {
 }
 
 /// Record that `tenant` elects `org` to receive NEAR AI inference credit,
-/// revoking any earlier election. The caller has already verified, with the
-/// contributor's own NEAR AI token, that they hold `role` in `org`.
+/// revoking any earlier election. `org` and `role` must come from
+/// [`crate::near_ai_recipient::verify_recipient`], which checks them with the
+/// contributor's own NEAR AI token; this function re-checks only the role's
+/// shape.
 pub async fn bind_near_ai_recipient(
     pool: &Pool,
     tenant: &str,

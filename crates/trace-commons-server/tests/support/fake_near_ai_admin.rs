@@ -59,6 +59,8 @@ pub struct FakeState {
     pub patch_calls: u64,
     /// Commit the next PATCH, then stall the response this long.
     pub stall_after_commit: Option<Duration>,
+    /// Commit the next PATCH, then answer 502 as a proxy would.
+    pub bad_gateway_after_commit: bool,
     /// Before applying the next PATCH, apply a foreign write of this amount.
     pub foreign_write_before_patch: Option<i64>,
     /// Fail the next N requests with 503 before doing anything.
@@ -270,6 +272,9 @@ async fn update(
             changed_by,
             change_reason,
         );
+        if std::mem::take(&mut s.bad_gateway_after_commit) {
+            return Err(error(StatusCode::BAD_GATEWAY, "bad_gateway"));
+        }
         (
             json!({
                 "organization_id": org.to_string(),

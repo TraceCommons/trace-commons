@@ -127,7 +127,7 @@ async fn near() -> Near {
         &base,
         SecretString::from("adm_write".to_string()),
         UA,
-        Duration::from_millis(500),
+        Duration::from_secs(5),
     )
     .unwrap();
     Near {
@@ -305,12 +305,13 @@ async fn settlement_rail_end_to_end_under_the_runtime_role() {
         ["reconciled", "reconciled", "carried"]
     );
 
-    // A write that lands behind a timeout is retried without a second PATCH.
+    // A write that committed behind a failed response is retried without a
+    // second PATCH. Deterministic: the fake commits, then answers 502.
     let b3 = seed_batch(&pg, &t, 3).await;
     enqueue_batch(&pg.runtime, &t, b3, &near.rail, &rate)
         .await
         .unwrap();
-    near.state.lock().unwrap().stall_after_commit = Some(Duration::from_secs(2));
+    near.state.lock().unwrap().bad_gateway_after_commit = true;
     let s = dispatch_tick(&pg.runtime, &t, &near.rail, 10, Duration::from_secs(60))
         .await
         .unwrap();
