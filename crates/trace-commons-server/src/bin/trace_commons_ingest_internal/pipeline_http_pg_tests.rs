@@ -13215,9 +13215,25 @@ async fn a_contain_after_processing_releases_the_attempt_without_effect() {
         .batch_execute(&format!(
             "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql
                  SECURITY DEFINER SET search_path = public AS $$
+             DECLARE
+                 event UUID := gen_random_uuid();
+                 generation BIGINT;
              BEGIN
-                 UPDATE pipeline_tenant_routing SET routing_state = 'contained'
-                  WHERE tenant_id = NEW.tenant_id;
+                 -- A routing change names a new activation event with the
+                 -- row's state and generation (V110's triggers), as
+                 -- `write_routing_as_operator` writes one.
+                 UPDATE pipeline_tenant_routing
+                    SET routing_state = 'contained', activation_record_id = event
+                  WHERE tenant_id = NEW.tenant_id
+                 RETURNING routing_generation INTO generation;
+                 INSERT INTO pipeline_activation_events (
+                     tenant_id, event_id, action, previous_state, resulting_state,
+                     actor_principal_ref, reason_code, evidence_hash, routing_generation
+                 ) VALUES (
+                     NEW.tenant_id, event, 'contain', 'unselected', 'contained',
+                     'principal_sha256:' || repeat('ab', 32), 'test_routing_state',
+                     'sha256:' || repeat('cd', 32), generation
+                 );
                  RETURN NEW;
              END $$;
              CREATE TRIGGER {trigger} AFTER UPDATE OF status ON trace_admission_submissions
