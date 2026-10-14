@@ -133,3 +133,14 @@ final class PromptQuoteTests: XCTestCase {
         XCTAssertEqual(PromptQuote.icon("pasted_content"), "doc.on.clipboard")
     }
 }
+
+/// The map's node names are cut to 14 characters, the last an ellipsis
+/// (owner, 2026-10-12).
+final class FlowMapLabelTests: XCTestCase {
+    func test_namesAreCutToFourteenCharacters() {
+        XCTAssertEqual(FlowMapView.shortLabel("build-run-latest-design"), "build-run-lat\u{2026}")
+        XCTAssertEqual(FlowMapView.shortLabel("build-run-latest-design").count, 14)
+        XCTAssertEqual(FlowMapView.shortLabel("trace-commons"), "trace-commons")
+        XCTAssertEqual(FlowMapView.shortLabel("fourteen-chars"), "fourteen-chars")
+    }
+}

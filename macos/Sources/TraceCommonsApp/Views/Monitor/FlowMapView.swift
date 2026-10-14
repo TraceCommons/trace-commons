@@ -195,7 +195,7 @@ struct FlowMapView: View {
         // the primary ink, then 10 regular in the off tone, 14 below. Type
         // and gaps scale together, so the two lines never meet.
         let type = Self.labelType(scale: fit.scale)
-        let label = node.label.count > 18 ? node.label.prefix(17) + "…" : Substring(node.label)
+        let label = Self.shortLabel(node.label)
         layer.draw(
             Text(label).font(.system(size: type.labelSize, weight: .semibold)).foregroundStyle(GlassColor.textPrimary),
             at: CGPoint(x: centre.x, y: centre.y + radius + type.labelOffset))
@@ -291,6 +291,14 @@ struct FlowMapView: View {
                 .glassType(GlassTokens.TypeScale.micro.weight(.regular))
                 .foregroundStyle(GlassColor.textTertiary)
         }
+    }
+
+    /// A node's name on the map: at most `labelLimit` characters, the last
+    /// an ellipsis when it is cut (owner, 2026-10-12). The full name is the
+    /// node's tooltip and accessible name.
+    static let labelLimit = 14
+    static func shortLabel(_ label: String) -> String {
+        label.count > labelLimit ? String(label.prefix(labelLimit - 1)) + "\u{2026}" : label
     }
 
     /// A folder's dot by rule: the fill and the ring.

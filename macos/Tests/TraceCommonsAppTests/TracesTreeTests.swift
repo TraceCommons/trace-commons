@@ -483,19 +483,10 @@ final class TracesRowWordsTests: XCTestCase {
             fromJSON: TCCoreCopy.automaticGrantCopyJSON(disclosure: "patterns_only")))
         XCTAssertEqual(store.disclosureLines(armed.disclosure), words.lines)
         let view = TracesTreeView(store: store, selection: .constant(nil))
-        // The row draws the one sentence, never the long lines; those sit
-        // behind the info button with the core's "More about" label.
-        XCTAssertEqual(view.folderNotes(armed), [words.summary])
-        for line in words.lines { XCTAssertFalse(view.folderNotes(armed).contains(line)) }
-        let info = try XCTUnwrap(view.folderInfo(armed))
-        XCTAssertEqual(info.line, words.summary)
-        XCTAssertEqual(info.text, words.lines.joined(separator: "\n\n"))
-        XCTAssertEqual(
-            info.label,
-            FolderInspector.moreAboutLabel(try XCTUnwrap(store.words).inspector.contributionRule))
-        for folder in folders where folder.mode != .autoUpload {
-            XCTAssertNil(view.folderInfo(folder), folder.label)
-        }
+        // The row draws none of it (owner, 2026-10-12: too much text over
+        // the list); the inspector's Contribution rule card says it.
+        XCTAssertTrue(view.folderNotes(armed).isEmpty)
+        XCTAssertFalse(try TracesParityTests.text("Views/Monitor/TracesViews.swift").contains("folderInfo"))
         for folder in folders where folder.mode != .autoUpload {
             XCTAssertNil(folder.disclosure, folder.label)
             XCTAssertTrue(view.folderNotes(folder).isEmpty, folder.label)

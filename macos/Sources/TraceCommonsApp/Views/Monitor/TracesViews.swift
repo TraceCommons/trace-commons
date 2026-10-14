@@ -445,46 +445,27 @@ struct TracesTreeView: View {
     }
 
     /// What a folder says under its row, whether open or not: a refused
-    /// write; the one sentence for an armed folder's route (the card's own
-    /// `summary`, owner 2026-10-12), chosen by the daemon; and why the
-    /// bucket can never be armed. The long lines sit behind `folderInfo`.
+    /// write, and why the bucket can never be armed. An armed folder's
+    /// disclosure is not drawn on the row (owner, 2026-10-12: too much
+    /// text over the list); its inspector card says it in full.
     func folderNotes(_ folder: TracesTree.FolderNode) -> [String] {
         var lines: [String] = []
         if let refused = refusal(folder.id) { lines.append(refused) }
-        if let copy = store.armedDisclosure(folder.disclosure) { lines.append(copy.summary) }
         if folder.isBucket, let note = ProjectCopy.unresolvedBucketNote { lines.append(note) }
         return lines
     }
 
-    /// The info button beside an armed folder's summary: the core's "More
-    /// about {title}" label, the long lines as its text. Nil when the folder
-    /// is not armed or the core's words are unread; the long lines are then
-    /// not drawn on the row (the inspector card offers them).
-    func folderInfo(_ folder: TracesTree.FolderNode) -> (line: String, label: String, text: String)? {
-        guard let copy = store.armedDisclosure(folder.disclosure),
-              let title = store.words?.inspector.contributionRule,
-              let label = FolderInspector.moreAboutLabel(title) else { return nil }
-        return (copy.summary, label, copy.lines.joined(separator: "\n\n"))
-    }
-
     /// Caption lines under a row, indented to its content.
     @ViewBuilder
-    private func notes(
-        _ lines: [String], info: (line: String, label: String, text: String)? = nil, depth: GlassListRow.Depth
-    ) -> some View {
+    private func notes(_ lines: [String], depth: GlassListRow.Depth) -> some View {
         if !lines.isEmpty {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 ForEach(lines, id: \.self) { line in
-                    HStack(alignment: .top, spacing: GlassTokens.Space.s2) {
-                        Text(line)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            // #1146: tertiary, as a row's own sub line.
-                            .foregroundStyle(GlassColor.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        if let info, info.line == line {
-                            GlassInfoButton(info.label, text: info.text)
-                        }
-                    }
+                    Text(line)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        // #1146: tertiary, as a row's own sub line.
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -555,7 +536,7 @@ struct TracesTreeView: View {
             ? [] : offer.withheldLine.flatMap {
                 $0 == store.folderNotice ? nil : [Self.withheldNote($0, eligible: offer.count, words: words)]
             } ?? []
-        notes(folderNotes(folder) + withheld, info: folderInfo(folder), depth: .folder)
+        notes(folderNotes(folder) + withheld, depth: .folder)
         if isOpen(folder.id) {
             // #1146: a session under an ignored folder is drawn off too.
             ForEach(folder.sessions) { sessionRow($0, off: ignored) }
