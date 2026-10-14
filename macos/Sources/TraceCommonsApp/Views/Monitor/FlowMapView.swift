@@ -41,7 +41,7 @@ struct FlowMapView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let fit = FlowMapGeometry(size: proxy.size, zoom: zoom, focus: focus)
+            let fit = FlowMapGeometry(size: proxy.size, zoom: zoom, focus: focus, space: scene.space)
             ZStack(alignment: .topLeading) {
                 TimelineView(.animation(minimumInterval: 1 / 30, paused: reduceMotion || !scene.flows || !state.isHealthy)) { timeline in
                     Canvas { context, _ in
@@ -195,7 +195,10 @@ struct FlowMapView: View {
         // the primary ink, then 10 regular in the off tone, 14 below. Type
         // and gaps scale together, so the two lines never meet.
         let type = Self.labelType(scale: fit.scale)
-        let label = Self.shortLabel(node.label)
+        // Folder names are cut (they are the person's, and run long); the
+        // map's own words and the tools' names are drawn whole.
+        let label: String
+        if case .folder = node.kind { label = Self.shortLabel(node.label) } else { label = node.label }
         layer.draw(
             Text(label).font(.system(size: type.labelSize, weight: .semibold)).foregroundStyle(GlassColor.textPrimary),
             at: CGPoint(x: centre.x, y: centre.y + radius + type.labelOffset))
@@ -293,9 +296,9 @@ struct FlowMapView: View {
         }
     }
 
-    /// A node's name on the map: at most `labelLimit` characters, the last
-    /// an ellipsis when it is cut (owner, 2026-10-12). The full name is the
-    /// node's tooltip and accessible name.
+    /// A folder's name on the map: at most `labelLimit` characters, the
+    /// last an ellipsis when it is cut (owner, 2026-10-12). The full name is
+    /// the node's tooltip and accessible name.
     static let labelLimit = 14
     static func shortLabel(_ label: String) -> String {
         label.count > labelLimit ? String(label.prefix(labelLimit - 1)) + "\u{2026}" : label
@@ -384,18 +387,21 @@ struct FlowMapGeometry {
 
     static let focusScale: CGFloat = 1.6
 
-    init(size: CGSize, zoom: CGFloat, focus: CGPoint? = nil) {
-        let design = FlowMapScene.size
+    /// `space` is the scene's design space (`FlowMapScene.space`), #1146's
+    /// 580×760 by default.
+    init(size: CGSize, zoom: CGFloat, focus: CGPoint? = nil, space: CGSize = FlowMapScene.size) {
+        let design = space
         let fit = min(size.width / design.width, size.height / design.height)
         let centred = CGPoint(x: (size.width - design.width * fit) / 2, y: (size.height - design.height * fit) / 2)
         if let focus {
             // #1146: translate(290 - 1.6(x - 50), 380 - 1.6y) scale(1.6), in
-            // design units, then fitted.
+            // design units, then fitted; 290 and 380 are the space's
+            // middle, 50 its nudge right of the focused node.
             let k = Self.focusScale
             scale = max(0.01, fit * k)
             origin = CGPoint(
-                x: centred.x + fit * (290 - k * (focus.x - 50)),
-                y: centred.y + fit * (380 - k * focus.y))
+                x: centred.x + fit * (design.width / 2 - k * (focus.x - 50)),
+                y: centred.y + fit * (design.height / 2 - k * focus.y))
         } else {
             scale = max(0.01, fit * zoom)
             origin = CGPoint(x: (size.width - design.width * scale) / 2, y: (size.height - design.height * scale) / 2)

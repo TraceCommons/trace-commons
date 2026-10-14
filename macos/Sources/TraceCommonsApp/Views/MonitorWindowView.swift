@@ -886,12 +886,22 @@ private struct MonitorMapPane: View {
 
     @ViewBuilder
     private var map: some View {
+        // Laid out for the pane's own shape (owner, 2026-10-14: reflow the
+        // maps for the space there is), so neither letterboxes in it.
+        GeometryReader { proxy in
+            mapContent(space: FlowMapScene.space(for: proxy.size))
+        }
+    }
+
+    @ViewBuilder
+    private func mapContent(space: CGSize) -> some View {
         switch shownTab {
         case .traces:
             let scene = FlowMapScene.traces(
                 traces.tree,
                 gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations),
-                contributed: .init(history: history, failure: historyFailure), selectedTool: selectedTool)
+                contributed: .init(history: history, failure: historyFailure), selectedTool: selectedTool,
+                space: space)
             FlowMapView(
                 scene: scene,
                 legend: [.autoUpload, .ask, .ignore], zoomable: true,
@@ -908,7 +918,8 @@ private struct MonitorMapPane: View {
                         harnesses, destinationLabel: privateAILabel,
                         privateAI: traces.destinations?.privateAi ?? traces.status?.privateInferenceState?.state,
                         sentence: sentence,
-                        state: { HarnessSurface.state($0, calls: model.harnessCalls) }),
+                        state: { HarnessSurface.state($0, calls: model.harnessCalls) },
+                        space: space),
                     legend: [], zoomable: false, accessibilityName: privateAILabel)
             } else {
                 Color.clear
