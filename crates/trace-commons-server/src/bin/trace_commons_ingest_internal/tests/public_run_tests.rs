@@ -928,13 +928,13 @@ async fn object_primary_public_run_publish_reads_envelope_through_object_ref() {
     assert_eq!(error.1.0.error, "public run approval changed");
 }
 
-/// With no active envelope object ref, the account read falls back to the
-/// plaintext file only where object-primary submit/review is off. With it on,
-/// a file under `state.root` is never trusted: the read fails closed.
+/// Object-primary on: a missing active envelope object ref fails closed, and a
+/// file under `state.root` is never trusted. Object-primary off: the file is
+/// read exactly as before, even with an object ref present.
 #[tokio::test]
-async fn account_content_without_an_object_ref_reads_the_file_only_when_not_object_primary() {
+async fn account_content_reads_the_file_only_when_not_object_primary() {
     let fixture = object_primary_account_fixture().await;
-    fixture.db.object_refs.lock().unwrap().clear();
+    let refs = std::mem::take(&mut *fixture.db.object_refs.lock().unwrap());
     let file_path = fixture.state.root.join(trace_envelope_object_key(
         &fixture.ctx.tenant_id,
         TraceCorpusStatus::Accepted,
@@ -953,6 +953,9 @@ async fn account_content_without_an_object_ref_reads_the_file_only_when_not_obje
     assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(error.1.0.error, "trace content unavailable");
 
+    // Off: the ref is back but points at the encrypted object; the file is
+    // what a file-backed deployment reads.
+    *fixture.db.object_refs.lock().unwrap() = refs;
     let mut file_backed = fixture.state.clone();
     Arc::make_mut(&mut file_backed).object_primary_submit_review = false;
     let response = account_trace_content_handler(

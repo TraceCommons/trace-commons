@@ -69156,10 +69156,12 @@ async fn read_envelope_body_for_review_decision(
 /// The record these routes hold is built from the database row and carries no
 /// artifact receipt, so `read_envelope_by_record` alone can only read the
 /// plaintext file under `state.root`, which object-primary submit/review never
-/// writes. The active envelope object ref is read first (a rescrubbed envelope
-/// ahead of the submitted one), as the object-primary review path does. With
-/// no active ref, the file is read only when object-primary submit/review is
-/// off for the tenant; with it on, the read fails closed.
+/// writes. Where object-primary submit/review is on for the tenant, the active
+/// envelope object ref is read instead (a rescrubbed envelope ahead of the
+/// submitted one), as the object-primary review path does, and a missing ref
+/// fails closed. Where it is off, the file is read as before: a file-backed
+/// deployment rewrites that file in place (process evaluation), so its older
+/// file-store ref no longer matches the bytes.
 ///
 /// The object-store read and decrypt run on the blocking pool.
 async fn read_envelope_body_for_account(
@@ -69171,18 +69173,19 @@ async fn read_envelope_body_for_account(
         record.tenant_id == tenant_id,
         "trace metadata tenant mismatch"
     );
-    let object_ref = match state.db_mirror.as_ref() {
-        Some(db) => {
+    let object_ref = if state.object_primary_submit_review_for_tenant(tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("object-primary submit/review is enabled without a DB mirror")?;
+        let object_ref =
             get_latest_active_envelope_object_ref(db.as_ref(), tenant_id, record.submission_id)
                 .await
-                .context("failed to read active envelope object ref for account read")?
-        }
-        None => None,
+                .context("failed to read active envelope object ref for account read")?;
+        Some(object_ref.context("missing active envelope object ref for account read")?)
+    } else {
+        None
     };
-    anyhow::ensure!(
-        object_ref.is_some() || !state.object_primary_submit_review_for_tenant(tenant_id),
-        "missing active envelope object ref for account read"
-    );
     let read_state = Arc::clone(state);
     let tenant_id = tenant_id.to_string();
     tokio::task::spawn_blocking(move || match object_ref {
