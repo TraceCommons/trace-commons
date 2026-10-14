@@ -15084,9 +15084,11 @@ enum UploadRoute<'a> {
 /// retry is checked against no qualification. A refusal that only the receipt
 /// transaction finds (a routing row or a policy that changes after this read:
 /// a `contain` or a `suspend` that commits while the upload is in flight)
-/// comes after `attempt.processing`, as `main`'s quota refusal does: the
-/// attempt then stays `processing` until its lease ends, because
-/// `Attempt::finish` releases an attempt only from `reserved`. A legacy
+/// comes after `attempt.processing`, as `main`'s quota refusal does.
+/// `Attempt::finish` releases an attempt only from `reserved`, so
+/// `route_pipeline_receipt` releases it there, from `processing`, with
+/// `Attempt::finish_without_effect`: the receipt's refusal wrote nothing
+/// (#1237). The legacy quota refusal still keeps its charge. A legacy
 /// upload that passed this decision before a `contain` committed completes on
 /// the legacy path: the legacy claim reads no routing.
 async fn decide_upload_route<'a>(
@@ -15218,17 +15220,47 @@ async fn decide_upload_route<'a>(
 /// The text is compared whole: only the label itself, never an error that
 /// carries it.
 fn pipeline_receipt_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+    match pipeline_receipt_refusal_label(&error) {
+        Some(label) => api_error(StatusCode::SERVICE_UNAVAILABLE, label),
+        None => internal_error(error),
+    }
+}
+
+/// The label of a pipeline receipt error that `pipeline_receipt_error`
+/// answers as a `503`, or `None`. Each is raised before the receipt writes
+/// anything (the authority is resolved before any database work; a suspended
+/// policy is refused in the receipt's transaction, which writes nothing), so
+/// the upload's admission attempt is released without effect (#1237). Any
+/// other error's effects are not known.
+fn pipeline_receipt_refusal_label(error: &anyhow::Error) -> Option<&'static str> {
     let text = error.to_string();
-    for label in [
+    [
         PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
         trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL,
         trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_READ_FAILED_LABEL,
-    ] {
-        if text == label {
-            return api_error(StatusCode::SERVICE_UNAVAILABLE, label);
-        }
-    }
-    internal_error(error)
+    ]
+    .into_iter()
+    .find(|label| text == *label)
+}
+
+/// #1237: releases the upload's admission attempt, and gives back its cost
+/// bound or charge, for a pipeline receipt refused by a refusal that wrote
+/// nothing -- also when the attempt is already `processing`, which the
+/// handler's trailing `finish(false)` never releases. Called only from the
+/// refusal arms of `route_pipeline_receipt` that store nothing; a failure
+/// whose effects are not known keeps its charge.
+///
+/// The refusal is the upload's answer either way. A release the ledger
+/// refuses is logged under its admission label and leaves the attempt as it
+/// was, which is the behaviour from before this release existed.
+async fn release_attempt_without_effect(
+    state: &AppState,
+    admission: Option<&mut admission::Attempt>,
+) {
+    let (Some(attempt), Some(db)) = (admission, state.db_mirror.as_ref()) else {
+        return;
+    };
+    let _ = attempt.finish_without_effect(db.as_ref()).await;
 }
 
 /// Acts on the route `decide_upload_route` chose for a new upload: the legacy
@@ -15259,6 +15291,12 @@ fn pipeline_receipt_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) 
 /// pipeline-routed tenant never writes the legacy file record the ordinary
 /// `can_access_submission` check reads, so without this check here that
 /// check would never run against a receipt key at all.
+///
+/// `admission` is the upload's admission attempt, already `processing`. The
+/// refusals below that write nothing release it
+/// (`release_attempt_without_effect`, #1237); every other outcome leaves it
+/// to the handler's trailing `finish`.
+#[allow(clippy::too_many_arguments)]
 async fn route_pipeline_receipt(
     state: &AppState,
     tenant: &TenantCtx,
@@ -15267,6 +15305,7 @@ async fn route_pipeline_receipt(
     residual_risk_basis: &[ResidualRiskCondition],
     source_claim: Option<(Uuid, [u8; 32])>,
     route: UploadRoute<'_>,
+    mut admission: Option<&mut admission::Attempt>,
 ) -> ApiResult<Option<TraceSubmissionReceipt>> {
     let pipeline_service = match route {
         UploadRoute::Legacy { claim } => {
@@ -15276,7 +15315,7 @@ async fn route_pipeline_receipt(
         UploadRoute::Pipeline(pipeline_service) => pipeline_service,
     };
     let idempotency_key = envelope.submission_id.to_string();
-    let result = pipeline_service
+    let submitted = pipeline_service
         .submit(PipelineReceiptRequest {
             source_session: source_claim,
             tenant_id: tenant.tenant_id(),
@@ -15292,8 +15331,16 @@ async fn route_pipeline_receipt(
                 max_per_principal_per_hour: state.submission_quota.max_per_principal_per_hour,
             },
         })
-        .await
-        .map_err(pipeline_receipt_error)?;
+        .await;
+    let result = match submitted {
+        Ok(result) => result,
+        Err(error) => {
+            if pipeline_receipt_refusal_label(&error).is_some() {
+                release_attempt_without_effect(state, admission.take()).await;
+            }
+            return Err(pipeline_receipt_error(error));
+        }
+    };
     match result {
         PipelineReceiptResult::Created(run) => {
             state.pipeline_worker_wake.wake(tenant.tenant_id());
@@ -15372,10 +15419,17 @@ async fn route_pipeline_receipt(
         // transaction's own check. The transaction's answer is the one that
         // holds: a contained tenant is refused; one returned to the legacy
         // path is claimed for it.
-        PipelineReceiptResult::NotRouted(RoutingState::Contained) => Err(api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL,
-        )),
+        // Refused in the transaction, which wrote nothing, after the
+        // attempt was marked `processing` (#1237): the attempt is released
+        // and its cost bound or charge given back, so a retry is neither
+        // refused as in progress nor charged twice.
+        PipelineReceiptResult::NotRouted(RoutingState::Contained) => {
+            release_attempt_without_effect(state, admission.take()).await;
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL,
+            ))
+        }
         PipelineReceiptResult::NotRouted(RoutingState::Legacy) => {
             claim_legacy_receipt(state, tenant, envelope.submission_id, raw_body, true).await
         }
@@ -15865,6 +15919,7 @@ async fn submit_trace_handler(
             &residual_risk_basis,
             source_claim,
             upload_route,
+            admission.as_mut(),
         )
         .await?
         {
