@@ -1,9 +1,9 @@
 # Proposal to NEAR AI: a `trace_commons` credit type
 
 Status: draft, 2026-10-14. Not sent. A reviewable implementation exists on
-a local cloud-api branch, `trace-commons-credit-type` (commit `d18e2ca1` on
-top of `752e2976`). It is unpushed, and no PR or issue is open; opening one
-is the owner's call. Citations of the form `cloud-api:<path>:<line>` are
+a local cloud-api branch, `trace-commons-credit-type`: commits `d18e2ca1`
+and `3e0c371a`, on top of `752e2976`. It is unpushed, and no PR or issue
+is open; opening one is the owner's call. Citations of the form `cloud-api:<path>:<line>` are
 into `nearai/cloud-api` at `752e2976`.
 
 ## Why
@@ -82,7 +82,8 @@ same properties for credit earned through Trace Commons.
    - `GET` on the same path returns the current total, or 0 when there is
      none.
    - Errors: 404 for an unknown or inactive organization, 400 for invalid
-     input.
+     input, and a retryable 409 when the organization accounting lock times
+     out (the reconciliation route's behaviour).
    - `GET` is added to the read-only admin list
      (`cloud-api:crates/api/src/middleware/admin_policy.rs:36-69`); `PUT`
      needs a read-write token or a session, which is the default for any
@@ -134,7 +135,7 @@ be replaced by a NEP-141 balance read.
 | `cargo clippy --all-targets --all-features -- -D warnings` (their CI command) | pass |
 | `cargo test -p config -p database -p api -p services --lib` | 1471 passed |
 | `cargo test --workspace --lib --bins` | 1264 passed, 18 failed. All 18 failures are in `inference_providers` `placement_hook`, a crate the change does not touch and none of whose dependencies it touches. |
-| Database suites on PostgreSQL 16, their CI set plus `staking_source_inactive_writes` and the new `trace_commons_credit` (5 tests) | 52 passed, on fresh database `admission_test_cloudapi_db2` (`xact_commit` 2634) |
+| Database suites on PostgreSQL 16, their CI set plus `staking_source_inactive_writes` and the new `trace_commons_credit` (5 tests) | 52 passed, on fresh database `admission_test_cloudapi_db3` (`xact_commit` 2646) |
 | New e2e module `trace_commons_credit` (4 tests) | not run: the e2e server needs a dstack socket |
 
 ## Open questions for NEAR AI
@@ -148,3 +149,7 @@ be replaced by a NEP-141 balance read.
 5. Do they want a per-organization or per-call cap beyond $1B?
 6. Explicit `CREDIT_USAGE_ORDER` values must list five types after deploy.
    Is that acceptable as a deploy step?
+7. The default spend order changes under the unchanged
+   `CREDIT_ALLOCATION_POLICY_VERSION` "v1". No organization holds the type
+   yet, so no existing allocation changes. Should the version be bumped
+   anyway?
