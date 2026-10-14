@@ -568,4 +568,15 @@ final class MenuBarGlassPanelTests: XCTestCase {
         // The menu bar hidden: the visible frame reaches the top.
         XCTAssertEqual(MenuBarTopEdgePin.menuBarBottom(screen: screen, visible: screen, thickness: 24), 958)
     }
+
+    /// A resize notification arrives inside SwiftUI's own resize of the
+    /// panel, so the pin moves the window on the next turn of the run loop
+    /// rather than there, the shape that crashed the edge rail (#1402).
+    func test_thePinMovesTheWindowOutsideTheResizePass() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("GlassWindowFrame.onNextTurn { [weak self, weak window] in"))
+    }
 }
