@@ -344,8 +344,15 @@ leases immediately; in-flight rows finish their current step and stop.
    replacement, no CAS, 404 history, UA binding, read-only 403).
 7. Runbook stub `docs/operator/near-ai-inference-credit.md`.
 
-Deferred: the contributor binding route and client UI; wiring the tick into
-`trace-commons-ingest`'s scheduler; migrating the legacy NEAR outbox.
+Also built: `near_ai_recipient.rs`, the `/users/me` organization check that
+gates an election (owner or admin of an active organization; an empty list
+is unverified), and a startup refusal in `trace-commons-ingest` for an
+enabled rail with a missing control.
+
+Deferred: the contributor binding route and client UI; a worker route and
+scheduler that call `enqueue_batch`, `dispatch_tick` and `reconcile_tick`;
+admin routes for unfreeze, cancel and adopting a foreign baseline (Q2);
+migrating the legacy NEAR outbox.
 
 ## 5. Open questions for the owner
 
