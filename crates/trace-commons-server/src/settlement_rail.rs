@@ -3,8 +3,10 @@
 
 //! The seam a settlement rail plugs into.
 //!
-//! A rail turns one queued delivery -- an amount of one instrument for one
-//! recipient -- into an external effect, exactly once, and proves it. The
+//! A rail publishes one recipient's **cumulative** total of one instrument to
+//! an external system. The total only ever grows, and the external side keeps
+//! the maximum it has seen, so publishing is idempotent and a retried, late or
+//! duplicated publish is harmless: no compare-and-swap, no idempotency key. The
 //! dispatcher holds a rail as `Arc<dyn SettlementRail>` and knows nothing
 //! about any particular external system. See
 //! `docs/superpowers/specs/2026-10-14-near-ai-inference-credit-settlement-design.md`.
@@ -19,7 +21,6 @@
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::fmt;
-use uuid::Uuid;
 
 /// A recipient reference as the rail's external system names it. Its
 /// `Debug` is redacted: the value is an external account identifier and must
@@ -55,13 +56,13 @@ pub fn sha256_ref(domain: &str, parts: &[&str]) -> String {
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
-/// The correlation hash for one outbox row. Built from the rail, the
-/// instrument and the row's random id -- never from a tenant id -- so it can
-/// be written into an external system's audit field.
-pub fn delivery_hash(rail_id: &str, instrument_id: &str, outbox_id: Uuid) -> String {
+/// The reference published beside a cumulative total, so the external
+/// system's audit row can be matched to our ledger. Built from the rail, a
+/// hash of the recipient and the total -- never from a tenant id.
+pub fn statement_ref(rail_id: &str, recipient_ref_hash: &str, cumulative_units: u128) -> String {
     sha256_ref(
-        "trace-commons:settlement-rail-delivery:v1",
-        &[rail_id, instrument_id, &outbox_id.to_string()],
+        "trace-commons:settlement-rail-statement:v1",
+        &[rail_id, recipient_ref_hash, &cumulative_units.to_string()],
     )
 }
 
@@ -141,60 +142,60 @@ impl ConversionRate {
     }
 }
 
-/// What a rail last wrote for a recipient, as recorded by us. A rail whose
-/// external effect is "set the absolute value" uses it as its precondition.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PriorWrite {
-    pub external_receipt_hash: String,
-    pub written_units: u128,
-}
-
-/// One queued delivery, as the dispatcher hands it to a rail.
+/// One recipient's cumulative total, as the dispatcher hands it to a rail.
 #[derive(Debug, Clone)]
-pub struct RailDelivery {
-    pub delivery_hash: String,
+pub struct CumulativeStatement {
     pub recipient: RecipientRef,
-    pub units: u128,
-    /// `None` when we have never written for this recipient on this rail.
-    pub expected_prior: Option<PriorWrite>,
+    /// A hash of the recipient, for audit.
+    pub recipient_ref_hash: String,
+    /// Everything ever accrued to this recipient on this rail, in atomic
+    /// units of the rail's instrument.
+    pub cumulative_units: u128,
+    pub statement_ref: String,
 }
 
-/// Evidence that a delivery's external effect exists.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RailReceipt {
-    /// What the recipient's balance or ceiling was before our write.
-    pub prior_units: u128,
-    /// What our write set it to.
-    pub written_units: u128,
-    /// `sha256:` over the external system's record id. The id itself is not
-    /// stored.
-    pub external_receipt_hash: String,
-    /// True when this attempt found the effect already present and did not
-    /// write again.
-    pub replayed: bool,
-}
-
-/// The result of a delivery whose effect exists. `anomaly` is set when the
-/// effect landed but something about its surroundings was wrong -- for
-/// example, another writer touched the same external value between our read
-/// and our write. The dispatcher records the receipt and freezes the row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RailOutcome {
-    pub receipt: RailReceipt,
-    pub anomaly: Option<&'static str>,
-}
-
-/// What the reconciler learned about one recorded delivery.
+/// What publishing did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RailVerification {
-    /// Present with the recorded amount, and still the current value.
+pub enum Published {
+    /// The external system now holds `effective_units` (after the call).
+    /// `applied` is false when it already held at least our total.
+    Recorded {
+        effective_units: u128,
+        applied: bool,
+    },
+    /// The external system applies statements on its own schedule (pull);
+    /// nothing is known yet about what it holds.
+    Deferred,
+}
+
+/// How a published or observed external total compares with our ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Comparison {
+    /// It holds exactly our cumulative total.
     Current,
-    /// Present with the recorded amount; a later write of ours superseded it.
-    Superseded,
-    /// Present, but a write that is not ours came after it.
-    Overwritten,
-    /// Not present, or present with a different amount.
-    Missing,
+    /// It holds less than our total but no less than what it confirmed
+    /// before: more is still to publish.
+    Behind,
+    /// It holds more than we ever accrued. Someone else wrote it, or our
+    /// ledger lost an accrual. Freeze.
+    Ahead,
+    /// It holds less than it confirmed before. A monotonic total went down.
+    /// Freeze.
+    Regressed,
+}
+
+/// Compare an external total with our cumulative total and with what the
+/// external side last confirmed.
+pub fn compare(external: u128, cumulative: u128, confirmed: u128) -> Comparison {
+    if external > cumulative {
+        Comparison::Ahead
+    } else if external < confirmed {
+        Comparison::Regressed
+    } else if external == cumulative {
+        Comparison::Current
+    } else {
+        Comparison::Behind
+    }
 }
 
 /// The disposition a failed attempt asks the dispatcher for.
@@ -255,15 +256,11 @@ pub trait SettlementRail: Send + Sync {
     fn instrument_id(&self) -> &'static str;
     /// The instrument's decimals: atomic units per whole unit is `10^decimals`.
     fn instrument_decimals(&self) -> u8;
-    /// Deliver, exactly once. Calling it again for the same `delivery_hash`
-    /// after any failure, including an ambiguous one, must not deliver twice.
-    async fn deliver(&self, delivery: &RailDelivery) -> Result<RailOutcome, RailError>;
-    /// Check a recorded delivery against the external system.
-    async fn verify(
-        &self,
-        delivery: &RailDelivery,
-        receipt: &RailReceipt,
-    ) -> Result<RailVerification, RailError>;
+    /// Publish a recipient's cumulative total. Safe to repeat.
+    async fn publish(&self, statement: &CumulativeStatement) -> Result<Published, RailError>;
+    /// Read what the external system holds for a recipient. `Ok(None)` when
+    /// this rail cannot observe it (a pull rail without read access).
+    async fn observe(&self, recipient: &RecipientRef) -> Result<Option<u128>, RailError>;
 }
 
 /// Whether a label fits the column vocabulary.
@@ -334,15 +331,23 @@ mod tests {
     }
 
     #[test]
-    fn a_delivery_hash_is_stable_and_carries_no_input_in_clear() {
-        let id = Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
-        let h = delivery_hash("near_ai_org_limits", "near_ai_credit_usd", id);
-        assert_eq!(
-            h,
-            delivery_hash("near_ai_org_limits", "near_ai_credit_usd", id)
-        );
-        assert!(!h.contains("00000000"));
-        assert_ne!(h, delivery_hash("other", "near_ai_credit_usd", id));
+    fn a_statement_ref_is_stable_and_depends_on_every_input() {
+        let h = statement_ref("near_ai_trace_commons", "sha256:aa", 42);
+        assert_eq!(h, statement_ref("near_ai_trace_commons", "sha256:aa", 42));
+        assert_ne!(h, statement_ref("near_ai_trace_commons", "sha256:aa", 43));
+        assert_ne!(h, statement_ref("near_ai_trace_commons", "sha256:ab", 42));
+        assert!(h.starts_with("sha256:") && h.len() == 71);
+    }
+
+    #[test]
+    fn comparison_freezes_on_ahead_or_regressed_and_continues_behind() {
+        // cumulative 100, previously confirmed 60.
+        assert_eq!(compare(100, 100, 60), Comparison::Current);
+        assert_eq!(compare(80, 100, 60), Comparison::Behind);
+        assert_eq!(compare(60, 100, 60), Comparison::Behind);
+        assert_eq!(compare(101, 100, 60), Comparison::Ahead);
+        assert_eq!(compare(59, 100, 60), Comparison::Regressed);
+        assert_eq!(compare(0, 0, 0), Comparison::Current);
     }
 
     #[test]

@@ -1,16 +1,17 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! A typed client for the NEAR AI (`nearai/cloud-api`) admin routes the
+//! A typed client for the NEAR AI (`nearai/cloud-api`) admin route the
 //! inference-credit rail uses, behind a trait object so tests substitute a
 //! fake.
 //!
-//! The routes and their semantics are recorded in
-//! `docs/superpowers/specs/2026-10-14-near-ai-inference-credit-settlement-design.md`
-//! section 1. In short: `PATCH .../limits` sets an **absolute** ceiling per
-//! `(organization, credit type)` with no compare-and-swap and no idempotency
-//! key; `GET .../limits/history` lists every write with its author and
-//! reason, newest first, and answers 404 for an organization with no rows.
+//! The route is **proposed**, not yet in NEAR AI's tree:
+//! `PUT|GET /v1/admin/organizations/{org_id}/trace-commons/credit`, a
+//! dedicated `trace_commons` credit type whose limit only ever rises to the
+//! cumulative total the caller states, written under the organization
+//! accounting lock -- the staking-farm pattern
+//! (`cloud-api:crates/database/src/repositories/organization_staking_farm_sources.rs:286`).
+//! See `docs/superpowers/specs/2026-10-14-near-ai-trace-commons-credit-type-proposal.md`.
 //!
 //! # Secrets and identifiers
 //!
@@ -54,81 +55,23 @@ impl std::fmt::Debug for NearAiOrgId {
     }
 }
 
-/// `spendLimit` in a request: integer nano-USD (scale 9) and a currency.
+/// Body of the proposed `PUT .../trace-commons/credit`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpendLimitRequest {
-    pub amount: i64,
-    pub currency: String,
+pub struct SetTraceCommonsCreditRequest {
+    /// The organization's cumulative Trace Commons credit, nano-USD (scale 9).
+    #[serde(rename = "cumulativeNanoUsd")]
+    pub cumulative_nano_usd: i64,
+    #[serde(rename = "statementRef")]
+    pub statement_ref: String,
 }
 
-/// `spendLimit` in a response.
+/// Response of the PUT and the GET.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpendLimit {
-    pub amount: i64,
-    pub scale: i64,
-    pub currency: String,
-}
-
-/// Body of `PATCH /admin/organizations/{org_id}/limits`
-/// (`cloud-api:crates/api/src/models.rs:4610`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UpdateLimitsRequest {
-    #[serde(rename = "type")]
-    pub credit_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(rename = "spendLimit")]
-    pub spend_limit: SpendLimitRequest,
-    #[serde(rename = "changedBy", skip_serializing_if = "Option::is_none")]
-    pub changed_by: Option<String>,
-    #[serde(rename = "changeReason", skip_serializing_if = "Option::is_none")]
-    pub change_reason: Option<String>,
-}
-
-/// Response of the PATCH (`models.rs:4656`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UpdateLimitsResponse {
+pub struct TraceCommonsCreditResponse {
     pub organization_id: String,
-    #[serde(rename = "type")]
-    pub credit_type: String,
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(rename = "spendLimit")]
-    pub spend_limit: SpendLimit,
-    pub updated_at: String,
-}
-
-/// One row of `GET .../limits/history` (`models.rs:4669`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LimitsHistoryEntry {
-    pub id: String,
-    #[serde(rename = "organizationId")]
-    pub organization_id: String,
-    #[serde(rename = "type")]
-    pub credit_type: String,
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(rename = "spendLimit")]
-    pub spend_limit: SpendLimit,
-    #[serde(rename = "effectiveFrom")]
-    pub effective_from: String,
-    #[serde(rename = "effectiveUntil")]
-    pub effective_until: Option<String>,
-    #[serde(rename = "changedBy")]
-    pub changed_by: Option<String>,
-    #[serde(rename = "changeReason")]
-    pub change_reason: Option<String>,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-}
-
-/// A page of history.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LimitsHistoryPage {
-    pub history: Vec<LimitsHistoryEntry>,
-    pub total: i64,
-    pub limit: i64,
-    pub offset: i64,
+    #[serde(rename = "cumulativeNanoUsd")]
+    pub cumulative_nano_usd: i64,
+    pub applied: bool,
 }
 
 /// A failed admin call, by class. Carries no body, no id, no key.
@@ -137,7 +80,8 @@ pub enum AdminApiError {
     /// The request never reached the server (connect, DNS, TLS).
     #[error("near_ai_admin_unreachable")]
     Unreachable,
-    /// Sent, and no answer arrived in time. The write may have landed.
+    /// Sent, and no answer arrived in time. The write may have landed; a
+    /// cumulative write is safe to repeat.
     #[error("near_ai_admin_ambiguous")]
     Ambiguous,
     /// 401: missing, expired or User-Agent-mismatched key.
@@ -146,11 +90,11 @@ pub enum AdminApiError {
     /// 403: the key lacks the permission (a read-only key on a write).
     #[error("near_ai_admin_forbidden")]
     Forbidden,
-    /// 404 on a write: the organization is missing or inactive.
+    /// 404: the organization is missing or inactive.
     #[error("near_ai_org_not_found")]
     NotFound,
     /// 400: NEAR AI refused the value.
-    #[error("near_ai_limit_rejected")]
+    #[error("near_ai_credit_rejected")]
     Rejected,
     /// 429 or 5xx.
     #[error("near_ai_admin_unavailable")]
@@ -168,7 +112,7 @@ impl AdminApiError {
             Self::Unauthorized => "near_ai_admin_unauthorized",
             Self::Forbidden => "near_ai_admin_forbidden",
             Self::NotFound => "near_ai_org_not_found",
-            Self::Rejected => "near_ai_limit_rejected",
+            Self::Rejected => "near_ai_credit_rejected",
             Self::Unavailable => "near_ai_admin_unavailable",
             Self::Malformed => "near_ai_admin_response_malformed",
         }
@@ -178,21 +122,19 @@ impl AdminApiError {
 /// The admin routes the rail needs.
 #[async_trait]
 pub trait NearAiAdminApi: Send + Sync {
-    /// One page of history. `Ok(None)` is NEAR AI's 404 for an organization
-    /// with no history rows.
-    async fn limits_history_page(
+    /// The organization's current cumulative Trace Commons credit.
+    async fn get_trace_commons_credit(
         &self,
         org: NearAiOrgId,
-        limit: i64,
-        offset: i64,
-    ) -> Result<Option<LimitsHistoryPage>, AdminApiError>;
+    ) -> Result<TraceCommonsCreditResponse, AdminApiError>;
 
-    /// Set the absolute ceiling for one credit type.
-    async fn update_limits(
+    /// Raise it to a cumulative total. Monotonic and idempotent on NEAR AI's
+    /// side.
+    async fn set_trace_commons_credit(
         &self,
         org: NearAiOrgId,
-        request: &UpdateLimitsRequest,
-    ) -> Result<UpdateLimitsResponse, AdminApiError>;
+        request: &SetTraceCommonsCreditRequest,
+    ) -> Result<TraceCommonsCreditResponse, AdminApiError>;
 }
 
 /// The HTTP implementation.
@@ -225,12 +167,11 @@ impl HttpNearAiAdminApi {
         })
     }
 
-    fn org_url(&self, org: NearAiOrgId, suffix: &str) -> String {
+    fn url(&self, org: NearAiOrgId) -> String {
         format!(
-            "{}/admin/organizations/{}/{}",
+            "{}/admin/organizations/{}/trace-commons/credit",
             self.base_url,
-            org.as_uuid(),
-            suffix
+            org.as_uuid()
         )
     }
 }
@@ -249,66 +190,55 @@ fn classify_send_error(err: &reqwest::Error, is_write: bool) -> AdminApiError {
     if err.is_connect() {
         AdminApiError::Unreachable
     } else if is_write {
-        // Anything after the connection opened may have reached the handler.
         AdminApiError::Ambiguous
     } else {
         AdminApiError::Unavailable
     }
 }
 
+async fn read_body(
+    response: reqwest::Response,
+) -> Result<TraceCommonsCreditResponse, AdminApiError> {
+    let status = response.status();
+    if !status.is_success() {
+        return Err(classify_status(status));
+    }
+    response
+        .json::<TraceCommonsCreditResponse>()
+        .await
+        .map_err(|_| AdminApiError::Malformed)
+}
+
 #[async_trait]
 impl NearAiAdminApi for HttpNearAiAdminApi {
-    async fn limits_history_page(
+    async fn get_trace_commons_credit(
         &self,
         org: NearAiOrgId,
-        limit: i64,
-        offset: i64,
-    ) -> Result<Option<LimitsHistoryPage>, AdminApiError> {
+    ) -> Result<TraceCommonsCreditResponse, AdminApiError> {
         let response = self
             .http
-            .get(self.org_url(org, "limits/history"))
-            .query(&[("limit", limit), ("offset", offset)])
+            .get(self.url(org))
             .bearer_auth(self.key.expose_secret())
             .send()
             .await
             .map_err(|e| classify_send_error(&e, false))?;
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        if !status.is_success() {
-            return Err(classify_status(status));
-        }
-        response
-            .json::<LimitsHistoryPage>()
-            .await
-            .map(Some)
-            .map_err(|_| AdminApiError::Malformed)
+        read_body(response).await
     }
 
-    async fn update_limits(
+    async fn set_trace_commons_credit(
         &self,
         org: NearAiOrgId,
-        request: &UpdateLimitsRequest,
-    ) -> Result<UpdateLimitsResponse, AdminApiError> {
+        request: &SetTraceCommonsCreditRequest,
+    ) -> Result<TraceCommonsCreditResponse, AdminApiError> {
         let response = self
             .http
-            .patch(self.org_url(org, "limits"))
+            .put(self.url(org))
             .bearer_auth(self.key.expose_secret())
             .json(request)
             .send()
             .await
             .map_err(|e| classify_send_error(&e, true))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(classify_status(status));
-        }
-        // A 2xx means the write committed; an unreadable body does not undo
-        // it. The rail re-reads history either way.
-        response
-            .json::<UpdateLimitsResponse>()
-            .await
-            .map_err(|_| AdminApiError::Malformed)
+        read_body(response).await
     }
 }
 
@@ -317,23 +247,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_update_body_matches_cloud_api_field_names() {
-        let body = UpdateLimitsRequest {
-            credit_type: "grant".into(),
-            source: Some("trace-commons".into()),
-            spend_limit: SpendLimitRequest {
-                amount: 1_000_000_000,
-                currency: "USD".into(),
-            },
-            changed_by: Some("trace-commons-settlement".into()),
-            change_reason: Some("trace-commons:settle:v1:sha256:00".into()),
+    fn the_request_body_matches_the_proposed_field_names() {
+        let body = SetTraceCommonsCreditRequest {
+            cumulative_nano_usd: 1_000_000_000,
+            statement_ref: "sha256:00".into(),
         };
         let v = serde_json::to_value(&body).unwrap();
-        assert_eq!(v["type"], "grant");
-        assert_eq!(v["spendLimit"]["amount"], 1_000_000_000i64);
-        assert_eq!(v["changedBy"], "trace-commons-settlement");
-        assert_eq!(v["changeReason"], "trace-commons:settle:v1:sha256:00");
-        assert!(v.get("credit_type").is_none());
+        assert_eq!(v["cumulativeNanoUsd"], 1_000_000_000i64);
+        assert_eq!(v["statementRef"], "sha256:00");
+        assert_eq!(v.as_object().unwrap().len(), 2);
     }
 
     #[test]

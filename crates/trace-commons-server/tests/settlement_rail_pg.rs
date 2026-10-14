@@ -1,13 +1,15 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! V127's settlement rail outbox under a least-privilege runtime role, driven
-//! end to end against the fake NEAR AI admin API. Self-skips without
+//! V129's cumulative settlement ledger under a least-privilege runtime role,
+//! driven end to end against the fake of NEAR AI's proposed monotonic
+//! `trace-commons/credit` route. Self-skips without
 //! `TRACE_COMMONS_SETTLEMENT_RAIL_PG_TEST_DATABASE_URL`.
 
 #[path = "support/fake_near_ai_admin.rs"]
 mod fake;
 
+use chrono::Utc;
 use fake::{FakeState, Permission, Shared};
 use secrecy::SecretString;
 use std::sync::{Arc, Mutex};
@@ -15,16 +17,20 @@ use std::time::Duration;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::{Database, postgres::PgBackend};
 use trace_commons_server::near_ai_admin::{HttpNearAiAdminApi, NearAiOrgId};
-use trace_commons_server::near_ai_inference_credit::NearAiInferenceCreditRail;
+use trace_commons_server::near_ai_credit_statement::{StatementSigner, verify};
+use trace_commons_server::near_ai_inference_credit::{
+    PullTraceCommonsCreditRail, PushTraceCommonsCreditRail, RAIL_ID,
+};
 use trace_commons_server::settlement_rail::ConversionRate;
 use trace_commons_server::settlement_rail_store::{
-    DispatchSummary, EnqueueOutcome, ReconcileSummary, StoreError, bind_near_ai_recipient, cancel,
-    dispatch_tick, enqueue_batch, lease_next, reconcile_tick, unfreeze,
+    AccrueOutcome, PublishSummary, ReconcileSummary, StoreError, accrue_batch,
+    bind_near_ai_recipient, publish_tick, reconcile_tick, signed_statement, unfreeze,
 };
 use uuid::Uuid;
 
 const UA: &str = "trace-commons-settlement/test";
 const RUNTIME_ROLE: &str = "tc_settlement_rail_runtime";
+const LEASE: Duration = Duration::from_secs(60);
 
 fn config(url: String) -> DatabaseConfig {
     DatabaseConfig {
@@ -79,17 +85,27 @@ async fn pg() -> Option<Pg> {
     })
 }
 
-async fn seed_batch(pg: &Pg, tenant: &str, micros: i64) -> Uuid {
-    let client = pg.admin.get().await.unwrap();
-    client
+async fn seed_tenant(pg: &Pg) -> String {
+    let tenant = format!("nearai-{}", Uuid::new_v4().simple().to_string().repeat(2));
+    pg.admin
+        .get()
+        .await
+        .unwrap()
         .execute(
-            "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
             &[&tenant],
         )
         .await
         .unwrap();
+    tenant
+}
+
+async fn seed_batch(pg: &Pg, tenant: &str, micros: i64) -> Uuid {
     let batch = Uuid::new_v4();
-    client
+    pg.admin
+        .get()
+        .await
+        .unwrap()
         .execute(
             "INSERT INTO trace_credit_settlement_batches
                 (tenant_id, settlement_batch_id, policy_version, status, reason_hash,
@@ -103,13 +119,9 @@ async fn seed_batch(pg: &Pg, tenant: &str, micros: i64) -> Uuid {
     batch
 }
 
-fn tenant() -> String {
-    format!("nearai-{}", Uuid::new_v4().simple().to_string().repeat(2))
-}
-
 struct Near {
     state: Shared,
-    rail: NearAiInferenceCreditRail,
+    push: PushTraceCommonsCreditRail,
     org: Uuid,
 }
 
@@ -132,9 +144,34 @@ async fn near() -> Near {
     .unwrap();
     Near {
         state,
-        rail: NearAiInferenceCreditRail::new(Arc::new(api), "grant", 1_000_000_000_000, false),
+        push: PushTraceCommonsCreditRail::new(Arc::new(api), 1_000_000_000_000, false),
         org,
     }
+}
+
+impl Near {
+    fn current(&self) -> i64 {
+        self.state.lock().unwrap().current(self.org)
+    }
+    fn raises(&self) -> usize {
+        self.state.lock().unwrap().raises.len()
+    }
+}
+
+async fn ledger(pg: &Pg, tenant: &str) -> (String, String, String, Option<String>) {
+    let row = pg
+        .admin
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT cumulative_units::text, confirmed_units::text, publish_state, last_error_label
+               FROM trace_settlement_rail_ledgers WHERE tenant_id = $1",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    (row.get(0), row.get(1), row.get(2), row.get(3))
 }
 
 async fn make_due(pg: &Pg, tenant: &str) {
@@ -143,45 +180,30 @@ async fn make_due(pg: &Pg, tenant: &str) {
         .await
         .unwrap()
         .execute(
-            "UPDATE trace_settlement_rail_outbox SET next_attempt_at = NOW() - INTERVAL '1 second'
-              WHERE tenant_id = $1",
+            "UPDATE trace_settlement_rail_ledgers
+                SET publish_state = 'due', next_attempt_at = NOW() - INTERVAL '1 second'
+              WHERE tenant_id = $1 AND publish_state IN ('due', 'idle')",
             &[&tenant],
         )
         .await
         .unwrap();
 }
 
-async fn states(pg: &Pg, tenant: &str) -> Vec<String> {
-    pg.admin
-        .get()
-        .await
-        .unwrap()
-        .query(
-            "SELECT state FROM trace_settlement_rail_outbox WHERE tenant_id = $1 ORDER BY created_at",
-            &[&tenant],
-        )
-        .await
-        .unwrap()
-        .iter()
-        .map(|r| r.get(0))
-        .collect()
-}
-
 #[tokio::test]
 async fn settlement_rail_end_to_end_under_the_runtime_role() {
     let Some(pg) = pg().await else { return };
     let near = near().await;
-    let t = tenant();
+    let t = seed_tenant(&pg).await;
     let rate = ConversionRate::parse("1000/3").unwrap();
     let org = NearAiOrgId::from_uuid(near.org);
+    let rail = &near.push;
 
-    // No recipient, no queue.
     let b1 = seed_batch(&pg, &t, 1_000_000).await;
     assert_eq!(
-        enqueue_batch(&pg.runtime, &t, b1, &near.rail, &rate)
+        accrue_batch(&pg.runtime, &t, b1, rail, &rate)
             .await
             .unwrap(),
-        EnqueueOutcome::NoRecipient
+        AccrueOutcome::NoRecipient
     );
     assert_eq!(
         bind_near_ai_recipient(&pg.runtime, &t, org, "member").await,
@@ -191,219 +213,150 @@ async fn settlement_rail_end_to_end_under_the_runtime_role() {
         .await
         .unwrap();
 
-    // 1_000_000 micros * 1000 / 3 = 333_333_333 rem 1.
-    assert!(matches!(
-        enqueue_batch(&pg.runtime, &t, b1, &near.rail, &rate)
-            .await
-            .unwrap(),
-        EnqueueOutcome::Queued {
-            units: 333_333_333,
-            ..
-        }
-    ));
+    // 1_000_000 micros * 1000 / 3 = 333_333_333 remainder 1.
     assert_eq!(
-        enqueue_batch(&pg.runtime, &t, b1, &near.rail, &rate)
+        accrue_batch(&pg.runtime, &t, b1, rail, &rate)
             .await
             .unwrap(),
-        EnqueueOutcome::AlreadyQueued
+        AccrueOutcome::Accrued {
+            units: 333_333_333,
+            cumulative_units: 333_333_333
+        }
     );
-    let units: String = pg
+    assert_eq!(
+        accrue_batch(&pg.runtime, &t, b1, rail, &rate)
+            .await
+            .unwrap(),
+        AccrueOutcome::AlreadyAccrued
+    );
+    // The carried remainder joins the next batch: (2 * 1000 + 1) / 3 = 667.
+    let b2 = seed_batch(&pg, &t, 2).await;
+    assert_eq!(
+        accrue_batch(&pg.runtime, &t, b2, rail, &rate)
+            .await
+            .unwrap(),
+        AccrueOutcome::Accrued {
+            units: 667,
+            cumulative_units: 333_334_000
+        }
+    );
+
+    // Two workers publishing at once still credit the total once.
+    let (left, right) = tokio::join!(
+        publish_tick(&pg.runtime, &t, rail, 10, LEASE),
+        publish_tick(&pg.runtime, &t, rail, 10, LEASE)
+    );
+    assert_eq!(left.unwrap().confirmed + right.unwrap().confirmed, 1);
+    assert_eq!(near.current(), 333_334_000);
+    assert_eq!(near.raises(), 1);
+    assert_eq!(
+        ledger(&pg, &t).await,
+        ("333334000".into(), "333334000".into(), "idle".into(), None)
+    );
+    assert_eq!(
+        reconcile_tick(&pg.runtime, &t, rail, 10).await.unwrap(),
+        ReconcileSummary {
+            verified: 1,
+            ..Default::default()
+        }
+    );
+
+    // Republishing an unchanged total is a no-op on NEAR AI's side.
+    make_due(&pg, &t).await;
+    let s = publish_tick(&pg.runtime, &t, rail, 10, LEASE)
+        .await
+        .unwrap();
+    assert_eq!(s.confirmed, 1);
+    assert_eq!(near.raises(), 1);
+
+    // A publish that committed behind a failed response is retried, and the
+    // retry writes nothing new.
+    let b3 = seed_batch(&pg, &t, 3).await;
+    accrue_batch(&pg.runtime, &t, b3, rail, &rate)
+        .await
+        .unwrap();
+    near.state.lock().unwrap().bad_gateway_after_commit = true;
+    let s = publish_tick(&pg.runtime, &t, rail, 10, LEASE)
+        .await
+        .unwrap();
+    assert_eq!(s.retry, 1);
+    assert_eq!(near.raises(), 2);
+    make_due(&pg, &t).await;
+    let s = publish_tick(&pg.runtime, &t, rail, 10, LEASE)
+        .await
+        .unwrap();
+    assert_eq!(s.confirmed, 1);
+    assert_eq!(near.raises(), 2);
+    assert_eq!(near.current(), 333_335_000);
+
+    // NEAR AI holding more than we ever accrued freezes the ledger.
+    near.state
+        .lock()
+        .unwrap()
+        .credit
+        .insert(near.org, 999_999_999_999);
+    let r = reconcile_tick(&pg.runtime, &t, rail, 10).await.unwrap();
+    assert_eq!(r.frozen, 1);
+    let (_, _, state, label) = ledger(&pg, &t).await;
+    assert_eq!(
+        (state.as_str(), label.as_deref()),
+        ("frozen", Some("settlement_rail_external_ahead"))
+    );
+    // Accrual continues while frozen; nothing is published.
+    let b4 = seed_batch(&pg, &t, 30).await;
+    accrue_batch(&pg.runtime, &t, b4, rail, &rate)
+        .await
+        .unwrap();
+    assert_eq!(
+        publish_tick(&pg.runtime, &t, rail, 10, LEASE)
+            .await
+            .unwrap(),
+        PublishSummary::default()
+    );
+    // Unfreezing without fixing the cause freezes again on the next publish.
+    let recipient: Uuid = pg
         .admin
         .get()
         .await
         .unwrap()
         .query_one(
-            "SELECT atomic_units::text FROM trace_settlement_rail_outbox WHERE tenant_id = $1",
+            "SELECT recipient_id FROM trace_settlement_rail_ledgers WHERE tenant_id = $1",
             &[&t],
         )
         .await
         .unwrap()
         .get(0);
-    assert_eq!(units, "333333333");
-    // The next batch picks up the carried remainder: (2 * 1000 + 1) / 3 = 667.
-    let b2 = seed_batch(&pg, &t, 2).await;
-    assert!(matches!(
-        enqueue_batch(&pg.runtime, &t, b2, &near.rail, &rate)
-            .await
-            .unwrap(),
-        EnqueueOutcome::Queued { units: 667, .. }
-    ));
-    // A batch that converts to zero is carried, not sent.
-    let b0 = seed_batch(&pg, &t, 0).await;
-    assert!(matches!(
-        enqueue_batch(&pg.runtime, &t, b0, &near.rail, &rate)
-            .await
-            .unwrap(),
-        EnqueueOutcome::Carried { .. }
-    ));
-
-    // Only one lease in flight per tenant and rail.
-    let leased = lease_next(
-        &pg.runtime,
-        &t,
-        "near_ai_org_limits",
-        Duration::from_secs(60),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(
-        lease_next(
-            &pg.runtime,
-            &t,
-            "near_ai_org_limits",
-            Duration::from_secs(60)
-        )
-        .await
-        .unwrap()
-        .is_none()
-    );
-    assert_eq!(leased.delivery.expected_prior, None);
-    pg.admin
-        .get()
-        .await
-        .unwrap()
-        .execute(
-            "UPDATE trace_settlement_rail_outbox SET state = 'pending', lease_token = NULL,
-                    lease_expires_at = NULL WHERE tenant_id = $1 AND state = 'leased'",
-            &[&t],
-        )
-        .await
-        .unwrap();
-
-    // Dispatch both; the second builds on the first.
-    let summary = dispatch_tick(&pg.runtime, &t, &near.rail, 10, Duration::from_secs(60))
-        .await
-        .unwrap();
-    assert_eq!(
-        summary,
-        DispatchSummary {
-            delivered: 2,
-            ..Default::default()
-        }
-    );
-    assert_eq!(
-        near.state
-            .lock()
-            .unwrap()
-            .active(near.org, "grant")
-            .unwrap()
-            .amount,
-        333_333_333 + 667
-    );
-    assert_eq!(
-        reconcile_tick(&pg.runtime, &t, &near.rail, 10)
-            .await
-            .unwrap(),
-        ReconcileSummary {
-            reconciled: 2,
-            ..Default::default()
-        }
-    );
-    assert_eq!(
-        states(&pg, &t).await,
-        ["reconciled", "reconciled", "carried"]
-    );
-
-    // A write that committed behind a failed response is retried without a
-    // second PATCH. Deterministic: the fake commits, then answers 502.
-    let b3 = seed_batch(&pg, &t, 3).await;
-    enqueue_batch(&pg.runtime, &t, b3, &near.rail, &rate)
-        .await
-        .unwrap();
-    near.state.lock().unwrap().bad_gateway_after_commit = true;
-    let s = dispatch_tick(&pg.runtime, &t, &near.rail, 10, Duration::from_secs(60))
-        .await
-        .unwrap();
-    assert_eq!(s.retry, 1);
-    let calls = near.state.lock().unwrap().patch_calls;
-    make_due(&pg, &t).await;
-    let s = dispatch_tick(&pg.runtime, &t, &near.rail, 10, Duration::from_secs(60))
-        .await
-        .unwrap();
-    assert_eq!(s.delivered, 1);
-    assert_eq!(near.state.lock().unwrap().patch_calls, calls);
-    assert_eq!(
-        near.state
-            .lock()
-            .unwrap()
-            .active(near.org, "grant")
-            .unwrap()
-            .amount,
-        333_333_333 + 667 + 1000
-    );
-
-    // Someone else writes the bucket: the reconciler freezes the recipient,
-    // and nothing further is leased for it.
-    near.state
-        .lock()
-        .unwrap()
-        .write(near.org, "grant", Some("nearai"), 5, Some("ops"), None);
-    let r = reconcile_tick(&pg.runtime, &t, &near.rail, 10)
-        .await
-        .unwrap();
-    assert_eq!(r.overwritten, 1);
-    let b4 = seed_batch(&pg, &t, 30).await;
-    let EnqueueOutcome::Queued { outbox_id, .. } =
-        enqueue_batch(&pg.runtime, &t, b4, &near.rail, &rate)
-            .await
-            .unwrap()
-    else {
-        panic!("expected queued")
-    };
-    assert!(
-        lease_next(
-            &pg.runtime,
-            &t,
-            "near_ai_org_limits",
-            Duration::from_secs(60)
-        )
-        .await
-        .unwrap()
-        .is_none()
-    );
-    // Clearing the recipient freeze without fixing the bucket still cannot
-    // build on the foreign value: the rail freezes the row instead.
-    pg.admin
-        .get()
-        .await
-        .unwrap()
-        .execute(
-            "UPDATE trace_near_ai_credit_recipients SET frozen_label = NULL, frozen_at = NULL
-              WHERE tenant_id = $1",
-            &[&t],
-        )
-        .await
-        .unwrap();
-    let s = dispatch_tick(&pg.runtime, &t, &near.rail, 10, Duration::from_secs(60))
+    assert!(unfreeze(&pg.runtime, &t, RAIL_ID, recipient).await.unwrap());
+    let s = publish_tick(&pg.runtime, &t, rail, 10, LEASE)
         .await
         .unwrap();
     assert_eq!(s.frozen, 1);
+
+    // A server answering below the total it was given is refused, not
+    // retried forever.
+    near.state.lock().unwrap().credit.insert(near.org, 0);
+    near.state.lock().unwrap().lie_next_put = Some(5);
+    assert!(unfreeze(&pg.runtime, &t, RAIL_ID, recipient).await.unwrap());
+    let s = publish_tick(&pg.runtime, &t, rail, 10, LEASE)
+        .await
+        .unwrap();
+    assert_eq!(s.frozen, 1);
+    let (_, _, _, label) = ledger(&pg, &t).await;
     assert_eq!(
-        near.state
-            .lock()
-            .unwrap()
-            .active(near.org, "grant")
-            .unwrap()
-            .amount,
-        5
+        label.as_deref(),
+        Some("settlement_rail_external_refused_total")
     );
-    // A frozen row without an effect can be cancelled; then the batch is
-    // free for another path, and the row's identity stays immutable.
-    assert!(cancel(&pg.runtime, &t, outbox_id).await.unwrap());
-    assert!(!unfreeze(&pg.runtime, &t, outbox_id).await.unwrap());
 }
 
 #[tokio::test]
-async fn settlement_rail_tables_are_tenant_isolated_and_one_org_has_one_tenant() {
+async fn settlement_rail_tables_are_tenant_isolated_and_totals_only_grow() {
     let Some(pg) = pg().await else { return };
     let near = near().await;
-    let a = tenant();
-    let b = tenant();
+    let a = seed_tenant(&pg).await;
+    let b = seed_tenant(&pg).await;
     let rate = ConversionRate::parse("1/1").unwrap();
     let org = NearAiOrgId::from_uuid(near.org);
     let batch_a = seed_batch(&pg, &a, 10).await;
-    seed_batch(&pg, &b, 10).await;
     bind_near_ai_recipient(&pg.runtime, &a, org, "admin")
         .await
         .unwrap();
@@ -411,11 +364,10 @@ async fn settlement_rail_tables_are_tenant_isolated_and_one_org_has_one_tenant()
         bind_near_ai_recipient(&pg.runtime, &b, org, "owner").await,
         Err(StoreError::Refused("near_ai_org_bound_elsewhere"))
     );
-    enqueue_batch(&pg.runtime, &a, batch_a, &near.rail, &rate)
+    accrue_batch(&pg.runtime, &a, batch_a, &near.push, &rate)
         .await
         .unwrap();
 
-    // Under tenant b's context, none of tenant a's rows is visible.
     let mut client = pg.runtime.get().await.unwrap();
     let tx = client.transaction().await.unwrap();
     tx.execute(
@@ -425,9 +377,9 @@ async fn settlement_rail_tables_are_tenant_isolated_and_one_org_has_one_tenant()
     .await
     .unwrap();
     for table in [
-        "trace_settlement_rail_outbox",
         "trace_near_ai_credit_recipients",
-        "trace_settlement_rail_carry",
+        "trace_settlement_rail_credits",
+        "trace_settlement_rail_ledgers",
     ] {
         let n: i64 = tx
             .query_one(&format!("SELECT COUNT(*) FROM {table}"), &[])
@@ -436,39 +388,34 @@ async fn settlement_rail_tables_are_tenant_isolated_and_one_org_has_one_tenant()
             .get(0);
         assert_eq!(n, 0, "{table} leaks across tenants");
     }
-    // The runtime cannot delete, and cannot rewrite an amount.
-    assert!(
-        tx.execute("DELETE FROM trace_settlement_rail_outbox", &[])
-            .await
-            .is_err()
-    );
     drop(tx);
-    let mut client = pg.runtime.get().await.unwrap();
-    let tx = client.transaction().await.unwrap();
-    tx.execute(
-        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
-        &[&a],
-    )
-    .await
-    .unwrap();
-    assert!(
+
+    // Under tenant a's own context: no delete, no rewriting a credit, and the
+    // ledger total cannot go down.
+    for statement in [
+        "DELETE FROM trace_settlement_rail_ledgers",
+        "UPDATE trace_settlement_rail_credits SET atomic_units = 0",
+        "UPDATE trace_settlement_rail_ledgers SET cumulative_units = 0",
+        "UPDATE trace_settlement_rail_ledgers SET confirmed_units = cumulative_units + 1",
+    ] {
+        let mut client = pg.runtime.get().await.unwrap();
+        let tx = client.transaction().await.unwrap();
         tx.execute(
-            "UPDATE trace_settlement_rail_outbox SET atomic_units = atomic_units + 1",
-            &[]
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&a],
         )
         .await
-        .is_err()
-    );
+        .unwrap();
+        assert!(tx.execute(statement, &[]).await.is_err(), "{statement}");
+    }
 }
 
 #[tokio::test]
 async fn a_batch_pays_out_on_exactly_one_path() {
     let Some(pg) = pg().await else { return };
     let near = near().await;
-    let t = tenant();
+    let t = seed_tenant(&pg).await;
     let rate = ConversionRate::parse("1/1").unwrap();
-    // The first batch seeds the tenant row the recipient references.
-    let b1 = seed_batch(&pg, &t, 5).await;
     bind_near_ai_recipient(&pg.runtime, &t, NearAiOrgId::from_uuid(near.org), "owner")
         .await
         .unwrap();
@@ -490,7 +437,8 @@ async fn a_batch_pays_out_on_exactly_one_path() {
         }
     };
     // Rail first: the NEAR receipt path is refused.
-    enqueue_batch(&pg.runtime, &t, b1, &near.rail, &rate)
+    let b1 = seed_batch(&pg, &t, 5).await;
+    accrue_batch(&pg.runtime, &t, b1, &near.push, &rate)
         .await
         .unwrap();
     assert!(insert_near(b1).await.is_err());
@@ -498,8 +446,56 @@ async fn a_batch_pays_out_on_exactly_one_path() {
     let b2 = seed_batch(&pg, &t, 5).await;
     insert_near(b2).await.unwrap();
     assert!(
-        enqueue_batch(&pg.runtime, &t, b2, &near.rail, &rate)
+        accrue_batch(&pg.runtime, &t, b2, &near.push, &rate)
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn pull_mode_serves_a_signed_cumulative_statement() {
+    let Some(pg) = pg().await else { return };
+    let near = near().await;
+    let t = seed_tenant(&pg).await;
+    let rate = ConversionRate::parse("1/1").unwrap();
+    let pull = PullTraceCommonsCreditRail::new(None, 1_000_000);
+    let signer = StatementSigner::from_base64_pkcs8(&{
+        use base64::Engine;
+        let doc = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(doc.as_ref())
+    })
+    .unwrap();
+    assert!(
+        signed_statement(&pg.runtime, &t, RAIL_ID, &signer, Utc::now())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    bind_near_ai_recipient(&pg.runtime, &t, NearAiOrgId::from_uuid(near.org), "owner")
+        .await
+        .unwrap();
+    for micros in [40, 2] {
+        let b = seed_batch(&pg, &t, micros).await;
+        accrue_batch(&pg.runtime, &t, b, &pull, &rate)
+            .await
+            .unwrap();
+    }
+    let s = publish_tick(&pg.runtime, &t, &pull, 10, LEASE)
+        .await
+        .unwrap();
+    assert_eq!(s.deferred, 1);
+    let (_, confirmed, state, _) = ledger(&pg, &t).await;
+    assert_eq!((confirmed.as_str(), state.as_str()), ("0", "published"));
+
+    let signed = signed_statement(&pg.runtime, &t, RAIL_ID, &signer, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(signed.statement.cumulative_nano_usd, "42");
+    assert_eq!(signed.statement.org_id, near.org.to_string());
+    assert!(!signed.statement.statement_ref.contains(&t));
+    assert_eq!(verify(&signed, &signer.public_key()), Ok(()));
+    // No admin call was made in pull mode.
+    assert_eq!(near.state.lock().unwrap().put_calls, 0);
 }

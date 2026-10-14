@@ -39,6 +39,7 @@ pub mod legacy_invite_link;
 pub mod mission_rewards;
 pub mod near_account_identity;
 pub mod near_ai_admin;
+pub mod near_ai_credit_statement;
 pub mod near_ai_inference_credit;
 pub mod near_ai_login;
 pub mod near_ai_recipient;
