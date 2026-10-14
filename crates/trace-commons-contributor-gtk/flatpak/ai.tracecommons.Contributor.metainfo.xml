@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.16.1" date="2026-10-13">
+      <description>
+        <p>Maintenance release for Linux: the version number follows the macOS app, which fixes a crash in its edge rail.</p>
+      </description>
+    </release>
     <release version="0.16.0" date="2026-10-12">
       <description>
         <p>The command-line contributor can now enroll with a NEAR AI sign-in in your browser, with no invite needed. Invites still work.</p>
