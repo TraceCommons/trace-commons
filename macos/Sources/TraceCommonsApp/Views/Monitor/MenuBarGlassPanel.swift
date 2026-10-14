@@ -656,10 +656,15 @@ struct MenuBarTopEdgePin: NSViewRepresentable {
             let center = NotificationCenter.default
             for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResizeNotification,
                          NSWindow.didMoveNotification, NSWindow.didChangeOcclusionStateNotification] {
+                // On the next turn: a resize arrives inside SwiftUI's own
+                // resize of the panel, and moving the window there
+                // re-enters that layout pass.
                 observers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self, weak window] _ in
                     MainActor.assumeIsolated {
-                        guard let self, let window, window.isVisible else { return }
-                        self.pin(window)
+                        GlassWindowFrame.onNextTurn { [weak self, weak window] in
+                            guard let self, let window, window.isVisible else { return }
+                            self.pin(window)
+                        }
                     }
                 })
             }
