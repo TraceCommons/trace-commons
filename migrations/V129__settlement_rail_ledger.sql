@@ -26,13 +26,14 @@ CREATE UNIQUE INDEX trace_near_ai_credit_recipients_one_active
     ON trace_near_ai_credit_recipients (tenant_id)
     WHERE revoked_at IS NULL;
 
--- One active tenant per organization: the organization's total is the
--- tenant's ledger, so two tenants publishing to one organization would each
--- state a different "cumulative" and the maximum would hide the other's.
--- Global, across RLS, on purpose.
+-- One tenant per organization, ever, and one row: NEAR AI's total for an
+-- organization never decreases, so it must always equal exactly one ledger.
+-- A second tenant, or a fresh row for the same tenant, would start a new
+-- "cumulative" at zero that the organization's maximum already exceeds.
+-- Rebinding reactivates the row instead. Global, across RLS, on purpose,
+-- and not conditional on revoked_at.
 CREATE UNIQUE INDEX trace_near_ai_credit_recipients_one_tenant_per_org
-    ON trace_near_ai_credit_recipients (org_ref_hash)
-    WHERE revoked_at IS NULL;
+    ON trace_near_ai_credit_recipients (org_ref_hash);
 
 -- One row per (batch, rail): what the batch added. Append-only.
 CREATE TABLE trace_settlement_rail_credits (

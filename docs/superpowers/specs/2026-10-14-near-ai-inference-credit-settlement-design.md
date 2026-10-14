@@ -130,7 +130,7 @@ paths are into this repository.
   (`near_ai_login.rs:62-83`) and store only an HMAC blind index of the
   subject (`near_account_identity.rs:181-205`). **No NEAR AI organization id
   is stored anywhere in this repository today.** Recipient mapping is
-  net-new work (section 4).
+  net-new work (section 3.4).
 
 ### 1.8 The 2026-09-04 memo, checked
 
@@ -243,11 +243,23 @@ Unchanged from the first draft. `near_ai_recipient::verify_recipient` calls
 `/users/me` with the contributor's own token and accepts an `owner` or
 `admin` of an active organization. An empty list is "unverified", never
 "none". The election is stored in `trace_near_ai_credit_recipients`.
-There is one active recipient per tenant, and one active tenant per
-organization: the organization's total is the tenant's ledger, so two
-tenants publishing to one organization would hide each other behind the
-maximum. Rebinding starts a new ledger at zero. The org id is the one
-external identifier we send; audit uses `org_ref_hash`.
+
+NEAR AI keeps one total per organization, and that total never decreases.
+So an organization's total must always equal exactly one ledger, forever.
+Three rules follow:
+
+- **One active recipient per tenant.** A tenant elects one organization at
+  a time.
+- **One tenant per organization, ever.** The unique index on
+  `org_ref_hash` is not conditional on revocation. If a second tenant
+  could take over the organization, its ledger would start at zero below
+  the organization's existing maximum. A fresh row for the same tenant
+  would do the same, and both cases would freeze as "external ahead".
+- **Rebinding reactivates.** A tenant that moves to another organization
+  and back gets its original recipient and ledger again.
+
+The org id is the one external identifier we send; audit uses
+`org_ref_hash`.
 
 ### 3.5 Delivery: push or pull
 

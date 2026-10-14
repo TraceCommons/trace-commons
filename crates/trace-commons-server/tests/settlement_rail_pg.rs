@@ -174,6 +174,21 @@ async fn ledger(pg: &Pg, tenant: &str) -> (String, String, String, Option<String
     (row.get(0), row.get(1), row.get(2), row.get(3))
 }
 
+async fn recipient_of(pg: &Pg, tenant: &str) -> Uuid {
+    pg.admin
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT recipient_id FROM trace_near_ai_credit_recipients
+              WHERE tenant_id = $1 AND revoked_at IS NULL",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
 async fn make_due(pg: &Pg, tenant: &str) {
     pg.admin
         .get()
@@ -365,6 +380,32 @@ async fn settlement_rail_tables_are_tenant_isolated_and_totals_only_grow() {
         Err(StoreError::Refused("near_ai_org_bound_elsewhere"))
     );
     accrue_batch(&pg.runtime, &a, batch_a, &near.push, &rate)
+        .await
+        .unwrap();
+
+    // NEAR AI's total for an organization never decreases, so it must always
+    // equal one ledger. Moving to another organization and back reuses the
+    // same recipient and ledger instead of restarting at zero ...
+    let first = recipient_of(&pg, &a).await;
+    let other = NearAiOrgId::from_uuid(Uuid::new_v4());
+    bind_near_ai_recipient(&pg.runtime, &a, other, "owner")
+        .await
+        .unwrap();
+    let back = bind_near_ai_recipient(&pg.runtime, &a, org, "owner")
+        .await
+        .unwrap();
+    assert_eq!(back, first);
+    assert_eq!(ledger(&pg, &a).await.0, "10");
+    // ... and an organization that has ever been bound can never move to
+    // another tenant, even after its first tenant revoked it.
+    bind_near_ai_recipient(&pg.runtime, &a, other, "owner")
+        .await
+        .unwrap();
+    assert_eq!(
+        bind_near_ai_recipient(&pg.runtime, &b, org, "owner").await,
+        Err(StoreError::Refused("near_ai_org_bound_elsewhere"))
+    );
+    bind_near_ai_recipient(&pg.runtime, &a, org, "owner")
         .await
         .unwrap();
 

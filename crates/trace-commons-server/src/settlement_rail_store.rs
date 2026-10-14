@@ -70,7 +70,12 @@ fn parse_units(text: &str) -> Result<u128, StoreError> {
 /// revoking any earlier election. `org` and `role` must come from
 /// [`crate::near_ai_recipient::verify_recipient`], which checks them with the
 /// contributor's own NEAR AI token; this function re-checks only the role's
-/// shape. A new recipient starts its own cumulative total at zero.
+/// shape.
+///
+/// NEAR AI keeps one never-decreasing total per organization, so an
+/// organization belongs to one tenant and one ledger for good: rebinding an
+/// organization this tenant used before reactivates its recipient (and so
+/// its ledger), and an organization another tenant ever bound is refused.
 pub async fn bind_near_ai_recipient(
     pool: &Pool,
     tenant: &str,
@@ -83,18 +88,39 @@ pub async fn bind_near_ai_recipient(
     let mut client = pool.get().await?;
     let tx = client.transaction().await?;
     scope(&tx, tenant).await?;
+    let org_ref_hash = org.ref_hash();
     tx.execute(
         "UPDATE trace_near_ai_credit_recipients SET revoked_at = NOW()
-          WHERE tenant_id = $1 AND revoked_at IS NULL",
-        &[&tenant],
+          WHERE tenant_id = $1 AND revoked_at IS NULL AND org_ref_hash <> $2",
+        &[&tenant, &org_ref_hash],
     )
     .await?;
+    if let Some(row) = tx
+        .query_opt(
+            "SELECT recipient_id, revoked_at IS NOT NULL FROM trace_near_ai_credit_recipients
+              WHERE tenant_id = $1 AND org_ref_hash = $2",
+            &[&tenant, &org_ref_hash],
+        )
+        .await?
+    {
+        let id: Uuid = row.get(0);
+        if row.get::<_, bool>(1) {
+            tx.execute(
+                "UPDATE trace_near_ai_credit_recipients SET revoked_at = NULL
+                  WHERE tenant_id = $1 AND recipient_id = $2",
+                &[&tenant, &id],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        return Ok(id);
+    }
     let id = Uuid::new_v4();
     tx.execute(
         "INSERT INTO trace_near_ai_credit_recipients
             (tenant_id, recipient_id, org_id, org_ref_hash, role_at_bind)
          VALUES ($1, $2, $3, $4, $5)",
-        &[&tenant, &id, &org.as_uuid(), &org.ref_hash(), &role],
+        &[&tenant, &id, &org.as_uuid(), &org_ref_hash, &role],
     )
     .await
     .map_err(|e| match StoreError::from(e) {
@@ -557,7 +583,7 @@ pub async fn reconcile_tick(
                    FROM trace_settlement_rail_ledgers l
                    JOIN trace_near_ai_credit_recipients r
                      ON r.tenant_id = l.tenant_id AND r.recipient_id = l.recipient_id
-                  WHERE l.tenant_id = $1 AND l.rail_id = $2
+                  WHERE l.tenant_id = $1 AND l.rail_id = $2 AND r.revoked_at IS NULL
                     AND l.publish_state IN ('idle', 'due', 'published')
                   ORDER BY l.verified_at NULLS FIRST
                   LIMIT $3",
