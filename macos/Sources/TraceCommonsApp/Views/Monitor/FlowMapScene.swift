@@ -493,7 +493,8 @@ struct FlowMapScene: Equatable {
                 control2: CGPoint(x: bend, y: destinationPoint.y), to: destinationPoint,
                 style: style))
             scene.nodes.append(Node(
-                id: "harness:\(row.id)", kind: .harness(glassTool(harness: row.id), installed: row.installed),
+                id: "harness:\(row.id)",
+                kind: .harness(glassTool(harness: row.id) ?? .other(initials: initials(row.name)), installed: row.installed),
                 at: CGPoint(x: x, y: y), radius: 13, label: row.name, detail: sentence(row) ?? "—",
                 dim: row.installed ? 1 : 0.5))
         }
@@ -532,6 +533,19 @@ struct FlowMapScene: Equatable {
         case "off": .off
         default: .unknown
         }
+    }
+
+    /// A tool with no artwork is drawn as two letters of its name (owner,
+    /// 2026-10-14: a long list of blank circles reads as one): a word's
+    /// first two ("Cursor" is "Cu"), or the first letters of its first two
+    /// words ("GitHub Copilot CLI" is "GC").
+    static func initials(_ name: String) -> String {
+        let words = name.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        guard let first = words.first else { return "?" }
+        if words.count > 1, let second = words.dropFirst().first?.first {
+            return String(first.prefix(1)).uppercased() + String(second).uppercased()
+        }
+        return String(first.prefix(1)).uppercased() + String(first.dropFirst().prefix(1)).lowercased()
     }
 
     /// IronWire's harness ids to the tools that have artwork. The table is

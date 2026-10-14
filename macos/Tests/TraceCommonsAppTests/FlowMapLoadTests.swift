@@ -75,4 +75,19 @@ final class FlowMapLoadTests: XCTestCase {
             }
         }
     }
+
+    /// A tool with no artwork carries two letters of its name, never a
+    /// blank circle (owner, 2026-10-14).
+    func test_aToolWithoutArtworkCarriesItsInitials() {
+        XCTAssertEqual(FlowMapScene.initials("Cursor"), "Cu")
+        XCTAssertEqual(FlowMapScene.initials("GitHub Copilot CLI"), "GC")
+        XCTAssertEqual(FlowMapScene.initials("Agent 3"), "A3")
+        let scene = FlowMapScene.privateAI(
+            Self.harnesses(3), destinationLabel: "Credential", privateAI: "running", sentence: { _ in nil },
+            state: { _ in .notConnected })
+        for node in scene.nodes where node.id.hasPrefix("harness:") {
+            guard case .harness(let tool, _) = node.kind else { return XCTFail(node.id) }
+            XCTAssertNotNil(tool, "\(node.id) is a blank circle")
+        }
+    }
 }
