@@ -148,8 +148,8 @@ use super::history::{HistoryCache, rollup};
 use super::notify;
 use super::policy::{
     ERR_PROJECT_ID_UNRECOGNIZED, ERR_PROJECT_KEY_UNRECOGNIZED, ProjectMode, ProjectPolicy,
-    UNKNOWN_PROJECT_KEY, disambiguated_label, known_keys, project_id_for, project_key_for_id,
-    project_key_is_admissible,
+    UNKNOWN_PROJECT_KEY, disambiguated_label, known_keys, normalize_policy_key, project_id_for,
+    project_key_for_id, project_key_is_admissible,
 };
 use super::preview_scheduler::{PreviewKey, PreviewScheduler, RequestState};
 use super::queue::{Queue, QueueEntry, QueueState};
@@ -4903,11 +4903,27 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
                 }
             },
             None => {
-                let key = key_param.unwrap_or_default();
-                if !project_key_is_admissible(key, &known) {
-                    return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_KEY_UNRECOGNIZED);
+                // Stored under the watcher's spelling of the key, never the
+                // caller's (#992). `daemon project <path>` sends the case on
+                // disk; sessions resolve through the same normalization as
+                // this, which folds case on macOS and Windows. A key stored
+                // unnormalized is one no session looks up, and under an
+                // "Automatic" override that miss reads as `AutoUpload`.
+                let raw = key_param.unwrap_or_default();
+                let admitted = normalize_policy_key(raw).filter(|key| {
+                    project_key_is_admissible(key, &known)
+                        // A key the daemon already holds stays settable
+                        // when its directory is gone, so the normalized
+                        // form names nothing on disk. It is still stored
+                        // normalized: that is the spelling sessions use.
+                        || known.iter().any(|k| k == raw)
+                });
+                match admitted {
+                    Some(key) => key,
+                    None => {
+                        return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_KEY_UNRECOGNIZED);
+                    }
                 }
-                key.to_string()
             }
         };
         let shown = crate::daemon::policy::display_path_for_key(&key);
@@ -10120,6 +10136,13 @@ mod tests {
     /// must stay resolvable for as long as the daemon under test might
     /// re-validate it.
     fn tmp_project(basename: &str) -> String {
+        crate::daemon::policy::project_key_for(Some(&tmp_project_dir(basename)))
+    }
+
+    /// [`tmp_project`]'s directory as `daemon project <path>` names it:
+    /// canonical, in the case on disk, which on macOS and Windows is not the
+    /// key the watcher stores (#992).
+    fn tmp_project_dir(basename: &str) -> String {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join(basename);
         std::fs::create_dir_all(&p).unwrap();
@@ -12397,7 +12420,7 @@ mod tests {
         // id exists for it and none can. This is why the id supplements the
         // key rather than replacing it.
         let s = shared();
-        let key = tmp_project("employer-repo");
+        let path = tmp_project_dir("employer-repo");
         assert!(
             projects_of(&s).is_empty(),
             "the project must be genuinely unknown for this test to mean anything"
@@ -12406,10 +12429,12 @@ mod tests {
             &s,
             &req(
                 "set_project_mode",
-                serde_json::json!({"project_key": key, "mode": "ignore"}),
+                serde_json::json!({"project_key": path, "mode": "ignore"}),
             ),
         );
         assert!(r.error.is_none(), "{:?}", r.error);
+        // Looked up the way a session in that directory is.
+        let key = crate::daemon::policy::project_key_for(Some(&path));
         assert_eq!(s.policy.lock().unwrap().resolve(&key), ProjectMode::Ignore);
     }
 
@@ -12924,6 +12949,108 @@ mod tests {
         );
         assert!(r.error.is_none(), "{:?}", r.error);
         assert_eq!(s.policy.lock().unwrap().resolve(gone), ProjectMode::Ignore);
+    }
+
+    /// A mixed-case directory, named the way `daemon project <path>` names
+    /// it: `std::fs::canonicalize`, which keeps the case on disk. Returned
+    /// beside the key the watcher derives for a session recorded there.
+    fn mixed_case_project() -> (String, String) {
+        let cli_key = tmp_project_dir("MixedCase");
+        let watcher_key = crate::daemon::policy::project_key_for(Some(&cli_key));
+        (cli_key, watcher_key)
+    }
+
+    /// #992: the CLI sends the on-disk spelling, the watcher looks up the
+    /// folded one on macOS and Windows. The mode must land where the
+    /// watcher looks, or `--mode ignore` prints success and silences
+    /// nothing.
+    #[test]
+    fn a_mixed_case_key_set_over_the_socket_applies_to_the_watchers_key() {
+        let s = shared();
+        let (cli_key, watcher_key) = mixed_case_project();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": cli_key, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let policy = s.policy.lock().unwrap();
+        assert_eq!(policy.resolve(&watcher_key), ProjectMode::Ignore);
+        assert_eq!(
+            policy.projects.keys().collect::<Vec<_>>(),
+            vec![&watcher_key],
+            "stored under the watcher's key and nothing else"
+        );
+    }
+
+    /// #992, the consent half: under an "Automatic" override a lookup that
+    /// misses the folder's own mode reads as `AutoUpload`, so a mis-keyed
+    /// Never let the folder upload with nobody asked.
+    #[test]
+    fn a_mixed_case_never_set_over_the_socket_holds_under_an_automatic_override() {
+        let s = shared();
+        let (cli_key, watcher_key) = mixed_case_project();
+        s.policy.lock().unwrap().contribution_override =
+            Some(super::super::policy::ContributionOverride {
+                mode: ProjectMode::AutoUpload,
+                since: Utc::now(),
+                arming: None,
+                granted_under: None,
+                claim: None,
+            });
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": cli_key, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(&watcher_key),
+            ProjectMode::Ignore
+        );
+    }
+
+    /// The folded spelling names the same directory on a case-insensitive
+    /// filesystem, so it is as admissible as the on-disk one.
+    #[test]
+    fn the_watchers_own_spelling_of_a_directory_is_admissible() {
+        let s = shared();
+        let (_cli_key, watcher_key) = mixed_case_project();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": watcher_key, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(&watcher_key),
+            ProjectMode::Ignore
+        );
+    }
+
+    /// The sentinel is not a path and must not be normalized out of
+    /// existence: silencing the unknown bucket stays possible.
+    #[test]
+    fn the_unknown_bucket_can_still_be_silenced_from_a_terminal() {
+        let s = shared();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": UNKNOWN_PROJECT_KEY, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(UNKNOWN_PROJECT_KEY),
+            ProjectMode::Ignore
+        );
     }
 
     #[test]

@@ -31,10 +31,34 @@ use crate::config::{ConfigStore, DAEMON_PROJECTS_FILE};
 /// recorded working directories, which no longer match anything
 /// `project_key_for` produces, so `load` re-keys it. The version is what
 /// makes that happen exactly once.
-pub const DAEMON_PROJECTS_SCHEMA: &str = "trace_commons.daemon_projects.v2";
+///
+/// Bumped to v3 when `set_project_mode` began normalizing a caller's key
+/// (#992). Until then a key `daemon project <path>` sent was stored in the
+/// on-disk spelling, which the watcher -- folding case on macOS and Windows
+/// -- never looked up, so a v2 file can hold keys that no session reaches.
+/// `load` re-keys a v2 file once, with [`MovedArming::AsksAgain`].
+pub const DAEMON_PROJECTS_SCHEMA: &str = "trace_commons.daemon_projects.v3";
 
 /// The pre-normalization schema. Recognized only so `load` can migrate it.
 pub const DAEMON_PROJECTS_SCHEMA_V1: &str = "trace_commons.daemon_projects.v1";
+
+/// The schema whose keys the watcher wrote normalized and `set_project_mode`
+/// did not. Recognized only so `load` can migrate it.
+pub const DAEMON_PROJECTS_SCHEMA_V2: &str = "trace_commons.daemon_projects.v2";
+
+/// What a re-key does with an `AutoUpload` entry whose key it changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovedArming {
+    /// Carry the mode across. Right for a v1 file, whose raw keys were the
+    /// ones the watcher of the day looked up, so its arming was in effect.
+    Carries,
+    /// Return it to `NotifyOnly`. Right for a v2 file: a v2 key that
+    /// normalization changes is one the watcher never matched, so the
+    /// arming was never in effect, and its arm-from-now hold and claim are
+    /// stored under the old spelling. Carrying the mode without them would
+    /// send a backlog the contributor held back; asking again loses nothing.
+    AsksAgain,
+}
 
 /// The bucket for sessions with no resolvable working directory. Permanently
 /// notify-only.
@@ -1117,16 +1141,25 @@ impl ProjectPolicy {
     /// hand-edited file, say -- is dropped rather than kept under its old
     /// spelling, because nothing will ever look it up again.
     pub fn rekey(&mut self) {
-        let renamed = |key: &str| -> Option<String> {
-            if key == UNKNOWN_PROJECT_KEY {
-                return Some(UNKNOWN_PROJECT_KEY.to_string());
-            }
-            crate::daemon::project_key::normalize_project_key(key)
-        };
+        self.rekey_with(MovedArming::Carries);
+    }
+
+    /// [`Self::rekey`], choosing what happens to an armed entry whose key
+    /// moves. See [`MovedArming`].
+    pub fn rekey_with(&mut self, moved_arming: MovedArming) {
+        let renamed = normalize_policy_key;
 
         let mut projects: BTreeMap<String, ProjectEntry> = BTreeMap::new();
-        for (key, entry) in std::mem::take(&mut self.projects) {
+        for (key, mut entry) in std::mem::take(&mut self.projects) {
             let Some(fresh) = renamed(&key) else { continue };
+            if moved_arming == MovedArming::AsksAgain
+                && fresh != key
+                && entry.mode == ProjectMode::AutoUpload
+            {
+                entry.mode = ProjectMode::NotifyOnly;
+                entry.armed_under = None;
+                entry.automatic_redaction = AutomaticRedactionTally::default();
+            }
             // Re-derived rather than carried across from `entry`: a v2 file
             // has no display path at all, and one written on another host
             // may name a directory this one spells differently.
@@ -1197,6 +1230,22 @@ impl ProjectPolicy {
         }
         self.arming_declined_at = declined;
 
+        if moved_arming == MovedArming::AsksAgain {
+            // What only an armed folder carries, left under a spelling no
+            // folder is armed under any more: the old key of a moved arming,
+            // or a key a merge made stricter. Nothing would look it up again,
+            // and a re-arm starts each of these fresh.
+            let armed: BTreeSet<String> = self
+                .projects
+                .iter()
+                .filter(|(_, e)| e.mode == ProjectMode::AutoUpload)
+                .map(|(k, _)| k.clone())
+                .collect();
+            self.armed_from_now.retain(|k, _| armed.contains(k));
+            self.arming_claims.retain(|k, _| armed.contains(k));
+            self.armed_by_grant.retain(|k| armed.contains(k));
+        }
+
         self.schema_version = DAEMON_PROJECTS_SCHEMA.to_string();
     }
 
@@ -1211,7 +1260,9 @@ impl ProjectPolicy {
         // every mutation already performs -- persists the v2 form. A file
         // that is never mutated again is migrated identically on every read,
         // which costs one normalization pass and is always correct.
-        if policy.schema_version != DAEMON_PROJECTS_SCHEMA {
+        if policy.schema_version == DAEMON_PROJECTS_SCHEMA_V2 {
+            policy.rekey_with(MovedArming::AsksAgain);
+        } else if policy.schema_version != DAEMON_PROJECTS_SCHEMA {
             policy.rekey();
         }
         Ok(policy)
@@ -1668,6 +1719,12 @@ pub const ERR_PROJECT_KEY_UNRECOGNIZED: &str = "project-key-unrecognized";
 /// writing a session file with an arbitrary `cwd`. `MAX_PROJECT_LABEL_CHARS`
 /// bounds the length independently at the render sinks, since a filesystem
 /// limit is not a promise this crate makes.
+///
+/// "Canonicalizes to itself" means the key is its own normalized form
+/// ([`normalize_policy_key`]) and names an existing directory. That is the
+/// watcher's spelling, folded on macOS and Windows, so the folded form of a
+/// mixed-case directory is admissible there and the on-disk spelling is not
+/// (#992): `set_project_mode` normalizes a caller's key before asking.
 pub fn project_key_is_admissible(project_key: &str, known_keys: &[String]) -> bool {
     if project_key == UNKNOWN_PROJECT_KEY {
         return true;
@@ -1679,10 +1736,25 @@ pub fn project_key_is_admissible(project_key: &str, known_keys: &[String]) -> bo
     if !path.is_absolute() {
         return false;
     }
-    match std::fs::canonicalize(path) {
-        Ok(resolved) => resolved.is_dir() && resolved.as_os_str() == path.as_os_str(),
-        Err(_) => false,
+    normalize_policy_key(project_key).as_deref() == Some(project_key) && path.is_dir()
+}
+
+/// The policy key for a caller-supplied project key: the unknown bucket's
+/// sentinel as itself, anything else through
+/// `project_key::normalize_project_key` -- the one normalization the watcher
+/// keys sessions by and [`ProjectPolicy::rekey`] keys stored entries by.
+///
+/// That includes folding case where the filesystem is case-insensitive
+/// (macOS, Windows; never Linux) and walking up to the repository root, so
+/// `daemon project <repo>/sub` names `<repo>`, which is the key every
+/// session in `sub` already resolves to.
+///
+/// `None` for anything that cannot be a key (relative, empty).
+pub fn normalize_policy_key(project_key: &str) -> Option<String> {
+    if project_key == UNKNOWN_PROJECT_KEY {
+        return Some(UNKNOWN_PROJECT_KEY.to_string());
     }
+    crate::daemon::project_key::normalize_project_key(project_key)
 }
 
 /// The prefix every opaque project id carries.
@@ -3147,6 +3219,99 @@ mod tests {
         let loaded = ProjectPolicy::load(&store).unwrap();
         let key = project_key_for(Some(root.to_str().unwrap()));
         assert_eq!(loaded.resolve(&key), ProjectMode::Ignore);
+    }
+
+    /// #992: a v2 file can hold a key `daemon project <path>` stored in the
+    /// on-disk spelling, which the watcher (folding case on macOS and
+    /// Windows) never looked up. Loading it must put an `Ignore` where the
+    /// watcher looks.
+    ///
+    /// An `AutoUpload` under such a key was never in effect, and its
+    /// arm-from-now hold sits under the old spelling too. Carrying the mode
+    /// across without the hold would start sending the backlog the
+    /// contributor held back, so it asks again instead.
+    #[test]
+    fn loading_a_v2_file_rekeys_keys_the_cli_stored_unfolded() {
+        let (_d, store) = temp_store();
+        let dir = tempfile::tempdir().unwrap();
+        let never = dir.path().join("NeverRepo");
+        let armed = dir.path().join("ArmedRepo");
+        std::fs::create_dir(&never).unwrap();
+        std::fs::create_dir(&armed).unwrap();
+        // The CLI's spelling: canonical, with the case on disk.
+        let never_cli = std::fs::canonicalize(&never)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let armed_cli = std::fs::canonicalize(&armed)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let mut p = ProjectPolicy::new();
+        p.set_mode(&never_cli, ProjectMode::Ignore, now()).unwrap();
+        p.set_mode(&armed_cli, ProjectMode::AutoUpload, now())
+            .unwrap();
+        p.arm_from_now(&armed_cli, now());
+        p.schema_version = "trace_commons.daemon_projects.v2".to_string();
+        p.save(&store).unwrap();
+
+        let loaded = ProjectPolicy::load(&store).unwrap();
+        let never_key = project_key_for(Some(&never_cli));
+        let armed_key = project_key_for(Some(&armed_cli));
+        assert_eq!(loaded.resolve(&never_key), ProjectMode::Ignore);
+        assert_eq!(loaded.schema_version, DAEMON_PROJECTS_SCHEMA);
+        if armed_key == armed_cli {
+            // Linux: the CLI's key already was the watcher's.
+            assert_eq!(loaded.resolve(&armed_key), ProjectMode::AutoUpload);
+            assert!(loaded.armed_from_now.contains_key(&armed_key));
+        } else {
+            assert_eq!(loaded.resolve(&armed_key), ProjectMode::NotifyOnly);
+            assert!(
+                loaded.armed_from_now.is_empty(),
+                "no hold left behind under a key nothing looks up"
+            );
+        }
+        for key in loaded.projects.keys() {
+            assert_eq!(
+                crate::daemon::project_key::normalize_project_key(key).as_deref(),
+                Some(key.as_str()),
+                "every stored key is the watcher's"
+            );
+        }
+    }
+
+    /// The same file under an "Automatic" override: a miss there reads as
+    /// `AutoUpload`, so the migration is what stands between a Never set
+    /// from the CLI and an unattended upload.
+    #[test]
+    fn a_v2_never_set_from_the_cli_holds_under_an_automatic_override() {
+        let (_d, store) = temp_store();
+        let dir = tempfile::tempdir().unwrap();
+        let never = dir.path().join("NeverRepo");
+        std::fs::create_dir(&never).unwrap();
+        let never_cli = std::fs::canonicalize(&never)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let mut p = ProjectPolicy::new();
+        p.set_mode(&never_cli, ProjectMode::Ignore, now()).unwrap();
+        p.contribution_override = Some(ContributionOverride {
+            mode: ProjectMode::AutoUpload,
+            since: now(),
+            arming: None,
+            granted_under: None,
+            claim: None,
+        });
+        p.schema_version = "trace_commons.daemon_projects.v2".to_string();
+        p.save(&store).unwrap();
+
+        let loaded = ProjectPolicy::load(&store).unwrap();
+        assert_eq!(
+            loaded.resolve(&project_key_for(Some(&never_cli))),
+            ProjectMode::Ignore
+        );
     }
 
     #[test]
