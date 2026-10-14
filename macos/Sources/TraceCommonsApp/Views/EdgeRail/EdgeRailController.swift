@@ -45,7 +45,7 @@ final class EdgeRailController {
     private func show() {
         guard panel == nil, let model else { return }
         let panel = EdgeRailPanel()
-        let root = EdgeRailView(state: state, onOpenChange: { [weak self] open in self?.place(open: open) })
+        let root = EdgeRailView(state: state, onOpenChange: Self.deferred { [weak self] open in self?.place(open: open) })
             .environmentObject(model)
             .tint(GlassTokens.Color.purpleSoft.color)
             // No focus ring drawn round controls (owner, 2026-10-11).
@@ -54,7 +54,7 @@ final class EdgeRailController {
             // is using while it is open: it draws in focus, without the
             // flat theme's out-of-focus dim (`inactiveDim`).
             .environment(\.controlActiveState, .key)
-        panel.contentView = NSHostingView(rootView: root)
+        panel.contentView = Self.hostingView(root)
         self.panel = panel
         state.open = false
         place(open: false)
@@ -73,6 +73,28 @@ final class EdgeRailController {
         panel?.orderOut(nil)
         panel = nil
         state.open = false
+    }
+
+    /// The rail's hosting view, which never sizes its window. The panel's
+    /// frame is `place(open:)`'s alone: a hosting view on its default
+    /// sizing options also sizes the window to its SwiftUI content, and the
+    /// two fought inside one layout pass until AppKit threw from
+    /// `_postWindowNeedsUpdateConstraints` and the app aborted. The rail is
+    /// borderless at a screen edge, so it takes no safe-area insets either,
+    /// which keeps the insets' invalidation out of that pass as well.
+    static func hostingView<Content: View>(_ root: Content) -> NSHostingView<Content> {
+        let hosting = NSHostingView(rootView: root)
+        hosting.sizingOptions = []
+        hosting.safeAreaRegions = []
+        return hosting
+    }
+
+    /// Runs a placement on the next turn of the run loop. Opening and
+    /// closing are asked for from inside SwiftUI's hover handling and
+    /// animation, and a window frame set there re-enters the layout pass
+    /// that is already running.
+    static func deferred(_ place: @escaping @MainActor (Bool) -> Void) -> (Bool) -> Void {
+        { open in DispatchQueue.main.async { MainActor.assumeIsolated { place(open) } } }
     }
 
     /// Moves the panel to the main display's right edge, at the size the
