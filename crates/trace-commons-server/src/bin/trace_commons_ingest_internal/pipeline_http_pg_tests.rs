@@ -16612,3 +16612,94 @@ async fn without_the_accept_medium_setting_a_found_and_removed_upload_is_quarant
     assert_eq!(upload.admission_rule_id, "privacy_review_required");
     assert_eq!(upload.row_status, "quarantined");
 }
+
+/// #1313: a run held for an operator (`awaiting_operator`, with the review
+/// audit marker its hold sets) gets one label-only `lifecycle_status_change`
+/// event from the review audit pass: status `quarantined`, reason
+/// `pipeline_settle_held_for_operator`, its id derived from the run. A second
+/// pass adds none. The hold itself (`mark_failed` on a paid run whose Settle
+/// commit was refused) is driven in `versioned_pipeline_runtime_pg`; here the
+/// state and marker are set directly, as the owner, to test the audit pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_review_audit_pass_records_a_run_held_for_an_operator() {
+    let Some(fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_compatibility_pipeline_service(
+            runtime,
+            &ConfiguredTraceArtifactStore::legacy(artifacts),
+            IsolatedPipelineIndex::new(),
+            2_500_000,
+            Arc::new(PassThroughPipelinePrivacyBoundary),
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+    {
+        let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE pipeline_runs
+                SET state = 'awaiting_operator',
+                    last_error_label = 'pipeline_gate_decision_conflict',
+                    review_audit_pending_at = clock_timestamp()
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &created.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let held_id = deterministic_trace_uuid_for(
+        "pipeline-settle-held-for-operator-audit",
+        &tenant,
+        created.run_id,
+    );
+    let events =
+        audit_file_events_of_kind(&fixture, envelope.submission_id, "lifecycle_status_change");
+    let held = events
+        .iter()
+        .filter(|event| event.event_id == held_id)
+        .collect::<Vec<_>>();
+    assert_eq!(held.len(), 1, "{events:?}");
+    assert_eq!(held[0].status, Some(TraceCorpusStatus::Quarantined));
+    assert_eq!(
+        held[0].reason.as_deref(),
+        Some(trace_commons_server::versioned_pipeline::PIPELINE_SETTLE_HELD_FOR_OPERATOR_LABEL)
+    );
+    assert!(!review_audit_marker_is_set(&fixture, created.run_id).await);
+
+    set_review_audit_marker(&fixture, created.run_id).await;
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the second pass runs");
+    let again =
+        audit_file_events_of_kind(&fixture, envelope.submission_id, "lifecycle_status_change");
+    assert_eq!(
+        again
+            .iter()
+            .filter(|event| event.event_id == held_id)
+            .count(),
+        1,
+        "a second pass adds no event"
+    );
+}

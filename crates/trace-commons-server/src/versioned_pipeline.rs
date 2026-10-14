@@ -6329,7 +6329,9 @@ impl PgPipelineStore {
     /// transaction, as every failure path does
     /// (`invalidate_index_writes_of_failed_runs_on_tx`). `Release` gives it
     /// one more Settle attempt, due now: its paid legs are terminal, so the
-    /// attempt only commits, and a commit refused again holds it again.
+    /// attempt only commits, and a commit refused again holds it again. The
+    /// release counts as the run's extra attempt (`settle_finish_granted_at`),
+    /// so a charged failure on it fails the run rather than granting another.
     /// Lock order: the run row, then the invalidation rows.
     pub async fn resolve_operator_held_run(
         &self,
@@ -6351,6 +6353,8 @@ impl PgPipelineStore {
                     SET state = 'retry',
                         attempt_count = GREATEST(max_attempts - 1, 0),
                         next_attempt_at = NOW(),
+                        settle_finish_granted_at =
+                            COALESCE(settle_finish_granted_at, clock_timestamp()),
                         last_error_label = $3, updated_at = NOW()
                   WHERE tenant_id = $1 AND run_id = $2 AND state = 'awaiting_operator'
                   RETURNING *"

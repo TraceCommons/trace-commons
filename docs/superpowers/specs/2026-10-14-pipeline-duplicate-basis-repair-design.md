@@ -160,7 +160,9 @@ still fails under N-7.
     N-7 in the same transaction.
   - `Release` gives it one more attempt, due now
     (`operator_released_held_run`). Its legs are terminal, so the attempt
-    only commits. A commit that is refused again holds the run again.
+    only commits. A commit that is refused again holds the run again. The
+    release counts as the run's extra attempt (it sets
+    `settle_finish_granted_at`), so a charged failure on it fails the run.
 
   Both act only on a run that is still `awaiting_operator`. **No HTTP route
   is wired yet**, so the operator route and its audit event are a follow-up.
