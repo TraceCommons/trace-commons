@@ -675,3 +675,296 @@ impl Drop for SelfHostedPrivacyEnvGuard {
         }
     }
 }
+
+/// Object-primary submit/review (#1168): an owned submission's envelope lives
+/// only in the encrypted object store, behind an active `submitted_envelope`
+/// object ref. Nothing is written under `state.root`, and the record built
+/// from the database row carries no artifact receipt. The three account routes
+/// that read the envelope must read it through the object ref, not the file.
+struct ObjectPrimaryAccountFixture {
+    _temp: tempfile::TempDir,
+    _remote_temp: tempfile::TempDir,
+    db: Arc<NativeAuthTestDb>,
+    state: Arc<AppState>,
+    ctx: trace_commons_server::account_session::AccountCtx,
+    submission_id: Uuid,
+    object_ref_id: Uuid,
+    stored_body: Vec<u8>,
+    envelope: trace_commons_protocol::trace_contribution::TraceContributionEnvelope,
+}
+
+async fn object_primary_account_fixture() -> ObjectPrimaryAccountFixture {
+    use trace_commons_server::account_session::{
+        AccountAuthMethod, AccountCtx, AccountId, AccountPrincipalSet, account_actor_ref,
+    };
+
+    let tenant_id = format!("object-primary-account-{}", Uuid::new_v4().simple());
+    let principal_ref = format!("principal:object-primary-account-{}", Uuid::new_v4());
+    let temp = tempfile::tempdir().expect("temp dir");
+    let remote_temp = tempfile::tempdir().expect("remote artifact temp dir");
+    let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+    let remote_config = TraceRemoteObjectStoreConfig::from_parts(
+        Some("file_system"),
+        Some(remote_temp.path().to_str().expect("utf8 temp path")),
+        Some("test-kms-key-ref"),
+        Some("test-credential-ref"),
+    )
+    .expect("filesystem remote config parses");
+    let artifact_store =
+        ConfiguredTraceArtifactStore::remote_service(remote_config, SecretString::from(key))
+            .expect("filesystem remote service store builds");
+    let db = Arc::new(NativeAuthTestDb::default());
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+        temp.path().to_path_buf(),
+        Some(db.clone() as Arc<dyn Database>),
+        Some(artifact_store),
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).object_primary_submit_review = true;
+
+    let mut envelope = low_risk_envelope().await;
+    let submission_id = Uuid::new_v4();
+    envelope.submission_id = submission_id;
+    let mut stored = seeded_storage_submission_record(
+        &tenant_id,
+        submission_id,
+        StorageTraceCorpusStatus::Accepted,
+    );
+    stored.auth_principal_ref = principal_ref.clone();
+    db.insert_trace_submission(stored);
+
+    // Store the envelope as object-primary `store_envelope` does -- encrypted
+    // object only, no plaintext file -- and record the active ref that
+    // `trace_object_ref_write_from_record` mirrors for it.
+    let store = state
+        .artifact_store
+        .as_ref()
+        .expect("artifact store configured");
+    let receipt = store
+        .put_json(
+            &tenant_storage_ref(&tenant_id),
+            TraceArtifactKind::ContributionEnvelope,
+            &format!("{submission_id}:accepted:submitted:{}", Uuid::new_v4()),
+            &envelope,
+        )
+        .expect("encrypted envelope write");
+    let object_ref_id = Uuid::new_v4();
+    db.insert_object_ref(StorageTraceObjectRefRecord {
+        tenant_id: tenant_id.clone(),
+        submission_id,
+        object_ref_id,
+        artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+        object_store: store.object_store_name().to_string(),
+        object_key: receipt.object_key.clone(),
+        content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+        encryption_key_ref: format!("tenant:{}", tenant_storage_ref(&tenant_id)),
+        size_bytes: 0,
+        compression: None,
+        created_by_job_id: None,
+        invalidated_at: None,
+        deleted_at: None,
+        updated_at: receipt.encrypted_at,
+        created_at: receipt.encrypted_at,
+    });
+    let file_path = temp.path().join(trace_envelope_object_key(
+        &tenant_id,
+        TraceCorpusStatus::Accepted,
+        submission_id,
+    ));
+    assert!(
+        !file_path.exists(),
+        "object-primary leaves no plaintext envelope file"
+    );
+
+    let account_id = AccountId::from_uuid(Uuid::new_v4());
+    let ctx = AccountCtx {
+        account_id,
+        principal_set: AccountPrincipalSet::from_iter_for_test_only([principal_ref]),
+        auth_method: AccountAuthMethod::NativeToken,
+        tenant_id,
+        actor_ref: account_actor_ref(&account_id),
+        auth_credential_id: None,
+        client_kind: "native".to_string(),
+        session_token_hash: None,
+    };
+    let stored_body = serde_json::to_vec(&envelope).expect("serialize envelope");
+    ObjectPrimaryAccountFixture {
+        _temp: temp,
+        _remote_temp: remote_temp,
+        db,
+        state,
+        ctx,
+        submission_id,
+        object_ref_id,
+        stored_body,
+        envelope,
+    }
+}
+
+/// The success audit row names the object ref the read resolved.
+fn assert_read_audited_against_ref(fixture: &ObjectPrimaryAccountFixture) {
+    let events = fixture.db.trace_audit_events.lock().unwrap();
+    assert!(
+        events.iter().any(|event| {
+            event.submission_id == Some(fixture.submission_id)
+                && event.object_ref_id == Some(fixture.object_ref_id)
+        }),
+        "the successful read is audited against the object ref it read"
+    );
+}
+
+#[tokio::test]
+async fn object_primary_account_content_reads_envelope_through_object_ref() {
+    let fixture = object_primary_account_fixture().await;
+    let response = account_trace_content_handler(
+        State(fixture.state.clone()),
+        Extension(fixture.ctx.clone()),
+        AxumPath(fixture.submission_id),
+    )
+    .await
+    .expect("object-primary content read succeeds");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read content body");
+    assert_eq!(body.as_ref(), fixture.stored_body.as_slice());
+    assert_read_audited_against_ref(&fixture);
+}
+
+#[tokio::test]
+async fn object_primary_public_run_session_detail_reads_envelope_through_object_ref() {
+    let fixture = object_primary_account_fixture().await;
+    let response = account_public_run_session_detail_handler(
+        State(fixture.state.clone()),
+        Extension(fixture.ctx.clone()),
+        AxumPath(fixture.submission_id),
+    )
+    .await
+    .expect("object-primary session detail succeeds");
+    assert_eq!(response.status(), StatusCode::OK);
+    let detail: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read session detail"),
+    )
+    .expect("session detail JSON");
+    assert_eq!(detail["contribution_status"], "accepted");
+    assert_eq!(
+        detail["task_success"],
+        serde_json::to_value(fixture.envelope.outcome.task_success).expect("task success"),
+        "the full projection, read from the envelope, not the status-only one"
+    );
+    assert_read_audited_against_ref(&fixture);
+}
+
+#[tokio::test]
+async fn object_primary_public_run_publish_reads_envelope_through_object_ref() {
+    use trace_commons_protocol::public_run::{
+        PublicRunDraft, PublicRunEvidenceDraft, PublicRunPublishRequest, PublicRunReusePermission,
+    };
+    use trace_commons_protocol::trace_contribution::TaskSuccess;
+    use wiremock::matchers::{method, path};
+
+    let _env_lock = near_ai_env_lock().lock().await;
+    let privacy_server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": [{"spans": []}]})),
+        )
+        .mount(&privacy_server)
+        .await;
+    let _privacy_env = SelfHostedPrivacyEnvGuard::set(&privacy_server.uri());
+
+    let fixture = object_primary_account_fixture().await;
+    // A request whose `task_success` disagrees with the stored envelope. The
+    // handler can answer `public run approval changed` only after it has read
+    // the envelope; a failed read answers the generic 500 instead.
+    let task_success = match fixture.envelope.outcome.task_success {
+        TaskSuccess::Success => TaskSuccess::Failure,
+        _ => TaskSuccess::Success,
+    };
+    let contributed_version = fixture.envelope.schema_version.clone();
+    let draft = PublicRunDraft {
+        title: "Reviewed synthetic recovery".to_string(),
+        outcome_summary: "The reviewed synthetic recovery completed.".to_string(),
+        correction_excerpt: None,
+        workflow: "Apply the reviewed synthetic recovery steps.".to_string(),
+        reuse_permission: PublicRunReusePermission::CcBy40,
+        evidence: vec![PublicRunEvidenceDraft {
+            event_id: Uuid::new_v4(),
+            excerpt: "reviewed synthetic excerpt".to_string(),
+        }],
+        source_slug: None,
+    };
+    let request = PublicRunPublishRequest {
+        approval_sha256: draft
+            .approval_sha256(task_success, &contributed_version, 0)
+            .expect("approval digest"),
+        draft,
+        task_success,
+        contributed_version,
+        expected_publication_version: 0,
+    };
+    let error = account_public_run_publish_handler(
+        State(fixture.state.clone()),
+        Extension(fixture.ctx.clone()),
+        HeaderMap::new(),
+        AxumPath(fixture.submission_id),
+        Json(request),
+    )
+    .await
+    .expect_err("a changed approval is refused after the envelope is read");
+    assert_eq!(error.0, StatusCode::CONFLICT);
+    assert_eq!(error.1.0.error, "public run approval changed");
+}
+
+/// With no active envelope object ref, the account read falls back to the
+/// plaintext file only where object-primary submit/review is off. With it on,
+/// a file under `state.root` is never trusted: the read fails closed.
+#[tokio::test]
+async fn account_content_without_an_object_ref_reads_the_file_only_when_not_object_primary() {
+    let fixture = object_primary_account_fixture().await;
+    fixture.db.object_refs.lock().unwrap().clear();
+    let file_path = fixture.state.root.join(trace_envelope_object_key(
+        &fixture.ctx.tenant_id,
+        TraceCorpusStatus::Accepted,
+        fixture.submission_id,
+    ));
+    std::fs::create_dir_all(file_path.parent().expect("object dir")).expect("create object dir");
+    std::fs::write(&file_path, &fixture.stored_body).expect("write envelope file");
+
+    let error = account_trace_content_handler(
+        State(fixture.state.clone()),
+        Extension(fixture.ctx.clone()),
+        AxumPath(fixture.submission_id),
+    )
+    .await
+    .expect_err("object-primary with no object ref fails closed");
+    assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(error.1.0.error, "trace content unavailable");
+
+    let mut file_backed = fixture.state.clone();
+    Arc::make_mut(&mut file_backed).object_primary_submit_review = false;
+    let response = account_trace_content_handler(
+        State(file_backed),
+        Extension(fixture.ctx.clone()),
+        AxumPath(fixture.submission_id),
+    )
+    .await
+    .expect("a file-backed deployment still reads the file");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read content body");
+    assert_eq!(body.as_ref(), fixture.stored_body.as_slice());
+}
