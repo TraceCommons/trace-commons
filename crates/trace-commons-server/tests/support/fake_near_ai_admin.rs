@@ -179,7 +179,7 @@ async fn history(
     if rows.is_empty() {
         return Err(error(StatusCode::NOT_FOUND, "organization_not_found"));
     }
-    rows.sort_by(|a, b| b.effective_from.cmp(&a.effective_from));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.effective_from));
     let total = rows.len() as i64;
     let page: Vec<Value> = rows
         .iter()

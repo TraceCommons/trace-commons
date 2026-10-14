@@ -50,6 +50,7 @@ pub mod rescore_distribution;
 pub mod reward_participant;
 pub mod secrets;
 pub mod settlement_rail;
+pub mod settlement_rail_store;
 pub mod trace_artifact_gcs;
 pub mod trace_artifact_kek;
 pub mod trace_artifact_store;

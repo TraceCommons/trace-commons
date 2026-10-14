@@ -350,7 +350,7 @@ impl NearAiInferenceCreditRail {
         };
         let anomaly = if !expected_base {
             Some("near_ai_grant_interleaved_write")
-        } else if written != prior_units.checked_add(delivery.units).unwrap_or(u128::MAX) {
+        } else if written != prior_units.saturating_add(delivery.units) {
             Some("near_ai_write_amount_mismatch")
         } else if newest != 0 && !self.all_ours(&typed[..newest]) {
             Some("near_ai_grant_bucket_foreign_write")
