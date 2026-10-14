@@ -1,260 +1,264 @@
-# Pipeline duplicate-basis repair (#1313) -- design note
+# Pipeline duplicate-basis repair (#1313) -- design
 
-Status: design only. Case (b) is ready to build. Case (a), as ruled, needs
-a change to the pipeline's run model, and the work stopped here for an owner
-decision (see "Case (a): why this stops at the design").
+Status: implemented on `pipeline-duplicate-basis-repair` for case (b) and
+for the gap the owner ruled on. For case (a), the bases are recorded and the
+rescore is deferred.
 
-Issue: #1313 (item L2-6 of #1185). Rulings: the #1143 review. The duplicate
-ruling is "near-duplicates are dropped after the first one", and N-7 is "the
-index holds only revisions of runs that completed". Owner decisions of
-2026-10-14: (b) as ruled, keep N-7, no short form; (a) as ruled, in the same
-branch.
+Issue: #1313 (item L2-6 of #1185). Rulings come from the #1143 review. The
+duplicate ruling is "near-duplicates are dropped after the first one". N-7
+is "the index holds only revisions of runs that completed".
+
+Owner decisions of 2026-10-14:
+
+1. Case (b) as ruled. Keep N-7, with no short form.
+2. The gap (a paid run whose Settle commit is refused for good) is held for
+   operator review and not failed.
+3. Case (a): record the bases now, and defer the rescore.
+4. The migration is V128. V127 is reserved for #1237.
 
 Code read on `origin/main` at `91f37668d`.
 
-## Case (b): a credited run whose Settle failed for good
+## Migration V128
 
-### What happens today
+`migrations/V128__pipeline_settle_finish_and_score_bases.sql`:
 
-The Trace Credit leg commits `complete` with a `credit_event_id`, and the
-ledger row commits in the same transaction (`settle_internal_credit`). The
-run completes later, in another transaction (`commit_settle_from_progress`
-calls `commit_settle`). Three paths can fail the run between the two:
+- `pipeline_runs.state` gains `awaiting_operator`. The check constraint is
+  widened.
+- `pipeline_runs.settle_finish_granted_at TIMESTAMPTZ` records when a
+  failure path gave a finishable Settle run its one extra attempt. The
+  runtime gets `UPDATE` on this column only. `max_attempts` keeps no update
+  grant, because the extra attempt is an attempt given back:
+  `attempt_count = max_attempts - 1`.
+- `pipeline_score_bases (tenant_id, run_id, basis_run_id, basis_revision_id,
+  recorded_at)`, with primary key `(tenant_id, run_id, basis_run_id)`:
+  - a foreign key to the scored run, which cascades;
+  - no foreign key on the basis run, so the record outlives a basis run that
+    is deleted with its submission;
+  - an index on `(tenant_id, basis_run_id)`;
+  - `ENABLE` and `FORCE ROW LEVEL SECURITY`, with the
+    `trace_corpus_tenant_isolation` policy on `trace_current_tenant_id()`;
+  - for the runtime, `SELECT` and `INSERT` only.
 
-- `claim_next`'s sweep: a lease that expired with `attempt_count >=
-  max_attempts`, for example after a crash after
-  `PipelineCrashPoint::AfterInstrumentOperation` on the last attempt;
-- `mark_retry`, when a charged retry exhausts the attempts;
-- `mark_failed`, after a terminal label.
+  The table is listed in `TRACE_COMMONS_RLS_TABLES`, so the pipeline's
+  tenant-isolation control in the operational summary covers it.
 
-Each of the three calls `resolve_open_settlement_legs_on_tx`, which leaves the
-completed leg alone, and then `invalidate_index_writes_of_failed_runs_on_tx`,
-which queues the invalidation of the credited revision. The index loses an
-entry that was paid for, and the next near-duplicate is credited again.
+## Case (b): a paid run whose Settle failed for good
+
+### What happened
+
+The Trace Credit leg commits `complete` with its ledger row in one
+transaction. The run completes in a later one (`commit_settle`). Three paths
+could fail the run between the two:
+
+- the sweep in `claim_next`, on an expired lease with the attempts spent
+  (for example a crash after `AfterInstrumentOperation` on the last attempt);
+- `mark_retry` when it exhausts the attempts;
+- `mark_failed`.
+
+N-7 (`invalidate_index_writes_of_failed_runs_on_tx`) then removed the paid
+revision from the index, and the next near-duplicate was paid again.
 
 ### Rule
 
-A Settle run that a failure path would fail, and that holds only terminal
-legs, is completed, not failed. It ends `complete`, so N-7 keeps its index
-entries and no invalidation is queued. `invalidate_index_writes_of_failed_runs_on_tx`
-does not change. The owner rejected the short form, a skip in that function,
-because it overturns N-7.
-
-A run counts as **finishable** when all of these hold:
+A run is **finishable** (`settle_run_is_finishable_sql!`) when all of these
+hold:
 
 - `next_phase = 'settle'`;
-- the Settle selection is persisted (`pipeline_runs.settle_selection IS NOT
-  NULL`, the column `load_settle_selection` reads);
-- `index_write_state` is not `pending`, so the index write is done
-  (`none`, `complete`, `cancelled` or `failed`; Step 5 runs before Step 6);
-- every leg is `complete` or `forfeited`. A `failed` leg rules this out:
-  `commit_settle_from_progress` refuses one, and only the failure path
-  resolves it. A run with no legs, a zero award, also qualifies.
+- the selection is persisted;
+- `index_write_state` is `none`, `complete` or `cancelled`. It is not
+  `pending`, and not `failed`, because partly written entries must leave the
+  index under N-7;
+- every leg is `complete` or `forfeited`. A run with no leg qualifies.
 
-### Mechanism: one more claim through the normal path
+A failure path that would fail a finishable run whose
+`settle_finish_granted_at` is still NULL (`finishable_settle_run_sql!`)
+does not fail it. Instead it:
 
-The commit needs a live lease, the bound bundle (to verify the Score
-decision), the persisted selection and a fresh submission guard. Only
-`PipelineService::complete_settle_phase` has all four, and the sweep is SQL in
-the store. So the sweep does not commit. It leaves a finishable run to be
-claimed again, and the next claim runs Settle as usual:
+- moves the run to `retry`, due now;
+- sets `attempt_count = max_attempts - 1`;
+- sets `settle_finish_granted_at`;
+- sets the label `settle_finish_granted`.
 
-- Step 4 reuses the persisted selection, and the Settle policy does not run
-  again.
-- Step 5 is skipped, because `index_write_state` is not `pending`.
-- Step 6 skips every `complete` and `forfeited` leg, so no adapter is called
-  and no ledger row is written.
-- `commit_settle_from_progress` builds the outcome from the legs, and
-  `write_pipeline_gate_decision_on_tx` is idempotent for its own run.
+The next claim runs Settle through the normal path:
 
-Changes:
+- Step 4 reuses the selection.
+- Step 5 is skipped, because the index write is not `pending`.
+- Step 6 skips every terminal leg.
+- `commit_settle_from_progress` commits.
 
-1. **`claim_next` sweep.** The `expired` CTE leaves out finishable runs.
-   They stay `leased`, with an expired lease.
-2. **Claim predicates** (`claim_next`'s candidate, `claim_run`,
-   `claim_run_with_lease_config`). Today a run is claimable when
-   `attempt_count < max_attempts`. That becomes
-   `attempt_count < max_attempts OR (finishable AND attempt_count <
-   max_attempts + 1)`: exactly one extra, charged attempt, and only for the
-   commit. The bound stays finite, so the terminal bound of 3 x
-   `max_attempts` charged attempts that the #1143 review relied on becomes
-   3 x `max_attempts` + 1.
-3. **`mark_retry`.** A Settle run that this retry would exhaust, and that is
-   finishable, goes to `retry`, due now, not to `failed`. The extra attempt
-   then commits it. If that attempt is charged again, `attempt_count`
-   reaches `max_attempts + 1` and the run fails as today: invalidated, legs
-   kept.
-4. **`mark_failed`.** It does not change. Its Settle labels are
-   `index_key_conflict`, which comes before any leg, and the two gate-decision
-   refusals. Those two are refusals *of the commit itself*, so a commit
-   cannot finish such a run (see the residual below). `fail_run` and
-   `charged_retry` keep reconciling dispatched legs first.
-5. **Uncharged suspensions are unchanged.** A transient database error, a
-   policy that is not runnable, or a credit hold in the extra attempt is
-   `mark_transient_retry` as today, with no charge and no terminal bound,
-   which is the ruling for suspensions.
+The run ends `complete`, so N-7 never applies to it.
+`invalidate_index_writes_of_failed_runs_on_tx` is unchanged.
 
-`unapplied_index_commands_on_tx` does not change. It counts only
-`index_write_state IN ('none', 'pending')`, and a finishable run is never
-`pending`. A finishable run with state `none` and membership `excluded`
-was already left out. One with state `none` and membership `included` cannot
-reach Step 6: Step 5 sets `complete` or `cancelled` first.
+Where the rule applies:
 
-### Residual, not covered
+- **`claim_next`**: one statement before the sweep grants the extra attempt
+  to expired, exhausted, finishable runs. It uses the sweep's own lock rule
+  (`FOR UPDATE OF p SKIP LOCKED`, in run-id order). The sweep then sees them
+  as `retry` and leaves them, and the same claim can pick one up.
+- **`mark_retry`**: after its UPDATE fails a Settle run, the same
+  transaction converts a finishable run to the extra attempt. In that case it
+  resolves no legs, queues no invalidation and rejects no submission.
+- **`mark_failed`**: the gap below.
 
-If `commit_settle` refuses with `pipeline_gate_decision_conflict` (another
-run's pipeline row exists for the submission) or
-`pipeline_gate_decision_evidence_incomplete`, it refuses on every attempt.
-`complete_settle_phase` checks the evidence before any leg settles, so the
-second refusal can follow a completed leg only if the outcome changed in
-between. A conflict means two runs reached Settle for one submission, which
-`insert_pipeline_receipt` exists to prevent. Such a run still fails under
-N-7, and its paid revision leaves the index. Fixing that needs a rule this
-note does not make.
+**Bound.** The extra attempt is given once. A run charged again on it fails
+exactly as before, and N-7 applies. Uncharged suspensions during the extra
+attempt (a transient database error, a policy that is not runnable) still
+give the attempt back, as they always did.
 
-### Double payment and concurrency (b)
+## The gap: a paid run whose Settle commit is refused for good
 
-- The extra attempt makes no adapter call and writes no ledger row: Step 6
-  skips terminal legs. The ledger's unique index
-  `idx_trace_credit_ledger_pipeline_score (tenant, run, score_outcome,
-  instrument)` still backs this.
-- The claim is the same `FOR UPDATE SKIP LOCKED` claim under a new lease
-  token, so two workers cannot both hold the run. A worker whose old lease
-  expired is fenced by the lease checks it already has.
-- Lock order is unchanged: the run row, then the settlement and
-  invalidation rows. The per-tenant Score lock is not involved.
+`commit_settle` can refuse permanently with `pipeline_gate_decision_conflict`
+(another run's pipeline gate-decision row exists for the submission) or with
+`pipeline_gate_decision_evidence_incomplete`. A retry cannot finish such a
+run.
 
-### Tests (b), written first
+**Rule** (`hold_paid_settle_run_for_operator_on_tx`, inside `mark_failed`'s
+transaction). A run is held, not failed, when all of these hold:
 
-- `a_credited_settle_run_crashing_on_its_last_attempt_completes_and_keeps_its_index_entries`:
-  crash at `AfterInstrumentOperation` on attempt `max_attempts`, expire the
-  lease, run `process_one`. Expect `complete`, no
-  `pipeline_index_invalidations` row, one `novelty_utility` ledger row and no
-  second adapter call. Today the run is `failed`, with an invalidation
-  queued.
-- The same through `mark_retry`: the last attempt fails with a charged label
-  after the leg committed.
-- `a_finishable_run_charged_again_fails_and_is_invalidated`: the extra
-  attempt is bounded.
-- `a_settle_run_with_a_failed_leg_still_fails`: an unchanged control.
+- the run is in Settle;
+- its label is one of those two;
+- it is finishable, ignoring the grant;
+- at least one leg paid: `complete` with a `credit_event_id` or an
+  `external_receipt_hash`.
 
-## Case (a): a duplicate scored against a run that later fails
+A held run moves to **`awaiting_operator`** and keeps its label. Its legs
+are left alone (they are terminal), no invalidation is queued, and the
+submission is not rejected. Its paid revision stays in the index.
 
-### What happens today
+Every other `mark_failed`, and every refusal on a run with nothing paid,
+still fails under N-7.
 
-B's compatibility Score runs under the tenant's Score lock and reads the
-unapplied commands of the tenant's other runs
-(`unapplied_index_commands_on_tx`). A's command makes B fail
-`novelty_passed`. The Score then returns **no awards and no index command**
-(`versioned_pipeline_compat.rs` around lines 466-508), and
-`commit_score_in` seeds legs "one per award", so **B has no settlement leg
-at all**. B completes with an empty Settle. Its gate decision row records
-`novelty_passed = false`. When A fails, A's command drops out, but no B
-artifact records that B was counted against it.
+- **Audit.** The hold sets the V118 review audit marker. The worker's review
+  audit pass (`append_pipeline_review_audit_events`) appends a system
+  `lifecycle_status_change` event:
+  - status `quarantined`;
+  - reason label `pipeline_settle_held_for_operator`;
+  - event id derived from the run (`pipeline-settle-held-for-operator-audit`).
 
-### What the ruling needs
+  The event is label-only, with no run id and no content. A `tracing::warn!`
+  logs the label, the reason label, the tenant storage reference and a hash
+  of the run id.
+- **Operator surface.** `GET /v1/admin/pipeline/operational-summary`
+  (`PipelineProductStore::operational_summary`, served by
+  `pipeline_operational_summary_handler`). `trace-commons-admin
+  operational-summary` reads `main`'s summary, not this one:
+  - the `work` rows group by `(phase, state, reason label)`, so a held run
+    shows as `settle / awaiting_operator / pipeline_gate_decision_conflict`;
+  - the new count `operator_held_run_count` (`serde(default)`, so an older
+    reader is unaffected).
 
-"Record the bases, and queue the duplicate's Score again." The record is
-small:
+  Activation readiness ignores the state: it measures only `pending`,
+  `retry` and `leased` work.
+- **No claim selects it.** The claim queries list only `pending`, `retry`
+  and expired `leased` runs. `runnable_bundle_ids` keeps the run's bundle
+  loadable while it is held.
+- **Contributor status.** The contributor sees `pending`. Processing has not
+  finished, and the credit already shows from the leg.
+- **Operator decision**
+  (`PgPipelineStore::resolve_operator_held_run`):
+  - `Fail` ends the run `failed` (`operator_failed_held_run`) and applies
+    N-7 in the same transaction.
+  - `Release` gives it one more attempt, due now
+    (`operator_released_held_run`). Its legs are terminal, so the attempt
+    only commits. A commit that is refused again holds the run again.
 
-- **Migration V127** (V125 and V126 are the last on `main`; other open
-  branches are not visible from here):
-  `pipeline_score_bases (tenant_id, run_id, basis_run_id, basis_revision_id,
-  recorded_at, PRIMARY KEY (tenant_id, run_id, basis_run_id))`, with
-  foreign keys to `pipeline_runs` that cascade, an index on
-  `(tenant_id, basis_run_id)`, `ENABLE` and `FORCE ROW LEVEL SECURITY`, and
-  the `trace_corpus_tenant_isolation` policy on `trace_current_tenant_id()`,
-  granted like `pipeline_runs`.
-- Written in `commit_score_in`, on the Score-lock transaction, from the rows
-  `unapplied_index_commands_on_tx` returned. To keep the record small, only a
-  Score that ends with `quality_passed = true` and `novelty_passed = false`
-  writes them.
-- Read in the fail transactions (the sweep, `mark_retry`, `mark_failed`),
-  right after `invalidate_index_writes_of_failed_runs_on_tx`, for a basis run
-  that ends failed with its command never applied
-  (`index_write_state IN ('none', 'pending', 'cancelled')`). Lock order: the
-  run rows the caller holds, then the invalidation rows, then the base rows,
-  then the dependant runs, by `run_id`.
+  Both act only on a run that is still `awaiting_operator`. **No HTTP route
+  is wired yet**, so the operator route and its audit event are a follow-up.
+- **Withdrawal** of a held run's submission queues the revision's
+  invalidation through the existing path, because the index write is
+  `complete`. The run stays held for the operator.
 
-The record is not the problem. "Queue B's Score again" is. Nothing in the
-schema lets a run be scored a second time:
+## Double payment and concurrency
 
-1. **Score outcomes are immutable and unique per run.** `phase_outcomes` has
-   `UNIQUE (tenant_id, run_id, phase)`, and the V92 triggers refuse every
-   UPDATE and direct DELETE. No later migration relaxes either. B already
-   has a Score outcome (and a Settle outcome, once complete), so B cannot be
-   put back to `score`. That holds even while B has not yet completed.
-2. **Re-deciding the credit means scoring again, not settling again.** B has
-   no leg, no award, no command and no index entries. The credit depends on
-   a new perplexity and embedder pass and a new novelty read against the
-   current index, under the Score lock. Only that can produce the award, the
-   index command (B's entries must enter the index, or the next
-   near-duplicate is credited too), the leg and the ledger row.
-3. **A second run for B's submission conflicts with three invariants.**
-   - `trace_gate_decisions_one_pipeline_row` (V116) allows one pipeline row
-     per submission, and `write_pipeline_gate_decision_on_tx` refuses another
-     run's row with `pipeline_gate_decision_conflict`. A successor run would
-     fail terminally at its own Settle commit.
-   - Receipts are keyed one run per `request_idempotency_key`.
-   - Five status readers pick a submission's run by `created_at DESC`, and
-     about 66 non-test sites read `pipeline_run_settlements`.
+- The extra attempt and a `Release` call no adapter and write no ledger row:
+  Step 6 skips terminal legs. The ledger's unique index
+  `idx_trace_credit_ledger_pipeline_score` (run, Score outcome, instrument)
+  still backs this.
+- The tests assert one ledger row and no new adapter request after the
+  extra attempt.
+- Grants and holds run inside transactions that hold the run row: the
+  claim's `FOR UPDATE SKIP LOCKED`, and the lease-fenced UPDATE of
+  `mark_retry` and `mark_failed`. Two workers cannot both act on one run.
+  Lock order is unchanged: the run row, then the settlement and invalidation
+  rows.
+- None of this takes the per-tenant Score lock.
 
-So the ruled design needs one of these:
+## Case (a): bases recorded, rescore deferred
 
-- **(a1) A rescore generation on a run.** Add `score_generation` to
-  `pipeline_runs`, `phase_outcomes` (making the unique key `(tenant, run,
-  phase, generation)`), the settlement legs (whose primary key is `(tenant,
-  run, instrument)`) and the ledger key. Every `outcome_for_phase` caller
-  (7), the direct `FROM phase_outcomes` readers (16), the exports and the
-  qualification readers then have to pick a generation. The gate decision
-  row has to become updatable for its own run.
-- **(a2) A successor run for the same submission.** A new run, bound to B's
-  bundle, starting at `score` with B's approved revision and a derived
-  idempotency key. The gate decision row moves from B to the successor
-  (V116 changes from "one row" to "one row per live run"). The status
-  readers, the withdrawal and revocation fan-out, the exports and
-  `insert_pipeline_receipt` all need to know about successors.
+### What happens
 
-Either is a change to the run model, larger than the issue's "needs a
-design", and it touches readers outside this issue (status, exports, gate
-consumers). The task said to stop in that case, not to pick a model.
+B's compatibility Score counts A's unapplied index command, fails novelty,
+and gets no award, no command and no leg. If A then fails with its command
+never applied, nothing ever credits B.
 
-### Double payment (a), whichever model is chosen
+### What is built
 
-- B was never paid: an empty award seeds no leg and no ledger row. The first
-  rescore pays at most once through the existing ledger key, because its
-  outcome or run id is new.
-- The second payment to prevent is a **second rescore**: A1 and A2 both fail,
-  or B's rescore counts C and C fails. Proposed rule: a submission is
-  rescored only while none of its runs or generations has a `trace_credit`
-  leg with a `credit_event_id`. The check runs under the Score lock, in the
-  rescore's commit, so two concurrent rescores cannot both pass it.
-- **A nondeterministic scorer.** The NEAR AI scorer is not bit-stable, so a
-  rescore gives a run a second try at the perplexity floor. Requeuing only a
-  Score that already had `quality_passed = true` and `novelty_passed = false`
-  limits the rescore to the novelty question the ruling is about.
+`commit_score_phase` keeps the `(run id, revision id)` of every row that
+`unapplied_index_commands_on_tx` returned under the tenant's Score lock.
+`score_and_commit` passes them to `commit_score_in` only when the Score's
+evidence says `quality_passed = true` and `novelty_passed = false`.
+`commit_score_in` inserts them into `pipeline_score_bases` on the
+Score-lock transaction, after the outcome, so a refused commit records
+nothing.
 
-### Concurrency (a)
+The rule records every unapplied run the Score counted, not only the
+nearest. That over-approximates, on purpose: a backfill can recompute.
 
-- Requeuing happens in the transaction that fails A, which holds A's run row.
-  It only marks B (or inserts B's successor) as due. It never takes the
-  tenant's Score lock, so it cannot deadlock with a Score that holds the lock
-  and reads `pipeline_runs`.
-- The rescore takes the Score lock with `pg_try_advisory_xact_lock`, like any
-  Score. A busy lock releases the run uncharged.
-- Withdrawal of a basis run (A withdrawn, not failed) also drops A's command
-  without an index entry. The ruling covers failure only. **Open question.**
+`PgPipelineStore::list_score_bases` reads them.
 
-### Hash-only and fail-closed
+The runs affected by (a) are then:
 
-New log lines carry run ids hashed (`sha256_prefixed`), as the
-`unapplied_index_command_unreadable` warning does. A basis row that cannot be
-read fails closed: no requeue, and an operator-visible label.
+```sql
+SELECT b.run_id, b.basis_run_id
+  FROM pipeline_score_bases b
+  JOIN pipeline_runs a
+    ON a.tenant_id = b.tenant_id AND a.run_id = b.basis_run_id
+ WHERE b.tenant_id = $1
+   AND a.state = 'failed'
+   AND a.index_write_state IN ('none', 'pending', 'cancelled');
+```
 
-## Owner questions
+### What is deferred
 
-1. Case (a): a rescore generation (a1) or a successor run (a2)? Or accept (a)
-   as a known loss, with the bases recorded for a later backfill?
-2. Case (a): does withdrawal or revocation of a basis run also requeue?
-3. Case (b) residual: what should happen to a run with completed legs whose
-   Settle commit refuses for good (a gate decision conflict)?
+There is no rescore. Case (a) is a **known, rare loss**: B's contributor is
+not credited. A backfill follows once a rescore model is chosen. The
+options are recorded in this note's first revision (commit `e245b686b`):
+
+- a rescore generation on the run;
+- a successor run.
+
+Either changes the run model, because `phase_outcomes` is immutable and
+unique per run and phase, and V116 allows one pipeline gate row per
+submission. The double-payment rule proposed for the rescore: rescore a
+submission only while it has no leg with a `credit_event_id`, checked under
+the Score lock.
+
+## Open questions
+
+1. Should withdrawal or revocation of a basis run (its command dropped, not
+   failed) also count toward (a)? Out of scope here.
+2. The operator route for `resolve_operator_held_run` and its audit event.
+3. Should holds cover other permanent Settle failures of a paid run (for
+   example a bound bundle that no longer loads)? Today only the two
+   gate-decision refusals are held.
+
+## Tests
+
+In `crates/trace-commons-server/tests/versioned_pipeline_runtime_pg.rs`:
+
+- `a_paid_settle_run_that_crashes_on_its_last_attempt_completes_and_stays_indexed`
+  (the sweep);
+- `a_charged_retry_that_exhausts_a_paid_settle_run_gives_it_one_extra_attempt`
+  (`mark_retry`);
+- `a_finishable_run_charged_again_on_its_extra_attempt_fails_under_n7`
+  (the bound);
+- `a_paid_run_whose_settle_commit_is_refused_waits_for_an_operator` (the
+  gap: hold, audit marker, summary, no claim, `Fail` under N-7);
+- `an_operator_released_held_run_completes_without_paying_again`;
+- `a_near_duplicate_score_records_the_unapplied_run_it_counted` (case (a)
+  bases).
+
+The existing N-7 test
+`a_run_that_fails_for_good_after_its_index_write_has_its_revision_removed`
+is unchanged and still passes: its write is `pending`, so the run is not
+finishable.

@@ -1713,6 +1713,26 @@ async fn append_pipeline_review_audit_item(
         )
         .await?;
     }
+    if item.settle_held_for_operator {
+        // #1313: a paid run whose Settle commit was refused for good is
+        // held for an operator (`awaiting_operator`) rather than failed.
+        // Label-only, like the other hold events.
+        append_pipeline_lifecycle_audit_event(
+            state,
+            db,
+            tenant_id,
+            item.submission_id,
+            deterministic_trace_uuid_for(
+                "pipeline-settle-held-for-operator-audit",
+                tenant_id,
+                item.run_id,
+            ),
+            TraceCorpusStatus::Quarantined,
+            trace_commons_server::versioned_pipeline::PIPELINE_SETTLE_HELD_FOR_OPERATOR_LABEL,
+            "pipeline settle operator hold audit event",
+        )
+        .await?;
+    }
     if let Some(assessment) = &item.assessment {
         if db
             .get_trace_audit_event_by_id(tenant_id, assessment.assessment_id)

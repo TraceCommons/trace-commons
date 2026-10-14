@@ -50195,3 +50195,526 @@ async fn accept_medium_leaves_a_declared_and_a_consent_flag_medium_as_they_were(
         "accepted"
     );
 }
+
+// #1313: a Settle run whose legs are all terminal finishes rather than
+// failing (case (b), N-7 kept); a paid run whose Settle commit is refused for
+// good waits for an operator; and a compatibility Score records the
+// unapplied runs it counted (case (a), bases only). Design:
+// docs/superpowers/specs/2026-10-14-pipeline-duplicate-basis-repair-design.md.
+
+/// A minimal config that awards only `trace_credit`, so the one leg is the
+/// last leg and `AfterInstrumentOperation` fires after it completed.
+fn indexed_trace_credit_only_config() -> PipelineBundleConfig {
+    PipelineBundleConfig {
+        instrument_awards: vec![PipelineInstrumentAwardConfig {
+            instrument_id: InstrumentId::trace_credit().as_str().to_string(),
+            atomic_units: AtomicUnits::from_raw(1_000_000),
+            descriptor: trace_credit_descriptor(),
+        }],
+        include_index: true,
+        variant: None,
+    }
+}
+
+/// Sets `run_id`'s `attempt_count` to `max_attempts - 1`, so its next claim
+/// takes its last attempt.
+async fn spend_all_but_one_attempt(backend: &Arc<PgBackend>, tenant: &str, run_id: uuid::Uuid) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET attempt_count = max_attempts - 1
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// The run's `pipeline_index_invalidations` row count and whether its one
+/// extra Settle attempt was granted (`settle_finish_granted_at`).
+async fn invalidations_and_finish_grant(
+    backend: &Arc<PgBackend>,
+    tenant: &str,
+    run_id: uuid::Uuid,
+) -> (i64, bool) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT (SELECT COUNT(*) FROM pipeline_index_invalidations
+                      WHERE tenant_id = $1 AND run_id = $2),
+                    (SELECT settle_finish_granted_at IS NOT NULL FROM pipeline_runs
+                      WHERE tenant_id = $1 AND run_id = $2)",
+            &[&tenant, &run_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (row.get(0), row.get(1))
+}
+
+/// Drives a `indexed_trace_credit_only_config` run to a crash right after its Trace
+/// Credit leg completed, on its last Settle attempt. Returns the service,
+/// the index, the recording adapters and the leased run.
+async fn crash_after_the_paid_leg_on_the_last_attempt(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    tenant: &str,
+) -> (
+    Arc<PipelineService>,
+    Arc<IsolatedPipelineIndex>,
+    Vec<Arc<RecordingSettlementAdapter>>,
+    PipelineRunRecord,
+) {
+    let (service, index, adapters) = test_service(
+        backend.clone(),
+        artifact_store(dir),
+        indexed_trace_credit_only_config(),
+        Some(PipelineCrashPoint::AfterInstrumentOperation),
+    )
+    .await;
+    let (run, _) = run_to_settle_ready(&service, tenant).await;
+    spend_all_but_one_attempt(backend, tenant, run.run_id).await;
+    let crashed = service
+        .process_run(tenant, run.run_id)
+        .await
+        .expect_err("Settle crashes after the Trace Credit leg");
+    assert_eq!(crashed.to_string(), INJECTED_PIPELINE_CRASH);
+    let leased = service
+        .store()
+        .get_run(tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(leased.state, PipelineRunState::Leased);
+    assert_eq!(leased.attempt_count, leased.max_attempts);
+    let legs = service
+        .store()
+        .list_settlements(tenant, run.run_id)
+        .await
+        .unwrap();
+    assert!(
+        !legs.is_empty()
+            && legs
+                .iter()
+                .all(|leg| leg.operation_state == "complete" && leg.credit_event_id.is_some()),
+        "the Trace Credit leg paid before the crash: {legs:?}"
+    );
+    (service, index, adapters, leased)
+}
+
+/// #1313 (b), the claim sweep: a run whose Trace Credit leg paid, crashed on
+/// its last Settle attempt, is not failed by the sweep. It gets one extra
+/// attempt, which pays nothing again, and ends `complete`, so N-7 never
+/// removes its paid revision from the index.
+#[tokio::test]
+async fn a_paid_settle_run_that_crashes_on_its_last_attempt_completes_and_stays_indexed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("finish-sweep-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (service, index, adapters, leased) =
+        crash_after_the_paid_leg_on_the_last_attempt(&backend, &dir, &tenant).await;
+    let entries = index.entry_count(&tenant_ref, MINIMAL_INDEX_ID);
+    assert!(
+        entries > 0,
+        "the crashed Settle wrote the revision's entries"
+    );
+    let calls_before = adapters[1].requests().len();
+    expire_lease(&backend, &tenant, leased.run_id).await;
+
+    let finished = service
+        .process_one(&tenant)
+        .await
+        .unwrap()
+        .expect("the finishable run is claimed for its extra attempt");
+    assert_eq!(finished.run_id, leased.run_id);
+    assert_eq!(finished.state, PipelineRunState::Complete, "{finished:?}");
+    assert_eq!(finished.next_phase, None);
+    let (invalidations, granted) =
+        invalidations_and_finish_grant(&backend, &tenant, leased.run_id).await;
+    assert_eq!(
+        invalidations, 0,
+        "a completed run's revision is not removed"
+    );
+    assert!(granted, "the extra attempt is recorded");
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), entries);
+    assert_eq!(
+        adapters[1].requests().len(),
+        calls_before,
+        "the extra attempt calls no adapter"
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, leased.run_id).await,
+        1,
+        "the extra attempt writes no second ledger row"
+    );
+    assert!(
+        service
+            .store()
+            .outcome_for_phase(&tenant, leased.run_id, Phase::Settle)
+            .await
+            .unwrap()
+            .is_some(),
+        "the extra attempt committed the Settle outcome"
+    );
+}
+
+/// #1313 (b), `mark_retry`: a charged retry that would exhaust a finishable
+/// Settle run gives it its extra attempt instead of failing it, and that
+/// attempt completes it.
+#[tokio::test]
+async fn a_charged_retry_that_exhausts_a_paid_settle_run_gives_it_one_extra_attempt() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("finish-retry-{}", uuid::Uuid::new_v4());
+    let (service, _, _, leased) =
+        crash_after_the_paid_leg_on_the_last_attempt(&backend, &dir, &tenant).await;
+
+    let retried = service
+        .store()
+        .mark_retry(&leased, PIPELINE_OPERATIONAL_ERROR_LABEL)
+        .await
+        .expect("the charged retry records");
+    assert_eq!(retried.state, PipelineRunState::Retry, "{retried:?}");
+    assert_eq!(retried.attempt_count, retried.max_attempts - 1);
+    let (invalidations, granted) =
+        invalidations_and_finish_grant(&backend, &tenant, leased.run_id).await;
+    assert_eq!(invalidations, 0);
+    assert!(granted);
+
+    let finished = service
+        .process_run(&tenant, leased.run_id)
+        .await
+        .unwrap()
+        .expect("the extra attempt runs");
+    assert_eq!(finished.state, PipelineRunState::Complete, "{finished:?}");
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, leased.run_id).await,
+        1
+    );
+}
+
+/// #1313 (b): the extra attempt is given once. A finishable run charged
+/// again on it fails as before, and N-7 queues its revision's removal.
+#[tokio::test]
+async fn a_finishable_run_charged_again_on_its_extra_attempt_fails_under_n7() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("finish-bounded-{}", uuid::Uuid::new_v4());
+    let (service, _, _, leased) =
+        crash_after_the_paid_leg_on_the_last_attempt(&backend, &dir, &tenant).await;
+    service
+        .store()
+        .mark_retry(&leased, PIPELINE_OPERATIONAL_ERROR_LABEL)
+        .await
+        .expect("the first exhaustion grants the extra attempt");
+    let reclaimed = service
+        .store()
+        .claim_run(&tenant, leased.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the extra attempt is claimable");
+    assert_eq!(reclaimed.attempt_count, reclaimed.max_attempts);
+    let failed = service
+        .store()
+        .mark_retry(&reclaimed, PIPELINE_OPERATIONAL_ERROR_LABEL)
+        .await
+        .expect("the second exhaustion records");
+    assert_eq!(failed.state, PipelineRunState::Failed, "{failed:?}");
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+    );
+    let (invalidations, _) = invalidations_and_finish_grant(&backend, &tenant, leased.run_id).await;
+    assert_eq!(invalidations, 1, "N-7 removes a failed run's revision");
+}
+
+/// #1313, the gap: a run whose Trace Credit leg paid, and whose Settle
+/// commit is then refused for good (another run's pipeline gate decision row
+/// for the submission), is not failed. It waits for an operator in
+/// `awaiting_operator`, keeps its index entries, is marked for a label-only
+/// audit event, and shows on the operational summary. The operator's
+/// `Fail` ends it under N-7.
+#[tokio::test]
+async fn a_paid_run_whose_settle_commit_is_refused_waits_for_an_operator() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let tenant = format!("operator-held-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let run_id = receive_envelope(&service, &tenant, "principal_sha256:operator-held", &env).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    let other_run = uuid::Uuid::new_v4();
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        tx.execute(
+            "INSERT INTO trace_gate_decisions (
+                 tenant_id, decision_id, submission_id, gate_policy_version,
+                 gate_version_hash, perplexity_micros, tail_fraction_micros,
+                 perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                 novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+                 source, pipeline_run_id
+             ) VALUES ($1,$2,$3,'v','h',1,0,true,1,'n',true,'e','a','pipeline_settle',$4)",
+            &[
+                &tenant,
+                &expected_pipeline_decision_id(&tenant, other_run),
+                &env.submission_id,
+                &other_run,
+            ],
+        )
+        .await
+        .expect("another run's pipeline row");
+        tx.commit().await.unwrap();
+    }
+
+    let held = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(held.state, PipelineRunState::AwaitingOperator, "{held:?}");
+    assert_eq!(held.next_phase, Some(Phase::Settle));
+    assert_eq!(
+        held.last_error_label.as_deref(),
+        Some(PIPELINE_GATE_DECISION_CONFLICT_LABEL)
+    );
+    assert_eq!(
+        count_novelty_utility_rows_for_run(&backend, &tenant, run_id).await,
+        1
+    );
+    let (invalidations, _) = invalidations_and_finish_grant(&backend, &tenant, run_id).await;
+    assert_eq!(invalidations, 0, "the paid revision stays in the index");
+    assert_eq!(index.revision_count(&tenant_ref, MINIMAL_INDEX_ID), 1);
+
+    let audits = service
+        .store()
+        .list_pending_review_audits(&tenant, 10)
+        .await
+        .unwrap();
+    let audit = audits
+        .iter()
+        .find(|item| item.run_id == run_id)
+        .expect("the hold is marked for its audit event");
+    assert!(audit.settle_held_for_operator, "{audit:?}");
+
+    let summary = PipelineProductStore::new(backend.clone())
+        .operational_summary(&tenant)
+        .await
+        .unwrap();
+    assert_eq!(summary.operator_held_run_count, 1);
+    assert!(
+        summary
+            .work
+            .iter()
+            .any(|item| item.state == "awaiting_operator"
+                && item.reason_label.as_deref() == Some(PIPELINE_GATE_DECISION_CONFLICT_LABEL)),
+        "{:?}",
+        summary.work
+    );
+    assert!(
+        service.process_one(&tenant).await.unwrap().is_none(),
+        "no claim selects a held run"
+    );
+
+    let resolved = service
+        .store()
+        .resolve_operator_held_run(&tenant, run_id, PipelineOperatorHeldRunResolution::Fail)
+        .await
+        .unwrap()
+        .expect("the held run resolves");
+    assert_eq!(resolved.state, PipelineRunState::Failed);
+    let (invalidations, _) = invalidations_and_finish_grant(&backend, &tenant, run_id).await;
+    assert_eq!(invalidations, 1, "an operator's failure applies N-7");
+    assert!(
+        service
+            .store()
+            .resolve_operator_held_run(&tenant, run_id, PipelineOperatorHeldRunResolution::Fail)
+            .await
+            .unwrap()
+            .is_none(),
+        "a run no longer held is left alone"
+    );
+}
+
+/// #1313, the gap, operator `Release`: the held run gets one more attempt,
+/// which completes it once the conflicting row is gone, with no second
+/// payment.
+#[tokio::test]
+async fn an_operator_released_held_run_completes_without_paying_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let tenant = format!("operator-release-{}", uuid::Uuid::new_v4());
+    let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let run_id =
+        receive_envelope(&service, &tenant, "principal_sha256:operator-release", &env).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    let other_run = uuid::Uuid::new_v4();
+    let decision_id = expected_pipeline_decision_id(&tenant, other_run);
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        tx.execute(
+            "INSERT INTO trace_gate_decisions (
+                 tenant_id, decision_id, submission_id, gate_policy_version,
+                 gate_version_hash, perplexity_micros, tail_fraction_micros,
+                 perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                 novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+                 source, pipeline_run_id
+             ) VALUES ($1,$2,$3,'v','h',1,0,true,1,'n',true,'e','a','pipeline_settle',$4)",
+            &[&tenant, &decision_id, &env.submission_id, &other_run],
+        )
+        .await
+        .expect("another run's pipeline row");
+        tx.commit().await.unwrap();
+    }
+    let held = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(held.state, PipelineRunState::AwaitingOperator, "{held:?}");
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        tx.execute(
+            "DELETE FROM trace_gate_decisions WHERE tenant_id = $1 AND decision_id = $2",
+            &[&tenant, &decision_id],
+        )
+        .await
+        .expect("the operator removes the conflicting row");
+        tx.commit().await.unwrap();
+    }
+    let released = service
+        .store()
+        .resolve_operator_held_run(&tenant, run_id, PipelineOperatorHeldRunResolution::Release)
+        .await
+        .unwrap()
+        .expect("the held run resolves");
+    assert_eq!(released.state, PipelineRunState::Retry, "{released:?}");
+    let finished = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the released run runs");
+    assert_eq!(finished.state, PipelineRunState::Complete, "{finished:?}");
+    assert_eq!(
+        count_novelty_utility_rows_for_run(&backend, &tenant, run_id).await,
+        1,
+        "no second payment"
+    );
+}
+
+/// #1313 (a), bases only: a Score judged a near-duplicate of a run whose
+/// command Settle has not applied records that run as its basis; the first,
+/// novel Score records none.
+#[tokio::test]
+async fn a_near_duplicate_score_records_the_unapplied_run_it_counted() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        IsolatedPipelineIndex::new(),
+    )
+    .await;
+    let (tenant, first, second) = identical_receipts().await;
+    let principal = "principal_sha256:score-bases";
+    let first_run = receive_envelope(&service, &tenant, principal, &first).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, first_run)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    let second_run = receive_envelope(&service, &tenant, principal, &second).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, second_run)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("the second run's {phase} runs"));
+    }
+    let first_record = service
+        .store()
+        .get_run(&tenant, first_run)
+        .await
+        .unwrap()
+        .expect("the first run");
+    assert_eq!(
+        service
+            .store()
+            .list_score_bases(&tenant, second_run)
+            .await
+            .unwrap(),
+        vec![(
+            first_run,
+            first_record
+                .approved_revision_id
+                .expect("approved revision")
+        )]
+    );
+    assert!(
+        service
+            .store()
+            .list_score_bases(&tenant, first_run)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a novel Score records no basis"
+    );
+    assert_eq!(count_tenant_rows(&tenant, "pipeline_score_bases").await, 1);
+}
