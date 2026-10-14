@@ -1,69 +1,84 @@
 # NEAR AI inference credit settlement (stub)
 
-Status: **not live.** The rail, its outbox (V127) and its tests exist; the
-NEAR AI admin key does not, and nothing in `trace-commons-ingest` drives the
-rail yet. This page covers what an operator needs once both arrive. Design:
+Status: **not live.** The rail, its ledger (V129) and its tests exist, but
+three things are still missing:
+
+- NEAR AI has not shipped the `trace_commons` credit type it depends on;
+- we have no NEAR AI admin key;
+- nothing in `trace-commons-ingest` drives the rail yet.
+
+Design:
 [`../superpowers/specs/2026-10-14-near-ai-inference-credit-settlement-design.md`](../superpowers/specs/2026-10-14-near-ai-inference-credit-settlement-design.md).
+NEAR AI proposal:
+[`../superpowers/specs/2026-10-14-near-ai-trace-commons-credit-type-proposal.md`](../superpowers/specs/2026-10-14-near-ai-trace-commons-credit-type-proposal.md).
 
 ## What it does
 
-A finalized settlement batch for a tenant that has elected a NEAR AI
-organization is converted at a configured rate into nano-USD and added to
-that organization's NEAR AI spend ceiling through
-`PATCH /v1/admin/organizations/{org_id}/limits`. That route sets an
-**absolute** ceiling per credit type, with no compare-and-swap; the rail
-reads the history before and after every write and freezes on anything it
-did not write itself.
+Each finalized settlement batch for a tenant that has elected a NEAR AI
+organization is converted at a configured rate into nano-USD. It is added
+once to that recipient's **cumulative** total in
+`trace_settlement_rail_ledgers`. The rail publishes the total. NEAR AI
+keeps the maximum it has seen, as it does for staking-farm credit, so
+publishing again is always safe. Totals never decrease: the database
+refuses it.
+
+- **Push** (default): we `PUT` the total to
+  `/v1/admin/organizations/{org_id}/trace-commons/credit`.
+- **Pull**: NEAR AI fetches a statement of the total, Ed25519-signed with
+  our statement key.
 
 ## Configuration
 
 | Variable | Required | Meaning |
 |---|---|---|
 | `TRACE_COMMONS_NEAR_AI_CREDIT_RAIL` | no | `disabled` (default; also any unrecognised value), `dry_run`, `live`. The kill switch. |
-| `TRACE_COMMONS_NEAR_AI_ADMIN_BASE_URL` | when enabled | API root including `/v1`; `https://` only |
-| `TRACE_COMMONS_NEAR_AI_ADMIN_KEY` | `live` | read-write admin token (`adm_...`) |
-| `TRACE_COMMONS_NEAR_AI_ADMIN_READ_KEY` | `dry_run` without the write key; reconciler | read-only admin token |
-| `TRACE_COMMONS_NEAR_AI_ADMIN_USER_AGENT` | when enabled | the exact User-Agent the key was minted with |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_DELIVERY` | no | `push` (default) or `pull` |
+| `TRACE_COMMONS_NEAR_AI_ADMIN_BASE_URL` | push; pull with a read key | API root including `/v1`; `https://` only |
+| `TRACE_COMMONS_NEAR_AI_ADMIN_KEY` | push `live` | read-write admin token (`adm_...`) |
+| `TRACE_COMMONS_NEAR_AI_ADMIN_READ_KEY` | push `dry_run` without the write key; optional otherwise | read-only admin token |
+| `TRACE_COMMONS_NEAR_AI_ADMIN_USER_AGENT` | whenever an admin key is set | the exact User-Agent the key was minted with |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_STATEMENT_KEY` | pull | base64 PKCS#8 Ed25519 key that signs statements |
 | `TRACE_COMMONS_NEAR_AI_CREDIT_RATE` | when enabled | `numerator/denominator`, nano-USD per microcredit. No default. |
-| `TRACE_COMMONS_NEAR_AI_CREDIT_MAX_DELIVERY_NANO_USD` | when enabled | per-delivery ceiling; a larger row freezes |
-| `TRACE_COMMONS_NEAR_AI_CREDIT_TYPE` | no | NEAR AI credit type to write; default `grant` |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_MAX_CUMULATIVE_NANO_USD` | when enabled | per-recipient ceiling; a total above it freezes |
 | `TRACE_COMMONS_NEAR_AI_ADMIN_TIMEOUT_MS` | no | 100 to 120000; default 15000 |
 
-An enabled mode with a missing or invalid control refuses with
-`missing_control:<name>` and never falls back to a less restrictive mode.
+If the rail is enabled and a control is missing or invalid, it refuses with
+`missing_control:<name>`. `trace-commons-ingest` then refuses to start. It
+never falls back to a less restrictive mode or to another delivery mode.
 
 ## Minting the keys
 
-NEAR AI admin keys are bound to the User-Agent of the request that minted
-them. A key minted from a browser session fails from the server with
-`near_ai_admin_unauthorized`. Mint each key with the User-Agent you put in
-`TRACE_COMMONS_NEAR_AI_ADMIN_USER_AGENT` (or with none). Keys expire; record
-the expiry and rotate before it. Every write is attributed on NEAR AI's side
-to the admin who minted the key.
-
-Use two keys: `read_write` for dispatch, `read_only` for the reconciler.
+NEAR AI binds an admin key to the User-Agent of the request that minted it.
+A key minted from a browser session fails from the server with
+`near_ai_admin_unauthorized`. Mint each key with the User-Agent you set in
+`TRACE_COMMONS_NEAR_AI_ADMIN_USER_AGENT`, or with none. Keys expire: record
+the expiry and rotate before it. On NEAR AI's side, every write is
+attributed to the admin who minted the key.
 
 ## Freeze labels
 
+A frozen ledger keeps accruing but publishes nothing until it is
+unfrozen. If you unfreeze without fixing the cause, it freezes again.
+
 | Label | Meaning | Action |
 |---|---|---|
-| `near_ai_grant_bucket_foreign_baseline` | the organization already had a credit row of this type we did not write | agree with NEAR AI how to treat it; there is no adopt action yet |
-| `near_ai_grant_bucket_foreign_write` | someone else wrote the bucket after us; our credit may have been overwritten | read the history with NEAR AI, restore if needed, then clear the recipient freeze |
-| `near_ai_grant_interleaved_write` | a foreign write landed between our read and our write; ours replaced it | the foreign amount was lost on their side; tell NEAR AI |
-| `near_ai_admin_read_only_key` | dispatch is using the read-only key | fix the configuration |
+| `settlement_rail_external_ahead` | NEAR AI holds more than we ever accrued | find the extra writer, or the lost accrual, with NEAR AI |
+| `settlement_rail_external_regressed` | NEAR AI's total went below what it confirmed | escalate to NEAR AI; their total is meant to be monotonic |
+| `settlement_rail_external_refused_total` | NEAR AI answered a publish with less than we sent | escalate to NEAR AI |
+| `near_ai_admin_read_only_key` | push is using a read-only key | fix the configuration |
 | `near_ai_org_not_found` | the organization is missing or inactive | the contributor rebinds |
-| `near_ai_delivery_above_ceiling` | a row exceeds the per-delivery ceiling | check the rate before raising the ceiling |
-| `settlement_rail_effect_missing` | the reconciler cannot find a recorded write | escalate; do not re-send |
+| `near_ai_cumulative_above_ceiling` | a total exceeds the configured ceiling | check the rate before raising the ceiling |
 
-A frozen row is never retried automatically. A frozen row with no recorded
-effect may be cancelled, which frees its batch for another payout path. A row
-whose effect exists can never be cancelled.
+## Database grants (V129)
 
-## Database grants (V127)
-
-V127 grants `trace_ingest_runtime` `SELECT, INSERT` and column-level
-`UPDATE` on `trace_near_ai_credit_recipients`, `trace_settlement_rail_carry`
-and `trace_settlement_rail_outbox`, and no `DELETE`. All three force row-level
-security. The rail also reads `trace_credit_settlement_batches` and, through
-its one-payout-path trigger, `trace_near_credit_outbox`, both covered by the
-pilot's table-wide grants on pre-V62 tables.
+- **`trace_near_ai_credit_recipients`:** `SELECT, INSERT`, plus
+  `UPDATE (revoked_at)`.
+- **`trace_settlement_rail_credits`:** `SELECT, INSERT` only. It is
+  append-only.
+- **`trace_settlement_rail_ledgers`:** `SELECT, INSERT`, plus column-level
+  `UPDATE`. A trigger refuses any decrease of a total.
+- **All three:** `trace_ingest_runtime` gets no `DELETE`, and row-level
+  security is forced.
+- **Older tables:** the rail also reads `trace_credit_settlement_batches`,
+  and its one-payout-path trigger reads `trace_near_credit_outbox`. The
+  pilot's table-wide grants on pre-V62 tables cover both.

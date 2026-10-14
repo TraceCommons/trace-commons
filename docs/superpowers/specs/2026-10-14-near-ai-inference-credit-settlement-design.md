@@ -1,6 +1,6 @@
 # NEAR AI inference credit settlement — design
 
-Status: draft, 2026-10-14. Owner goal: settle contributor credit into NEAR AI
+Status: draft, 2026-10-14, revised the same day around NEAR AI's staking-farm credit mechanism. Owner goal: settle contributor credit into NEAR AI
 inference credit, built up to the point where only the NEAR AI admin key is
 missing, behind configuration that fails closed without it.
 
@@ -143,237 +143,237 @@ source, with three additions: (a) `credit/reconciliations` now carries an
 so `source` gives no isolation; (c) `limits/history` records provenance,
 which is what makes a detect-and-freeze design possible at all.
 
-### 1.9 Verdict
+### 1.9 Verdict, and the staking-farm precedent
 
-Not a safe primitive on its own, but a **detectable** one: every write
-leaves a history row with our `changedBy`/`changeReason`, so we can prove
-whether our write landed, whether anyone else wrote the bucket, and whether
-ours was overwritten. We build on it only with (i) a precondition that the
-active `grant` row is absent or ours, (ii) a correlation marker in
-`changeReason`, (iii) read-back verification and (iv) a reconciler, with
-every anomaly a freeze rather than a retry. The durable fix is a dedicated
-credit type for Trace Commons (Q1), which turns every write into the
-staking-farm pattern.
+The limits PATCH is not a safe primitive for an external rewards source.
+The 2026-10-14 first draft of this spec built a detect-and-freeze protocol
+on top of it: read the prior value, write prior plus delta, read back, and
+freeze on any foreign write. The owner redirected the design the same day:
+staking NEAR for inference already grants credit through an admin
+mechanism, and we should use the same one.
+
+NEAR AI's staking-farm sync is that mechanism
+(`cloud-api:crates/services/src/staking_farm.rs:319-430`,
+`organization_staking_farm_sources.rs:286-385`):
+
+- a dedicated `staking_farm` credit type with a single writer;
+- each sync recomputes the **cumulative** credit and writes
+  `max(computed, last_synced)`;
+- the write happens under the organization accounting lock, after
+  rechecking that the source and the organization are active, and only
+  when the value grows.
+
+Monotonic cumulative writes are idempotent and need no compare-and-swap.
+This design adopts that model and proposes a `trace_commons` credit type to
+NEAR AI. See
+[`2026-10-14-near-ai-trace-commons-credit-type-proposal.md`](./2026-10-14-near-ai-trace-commons-credit-type-proposal.md)
+for the proposal and a local cloud-api draft.
 
 ## 2. Our side today (checked)
 
-- Legacy outbox: `trace_near_credit_outbox` (`migrations/V2__trace_credit_settlement.sql:56-73`),
-  fed by finalized `trace_credit_settlement_batches` (`V2:20-37`,
-  `settled_credit_micros BIGINT`), drained by a per-tenant scheduler
-  (`run_trace_near_credit_outbox_scheduler_tick`, `trace-commons-ingest.rs:45711`),
-  kill switch `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` defaulting to `Disabled`
-  (`trace-commons-ingest.rs:26845-26867`). No backoff columns.
-- `near_credit.rs` builds non-transferable contract calls only; `ft_transfer`
-  is refused by allowlist (`near_credit.rs:303-316`). Amount `i64` micros
-  (`:25`).
-- Multi-instrument is **partly** in place, contrary to the memory note:
-  `instrument_id` exists on the ledger, batches and outbox (V94:33-106), and
-  `pipeline_run_settlements` carries `instrument_id`, `atomic_units
-  NUMERIC(39,0)` with a u128 bound, and a `payout_rail` (`V94:108-235`). Only
-  `trace_credit` on rail `near` is ever paid (`versioned_pipeline.rs:3955-3962`).
-  No per-instrument decimals column exists.
-- Revocation does not claw back settled credit (`trace-commons-ingest.rs:65811-65819`,
-  `docs/trace-commons.md:1293`, `:1300`).
-- Tenant ids leave only as `tenant_sha256:` + 16 bytes of an unsalted SHA-256
-  (`trace-commons-ingest.rs:78371-78413`). Safe for random `near-`/`nearai-`
-  ids, guessable for low-entropy legacy ids. The new rail sends **no tenant
-  identifier at all**.
+- **Legacy outbox.** `trace_near_credit_outbox`
+  (`migrations/V2__trace_credit_settlement.sql:56-73`) is fed by finalized
+  `trace_credit_settlement_batches` (`V2:20-37`,
+  `settled_credit_micros BIGINT`). A per-tenant scheduler drains it
+  (`trace-commons-ingest.rs:45711`). Its kill switch,
+  `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`, defaults to `Disabled`.
+- **Multi-instrument is partly in place**, contrary to the earlier memory
+  note. `instrument_id` exists on the ledger, batches and outbox (V94), and
+  `pipeline_run_settlements` carries `atomic_units NUMERIC(39,0)` and a
+  `payout_rail`. Only `trace_credit` on rail `near` is ever paid.
+- **Revocation does not claw back settled credit**
+  (`trace-commons-ingest.rs:65811-65819`).
+- **Tenant identifiers.** On the legacy path, tenant ids leave only as an
+  unsalted, truncated SHA-256 (`trace-commons-ingest.rs:78371-78413`). This
+  rail sends no tenant identifier at all.
 
 ## 3. Design
 
-### 3.1 Shape: a rail, not another NEAR-only path
+### 3.1 A cumulative ledger behind a rail seam
 
-- New generic table `trace_settlement_rail_outbox`, discriminated by
-  `rail_id` and `instrument_id`, with `atomic_units NUMERIC(39,0)` and
-  `instrument_decimals SMALLINT`. The NEAR AI rail is `rail_id =
-  'near_ai_org_limits'`, `instrument_id = 'near_ai_credit_usd'`, decimals 9.
-- A `SettlementRail` trait (`crates/trace-commons-server/src/settlement_rail.rs`)
-  held as `Arc<dyn SettlementRail>`; the dispatcher knows nothing NEAR
-  AI-specific. Below it, `NearAiAdminApi` is a second trait object so the
-  HTTP client and the test fake are interchangeable.
-- The legacy NEAR outbox is not migrated onto the new table in this slice;
-  the spec leaves that as a follow-up once the new table has run in
-  production.
+- **`SettlementRail`** (`settlement_rail.rs`) is held as
+  `Arc<dyn SettlementRail>`. Its two operations are
+  `publish(CumulativeStatement) -> Published` and
+  `observe(recipient) -> Option<u128>`. The dispatcher knows only rail ids,
+  instruments and cumulative totals.
+- **Recipient ledger.** The per-recipient ledger is
+  `trace_settlement_rail_ledgers` (V129). It holds:
+  - `cumulative_units` and `cumulative_micros` (`NUMERIC(39,0)`);
+  - `confirmed_units`: what the external side last confirmed holding;
+  - a rounding carry and the hash of the rate the carry is denominated in;
+  - a publish state.
+
+  A trigger refuses any decrease of a total. `confirmed_units` can never
+  exceed `cumulative_units`.
+- **Batch credits.** `trace_settlement_rail_credits` (V129) holds one
+  insert-only row per `(batch, rail)`: what that batch added, and at which
+  rate. A batch accrues once.
+- **Discriminators.** `rail_id` (`near_ai_trace_commons`) and
+  `instrument_id` (`near_ai_credit_usd`, 9 decimals) identify the rail and
+  instrument. A NEP-141 trace-credit rail or another instrument would be
+  another rail id on the same tables.
+- **What V129 replaces.** It replaces the first draft's outbox, carry table
+  and per-delivery state machine (the never-merged V127). V127 and V128 are
+  taken by open PRs.
 
 ### 3.2 Epoch / batch boundary
 
-The unit of settlement is an existing **finalized
-`trace_credit_settlement_batches` row** for a tenant. A batch is converted to
-one rail outbox row per elected rail. A batch settles on exactly one payout
-path: a trigger refuses a rail row for a batch that already has a
-`trace_near_credit_outbox` row and vice versa, so one batch can never pay out
-both as NEAR receipts and as NEAR AI credit (Q3).
+The unit of accrual is an existing **finalized
+`trace_credit_settlement_batches` row**. Accrual adds the batch to the
+active recipient's cumulative total in one transaction. Publishing is
+decoupled from accrual and states the total, not the batch. A batch pays
+out on exactly one path: triggers refuse a rail credit beside a NEAR
+receipt outbox row for the same batch, and the reverse.
 
 ### 3.3 Conversion
 
-- Config `TRACE_COMMONS_NEAR_AI_CREDIT_RATE` = `"<numerator>/<denominator>"`,
-  integer nano-USD per microcredit, as a rational. No default: unset refuses
-  with `missing_control:near_ai_credit_rate`. No floats anywhere.
-- `nano_usd = floor((micros * num + carry) / den)`, remainder carried per
-  `(tenant, rail)` in `trace_settlement_rail_carry`, so rounding never loses
-  or invents value across batches. Computed in u128 with checked arithmetic;
-  overflow refuses.
-- The rate's text and a SHA-256 of it are recorded on every outbox row
-  (`rate_ref_hash`), so a later rate change never reprices a queued row.
-- A per-delivery ceiling `TRACE_COMMONS_NEAR_AI_CREDIT_MAX_DELIVERY_NANO_USD`
-  (required) bounds the blast radius of a bad rate; a row above it is frozen
-  `near_ai_delivery_above_ceiling`, not split.
+- `TRACE_COMMONS_NEAR_AI_CREDIT_RATE` is `"num/den"` nano-USD per
+  microcredit. It has no default; unset refuses with
+  `missing_control:near_ai_credit_rate`.
+- Each accrual computes `floor((micros * num + carry) / den)` in checked
+  u128 arithmetic and keeps the remainder in the ledger's carry. If the rate
+  changes, the carry restarts at zero (less than one atomic unit is
+  forgone).
+- Every credit row records the rate text and its hash, so a past accrual is
+  never repriced.
 
 ### 3.4 Recipient mapping
 
-- New table `trace_near_ai_credit_recipients` (tenant-scoped, RLS forced):
-  `tenant_id`, `org_id UUID`, `org_ref_hash` (HMAC-free SHA-256 over a
-  domain-separated string, for audit only), `role_at_bind`, `bound_at`,
-  `revoked_at`. One active recipient per tenant.
-- Binding is contributor-initiated and needs **no admin key**: the daemon
-  sends its NEAR AI access token once; the server calls `/users/me` with it,
-  deserialises a **separate** struct that reads `organizations[{id, role,
-  is_active}]` (the existing `IntrospectedUser` is not widened — its docs
-  forbid it), and accepts the chosen `org_id` only if it is listed, active,
-  and the role is `owner` or `admin`. An empty list is refused
-  (`near_ai_org_membership_unverified`), never treated as "none".
-- The org id is the one external identifier we must send; it never appears in
-  logs, audit rows, or contributor-visible status (2026-09-04 memo `:158-159`).
-  Audit uses `org_ref_hash`.
-- Without an active recipient a tenant's batches are not enqueued for this
-  rail (they stay eligible for the legacy path or wait).
+Unchanged from the first draft. `near_ai_recipient::verify_recipient` calls
+`/users/me` with the contributor's own token and accepts an `owner` or
+`admin` of an active organization. An empty list is "unverified", never
+"none". The election is stored in `trace_near_ai_credit_recipients`.
+There is one active recipient per tenant, and one active tenant per
+organization: the organization's total is the tenant's ledger, so two
+tenants publishing to one organization would hide each other behind the
+maximum. Rebinding starts a new ledger at zero. The org id is the one
+external identifier we send; audit uses `org_ref_hash`.
 
-### 3.5 Exactly-once delivery without CAS
+### 3.5 Delivery: push or pull
 
-For each outbox row, under a **per-organization** session advisory lock
-(`pg_try_advisory_lock` over a hash of the org id; multiple tenants may bind
-one org), with marker `changeReason = "trace-commons:settle:v1:<delivery_hash>"`
-where `delivery_hash = sha256(rail_id || instrument_id || tenant-scoped
-outbox id)` (no tenant id inside the marker, only a hash):
-
-1. **Scan.** Read the full `limits/history` (paginate to `total`; 404 =
-   empty). If any row's `changeReason` equals our marker, the write already
-   landed (e.g. a timeout after send): verify and record, never PATCH again.
-2. **Precondition.** Let `active` be the open row of the configured credit
-   type. Require `active` is absent, or `changedBy == "trace-commons-settlement"`
-   and its `changeReason` starts with our prefix **and** its id equals the
-   row we last recorded for this org. Anything else freezes the row
-   `near_ai_grant_bucket_foreign_write` and writes nothing. (A pre-existing
-   NEAR AI grant therefore blocks the first delivery until an operator adopts
-   it; Q2.)
-3. **Bound.** `new = active.amount + delta`, checked `<= 1e18` and the
-   ceiling.
-4. **PATCH** `{type, source: "trace-commons", spendLimit: {amount: new,
-   currency: "USD"}, changedBy: "trace-commons-settlement", changeReason:
-   marker}`.
-5. **Read-back.** Re-read history. Require exactly one row with our marker,
-   `spendLimit.amount == new`, and that the row it superseded is `active`
-   (same id, same amount). Else freeze `near_ai_grant_interleaved_write`.
-6. **Record** `prior_amount`, `written_amount`, delta, and a hash of the
-   history row id (`external_receipt_hash`) — the row id itself is not
-   stored.
-
-Failure classes:
-
-| Outcome | Row state | Next action |
+| | Push (recommended now) | Pull (staking-farm style) |
 |---|---|---|
-| transport error before send, 5xx, 429 | `retry` with backoff | redo from step 1 |
-| timeout / connection reset after send | `retry` | step 1 finds or does not find the marker |
-| 401 (missing, expired, UA-mismatched key) | `retry`, label `near_ai_admin_unauthorized` | operator; all rows wait |
-| 403 `insufficient_permissions` | `frozen` `near_ai_admin_read_only_key` | operator |
-| 404 on PATCH (org inactive/deleted) | `frozen` `near_ai_org_not_found` | operator / contributor rebinds |
-| 400 `invalid_limits` | `frozen` `near_ai_limit_rejected` | operator |
-| foreign or interleaved write | `frozen` | operator, section 3.7 |
+| Who acts | we `PUT` our cumulative total to the proposed `trace-commons/credit` admin route | NEAR AI fetches our signed statement and applies it with the same repository function |
+| Credential on our side | a NEAR AI read-write admin token, bound to the User-Agent it was minted with | none; an optional read-only token lets us reconcile |
+| NEAR AI work | one credit type, one route, one repository function (drafted) | the same, plus binding, key pinning, a sync schedule, perhaps AML |
+| Latency | ours to choose | theirs (schedule or preflight) |
+| Built here | `PushTraceCommonsCreditRail` | `PullTraceCommonsCreditRail`, `near_ai_credit_statement` (Ed25519 over a fixed preimage), `signed_statement` |
 
-### 3.6 Reconciler
+**Recommendation: push first.** It is the smaller change for NEAR AI and
+mirrors how their billing service already writes limits. The monotonic type
+removes the overwrite hazard that made push unsafe in the first draft. Pull
+is the later step that removes our admin credential, and a NEP-141 balance
+can replace the signed statement after that.
 
-A separate loop needs only a **read-only** key. For each org with delivered
-rows it reads `limits/history` and checks: every delivered marker is present
-with its recorded amount; the active row is our latest write. A foreign row
-after ours sets the recipient `frozen` (`near_ai_grant_bucket_foreign_write`)
-so no further delivery can build on an overwritten base, and marks the
-affected rows `reconcile_mismatch`. Delivered and verified rows move to
-`reconciled`.
+### 3.6 Publish outcomes
 
-### 3.7 States
+A publish states `cumulative_units`. NEAR AI returns what it now holds,
+which we call `effective`.
 
-`trace_settlement_rail_outbox.state`:
-`pending -> leased -> delivered -> reconciled`, with `retry` (backoff via
-`next_attempt_at`, `attempt_count`), `frozen` (label, operator `unfreeze`
-returns to `retry` — a frozen row is never deleted), and `cancelled` (operator,
-only from `pending`/`retry`/`frozen`; the batch becomes eligible for another
-path). Identity columns (tenant, batch, rail, instrument, amount, marker) are
-immutable by trigger, as V94 does for legs.
+- `effective == cumulative`: confirmed. The ledger goes `idle`.
+- `published <= effective < cumulative`: an accrual landed meanwhile. The
+  ledger goes back to `due`.
+- `effective > cumulative`: someone else wrote the type, or we lost an
+  accrual. The ledger is frozen with `settlement_rail_external_ahead`.
+- `effective < published`: a monotonic max cannot be below our total. The
+  ledger is frozen with `settlement_rail_external_refused_total`.
+- Transport failures, timeouts, 401, 429 and 5xx: retried with backoff.
+  Repeating the total is harmless, including after a write that committed
+  behind a failed response.
+- 403 (read-only key), 404 (organization), 400: frozen.
+- Pull: `Deferred`, and the ledger goes to `published`.
 
-### 3.8 Audit
+### 3.7 Reconciler
 
-Every transition writes the row's own `last_error_label` (`^[a-z0-9_]{1,64}$`)
-and hashes only: `delivery_hash`, `org_ref_hash`, `external_receipt_hash`,
-`rate_ref_hash`. No org id, tenant id, admin email, or NEAR AI row id in any
-log line. The HTTP client's errors carry a status class and a label, never a
-body (NEAR AI error bodies echo the org id: `admin/mod.rs:590-594`).
+The reconciler observes the external total and compares it with the
+ledger:
 
-### 3.9 Kill switch and config
+- equal to `cumulative`: verified;
+- between the confirmed value and `cumulative`: behind, and published
+  again;
+- above `cumulative`: frozen with `settlement_rail_external_ahead`;
+- below the confirmed value: frozen with
+  `settlement_rail_external_regressed`.
 
-| Variable | Required when enabled | Meaning |
+It needs only a read-only key. Without one, a pull rail is unobservable and
+is counted as such.
+
+### 3.8 States
+
+`publish_state` is `idle`, `due`, `leased`, `published` or `frozen`.
+
+- Leases use `FOR UPDATE SKIP LOCKED`. Two workers publishing the same
+  total are harmless anyway.
+- A frozen ledger keeps accruing and publishes nothing until an operator
+  unfreezes it.
+- Unfreezing without fixing the cause freezes it again on the next publish.
+
+### 3.9 Audit
+
+- Labels only (`^[a-z0-9_]{1,64}$`) and hashes only: `org_ref_hash`,
+  `rate_ref_hash`, and `statement_ref`, a hash of rail, recipient hash and
+  total.
+- No tenant id, org id or admin email appears in any log line or stored
+  label.
+- HTTP errors carry a status class only, never a body.
+
+### 3.10 Kill switch and config
+
+| Variable | Required | Meaning |
 |---|---|---|
-| `TRACE_COMMONS_NEAR_AI_CREDIT_RAIL` | — | `disabled` (default, also any unknown value), `dry_run` (everything except the PATCH), `live` |
-| `TRACE_COMMONS_NEAR_AI_ADMIN_BASE_URL` | yes | API root including `/v1` |
-| `TRACE_COMMONS_NEAR_AI_ADMIN_KEY` | `live` | `read_write` admin token, `adm_` prefix |
-| `TRACE_COMMONS_NEAR_AI_ADMIN_READ_KEY` | reconciler | `read_only` token; falls back to nothing |
-| `TRACE_COMMONS_NEAR_AI_ADMIN_USER_AGENT` | yes | exact UA the key was minted with |
-| `TRACE_COMMONS_NEAR_AI_CREDIT_RATE` | yes | `num/den` nano-USD per microcredit |
-| `TRACE_COMMONS_NEAR_AI_CREDIT_MAX_DELIVERY_NANO_USD` | yes | per-row ceiling |
-| `TRACE_COMMONS_NEAR_AI_CREDIT_TYPE` | no, default `grant` | NEAR AI `type` to write |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_RAIL` | — | `disabled` (default, also any unknown value), `dry_run`, `live` |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_DELIVERY` | — | `push` (default) or `pull`; anything else refuses |
+| `TRACE_COMMONS_NEAR_AI_ADMIN_BASE_URL` | push; pull with a read key | API root including `/v1`; `https://` (loopback http for tests) |
+| `TRACE_COMMONS_NEAR_AI_ADMIN_KEY` | push `live` | read-write admin token |
+| `TRACE_COMMONS_NEAR_AI_ADMIN_READ_KEY` | push `dry_run` without the write key; optional otherwise | read-only admin token |
+| `TRACE_COMMONS_NEAR_AI_ADMIN_USER_AGENT` | whenever an admin key is used | exact UA the key was minted with |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_STATEMENT_KEY` | pull | base64 PKCS#8 Ed25519 signing key |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_RATE` | always | `num/den` |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_MAX_CUMULATIVE_NANO_USD` | always | per-recipient ceiling, at most 1e18; above it freezes |
+| `TRACE_COMMONS_NEAR_AI_ADMIN_TIMEOUT_MS` | — | 100 to 120000, default 15000 |
 
-`live` without the key refuses at boot with `missing_control:near_ai_admin_key`;
-there is no fallback to `dry_run`. Setting the mode to `disabled` stops new
-leases immediately; in-flight rows finish their current step and stop.
+Every refusal is `missing_control:<name>`, and there is no fallback. Ingest
+refuses to start on an enabled rail with a missing control. The kill switch
+at `disabled` stops new publishes.
 
-### 3.10 What needs the key
+### 3.11 What needs which credential
 
 | Needs nothing | Read-only key | Read-write key |
 |---|---|---|
-| enqueue, conversion, carry, recipient binding via the contributor's own token, dry-run, fake-server tests | reconciler, balance display, pre-flight history scan | the PATCH |
+| accrual, conversion, recipient binding (contributor's own token), pull statements, fake-server tests | reconciler; push `dry_run` | push `live` |
 
-## 4. Build plan in this slice
+## 4. What this slice built
 
-1. `settlement_rail.rs`: trait, amounts, rate, labels.
-2. `near_ai_admin.rs`: `NearAiAdminApi` trait and reqwest client.
-3. `near_ai_inference_credit.rs`: the rail (section 3.5), reconciler check,
-   config with fail-closed refusal.
-4. `V127__settlement_rail_outbox.sql`: outbox, carry, recipients, triggers,
-   RLS, grants.
-5. A per-tenant dispatch tick over the store.
-6. Tests: a fake NEAR AI admin server modelling 1.1-1.6 (per-type
-   replacement, no CAS, 404 history, UA binding, read-only 403).
-7. Runbook stub `docs/operator/near-ai-inference-credit.md`.
+`settlement_rail.rs`, `near_ai_admin.rs`, `near_ai_inference_credit.rs`
+(both rails and the config), `near_ai_credit_statement.rs`,
+`near_ai_recipient.rs`, `settlement_rail_store.rs`, `V129`, the ingest boot
+refusal, a fake of the proposed route, and the runbook stub.
 
-Also built: `near_ai_recipient.rs`, the `/users/me` organization check that
-gates an election (owner or admin of an active organization; an empty list
-is unverified), and a startup refusal in `trace-commons-ingest` for an
-enabled rail with a missing control.
+Deferred:
 
-Deferred: the contributor binding route and client UI; a worker route and
-scheduler that call `enqueue_batch`, `dispatch_tick` and `reconcile_tick`;
-admin routes for unfreeze, cancel and adopting a foreign baseline (Q2);
-migrating the legacy NEAR outbox.
+- the contributor binding route and UI;
+- a worker route and scheduler that call `accrue_batch`, `publish_tick` and
+  `reconcile_tick`;
+- the pull statement HTTP route;
+- an operator route for `unfreeze`;
+- migrating the legacy NEAR outbox onto the rail tables.
 
 ## 5. Open questions for the owner
 
-1. **Ask NEAR AI for a dedicated credit type** (e.g. `trace_commons`), or a
-   `(type, source)`-scoped replace. Recommendation: yes, before going live.
-   With it, we write the absolute lifetime total per org — idempotent by
-   construction, no precondition freezes, no clobbering of their grants.
-2. **Pre-existing NEAR AI grants.** Recommendation: freeze, and give the
-   operator an explicit "adopt baseline" action that records the foreign
-   row's hash and amount; do not auto-adopt.
-3. **Conversion or addition?** Recommendation: conversion — a batch pays on
-   exactly one path (enforced), chosen per tenant.
-4. **Rate.** Recommendation: start at an owner-set rate, record its hash on
-   every row, never reprice queued rows.
-5. **Which roles may receive.** Recommendation: `owner` or `admin` of the
-   org only.
-6. **Who mints the key.** Recommendation: two keys (read-write for dispatch,
-   read-only for the reconciler), minted with our exact User-Agent, 90-day
-   expiry, on a rotation runbook. Every grant is attributed to the minting
-   admin's email on NEAR AI's side.
-7. **Unfunded debt.** New capacity pays the org's prior overage first.
-   Recommendation: say so in the contributor copy rather than work around it.
-8. **Recipient id at rest.** Recommendation: plaintext UUID in an RLS-forced
-   table now; envelope-encrypt with the artifact KEK before production.
+1. **Send the proposal and the draft PR?** Recommendation: yes. The draft
+   is small and in their style. It is the precondition for going live.
+2. **Push or pull.** Recommendation: push now, and propose pull as the
+   follow-up that removes our admin credential.
+3. **Conversion or addition?** Recommendation: conversion. A batch pays on
+   exactly one path, which is enforced.
+4. **Rate.** Recommendation: set by the owner, with its hash recorded on
+   every credit row and past accruals never repriced.
+5. **Which roles may receive.** Recommendation: `owner` or `admin` only.
+6. **Keys.** Recommendation: a read-write key for push and a read-only key
+   for the reconciler, both minted with our exact User-Agent and rotated
+   before expiry. NEAR AI attributes each write to the admin who minted the
+   key.
+7. **Unfunded debt.** New capacity first pays an organization's prior
+   overage. Recommendation: say so in contributor copy.
+8. **Recipient id at rest.** Recommendation: envelope-encrypt the org id
+   before production.

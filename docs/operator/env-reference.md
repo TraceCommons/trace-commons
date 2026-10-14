@@ -242,13 +242,14 @@ configured, and prints all three assignments in env-file format.
 | `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_DRY_RUN` | optional | `false` | Dry-run. |
 | `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_PURPOSE` | optional | — | Audit reason. |
 | `TRACE_COMMONS_NEAR_AI_CREDIT_RAIL` | optional | `disabled` | NEAR AI inference credit rail (not live): `disabled`, `dry_run`, `live`. See [`near-ai-inference-credit.md`](./near-ai-inference-credit.md). |
-| `TRACE_COMMONS_NEAR_AI_ADMIN_BASE_URL` | R when enabled | — | NEAR AI API root including `/v1`; `https://` only. |
-| `TRACE_COMMONS_NEAR_AI_ADMIN_KEY` | R for `live` | — | Read-write NEAR AI admin token. |
-| `TRACE_COMMONS_NEAR_AI_ADMIN_READ_KEY` | R for `dry_run` without the write key | — | Read-only NEAR AI admin token. |
-| `TRACE_COMMONS_NEAR_AI_ADMIN_USER_AGENT` | R when enabled | — | Exact User-Agent the admin key was minted with. |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_DELIVERY` | optional | `push` | `push` (our admin call) or `pull` (NEAR AI fetches a signed statement). |
+| `TRACE_COMMONS_NEAR_AI_ADMIN_BASE_URL` | R for push | — | NEAR AI API root including `/v1`; `https://` only. |
+| `TRACE_COMMONS_NEAR_AI_ADMIN_KEY` | R for push `live` | — | Read-write NEAR AI admin token. |
+| `TRACE_COMMONS_NEAR_AI_ADMIN_READ_KEY` | R for push `dry_run` without the write key | — | Read-only NEAR AI admin token (reconciler). |
+| `TRACE_COMMONS_NEAR_AI_ADMIN_USER_AGENT` | R with any admin key | — | Exact User-Agent the admin key was minted with. |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_STATEMENT_KEY` | R for pull | — | Base64 PKCS#8 Ed25519 key signing pull statements. |
 | `TRACE_COMMONS_NEAR_AI_CREDIT_RATE` | R when enabled | — | `num/den` nano-USD per microcredit. |
-| `TRACE_COMMONS_NEAR_AI_CREDIT_MAX_DELIVERY_NANO_USD` | R when enabled | — | Per-delivery ceiling. |
-| `TRACE_COMMONS_NEAR_AI_CREDIT_TYPE` | optional | `grant` | NEAR AI credit type written. |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_MAX_CUMULATIVE_NANO_USD` | R when enabled | — | Per-recipient cumulative ceiling. |
 | `TRACE_COMMONS_NEAR_AI_ADMIN_TIMEOUT_MS` | optional | `15000` | Admin call timeout. |
 
 ## 11. Benchmark surface
