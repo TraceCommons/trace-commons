@@ -188,6 +188,16 @@ pub const REASON_WITNESS_SATURATED: &str = "witness-saturated";
 /// server's bare `{"error":"rate limited"}`, and a 429 with no JSON body at
 /// all from something in front of ingest.
 pub const REASON_RATE_LIMITED: &str = "rate-limited";
+/// Ingest could not be reached once the in-call retries ran out, or answered
+/// with a `5xx` (Caddy's 502/503 while ingest restarts during a deploy, a
+/// 500 from a passing database error). Nothing was judged and nothing is
+/// lost: the daemon keeps the approval and retries with a bounded backoff
+/// (#1358).
+///
+/// Also the daemon's health label for the condition
+/// (`daemon::health::LABEL_INGEST_UNREACHABLE`), so one fact has one
+/// spelling, and the queue row reads the copy that label already has.
+pub const REASON_INGEST_UNREACHABLE: &str = crate::daemon::health::LABEL_INGEST_UNREACHABLE;
 /// The wait used when a rate-limit refusal carries no usable
 /// `retry_after_seconds`: the server's whole fixed window.
 pub const RATE_LIMIT_DEFAULT_RETRY_SECS: u32 = 60;
@@ -2793,7 +2803,7 @@ async fn upload_with_retry(
             Err(OcError::Transport { .. }) => {
                 transport_attempts += 1;
                 if transport_attempts >= 3 {
-                    return Err("transport".to_string());
+                    return Err(REASON_INGEST_UNREACHABLE.to_string());
                 }
                 let delay_secs = if transport_attempts == 1 { 1 } else { 4 };
                 tokio::time::sleep(StdDuration::from_secs(delay_secs)).await;
@@ -2811,6 +2821,11 @@ async fn upload_with_retry(
                 if let Some(retry_after_secs) = upload_rate_limit(&e) {
                     *rate_limit_retry_after = Some(retry_after_secs);
                     return Err(REASON_RATE_LIMITED.to_string());
+                }
+                // Ingest, or something in front of it, is down or failing.
+                // Not a verdict either; the daemon retries it with backoff.
+                if ingest_unavailable(&e) {
+                    return Err(REASON_INGEST_UNREACHABLE.to_string());
                 }
                 if !is_auth_failure(&e) {
                     return Err(e.kind().to_string());
@@ -2883,6 +2898,20 @@ fn upload_rate_limit(e: &OcError) -> Option<u32> {
     )
 }
 
+/// Whether this answer says ingest is down or failing rather than judging the
+/// upload: any `5xx`, labelled or not. See [`REASON_INGEST_UNREACHABLE`].
+///
+/// Only the status decides. A `4xx` is a verdict on this request and stays
+/// with the caller's terminal handling.
+fn ingest_unavailable(e: &OcError) -> bool {
+    match e {
+        OcError::ServerLabel { status, .. } | OcError::HttpFailure { status, .. } => {
+            status.is_server_error()
+        }
+        _ => false,
+    }
+}
+
 /// Whether this is the expired credential a remint answers.
 ///
 /// **Fail closed.** A `403` stays an authentication failure unless the body
@@ -2915,6 +2944,33 @@ mod tests {
             status: reqwest::StatusCode::from_u16(status).unwrap(),
             label: label.into(),
             body: body.into(),
+        }
+    }
+
+    /// Any 5xx, labelled or bare, is ingest being unavailable (#1358); no
+    /// 4xx is, including the 409s and 429s that keep their own handling.
+    #[test]
+    fn only_a_5xx_reads_as_ingest_unavailable() {
+        let bare = |status: u16| OcError::HttpFailure {
+            url: "http://127.0.0.1/v1/traces".into(),
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            body: "Bad Gateway".into(),
+        };
+        for status in [500, 502, 503, 504] {
+            assert!(ingest_unavailable(&labelled(
+                status,
+                "x",
+                "{\"error\":\"x\"}"
+            )));
+            assert!(ingest_unavailable(&bare(status)));
+        }
+        for status in [400, 401, 403, 404, 409, 413, 422, 429] {
+            assert!(!ingest_unavailable(&labelled(
+                status,
+                "x",
+                "{\"error\":\"x\"}"
+            )));
+            assert!(!ingest_unavailable(&bare(status)));
         }
     }
 

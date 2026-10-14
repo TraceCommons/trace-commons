@@ -300,6 +300,13 @@ pub struct QueueEntry {
     /// an approval (a person's, or a standing opt-in's) starts it again.
     #[serde(default)]
     pub transient_redaction_failures: u32,
+    /// Uploads since this entry was last approved that reached no verdict
+    /// because ingest or the issuer was unavailable, or another attempt held
+    /// the submission's lease (#1358). Counted like
+    /// `transient_redaction_failures`, against the daemon's
+    /// `MAX_TRANSIENT_UPLOAD_FAILURES`, and restarted by an approval.
+    #[serde(default)]
+    pub transient_upload_failures: u32,
     pub submission_id: Option<Uuid>,
     /// The consent scopes in force at the moment this entry was approved.
     ///
@@ -755,7 +762,9 @@ impl QueueEntry {
     }
 
     /// A paced retry -- a transient classifier outage, a witness at
-    /// capacity, or ingest's upload rate limit -- stays approved, but cannot
+    /// capacity, ingest's upload rate limit, or an upload that reached no
+    /// verdict because ingest or the issuer was unavailable or another
+    /// attempt held the submission's lease (#1358) -- stays approved, but cannot
     /// be claimed before its persisted deadline. A missing deadline fails
     /// closed.
     pub(crate) fn ready_for_upload(&self, now: DateTime<Utc>) -> bool {
@@ -772,8 +781,13 @@ impl QueueEntry {
                 crate::submit::REASON_TRANSIENT_REDACTION
                     | crate::submit::REASON_WITNESS_SATURATED
                     | crate::submit::REASON_RATE_LIMITED
+                    | crate::submit::REASON_INGEST_UNREACHABLE
+                    | super::health::LABEL_CLAIM_MINT_FAILED
             )
-        )
+        ) || self.reason_label.as_deref().is_some_and(|label| {
+            trace_commons_protocol::admission::AdmissionRefusal::from_label(label)
+                == Some(trace_commons_protocol::admission::AdmissionRefusal::InProgress)
+        })
     }
 
     /// Whether this entry is approved and held because the witness is at
@@ -976,6 +990,7 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         attempts: 0,
         retry_after: None,
         transient_redaction_failures: 0,
+        transient_upload_failures: 0,
         submission_id: None,
         review_started_at: None,
         // Provenance carries over; the approval and every term it was given
@@ -1737,6 +1752,7 @@ impl Queue {
         // A fresh approval gets a whole retry budget, or a session a person
         // re-approved after the cap would be held again after one try.
         e.transient_redaction_failures = 0;
+        e.transient_upload_failures = 0;
         // The latest approver wins. An entry can be auto-approved, revoked
         // back to `Pending` by a scope change or an Undo, and then approved
         // by hand; without this reset it would still be marked unattended
@@ -2200,6 +2216,18 @@ impl Queue {
             Some(e) => {
                 e.transient_redaction_failures = e.transient_redaction_failures.saturating_add(1);
                 e.transient_redaction_failures
+            }
+            None => 0,
+        }
+    }
+
+    /// Count one more upload that reached no verdict for a passing reason,
+    /// and return the run so far. See `QueueEntry::transient_upload_failures`.
+    pub fn record_transient_upload_failure(&mut self, entry_id: Uuid) -> u32 {
+        match self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            Some(e) => {
+                e.transient_upload_failures = e.transient_upload_failures.saturating_add(1);
+                e.transient_upload_failures
             }
             None => 0,
         }
