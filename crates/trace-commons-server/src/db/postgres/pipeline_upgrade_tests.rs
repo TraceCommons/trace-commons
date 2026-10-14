@@ -103,7 +103,7 @@ async fn set_tenant(client: &Client, tenant: &str) {
         .expect("set migration test tenant");
 }
 
-const PIPELINE_TABLES: [&str; 20] = [
+const PIPELINE_TABLES: [&str; 21] = [
     "pipeline_runs",
     "phase_outcomes",
     "pipeline_bundle_packages",
@@ -124,10 +124,11 @@ const PIPELINE_TABLES: [&str; 20] = [
     "pipeline_receipt_ownership",
     "pipeline_policy_interventions",
     "pipeline_index_rebuild_fences",
+    "pipeline_score_bases",
 ];
 
 /// Every privilege the ingest runtime group, `trace_ingest_runtime`, holds on
-/// the pipeline tables once V92 to V95, V105 to V108, V110 to V113, V117, V118, and V123 have run, as
+/// the pipeline tables once V92 to V95, V105 to V108, V110 to V113, V117, V118, V123 and V128 have run, as
 /// `(table, privilege, columns)`; no columns means the whole table. It holds
 /// what the pipeline code reads and writes and nothing broader. The only
 /// other grantee is `trace_gate_driver` (`GATE_DRIVER_PIPELINE_GRANTS`). A
@@ -178,6 +179,8 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
             "review_audit_pending_at",
             // V123 (#1346)
             "submission_rejected_at",
+            // V128 (#1313): a finishable Settle run's one extra attempt
+            "settle_finish_granted_at",
         ],
     ),
     ("phase_outcomes", "SELECT", &[]),
@@ -334,6 +337,10 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
     ("pipeline_index_rebuild_fences", "INSERT", &[]),
     ("pipeline_index_rebuild_fences", "DELETE", &[]),
     ("pipeline_index_rebuild_fences", "UPDATE", &["fenced_until"]),
+    // V128 (#1313): the compatibility Score commit records the unapplied
+    // runs it counted; the store reads them. No update, no delete.
+    ("pipeline_score_bases", "SELECT", &[]),
+    ("pipeline_score_bases", "INSERT", &[]),
 ];
 
 /// What `main`'s gate driver role, `trace_gate_driver`, holds on the pipeline
@@ -429,7 +436,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     let latest = super::MIGRATIONS.iter().map(|(v, _, _)| *v).max();
     assert_eq!(version, latest);
     for pipeline_version in [
-        92, 93, 94, 95, 105, 106, 107, 108, 109, 110, 111, 112, 113, 117, 118, 123,
+        92, 93, 94, 95, 105, 106, 107, 108, 109, 110, 111, 112, 113, 117, 118, 123, 128,
     ] {
         let recorded: bool = admin
             .query_one(
@@ -473,6 +480,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         ("pipeline_runs", "admission_reason"),
         ("pipeline_runs", "review_audit_pending_at"),
         ("pipeline_runs", "submission_rejected_at"),
+        ("pipeline_runs", "settle_finish_granted_at"),
         ("pipeline_run_settlements", "payout_eligible"),
         ("pipeline_run_settlements", "credit_audited_at"),
         ("pipeline_index_invalidations", "next_attempt_at"),
