@@ -1831,8 +1831,8 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     // V128 (#1313): a finishable Settle run's one extra attempt
     // (`settle_finish_granted_at`), the `awaiting_operator` run state for a
     // paid run whose Settle commit is refused for good, and
-    // `pipeline_score_bases`, the unapplied runs a compatibility Score
-    // counted.
+    // `pipeline_score_bases`, the unapplied runs a Score that runs under
+    // the runtime controls counted.
     (
         128,
         "pipeline_settle_finish_and_score_bases",

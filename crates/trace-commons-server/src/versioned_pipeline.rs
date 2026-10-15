@@ -6585,7 +6585,8 @@ impl PgPipelineStore {
         Ok(None)
     }
 
-    /// The unapplied runs a compatibility Score of `run_id` counted as
+    /// The unapplied runs a Score of `run_id` (one that runs under the runtime
+    /// controls) counted as
     /// neighbours (#1313 case (a), V128 `pipeline_score_bases`), as
     /// `(basis run id, basis revision id)` by basis run id. Only a Score
     /// that passed quality and failed novelty records them.

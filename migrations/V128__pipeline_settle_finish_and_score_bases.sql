@@ -1,6 +1,7 @@
 -- V128 (#1313): a Settle run whose legs are all terminal finishes instead of
 -- failing; a paid run whose Settle commit is refused for good waits for an
--- operator; and a compatibility Score records the unapplied runs it counted.
+-- operator; and a Score that runs under the runtime controls records the
+-- unapplied runs it counted.
 -- Design: docs/superpowers/specs/2026-10-14-pipeline-duplicate-basis-repair-design.md.
 
 -- `awaiting_operator`: a Settle run with a paid leg whose commit was refused
@@ -36,8 +37,8 @@ ALTER TABLE pipeline_runs
 
 GRANT UPDATE (operator_held_at) ON pipeline_runs TO trace_ingest_runtime;
 
--- The unapplied index commands of other runs that a compatibility Score
--- counted (`unapplied_index_commands_on_tx`), written by the Score commit on
+-- The unapplied index commands of other runs that a Score running under the
+-- runtime controls counted (`unapplied_index_commands_on_tx`), written by the Score commit on
 -- the transaction that holds the tenant's Score lock. Only a Score that
 -- passed quality and failed novelty writes rows. A basis run that later
 -- fails with its command never applied names a Score that may have been
