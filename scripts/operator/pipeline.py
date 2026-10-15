@@ -102,13 +102,13 @@ def _with_harness_assembly(evidence, assembly):
 
 # The ingest test binary hosts the shared app in-process (P4-D3): `run` and
 # `package` start one exact ignored test in it.
-INGEST_TEST_ARGS = ("-p", "trace-commons-server", "--bin", "trace-commons-ingest")
-CORPUS_HARNESS = "tests::pipeline_corpus_pg_tests::pipeline_corpus_run"
-PACKAGE_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_package_write"
+INGEST_TEST_ARGS = ("-p", "trace-commons-server", "--lib")
+CORPUS_HARNESS = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_corpus_run"
+PACKAGE_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_package_write"
 # `qualify --signing-key` and `keygen` (P5-D13): the signing step and the key
 # writer, two more ignored tests beside the package writer.
-ATTESTATION_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
-KEY_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
+ATTESTATION_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
+KEY_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
 BUNDLES = ("minimal", "compatibility")
 # `package` also builds the production package (spec B-D5), from the
 # deployment's env file; `run` never serves it as a built-in bundle.
@@ -135,8 +135,8 @@ EPHEMERAL_COMMANDS = frozenset({"revision", "keygen"})
 
 # `restore-drill`: the two ignored tests around the dump, the restore, and
 # the artifact copy, and the one check the resume emits.
-RESTORE_SEED = "tests::pipeline_restore_pg_tests::pipeline_restore_seed"
-RESTORE_RESUME = "tests::pipeline_restore_pg_tests::pipeline_restore_resume"
+RESTORE_SEED = "ingest::app::tests::pipeline_restore_pg_tests::pipeline_restore_seed"
+RESTORE_RESUME = "ingest::app::tests::pipeline_restore_pg_tests::pipeline_restore_resume"
 RESTORE_FINGERPRINT_SCHEMA = "trace_commons.pipeline_restore_fingerprint.v1"
 RESTORE_SAFE_BLOCKER = "filesystem_restore_local_only"
 _RESTORE_FINGERPRINT_HASHES = (
@@ -185,7 +185,7 @@ QUALIFY_CORPUS_RUNS = (
 
 # `compare`: the ignored test that sends each trace of a pin through the old
 # gate path and through the pipeline, and the two pins of `--self-test`.
-COMPARE_HARNESS = "tests::pipeline_compare_pg_tests::pipeline_compare_run"
+COMPARE_HARNESS = "ingest::app::tests::pipeline_compare_pg_tests::pipeline_compare_run"
 COMPARE_LOCAL_PIN = ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl/pin-local.json"
 COMPARE_RISK_PIN = ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl/pin-local-risk.json"
 

@@ -2922,8 +2922,8 @@ async fn production_restore_dependencies_serve_the_production_package() {
 /// bodies the two ignored tests run. Ignored: it writes the drill's fixed
 /// tenants into the shared pilot-shaped database, which the rest of the
 /// suite also uses, so it runs alone:
-/// `cargo test -p trace-commons-server --bin trace-commons-ingest
-/// production_restore_drill_resumes_once_over_doubles -- --ignored --exact`
+/// `cargo test -p trace-commons-server --lib
+/// production_restore_drill_resumes_once_over_doubles -- --ignored`
 /// against a fresh `TRACE_COMMONS_PG_TEST_DATABASE_URL`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "writes the drill's fixed tenants into the shared database: run alone"]

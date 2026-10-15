@@ -100243,8 +100243,8 @@ mod migrated_pg_fixture;
 /// The NEAR AI enrollment ceremony, both halves, over a real PostgreSQL.
 ///
 /// **The module name is load-bearing.** The `postgres-suites` job selects this
-/// suite with `cargo test --bin trace-commons-ingest nearai_ceremony_pg_tests
-/// -- --ignored`, a substring match on the test path. A rename that does not
+/// suite with `cargo test -p trace-commons-server --lib
+/// nearai_ceremony_pg_tests -- --ignored`, a substring match on the test path. A rename that does not
 /// change the workflow leaves these tests reporting `ignored` forever, which
 /// is the failure mode that step exists to prevent.
 #[path = "nearai_ceremony_pg_tests.rs"]

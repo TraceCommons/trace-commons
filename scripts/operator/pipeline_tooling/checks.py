@@ -109,7 +109,7 @@ RUNTIME_STEPS = (
     TestStep(
         "runtime_pipeline_runtime_bin",
         "cargo",
-        cargo_args=("-p", "trace-commons-server", "--bin", "trace-commons-ingest"),
+        cargo_args=("-p", "trace-commons-server", "--lib"),
         test_filter="pipeline_runtime",
     ),
     TestStep(
@@ -149,14 +149,14 @@ POSTGRES_STEPS = (
     TestStep(
         "postgres_real_http_receipt",
         "cargo",
-        cargo_args=("-p", "trace-commons-server", "--bin", "trace-commons-ingest"),
+        cargo_args=("-p", "trace-commons-server", "--lib"),
         test_filter="real_http_receipt_completes_and_resumes_after_restart",
         needs_pilot_check=True,
     ),
     TestStep(
         "postgres_compatibility_http",
         "cargo",
-        cargo_args=("-p", "trace-commons-server", "--bin", "trace-commons-ingest"),
+        cargo_args=("-p", "trace-commons-server", "--lib"),
         test_filter="compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export",
         needs_login_resolver=True,
         needs_pilot_check=True,
@@ -164,7 +164,7 @@ POSTGRES_STEPS = (
     TestStep(
         "postgres_legacy_parity",
         "cargo",
-        cargo_args=("-p", "trace-commons-server", "--bin", "trace-commons-ingest"),
+        cargo_args=("-p", "trace-commons-server", "--lib"),
         test_filter="legacy_and_pipeline_tenants_match_under_equivalent_configuration",
         needs_login_resolver=True,
         needs_pilot_check=True,
@@ -200,8 +200,8 @@ class DatabaseCheck:
 
 _LIB = ("-p", "trace-commons-server", "--lib")
 _RUNTIME_SUITE = ("-p", "trace-commons-server", "--test", "versioned_pipeline_runtime_pg")
-_INGEST_BIN = ("-p", "trace-commons-server", "--bin", "trace-commons-ingest")
-_HTTP_TESTS = "tests::pipeline_http_pg_tests::"
+_INGEST_BIN = ("-p", "trace-commons-server", "--lib")
+_HTTP_TESTS = "ingest::app::tests::pipeline_http_pg_tests::"
 
 
 def _runtime(check_id, test_name, digests=False):
@@ -262,7 +262,7 @@ REQUIRED_DATABASE_CHECKS = (
     DatabaseCheck(
         "pipeline_legacy_drain",
         _INGEST_BIN,
-        "tests::pipeline_activation_pg_tests::the_legacy_drain_report_counts_real_pending_work_and_reaches_zero",
+        "ingest::app::tests::pipeline_activation_pg_tests::the_legacy_drain_report_counts_real_pending_work_and_reaches_zero",
         "pilot",
         False,
         False,
