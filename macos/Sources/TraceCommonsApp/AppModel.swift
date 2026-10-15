@@ -1781,10 +1781,11 @@ final class AppModel: ObservableObject {
     /// Whether the wallet step signs in through the NEAR signer app: the
     /// setting is on (off by default), this build has the signer's client, and
     /// the installed app passes its code-signature requirement.
-    var nearSignerRoute: WalletRoute {
+    func nearSignerRoute(browserChosen: Bool = false) -> WalletRoute {
         chooseRoute(
             settingOn: UserDefaults.standard.bool(forKey: nearSignerSettingKey),
-            signerInstalled: nearSignerCompiledIn && signerInstalled())
+            signerInstalled: nearSignerCompiledIn && signerInstalled(),
+            browserChosen: browserChosen)
     }
 
     /// Runs the signer route for an open flow. Nil is success; otherwise the

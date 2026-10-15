@@ -24,8 +24,13 @@ public let nearSignerCodeRequirement =
 /// UserDefaults key of the "Use the NEAR signer app" setting.
 public let nearSignerSettingKey = "trace_commons.near_signer.enabled"
 
-public func chooseRoute(settingOn: Bool, signerInstalled: Bool) -> WalletRoute {
-    settingOn && signerInstalled ? .nativeSigner : .browser
+/// `signerInstalled` is lazy: the code-signature check hashes the whole
+/// bundle, so it runs only when the setting is on and the person has not
+/// chosen the browser after a refusal.
+public func chooseRoute(
+    settingOn: Bool, signerInstalled: @autoclosure () -> Bool, browserChosen: Bool = false
+) -> WalletRoute {
+    settingOn && !browserChosen && signerInstalled() ? .nativeSigner : .browser
 }
 
 /// True when an app with the signer's bundle ID is installed and its code

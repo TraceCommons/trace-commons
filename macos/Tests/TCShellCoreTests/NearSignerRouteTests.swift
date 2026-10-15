@@ -31,6 +31,19 @@ final class NearSignerRouteTests: XCTestCase {
         XCTAssertEqual(chooseRoute(settingOn: true, signerInstalled: true), .nativeSigner)
     }
 
+    func testBrowserChosenAfterRefusalOverridesSigner() {
+        XCTAssertEqual(chooseRoute(settingOn: true, signerInstalled: true, browserChosen: true), .browser)
+        XCTAssertEqual(chooseRoute(settingOn: true, signerInstalled: true, browserChosen: false), .nativeSigner)
+    }
+
+    func testSignerProbeSkippedWhenSettingOffOrBrowserChosen() {
+        var probes = 0
+        func probe() -> Bool { probes += 1; return true }
+        _ = chooseRoute(settingOn: false, signerInstalled: probe())
+        _ = chooseRoute(settingOn: true, signerInstalled: probe(), browserChosen: true)
+        XCTAssertEqual(probes, 0)
+    }
+
     func testRequirementStringPinsTeamAndBundle() {
         XCTAssertEqual(
             nearSignerCodeRequirement,

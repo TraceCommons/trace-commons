@@ -15,6 +15,11 @@ struct NearAccountConnectView: View {
     /// The signer app refused or was unreachable. The browser route is then
     /// offered, never taken on its own.
     @State private var signerRefused = false
+    /// Set only by the person's tap on the browser link after a refusal.
+    @State private var browserChosen = false
+    /// Computed once per appearance and per choice, not on every render: the
+    /// signer's signature check is not cheap.
+    @State private var route: WalletRoute = .browser
     var onBusyChanged: (Bool) -> Void = { _ in }
     var onEnrolled: () -> Void
     private var busy: Bool { pending || flow?.busy == true }
@@ -34,13 +39,19 @@ struct NearAccountConnectView: View {
                         .buttonStyle(GlassButtonStyle(.glass))
                         .disabled(pending || !flow.canCheck)
                     if flow.canStart {
-                        if model.nearSignerRoute == .nativeSigner {
+                        if route == .nativeSigner {
                             Button(copy.start) { run("native_signer") }
                                 .buttonStyle(GlassButtonStyle(.primary))
                                 .disabled(pending)
                             if signerRefused {
                                 GlassAlert(NearSignerCopy.failed)
-                                Button(NearSignerCopy.useBrowserInstead) { signerRefused = false; run("start") }
+                                Button(NearSignerCopy.useBrowserInstead) {
+                                    // Shows the browser route's account field and Start;
+                                    // nothing opens until the person taps Start there.
+                                    signerRefused = false
+                                    browserChosen = true
+                                    route = model.nearSignerRoute(browserChosen: true)
+                                }
                                     .buttonStyle(GlassButtonStyle(.link))
                                     .disabled(pending)
                             }
@@ -71,6 +82,7 @@ struct NearAccountConnectView: View {
             }
         }
         .task {
+            route = model.nearSignerRoute(browserChosen: browserChosen)
             flow = await model.nativeWalletFlow(action: "open", flowID: "", commons: "", account: "")
             if closed { await cancel() }
         }
