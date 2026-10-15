@@ -20,7 +20,8 @@ let ffiLibDir = ProcessInfo.processInfo.environment["TC_FFI_LIB_DIR"]
 
 // The NEAR signer's caller library. Until the signer repo is published this is
 // a local path dependency, supplied by NEAR_SIGNER_PATH (a checkout of
-// nearai/near-signer). Without it the signer route is compiled out of the app
+// nearai/near-signer, in a directory named near-signer: SwiftPM takes a
+// path dependency's identity from the directory name). Without it the signer route is compiled out of the app
 // (`#if canImport(NearSignerClient)`), and CI, which has no such checkout,
 // builds exactly what it built before. A published release replaces this with
 // an exactly pinned URL dependency.
