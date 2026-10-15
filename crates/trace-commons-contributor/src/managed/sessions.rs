@@ -592,7 +592,7 @@ impl SessionRegistry {
             expected_generation: entry.request.expected_generation,
             ..request.clone()
         } == entry.request;
-        same.then(|| PreparedLaunch {
+        same.then_some(PreparedLaunch {
             session_id: entry.view.id,
             ticket: None,
         })
