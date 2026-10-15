@@ -257,6 +257,23 @@ contain it. Qualification binds a package to the code revision that it tested,
 and activation checks that revision. See
 [package qualification](2026-09-14-versioned-pipeline-package-qualification.md).
 
+An embedding binary can add Score policies to the ones built in. It passes a
+`ScorePolicyRegistry` (`versioned_pipeline_score_registry`) to
+`PipelineServiceBuilder::with_score_policies`: factories keyed by the Score
+`implementation_id`. A package binds a registered factory only when its
+Admission, Review, and Settle policies are the compatibility bundle's. The
+factory receives the manifest, the configuration artifact that the Score
+`configuration_hash` names, and the scorer, embedder, and index reader that
+the compatibility Score policy receives. It returns the policy as a trait
+object and declares the Trace Credit event that the bundle settles under. The
+two built-in Score ids (`trace_commons.score.minimal.v1` and
+`trace_commons.score.compatibility.v1`) are reserved. The ingest binary passes
+an empty registry. A Score id that is neither built in nor registered is
+refused with `bundle_policy_not_runnable` and never falls back to a built-in
+policy. The registry supplies only code for an id. The manifest, which the
+package signature covers, still pins the id, the configuration, and the
+dependencies.
+
 The bundle package contains the manifest and deployable artifacts. The ingest
 service makes sure that the package matches its bundle identifier before use.
 

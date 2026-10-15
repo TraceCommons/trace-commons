@@ -40,6 +40,9 @@ use crate::versioned_pipeline_compat::{
     CompatibilityBundleConfig, CompatibilityScorePolicy, CompatibilitySettlePolicy,
 };
 use crate::versioned_pipeline_index::IsolatedPipelineIndex;
+use crate::versioned_pipeline_score_registry::{
+    ScorePolicyDependencies, ScorePolicyFactory, ScorePolicyRegistry,
+};
 
 /// Test-index identity the minimal Score policy proposes entries against.
 pub const MINIMAL_INDEX_ID: &str = "pipeline-test-index-v1";
@@ -494,7 +497,7 @@ impl SettlePolicy for FixedSettlePolicy {
 /// not runnable by this bundle.
 const MINIMAL_ADMISSION_IMPLEMENTATION: &str = "trace_commons.admission.minimal.v1";
 const MINIMAL_REVIEW_IMPLEMENTATION: &str = "trace_commons.review.minimal.v1";
-const MINIMAL_SCORE_IMPLEMENTATION: &str = "trace_commons.score.minimal.v1";
+pub const MINIMAL_SCORE_IMPLEMENTATION: &str = "trace_commons.score.minimal.v1";
 const MINIMAL_SETTLE_IMPLEMENTATION: &str = "trace_commons.settle.minimal.v1";
 
 /// Which event type the Trace Credit leg of PR 2's FR2 settlement
@@ -666,11 +669,43 @@ impl MinimalPolicyBundle {
     /// `package`'s four implementation ids must be entirely one known
     /// family -- all minimal or all compatibility -- or the package is not
     /// runnable by this bundle at all.
+    ///
+    /// This is [`Self::from_package_with_runtime_and_score_policies`] with an
+    /// empty Score policy registry, which is what the open build runs.
     pub fn from_package_with_runtime(
         package: BundlePackage,
         scorer: Arc<dyn IdentifiedPerplexityScorer>,
         embedder: Arc<dyn IdentifiedEmbedder>,
         index_reader: Arc<dyn IdentifiedIndexReader>,
+    ) -> anyhow::Result<Self> {
+        Self::from_package_with_runtime_and_score_policies(
+            package,
+            scorer,
+            embedder,
+            index_reader,
+            &ScorePolicyRegistry::new(),
+        )
+    }
+
+    /// [`Self::from_package_with_runtime`], with the Score policies an
+    /// embedding binary registered. Besides the two built-in families, a
+    /// package binds when its Admission, Review, and Settle policies are the
+    /// compatibility bundle's and its Score implementation id is one
+    /// `score_policies` holds a factory for: the factory builds the Score
+    /// policy from the manifest, the configuration artifact the Score
+    /// policy ref's `configuration_hash` names, and the same scorer,
+    /// embedder, and index reader the compatibility Score policy is given,
+    /// and declares the Trace Credit event the bundle settles under. A Score
+    /// implementation id that is neither built in nor registered is refused
+    /// with `bundle_policy_not_runnable`. The built-in ids cannot be
+    /// registered (`ScorePolicyRegistry::with_factory`), so a registry never
+    /// changes how a built-in family binds.
+    pub fn from_package_with_runtime_and_score_policies(
+        package: BundlePackage,
+        scorer: Arc<dyn IdentifiedPerplexityScorer>,
+        embedder: Arc<dyn IdentifiedEmbedder>,
+        index_reader: Arc<dyn IdentifiedIndexReader>,
+        score_policies: &ScorePolicyRegistry,
     ) -> anyhow::Result<Self> {
         package
             .validate()
@@ -774,10 +809,57 @@ impl MinimalPolicyBundle {
                 settle: Arc::new(CompatibilitySettlePolicy),
                 trace_credit_event: PipelineTraceCreditEvent::NoveltyUtility,
             })
+        } else if let Some(factory) = registered_score_factory(&package, score_policies) {
+            let configuration = package
+                .artifacts
+                .get(&package.manifest.score.configuration_hash)
+                .ok_or_else(|| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
+            let score = factory
+                .build(ScorePolicyDependencies {
+                    manifest: &package.manifest,
+                    configuration,
+                    scorer,
+                    embedder,
+                    index_reader,
+                })
+                .map_err(|_| anyhow::anyhow!(PIPELINE_BUNDLE_INVALID_LABEL))?;
+            let trace_credit_event = factory.trace_credit_event();
+
+            Ok(Self {
+                package,
+                admission: Arc::new(MinimalAdmissionPolicy),
+                review: Arc::new(MinimalReviewPolicy),
+                score,
+                settle: Arc::new(CompatibilitySettlePolicy),
+                trace_credit_event,
+            })
         } else {
             anyhow::bail!("bundle_policy_not_runnable")
         }
     }
+}
+
+/// The factory `score_policies` holds for `package`'s Score implementation
+/// id, when `package`'s Admission, Review, and Settle policies are the
+/// compatibility bundle's; `None` otherwise. Never answers for a built-in
+/// Score id, which a registry cannot hold.
+pub fn registered_score_factory<'a>(
+    package: &BundlePackage,
+    score_policies: &'a ScorePolicyRegistry,
+) -> Option<&'a Arc<dyn ScorePolicyFactory>> {
+    let compatibility_triple = [
+        package.manifest.admission.implementation_id.as_str(),
+        package.manifest.review.implementation_id.as_str(),
+        package.manifest.settle.implementation_id.as_str(),
+    ] == [
+        COMPATIBILITY_ADMISSION_IMPLEMENTATION,
+        COMPATIBILITY_REVIEW_IMPLEMENTATION,
+        COMPATIBILITY_SETTLE_IMPLEMENTATION,
+    ];
+    if !compatibility_triple {
+        return None;
+    }
+    score_policies.get(&package.manifest.score.implementation_id)
 }
 
 /// Whether `package`'s four policies are the compatibility bundle's.
@@ -843,6 +925,10 @@ mod tests {
     use super::*;
     use crate::versioned_pipeline::pipeline_tenant_storage_ref;
     use crate::versioned_pipeline_index::IsolatedPipelineIndex;
+    use crate::versioned_pipeline_score_registry::{
+        SCORE_POLICY_IMPLEMENTATION_DUPLICATE_LABEL, SCORE_POLICY_IMPLEMENTATION_INVALID_LABEL,
+        SCORE_POLICY_IMPLEMENTATION_RESERVED_LABEL,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use trace_commons_gate_api::pipeline::{InstrumentKind, TRACE_CREDIT_DECIMALS};
     use trace_commons_gate_api::{Embedder, ReferenceEmbedder, ReferencePerplexityScorer};
@@ -1482,5 +1568,311 @@ mod tests {
         .err()
         .expect("a package with no trace_credit pin must not build a bundle");
         assert_eq!(error.to_string(), PIPELINE_BUNDLE_INVALID_LABEL);
+    }
+
+    // The Score policy registry (`versioned_pipeline_score_registry`): an
+    // embedding binary supplies a Score policy for an implementation id the
+    // bundle manifest names. The tests below use a test-only id and a
+    // test-only policy whose award is fixed.
+
+    const TEST_SCORE_IMPLEMENTATION: &str = "substituted.score.test_only.v1";
+
+    struct TestScorePolicy {
+        manifest: BundleManifest,
+        atomic_units: u128,
+    }
+
+    #[async_trait]
+    impl ScorePolicy for TestScorePolicy {
+        async fn execute(&self, _input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
+            let awards = InstrumentAwards::new(vec![
+                InstrumentAward::new(
+                    InstrumentId::trace_credit(),
+                    AtomicUnits::from_raw(self.atomic_units),
+                )
+                .map_err(score_invalid)?,
+            ])
+            .map_err(score_invalid)?;
+            let decision =
+                ScoreDecision::for_bundle(&self.manifest, awards).map_err(score_invalid)?;
+            ScoreOutput::new(
+                PhaseResult {
+                    decision: decision.clone(),
+                    evidence: ScoreEvidence::fixed(decision.awards().clone()),
+                    evaluation: ScoreEvaluation {
+                        rule_id: "substituted_test_only_v1".to_string(),
+                        awards: decision.awards().clone(),
+                    },
+                },
+                None,
+                None,
+            )
+            .map_err(score_invalid)
+        }
+    }
+
+    struct TestScoreFactory {
+        trace_credit_event: PipelineTraceCreditEvent,
+        built: AtomicUsize,
+        configuration: std::sync::Mutex<Option<Vec<u8>>>,
+        fail_build: bool,
+    }
+
+    impl TestScoreFactory {
+        fn new(trace_credit_event: PipelineTraceCreditEvent) -> Arc<Self> {
+            Arc::new(Self {
+                trace_credit_event,
+                built: AtomicUsize::new(0),
+                configuration: std::sync::Mutex::new(None),
+                fail_build: false,
+            })
+        }
+    }
+
+    impl ScorePolicyFactory for TestScoreFactory {
+        fn dependency_identity(&self) -> &str {
+            "substituted_score_policy_test_only"
+        }
+
+        fn trace_credit_event(&self) -> PipelineTraceCreditEvent {
+            self.trace_credit_event
+        }
+
+        fn build(
+            &self,
+            dependencies: ScorePolicyDependencies<'_>,
+        ) -> Result<Arc<dyn ScorePolicy>, &'static str> {
+            self.built.fetch_add(1, Ordering::SeqCst);
+            if self.fail_build {
+                return Err("substituted_configuration_invalid");
+            }
+            *self.configuration.lock().unwrap() = Some(dependencies.configuration.to_vec());
+            Ok(Arc::new(TestScorePolicy {
+                manifest: dependencies.manifest.clone(),
+                atomic_units: 7,
+            }))
+        }
+    }
+
+    /// The compatibility package with its Score policy ref renamed to
+    /// `implementation_id`: the compatibility Admission, Review, and Settle
+    /// policies, and a Score policy a registry supplies.
+    fn substituted_package(implementation_id: &str) -> BundlePackage {
+        let config = CompatibilityBundleConfig::local_reference();
+        let mut package = MinimalPolicyBundle::compatibility_package(
+            &config,
+            &ReferencePerplexityScorer::new(),
+            &ReferenceEmbedder::new(),
+        )
+        .unwrap();
+        package.manifest.score.policy_id = "substituted.score".to_string();
+        package.manifest.score.implementation_id = implementation_id.to_string();
+        package.bundle_id = package.manifest.bundle_id().unwrap();
+        package.validate().unwrap();
+        package
+    }
+
+    fn bind(
+        package: BundlePackage,
+        policies: &ScorePolicyRegistry,
+    ) -> anyhow::Result<MinimalPolicyBundle> {
+        MinimalPolicyBundle::from_package_with_runtime_and_score_policies(
+            package,
+            Arc::new(ReferencePerplexityScorer::new()),
+            Arc::new(ReferenceEmbedder::new()),
+            IsolatedPipelineIndex::new(),
+            policies,
+        )
+    }
+
+    /// (a) An empty registry -- what the ingest binary passes -- binds the
+    /// two built-in families exactly as `from_package_with_runtime` does,
+    /// and a non-empty one does not change how they bind: a registered
+    /// factory is never consulted for a built-in id.
+    #[tokio::test]
+    async fn an_empty_registry_binds_the_built_in_families_as_before() {
+        let scorer = ReferencePerplexityScorer::new();
+        let embedder = ReferenceEmbedder::new();
+        let minimal = MinimalPolicyBundle::minimal_package(&config(false), &scorer, &embedder)
+            .expect("build minimal bundle package");
+        let compatibility = MinimalPolicyBundle::compatibility_package(
+            &CompatibilityBundleConfig::local_reference(),
+            &scorer,
+            &embedder,
+        )
+        .expect("build compatibility bundle package");
+        let factory = TestScoreFactory::new(PipelineTraceCreditEvent::PipelineScore);
+        let registered = ScorePolicyRegistry::new()
+            .with_factory(TEST_SCORE_IMPLEMENTATION, factory.clone())
+            .unwrap();
+
+        for (package, event) in [
+            (minimal, PipelineTraceCreditEvent::PipelineScore),
+            (compatibility, PipelineTraceCreditEvent::NoveltyUtility),
+        ] {
+            let before = MinimalPolicyBundle::from_package_with_runtime(
+                package.clone(),
+                Arc::new(ReferencePerplexityScorer::new()),
+                Arc::new(ReferenceEmbedder::new()),
+                IsolatedPipelineIndex::new(),
+            )
+            .unwrap();
+            for policies in [&ScorePolicyRegistry::new(), &registered] {
+                let bound = bind(package.clone(), policies).unwrap();
+                assert_eq!(bound.package, before.package);
+                assert_eq!(bound.trace_credit_event, event);
+                assert_eq!(bound.trace_credit_event, before.trace_credit_event);
+            }
+        }
+        assert_eq!(factory.built.load(Ordering::SeqCst), 0);
+    }
+
+    /// (b) A factory registered under the id a bundle's Score policy ref
+    /// names is selected: it is given the configuration the manifest's
+    /// `configuration_hash` pins, the bundle settles under the Trace Credit
+    /// event the factory declares, and the policy's award flows through
+    /// under the bound manifest.
+    #[tokio::test]
+    async fn a_registered_score_policy_is_selected_and_its_award_flows_through() {
+        for event in [
+            PipelineTraceCreditEvent::PipelineScore,
+            PipelineTraceCreditEvent::NoveltyUtility,
+        ] {
+            let factory = TestScoreFactory::new(event);
+            let policies = ScorePolicyRegistry::new()
+                .with_factory(TEST_SCORE_IMPLEMENTATION, factory.clone())
+                .unwrap();
+            let package = substituted_package(TEST_SCORE_IMPLEMENTATION);
+            let configuration = package
+                .artifacts
+                .get(&package.manifest.score.configuration_hash)
+                .cloned()
+                .unwrap();
+
+            let bundle = bind(package.clone(), &policies).expect("the registered policy binds");
+            assert_eq!(bundle.trace_credit_event, event);
+            // A factory that declares nothing is unqualified, and so is its
+            // configuration: the family-level configuration term
+            // (`package_configuration_is_qualifiable`) passes any
+            // non-compatibility family, so the factory's own term is what
+            // keeps a registered family from being qualified by default.
+            assert!(package_configuration_is_qualifiable(&package));
+            assert!(!factory.production_qualified());
+            assert!(!factory.configuration_is_qualifiable(&configuration));
+            assert_eq!(factory.built.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                factory.configuration.lock().unwrap().as_deref(),
+                Some(configuration.as_slice())
+            );
+
+            let output = bundle.score.execute(&score_input(b"trace")).await.unwrap();
+            let decision = &output.result().decision;
+            decision
+                .require_bound(&package.manifest)
+                .expect("the award is bound to the package's manifest");
+            assert_eq!(
+                decision
+                    .awards()
+                    .iter()
+                    .map(|award| (
+                        award.instrument_id().as_str().to_string(),
+                        award.atomic_units()
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![("trace_credit".to_string(), AtomicUnits::from_raw(7))]
+            );
+        }
+
+        // A factory that refuses its configuration refuses the package.
+        let failing = Arc::new(TestScoreFactory {
+            trace_credit_event: PipelineTraceCreditEvent::PipelineScore,
+            built: AtomicUsize::new(0),
+            configuration: std::sync::Mutex::new(None),
+            fail_build: true,
+        });
+        let policies = ScorePolicyRegistry::new()
+            .with_factory(TEST_SCORE_IMPLEMENTATION, failing)
+            .unwrap();
+        let error = bind(substituted_package(TEST_SCORE_IMPLEMENTATION), &policies)
+            .err()
+            .expect("a refused configuration must not build a bundle");
+        assert_eq!(error.to_string(), PIPELINE_BUNDLE_INVALID_LABEL);
+    }
+
+    /// (c) A Score implementation id no factory is registered under refuses
+    /// at bind time with `bundle_policy_not_runnable`; it never falls back
+    /// to the compatibility policy. Nor does a registered Score id paired
+    /// with anything but the compatibility Admission, Review, and Settle
+    /// policies.
+    #[test]
+    fn an_unregistered_score_implementation_refuses_with_the_label() {
+        let elsewhere = ScorePolicyRegistry::new()
+            .with_factory(
+                "substituted.score.other.v1",
+                TestScoreFactory::new(PipelineTraceCreditEvent::PipelineScore),
+            )
+            .unwrap();
+        for policies in [&ScorePolicyRegistry::new(), &elsewhere] {
+            let error = bind(substituted_package(TEST_SCORE_IMPLEMENTATION), policies)
+                .err()
+                .expect("an unregistered Score policy must not build a bundle");
+            assert_eq!(error.to_string(), "bundle_policy_not_runnable");
+        }
+
+        let factory = TestScoreFactory::new(PipelineTraceCreditEvent::PipelineScore);
+        let policies = ScorePolicyRegistry::new()
+            .with_factory(TEST_SCORE_IMPLEMENTATION, factory.clone())
+            .unwrap();
+        let mut mixed = substituted_package(TEST_SCORE_IMPLEMENTATION);
+        mixed.manifest.settle.implementation_id = MINIMAL_SETTLE_IMPLEMENTATION.to_string();
+        mixed.bundle_id = mixed.manifest.bundle_id().unwrap();
+        let error = bind(mixed, &policies)
+            .err()
+            .expect("a registered Score policy outside the compatibility triple must not bind");
+        assert_eq!(error.to_string(), "bundle_policy_not_runnable");
+        assert_eq!(factory.built.load(Ordering::SeqCst), 0);
+    }
+
+    /// (d) The two built-in Score implementation ids are reserved: no
+    /// factory can be registered under either, so a compatibility or
+    /// minimal package always binds its built-in policy. An id registers
+    /// once, and an empty id is refused.
+    #[test]
+    fn the_built_in_score_implementations_cannot_be_overridden() {
+        for reserved in [
+            COMPATIBILITY_SCORE_IMPLEMENTATION,
+            MINIMAL_SCORE_IMPLEMENTATION,
+        ] {
+            let refused = ScorePolicyRegistry::new()
+                .with_factory(
+                    reserved,
+                    TestScoreFactory::new(PipelineTraceCreditEvent::PipelineScore),
+                )
+                .err();
+            assert_eq!(refused, Some(SCORE_POLICY_IMPLEMENTATION_RESERVED_LABEL));
+        }
+        let once = ScorePolicyRegistry::new()
+            .with_factory(
+                TEST_SCORE_IMPLEMENTATION,
+                TestScoreFactory::new(PipelineTraceCreditEvent::PipelineScore),
+            )
+            .unwrap();
+        assert_eq!(
+            once.with_factory(
+                TEST_SCORE_IMPLEMENTATION,
+                TestScoreFactory::new(PipelineTraceCreditEvent::NoveltyUtility),
+            )
+            .err(),
+            Some(SCORE_POLICY_IMPLEMENTATION_DUPLICATE_LABEL)
+        );
+        assert_eq!(
+            ScorePolicyRegistry::new()
+                .with_factory(
+                    " ",
+                    TestScoreFactory::new(PipelineTraceCreditEvent::PipelineScore),
+                )
+                .err(),
+            Some(SCORE_POLICY_IMPLEMENTATION_INVALID_LABEL)
+        );
     }
 }

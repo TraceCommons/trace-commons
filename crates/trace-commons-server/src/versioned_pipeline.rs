@@ -58,7 +58,7 @@ use crate::versioned_pipeline_authority::{
 use crate::versioned_pipeline_bundle::{
     MinimalPolicyBundle, PIPELINE_BUNDLE_INVALID_LABEL, PIPELINE_DEPENDENCY_MISSING_LABEL,
     PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL, PipelineTraceCreditEvent, dependency_content_hash,
-    pipeline_operation_ref, pipeline_result_ref,
+    pipeline_operation_ref, pipeline_result_ref, registered_score_factory,
 };
 use crate::versioned_pipeline_compat::{
     COMPATIBILITY_SCORE_IMPLEMENTATION, UnappliedIndexCommandsReader,
@@ -72,6 +72,9 @@ use crate::versioned_pipeline_credit::{
     pipeline_settlement_batch_id, source_list_hash,
 };
 use crate::versioned_pipeline_qualification::package_digests;
+use crate::versioned_pipeline_score_registry::{
+    SCORE_POLICY_MISSING_LABEL, ScorePolicyRegistry, is_built_in_score_implementation,
+};
 
 /// The lifecycle half of every pipeline operability check, over the
 /// `trace_submissions` row aliased `s` (Zaki review 1, round 2,
@@ -388,6 +391,10 @@ const PIPELINE_SUBMISSION_BOUND_MESSAGE: &str =
 /// (`PipelineBundleQualification::configuration_qualifiable`).
 pub const PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL: &str =
     "bundle_configuration_not_qualifiable";
+/// A bundle whose Score policy a registry supplies, from a factory that is
+/// not production-qualified, or that names a Score policy the service holds
+/// no factory for (`PipelineBundleQualification::score_policy`).
+pub const PIPELINE_SCORE_POLICY_NOT_PRODUCTION_LABEL: &str = "runtime_score_policy_not_production";
 /// Safe label of an object-store call in the run path that failed (an
 /// outage, not a decode or hash mismatch): the uncharged suspension of
 /// ruling FR3 (multi-lens review L2-2).
@@ -8987,6 +8994,16 @@ pub struct PipelineBundleQualification {
     pub privacy: bool,
     pub payout: Option<bool>,
     pub configuration_qualifiable: bool,
+    /// The Score policy a registry supplies for this bundle
+    /// (`PipelineServiceBuilder::with_score_policies`): its factory's
+    /// identity and `production_qualified()`. `None` for a built-in Score
+    /// policy, whose qualification the scorer, embedder, and configuration
+    /// terms already carry; omitted from the serialized form then, so a
+    /// built-in bundle's qualification serializes as it always has. A Score
+    /// implementation the service holds no factory for reports identity
+    /// `score_policy_missing`, unqualified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_policy: Option<PipelineDependencyCheck>,
     pub dependency_digest: String,
 }
 
@@ -9020,6 +9037,13 @@ impl PipelineBundleQualification {
         }
         if self.payout == Some(false) {
             blockers.push("runtime_payout_not_production");
+        }
+        if self
+            .score_policy
+            .as_ref()
+            .is_some_and(|check| !check.production_qualified)
+        {
+            blockers.push(PIPELINE_SCORE_POLICY_NOT_PRODUCTION_LABEL);
         }
         if !self.configuration_qualifiable {
             blockers.push(PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL);
@@ -9198,6 +9222,9 @@ pub struct PipelineServiceBuilder {
     index_write_fence_margin: std::time::Duration,
     /// A test's override of the lease config's privacy pass ceiling.
     privacy_pass_timeout_ceiling: Option<std::time::Duration>,
+    /// Score policies an embedding binary registered
+    /// (`with_score_policies`); empty by default.
+    score_policies: ScorePolicyRegistry,
 }
 
 impl PipelineServiceBuilder {
@@ -9236,7 +9263,21 @@ impl PipelineServiceBuilder {
                 PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS.unsigned_abs(),
             ),
             privacy_pass_timeout_ceiling: None,
+            score_policies: ScorePolicyRegistry::new(),
         }
+    }
+
+    /// The Score policies an embedding binary supplies for a substituted
+    /// backend, keyed by the Score implementation id a bundle manifest
+    /// names (`versioned_pipeline_score_registry`). Defaults to an empty
+    /// registry, which is what the ingest binary runs: only the two
+    /// built-in families bind, and any other Score id is refused as
+    /// `bundle_policy_not_runnable`. A registered factory is a dependency
+    /// of every bundle that names it, so `bundle_qualification` reports its
+    /// own `production_qualified()` (`runtime_score_policy_not_production`).
+    pub fn with_score_policies(mut self, score_policies: ScorePolicyRegistry) -> Self {
+        self.score_policies = score_policies;
+        self
     }
 
     /// The name of the object store `artifact_store` writes to, recorded as
@@ -9484,6 +9525,7 @@ impl PipelineServiceBuilder {
             index_write_fence_margin: self.index_write_fence_margin,
             privacy_pass_timeout,
             follow_ups: std::sync::Mutex::new(BTreeMap::new()),
+            score_policies: self.score_policies,
         };
         service
             .construct(service.default_package.clone())
@@ -9619,6 +9661,9 @@ pub struct PipelineService {
     /// The follow-up steps this service queued work for, per tenant, since
     /// the worker last took them (`take_follow_ups`).
     follow_ups: std::sync::Mutex<BTreeMap<String, PipelineFollowUps>>,
+    /// Score policies an embedding binary registered
+    /// (`PipelineServiceBuilder::with_score_policies`).
+    score_policies: ScorePolicyRegistry,
 }
 
 impl PipelineService {
@@ -10183,7 +10228,7 @@ impl PipelineService {
         main_gate: &crate::versioned_pipeline_compat::MainGateConfig,
         require_qualifiable: bool,
     ) -> Result<(), &'static str> {
-        self.construct(package.clone()).map_err(|label| {
+        let bundle = self.construct(package.clone()).map_err(|label| {
             if label == PIPELINE_DEPENDENCY_MISSING_LABEL {
                 PIPELINE_TENANT_BUNDLE_DEPENDENCY_MISSING_LABEL
             } else {
@@ -10196,9 +10241,14 @@ impl PipelineService {
             if !config.matches_main_gate(main_gate) {
                 return Err("pipeline_runtime_main_gate_config_mismatch");
             }
-            if self.novelty_utility_checks.issuer_principal_ref.is_none() {
-                return Err("pipeline_credit_issuer_principal_missing");
-            }
+        }
+        // Keyed on the Trace Credit event the bundle settles under, not on
+        // its family: a compatibility bundle settles under `NoveltyUtility`,
+        // and so does a bundle whose registered Score policy declares it.
+        if bundle.trace_credit_event == PipelineTraceCreditEvent::NoveltyUtility
+            && self.novelty_utility_checks.issuer_principal_ref.is_none()
+        {
+            return Err("pipeline_credit_issuer_principal_missing");
         }
         // The default package's gate (`pipeline_runtime_is_production_qualified`
         // in ingest): the bundle qualification of this package, which also
@@ -10303,12 +10353,18 @@ impl PipelineService {
         index_reader: Arc<dyn IdentifiedIndexReader>,
     ) -> Result<MinimalPolicyBundle, &'static str> {
         let (scorer, embedder) = self.resolve_score_dependencies(&package)?;
-        MinimalPolicyBundle::from_package_with_runtime(package, scorer, embedder, index_reader)
-            .map_err(|error| match error.to_string().as_str() {
-                PIPELINE_DEPENDENCY_MISSING_LABEL => PIPELINE_DEPENDENCY_MISSING_LABEL,
-                "bundle_policy_not_runnable" => PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
-                _ => PIPELINE_BUNDLE_INVALID_LABEL,
-            })
+        MinimalPolicyBundle::from_package_with_runtime_and_score_policies(
+            package,
+            scorer,
+            embedder,
+            index_reader,
+            &self.score_policies,
+        )
+        .map_err(|error| match error.to_string().as_str() {
+            PIPELINE_DEPENDENCY_MISSING_LABEL => PIPELINE_DEPENDENCY_MISSING_LABEL,
+            "bundle_policy_not_runnable" => PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+            _ => PIPELINE_BUNDLE_INVALID_LABEL,
+        })
     }
 
     /// Whether every dependency the package `package` actually uses is
@@ -10359,6 +10415,41 @@ impl PipelineService {
                 .as_ref()
                 .is_some_and(|(adapter, _)| adapter.production_qualified())
         });
+        // A Score policy a registry supplies is one of this bundle's
+        // dependencies, qualified only when its factory says so; so is the
+        // configuration it decodes. A built-in Score policy reports no
+        // check, which keeps every built-in bundle's qualification as it
+        // was. A Score id that is neither built in nor registered is not
+        // runnable, and fails closed here as well.
+        let score_implementation = package.manifest.score.implementation_id.as_str();
+        let (score_policy, score_configuration_qualifiable) =
+            if is_built_in_score_implementation(score_implementation) {
+                (None, true)
+            } else {
+                match registered_score_factory(package, &self.score_policies) {
+                    Some(factory) => {
+                        let configuration = package
+                            .artifacts
+                            .get(&package.manifest.score.configuration_hash)
+                            .map(Vec::as_slice)
+                            .unwrap_or_default();
+                        (
+                            Some(PipelineDependencyCheck {
+                                identity: factory.dependency_identity().to_string(),
+                                production_qualified: factory.production_qualified(),
+                            }),
+                            factory.configuration_is_qualifiable(configuration),
+                        )
+                    }
+                    None => (
+                        Some(PipelineDependencyCheck {
+                            identity: SCORE_POLICY_MISSING_LABEL.to_string(),
+                            production_qualified: false,
+                        }),
+                        false,
+                    ),
+                }
+            };
         Ok(PipelineBundleQualification {
             bundle_id: package.bundle_id.clone(),
             scorer: PipelineDependencyCheck {
@@ -10388,7 +10479,9 @@ impl PipelineService {
                 .is_some_and(|privacy| privacy.production_qualified()),
             payout,
             configuration_qualifiable:
-                crate::versioned_pipeline_bundle::package_configuration_is_qualifiable(package),
+                crate::versioned_pipeline_bundle::package_configuration_is_qualifiable(package)
+                    && score_configuration_qualifiable,
+            score_policy,
             dependency_digest: digests.dependency_digest,
         })
     }

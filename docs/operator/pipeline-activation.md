@@ -1900,6 +1900,43 @@ The same per-bundle check, with payout, is available as
 `pipeline_bundle_qualification` required check
 (`qualification_inspects_the_objects_the_constructor_receives`) exercises.
 
+### A registered Score policy
+
+The ingest binary registers no Score policies. Only a binary that embeds the
+server and supplies a substituted backend does, through
+`PipelineServiceBuilder::with_score_policies`. When it does, the registered
+factory is one more dependency of each bundle that names it:
+
+- `bundle_qualification` reports the factory as `score_policy`, with its
+  identity and its own `production_qualified()`, which is `false` by default.
+  An unqualified factory blocks the bundle under
+  `runtime_score_policy_not_production`.
+- The configuration term reads the factory's
+  `configuration_is_qualifiable()`, which is also `false` by default. A
+  configuration that the factory does not qualify blocks the bundle under
+  `bundle_configuration_not_qualifiable`.
+- A package that names a Score id the service has no factory for fails both
+  checks (its identity is `score_policy_missing`). Construction refuses that
+  package as `bundle_policy_not_runnable`, so a service whose default package
+  names such an id does not build.
+- `check_runnable_package` requires the credit issuer principal
+  (`pipeline_credit_issuer_principal_missing`) for each bundle that settles
+  under `NoveltyUtility`. That covers a compatibility bundle and also a
+  registered policy that declares `NoveltyUtility`.
+
+A built-in bundle reports no `score_policy`, and its qualification serializes
+exactly as before.
+
+Two limits apply for now:
+
+- `PipelineQualificationStore::qualify_bundle` still accepts only the
+  compatibility family (`validate_production_package`). A package with a
+  registered Score policy can pass the startup gate, but it cannot be recorded
+  as a qualified tenant bundle until that allow-list is deliberately widened.
+- The Score lock, the `trace_gate_decisions` row, and the duplicate verdict
+  are keyed to the compatibility Score id. A registered policy runs Score and
+  Settle the way the minimal family does, without any of the three.
+
 ## Per-phase claim lease
 
 Each pipeline phase claims its run under its own lease length, sized for how
