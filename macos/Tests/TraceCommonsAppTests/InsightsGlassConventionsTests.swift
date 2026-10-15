@@ -69,18 +69,22 @@ final class InsightsGlassConventionsTests: XCTestCase {
         XCTAssertLessThan(reads.lowerBound, notUseful.lowerBound, "Not useful comes after Show reads")
     }
 
-    /// The lighter accent series (Overview and Sessions cache write, the
-    /// Patterns weekly bars) take the token that clears 3:1 against the
-    /// flat pane (`ChartSeriesContrastTests`), never a literal opacity.
-    func test_reducedAccentSeriesUseTheChartToken() throws {
-        let reduced = "GlassColor.accentText.opacity(GlassTokens.Opacity.chartSeriesReduced)"
+    /// Every chart is plotted on the chart surface, never straight on glass,
+    /// and its series are the chart tokens, which clear 3:1 on that surface
+    /// (`ChartSeriesContrastTests`): never a text ink, never a dimmed one
+    /// (direction B, 2026-10-15; Ron's #1287 review asked for 3:1).
+    func test_chartsPlotOnTheChartSurfaceInTheSeriesTokens() throws {
+        let glass = try Self.text("Views/InsightsGlass.swift")
+        XCTAssertTrue(glass.contains(".fill(GlassTokens.Color.chartSurface.color)"))
+        for token in ["chartSeries1", "chartSeries2", "chartSeries3", "chartSeries4"] {
+            XCTAssertTrue(glass.contains("GlassTokens.Color.\(token)"), "InsightsSeries has no \(token)")
+        }
         for file in ["Views/InsightsOverviewTab.swift", "Views/InsightsPatternsTab.swift",
                      "Views/InsightsSessionsTab.swift"] {
             let source = try Self.text(file)
-            XCTAssertTrue(source.contains(reduced), "\(file) has no reduced accent series")
-            XCTAssertEqual(source.components(separatedBy: "accentText.opacity(").count - 1,
-                           source.components(separatedBy: reduced).count - 1,
-                           "\(file) dims accentText by a literal")
+            XCTAssertTrue(source.contains(".insightsPlot()"), "\(file) plots straight on glass")
+            XCTAssertFalse(source.contains("accentText.opacity("), "\(file) dims accentText for a series")
+            XCTAssertFalse(source.contains("range: [GlassColor."), "\(file) draws a series in a text ink")
         }
     }
 

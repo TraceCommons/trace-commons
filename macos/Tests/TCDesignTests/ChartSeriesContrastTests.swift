@@ -14,6 +14,25 @@ import XCTest
 final class ChartSeriesContrastTests: XCTestCase {
     static let floor = 3.0
 
+    /// Direction B (2026-10-15): the Insights charts plot on the opaque
+    /// `chartSurface` in `chartSeries1` to `chartSeries4` (Near AI OS data-1
+    /// to data-4), and a one-series chart in `purpleSoft`. Each clears 3:1
+    /// on the surface in both flat appearances.
+    func test_theChartSeriesClearThreeToOneOnTheChartSurface() throws {
+        for theme in ["flatLight", "flatDark"] {
+            let surface = try FlatThemeContrastTests.colour("chartSurface", theme: theme)
+            XCTAssertEqual(surface.alpha, 1, "\(theme): the chart surface is opaque")
+            let ground = surface.rgb
+            for name in ["chartSeries1", "chartSeries2", "chartSeries3", "chartSeries4", "purpleSoft"] {
+                let series = try FlatThemeContrastTests.colour(name, theme: theme)
+                let ratio = FlatThemeContrastTests.contrast(FlatThemeContrastTests.over(ground, series), ground)
+                XCTAssertGreaterThanOrEqual(
+                    ratio, Self.floor,
+                    "\(theme): \(name) on chartSurface is \(String(format: "%.2f", ratio)):1")
+            }
+        }
+    }
+
     func test_theReducedAccentSeriesClearsThreeToOneInFlatLight() throws {
         try assertClearsTheFloor(in: "flatLight", opacity: GlassTokens.Opacity.chartSeriesReduced)
     }

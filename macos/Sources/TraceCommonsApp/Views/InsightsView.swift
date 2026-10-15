@@ -91,30 +91,30 @@ struct InsightsView: View {
     /// decision D5). The models open and close with the container, not with
     /// a tab.
     private var tabs: some View {
+        // The page is in the main pane, whose insets it shares: no inset of
+        // its own across, so its cards get the pane's whole 408pt.
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: GlassTokens.Space.s6) {
-                GlassSegmentedTabs(model.text("title"), selection: $tab, segments: [
-                    GlassSegment(model.text("analytics_tab_overview"), value: InsightsTab.overview),
-                    GlassSegment(model.text("analytics_tab_patterns"), value: InsightsTab.patterns),
-                    GlassSegment(model.text("analytics_tab_sessions"), value: InsightsTab.sessions),
-                    GlassSegment(model.text("analytics_tab_analyze"), value: InsightsTab.analyze),
-                ])
-                .frame(maxWidth: 480)
-                Spacer()
-            }
-            .padding(.horizontal, 24).padding(.top, 16)
+            GlassSegmentedTabs(model.text("title"), selection: $tab, segments: [
+                GlassSegment(model.text("analytics_tab_overview"), value: InsightsTab.overview),
+                GlassSegment(model.text("analytics_tab_patterns"), value: InsightsTab.patterns),
+                GlassSegment(model.text("analytics_tab_sessions"), value: InsightsTab.sessions),
+                GlassSegment(model.text("analytics_tab_analyze"), value: InsightsTab.analyze),
+            ])
+            .padding(.top, GlassTokens.Space.s4)
             switch tab {
             case .overview:
                 InsightsOverviewTab(
                     model: overviewModel, comparisons: comparisonsModel, copy: model.copy,
                     snapshots: model.snapshots,
                     notice: model.counterPassNoticeKey.map(model.text),
+                    patterns: patternsModel.shown,
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
                     turnOffRecap: turnOffRecapCard.map { turnOff in
                         { Task { try? await turnOff(); await model.loadWeek() } }
                     },
-                    showReads: { tab = .patterns })
+                    showReads: { tab = .patterns },
+                    showPatterns: { tab = .patterns })
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
                                     selectWeek: selectWeek)
@@ -266,7 +266,7 @@ struct InsightsView: View {
                     }
                     Text(model.text("cancellation_notice"))
                         .insightsCaption()
-                }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
+                }.padding(.vertical, GlassTokens.Space.s7).frame(maxWidth: .infinity, alignment: .leading)
                 .insightsSurface()
             }
             .onChange(of: model.selected?.id) { _, id in
