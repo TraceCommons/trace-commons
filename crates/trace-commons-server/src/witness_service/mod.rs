@@ -1819,6 +1819,8 @@ mod tests {
             cost_usd: None,
             success: Some(true),
             failure_modes: Vec::new(),
+            exit_code: None,
+            model: None,
         });
         raw
     }
@@ -2188,6 +2190,8 @@ mod tests {
                 cost_usd: None,
                 success: Some(true),
                 failure_modes: Vec::new(),
+                exit_code: None,
+                model: None,
             });
         request
     }

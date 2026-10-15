@@ -18,6 +18,7 @@ pub mod comparison_task_store;
 pub mod comparison_tasks;
 pub mod episode_store;
 pub mod episodes;
+pub mod failure_signals;
 pub mod goal_store;
 pub mod goals;
 pub mod ledger_series;

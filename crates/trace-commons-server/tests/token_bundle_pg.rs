@@ -510,6 +510,8 @@ fn bundle_payloads(submission: uuid::Uuid) -> (Vec<u8>, Vec<u8>, String) {
         success: None,
         failure_modes: vec![],
         side_effect: SideEffectLevel::None,
+        exit_code: None,
+        model: None,
     };
     let mut envelope = envelope_with_events(vec![event]);
     envelope.submission_id = submission;

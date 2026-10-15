@@ -935,6 +935,8 @@ mod tests {
             cost_usd: None,
             success: None,
             failure_modes: Vec::new(),
+            exit_code: None,
+            model: None,
         }];
         (raw, receipt, signer, now)
     }

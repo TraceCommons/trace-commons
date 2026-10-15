@@ -264,6 +264,8 @@ fn envelope(submission_id: Uuid) -> TraceContributionEnvelope {
                 success: None,
                 failure_modes: Vec::new(),
                 side_effect: SideEffectLevel::ReadOnly,
+                model: None,
+                exit_code: None,
             },
             TraceContributionEvent {
                 event_id: Uuid::nil(),
@@ -281,6 +283,8 @@ fn envelope(submission_id: Uuid) -> TraceContributionEnvelope {
                 success: Some(true),
                 failure_modes: Vec::new(),
                 side_effect: SideEffectLevel::ReadOnly,
+                model: None,
+                exit_code: None,
             },
         ],
         outcome: OutcomeMetadata {

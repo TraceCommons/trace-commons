@@ -2748,6 +2748,9 @@ mod tests {
             token_counts: None,
             tool_call_id: None,
             success: None,
+            model: None,
+            exit_code: None,
+            edited_outside_model: None,
         };
         let mut t = crate::source::SessionTranscript {
             source_session: None,

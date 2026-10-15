@@ -7,22 +7,45 @@ use axum::extract::RawQuery;
 use trace_commons_protocol::activity_missions::{ActivityCatalogue, ActivityPolicy};
 
 pub(super) fn policy_from_env() -> anyhow::Result<Option<Arc<ActivityPolicy>>> {
-    policy_from_raw(std::env::var("TRACE_COMMONS_ACTIVITY_MISSIONS_POLICY_JSON"))
+    policy_from_raw_with_frontier(
+        std::env::var("TRACE_COMMONS_ACTIVITY_MISSIONS_POLICY_JSON"),
+        std::env::var("TRACE_COMMONS_ACTIVITY_MISSIONS_FRONTIER_MODELS_JSON"),
+    )
 }
 
 /// Absent is unconfigured; anything malformed fails startup. That includes a
 /// mission predicate of a version this server cannot validate: the server
 /// publishes predicates for clients to match locally, and never evaluates
 /// one or accepts a matching result.
+#[cfg(test)]
 pub(super) fn policy_from_raw(
     raw: Result<String, std::env::VarError>,
 ) -> anyhow::Result<Option<Arc<ActivityPolicy>>> {
+    policy_from_raw_with_frontier(raw, Err(std::env::VarError::NotPresent))
+}
+
+/// [`policy_from_raw`] with the operator's frontier model list, a JSON array
+/// of model labels. A version-2 predicate whose `models` is `"frontier"` is
+/// resolved to that list here, so the policy that is hashed and published
+/// carries only the explicit list (a released client refuses an unknown
+/// top-level key and does not know the keyword). `"frontier"` with no list
+/// fails startup, as does a malformed list.
+pub(super) fn policy_from_raw_with_frontier(
+    raw: Result<String, std::env::VarError>,
+    frontier: Result<String, std::env::VarError>,
+) -> anyhow::Result<Option<Arc<ActivityPolicy>>> {
+    let invalid = || anyhow::anyhow!("activity_missions_policy_invalid");
+    let frontier: Option<Vec<String>> = match frontier {
+        Ok(text) => Some(serde_json::from_str(&text).map_err(|_| invalid())?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => return Err(invalid()),
+    };
     match raw {
-        Ok(raw) => ActivityPolicy::parse(raw.as_bytes())
+        Ok(raw) => ActivityPolicy::parse_with_frontier(raw.as_bytes(), frontier.as_deref())
             .map(|p| Some(Arc::new(p)))
-            .map_err(|_| anyhow::anyhow!("activity_missions_policy_invalid")),
+            .map_err(|_| invalid()),
         Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(_) => anyhow::bail!("activity_missions_policy_invalid"),
+        Err(_) => Err(invalid()),
     }
 }
 fn protected(value: impl IntoResponse) -> axum::response::Response {

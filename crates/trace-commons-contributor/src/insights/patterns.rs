@@ -168,11 +168,11 @@ fn is_reread_edit(tool: ToolKind) -> bool {
     )
 }
 
-fn is_cycle_edit(tool: ToolKind) -> bool {
+pub(crate) fn is_cycle_edit(tool: ToolKind) -> bool {
     matches!(tool, ToolKind::Edit | ToolKind::Write | ToolKind::MultiEdit)
 }
 
-fn is_lookup(tool: ToolKind) -> bool {
+pub(crate) fn is_lookup(tool: ToolKind) -> bool {
     matches!(tool, ToolKind::Read | ToolKind::Grep | ToolKind::Glob)
 }
 
@@ -224,43 +224,72 @@ fn repeated_reads(series: &UsageSeries, shrinks: &[u32], found: &mut SessionPatt
 
 fn retried_calls(calls: &[ToolCallRecord]) -> PatternFigure {
     let mut figure = PatternFigure::default();
+    for (index, _) in retry_links(calls) {
+        figure.add_call(&calls[index]);
+    }
+    figure
+}
+
+/// Each retried call as `(index, earlier)`: the call at `index` repeats the
+/// one at `earlier` -- same tool, same arguments, both answered -- with
+/// nothing but lookups between them, inside [`RETRY_WINDOW_CALLS`]. One link
+/// per retried call, to the nearest earlier match. Shared by the Patterns
+/// card and the on-device failure detectors (`failure_signals`).
+pub(crate) fn retry_links(calls: &[ToolCallRecord]) -> Vec<(usize, usize)> {
+    let mut links = Vec::new();
     for (index, call) in calls.iter().enumerate() {
         if !call.paired {
             continue;
         }
         let earliest = index.saturating_sub(RETRY_WINDOW_CALLS);
-        for earlier in calls[earliest..index].iter().rev() {
-            if earlier.paired && earlier.tool == call.tool && earlier.args_key == call.args_key {
-                figure.add_call(call);
+        for earlier in (earliest..index).rev() {
+            let candidate = &calls[earlier];
+            if candidate.paired
+                && candidate.tool == call.tool
+                && candidate.args_key == call.args_key
+            {
+                links.push((index, earlier));
                 break;
             }
-            if !is_lookup(earlier.tool) {
+            if !is_lookup(candidate.tool) {
                 break;
             }
+        }
+    }
+    links
+}
+
+fn edit_fail_edit(calls: &[ToolCallRecord]) -> PatternFigure {
+    let mut figure = PatternFigure::default();
+    for (start, end) in edit_fail_edit_cycles(calls) {
+        figure.count += 1;
+        for cycle_call in &calls[start..=end] {
+            figure.add_bytes(cycle_call);
         }
     }
     figure
 }
 
-fn edit_fail_edit(calls: &[ToolCallRecord]) -> PatternFigure {
-    let mut figure = PatternFigure::default();
+/// Each edit, failed command, edit cycle as `(start, end)`: an edit of a
+/// file at `start`, a failed Bash call, and the next edit of the same file
+/// at `end`, inside [`EDIT_FAIL_EDIT_WINDOW_CALLS`]. The file is
+/// `calls[start].path_key`. Shared by the Patterns card and the on-device
+/// failure detectors (`failure_signals`).
+pub(crate) fn edit_fail_edit_cycles(calls: &[ToolCallRecord]) -> Vec<(usize, usize)> {
+    let mut cycles = Vec::new();
     for (start, first) in calls.iter().enumerate() {
         let Some(file) = first.path_key.filter(|_| is_cycle_edit(first.tool)) else {
             continue;
         };
         let last = (start + EDIT_FAIL_EDIT_WINDOW_CALLS - 1).min(calls.len().saturating_sub(1));
         let mut failed = false;
-        for end in start + 1..=last {
-            let call = &calls[end];
+        for (end, call) in calls.iter().enumerate().take(last + 1).skip(start + 1) {
             let edits_file = is_cycle_edit(call.tool) && call.path_key == Some(file);
             if call.tool == ToolKind::Bash && call.success == Some(false) {
                 failed = true;
             } else if edits_file {
                 if failed {
-                    figure.count += 1;
-                    for cycle_call in &calls[start..=end] {
-                        figure.add_bytes(cycle_call);
-                    }
+                    cycles.push((start, end));
                 }
                 // Either the cycle closed, or a later edit of the file starts
                 // its own: the first edit is the last one before the failure.
@@ -268,7 +297,7 @@ fn edit_fail_edit(calls: &[ToolCallRecord]) -> PatternFigure {
             }
         }
     }
-    figure
+    cycles
 }
 
 fn long_context(series: &UsageSeries) -> LongContextFigure {

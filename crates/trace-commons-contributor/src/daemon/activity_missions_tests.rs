@@ -538,12 +538,12 @@ fn parsed(raw: serde_json::Value) -> trace_commons_protocol::activity_missions::
 fn the_mission_slot_takes_only_missions_with_a_supported_predicate() {
     use crate::daemon::activity_missions::contribution_catalogue;
     let today = Utc::now().date_naive();
-    let v2 = serde_json::json!({"version":2,"tools":["codex"],"repo_size":"large"});
+    let v3 = serde_json::json!({"version":3,"tools":["codex"],"repo_size":"large"});
     let raw = contribution_catalogue(
         &parsed(predicate_catalogue(&[
             serde_json::Value::Null,
             claude_rust(),
-            v2,
+            v3,
         ])),
         today,
     )
@@ -581,6 +581,96 @@ fn the_mission_slot_takes_only_missions_with_a_supported_predicate() {
         contribution_catalogue(&catalogue, today - chrono::Duration::days(2)),
         None
     );
+}
+
+/// A version-2 (outcome-aware) mission is valid and published, but this
+/// client cannot match outcomes yet: it is skipped, never matched and never
+/// read as a version-1 mission with fewer criteria.
+#[test]
+fn the_mission_slot_skips_v2_missions() {
+    use crate::daemon::activity_missions::contribution_catalogue;
+    let today = Utc::now().date_naive();
+    // Carries a V1 field set a careless reader could match on.
+    let v2 = serde_json::json!({"version":2,"tools":["claude-code"],"languages":["rust"],"outcomes":["failure"],"min_sessions":1});
+    let only_v2 = parsed(predicate_catalogue(std::slice::from_ref(&v2)));
+    assert_eq!(contribution_catalogue(&only_v2, today), None);
+
+    let raw = contribution_catalogue(
+        &parsed(predicate_catalogue(&[v2, claude_rust()])),
+        today,
+    )
+    .expect("the V1 mission remains");
+    let missions = raw["missions"].as_array().unwrap();
+    assert_eq!(missions.len(), 1);
+    assert_eq!(missions[0]["mission_id"], "m-1");
+}
+
+/// What the server publishes for a V2 mission that asked for "frontier" is
+/// readable by a client from before V2: the policy and mission keys are the
+/// closed sets a released client accepts (no `frontier_models`, no
+/// keyword), the predicate is a version-2 block of integers, strings and
+/// booleans a pre-V2 reader carries verbatim as unsupported, and the
+/// current catalogue code parses it and skips the V2 mission.
+#[test]
+fn a_published_v2_policy_stays_readable_and_the_v2_mission_is_skipped() {
+    use crate::daemon::activity_missions::contribution_catalogue;
+    use trace_commons_protocol::activity_missions::{ActivityCatalogue, ActivityPolicy};
+    let today = Utc::now().date_naive();
+    let source = serde_json::json!({
+        "schema_version": 1, "policy_id": "test-policy",
+        "starts_on": today - chrono::Duration::days(1),
+        "ends_before": today + chrono::Duration::days(30),
+        "qualification": "accepted", "daily": null, "levels": null, "badges": null,
+        "missions": [
+            {"id": "m-0", "title": "Mission 0", "required_contributions": 1,
+             "predicate": {"version":2,"outcomes":["failure"],"models":"frontier","min_tier":"e2","min_sessions":1}},
+            {"id": "m-1", "title": "Mission 1", "required_contributions": 1,
+             "predicate": claude_rust()},
+        ],
+    });
+    let list = vec!["claude-opus-4.5".to_string()];
+    let policy = ActivityPolicy::parse_with_frontier(
+        &serde_json::to_vec(&source).unwrap(),
+        Some(&list),
+    )
+    .unwrap();
+    let published = serde_json::to_value(ActivityCatalogue::new(Some(policy)).unwrap()).unwrap();
+
+    let keys = |value: &serde_json::Value| -> Vec<String> {
+        value.as_object().unwrap().keys().cloned().collect()
+    };
+    let released_policy_keys = [
+        "schema_version", "policy_id", "starts_on", "ends_before", "qualification",
+        "missions", "daily", "levels", "badges",
+    ];
+    for key in keys(&published["policy"]) {
+        assert!(released_policy_keys.contains(&key.as_str()), "{key}");
+    }
+    for mission in published["policy"]["missions"].as_array().unwrap() {
+        for key in keys(mission) {
+            assert!(
+                ["id", "title", "required_contributions", "predicate"].contains(&key.as_str()),
+                "{key}"
+            );
+        }
+    }
+    let v2 = &published["policy"]["missions"][0]["predicate"];
+    assert_eq!(v2["models"], serde_json::json!(["claude-opus-4.5"]));
+    fn exact(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Number(n) => n.is_i64() || n.is_u64(),
+            serde_json::Value::Array(a) => a.iter().all(exact),
+            serde_json::Value::Object(o) => o.values().all(exact),
+            _ => true,
+        }
+    }
+    assert!(exact(v2), "a pre-V2 reader carries it verbatim");
+
+    let read_back: ActivityCatalogue = serde_json::from_value(published).unwrap();
+    let raw = contribution_catalogue(&read_back, today).expect("the V1 mission remains");
+    let missions = raw["missions"].as_array().unwrap();
+    assert_eq!(missions.len(), 1);
+    assert_eq!(missions[0]["mission_id"], "m-1");
 }
 
 /// The refresh is due at once, then every [`MISSION_SLOT_REFRESH`] after
