@@ -192,12 +192,15 @@ export function usePrivateAi() {
       try {
         await startMutation.mutateAsync(provider);
       } catch {
+        // The core's sentence, as macOS, Windows and GTK show for a start
+        // that did not start (#728): it does not claim nothing happened.
         setActionError(
-          "Credential ceremony did not start. Check provider availability.",
+          writeUnconfirmed ??
+            "The change could not be confirmed. Refresh status before retrying.",
         );
       }
     },
-    [startMutation],
+    [startMutation, writeUnconfirmed],
   );
   const cancel = useCallback(async () => {
     setActionError(null);
