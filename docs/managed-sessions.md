@@ -51,10 +51,13 @@ The app checks for executable Claude Code, Codex and OpenCode installations
 using the same resolver as managed launches. This does not run the tool, scan
 its session store, or enable watching, importing or collection. **Install** opens
 the tool's official installation page; **Check again** refreshes availability.
-Removing a tool leaves its saved accounts and session history intact. A missing
-executable is refused before a launch or sign-in ticket is created; supported
-version checks run on explicit launch and sign-in requests, with a ten-second
-probe deadline, and again when the helper starts the tool.
+Removing a tool leaves its saved accounts and session history intact. The
+desktop screens do not offer a launch or sign-in for a tool the resolver cannot
+find. On an explicit launch or sign-in request, an executable the daemon finds
+is version-checked before a ticket is created, with a ten-second probe deadline;
+the helper resolves and checks the tool again where it runs, before starting
+it. A CLI launch is not refused because the daemon cannot see a tool that is on
+the launching terminal's PATH: the helper's check decides.
 
 The additive `managed_snapshot.tools` array contains `tool`, `installed` and
 `install_url`. The read-only `tc_managed_tools_json` FFI export returns that same

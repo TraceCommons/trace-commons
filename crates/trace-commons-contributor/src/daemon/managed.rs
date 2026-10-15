@@ -173,8 +173,7 @@ impl ManagedService {
                 if p.save_default {
                     return Err(ManagedError::InvalidRequest);
                 }
-                self.profiles
-                    .verify_version(&account, &find_native(p.tool)?)?;
+                verify_visible_version(&self.profiles, &account)?;
                 Ok(json!(self.sessions.prepare(p, &account)?))
             }
             "managed_terminal_launch" => {
@@ -273,8 +272,7 @@ impl ManagedService {
                 if self.sessions.holds_profile(p.account_id) {
                     return Err(ManagedError::Conflict);
                 }
-                self.profiles
-                    .verify_version(&account, &find_native(account.tool)?)?;
+                verify_visible_version(&self.profiles, &account)?;
                 let request = LaunchRequest {
                     model: None,
                     collect_traces: false,
@@ -504,6 +502,23 @@ pub async fn sweep(shared: &DaemonShared, now: chrono::DateTime<chrono::Utc>) {
     .unwrap_or_default();
     for route in ended {
         route.shutdown().await;
+    }
+}
+
+/// The check before a ticket is issued, against the executable this
+/// process can see. The tool runs where the helper runs: a CLI launch from
+/// a terminal whose PATH holds a tool the daemon cannot see is not refused
+/// here, because the helper resolves and version-checks it there before
+/// starting it (`supervisor::redeem_and_run`). One the daemon does find is
+/// checked now, so an unsupported version is refused before a ticket.
+fn verify_visible_version(
+    profiles: &NativeProfiles,
+    account: &AccountView,
+) -> Result<(), ManagedError> {
+    match find_native(account.tool) {
+        Ok(native) => profiles.verify_version(account, &native),
+        Err(ManagedError::ToolUnavailable) => Ok(()),
+        Err(other) => Err(other),
     }
 }
 
