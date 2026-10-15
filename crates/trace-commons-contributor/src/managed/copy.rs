@@ -19,6 +19,14 @@
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "Managed sessions",
+            "tools_title": "Coding tools",
+            "tools_empty": "Install a coding tool to get started. Claude Code and Codex support managed sessions; OpenCode supports export imports.",
+            "install": "Install",
+            "check_again": "Refresh",
+            "not_installed": "Not installed",
+            "tool_unavailable": "This tool is not installed or is unavailable. Install it, then choose Refresh.",
+            "opencode": "OpenCode",
+            "opencode_export_scope": "Import an OpenCode export to collect traces. Managed sessions are not available for OpenCode.",
             "description": "Start a session with a saved account. Your other sessions keep running.",
             "launch": "Launch",
             "launch_title": "Launch managed session",

@@ -93,10 +93,34 @@ public sealed class ManagedSessionsView : UserControl
         _root.Children.Add(new TextBlock { Text = T("title"), FontSize = 22 });
         _root.Children.Add(new TextBlock { Text = T("description"), TextWrapping = TextWrapping.Wrap });
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-        actions.Children.Add(Button("launch", LaunchAsync, _snapshot.Capabilities.TerminalLaunch && _snapshot.Accounts.Length > 0));
-        actions.Children.Add(Button("add", AddAsync));
+        actions.Children.Add(Button("launch", LaunchAsync, _snapshot.Capabilities.TerminalLaunch && _snapshot.Accounts.Any(a => _snapshot.CanLaunch(a.Tool))));
+        actions.Children.Add(Button("add", AddAsync, _snapshot.SetupTools.Length > 0));
         actions.Children.Add(Button("refresh", RefreshAsync));
         _root.Children.Add(actions);
+        if (_snapshot.Tools is not null)
+        {
+            _root.Children.Add(new TextBlock { Text = T("tools_title"), FontSize = 20 });
+            if (!_snapshot.Tools.Any(t => t.Installed))
+                _root.Children.Add(new TextBlock { Text = T("tools_empty"), TextWrapping = TextWrapping.Wrap });
+            foreach (var tool in _snapshot.Tools.Where(t => t.Installed))
+            {
+                _root.Children.Add(new TextBlock { Text = T(tool.Tool) });
+                if (tool.Tool == "opencode")
+                    _root.Children.Add(new TextBlock { Text = T("opencode_export_scope"), TextWrapping = TextWrapping.Wrap });
+            }
+            foreach (var tool in _snapshot.RecoveryTools)
+            {
+                var recovery = new StackPanel { Spacing = 4 };
+                recovery.Children.Add(new TextBlock { Text = T(tool.Tool) });
+                var install = Button("install", async () => { await Windows.System.Launcher.LaunchUriAsync(new Uri(tool.InstallUrl)); });
+                AutomationProperties.SetName(install, $"{T("install")} {T(tool.Tool)}");
+                recovery.Children.Add(install);
+                var refresh = Button("check_again", RefreshAsync);
+                AutomationProperties.SetName(refresh, $"{T("check_again")} {T(tool.Tool)}");
+                recovery.Children.Add(refresh);
+                _root.Children.Add(recovery);
+            }
+        }
         _root.Children.Add(new TextBlock { Text = _snapshot.Capabilities.TerminalDestination is string destination
             ? T("terminal_scope").Replace("{destination}", destination) : T("terminal_unavailable"), TextWrapping = TextWrapping.Wrap });
         _root.Children.Add(_rows);
@@ -106,6 +130,7 @@ public sealed class ManagedSessionsView : UserControl
             bool held = _snapshot.Sessions.Any(s => s.AccountId == account.Id && s.HoldsAccount);
             var row = new StackPanel { Spacing = 4 };
             row.Children.Add(new TextBlock { Text = $"{account.Label} · {T(account.Tool)} · {T(account.Connection)} · {account.AuthState}" });
+            if (!_snapshot.CanLaunch(account.Tool)) row.Children.Add(new TextBlock { Text = T("tool_unavailable"), TextWrapping = TextWrapping.Wrap });
             var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
             controls.Children.Add(Button("use_default", async () => {
                 ulong generation = _snapshot.Generations.GetValueOrDefault(account.Tool);
@@ -114,7 +139,7 @@ public sealed class ManagedSessionsView : UserControl
             controls.Children.Add(Button("rename_short", () => RenameAsync(account)));
             if (account.Connection == "subscription") controls.Children.Add(Button("reconnect", async () => {
                 await OpenAsync(await CallAsync("managed_account_reconnect", new { account_id = account.Id }));
-            }, !held && _snapshot.Capabilities.TerminalLaunch));
+            }, !held && _snapshot.Capabilities.TerminalLaunch && _snapshot.CanLaunch(account.Tool)));
             controls.Children.Add(Button("remove", async () => {
                 var dialog = Dialog("remove_question", new TextBlock { Text = T("remove_description"), TextWrapping = TextWrapping.Wrap }, "remove");
                 if (await dialog.ShowAsync() == ContentDialogResult.Primary) await CallAsync("managed_account_remove", new { account_id = account.Id });
@@ -211,7 +236,9 @@ public sealed class ManagedSessionsView : UserControl
 
     private async Task AddAsync()
     {
-        string[] tools = ["claude", "codex"], connections = ManagedSignIn.ConnectionOptions(_snapshot?.NearAiSignedIn == true);
+        string[] tools = _snapshot?.SetupTools ?? [];
+        if (tools.Length == 0) return;
+        string[] connections = ManagedSignIn.ConnectionOptions(_snapshot?.NearAiSignedIn == true);
         var tool = new ComboBox { Header = T("tool"), ItemsSource = tools.Select(T).ToArray(), SelectedIndex = 0 };
         var connection = new ComboBox { Header = T("connection"), ItemsSource = connections.Select(T).ToArray(), SelectedIndex = 0 };
         var label = new TextBox { Header = T("label") };
@@ -233,7 +260,8 @@ public sealed class ManagedSessionsView : UserControl
     private async Task LaunchAsync()
     {
         if (_snapshot is null) return;
-        var accounts = _snapshot.Accounts;
+        var accounts = _snapshot.Accounts.Where(a => _snapshot.CanLaunch(a.Tool)).ToArray();
+        if (accounts.Length == 0) return;
         var account = new ComboBox { Header = T("saved_account"), ItemsSource = accounts.Select(a => $"{T(a.Tool)} · {a.Label} · {T(a.Connection)}").ToArray(), SelectedIndex = 0 };
         var project = new TextBox { Header = T("project_placeholder") };
         var form = new StackPanel { Spacing = 10 };

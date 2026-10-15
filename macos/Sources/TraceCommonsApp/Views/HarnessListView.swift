@@ -17,6 +17,10 @@ struct HarnessListSection: View {
     /// draws #1146's eyebrow header above it instead, with the same title.
     var titled = true
 
+    private var visibleHarnesses: [HarnessRow] {
+        ManagedSurface.visibleHarnesses(model.harnesses.harnesses, tools: model.managedSnapshot?.tools)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
             if titled {
@@ -66,14 +70,14 @@ struct HarnessListSection: View {
             // "none found".
             if model.harnesses == HarnessList.none {
                 RouteDisclosureUnreadableGlassLine(line: nil)
-            } else if model.harnesses.harnesses.isEmpty {
+            } else if visibleHarnesses.isEmpty {
                 Text(copy.harnessesNoneFound)
                     .glassType(GlassTokens.TypeScale.body)
                     .foregroundStyle(GlassColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 VStack(alignment: .leading, spacing: 1) {
-                    ForEach(model.harnesses.harnesses) { row in
+                    ForEach(visibleHarnesses) { row in
                         HarnessRowView(row: row, copy: copy)
                     }
                 }

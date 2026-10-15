@@ -10,6 +10,30 @@ fn text(key: &str) -> String {
         .unwrap_or_default()
         .into()
 }
+fn can_launch(snapshot: &Value, tool: &str) -> bool {
+    ["claude", "codex"].contains(&tool)
+        && snapshot["tools"].as_array().is_none_or(|tools| {
+            tools
+                .iter()
+                .any(|t| t["tool"] == tool && t["installed"] == true)
+        })
+}
+fn setup_tools(snapshot: &Value) -> Vec<&'static str> {
+    ["claude", "codex"]
+        .into_iter()
+        .filter(|tool| can_launch(snapshot, tool))
+        .collect()
+}
+fn launch_accounts(snapshot: &Value) -> Vec<Value> {
+    snapshot["accounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|a| can_launch(snapshot, a["tool"].as_str().unwrap_or_default()))
+        .cloned()
+        .collect()
+}
+
 fn button(key: &str, f: impl Fn() + 'static) -> gtk::Button {
     let b = gtk::Button::with_label(&text(key));
     b.connect_clicked(move |_| f());
@@ -54,17 +78,49 @@ pub fn refresh(app: &Rc<App>) {
         let launch_app = Rc::clone(app);
         let launch_snapshot = snapshot.clone();
         let launch = button("launch", move || launch_dialog(&launch_app, &launch_snapshot));
-        launch.set_sensitive(snapshot["capabilities"]["terminal_launch"] == true && snapshot["accounts"].as_array().is_some_and(|a| !a.is_empty()));
+        launch.set_sensitive(snapshot["capabilities"]["terminal_launch"] == true && !launch_accounts(&snapshot).is_empty());
         controls.append(&launch);
         let add_app = Rc::clone(app);
         let terminal = snapshot["capabilities"]["terminal_launch"] == true;
-        controls.append(&button("add", move || add_dialog(&add_app, terminal)));
+        let tools = setup_tools(&snapshot);
+        let has_tools = !tools.is_empty();
+        let add = button("add", move || add_dialog(&add_app, terminal, tools.clone()));
+        add.set_sensitive(has_tools);
+        controls.append(&add);
+        let refresh_app = Rc::clone(app);
+        controls.append(&button("check_again", move || refresh(&refresh_app)));
         root.append(&controls);
+        if let Some(tools) = snapshot["tools"].as_array() {
+            root.append(&style::section(&text("tools_title")));
+            let any_installed = tools.iter().any(|t| t["installed"] == true);
+            if !any_installed { style::append_body(root, text("tools_empty")); }
+            for tool in tools {
+                let id = tool["tool"].as_str().unwrap_or_default();
+                if tool["installed"] == true {
+                    style::append_body(root, text(id));
+                    if id == "opencode" { style::append_meta(root, text("opencode_export_scope")); }
+                    continue;
+                }
+                let saved = snapshot["accounts"].as_array().into_iter().flatten().any(|a| a["tool"] == id);
+                if any_installed && !saved { continue; }
+                style::append_body(root, text(id));
+                if let Some(url) = tool["install_url"].as_str() {
+                    let url = url.to_owned();
+                    let install = button("install", move || {
+                        let _ = gtk::gio::AppInfo::launch_default_for_uri(&url, None::<&gtk::gio::AppLaunchContext>);
+                    });
+                    install.update_property(&[gtk::accessible::Property::Label(&format!("{} {}", text("install"), text(id)))]);
+                    root.append(&install);
+                }
+            }
+        }
         let destination = snapshot["capabilities"]["terminal_destination"].as_str();
         style::append_meta(root, destination.map(|d| text("terminal_scope").replace("{destination}", d)).unwrap_or_else(|| text("terminal_unavailable")));
         for account in snapshot["accounts"].as_array().into_iter().flatten() {
             let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
             style::append_body(&row, format!("{} · {} · {} · {}", account["label"].as_str().unwrap_or_default(), text(account["tool"].as_str().unwrap_or_default()), text(account["connection"].as_str().unwrap_or_default()), account["auth_state"].as_str().unwrap_or_default()));
+            let available = can_launch(&snapshot, account["tool"].as_str().unwrap_or_default());
+            if !available { style::append_meta(&row, text("tool_unavailable")); }
             let held = snapshot["sessions"].as_array().into_iter().flatten().any(|s| s["account_id"] == account["id"] && s["state"] != "exited" && s["state"] != "failed");
             let controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             let a = Rc::clone(app); let account_copy = account.clone();
@@ -75,7 +131,7 @@ pub fn refresh(app: &Rc<App>) {
             if account["connection"] == "subscription" {
                 let a = Rc::clone(app); let id = account["id"].clone();
                 let reconnect = button("reconnect", move || action(&a, "managed_account_reconnect", json!({"account_id":id}), true));
-                reconnect.set_sensitive(!held && terminal); controls.append(&reconnect);
+                reconnect.set_sensitive(!held && terminal && available); controls.append(&reconnect);
             }
             let a = Rc::clone(app); let id = account["id"].clone();
             let remove = button("remove", move || {
@@ -143,9 +199,13 @@ fn rename_dialog(app: &Rc<App>, account: &Value) {
     window.present();
 }
 
-fn add_dialog(app: &Rc<App>, terminal: bool) {
+fn add_dialog(app: &Rc<App>, terminal: bool, tools: Vec<&'static str>) {
+    if tools.is_empty() {
+        return;
+    }
     let (window, content) = dialog(app, "save_title");
-    let tool = gtk::DropDown::from_strings(&[&text("claude"), &text("codex")]);
+    let labels: Vec<_> = tools.iter().map(|id| text(id)).collect();
+    let tool = gtk::DropDown::from_strings(&labels.iter().map(String::as_str).collect::<Vec<_>>());
     let connection =
         gtk::DropDown::from_strings(&[&text("subscription"), &text("api_key"), &text("near_ai")]);
     let label = gtk::Entry::builder()
@@ -169,7 +229,7 @@ fn add_dialog(app: &Rc<App>, terminal: bool) {
         let secret = key.text().to_string();
         if !subscription && secret.is_empty() { return; }
         let kind = ["subscription", "api_key", "near_ai"][connection.selected() as usize];
-        a.call("managed_account_add", json!({"tool":(["claude","codex"][tool.selected() as usize]),"connection":kind,"label":label.text().as_str()}), move |app, result| {
+        a.call("managed_account_add", json!({"tool":(tools[tool.selected() as usize]),"connection":kind,"label":label.text().as_str()}), move |app, result| {
             if let Ok(account) = result {
                 if subscription { action(app, "managed_account_reconnect", json!({"account_id":account["id"]}), true); }
                 else { action(app, "managed_account_set_key", json!({"account_id":account["id"],"key":secret}), false); }
@@ -181,10 +241,10 @@ fn add_dialog(app: &Rc<App>, terminal: bool) {
 }
 
 fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
-    let Some(accounts) = snapshot["accounts"].as_array() else {
+    let accounts = launch_accounts(snapshot);
+    if accounts.is_empty() {
         return;
-    };
-    let accounts = accounts.clone();
+    }
     let (window, content) = dialog(app, "launch_title");
     let labels: Vec<_> = accounts
         .iter()
@@ -243,4 +303,26 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
         w.close();
     }));
     window.present();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn availability_filters_launch_without_removing_saved_accounts() {
+        let snapshot = json!({"tools":[{"tool":"claude","installed":false},{"tool":"codex","installed":true},{"tool":"opencode","installed":true}],
+            "accounts":[{"tool":"claude"},{"tool":"codex"}]});
+        assert_eq!(setup_tools(&snapshot), vec!["codex"]);
+        assert_eq!(launch_accounts(&snapshot), vec![json!({"tool":"codex"})]);
+        assert_eq!(snapshot["accounts"].as_array().unwrap().len(), 2);
+        assert!(!can_launch(&snapshot, "opencode"));
+    }
+
+    #[test]
+    fn older_snapshot_retains_managed_tools_but_empty_inventory_does_not() {
+        assert_eq!(setup_tools(&json!({})), vec!["claude", "codex"]);
+        assert!(setup_tools(&json!({"tools":[]})).is_empty());
+        assert!(setup_tools(&json!({"tools":[{"tool":"opencode","installed":true}]})).is_empty());
+    }
 }

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -26,21 +27,31 @@ public sealed record ManagedCapabilities(
     [property: JsonPropertyName("terminal_destination")] string? TerminalDestination,
     [property: JsonPropertyName("near_ai_signin")] bool NearAiSignin = false);
 
+public sealed record ManagedTool(string Tool, bool Installed,
+    [property: JsonPropertyName("install_url")] string InstallUrl);
+
 /// <param name="SignInAccounts">One entry per tool, derived from the NEAR AI
 /// sign-in and never saved. Empty, or absent from an older daemon, without one.</param>
 public sealed record ManagedSnapshot(
     ulong Revision, ManagedAccount[] Accounts, ManagedSession[] Sessions,
     Dictionary<string, ulong> Generations, ManagedCapabilities Capabilities,
     Dictionary<string, string> Copy,
-    [property: JsonPropertyName("sign_in_accounts")] ManagedAccount[]? SignInAccounts = null)
+    [property: JsonPropertyName("sign_in_accounts")] ManagedAccount[]? SignInAccounts = null, ManagedTool[]? Tools = null)
 {
+    // Older snapshots retain their original two-tool surface. New inventories
+    // must positively report an installed managed tool.
+    public bool CanLaunch(string tool) => ManagedSignIn.Tools.Contains(tool) &&
+        (Tools is null || Tools.Any(t => t.Tool == tool && t.Installed));
+    public string[] SetupTools => ManagedSignIn.Tools.Where(CanLaunch).ToArray();
+    public ManagedTool[] RecoveryTools => (Tools ?? []).Where(t => !t.Installed &&
+        (!Tools!.Any(x => x.Installed) || Accounts.Any(a => a.Tool == t.Tool))).ToArray();
     public string Text(string key) => Copy.GetValueOrDefault(key, string.Empty);
 
     /// <summary>Whether the daemon holds a NEAR AI sign-in.</summary>
     [JsonIgnore] public bool NearAiSignedIn => Capabilities.NearAiSignin;
 
     /// <summary>The tool's NEAR AI sign-in entry, only while signed in.</summary>
-    public ManagedAccount? SignInEntry(string tool) => NearAiSignedIn
+    public ManagedAccount? SignInEntry(string tool) => NearAiSignedIn && CanLaunch(tool)
         ? System.Array.Find(SignInAccounts ?? [], a => a.Tool == tool && a.Connection == "near_ai_signin")
         : null;
 

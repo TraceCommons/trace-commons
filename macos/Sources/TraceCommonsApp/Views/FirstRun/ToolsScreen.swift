@@ -22,6 +22,25 @@ enum AddToolOutcome: Equatable {
 /// Every write goes through `FirstRunState.add(_:)`, `answerAdded`, or, on
 /// a tool row, `ToolAnswerRowLayout.select`.
 enum ToolsScreenLayout {
+    static func sourceKind(_ tool: String) -> SourceKind? {
+        switch tool { case "claude": .claudeCode; case "codex": .codex; case "opencode": .opencode; default: nil }
+    }
+    static func shownRows(_ discovered: [SourceCandidate], state: FirstRunState, tools: [ManagedToolAvailability]?) -> [SourceCandidate] {
+        ToolsScreenLayout.rows(discovered, state: state).filter { candidate in
+            // Existing exports and explicit choices remain visible even after uninstall.
+            if candidate.exists || ToolAnswerRowLayout.asks(candidate, in: state) { return true }
+            guard tools != nil else { return true }
+            return false
+        }
+    }
+    static func setupRows(_ discovered: [SourceCandidate], state: FirstRunState, tools: [ManagedToolAvailability]?) -> [ManagedToolAvailability] {
+        (tools ?? []).filter { tool in
+            tool.installed && !ToolsScreenLayout.rows(discovered, state: state).contains {
+                $0.source == sourceKind(tool.tool) && ($0.exists || ToolAnswerRowLayout.asks($0, in: state))
+            }
+        }
+    }
+
     /// The `tc_describe_folder` JSON for `path` as an outcome. Decoded with
     /// `FolderMatch.decodeList`, which keeps every row: a dropped trajectory
     /// row would turn a question into a certainty. A nil or undecodable
@@ -306,12 +325,45 @@ struct ToolList: View {
     let installURL: (SourceKind) -> URL?
     let retry: () -> Void
 
+    @State private var tools: [ManagedToolAvailability]?
+    @State private var managedCopy: [String: String] = [:]
+    private func managedText(_ key: String) -> String { managedCopy[key] ?? "" }
+    private func refreshTools() {
+        tools = TCDiscovery.managedToolsJSON().flatMap { try? JSONDecoder().decode([ManagedToolAvailability].self, from: Data($0.utf8)) }
+        if let json = TCDiscovery.managedCopyJSON(), let copy = try? JSONDecoder().decode([String: String].self, from: Data(json.utf8)) { managedCopy = copy }
+    }
+
     var body: some View {
         Group {
             switch discovery {
             case .found(let discovered):
                 VStack(spacing: GlassTokens.Space.s4) {
-                    ForEach(ToolsScreenLayout.rows(discovered, state: runner.state), id: \.source) { candidate in
+                    if let tools, !tools.contains(where: \.installed) {
+                        ManagedToolInstallation(tools: tools, copy: managedText) { refreshTools(); retry() }
+                    }
+                    ForEach(ToolsScreenLayout.setupRows(discovered, state: runner.state, tools: tools)) { tool in
+                        GlassCard {
+                            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                                HStack {
+                                    GlassToolTile(.tool(ManagedWords.glassTool(tool.tool)))
+                                    Text(managedText(tool.tool)).glassType(GlassTokens.TypeScale.bodyStrong)
+                                    Spacer()
+                                    if let kind = ToolsScreenLayout.sourceKind(tool.tool) {
+                                        GlassFolderButton(FirstRunCopy.fill(copy.folders.chooseFolder, ["tool": kind.displayName])) {
+                                            if let path = FolderPanel.choose() { adding.describe(path, runner: runner) }
+                                        }
+                                    }
+                                }
+                                if tool.tool == "opencode" {
+                                    Text(managedText("opencode_export_scope"))
+                                        .glassType(GlassTokens.TypeScale.caption)
+                                        .foregroundStyle(GlassColor.textSecondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                    }
+                    ForEach(ToolsScreenLayout.shownRows(discovered, state: runner.state, tools: tools), id: \.source) { candidate in
                         ToolAnswerRow(
                             copy: copy.folders,
                             choose: copy.frame.choose,
@@ -373,6 +425,8 @@ struct ToolList: View {
                 }
             }
         }
+        .task { refreshTools() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in refreshTools() }
     }
 
     /// A folder added with the tile (Ron's custom tool row): named after

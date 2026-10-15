@@ -27,6 +27,37 @@ public sealed class ManagedSessionsTests
         Assert.Null(snapshot.SignInLaunchParams("claude", "C:\\p", "r"));
     }
 
+    [Fact]
+    public void AvailabilityFiltersSetupAndSignInWithoutLosingSavedAccounts()
+    {
+        var snapshot = ManagedSnapshot.Parse(SignedIn)! with {
+            Tools = [new("claude", false, "https://claude.ai/download"), new("codex", true, "https://developers.openai.com/codex/cli/"), new("opencode", true, "https://opencode.ai")],
+            Accounts = [new("saved", "claude", "subscription", "Personal", "ready")]
+        };
+        Assert.Equal(["codex"], snapshot.SetupTools);
+        Assert.Null(snapshot.SignInEntry("claude"));
+        Assert.NotNull(snapshot.SignInEntry("codex"));
+        Assert.False(snapshot.CanLaunch("opencode"));
+        Assert.Single(snapshot.Accounts);
+        Assert.Equal("claude", Assert.Single(snapshot.RecoveryTools).Tool);
+        Assert.Empty((snapshot with { Accounts = [] }).RecoveryTools);
+    }
+
+    [Fact]
+    public void EmptyInventoryAndOlderSnapshotsHaveDistinctBehavior()
+    {
+        var snapshot = ManagedSnapshot.Parse(SignedIn)!;
+        Assert.Equal(["claude", "codex"], snapshot.SetupTools);
+        Assert.Empty((snapshot with { Tools = [] }).SetupTools);
+        var decoded = ManagedSnapshot.Parse(SignedIn.Replace("\"revision\":1", "\"tools\":[{\"tool\":\"codex\",\"installed\":true,\"install_url\":\"https://example.test\"}],\"revision\":1"))!;
+        Assert.Equal(["codex"], decoded.SetupTools);
+        Assert.Equal("https://example.test", Assert.Single(decoded.Tools!).InstallUrl);
+        var empty = snapshot with { Tools = [new("claude", false, "a"), new("codex", false, "b"), new("opencode", false, "c")] };
+        Assert.Equal(3, empty.RecoveryTools.Length);
+        Assert.Empty(empty.SetupTools);
+        Assert.Empty((snapshot with { Tools = [new("opencode", true, "c")] }).SetupTools);
+    }
+
     private const string SignedIn = """
     {"revision":1,"accounts":[],"sign_in_accounts":[{"id":"c","tool":"claude","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready"},{"id":"x","tool":"codex","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready"}],"sessions":[],"generations":{"claude":4},"capabilities":{"managed_launch":true,"near_ai_signin":true,"terminal_launch":true},"copy":{}}
     """;
