@@ -1576,8 +1576,9 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let service_paying_in =
-            |mode| crate::tests::qualified_test_service_with_payout(&dir, Some(mode));
-        let unpaid = crate::tests::qualified_test_service_with_payout(&dir, None).await;
+            |mode| crate::ingest::app::tests::qualified_test_service_with_payout(&dir, Some(mode));
+        let unpaid =
+            crate::ingest::app::tests::qualified_test_service_with_payout(&dir, None).await;
         let paid = service_paying_in(PipelineNearSettlementMode::Http).await;
         let dry_run = service_paying_in(PipelineNearSettlementMode::DryRun).await;
         let disabled = service_paying_in(PipelineNearSettlementMode::Disabled).await;
@@ -1612,7 +1613,8 @@ mod tests {
             kek_status: Some(kek("gcp_cloud_kms")),
             ..local_store()
         };
-        let mut production_state = (*crate::tests::test_state(dir.path().to_path_buf())).clone();
+        let mut production_state =
+            (*crate::ingest::app::tests::test_state(dir.path().to_path_buf())).clone();
         production_state.db_mirror = Some(backend);
         production_state.require_db_mirror_writes = true;
         production_state.artifact_store = Some(gcs.clone());
@@ -2208,7 +2210,7 @@ mod tests {
     #[tokio::test]
     async fn config_status_reports_the_revision_and_the_trust_stores() {
         let dir = tempfile::tempdir().unwrap();
-        let base = crate::tests::test_state(dir.path().to_path_buf());
+        let base = crate::ingest::app::tests::test_state(dir.path().to_path_buf());
         let fields = [
             "pipeline_code_revision_configured",
             "pipeline_package_trust_store_loaded",
@@ -2248,7 +2250,7 @@ mod tests {
     #[tokio::test]
     async fn config_status_reports_unqualified_routing() {
         let dir = tempfile::tempdir().unwrap();
-        let base = crate::tests::test_state(dir.path().to_path_buf());
+        let base = crate::ingest::app::tests::test_state(dir.path().to_path_buf());
         for allowed in [false, true] {
             let mut state = (*base).clone();
             state.pipeline_unqualified_routing = allowed;

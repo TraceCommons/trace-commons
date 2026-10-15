@@ -13473,6 +13473,11 @@ mod tests {
             ),
         );
         assert_eq!(r.error.unwrap().message, "near_ai_credential_unknown");
+        // So does an unnamed cancel with nothing in flight: a label, never a
+        // made-up `cancelled` for a sign-in that was not running.
+        let r = handle_request(&s, &req("near_ai_credential_cancel", serde_json::json!({})));
+        assert!(r.result.is_none(), "{:?}", r.result);
+        assert_eq!(r.error.unwrap().message, "near_ai_credential_unknown");
 
         s.settings.lock().unwrap().near_ai_inference =
             Some(crate::daemon::settings::NearAiInferenceCredential {
@@ -13496,8 +13501,10 @@ mod tests {
         let r = handle_request(&s, &req("near_ai_credential_forget", serde_json::json!({})));
         let body = r.result.unwrap();
         assert_eq!(body["removed"], true);
-        // Local only. Revoking needs a session, and the session was discarded
-        // the moment the key was minted.
+        // Local only: forget never calls the service, though the retained
+        // session would let it. `credential_forget_explains` says so, and
+        // `forget_answers_not_revoked_because_the_forget_sentence_says_so`
+        // ties the two together.
         assert_eq!(body["revoked"], false);
         assert!(
             DaemonSettings::load(&s.store)

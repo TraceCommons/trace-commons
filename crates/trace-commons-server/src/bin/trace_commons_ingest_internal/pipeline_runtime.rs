@@ -45,13 +45,20 @@ use super::*;
 /// assembly. An assembly that enables payout passes them as
 /// `PipelinePayoutConfig::controls`, and `assemble_ingest_pipeline_runtime`
 /// refuses one that does not (Zaki review 1, round 2, finding 2).
+///
+/// The open build's production assembly never enables payout, so outside
+/// tests nothing in this crate reads the three NEAR payout fields; they are
+/// part of the seam's contract all the same.
 pub struct IngestPipelineRuntimeContext {
     pub backend: Arc<PgBackend>,
     pub artifact_store: Arc<dyn TraceArtifactStore>,
     pub object_store_name: String,
     pub lease_config: PipelineLeaseConfig,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub near_contract_id: Option<String>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub near_confirmation_interval: StdDuration,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub near_payout_controls: PipelineNearPayoutControls,
     pub novelty_utility_checks: PipelineNoveltyUtilityChecks,
     /// Whether a tenant with no routing row on the receipts list is routed to
@@ -75,6 +82,12 @@ pub struct IngestPipelineRuntimeContext {
     /// runtime is selected. The production assembler refuses `None` with
     /// `pipeline_production_components_missing`.
     pub components: Option<Arc<super::production_assembly::PipelineGateComponents>>,
+    /// The Score policy factories ingest was started with
+    /// (`trace_commons_server::ingest::IngestOptions::with_score_policies`):
+    /// empty in the open build. An assembly passes them to
+    /// `PipelineServiceBuilder::with_score_policies`, so a bundle naming a
+    /// registered implementation id can bind.
+    pub score_policies: ScorePolicyRegistry,
 }
 
 /// Compile-time injection seam for a proprietary production pipeline
@@ -174,6 +187,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         novelty_utility_checks,
         main_gate,
         None,
+        ScorePolicyRegistry::new(),
     )
 }
 
@@ -195,6 +209,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime_with_components(
     novelty_utility_checks: &PipelineNoveltyUtilityChecks,
     main_gate: MainGateConfig,
     components: Option<Arc<super::production_assembly::PipelineGateComponents>>,
+    score_policies: ScorePolicyRegistry,
 ) -> anyhow::Result<Option<Arc<PipelineService>>> {
     anyhow::ensure!(
         !(allow_test_dependencies && production_required),
@@ -233,6 +248,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime_with_components(
         unqualified_routing_allowed,
         main_gate,
         components,
+        score_policies,
     })?;
     // M11: every object ref the pipeline commits names the store it was
     // written to, exactly as a legacy receipt's does.

@@ -166,6 +166,12 @@ public enum TCCoreCopy {
         take(tc_first_run_copy_json())
     }
 
+    /// `tc_install_guides_json`: each coding tool's setup guide, keyed by
+    /// discovery slug. Decoded by `TCShellCore.InstallGuides`.
+    public static func installGuidesJSON() -> String? {
+        take(tc_install_guides_json())
+    }
+
     /// `tc_contribution_mode_copy_json`: the menu-bar Contribution mode
     /// pill's words (#1208). Decoded by `TCShellCore.ContributionModeCopy`.
     public static func contributionModeCopyJSON() -> String? {

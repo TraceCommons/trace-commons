@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TCBridge
 import TCShellCore
 import XCTest
 @testable import TraceCommonsApp
@@ -23,6 +24,28 @@ final class ManagedSessionsRenderTests: XCTestCase {
         let account = try XCTUnwrap(model.managedSnapshot?.accounts.first)
         try render(ManagedRenameSheet(account: account, onClose: {}).environmentObject(model), size: CGSize(width: 520, height: 240), to: directory.appendingPathComponent("managed-rename.png"))
         try render(ManagedRemoveSheet(account: account, onClose: {}).environmentObject(model), size: CGSize(width: 520, height: 240), to: directory.appendingPathComponent("managed-remove.png"))
+    }
+
+    @MainActor
+    func testMissingAndExportOnlyToolsKeepRecoveryVisible() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        var fixture = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json"))) as? [String: Any])
+        let copy = try XCTUnwrap(TCDiscovery.managedCopyJSON())
+        fixture["copy"] = try JSONSerialization.jsonObject(with: Data(copy.utf8))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for installed in [[], ["opencode"], ["codex"]] {
+            fixture["tools"] = ManagedSurface.supportedTools.map { ["tool": $0, "installed": installed.contains($0), "install_url": "https://example.com/" + $0] as [String: Any] }
+            let model = AppModel()
+            let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: fixture))
+            model.managedSnapshot = snapshot
+            XCTAssertFalse(snapshot.canLaunch(tool: "claude"))
+            XCTAssertEqual(ManagedSessionsSection.offersLaunch(snapshot), installed.contains("codex"))
+            XCTAssertFalse(ManagedSessionsSection.accountsBodyEmpty(snapshot, failing: false))
+            XCTAssertEqual(snapshot.needsToolInstallation, installed.isEmpty)
+            try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 720, height: 900), to: directory.appendingPathComponent("availability-\(installed.first ?? "none").png"))
+        }
     }
 
     /// The NEAR AI sign-in card both ways: Start buttons with a sign-in,

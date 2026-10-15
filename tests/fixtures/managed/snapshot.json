@@ -60,6 +60,10 @@
   },
   "copy": {
     "title": "Managed sessions",
+    "tools_title": "Coding tools",
+    "tools_empty": "Install a coding tool to get started.",
+    "install": "Install",
+    "tool_unavailable": "{tool} wasn't found on this computer.",
     "description": "Start a session with a saved account. Your other sessions keep running.",
     "launch": "Launch",
     "launch_title": "Launch managed session",

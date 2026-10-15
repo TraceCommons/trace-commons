@@ -36,6 +36,8 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.errorKey(code: "launch-unknown", message: "managed-launch-unknown"), "launch_unknown")
         XCTAssertEqual(ManagedSurface.errorKey(code: "conflict", message: "raw daemon text"), "action_failed")
         XCTAssertEqual(ManagedSurface.errorKey(code: nil, message: nil), "action_failed")
+        // tool_unavailable needs a {tool}; the banner has none to give it.
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-tool-unavailable", message: "managed-tool-unavailable"), "action_failed")
     }
 
     func testSnapshotKnowsWhichAccountsAreHeldAndDefault() throws {

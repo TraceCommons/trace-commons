@@ -13,7 +13,7 @@
 //! CI job.
 
 use super::*;
-use crate::account_routes::{
+use crate::ingest::app::account_routes::{
     ACCOUNT_UNBOUND, RegisteredAccountRoute, UNBOUND_ACCOUNT_ROUTE_POLICY, UnboundAccess,
 };
 use axum::body::Body;
