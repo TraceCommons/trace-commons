@@ -1838,6 +1838,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "pipeline_settle_finish_and_score_bases",
         include_str!("../../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"),
     ),
+    // V130: a human assessment per phase (`phase`, and the Score hold's
+    // `hold_label`), one per run and phase, so an operator can resolve a
+    // Score hold. No grant changes. V129 is taken by an open PR.
+    (
+        130,
+        "pipeline_score_hold_assessments",
+        include_str!("../../../../migrations/V130__pipeline_score_hold_assessments.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus
