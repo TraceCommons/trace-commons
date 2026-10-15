@@ -356,6 +356,10 @@ struct ManagedSessionsSection: View {
             session.accountLabel,
             model.managedText(session.connection),
         ].compactMap { $0 }.filter { !$0.isEmpty }
+        if let selectedModel = session.model { meta.append(selectedModel) }
+        if let collection = session.collection, ["pending", "collected", "failed"].contains(collection) {
+            meta.append(model.managedText("collection_" + collection))
+        }
         if let code = session.exitCode {
             meta.append(model.managedText("exit_code").replacingOccurrences(of: "{code}", with: String(code)))
         }
@@ -498,14 +502,14 @@ struct ManagedAccountSheet: View {
                 HStack(alignment: .top, spacing: GlassTokens.Space.s5) {
                     ManagedField(label: model.managedText("tool")) {
                         GlassSelect(
-                            model.managedText("tool"), selection: $tool,
+                            model.managedText("tool"), selection: Binding(get: { tool }, set: { tool = $0; if tool == "opencode" && connection == "subscription" { connection = "api_key" } }),
                             options: availableTools.map { GlassPickerOption(model.managedText($0), value: $0) })
                     }
                     ManagedField(label: model.managedText("connection")) {
                         GlassSelect(
                             model.managedText("connection"), selection: $connection,
-                            options: ManagedSurface.connectionOptions(signedIn: model.managedSnapshot?.nearAiSignedIn == true)
-                                .map { GlassPickerOption(model.managedText($0), value: $0) })
+                            options: ManagedSurface.connectionOptions(signedIn: model.managedSnapshot?.nearAiSignedIn == true, tool: tool)
+                                .map { GlassPickerOption(model.managedText(tool == "opencode" && $0 == "api_key" ? "openai_api_key" : $0), value: $0) })
                     }
                 }
                 GlassTextField(model.managedText("label"), text: $label, prompt: model.managedText("label_placeholder"))
@@ -537,9 +541,17 @@ struct ManagedLaunchSheet: View {
     let onClose: () -> Void
     @EnvironmentObject private var model: AppModel
     @State private var accountID = ""
+    @State private var selectedModel = ""
+    @State private var collectTraces = false
+    private var isOpenCode: Bool { model.managedSnapshot?.accounts.first(where: { $0.id == accountID })?.tool == "opencode" }
     @State private var project: URL?
     private var selectedAccount: ManagedAccount? { model.managedSnapshot?.accounts.first { $0.id == accountID } }
     private var toolAvailable: Bool { selectedAccount.map { model.managedSnapshot?.canLaunch(tool: $0.tool) == true } ?? false }
+
+    init(onClose: @escaping () -> Void, accountID: String = "") {
+        self.onClose = onClose
+        _accountID = State(initialValue: accountID)
+    }
 
     var body: some View {
         GlassModal(
@@ -548,7 +560,7 @@ struct ManagedLaunchSheet: View {
                 .cancel(model.managedText("cancel"), action: onClose),
                 GlassModalAction(
                     model.managedText("launch_short"), isDefault: true,
-                    isEnabled: toolAvailable && !accountID.isEmpty && project != nil && !model.managedBusy, id: "launch", action: launch),
+                    isEnabled: toolAvailable && !accountID.isEmpty && project != nil && (!isOpenCode || !selectedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) && !model.managedBusy, id: "launch", action: launch),
             ],
             busy: model.managedBusy,
             onCancel: onClose
@@ -573,6 +585,13 @@ struct ManagedLaunchSheet: View {
                     }
                     Button(model.managedText("check_again")) { model.refreshManagedSessions() }
                 }
+                if isOpenCode {
+                    GlassTextField(model.managedText("model"), text: $selectedModel)
+                    ManagedNote(text: model.managedText("opencode_scope"))
+                    Toggle(model.managedText("collect_traces"), isOn: $collectTraces)
+                        .toggleStyle(GlassToggleStyle(.settings))
+                    ManagedNote(text: model.managedText("collection_scope"))
+                }
                 HStack(spacing: GlassTokens.Space.s4) {
                     Text(project?.path ?? model.managedText("project_placeholder"))
                         .glassType(project == nil ? GlassTokens.TypeScale.label.weight(.regular) : GlassTokens.TypeScale.mono)
@@ -592,7 +611,12 @@ struct ManagedLaunchSheet: View {
 
     private func launch() {
         guard toolAvailable, !model.managedBusy, let snapshot = model.managedSnapshot, let account = snapshot.accounts.first(where: { $0.id == accountID }), let project else { return }
-        model.managedAction("managed_launch_prepare", params: ["request_id": UUID().uuidString, "purpose": "coding", "tool": account.tool, "connection": account.connection, "account_id": account.id, "cwd": project.path, "expected_generation": snapshot.generations[account.tool] ?? 0, "save_default": false], openTerminal: true)
+        var params: [String: Any] = ["request_id": UUID().uuidString, "purpose": "coding", "tool": account.tool, "connection": account.connection, "account_id": account.id, "cwd": project.path, "expected_generation": snapshot.generations[account.tool] ?? 0, "save_default": false]
+        if account.tool == "opencode" {
+            params["model"] = selectedModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            params["collect_traces"] = collectTraces
+        }
+        model.managedAction("managed_launch_prepare", params: params, openTerminal: true)
         onClose()
     }
 }

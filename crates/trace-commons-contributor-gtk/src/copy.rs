@@ -1697,6 +1697,7 @@ pub const ROOTS_CLAUDE: &str = "Claude Code traces";
 pub const ROOTS_CODEX: &str = "Codex traces";
 pub const ROOTS_GEMINI: &str = "Gemini CLI traces";
 pub const ROOTS_CLINE: &str = "Cline traces";
+pub const ROOTS_OPENCODE: &str = "OpenCode traces";
 /// Shown when a store arrives that this build has no name for -- a newer
 /// contributor library discovering a source this shell predates. Deliberately
 /// not one of the named titles: a row must never claim to be a product it is

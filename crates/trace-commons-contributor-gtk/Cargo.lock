@@ -4849,6 +4849,7 @@ dependencies = [
  "notify",
  "reqwest 0.12.28",
  "ring",
+ "rusqlite",
  "security-framework",
  "serde",
  "serde_json",

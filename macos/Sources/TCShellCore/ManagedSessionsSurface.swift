@@ -27,9 +27,11 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
     public let state: String
     public let purpose: String
     public let exitCode: Int?
+    public let model: String?
+    public let collection: String?
     public var holdsAccount: Bool { state != "exited" && state != "failed" }
     enum CodingKeys: String, CodingKey {
-        case id, tool, connection, cwd, state, purpose
+        case id, tool, connection, cwd, state, purpose, model, collection
         case accountID = "account_id", accountLabel = "account_label", projectLabel = "project_label", exitCode = "exit_code"
     }
 }
@@ -89,7 +91,9 @@ public enum ManagedSurface {
     }
 
     public static let installableTools = ["claude", "codex", "opencode"]
-    public static let supportedTools = ["claude", "codex"]
+    /// The tools managed sessions can set up and launch on macOS (#1417
+    /// added OpenCode).
+    public static let supportedTools = ["claude", "codex", "opencode"]
     public static func setupTools(_ tools: [ManagedToolAvailability]?) -> [String] {
         guard let tools else { return supportedTools }
         return supportedTools.filter { tool in tools.first(where: { $0.tool == tool })?.installed == true }
@@ -122,8 +126,11 @@ public enum ManagedSurface {
     /// The Add sheet's sign-in types. Signed in, NEAR AI is not offered: the
     /// sign-in entries already run on it, with no key. Signed out, a pasted
     /// key stays the fallback.
-    public static func connectionOptions(signedIn: Bool) -> [String] {
-        signedIn ? ["subscription", "api_key"] : ["subscription", "api_key", "near_ai"]
+    public static func connectionOptions(signedIn: Bool, tool: String = "claude") -> [String] {
+        // OpenCode has no sign-in entry or subscription flow. Its NEAR AI
+        // connection always uses a pasted key, even while signed in.
+        if tool == "opencode" { return ["api_key", "near_ai"] }
+        return signedIn ? ["subscription", "api_key"] : ["subscription", "api_key", "near_ai"]
     }
 
     /// The sign-in card's line with `{destination}` filled from the
@@ -135,7 +142,7 @@ public enum ManagedSurface {
 
     /// The tool's name key, or nil for a tool this shell does not know.
     public static func toolKey(_ tool: String) -> String? {
-        ["claude", "codex"].contains(tool) ? tool : nil
+        ["claude", "codex", "opencode"].contains(tool) ? tool : nil
     }
 
     /// A failed action is said in the shared copy, never as the daemon's

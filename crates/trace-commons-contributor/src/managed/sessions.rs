@@ -54,6 +54,10 @@ impl SessionState {
 #[serde(deny_unknown_fields)]
 pub struct LaunchRequest {
     #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub collect_traces: bool,
+    #[serde(default)]
     pub purpose: LaunchPurpose,
     pub request_id: Uuid,
     pub tool: ToolId,
@@ -67,6 +71,12 @@ pub struct LaunchRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionView {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub collect_traces: bool,
+    #[serde(default)]
+    pub collection: CollectionState,
     #[serde(default)]
     pub purpose: LaunchPurpose,
     pub id: Uuid,
@@ -109,9 +119,21 @@ pub struct LaunchContext {
     pub route_port: Option<u16>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionState {
+    #[default]
+    Off,
+    Pending,
+    Collected,
+    Failed,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LifecycleReport {
+    #[serde(default)]
+    pub collection: Option<CollectionState>,
     pub session_id: Uuid,
     pub proof: String,
     pub state: SessionState,
@@ -182,6 +204,11 @@ impl SessionRegistry {
                     lapsed(entry.view.connection)
                 };
             }
+            if entry.view.state == SessionState::Failed
+                && entry.view.collection == CollectionState::Pending
+            {
+                entry.view.collection = CollectionState::Failed;
+            }
             entry.ticket_hash = None;
         }
         let mut registry = Self {
@@ -244,6 +271,9 @@ impl SessionRegistry {
                 && now >= entry.ticket_expires
             {
                 entry.view.state = SessionState::Failed;
+                if entry.view.collection == CollectionState::Pending {
+                    entry.view.collection = CollectionState::Failed;
+                }
                 entry.ticket_hash = None;
                 changed = true;
             } else if matches!(
@@ -295,6 +325,22 @@ impl SessionRegistry {
         request: LaunchRequest,
         account: &AccountView,
     ) -> Result<PreparedLaunch, ManagedError> {
+        if request.tool == ToolId::Opencode {
+            if request.purpose != LaunchPurpose::Coding
+                || matches!(
+                    request.connection,
+                    ConnectionKind::Subscription | ConnectionKind::NearAiSignIn
+                )
+                || request
+                    .model
+                    .as_deref()
+                    .is_none_or(|model| !super::opencode::valid_model(model))
+            {
+                return Err(ManagedError::InvalidRequest);
+            }
+        } else if request.model.is_some() || request.collect_traces {
+            return Err(ManagedError::InvalidRequest);
+        }
         if request.account_id != account.id
             || request.tool != account.tool
             || request.connection != account.connection
@@ -330,6 +376,13 @@ impl SessionRegistry {
         let ticket = secret();
         let id = Uuid::new_v4();
         let view = SessionView {
+            model: request.model.clone(),
+            collect_traces: request.collect_traces,
+            collection: if request.collect_traces {
+                CollectionState::Pending
+            } else {
+                CollectionState::Off
+            },
             purpose: request.purpose,
             id,
             tool: request.tool,
@@ -462,6 +515,18 @@ impl SessionRegistry {
         {
             return Err(ManagedError::Conflict);
         }
+        if let Some(collection) = report.collection {
+            if !entry.view.collect_traces
+                || !matches!(report.state, SessionState::Exited | SessionState::Failed)
+                || !matches!(
+                    collection,
+                    CollectionState::Collected | CollectionState::Failed
+                )
+            {
+                return Err(ManagedError::InvalidRequest);
+            }
+            entry.view.collection = collection;
+        }
         entry.process_id = report.process_id;
         entry.process_identity = report.process_identity;
         entry.view.state = report.state;
@@ -561,6 +626,8 @@ mod tests {
             .unwrap();
         let mut registry = SessionRegistry::open(&store).unwrap();
         let request = LaunchRequest {
+            model: None,
+            collect_traces: false,
             purpose: LaunchPurpose::Coding,
             request_id: Uuid::new_v4(),
             tool: ToolId::Claude,
