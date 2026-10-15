@@ -1157,6 +1157,11 @@ jobs:
       # `-- --list`, never by grepping `#[test]`: client.rs carries a test
       # behind `#[cfg(not(feature = "near-attestation-collateral"))]`, which
       # this job excludes, so the source-attribute count is always one high.
+      #
+      # Since the ingest service compiled into the library (`ingest::app`),
+      # the `--lib near_attestation` filter also runs the 11 ingest tests
+      # whose names contain it; they pass under the feature. The counts above
+      # predate that, so re-measure with `-- --list` before relying on them.
       - run: cargo test -p trace-commons-attestation --features collateral-client
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why. Only a finished job saves its cache, so this

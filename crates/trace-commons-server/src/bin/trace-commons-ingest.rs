@@ -1301,6 +1301,19 @@ pub(crate) async fn run_ingest_main(options: super::IngestOptions) -> anyhow::Re
     run_ingest(selection.assembler(), options).await
 }
 
+/// The Score policy registry the qualification store qualifies: the one the
+/// assembled pipeline service holds, or, with no pipeline runtime, the one
+/// ingest was started with (empty in the open build either way).
+fn qualification_score_policies(
+    service: Option<&PipelineService>,
+    started_with: &ScorePolicyRegistry,
+) -> ScorePolicyRegistry {
+    match service {
+        Some(service) => service.score_policies().clone(),
+        None => started_with.clone(),
+    }
+}
+
 /// Starts ingest with an optional production pipeline assembly.
 ///
 /// The repository build deliberately passes `None`: proprietary scorer,
@@ -4271,10 +4284,10 @@ impl AppState {
         // in the open build either way).
         let pipeline_qualification = db_connections.as_ref().map(|connections| {
             let store = PipelineQualificationStore::new(connections.postgres.clone());
-            Arc::new(match pipeline_service.as_ref() {
-                Some(service) => store.with_score_policies(service.score_policies().clone()),
-                None => store.with_score_policies(score_policies.clone()),
-            })
+            Arc::new(store.with_score_policies(qualification_score_policies(
+                pipeline_service.as_deref(),
+                &score_policies,
+            )))
         });
         // Task 10: the two trust stores the qualification and activation
         // routes verify against. A set variable whose file does not hold a

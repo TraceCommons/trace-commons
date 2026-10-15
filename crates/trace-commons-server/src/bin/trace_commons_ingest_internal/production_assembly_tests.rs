@@ -992,6 +992,37 @@ async fn production_assembler_binds_the_score_policies_ingest_was_started_with()
     assert!(open.score_policies().is_empty());
 }
 
+/// The qualification store qualifies what the pipeline service can bind: the
+/// registry the assembled service holds, or, with no pipeline runtime, the
+/// one ingest was started with.
+#[tokio::test]
+async fn qualification_store_registry_follows_the_service_or_the_options() {
+    let registry = || {
+        ScorePolicyRegistry::new()
+            .with_factory(
+                "test.registered_only.score.v1",
+                Arc::new(RegisteredOnlyScorePolicy),
+            )
+            .unwrap()
+    };
+    let service = Boot {
+        score_policies: registry(),
+        ..Boot::test_opt_in()
+    }
+    .assemble(&ProductionPipelineAssembler)
+    .await
+    .expect("the production assembly over doubles starts with the test opt-in");
+
+    // A service wins over the options.
+    let from_service = qualification_score_policies(Some(&service), &ScorePolicyRegistry::new());
+    assert!(from_service.get("test.registered_only.score.v1").is_some());
+
+    // No pipeline runtime: the options' registry is what is qualified.
+    let from_options = qualification_score_policies(None, &registry());
+    assert!(from_options.get("test.registered_only.score.v1").is_some());
+    assert!(qualification_score_policies(None, &ScorePolicyRegistry::new()).is_empty());
+}
+
 /// An assembly that binds floors other than `main`'s: the production
 /// assembler with the context's gate configuration shifted first.
 struct ShiftedFloorsAssembler;
