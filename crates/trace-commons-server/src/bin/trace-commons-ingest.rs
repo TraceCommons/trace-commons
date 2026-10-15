@@ -16011,6 +16011,14 @@ async fn submit_trace_handler(
         } else {
             "submitted-envelope"
         };
+        let db_first = state.require_db_mirror_writes || state.account_admission.is_some();
+        // What a failed DB-first remediation restores (#332), read before
+        // `store_envelope` can overwrite the prior's plaintext path. Kept as
+        // a result: a prior that cannot be read blocks only the rollback.
+        let remediation_prior_snapshot = remediating_prior
+            .as_ref()
+            .filter(|_| db_first)
+            .map(|prior| quarantine_remediation_prior_snapshot(state.as_ref(), prior));
         let stored_envelope = store_envelope(
             &state,
             tenant.tenant_id(),
@@ -16106,7 +16114,7 @@ async fn submit_trace_handler(
         // (same id, same chain fields), appended once both submission writes
         // below are done.
         let audit_row = submission_audit_row_mirror(&record).map_err(internal_error)?;
-        if state.require_db_mirror_writes || state.account_admission.is_some() {
+        if db_first {
             let mirror_result = mirror_submission_to_db_with_options(
                 &state,
                 tenant.auth(),
@@ -16125,8 +16133,19 @@ async fn submit_trace_handler(
                     submission_id = %record.submission_id,
                     "Trace Commons DB dual-write mirror failed"
                 );
-                cleanup_submission_file_side_writes(state.as_ref(), &record)
-                    .map_err(internal_error)?;
+                match (remediating_prior.as_ref(), remediation_prior_snapshot) {
+                    (Some(prior), Some(snapshot)) => roll_back_failed_quarantine_remediation(
+                        state.as_ref(),
+                        tenant.auth(),
+                        prior,
+                        snapshot,
+                        &record,
+                    )
+                    .await
+                    .map_err(internal_error)?,
+                    _ => cleanup_submission_file_side_writes(state.as_ref(), &record)
+                        .map_err(internal_error)?,
+                }
             }
             enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
                 .map_err(internal_error)?;
@@ -69667,6 +69686,65 @@ fn cleanup_submission_file_side_writes(
         record.submission_id,
     ))?;
     delete_trace_objects_for_record(state, record)?;
+    Ok(())
+}
+
+/// The prior submission's derived record and envelope, which
+/// [`roll_back_failed_quarantine_remediation`] restores.
+fn quarantine_remediation_prior_snapshot(
+    state: &AppState,
+    prior: &TraceCommonsSubmissionRecord,
+) -> anyhow::Result<(TraceCommonsDerivedRecord, TraceContributionEnvelope)> {
+    let derived = read_derived_record(&state.root, &prior.tenant_id, prior.submission_id)?
+        .context("prior derived record unavailable for remediation rollback")?;
+    Ok((derived, read_envelope_by_record(state, prior)?))
+}
+
+/// Undoes a quarantine remediation whose DB-first mirror failed (#332).
+///
+/// The mirror's writes are separate transactions, so a failure part-way
+/// leaves the DB naming the remediation's artifact. The prior submission is
+/// re-mirrored first, so no live object ref points at the artifact deleted
+/// next; only then are this request's own writes removed. The prior's file
+/// metadata and derived record are not touched: the DB-first path writes
+/// them only after the mirror succeeds, so on this path they are still the
+/// prior's. If the prior cannot be read or re-mirrored, nothing is deleted.
+///
+/// Witness evidence the failed remediation already replaced or removed is
+/// not restored: the re-mirror offers none and leaves what is stored.
+async fn roll_back_failed_quarantine_remediation(
+    state: &AppState,
+    tenant: &TenantAuth,
+    prior: &TraceCommonsSubmissionRecord,
+    prior_snapshot: anyhow::Result<(TraceCommonsDerivedRecord, TraceContributionEnvelope)>,
+    record: &TraceCommonsSubmissionRecord,
+) -> anyhow::Result<()> {
+    let (prior_derived, prior_envelope) = prior_snapshot?;
+    mirror_submission_to_db_with_options(
+        state,
+        tenant,
+        prior,
+        &prior_derived,
+        &prior_envelope,
+        None,
+        SubmissionMirrorKind::Submission,
+    )
+    .await
+    .context("failed to restore the prior submission after a failed remediation")?;
+    let path = state.root.join(&record.object_key);
+    if record.object_key != prior.object_key {
+        remove_file_if_exists(&path)?;
+    } else if path.exists() {
+        // `store_envelope` overwrote the prior's plaintext at the same path.
+        write_json_file(&path, &prior_envelope, "trace contribution envelope")?;
+    }
+    if let (Some(store), Some(receipt)) = (
+        state.artifact_store.as_ref(),
+        record.artifact_receipt.as_ref(),
+    ) && prior.artifact_receipt.as_ref().map(|r| &r.object_key) != Some(&receipt.object_key)
+    {
+        store.delete_artifact(&record.tenant_storage_ref, receipt)?;
+    }
     Ok(())
 }
 

@@ -766,4 +766,100 @@ mod tests {
         assert_eq!(ATTEMPT_STATUS_FIELD, "attempt_status");
         assert_eq!(ceremony::STATUS_COMPLETE, "complete");
     }
+
+    /// `handle_forget` answers `revoked: false`, and the reason is a sentence.
+    ///
+    /// No shell reads `revoked`. What tells a contributor that forgetting is
+    /// local is `credential_forget_explains`, drawn beside the Forget button
+    /// in every shell: "This does not revoke them at NEAR AI." The coupling
+    /// between that sentence and this answer runs through prose alone, so
+    /// nothing else would fail if the two drifted apart.
+    ///
+    /// And the reason they could drift is real. `ceremony::forget` now keeps
+    /// the session beside the key, so a revoke is reachable in principle. If
+    /// this ever answers `revoked: true`, every shell goes on saying the key
+    /// stays valid at the service, and the sentence is false with no test
+    /// red. Changing this answer must mean rewriting that sentence in the
+    /// same change -- this test is where that is forced.
+    #[tokio::test]
+    async fn forget_answers_not_revoked_because_the_forget_sentence_says_so() {
+        let (_directory, store) = crate::config::tests_support::temp_store();
+        let shared = DaemonShared::load(store).unwrap();
+        shared.settings.lock().unwrap().near_ai_inference =
+            Some(crate::daemon::settings::NearAiInferenceCredential {
+                key: "sk-forget-pin".into(),
+                key_id: "key-1".into(),
+                key_prefix: "sk-for".into(),
+                organization_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                minted_at: chrono::Utc::now(),
+            });
+        shared
+            .settings
+            .lock()
+            .unwrap()
+            .save_for_test(&shared.store)
+            .unwrap();
+
+        let explains =
+            crate::private_inference_copy::private_inference_copy().credential_forget_explains;
+        let request = Request {
+            id: 29,
+            method: "near_ai_credential_forget".into(),
+            params: serde_json::json!({}),
+        };
+        let body = handle_forget(&shared, &request)
+            .result
+            .expect("forgetting a stored key is answered");
+        assert_eq!(body["removed"], true, "{body}");
+        assert_eq!(
+            body["revoked"], false,
+            "forget now claims a revocation, so this sentence beside the Forget \
+             button in every shell is false and must change in the same \
+             commit: {explains}"
+        );
+        // The sentence still says what the answer means. If it stops saying
+        // it, the answer above is no longer explained anywhere a contributor
+        // can read.
+        assert!(
+            explains.contains("does not revoke"),
+            "credential_forget_explains no longer explains revoked: false: {explains}"
+        );
+    }
+
+    /// An unnamed cancel answers only for a sign-in that is running.
+    ///
+    /// Over the handler, not just the registry: once an attempt has finished
+    /// the registry still holds it, and an unnamed cancel must not answer
+    /// `ok {status: cancelled}` for it. Naming it keeps its answer.
+    #[tokio::test]
+    async fn an_unnamed_cancel_answers_unknown_once_nothing_is_running() {
+        let (_directory, store) = crate::config::tests_support::temp_store();
+        let shared = DaemonShared::load(store).unwrap();
+        let request = |id: u64, params: serde_json::Value| Request {
+            id,
+            method: "near_ai_credential_cancel".into(),
+            params,
+        };
+        let started = ceremony::begin(&shared.store, "github").await.unwrap();
+        let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
+
+        let running = handle_cancel(&shared, &request(31, serde_json::json!({})));
+        let body = running.result.expect("a running sign-in is cancelled");
+        assert_eq!(body["status"], "cancelled", "{body}");
+        assert!(body.get("attempt_id").is_none(), "{body}");
+
+        let finished = handle_cancel(&shared, &request(32, serde_json::json!({})));
+        assert!(finished.result.is_none(), "{:?}", finished.result);
+        assert_eq!(
+            finished.error.unwrap().message,
+            "near_ai_credential_unknown"
+        );
+
+        let named = handle_cancel(
+            &shared,
+            &request(33, serde_json::json!({ "attempt_id": attempt_id })),
+        );
+        assert_eq!(named.result.unwrap()["status"], "cancelled");
+    }
 }
