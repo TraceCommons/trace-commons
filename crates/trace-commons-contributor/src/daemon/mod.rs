@@ -1237,14 +1237,13 @@ async fn drain_approved(
                 uploaded_this_pass = true;
             }
             uploader::UploadDecision::Superseded { new_hash } => {
-                let meta = std::fs::metadata(&entry.path).ok();
-                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                // When the new content was last written, as the watcher
-                // would observe it: the group's newest write for a grouped
-                // source. Local-only; see `QueueEntry::last_modified_at`.
+                // Use the adapter's grouped/database observation, not the virtual path's stat.
+                let size = session_ref.size_bytes;
                 let written = eligibility::last_write(
                     session_ref.group_modified_at,
-                    meta.and_then(|m| m.modified().ok()),
+                    std::fs::metadata(&entry.path)
+                        .ok()
+                        .and_then(|m| m.modified().ok()),
                 );
                 if let Some(fresh) = q.supersede(entry.entry_id, &new_hash, size, written, now) {
                     let max = shared

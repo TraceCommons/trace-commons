@@ -28,6 +28,10 @@ pub async fn redeem_and_run(store: &ConfigStore, prepared: PreparedLaunch) -> an
     .await;
     if result.is_err() && !spawned {
         let report = LifecycleReport {
+            collection: context
+                .session
+                .collect_traces
+                .then_some(super::sessions::CollectionState::Failed),
             session_id: context.session.id,
             proof: context.proof.clone(),
             state: SessionState::Failed,
@@ -80,48 +84,87 @@ async fn run_native(
         &row.cwd,
     )?;
     let mut route = None;
-    match row.connection {
-        ConnectionKind::Subscription => {}
-        ConnectionKind::ApiKey => {
-            let key = SecretStore::new(store).get(account.id)?;
-            match row.tool {
-                super::ToolId::Claude => {
-                    command.env("ANTHROPIC_API_KEY", key.expose());
-                }
-                super::ToolId::Codex => {
-                    command.env("NEAR_AI_SESSION_API_KEY", key.expose()).args([
-                        "-c",
-                        "model_provider=\"near_ai_openai\"",
-                        "-c",
-                        "model_providers.near_ai_openai.name=\"OpenAI API\"",
-                        "-c",
-                        "model_providers.near_ai_openai.base_url=\"https://api.openai.com/v1\"",
-                        "-c",
-                        "model_providers.near_ai_openai.env_key=\"NEAR_AI_SESSION_API_KEY\"",
-                        "-c",
-                        "model_providers.near_ai_openai.wire_api=\"responses\"",
-                    ]);
-                }
+    let opencode = if row.tool == super::ToolId::Opencode {
+        let session =
+            super::opencode::OpenCodeSession::new(store, &account, &native, row.id, &row.cwd)?;
+        let model = row.model.as_deref().ok_or(ManagedError::InvalidRequest)?;
+        session.prepare()?;
+        match row.connection {
+            ConnectionKind::Subscription | ConnectionKind::NearAiSignIn => {
+                return Err(ManagedError::InvalidRequest.into());
+            }
+            ConnectionKind::ApiKey => {
+                command = session.command(
+                    model,
+                    "https://api.openai.com/v1",
+                    SecretStore::new(store).get(account.id)?.expose(),
+                )?;
+            }
+            ConnectionKind::NearAi => {
+                let proxy = super::route::ManagedRoute::start_selected(
+                    store,
+                    row.id,
+                    SecretStore::new(store).get(account.id)?,
+                    Some(model),
+                )
+                .await?;
+                command = session.command(
+                    model,
+                    &format!("http://127.0.0.1:{}/openai/v1", proxy.port()),
+                    "managed-local-session",
+                )?;
+                route = Some(proxy);
             }
         }
-        ConnectionKind::NearAi => {
-            let proxy = super::route::ManagedRoute::start(
-                store,
-                row.id,
-                SecretStore::new(store).get(account.id)?,
-            )
-            .await?;
-            near_ai_route(&mut command, row.tool, proxy.port());
-            route = Some(proxy);
-        }
-        // The daemon holds the sign-in and hosts this session's proxy. This
-        // process learns its port and never the credential; no port, no run.
-        ConnectionKind::NearAiSignIn => {
-            near_ai_route(
-                &mut command,
-                row.tool,
-                context.route_port.ok_or(ManagedError::LaunchUnknown)?,
-            );
+        Some(session)
+    } else {
+        None
+    };
+    if opencode.is_none() {
+        match row.connection {
+            ConnectionKind::Subscription => {}
+            ConnectionKind::ApiKey => {
+                let key = SecretStore::new(store).get(account.id)?;
+                match row.tool {
+                    super::ToolId::Opencode => return Err(ManagedError::InvalidRequest.into()),
+                    super::ToolId::Claude => {
+                        command.env("ANTHROPIC_API_KEY", key.expose());
+                    }
+                    super::ToolId::Codex => {
+                        command.env("NEAR_AI_SESSION_API_KEY", key.expose()).args([
+                            "-c",
+                            "model_provider=\"near_ai_openai\"",
+                            "-c",
+                            "model_providers.near_ai_openai.name=\"OpenAI API\"",
+                            "-c",
+                            "model_providers.near_ai_openai.base_url=\"https://api.openai.com/v1\"",
+                            "-c",
+                            "model_providers.near_ai_openai.env_key=\"NEAR_AI_SESSION_API_KEY\"",
+                            "-c",
+                            "model_providers.near_ai_openai.wire_api=\"responses\"",
+                        ]);
+                    }
+                }
+            }
+            ConnectionKind::NearAi => {
+                let proxy = super::route::ManagedRoute::start(
+                    store,
+                    row.id,
+                    SecretStore::new(store).get(account.id)?,
+                )
+                .await?;
+                near_ai_route(&mut command, row.tool, proxy.port())?;
+                route = Some(proxy);
+            }
+            // The daemon holds the sign-in and hosts this session's proxy. This
+            // process learns its port and never the credential; no port, no run.
+            ConnectionKind::NearAiSignIn => {
+                near_ai_route(
+                    &mut command,
+                    row.tool,
+                    context.route_port.ok_or(ManagedError::LaunchUnknown)?,
+                )?;
+            }
         }
     }
     // Signals were registered before ticket redemption. A terminal closed
@@ -160,6 +203,7 @@ async fn run_native(
         .map(|p| format!("{}:{}", pid, p.start_time()))
         .unwrap_or_else(|| format!("{}:{}", pid, uuid::Uuid::new_v4()));
     let report = |state, exit_code| LifecycleReport {
+        collection: None,
         session_id: row.id,
         proof: context.proof.clone(),
         state,
@@ -207,7 +251,24 @@ async fn run_native(
     };
     #[cfg(not(unix))]
     let code = status.code().unwrap_or(1);
-    let receipt = report(SessionState::Exited, Some(code));
+    let mut receipt = report(SessionState::Exited, Some(code));
+    if row.collect_traces {
+        receipt.collection = Some(
+            match opencode
+                .as_ref()
+                .ok_or(ManagedError::InvalidRequest)?
+                .collect(store)
+            {
+                Ok(()) => super::sessions::CollectionState::Collected,
+                Err(_) => {
+                    eprintln!(
+                        "OpenCode exited, but its trace could not be collected. The local session is preserved."
+                    );
+                    super::sessions::CollectionState::Failed
+                }
+            },
+        );
+    }
     let persisted = super::sessions::persist_exit(store, &receipt);
     let final_report: anyhow::Result<Value> = call(store, "managed_session_report", json!(receipt));
     if final_report.is_ok() {
@@ -234,9 +295,14 @@ async fn run_native(
 
 /// Point the tool at a session's local NEAR AI proxy. The tool gets the
 /// loopback URL and a placeholder token, never a credential.
-fn near_ai_route(command: &mut std::process::Command, tool: super::ToolId, port: u16) {
+fn near_ai_route(
+    command: &mut std::process::Command,
+    tool: super::ToolId,
+    port: u16,
+) -> Result<(), ManagedError> {
     let base = format!("http://127.0.0.1:{port}");
     match tool {
+        super::ToolId::Opencode => return Err(ManagedError::InvalidRequest),
         super::ToolId::Claude => {
             command
                 .env("ANTHROPIC_BASE_URL", format!("{base}/anthropic"))
@@ -263,6 +329,7 @@ fn near_ai_route(command: &mut std::process::Command, tool: super::ToolId, port:
                 ]);
         }
     }
+    Ok(())
 }
 
 #[cfg(unix)]

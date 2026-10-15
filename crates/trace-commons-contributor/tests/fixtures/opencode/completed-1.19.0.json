@@ -1,0 +1,132 @@
+{
+  "info": {
+    "id": "ses_tracequalification",
+    "slug": "trace-qualification",
+    "projectID": "global",
+    "directory": "/synthetic/project",
+    "path": "synthetic/project",
+    "title": "Managed session",
+    "agent": "build",
+    "model": {
+      "id": "fixture-model",
+      "providerID": "trace-managed",
+      "variant": "default"
+    },
+    "version": "1.19.0",
+    "summary": {
+      "additions": 0,
+      "deletions": 0,
+      "files": 0
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+        "read": 0,
+        "write": 0
+      }
+    },
+    "time": {
+      "created": 1791936000000,
+      "updated": 1792021615901
+    }
+  },
+  "messages": [
+    {
+      "info": {
+        "role": "user",
+        "time": {
+          "created": 1792021615318
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "trace-managed",
+          "modelID": "fixture-model"
+        },
+        "summary": {
+          "diffs": []
+        },
+        "id": "msg_13ccfd2d60017Dmbd8FNyYdYQT",
+        "sessionID": "ses_tracequalification"
+      },
+      "parts": [
+        {
+          "type": "text",
+          "text": "\"Return the synthetic word.\"",
+          "id": "prt_13ccfd2dc001a4MrdWgJUUhI36",
+          "sessionID": "ses_tracequalification",
+          "messageID": "msg_13ccfd2d60017Dmbd8FNyYdYQT"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_13ccfd2d60017Dmbd8FNyYdYQT",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/synthetic/project",
+          "root": "/synthetic/project"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "modelID": "fixture-model",
+        "providerID": "trace-managed",
+        "time": {
+          "created": 1792021615577,
+          "completed": 1792021615894
+        },
+        "finish": "stop",
+        "id": "msg_13ccfd3d8001cxrPieXhS0mwsq",
+        "sessionID": "ses_tracequalification"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_13ccfd50f001QdTQ7rEQxDUbqV",
+          "sessionID": "ses_tracequalification",
+          "messageID": "msg_13ccfd3d8001cxrPieXhS0mwsq"
+        },
+        {
+          "type": "text",
+          "text": "Synthetic.",
+          "time": {
+            "start": 1792021615888,
+            "end": 1792021615890
+          },
+          "id": "prt_13ccfd510001CKTBvvaVKbJLAd",
+          "sessionID": "ses_tracequalification",
+          "messageID": "msg_13ccfd3d8001cxrPieXhS0mwsq"
+        },
+        {
+          "reason": "stop",
+          "type": "step-finish",
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 0
+            }
+          },
+          "cost": 0,
+          "id": "prt_13ccfd514001J1lUBD4HzASUy3",
+          "sessionID": "ses_tracequalification",
+          "messageID": "msg_13ccfd3d8001cxrPieXhS0mwsq"
+        }
+      ]
+    }
+  ]
+}

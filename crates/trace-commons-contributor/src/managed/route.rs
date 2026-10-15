@@ -19,18 +19,38 @@ pub(crate) static TEST_BASE_URL: std::sync::OnceLock<String> = std::sync::OnceLo
 
 impl ManagedRoute {
     pub async fn start(store: &ConfigStore, id: Uuid, key: ApiKey) -> Result<Self, ManagedError> {
-        #[cfg(test)]
-        if let Some(base_url) = TEST_BASE_URL.get() {
-            return Self::start_at(store, id, key, base_url).await;
-        }
-        Self::start_at(store, id, key, "https://cloud-api.near.ai/v1").await
+        Self::start_selected(store, id, key, None).await
     }
 
+    pub async fn start_selected(
+        store: &ConfigStore,
+        id: Uuid,
+        key: ApiKey,
+        model: Option<&str>,
+    ) -> Result<Self, ManagedError> {
+        #[cfg(test)]
+        if let Some(base_url) = TEST_BASE_URL.get() {
+            return Self::start_at_selected(store, id, key, base_url, model).await;
+        }
+        Self::start_at_selected(store, id, key, "https://cloud-api.near.ai/v1", model).await
+    }
+
+    #[cfg(test)]
     async fn start_at(
         store: &ConfigStore,
         id: Uuid,
         key: ApiKey,
         base_url: &str,
+    ) -> Result<Self, ManagedError> {
+        Self::start_at_selected(store, id, key, base_url, None).await
+    }
+
+    async fn start_at_selected(
+        store: &ConfigStore,
+        id: Uuid,
+        key: ApiKey,
+        base_url: &str,
+        requested: Option<&str>,
     ) -> Result<Self, ManagedError> {
         let root = store.dir().join("managed-routes");
         super::profiles::private_directory(&root)?;
@@ -85,7 +105,12 @@ base_url = {base_url}
                 if let Ok(value) = response.json::<serde_json::Value>().await {
                     if let Some(model) = value["data"]
                         .as_array()
-                        .and_then(|models| models.first())
+                        .and_then(|models| match requested {
+                            Some(id) => {
+                                models.iter().find(|model| model["id"].as_str() == Some(id))
+                            }
+                            None => models.first(),
+                        })
                         .and_then(|model| model["id"].as_str())
                     {
                         break model.to_owned();
@@ -156,7 +181,7 @@ mod tests {
         let app = Router::new()
             .route(
                 "/v1/models",
-                get(|| async { Json(json!({"data":[{"id":"deepseek-ai/DeepSeek-V3.1"}]})) }),
+                get(|| async { Json(json!({"data":[{"id":"deepseek-ai/DeepSeek-V3.1"},{"id":"selected-model"}]})) }),
             )
             .route("/v1/chat/completions", post(completion))
             .with_state(seen.clone());
@@ -175,11 +200,12 @@ mod tests {
         )
         .await
         .unwrap();
-        let b = ManagedRoute::start_at(
+        let b = ManagedRoute::start_at_selected(
             &store,
             Uuid::new_v4(),
             ApiKey::new("fixture-b".into()).unwrap(),
             &endpoint,
+            Some("selected-model"),
         )
         .await
         .unwrap();
@@ -205,10 +231,7 @@ mod tests {
                     "Bearer fixture-a".into(),
                     "deepseek-ai/DeepSeek-V3.1".into()
                 ),
-                (
-                    "Bearer fixture-b".into(),
-                    "deepseek-ai/DeepSeek-V3.1".into()
-                )
+                ("Bearer fixture-b".into(), "selected-model".into())
             ]
         );
         a.shutdown().await;

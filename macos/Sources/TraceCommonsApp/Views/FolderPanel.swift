@@ -1,4 +1,6 @@
 import AppKit
+import TCBridge
+import TCShellCore
 
 /// The one folder picker every screen opens (Settings' tool rows, the first
 /// run's Folders rows and its "add your tool" tile): one directory, never a
@@ -14,5 +16,26 @@ enum FolderPanel {
         panel.canCreateDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
         return url.path
+    }
+}
+
+/// Resolve only a newly chosen folder. Existing saved directory declarations
+/// keep their export-only meaning until the contributor selects again.
+enum SourceFolderSelection {
+    static func path(for kind: SourceKind, chosenFolder: String) -> String {
+        guard kind == .opencode,
+              let json = TCDiscovery.describeFolderJSON(chosenFolder),
+              let matches = try? FolderMatch.decodeList(from: json)
+        else { return chosenFolder }
+        return path(for: kind, chosenFolder: chosenFolder, matches: matches)
+    }
+
+    static func path(for kind: SourceKind, chosenFolder: String, matches: [FolderMatch]) -> String {
+        guard kind == .opencode, matches.count == 1,
+              let match = matches.first, match.kind == .source(.opencode),
+              URL(fileURLWithPath: match.path).standardizedFileURL
+                == URL(fileURLWithPath: chosenFolder).appendingPathComponent("opencode.db").standardizedFileURL
+        else { return chosenFolder }
+        return match.path
     }
 }
