@@ -1788,10 +1788,6 @@ async fn append_pipeline_review_audit_item(
     Ok(())
 }
 
-/// Appends the system `lifecycle_status_change` event `event_id` of
-/// `submission_id`, with `status` and `reason_label`, when the database has no
-/// row of that id.
-#[allow(clippy::too_many_arguments)]
 /// The id of the audit event for the hold of `run_id` at `held_at` (V128
 /// `operator_held_at`): one per hold, so a run held again after a release
 /// gets a second event, and a repeated pass appends none.
@@ -1808,6 +1804,10 @@ pub(crate) fn pipeline_settle_hold_audit_event_id(
     )
 }
 
+/// Appends the system `lifecycle_status_change` event `event_id` of
+/// `submission_id`, with `status` and `reason_label`, when the database has no
+/// row of that id.
+#[allow(clippy::too_many_arguments)]
 async fn append_pipeline_lifecycle_audit_event(
     state: &AppState,
     db: &dyn Database,
