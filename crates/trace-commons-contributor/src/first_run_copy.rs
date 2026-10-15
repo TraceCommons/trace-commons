@@ -188,16 +188,6 @@ pub struct JoinCopy {
     pub signed_out: &'static str,
 }
 
-/// Each asked-about tool's own install page, keyed by the tool, for "Get {tool}".
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct InstallUrls {
-    pub claude_code: &'static str,
-    pub codex: &'static str,
-    pub gemini_cli: &'static str,
-    pub cline: &'static str,
-    pub opencode: &'static str,
-}
-
 /// Folders, Quick setup's tool list (`tool-screens.tsx`, `tool-row.tsx`).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FoldersCopy {
@@ -210,11 +200,14 @@ pub struct FoldersCopy {
     /// `{tool}`: the row's accessible picker label.
     pub watch_question: &'static str,
     pub choose_folder: &'static str,
+    /// An installed tool whose folder was not found: the button in place of
+    /// the picker, and (`{tool}`) its accessible name.
+    pub choose_tool_folder: &'static str,
+    pub choose_tool_folder_accessibility: &'static str,
+    /// A tool that is not installed. Where it leads is
+    /// `crate::install_guides`, the table every surface reads.
     pub get_tool: &'static str,
     pub download_tool: &'static str,
-    /// Where "Get {tool}" sends a person for each tool the Mac is asked about:
-    /// the tool's own install page, over https.
-    pub install_urls: InstallUrls,
     /// Discovery returned no row the shell could read.
     pub discovery_failed: &'static str,
     /// Runs discovery again after `discovery_failed`.
@@ -492,17 +485,16 @@ pub fn first_run_copy() -> FirstRunCopy {
             dont_use: "Not used",
             watch_question: "{tool}: watch this folder?",
             choose_folder: "Choose a different folder for {tool}",
-            // Approved 2026-10-08 (button rule); the row names the tool, and
-            // `download_tool` is the button's accessible name.
-            get_tool: "Download",
-            download_tool: "Download {tool}",
-            install_urls: InstallUrls {
-                claude_code: "https://claude.com/product/claude-code",
-                codex: "https://github.com/openai/codex",
-                gemini_cli: "https://github.com/google-gemini/gemini-cli",
-                cline: "https://cline.bot/",
-                opencode: "https://opencode.ai/",
-            },
+            // Approved 2026-10-15 (#1419 review, decision 2): an installed
+            // tool with no folder found keeps its row; this button stands
+            // where Watch / Not used would be. No caption under it.
+            choose_tool_folder: "Choose folder",
+            choose_tool_folder_accessibility: "Choose {tool} folder",
+            // Approved 2026-10-15 (#1419 review, decision 3): "Install"
+            // everywhere. The row names the tool, and `download_tool` is the
+            // button's accessible name.
+            get_tool: "Install",
+            download_tool: "Install {tool}",
             discovery_failed: "Could not look for coding tools on this Mac.",
             retry: "Look again",
             enroll_refused: "Your invite was found, but joining with it did not go through. Press Continue to try again.",
@@ -611,20 +603,6 @@ pub fn first_run_copy() -> FirstRunCopy {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_install_url_is_https() {
-        let urls = first_run_copy().folders.install_urls;
-        for url in [
-            urls.claude_code,
-            urls.codex,
-            urls.gemini_cli,
-            urls.cline,
-            urls.opencode,
-        ] {
-            assert!(url.starts_with("https://"), "{url}");
-        }
-    }
 
     #[test]
     fn a_dead_invite_and_a_pay_range_have_their_own_words() {

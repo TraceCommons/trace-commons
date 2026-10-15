@@ -10,6 +10,48 @@ import XCTest
 /// more than one asks which, none is refused. Read from the screen's pure
 /// layout and its source, the house pattern for a SwiftUI view.
 final class ToolsScreenTests: XCTestCase {
+    /// Ron's review of #1419 (2026-10-15), decisions 1 and 2: first run
+    /// keeps a row for every tool. A missing tool offers Install; an
+    /// installed one with no folder found offers "Choose folder" where the
+    /// picker would be.
+    func testEveryToolKeepsItsRowAndAnInstalledOneOffersChooseFolder() throws {
+        let missing = SourceCandidate(source: .opencode, path: "/missing", exists: false, sessionCount: 0, mostRecent: nil, relocatedByEnv: false)
+        let state = FirstRunState()
+        let url = URL(string: "https://opencode.ai/docs/")
+        // Installed, no folder: Choose folder, not Install, not the picker.
+        XCTAssertTrue(ToolAnswerRowLayout.offersChooseFolder(missing, installed: true, in: state))
+        XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(missing, installURL: url, installed: true, in: state))
+        XCTAssertEqual(ToolAnswerRowLayout.options(for: missing, in: state), [])
+        // Not installed, or not known: Install, as today.
+        for installed in [false, nil] as [Bool?] {
+            XCTAssertFalse(ToolAnswerRowLayout.offersChooseFolder(missing, installed: installed, in: state))
+            XCTAssertTrue(ToolAnswerRowLayout.offersGetTool(missing, installURL: url, installed: installed, in: state))
+        }
+        // Picking a folder makes the row ask, with the picker on Watch.
+        var chosen = state
+        ToolAnswerRowLayout.choose(folder: "/picked", for: missing, in: &chosen)
+        XCTAssertTrue(ToolAnswerRowLayout.asks(missing, in: chosen))
+        XCTAssertFalse(ToolAnswerRowLayout.offersChooseFolder(missing, installed: true, in: chosen))
+        XCTAssertEqual(ToolAnswerRowLayout.answer(in: chosen, for: missing), .watch)
+        XCTAssertEqual(state.sessionRoots.opencode, .undecided)
+        let tools = try JSONDecoder().decode([ManagedToolAvailability].self, from: Data(#"[{"tool":"claude","installed":true,"install_url":"https://code.claude.com/docs/en/setup"},{"tool":"opencode","installed":false,"install_url":"https://opencode.ai/docs/"}]"#.utf8))
+        XCTAssertEqual(ToolsScreenLayout.installed(.claudeCode, tools: tools), true)
+        XCTAssertEqual(ToolsScreenLayout.installed(.opencode, tools: tools), false)
+        XCTAssertNil(ToolsScreenLayout.installed(.codex, tools: tools))
+        XCTAssertNil(ToolsScreenLayout.installed(.geminiCli, tools: tools))
+        XCTAssertNil(ToolsScreenLayout.installed(.claudeCode, tools: nil))
+    }
+
+    /// No "none installed" block, no filtered rows and no separate setup
+    /// card on first run; install links come from the one shared table.
+    func testFirstRunDrawsNoSeparateInstallBlock() throws {
+        let screen = try Self.source("ToolsScreen.swift")
+        XCTAssertFalse(screen.contains("ManagedToolInstallation"))
+        XCTAssertFalse(screen.contains("shownRows"))
+        XCTAssertFalse(screen.contains("setupRows"))
+        XCTAssertTrue(screen.contains("ForEach(ToolsScreenLayout.rows(discovered, state: runner.state), id: \\.source)"))
+    }
+
     private static func source(_ name: String) throws -> String {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

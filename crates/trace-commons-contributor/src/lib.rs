@@ -32,6 +32,7 @@ pub mod history_copy;
 pub mod identity;
 pub mod inference_connection;
 pub mod insights;
+pub mod install_guides;
 pub mod issuer_client;
 pub mod managed;
 pub mod mission_attempt;
