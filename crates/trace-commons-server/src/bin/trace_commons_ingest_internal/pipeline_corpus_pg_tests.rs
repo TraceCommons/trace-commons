@@ -685,6 +685,7 @@ pub(super) fn production_harness_runtime(
             unqualified_routing_allowed: context.unqualified_routing_allowed,
             main_gate: context.main_gate,
             components,
+            score_policies: context.score_policies,
         },
         crash_point,
     )?))
