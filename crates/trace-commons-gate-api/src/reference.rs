@@ -14,6 +14,9 @@ use sha2::{Digest, Sha256};
 use crate::dependency::{IdentifiedEmbedder, IdentifiedPerplexityScorer};
 use crate::embedder::{Embedder, MOCK_EMBEDDING_DIM};
 use crate::perplexity::{PerplexityResult, PerplexityScorer};
+use crate::settlement_award::{
+    AwardError, PeriodAward, PeriodKey, PeriodSummary, SettlementAwardPolicy, utc_month_period_key,
+};
 
 /// Perplexity proxy built from the Shannon entropy of the byte distribution.
 ///
@@ -155,6 +158,75 @@ impl Embedder for ReferenceEmbedder {
     }
 }
 
+/// An award of `floor(period_micros * numerator / denominator)` atomic
+/// units per UTC calendar month.
+///
+/// Real but deliberately simple and uncalibrated: no floor, no cap, no
+/// dependence on activity. The production policy is supplied by a private
+/// backend at the [`SettlementAwardPolicy`] seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceFlatRateAwardPolicy {
+    numerator: u128,
+    denominator: u128,
+}
+
+impl ReferenceFlatRateAwardPolicy {
+    /// Parse `"<numerator>/<denominator>"`, both positive decimal integers
+    /// of at most 30 digits. A bare integer is accepted as `n/1`. Anything
+    /// else, zero included, is refused: a zero rate would silently award
+    /// nothing.
+    pub fn parse(text: &str) -> Result<Self, AwardError> {
+        let refuse = || AwardError::new("award_flat_rate_malformed");
+        let text = text.trim();
+        let (num, den) = match text.split_once('/') {
+            Some((n, d)) => (n.trim(), d.trim()),
+            None => (text, "1"),
+        };
+        let digits =
+            |s: &str| !s.is_empty() && s.len() <= 30 && s.bytes().all(|b| b.is_ascii_digit());
+        if !digits(num) || !digits(den) {
+            return Err(refuse());
+        }
+        let numerator: u128 = num.parse().map_err(|_| refuse())?;
+        let denominator: u128 = den.parse().map_err(|_| refuse())?;
+        if numerator == 0 || denominator == 0 {
+            return Err(refuse());
+        }
+        Ok(Self {
+            numerator,
+            denominator,
+        })
+    }
+
+    pub fn numerator(&self) -> u128 {
+        self.numerator
+    }
+
+    pub fn denominator(&self) -> u128 {
+        self.denominator
+    }
+}
+
+impl SettlementAwardPolicy for ReferenceFlatRateAwardPolicy {
+    fn policy_ref(&self) -> String {
+        format!("flat_rate:{}/{}", self.numerator, self.denominator)
+    }
+
+    fn period_key(&self, finalized_at_unix_seconds: i64) -> Result<PeriodKey, AwardError> {
+        utc_month_period_key(finalized_at_unix_seconds)
+    }
+
+    fn period_target(&self, summary: &PeriodSummary) -> Result<PeriodAward, AwardError> {
+        let scaled = summary
+            .period_source_micros
+            .checked_mul(self.numerator)
+            .ok_or(AwardError::new("award_overflow"))?;
+        Ok(PeriodAward {
+            target_units: scaled / self.denominator,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +336,107 @@ mod tests {
             b"trace-commons-reference-embedder.v1".to_vec()
         );
         assert!(!embedder.production_qualified());
+    }
+}
+
+#[cfg(test)]
+mod flat_rate_tests {
+    use super::*;
+    use crate::settlement_award::is_valid_policy_ref;
+
+    fn summary(micros: u128) -> PeriodSummary {
+        PeriodSummary {
+            period_key: PeriodKey::new("2026-10").unwrap(),
+            recipient_ref_hash: format!("sha256:{}", "a".repeat(64)),
+            instrument_id: "example_instrument".into(),
+            instrument_decimals: 9,
+            period_source_micros: micros,
+            period_batch_count: 1,
+            period_submission_count: 1,
+            period_awarded_units: 0,
+        }
+    }
+
+    #[test]
+    fn a_rate_parses_only_positive_integer_rationals() {
+        assert_eq!(
+            ReferenceFlatRateAwardPolicy::parse("3/2")
+                .unwrap()
+                .policy_ref(),
+            "flat_rate:3/2"
+        );
+        assert_eq!(
+            ReferenceFlatRateAwardPolicy::parse(" 1000 ")
+                .unwrap()
+                .policy_ref(),
+            "flat_rate:1000/1"
+        );
+        for bad in ["", "0/1", "1/0", "1.5/1", "-1/2", "a/b", "1/2/3", "1e3"] {
+            assert_eq!(
+                ReferenceFlatRateAwardPolicy::parse(bad).unwrap_err(),
+                AwardError::new("award_flat_rate_malformed"),
+                "{bad:?}"
+            );
+        }
+        assert!(
+            ReferenceFlatRateAwardPolicy::parse(&"9".repeat(31)).is_err(),
+            "more than 30 digits"
+        );
+    }
+
+    #[test]
+    fn the_target_is_the_floor_of_the_period_total_times_the_rate() {
+        let policy = ReferenceFlatRateAwardPolicy::parse("7/3").unwrap();
+        assert_eq!(policy.period_target(&summary(0)).unwrap().target_units, 0);
+        assert_eq!(policy.period_target(&summary(1)).unwrap().target_units, 2);
+        assert_eq!(policy.period_target(&summary(3)).unwrap().target_units, 7);
+        // Recomputed from the total, so splitting a period into batches
+        // loses nothing to rounding: 1 + 1 + 1 micros is still 7 units.
+        let mut awarded = 0u128;
+        let mut total = 0u128;
+        for micros in [1u128, 1, 1, 5, 0, 2] {
+            total += micros;
+            let target = policy.period_target(&summary(total)).unwrap().target_units;
+            awarded += target - awarded;
+        }
+        assert_eq!(awarded, total * 7 / 3);
+    }
+
+    #[test]
+    fn the_target_refuses_overflow() {
+        let policy = ReferenceFlatRateAwardPolicy::parse("2/1").unwrap();
+        assert_eq!(
+            policy
+                .period_target(&summary(u128::MAX))
+                .unwrap_err()
+                .label(),
+            "award_overflow"
+        );
+    }
+
+    #[test]
+    fn the_policy_ref_names_the_rate_and_its_hash_tells_rates_apart() {
+        let a = ReferenceFlatRateAwardPolicy::parse("1/1").unwrap();
+        let b = ReferenceFlatRateAwardPolicy::parse("2/2").unwrap();
+        assert!(is_valid_policy_ref(&a.policy_ref()));
+        assert_ne!(
+            a.policy_ref_hash(),
+            b.policy_ref_hash(),
+            "2/2 is not reduced, and is a different configuration"
+        );
+        assert!(a.policy_ref_hash().starts_with("sha256:") && a.policy_ref_hash().len() == 71);
+    }
+
+    #[test]
+    fn the_period_is_the_utc_calendar_month() {
+        let policy = ReferenceFlatRateAwardPolicy::parse("1/1").unwrap();
+        assert_eq!(
+            policy.period_key(1_709_251_199).unwrap().as_str(),
+            "2024-02"
+        );
+        assert_eq!(
+            policy.period_key(1_709_251_200).unwrap().as_str(),
+            "2024-03"
+        );
     }
 }
