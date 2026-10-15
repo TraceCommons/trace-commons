@@ -34,6 +34,7 @@ use crate::versioned_pipeline_compat::{
     COMPATIBILITY_ADMISSION_IMPLEMENTATION, COMPATIBILITY_REVIEW_IMPLEMENTATION,
     COMPATIBILITY_SCORE_IMPLEMENTATION, COMPATIBILITY_SETTLE_IMPLEMENTATION,
 };
+use crate::versioned_pipeline_score_registry::ScorePolicyRegistry;
 
 pub const PIPELINE_CHECK_RESULT_SCHEMA: &str = "trace_commons.pipeline_check_result.v1";
 const PIPELINE_CHECK_RESULT_DIR_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR";
@@ -45,6 +46,11 @@ pub const PACKAGE_SIGNATURE_INVALID_LABEL: &str = "bundle_package_signature_inva
 pub const PACKAGE_SIGNER_UNTRUSTED_LABEL: &str = "bundle_package_signer_untrusted";
 pub const PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL: &str = "bundle_implementation_unknown";
 pub const PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL: &str = "bundle_development_dependency";
+/// A package's Score policy is one a registry supplies, but its factory does
+/// not declare itself qualified for production
+/// (`ScorePolicyFactory::production_qualified`).
+pub const PACKAGE_SCORE_POLICY_NOT_QUALIFIED_LABEL: &str =
+    "bundle_score_policy_not_production_qualified";
 pub const QUALIFICATION_EVIDENCE_STALE_LABEL: &str = "qualification_evidence_stale";
 pub const QUALIFICATION_EVIDENCE_MISSING_LABEL: &str = "qualification_evidence_missing";
 pub const QUALIFICATION_EVIDENCE_FAILED_LABEL: &str = "qualification_evidence_failed";
@@ -1331,15 +1337,52 @@ impl ProductionDependencyProfile {
 /// compatibility family, or which carries any development or synthetic
 /// dependency marker: a Score or Settle projection id containing `test` or
 /// `reference`, or an artifact whose bytes contain `local_reference`,
-/// `reference_`, `pipeline-test`, `mock_`, or `synthetic`.
+/// `reference_`, `pipeline-test`, `mock_`, or `synthetic`. The open build's
+/// rule: no Score policy is registered
+/// ([`validate_production_package_with_score_policies`] with an empty
+/// registry).
 pub fn validate_production_package(package: &BundlePackage) -> Result<(), String> {
-    let known = package.manifest.admission.implementation_id
+    validate_production_package_with_score_policies(package, &ScorePolicyRegistry::new())
+}
+
+/// [`validate_production_package`], where the Score policy may also be one
+/// `score_policies` supplies. The Admission, Review and Settle policies must
+/// still be the compatibility family's. A registered Score policy is
+/// accepted only when its factory declares itself qualified for production
+/// (`ScorePolicyFactory::production_qualified`, else
+/// `bundle_score_policy_not_production_qualified`) and accepts the bytes the
+/// manifest's Score `configuration_hash` names
+/// (`ScorePolicyFactory::configuration_is_qualifiable`, else
+/// `bundle_configuration_not_qualifiable`; a missing configuration artifact
+/// is refused the same way). A Score implementation id that is neither the
+/// compatibility policy's nor registered is refused
+/// (`bundle_implementation_unknown`). The development-marker check applies
+/// to every package.
+pub fn validate_production_package_with_score_policies(
+    package: &BundlePackage,
+    score_policies: &ScorePolicyRegistry,
+) -> Result<(), String> {
+    let compatibility_triple = package.manifest.admission.implementation_id
         == COMPATIBILITY_ADMISSION_IMPLEMENTATION
         && package.manifest.review.implementation_id == COMPATIBILITY_REVIEW_IMPLEMENTATION
-        && package.manifest.score.implementation_id == COMPATIBILITY_SCORE_IMPLEMENTATION
         && package.manifest.settle.implementation_id == COMPATIBILITY_SETTLE_IMPLEMENTATION;
-    if !known {
+    if !compatibility_triple {
         return Err(PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string());
+    }
+    if package.manifest.score.implementation_id != COMPATIBILITY_SCORE_IMPLEMENTATION {
+        let factory =
+            crate::versioned_pipeline_bundle::registered_score_factory(package, score_policies)
+                .ok_or_else(|| PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string())?;
+        if !factory.production_qualified() {
+            return Err(PACKAGE_SCORE_POLICY_NOT_QUALIFIED_LABEL.to_string());
+        }
+        let configuration_qualifiable = package
+            .artifacts
+            .get(&package.manifest.score.configuration_hash)
+            .is_some_and(|configuration| factory.configuration_is_qualifiable(configuration));
+        if !configuration_qualifiable {
+            return Err(PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL.to_string());
+        }
     }
     let has_development_dependency = package
         .manifest
@@ -1431,21 +1474,36 @@ pub struct BundleQualificationRecord {
 pub struct PipelineQualificationStore {
     backend: Arc<PgBackend>,
     packages: PgPipelineStore,
+    score_policies: ScorePolicyRegistry,
 }
 
 impl PipelineQualificationStore {
+    /// A store that qualifies the compatibility family only: no Score policy
+    /// is registered.
     pub fn new(backend: Arc<PgBackend>) -> Self {
         Self {
             packages: PgPipelineStore::new(backend.clone()),
             backend,
+            score_policies: ScorePolicyRegistry::new(),
         }
+    }
+
+    /// Qualifies, besides the compatibility family, a package whose Score
+    /// policy `score_policies` supplies, on the terms of
+    /// [`validate_production_package_with_score_policies`]. Pass the
+    /// registry the pipeline service runs with, so the store qualifies
+    /// exactly what the service can bind.
+    pub fn with_score_policies(mut self, score_policies: ScorePolicyRegistry) -> Self {
+        self.score_policies = score_policies;
+        self
     }
 
     /// Verifies `signed`'s trust and production shape, checks `metadata` and
     /// `dependencies` against `signed.package` and each other, and records
     /// the qualification. Fails closed on: an untrusted or tampered package
     /// (`trust.verify`), a non-production or development package
-    /// (`validate_production_package`), malformed metadata
+    /// (`validate_production_package_with_score_policies` over this store's
+    /// registry, `Self::with_score_policies`), malformed metadata
     /// (`bundle_qualification_metadata_invalid`), a `dependencies` profile
     /// built for a different bundle -- a different `bundle_id` or a
     /// `dependency_digest` that does not match `signed.package`'s own
@@ -1536,7 +1594,8 @@ impl PipelineQualificationStore {
         verified: Option<(&str, &str)>,
     ) -> Result<BundleQualificationRecord, DatabaseError> {
         trust.verify(signed).map_err(DatabaseError::Constraint)?;
-        validate_production_package(&signed.package).map_err(DatabaseError::Constraint)?;
+        validate_production_package_with_score_policies(&signed.package, &self.score_policies)
+            .map_err(DatabaseError::Constraint)?;
         if !package_configuration_is_qualifiable(&signed.package) {
             return Err(DatabaseError::Constraint(
                 PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL.to_string(),
@@ -4068,6 +4127,135 @@ mod tests {
             "trace_commons.score.unknown.v1".to_string();
         assert_eq!(
             validate_production_package(&unknown_score),
+            Err(PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string())
+        );
+    }
+
+    /// A registered Score policy's factory for the production-shape tests:
+    /// it declares its own production qualification and accepts only the
+    /// configuration bytes `b"qualifiable"`.
+    struct QualificationTestScoreFactory {
+        qualified: bool,
+    }
+
+    impl crate::versioned_pipeline_score_registry::ScorePolicyFactory
+        for QualificationTestScoreFactory
+    {
+        fn dependency_identity(&self) -> &str {
+            "substituted_score_policy_qualification_test_only"
+        }
+
+        fn trace_credit_event(&self) -> crate::versioned_pipeline_bundle::PipelineTraceCreditEvent {
+            crate::versioned_pipeline_bundle::PipelineTraceCreditEvent::PipelineScore
+        }
+
+        fn build(
+            &self,
+            _dependencies: crate::versioned_pipeline_score_registry::ScorePolicyDependencies<'_>,
+        ) -> Result<Arc<dyn trace_commons_gate_api::pipeline::ScorePolicy>, &'static str> {
+            Err("score_policy_not_built_in_this_test")
+        }
+
+        fn production_qualified(&self) -> bool {
+            self.qualified
+        }
+
+        fn configuration_is_qualifiable(&self, configuration: &[u8]) -> bool {
+            configuration == b"qualifiable"
+        }
+    }
+
+    const QUALIFICATION_TEST_SCORE_IMPLEMENTATION: &str =
+        "substituted.score.qualification_test_only.v1";
+
+    /// The compatibility triple with a registered Score policy, free of
+    /// development markers, whose Score configuration is `configuration`.
+    fn registered_score_production_package(configuration: &[u8]) -> BundlePackage {
+        let mut package = MinimalPolicyBundle::compatibility_package(
+            &CompatibilityBundleConfig::local_reference(),
+            &ReferencePerplexityScorer::new(),
+            &ReferenceEmbedder::new(),
+        )
+        .expect("compatibility package builds");
+        package.manifest.score.implementation_id =
+            QUALIFICATION_TEST_SCORE_IMPLEMENTATION.to_string();
+        package.manifest.score.projection_ids = vec!["projection_v1".to_string()];
+        package.manifest.settle.projection_ids = vec!["projection_v1".to_string()];
+        package.artifacts = BTreeMap::from([(
+            package.manifest.score.configuration_hash.clone(),
+            configuration.to_vec(),
+        )]);
+        package
+    }
+
+    fn score_registry(qualified: bool) -> ScorePolicyRegistry {
+        ScorePolicyRegistry::new()
+            .with_factory(
+                QUALIFICATION_TEST_SCORE_IMPLEMENTATION,
+                Arc::new(QualificationTestScoreFactory { qualified }),
+            )
+            .expect("register the test factory")
+    }
+
+    /// A registered Score policy is production-shaped only when its
+    /// factory declares itself qualified and accepts the package's Score
+    /// configuration; an unregistered id is refused as before, and the
+    /// development-marker check still applies.
+    #[test]
+    fn production_package_validation_accepts_only_a_qualified_registered_score_policy() {
+        let package = registered_score_production_package(b"qualifiable");
+        assert_eq!(
+            validate_production_package_with_score_policies(&package, &score_registry(true)),
+            Ok(())
+        );
+        // Unregistered: the open build's empty registry, and a registry
+        // that holds another id.
+        assert_eq!(
+            validate_production_package(&package),
+            Err(PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string())
+        );
+        let elsewhere = ScorePolicyRegistry::new()
+            .with_factory(
+                "substituted.score.other_test_only.v1",
+                Arc::new(QualificationTestScoreFactory { qualified: true }),
+            )
+            .unwrap();
+        assert_eq!(
+            validate_production_package_with_score_policies(&package, &elsewhere),
+            Err(PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string())
+        );
+        // Registered, but the factory does not declare itself qualified.
+        assert_eq!(
+            validate_production_package_with_score_policies(&package, &score_registry(false)),
+            Err(PACKAGE_SCORE_POLICY_NOT_QUALIFIED_LABEL.to_string())
+        );
+        // Registered and qualified, but its configuration is not.
+        assert_eq!(
+            validate_production_package_with_score_policies(
+                &registered_score_production_package(b"local"),
+                &score_registry(true)
+            ),
+            Err(PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL.to_string())
+        );
+        // So is a package whose configuration artifact is missing.
+        let mut missing = package.clone();
+        missing.artifacts.clear();
+        assert_eq!(
+            validate_production_package_with_score_policies(&missing, &score_registry(true)),
+            Err(PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL.to_string())
+        );
+        // A development marker still refuses.
+        let mut marked = package.clone();
+        marked.manifest.score.projection_ids = vec!["reference_projection".to_string()];
+        assert_eq!(
+            validate_production_package_with_score_policies(&marked, &score_registry(true)),
+            Err(PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL.to_string())
+        );
+        // A registry never widens the other three phases.
+        let mut review = package;
+        review.manifest.review.implementation_id = "substituted.review.v1".to_string();
+        assert_eq!(
+            validate_production_package_with_score_policies(&review, &score_registry(true)),
             Err(PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string())
         );
     }

@@ -4246,10 +4246,15 @@ impl AppState {
         let pipeline_activation = db_connections.as_ref().map(|connections| {
             Arc::new(PipelineActivationStore::new(connections.postgres.clone()))
         });
+        // The qualification store qualifies the Score policies the pipeline
+        // service can bind: the registry the assembled service holds (empty
+        // in the open build).
         let pipeline_qualification = db_connections.as_ref().map(|connections| {
-            Arc::new(PipelineQualificationStore::new(
-                connections.postgres.clone(),
-            ))
+            let store = PipelineQualificationStore::new(connections.postgres.clone());
+            Arc::new(match pipeline_service.as_ref() {
+                Some(service) => store.with_score_policies(service.score_policies().clone()),
+                None => store,
+            })
         });
         // Task 10: the two trust stores the qualification and activation
         // routes verify against. A set variable whose file does not hold a
@@ -44196,8 +44201,10 @@ struct PipelineReviewQueueItem {
     admission_reason: Option<String>,
     /// The phase the run is held at: `review` for a run waiting for a
     /// reviewer's assessment, `score` for a run its Score policy held for
-    /// operator review instead of pricing it. A `score` hold is listed for
-    /// visibility only and cannot be claimed.
+    /// operator review instead of pricing it. Both are claimed and assessed
+    /// through the same routes and the same reviewer credential; a `score`
+    /// approval must resolve the hold reason, and a `score` rejection
+    /// settles the run with no credit.
     phase: &'static str,
     /// What holds the run: the Score policy's label for a `score` hold;
     /// `privacy_pass_review_required` when the Review-start privacy pass

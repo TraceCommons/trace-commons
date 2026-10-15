@@ -881,7 +881,7 @@ fn production_adapters_observation(
     near_settlement_mode: &str,
 ) -> anyhow::Result<(Vec<String>, serde_json::Value)> {
     use crate::versioned_pipeline_qualification::{
-        ProductionDependencyProfile, is_safe_label, validate_production_package,
+        ProductionDependencyProfile, is_safe_label, validate_production_package_with_score_policies,
     };
     let package = service.default_package();
     let bundle = service
@@ -912,7 +912,9 @@ fn production_adapters_observation(
     if components.index_root_shared_with_legacy {
         blockers.push(PIPELINE_VECTOR_INDEX_ROOT_SHARED_LABEL.to_string());
     }
-    if let Err(label) = validate_production_package(package) {
+    if let Err(label) =
+        validate_production_package_with_score_policies(package, service.score_policies())
+    {
         blockers.push(if is_safe_label(&label) {
             label
         } else {

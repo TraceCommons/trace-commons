@@ -1766,6 +1766,14 @@ pub struct ScoreEvidence {
     /// had before the field existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub award_adjustments: Vec<AwardAdjustment>,
+    /// Set only on the Score outcome the server commits when an operator
+    /// rejected a Score hold ([`ScoreOutput::rejected_after_hold`]): the
+    /// label the policy held the trace under. Such evidence awards nothing
+    /// and proposes no index entry. Absent on every Score a policy priced,
+    /// and not serialized when absent, so evidence without it keeps the
+    /// bytes (and the stored outcome hash) it had before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_rejected_hold: Option<ReasonCode>,
 }
 
 /// The most adjustments one Score evidence records.
@@ -1868,6 +1876,8 @@ struct ScoreEvidenceFields {
     neighbor_artifact_hash: Option<String>,
     #[serde(default)]
     award_adjustments: Vec<AwardAdjustment>,
+    #[serde(default)]
+    operator_rejected_hold: Option<ReasonCode>,
 }
 
 impl TryFrom<ScoreEvidenceFields> for ScoreEvidence {
@@ -1902,6 +1912,7 @@ impl TryFrom<ScoreEvidenceFields> for ScoreEvidence {
             credit_quality_version: fields.credit_quality_version,
             neighbor_artifact_hash: fields.neighbor_artifact_hash,
             award_adjustments: fields.award_adjustments,
+            operator_rejected_hold: fields.operator_rejected_hold,
         };
         evidence.validate()?;
         Ok(evidence)
@@ -1938,6 +1949,7 @@ impl ScoreEvidence {
             credit_quality_version: None,
             neighbor_artifact_hash: None,
             award_adjustments: Vec::new(),
+            operator_rejected_hold: None,
         }
     }
 
@@ -1958,6 +1970,15 @@ impl ScoreEvidence {
             if !labels.insert(adjustment.label.as_str()) {
                 return Err(ContractError::InvalidAwardAdjustment);
             }
+        }
+        // A rejected hold is priced at nothing and indexes nothing.
+        if self.operator_rejected_hold.is_some()
+            && (!self.fixed_awards.is_empty()
+                || self.include_eligible == Some(true)
+                || self.embedding_artifact_hash.is_some()
+                || !self.award_adjustments.is_empty())
+        {
+            return Err(ContractError::ScoreOutputMismatch);
         }
         Ok(())
     }
@@ -2163,6 +2184,10 @@ impl fmt::Debug for SealedIndexCommand {
     }
 }
 
+/// The rule id of the Score outcome the server commits for a rejected Score
+/// hold ([`ScoreOutput::rejected_after_hold`]).
+pub const SCORE_HOLD_REJECTED_RULE_ID: &str = "operator_rejected_score_hold";
+
 /// What a Score policy returns: the persisted result and the transient
 /// artifacts that its evidence names by hash. The server stores both
 /// artifacts encrypted before the Score outcome commits.
@@ -2248,6 +2273,33 @@ impl ScoreOutput {
         )?;
         output.hold_for_review = Some(label);
         Ok(output)
+    }
+
+    /// The Score outcome the server commits for a trace whose Score hold an
+    /// operator rejected: no award (a decision bound to `manifest` with an
+    /// empty award set), no index command, no neighbour artifact, evidence
+    /// that names `hold_label` as the reason
+    /// ([`ScoreEvidence::operator_rejected_hold`]), and the fixed rule
+    /// [`SCORE_HOLD_REJECTED_RULE_ID`]. The policy is not run for it.
+    pub fn rejected_after_hold(
+        manifest: &BundleManifest,
+        hold_label: ReasonCode,
+    ) -> Result<Self, ContractError> {
+        let awards = InstrumentAwards::default();
+        let mut evidence = ScoreEvidence::fixed(awards.clone());
+        evidence.operator_rejected_hold = Some(hold_label);
+        Self::new(
+            PhaseResult {
+                decision: ScoreDecision::for_bundle(manifest, awards.clone())?,
+                evidence,
+                evaluation: ScoreEvaluation {
+                    rule_id: SCORE_HOLD_REJECTED_RULE_ID.to_string(),
+                    awards,
+                },
+            },
+            None,
+            None,
+        )
     }
 
     /// The label under which the policy asked for the trace to be held for
@@ -2488,7 +2540,25 @@ impl fmt::Debug for ReviewInput {
     }
 }
 
+/// An operator's resolution of a Score hold, as the Score policy sees it on
+/// its next run ([`ScoreInput::operator_review`]): the decision and the
+/// label the policy held the trace under. Nothing in it names the reviewer.
+/// Only an approval reaches a policy: the server commits a rejected hold's
+/// Score outcome itself ([`ScoreOutput::rejected_after_hold`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScoreHoldReview {
+    pub decision: ReviewRecommendation,
+    pub hold_label: ReasonCode,
+}
+
 /// `Debug` withholds `reviewed_artifact`, the decrypted approved trace.
+///
+/// `operator_review` is `None` on every Score but the one that follows an
+/// operator's approval of a hold this run's Score policy asked for
+/// ([`ScoreOutput::held_for_review`]). A policy given an approval must
+/// price the trace: one that asks for a hold again fails the run closed,
+/// so a hold cannot loop.
 #[derive(Clone)]
 pub struct ScoreInput {
     pub run_id: Uuid,
@@ -2497,6 +2567,7 @@ pub struct ScoreInput {
     pub registry_revision_id: Uuid,
     pub source_content_hash: String,
     pub reviewed_artifact: Vec<u8>,
+    pub operator_review: Option<ScoreHoldReview>,
 }
 
 impl fmt::Debug for ScoreInput {
@@ -2509,6 +2580,7 @@ impl fmt::Debug for ScoreInput {
             .field("registry_revision_id", &self.registry_revision_id)
             .field("source_content_hash", &self.source_content_hash)
             .field("reviewed_artifact", &"<withheld>")
+            .field("operator_review", &self.operator_review)
             .finish()
     }
 }
@@ -3554,6 +3626,7 @@ mod tests {
             registry_revision_id: Uuid::nil(),
             source_content_hash: hash(&body),
             reviewed_artifact: body,
+            operator_review: None,
         };
         let command = index_command(vec![index_entry(1, vec![0.125])]).unwrap();
         let settle = SettleInput {
@@ -4820,5 +4893,92 @@ mod tests {
 
         let priced = ScoreOutput::new(score_result(None, false), None, None).unwrap();
         assert_eq!(priced.hold_for_review(), None);
+    }
+
+    /// An operator rejected a Score hold: the server's own output awards
+    /// nothing, proposes no index entry, does not hold again, and its
+    /// evidence names the hold label as the reason.
+    #[test]
+    fn a_rejected_score_hold_output_awards_nothing_and_names_the_hold() {
+        let manifest = golden_manifest();
+        let label = ReasonCode::new("operator_review_requested").unwrap();
+        let rejected = ScoreOutput::rejected_after_hold(&manifest, label.clone()).unwrap();
+        assert_eq!(rejected.hold_for_review(), None);
+        assert!(rejected.result().decision.awards().is_empty());
+        rejected.result().decision.require_bound(&manifest).unwrap();
+        assert_eq!(
+            rejected.result().evidence.operator_rejected_hold.as_ref(),
+            Some(&label)
+        );
+        assert_eq!(
+            rejected.result().evaluation.rule_id,
+            SCORE_HOLD_REJECTED_RULE_ID
+        );
+        assert!(rejected.index_command().is_none());
+        assert!(rejected.neighbor_artifact().is_none());
+        let value = serde_json::to_value(&rejected.result().evidence).unwrap();
+        assert_eq!(
+            value["operator_rejected_hold"],
+            serde_json::json!("operator_review_requested")
+        );
+        let read: ScoreEvidence = serde_json::from_value(value).unwrap();
+        assert_eq!(read, rejected.result().evidence);
+    }
+
+    /// Evidence that names a rejected hold awards nothing and indexes
+    /// nothing: one that does is refused, built or read back.
+    #[test]
+    fn rejected_hold_evidence_with_an_award_is_refused() {
+        let mut evidence = populated_score_evidence();
+        evidence.operator_rejected_hold =
+            Some(ReasonCode::new("operator_review_requested").unwrap());
+        assert_eq!(evidence.validate(), Err(ContractError::ScoreOutputMismatch));
+        let mut stored = serde_json::to_value(populated_score_evidence()).unwrap();
+        stored["operator_rejected_hold"] = serde_json::json!("operator_review_requested");
+        assert!(serde_json::from_value::<ScoreEvidence>(stored).is_err());
+    }
+
+    /// `operator_rejected_hold` absent serializes to nothing, so the pinned
+    /// bytes above are unchanged.
+    #[test]
+    fn absent_operator_rejected_hold_serializes_as_before() {
+        for evidence in [
+            ScoreEvidence::fixed(InstrumentAwards::default()),
+            populated_score_evidence(),
+        ] {
+            assert_eq!(evidence.operator_rejected_hold, None);
+            let value = serde_json::to_value(&evidence).unwrap();
+            assert!(value.get("operator_rejected_hold").is_none(), "{value}");
+        }
+    }
+
+    /// The operator's approval of a Score hold reaches the policy on its
+    /// input as the decision and the hold label, and nothing that names the
+    /// reviewer. A Score input with no hold review leaves it out of Debug's
+    /// withheld fields as `None`.
+    #[test]
+    fn a_score_input_carries_an_approved_hold_without_the_reviewer() {
+        let review = ScoreHoldReview {
+            decision: ReviewRecommendation::Approve,
+            hold_label: ReasonCode::new("operator_review_requested").unwrap(),
+        };
+        let value = serde_json::to_value(&review).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"decision": "approve", "hold_label": "operator_review_requested"})
+        );
+        let input = ScoreInput {
+            run_id: Uuid::nil(),
+            tenant_storage_ref: TenantStorageRef::new(format!("tenant_sha256:{}", "0".repeat(32)))
+                .unwrap(),
+            trace_id: Uuid::nil(),
+            registry_revision_id: Uuid::nil(),
+            source_content_hash: String::new(),
+            reviewed_artifact: b"secret trace".to_vec(),
+            operator_review: Some(review),
+        };
+        let debug = format!("{input:?}");
+        assert!(debug.contains("operator_review_requested"), "{debug}");
+        assert!(!debug.contains("secret trace"), "{debug}");
     }
 }

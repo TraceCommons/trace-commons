@@ -1027,6 +1027,7 @@ mod tests {
             registry_revision_id: Uuid::from_u128(3),
             source_content_hash: dependency_content_hash(bytes),
             reviewed_artifact: bytes.to_vec(),
+            operator_review: None,
         }
     }
 

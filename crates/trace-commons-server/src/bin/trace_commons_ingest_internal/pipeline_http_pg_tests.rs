@@ -16723,3 +16723,315 @@ async fn without_the_accept_medium_setting_a_found_and_removed_upload_is_quarant
     assert_eq!(upload.admission_rule_id, "privacy_review_required");
     assert_eq!(upload.row_status, "quarantined");
 }
+
+/// The label the HTTP tests' holding Score policy holds every trace under.
+const HTTP_SCORE_HOLD_LABEL: &str = "operator_review_requested";
+const HTTP_SCORE_HOLD_IMPLEMENTATION: &str = "substituted.score.http_hold_test_only.v1";
+
+/// A registered Score policy that holds every trace for operator review.
+struct HttpHoldingScorePolicy {
+    manifest: trace_commons_gate_api::pipeline::BundleManifest,
+}
+
+#[async_trait::async_trait]
+impl trace_commons_gate_api::pipeline::ScorePolicy for HttpHoldingScorePolicy {
+    async fn execute(
+        &self,
+        _input: &trace_commons_gate_api::pipeline::ScoreInput,
+    ) -> Result<
+        trace_commons_gate_api::pipeline::ScoreOutput,
+        trace_commons_gate_api::pipeline::PolicyError,
+    > {
+        Ok(
+            trace_commons_gate_api::pipeline::ScoreOutput::held_for_review(
+                &self.manifest,
+                trace_commons_gate_api::pipeline::ReasonCode::new(HTTP_SCORE_HOLD_LABEL)
+                    .expect("a safe hold label"),
+                "http_hold_test_only_v1",
+            )
+            .expect("a held output is consistent"),
+        )
+    }
+}
+
+struct HttpHoldingScoreFactory;
+
+impl trace_commons_server::versioned_pipeline_score_registry::ScorePolicyFactory
+    for HttpHoldingScoreFactory
+{
+    fn dependency_identity(&self) -> &str {
+        "substituted_score_policy_http_hold_test_only"
+    }
+
+    fn trace_credit_event(
+        &self,
+    ) -> trace_commons_server::versioned_pipeline_bundle::PipelineTraceCreditEvent {
+        trace_commons_server::versioned_pipeline_bundle::PipelineTraceCreditEvent::PipelineScore
+    }
+
+    fn build(
+        &self,
+        dependencies: trace_commons_server::versioned_pipeline_score_registry::ScorePolicyDependencies<'_>,
+    ) -> Result<Arc<dyn trace_commons_gate_api::pipeline::ScorePolicy>, &'static str> {
+        Ok(Arc::new(HttpHoldingScorePolicy {
+            manifest: dependencies.manifest.clone(),
+        }))
+    }
+}
+
+/// A pipeline service whose registered Score policy holds every trace, and
+/// whose Review-start privacy pass escalates every run (High), so every run
+/// is first held at Review.
+fn score_holding_http_service(
+    backend: Arc<PgBackend>,
+    artifacts: Arc<LocalEncryptedTraceArtifactStore>,
+) -> Arc<PipelineService> {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let mut package = MinimalPolicyBundle::compatibility_package(
+        &compatibility_test_config(2_500_000),
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("build the compatibility package");
+    package.manifest.score.policy_id = "substituted.score".to_string();
+    package.manifest.score.implementation_id = HTTP_SCORE_HOLD_IMPLEMENTATION.to_string();
+    package.bundle_id = package.manifest.bundle_id().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let registry = SettlementAdapterRegistry::new(vec![RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_http_hold_test_only",
+        "none",
+    ) as Arc<dyn SettlementAdapter>])
+    .unwrap();
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([(
+            InstrumentId::trace_credit().as_str().to_string(),
+            AtomicUnits::from_raw(u128::MAX),
+        )]),
+    };
+    let policies =
+        trace_commons_server::versioned_pipeline_score_registry::ScorePolicyRegistry::new()
+            .with_factory(
+                HTTP_SCORE_HOLD_IMPLEMENTATION,
+                Arc::new(HttpHoldingScoreFactory),
+            )
+            .unwrap();
+    Arc::new(
+        PipelineServiceBuilder::new(
+            backend,
+            artifacts,
+            package,
+            index.clone(),
+            index,
+            registry,
+            caps,
+        )
+        .with_scorer(scorer)
+        .with_embedder(embedder)
+        .with_novelty_utility_checks(PipelineNoveltyUtilityChecks {
+            issuer_principal_ref: Some(TEST_PIPELINE_CREDIT_ISSUER.to_string()),
+            ..PipelineNoveltyUtilityChecks::default()
+        })
+        .with_authority(allow_all_test_authority())
+        .with_privacy(Arc::new(EscalatingClassifierBoundary {
+            risk: ResidualPiiRisk::High,
+        }))
+        .with_unqualified_routing(true)
+        .with_score_policies(policies)
+        .build()
+        .expect("build the pipeline service"),
+    )
+}
+
+/// The review queue route says which phase each run is held at: `score`
+/// for a run its Score policy held (with the policy's label as the hold
+/// reason), `review` for a run held at Review. A Score hold is claimed and
+/// assessed through the same routes and reviewer credential as a Review
+/// hold; a rejection settles it with no credit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_review_queue_names_the_phase_of_each_hold() {
+    let Some(mut fixture) = withdrawal_fixture_with(score_holding_http_service, false).await else {
+        return;
+    };
+    let suffix = Uuid::new_v4().simple().to_string();
+    let reviewer = format!("token-review-phase-{suffix}");
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    fixture
+        .service
+        .register_default_bundle(&fixture.tenant)
+        .await
+        .expect("register the bundle");
+
+    let held_at_review = || async {
+        let mut envelope = model_training_envelope().await;
+        envelope.submission_id = Uuid::new_v4();
+        let raw = serde_json::to_vec(&envelope).unwrap();
+        let key = envelope.submission_id.to_string();
+        let PipelineReceiptResult::Created(created) = fixture
+            .service
+            .submit(PipelineReceiptRequest {
+                accept_medium_risk: false,
+                source_session: None,
+                tenant_id: &fixture.tenant,
+                actor_principal_ref: "principal_sha256:phase-queue",
+                counts_toward_quota: true,
+                request_idempotency_key: &key,
+                request_bytes: &raw,
+                server_envelope: &envelope,
+                residual_risk_basis: &[],
+                limits: PipelineAdmissionLimits {
+                    max_per_tenant_per_hour: 0,
+                    max_per_principal_per_hour: 0,
+                },
+            })
+            .await
+            .expect("the receipt succeeds")
+        else {
+            panic!("the receipt creates a run")
+        };
+        let held = fixture
+            .service
+            .process_run(&fixture.tenant, created.run_id)
+            .await
+            .expect("Review runs the privacy pass")
+            .expect("the run was claimed");
+        assert_eq!(held.state, PipelineRunState::AwaitingReview, "{held:?}");
+        assert_eq!(held.next_phase, Some(Phase::Review), "{held:?}");
+        held
+    };
+    let claim_and_assess = |run_id: Uuid, body: serde_json::Value| {
+        let state = fixture.state.clone();
+        let reviewer = reviewer.clone();
+        async move {
+            let (status, claim) = route_request(
+                state.clone(),
+                "POST",
+                &format!("/v1/review/pipeline/runs/{run_id}/claim"),
+                auth_headers(&reviewer),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{claim}");
+            let mut body = body;
+            body["lease_token"] = claim["lease_token"].clone();
+            route_request(
+                state,
+                "POST",
+                &format!("/v1/review/pipeline/runs/{run_id}/assessment"),
+                auth_headers(&reviewer),
+                Some(body),
+            )
+            .await
+        }
+    };
+
+    // One run is approved at Review and then held by the Score policy.
+    let score_held = held_at_review().await;
+    let (status, recorded) = claim_and_assess(
+        score_held.run_id,
+        serde_json::json!({
+            "recommendation": "approve",
+            "reason": "privacy_review_cleared",
+            "resolved_quarantine_reasons": ["privacy_pass_review_required"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{recorded}");
+    let reviewed = fixture
+        .service
+        .process_run(&fixture.tenant, score_held.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs on the assessment");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score), "{reviewed:?}");
+    let parked = fixture
+        .service
+        .process_run(&fixture.tenant, score_held.run_id)
+        .await
+        .unwrap()
+        .expect("the Score is claimed");
+    assert_eq!(
+        (parked.state, parked.next_phase),
+        (PipelineRunState::AwaitingReview, Some(Phase::Score)),
+        "{parked:?}"
+    );
+    // Another is still held at Review.
+    let review_held = held_at_review().await;
+
+    let (status, queue) = route_request(
+        fixture.state.clone(),
+        "GET",
+        "/v1/review/pipeline/quarantine",
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{queue}");
+    let queue = queue.as_array().expect("a review queue").clone();
+    assert_eq!(queue.len(), 2, "{queue:?}");
+    let item = |run_id: Uuid| {
+        queue
+            .iter()
+            .find(|item| item["run_id"] == run_id.to_string())
+            .unwrap_or_else(|| panic!("{run_id} is listed: {queue:?}"))
+            .clone()
+    };
+    let score_item = item(score_held.run_id);
+    assert_eq!(score_item["phase"], "score", "{score_item}");
+    assert_eq!(score_item["hold_reason"], HTTP_SCORE_HOLD_LABEL);
+    let review_item = item(review_held.run_id);
+    assert_eq!(review_item["phase"], "review", "{review_item}");
+    assert_eq!(review_item["hold_reason"], "privacy_pass_review_required");
+
+    // The Score hold is claimed and rejected through the same routes.
+    let (status, recorded) = claim_and_assess(
+        score_held.run_id,
+        serde_json::json!({
+            "recommendation": "reject",
+            "reason": "operator_rejected",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{recorded}");
+    for _ in 0..2 {
+        fixture
+            .service
+            .process_run(&fixture.tenant, score_held.run_id)
+            .await
+            .unwrap()
+            .expect("the released run is claimed");
+    }
+    let done = fixture
+        .service
+        .store()
+        .get_run(&fixture.tenant, score_held.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(done.state, PipelineRunState::Complete, "{done:?}");
+    assert!(
+        fixture
+            .service
+            .store()
+            .list_settlements(&fixture.tenant, score_held.run_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected Score hold pays nothing"
+    );
+    let (status, queue) = route_request(
+        fixture.state.clone(),
+        "GET",
+        "/v1/review/pipeline/quarantine",
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{queue}");
+    let queue = queue.as_array().expect("a review queue").clone();
+    assert_eq!(queue.len(), 1, "{queue:?}");
+    assert_eq!(queue[0]["phase"], "review");
+}

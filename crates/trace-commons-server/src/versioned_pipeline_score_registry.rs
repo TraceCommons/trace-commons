@@ -23,7 +23,11 @@
 //! policies it builds. Like every other identified dependency, a factory is
 //! unqualified for production unless it declares otherwise
 //! ([`ScorePolicyFactory::production_qualified`]); the per-bundle
-//! qualification reports it as the bundle's `score_policy` check.
+//! qualification reports it as the bundle's `score_policy` check, and a
+//! tenant bundle is recorded as qualified
+//! (`PipelineQualificationStore::qualify_bundle`) only when the factory is
+//! qualified and accepts the bundle's Score configuration
+//! ([`ScorePolicyFactory::configuration_is_qualifiable`]).
 //!
 //! [`PolicyRef`]: trace_commons_gate_api::pipeline::PolicyRef
 
@@ -86,6 +90,22 @@ pub struct ScorePolicyDependencies<'a> {
 ///   fails its run closed at Settle
 ///   (`pipeline_gate_decision_evidence_incomplete`) before any leg pays;
 ///   the server never fills one in.
+///
+/// A policy may hold a trace for operator review instead of pricing it
+/// (`ScoreOutput::held_for_review`). A reviewer resolves the hold through
+/// the pipeline review routes. On an approval the policy runs again with
+/// `ScoreInput::operator_review` set (the decision and the hold label,
+/// nothing that names the reviewer) and must price the trace: holding again
+/// fails the run closed (`pipeline_score_hold_repeated`). On a rejection the
+/// policy is not run; the server commits `ScoreOutput::rejected_after_hold`,
+/// and the run settles with no credit, no index entry and no gate decision
+/// row.
+///
+/// Production qualification: a bundle naming this factory's id is recorded
+/// as qualified (`validate_production_package_with_score_policies`) only
+/// when [`Self::production_qualified`] is `true` and
+/// [`Self::configuration_is_qualifiable`] accepts its Score configuration
+/// bytes. Both default to `false`.
 pub trait ScorePolicyFactory: Send + Sync {
     /// A safe label that names the factory in hash-only reports.
     fn dependency_identity(&self) -> &str;
