@@ -409,6 +409,10 @@ tc_handle*  tc_daemon_attach(const char* config_dir, char** err);
  * Reads directory entries and metadata only; never opens a session file.
  * Returns NULL only on a caught panic.
  */
+/* Read-only executable availability and shared managed copy; no daemon required. */
+char*       tc_managed_tools_json(void);
+char*       tc_managed_copy_json(void);
+
 char*       tc_discover_sources(void);
 
 /* Describe a folder the contributor has already named as their OpenCode

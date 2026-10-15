@@ -84,6 +84,8 @@ pub enum ManagedError {
     AmbiguousAccount,
     #[error("managed storage unavailable")]
     StorageUnavailable,
+    #[error("tool not installed or unavailable; install it, then check again")]
+    ToolUnavailable,
     #[error("unsupported native tool version")]
     UnsupportedVersion,
     #[error("sign in to this account before launching")]

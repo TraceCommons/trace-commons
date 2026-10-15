@@ -6504,3 +6504,25 @@ mod scalar_guard_tests {
         assert_eq!(borrowed_text(tc_last_error()), "fixture-untouched");
     }
 }
+
+/// Discovers installed managed tools without a daemon or subprocess.
+/// Returns the same tools array as managed_snapshot. Free with tc_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_managed_tools_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(&serde_json::to_string(
+            &trace_commons_contributor::managed::profiles::tools(),
+        )?))
+    })
+}
+
+/// Shared managed-session wording, available before daemon startup.
+/// Returns an owned JSON object; free it with tc_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_managed_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(&serde_json::to_string(
+            &trace_commons_contributor::managed::copy::copy(),
+        )?))
+    })
+}

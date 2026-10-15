@@ -513,7 +513,7 @@ fn enroll(store: &ConfigStore) {
 /// the store, so a temp store alone records the machine it runs on: its
 /// username in `config_path`, and whichever tools it has installed and
 /// credentialed. This points all of them at one fake home, seeded with an
-/// installed Claude Code and Codex and no IronWire, before any daemon
+/// installed Claude Code, Codex and OpenCode and no IronWire, before any daemon
 /// starts. `normalize` rewrites its path to [`RECORDED_HOME`].
 ///
 /// Process-wide on purpose: the environment is, and both tests in this
@@ -539,6 +539,17 @@ fn sample_home() -> &'static SampleHome {
         std::fs::write(fake.join(".claude/settings.json"), "{}\n").unwrap();
         std::fs::create_dir_all(fake.join(".codex")).unwrap();
         std::fs::write(fake.join(".codex/config.toml"), "").unwrap();
+        // Availability probes native executables, separately from session stores.
+        // Seed every supported tool so the recording is independent of the
+        // developer's PATH and platform-wide executable search locations.
+        let bin = fake.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for tool in ["claude", "codex", "opencode"] {
+            use std::os::unix::fs::PermissionsExt;
+            let executable = bin.join(tool);
+            std::fs::write(&executable, "#!/bin/sh\nexit 1\n").unwrap();
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         // SAFETY: set once, before any daemon or other thread in this test
         // binary reads the environment (see the doc above).
         unsafe {

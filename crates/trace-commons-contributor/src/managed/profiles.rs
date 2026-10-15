@@ -425,6 +425,10 @@ pub fn find_native(tool: ToolId) -> Result<PathBuf, ManagedError> {
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
     ]);
+    find_native_in(name, folders)
+}
+
+fn find_native_in(name: &str, folders: Vec<PathBuf>) -> Result<PathBuf, ManagedError> {
     for folder in folders {
         // Relative PATH entries depend on the launch project and are not a
         // stable executable identity for the daemon/helper handoff.
@@ -436,9 +440,10 @@ pub fn find_native(tool: ToolId) -> Result<PathBuf, ManagedError> {
         } else {
             name.into()
         });
-        if file.is_file() {
-            let resolved =
-                std::fs::canonicalize(file).map_err(|_| ManagedError::UnsupportedVersion)?;
+        if executable_file(&file) {
+            let Ok(resolved) = std::fs::canonicalize(file) else {
+                continue;
+            };
             if std::env::current_exe()
                 .ok()
                 .and_then(|p| std::fs::canonicalize(p).ok())
@@ -449,12 +454,75 @@ pub fn find_native(tool: ToolId) -> Result<PathBuf, ManagedError> {
             }
         }
     }
-    Err(ManagedError::UnsupportedVersion)
+    Err(ManagedError::ToolUnavailable)
+}
+
+fn executable_file(path: &std::path::Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Availability is filesystem discovery only: no version subprocess or source scan.
+pub fn tools() -> serde_json::Value {
+    serde_json::json!([
+        {"tool": ToolId::Claude, "installed": find_native(ToolId::Claude).is_ok(), "install_url": "https://code.claude.com/docs/en/setup"},
+        {"tool": ToolId::Codex, "installed": find_native(ToolId::Codex).is_ok(), "install_url": "https://developers.openai.com/codex/cli/"},
+        {"tool": ToolId::Opencode, "installed": find_native(ToolId::Opencode).is_ok(), "install_url": "https://opencode.ai/docs/"}
+    ])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_requires_an_executable_and_keeps_searching() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let first = home.path().join("first");
+        let second = home.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        std::fs::write(first.join("opencode"), b"not executable").unwrap();
+        std::fs::set_permissions(
+            first.join("opencode"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(
+            find_native_in("opencode", vec![first.clone()]),
+            Err(ManagedError::ToolUnavailable)
+        );
+        std::fs::write(second.join("opencode"), b"not run during discovery").unwrap();
+        std::fs::set_permissions(
+            second.join("opencode"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        assert_eq!(
+            find_native_in("opencode", vec![first.clone(), second.clone()]).unwrap(),
+            std::fs::canonicalize(second.join("opencode")).unwrap()
+        );
+        std::fs::remove_file(second.join("opencode")).unwrap();
+        assert_eq!(
+            find_native_in("opencode", vec![first, second]),
+            Err(ManagedError::ToolUnavailable)
+        );
+    }
 
     #[test]
     fn a_directory_another_launch_just_made_is_accepted() {

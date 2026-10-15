@@ -1120,6 +1120,13 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_onboarding_copy();
 
+    // Owned JSON strings; release with tc_string_free.
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_managed_tools_json();
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_managed_copy_json();
+
     /// <summary>
     /// The disclosure bundle (<c>disclosure_copy::contributor_disclosure_copy</c>)
     /// as an owned JSON object: every table of shared copy the onboarding,

@@ -47,9 +47,34 @@ an explicit new selection before a CLI launch without `--account`.
 
 ## Availability and recovery
 
+The app checks for executable Claude Code, Codex and OpenCode installations
+using the same resolver as managed launches. This does not run the tool, scan
+its session store, or enable watching, importing or collection. **Install** opens
+the tool's official installation page; **Check again** refreshes availability.
+Removing a tool leaves its saved accounts and session history intact. A missing
+executable is refused before a launch or sign-in ticket is created; supported
+version checks run on explicit launch and sign-in requests, with a ten-second
+probe deadline, and again when the helper starts the tool.
+
+The additive `managed_snapshot.tools` array contains `tool`, `installed` and
+`install_url`. The read-only `tc_managed_tools_json` FFI export returns that same
+array before daemon startup; `tc_managed_copy_json` provides its shared wording.
+`tool_destinations` includes `managed_copy` and a separate `managed_sessions`
+projection containing `id`, `tool`, `connection`, `provider`, `model`,
+`collection_state` and `state`. It excludes sign-in sessions, paths, account
+labels and native session identifiers. An unreadable registry yields null rather
+than an empty history. Collection states are `off`, `pending`, `collected` and
+`failed`; provider labels are `near_ai`, `anthropic` and `openai`. These session
+routes do not change the standard harness route or claim observed model calls.
+Map tool rows expose `installed` for the three managed tools and null for other
+tools whose executable availability is not checked.
+
+
 - Supported native adapter versions begin at Claude Code 2.1.289 (major 2) and
   Codex 0.160.0 (major 0). Older or unrecognized versions are refused before
   login, logout, or managed use.
+- On Windows, discovery requires the native `.exe` on PATH. npm `.cmd` wrappers
+  are not executed by this resolver; an installed wrapper alone is unavailable.
 - App terminal adapters target Terminal on macOS, Windows Terminal when found,
   and `x-terminal-emulator` on an unsandboxed Linux installation. The packaged
   `near-ai` helper must be present. Flatpak host-terminal launching is unavailable;
@@ -90,8 +115,10 @@ Use an upstream model ID, without a provider prefix added by Trace Commons.
 For NEAR AI, use an ID advertised by that account's model catalogue. A model
 absent from the catalogue is refused; the route never substitutes the first
 model. Without `--collect-traces`, the native session remains local and no
-export is staged. The CLI is also the launch surface on Windows and Linux;
-this change does not extend the frozen desktop launch controls there.
+export is staged. The native macOS, Windows and GTK managed-session screens also offer
+OpenCode account setup, an explicit model and opt-in collection. The frozen
+Tauri controls are unchanged. Windows and GTK do not currently have a routing
+map; their managed rows show the selected account, model and collection state.
 
 Each launch owns a separate HOME/XDG profile beneath its saved account and
 uses OpenCode's pure mode. Project OpenCode configuration and external plugins
@@ -123,3 +150,23 @@ other versions fail closed. A local synthetic-model qualification covers
 import, exact-ID run, explicit model routing, export, validation and staging.
 It does not certify real provider credentials, NEAR AI receipts, or unattended
 end-to-end contribution without an invite.
+
+## Native shell visibility and map
+
+New setup and launch choices hide unavailable coding tools when at least one
+supported executable is installed. With none installed, the managed screens
+offer Claude Code, Codex and OpenCode installation instructions and Check again.
+Installation is user initiated. Existing accounts, imported sources and session
+history survive removal of a tool; unavailable accounts cannot launch.
+
+The macOS first-run tool screen uses the same read-only executable discovery
+before starting the daemon. Finding OpenCode does not grant source-watch consent
+or invent an export location. It explains that ordinary sessions need an export
+folder and managed sessions can opt into collection when launched.
+
+The macOS map includes managed provider/model and collection details. Separate
+managed route nodes describe session configuration, using still dashed arcs.
+Neither a running process nor a collected export is evidence of an answered
+model call, contribution, or global routing configuration. Sign-in-only sessions
+are excluded. An unreadable registry remains unknown, and older payloads remain
+readable without the added availability or managed-route fields.

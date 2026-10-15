@@ -32,7 +32,8 @@
   "defaults": [],
   "generations": {
     "claude": 0,
-    "codex": 0
+    "codex": 0,
+    "opencode": 0
   },
   "capabilities": {
     "managed_launch": true,
@@ -109,6 +110,39 @@
     "auth_sign_in_required": "Needs sign-in",
     "auth_checking": "Checking",
     "auth_ready": "Ready",
-    "auth_unavailable": "Unavailable"
-  }
+    "auth_unavailable": "Unavailable",
+    "tools_title": "Coding tools",
+    "tools_empty": "Install a coding tool to start a managed session. Saved accounts and session history stay here.",
+    "install": "Install",
+    "check_again": "Check again",
+    "not_installed": "Not installed",
+    "tool_unavailable": "This tool is not installed or is unavailable. Install it, then choose Check again.",
+    "collection_disabled": "Trace collection off",
+    "model_required": "Enter a model ID to launch OpenCode.",
+    "opencode_export_scope": "OpenCode is installed. Import an exported session, or choose Collect this session when launching a managed session. Installation alone does not turn on collection.",
+    "provider_openai": "OpenAI",
+    "provider_anthropic": "Anthropic",
+    "provider_near_ai": "NEAR AI",
+    "collection_off": "Trace collection off",
+    "map_scope": "Managed session routes. A running session does not confirm that model calls were answered.",
+    "unsupported_version": "This tool version is not supported. Install a supported version, then try again.",
+    "update": "Update"
+  },
+  "tools": [
+    {
+      "tool": "claude",
+      "installed": true,
+      "install_url": "https://code.claude.com/docs/en/setup"
+    },
+    {
+      "tool": "codex",
+      "installed": true,
+      "install_url": "https://developers.openai.com/codex/cli/"
+    },
+    {
+      "tool": "opencode",
+      "installed": true,
+      "install_url": "https://opencode.ai/docs/"
+    }
+  ]
 }

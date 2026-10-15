@@ -75,7 +75,8 @@ final class GlassParityRoundOneTests: XCTestCase {
         XCTAssertEqual(words.credential, "NEAR AI credential")
         XCTAssertEqual(words.noneFound, "No configured tools found.")
         let empty = FlowMapScene.privateAI(
-            HarnessList.none, destinationLabel: "D", privateAI: "off",
+            HarnessList(catalogPresent: true, harnesses: [], activity: .none, destinationPort: nil),
+            destinationLabel: "D", privateAI: "off",
             sentence: { _ in nil }, state: { _ in .unknown })
         XCTAssertEqual(empty.nodes.first?.sublabel, words.noneFound)
     }

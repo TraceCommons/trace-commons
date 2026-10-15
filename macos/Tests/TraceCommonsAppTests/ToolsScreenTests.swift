@@ -10,6 +10,23 @@ import XCTest
 /// more than one asks which, none is refused. Read from the screen's pure
 /// layout and its source, the house pattern for a SwiftUI view.
 final class ToolsScreenTests: XCTestCase {
+    func testInstalledOpenCodeWithoutExportsOffersSetupWithoutInventingAWatchPath() throws {
+        let tools = try JSONDecoder().decode([ManagedToolAvailability].self, from: Data(#"[{"tool":"opencode","installed":true,"install_url":"https://opencode.ai/docs/"}]"#.utf8))
+        let state = FirstRunState()
+        XCTAssertEqual(ToolsScreenLayout.setupRows([], state: state, tools: tools).map(\.tool), ["opencode"])
+        XCTAssertEqual(ToolsScreenLayout.shownRows([], state: state, tools: tools), [])
+        XCTAssertEqual(state.sessionRoots.opencode, .undecided)
+    }
+
+    func testAvailabilityHidesMissingSourceChoicesButPreservesExports() throws {
+        let missing = SourceCandidate(source: .claudeCode, path: "/missing", exists: false, sessionCount: 0, mostRecent: nil, relocatedByEnv: false)
+        let exports = SourceCandidate(source: .opencode, path: "/exports", exists: true, sessionCount: 1, mostRecent: nil, relocatedByEnv: false)
+        let tools = try JSONDecoder().decode([ManagedToolAvailability].self, from: Data(#"[{"tool":"opencode","installed":false,"install_url":"https://opencode.ai/docs/"}]"#.utf8))
+        let state = FirstRunState()
+        XCTAssertEqual(ToolsScreenLayout.shownRows([missing, exports], state: state, tools: tools), [exports])
+        XCTAssertEqual(ToolsScreenLayout.shownRows([missing, exports], state: state, tools: nil), [missing, exports])
+    }
+
     private static func source(_ name: String) throws -> String {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

@@ -28,6 +28,11 @@ struct ManagedSessionsSection: View {
                 GlassNotice(tone: .outside, title: model.managedText("action_failed")) {
                     if key != "action_failed" {
                         Text(model.managedText(key)).textSelection(.enabled)
+                        if key == "unsupported_version" {
+                            ForEach(model.managedSnapshot?.updateRecoveryTools(attemptedTool: model.managedErrorTool) ?? []) { availability in
+                                ManagedInstallLink(tool: availability, copy: model.managedText, labelKey: "update", includeToolName: true)
+                            }
+                        }
                     }
                 }
             }
@@ -71,6 +76,9 @@ struct ManagedSessionsSection: View {
                     .foregroundStyle(GlassColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let snapshot = model.managedSnapshot {
+                    if snapshot.needsToolInstallation {
+                        ManagedToolInstallation(tools: snapshot.tools ?? [], copy: model.managedText, retry: model.refreshManagedSessions)
+                    }
                     accountActions(snapshot)
                     terminalLine(snapshot)
                     if !snapshot.accounts.isEmpty {
@@ -114,12 +122,13 @@ struct ManagedSessionsSection: View {
         }
         .buttonStyle(GlassButtonStyle(.glass, small: true))
         .fixedSize()
+        .disabled(snapshot.setupTools.isEmpty)
         let launch = Button { launching = true } label: {
             Text(model.managedText("launch")).lineLimit(1)
         }
         .buttonStyle(GlassButtonStyle(.primary, small: true))
         .fixedSize()
-        .disabled(snapshot.accounts.isEmpty || !snapshot.capabilities.terminalLaunch)
+        .disabled(!snapshot.accounts.contains { snapshot.canLaunch(tool: $0.tool) } || !snapshot.capabilities.terminalLaunch)
         return ViewThatFits(in: .horizontal) {
             HStack(spacing: GlassTokens.Space.s3) { add; launch }
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) { add; launch }
@@ -159,6 +168,13 @@ struct ManagedSessionsSection: View {
                         GlassTag(model.managedText("default"), tone: .accent)
                     }
                 }
+                if !snapshot.canLaunch(tool: account.tool) {
+                    Text(model.managedText("tool_unavailable"))
+                        .glassType(GlassTokens.TypeScale.caption)
+                    if let availability = snapshot.tools?.first(where: { $0.tool == account.tool }) {
+                        ManagedInstallLink(tool: availability, copy: model.managedText)
+                    }
+                }
                 Text(meta)
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textTertiary)
@@ -191,7 +207,7 @@ struct ManagedSessionsSection: View {
                             menuFor = nil
                             model.managedAction("managed_account_reconnect", params: ["account_id": account.id], openTerminal: true)
                         }
-                        .disabled(held || !snapshot.capabilities.terminalLaunch)
+                        .disabled(held || !snapshot.capabilities.terminalLaunch || !snapshot.canLaunch(tool: account.tool))
                     }
                     GlassMenuItem(model.managedText("verify")) {
                         menuFor = nil
@@ -233,7 +249,7 @@ struct ManagedSessionsSection: View {
             model.managedText(session.connection),
         ].compactMap { $0 }.filter { !$0.isEmpty }
         if let selectedModel = session.model { meta.append(selectedModel) }
-        if let collection = session.collection, ["pending", "collected", "failed"].contains(collection) {
+        if let collection = session.collection, ["off", "pending", "collected", "failed"].contains(collection) {
             meta.append(model.managedText("collection_" + collection))
         }
         if let code = session.exitCode {
@@ -346,10 +362,11 @@ struct ManagedAccountSheet: View {
     @State private var label = ""
     @State private var key = ""
 
+    private var availableTools: [String] { model.managedSnapshot?.setupTools ?? ManagedSurface.supportedTools }
     private var subscription: Bool { connection == "subscription" }
 
     private var canSave: Bool {
-        !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        availableTools.contains(tool) && !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && (subscription || !key.isEmpty)
             && (!subscription || model.managedSnapshot?.capabilities.terminalLaunch == true)
     }
@@ -370,7 +387,7 @@ struct ManagedAccountSheet: View {
                     ManagedField(label: model.managedText("tool")) {
                         GlassSelect(
                             model.managedText("tool"), selection: Binding(get: { tool }, set: { tool = $0; if tool == "opencode" && connection == "subscription" { connection = "api_key" } }),
-                            options: ["claude", "codex", "opencode"].map { GlassPickerOption(model.managedText($0), value: $0) })
+                            options: availableTools.map { GlassPickerOption(model.managedText($0), value: $0) })
                     }
                     ManagedField(label: model.managedText("connection")) {
                         GlassSelect(
@@ -387,6 +404,13 @@ struct ManagedAccountSheet: View {
                 }
             }
         }
+        .onAppear { reconcileTool() }
+        .onChange(of: availableTools) { reconcileTool() }
+    }
+
+    private func reconcileTool() {
+        if !availableTools.contains(tool), let first = availableTools.first { tool = first }
+        if tool == "opencode" && connection == "subscription" { connection = "api_key" }
     }
 
     private func save() {
@@ -403,6 +427,8 @@ struct ManagedLaunchSheet: View {
     @State private var accountID = ""
     @State private var selectedModel = ""
     @State private var collectTraces = false
+    private var selectedAccount: ManagedAccount? { model.managedSnapshot?.accounts.first { $0.id == accountID } }
+    private var toolAvailable: Bool { selectedAccount.map { model.managedSnapshot?.canLaunch(tool: $0.tool) == true } ?? false }
     private var isOpenCode: Bool { model.managedSnapshot?.accounts.first(where: { $0.id == accountID })?.tool == "opencode" }
     @State private var project: URL?
 
@@ -418,7 +444,7 @@ struct ManagedLaunchSheet: View {
                 .cancel(model.managedText("cancel"), action: onClose),
                 GlassModalAction(
                     model.managedText("launch_short"), isDefault: true,
-                    isEnabled: !accountID.isEmpty && project != nil && (!isOpenCode || !selectedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) && !model.managedBusy, id: "launch", action: launch),
+                    isEnabled: toolAvailable && !accountID.isEmpty && project != nil && (!isOpenCode || !selectedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) && !model.managedBusy, id: "launch", action: launch),
             ],
             busy: model.managedBusy,
             onCancel: onClose
@@ -428,13 +454,27 @@ struct ManagedLaunchSheet: View {
                     GlassPicker(
                         model.managedText("saved_account"),
                         selection: Binding(get: { accountID.isEmpty ? nil : accountID }, set: { accountID = $0 ?? "" }),
-                        options: (model.managedSnapshot?.accounts ?? []).map { account in
+                        options: (model.managedSnapshot?.accounts ?? []).filter { model.managedSnapshot?.canLaunch(tool: $0.tool) == true || $0.id == accountID }.map { account in
                             GlassPickerOption(
                                 [ManagedWords.tool(account.tool, model: model), account.label, model.managedText(account.connection)]
                                     .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),
                                 value: account.id)
                         },
                         placeholder: model.managedText("choose_account"))
+                }
+                if let account = selectedAccount, !toolAvailable {
+                    ManagedNote(text: model.managedText("tool_unavailable"))
+                    if let availability = model.managedSnapshot?.tools?.first(where: { $0.tool == account.tool }) {
+                        ManagedInstallLink(tool: availability, copy: model.managedText)
+                    }
+                    Button(model.managedText("check_again")) { model.refreshManagedSessions() }
+                }
+                if let account = selectedAccount, model.managedErrorKey == "unsupported_version",
+                   model.managedErrorTool == nil || model.managedErrorTool == account.tool {
+                    ManagedNote(text: model.managedText("unsupported_version"))
+                    if let availability = model.managedSnapshot?.tools?.first(where: { $0.tool == account.tool }) {
+                        ManagedInstallLink(tool: availability, copy: model.managedText, labelKey: "update", includeToolName: true)
+                    }
                 }
                 if isOpenCode {
                     GlassTextField(model.managedText("model"), text: $selectedModel)
@@ -461,7 +501,7 @@ struct ManagedLaunchSheet: View {
     }
 
     private func launch() {
-        guard !model.managedBusy, let snapshot = model.managedSnapshot, let account = snapshot.accounts.first(where: { $0.id == accountID }), let project else { return }
+        guard toolAvailable, !model.managedBusy, let snapshot = model.managedSnapshot, let account = snapshot.accounts.first(where: { $0.id == accountID }), let project else { return }
         var params: [String: Any] = ["request_id": UUID().uuidString, "purpose": "coding", "tool": account.tool, "connection": account.connection, "account_id": account.id, "cwd": project.path, "expected_generation": snapshot.generations[account.tool] ?? 0, "save_default": false]
         if account.tool == "opencode" {
             params["model"] = selectedModel.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -522,5 +562,43 @@ struct ManagedRemoveSheet: View {
                 },
             ],
             onCancel: onClose)
+    }
+}
+
+/// Installation recovery uses the core's official links and words.
+struct ManagedInstallLink: View {
+    let tool: ManagedToolAvailability
+    let copy: (String) -> String
+    var labelKey: String = "install"
+    var includeToolName = false
+    private var actionLabel: String { copy(labelKey).isEmpty ? copy("install") : copy(labelKey) }
+    private var label: String { includeToolName ? actionLabel + " " + copy(tool.tool) : actionLabel }
+    var body: some View {
+        if let url = tool.url {
+            Link(label, destination: url)
+                .accessibilityLabel(actionLabel + " " + copy(tool.tool))
+                .buttonStyle(GlassButtonStyle(.glass, small: true))
+        }
+    }
+}
+
+struct ManagedToolInstallation: View {
+    let tools: [ManagedToolAvailability]
+    let copy: (String) -> String
+    let retry: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            Text(copy("tools_title")).glassType(GlassTokens.TypeScale.bodyStrong)
+            Text(copy("tools_empty")).glassType(GlassTokens.TypeScale.caption)
+            ForEach(tools.filter { ManagedSurface.toolKey($0.tool) != nil }) { tool in
+                HStack {
+                    GlassToolTile(.tool(ManagedWords.glassTool(tool.tool)))
+                    Text(copy(tool.tool))
+                    Spacer()
+                    ManagedInstallLink(tool: tool, copy: copy)
+                }
+            }
+            Button(copy("check_again"), action: retry).buttonStyle(GlassButtonStyle(.glass, small: true))
+        }
     }
 }

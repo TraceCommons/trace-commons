@@ -1074,15 +1074,42 @@ extension DaemonData {
         public let ledgerReadable: Bool?
         public let observedDestinations: [ObservedDestination]?
         public let hub: InferenceHub?
+        /// Explicit managed session configuration, not evidence of answered calls.
+        public var managedSessions: [ManagedMapSession]? = nil
+        public var managedCopy: [String: String]? = nil
 
         public enum CodingKeys: String, CodingKey {
             case folders, tools, hub
+            case managedSessions = "managed_sessions"
+            case managedCopy = "managed_copy"
             case privateAi = "private_ai"
             case sessionsRoute = "sessions_route"
             case windowHours = "window_hours"
             case unattributedCalls = "unattributed_calls"
             case ledgerReadable = "ledger_readable"
             case observedDestinations = "observed_destinations"
+        }
+    }
+
+    public struct ManagedMapSession: Codable, Equatable, Sendable, Identifiable {
+        public let id: String
+        public let tool: String
+        public let connection: String
+        public let provider: String
+        public let model: String?
+        public let collectionState: String
+        public let state: String
+        enum CodingKeys: String, CodingKey {
+            case id, tool, connection, provider, model, state
+            case collectionState = "collection_state"
+        }
+
+        public var source: String { tool == "claude" ? "claude-code" : tool }
+
+        public func detail(copy: [String: String]) -> String {
+            [copy["provider_" + provider], model,
+             copy[ManagedSurface.stateKey(state)], copy["collection_" + collectionState]]
+                .compactMap { $0 }.joined(separator: " · ")
         }
     }
 
@@ -1124,11 +1151,13 @@ extension DaemonData {
         public let modelCalls: ModelCallRoute?
         /// The map's per-tool node counts over `windowHours` (K14).
         public let counts: ToolCounts?
+        /// Nil on older daemons or when this tool has no executable probe.
+        public var installed: Bool? = nil
 
         public var id: String { tool }
 
         public enum CodingKeys: String, CodingKey {
-            case tool, name, sessions, counts
+            case tool, name, sessions, counts, installed
             case modelCalls = "model_calls"
         }
     }

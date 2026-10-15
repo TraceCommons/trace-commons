@@ -203,7 +203,15 @@ struct FlowMapScene: Equatable {
         _ tree: TracesTree, gate: CommonsGate, contributed: Contributions = .unread, selectedTool: String? = nil
     ) -> FlowMapScene {
         var scene = FlowMapScene()
-        let tools = mapTools(tree)
+        let tools = mapTools(tree).filter { entry in
+            guard let destinations = gate.destinations,
+                  destinations.tools.contains(where: { $0.installed == true }) else { return true }
+            // Preserve watched/imported sources and contribution history after uninstall.
+            if entry.watched || (contributed.tool(entry.tool.kind) ?? 0) > 0 { return true }
+            if destinations.managedSessions?.contains(where: { $0.source == entry.tool.id }) == true { return true }
+            let row = destinations.tools.first { $0.tool == entry.tool.id }
+            return row?.installed != false || (row?.counts?.sessions ?? 0) > 0
+        }
         let step = tools.count > 1 ? 460 / CGFloat(tools.count - 1) : 0
         var flowing = false
 
@@ -246,7 +254,7 @@ struct FlowMapScene: Equatable {
             }
             scene.nodes.append(Node(
                 id: "tool:\(tool.id)", kind: .tool(TracesTreeView.glassTool(tool.kind), off: off), at: at, radius: 13,
-                label: tool.kind.displayName, detail: toolDetail(tool), dim: toolDim, title: toolTitle(tool),
+                label: tool.kind.displayName, detail: toolDetail(tool) + managedDetail(source: tool.id, destinations: gate.destinations), dim: toolDim, title: toolTitle(tool),
                 dashed: !watched, ringed: selectedTool == tool.id))
         }
 
@@ -322,10 +330,20 @@ struct FlowMapScene: Equatable {
         destinationLabel: String,
         privateAI: String?,
         sentence: (HarnessRow) -> String?,
-        state: (HarnessRow) -> HarnessState
+        state: (HarnessRow) -> HarnessState,
+        destinations: DaemonData.ToolDestinations? = nil
     ) -> FlowMapScene {
+        // An unreadable global harness list is not an empty configured list.
+        // The caller can still append independently read managed routes.
+        guard harnesses != .none else { return FlowMapScene() }
         var scene = FlowMapScene()
-        let rows = harnesses.harnesses
+        let hasInstalled = destinations?.tools.contains(where: { $0.installed == true }) == true
+            || harnesses.harnesses.contains(where: \.installed)
+        let rows = harnesses.harnesses.filter { row in
+            guard hasInstalled else { return true }
+            let source = row.id == "claude" ? "claude-code" : row.id
+            return destinations?.tools.first(where: { $0.tool == source })?.installed ?? row.installed
+        }
         let step = rows.count > 1 ? 420 / CGFloat(rows.count - 1) : 0
         var anyAnswering = false
         var connected = 0
@@ -368,6 +386,43 @@ struct FlowMapScene: Equatable {
             label: words?.credential ?? destinationLabel, detail: detail,
             sublabel: rows.isEmpty ? words?.noneFound : words?.connected(tools: connected, sentence: false)), at: 0)
         return scene
+    }
+
+    /// Managed configuration has its own routes. A process being alive never
+    /// animates a model call or lights the global Private AI destination.
+    func addingManagedRoutes(_ destinations: DaemonData.ToolDestinations?) -> FlowMapScene {
+        guard let destinations, let sessions = destinations.managedSessions,
+              let copy = destinations.managedCopy else { return self }
+        var scene = self
+        let groups = Dictionary(grouping: sessions) { $0.tool + ":" + $0.provider }
+        let keys = groups.keys.sorted()
+        for (index, key) in keys.enumerated() {
+            guard let rows = groups[key], let first = rows.first else { continue }
+            let y = keys.count > 1 ? 130 + CGFloat(index) * 530 / CGFloat(keys.count - 1) : 560
+            let start = CGPoint(x: 390, y: y)
+            let end = CGPoint(x: 520, y: y)
+            let details = rows.prefix(4).map { $0.detail(copy: copy) }.joined(separator: "\n")
+            let overflow = rows.count > 4 ? "\n+\(rows.count - 4)" : ""
+            let detail = [copy["map_scope"], details + overflow].compactMap { $0 }.joined(separator: "\n")
+            scene.nodes.append(Node(
+                id: "managed:" + key, kind: .harness(Self.glassTool(harness: first.tool), installed: true),
+                at: start, radius: 13, label: copy[first.tool] ?? first.tool, detail: detail,
+                title: copy["title"], sublabel: copy["title"].map { Self.dotPair($0, rows.count) }))
+            scene.nodes.append(Node(
+                id: "managed-provider:" + key, kind: .destination(.unknown),
+                at: end, radius: 16, label: copy["provider_" + first.provider] ?? MonitorWords.unknown,
+                detail: detail))
+            scene.arcs.append(Self.curve(from: start, to: end, style: .dashed, dim: 1))
+        }
+        return scene
+    }
+
+    private static func managedDetail(source: String, destinations: DaemonData.ToolDestinations?) -> String {
+        guard let destinations, let copy = destinations.managedCopy,
+              let rows = destinations.managedSessions?.filter({ $0.source == source }), !rows.isEmpty else { return "" }
+        let detail = rows.prefix(4).map { $0.detail(copy: copy) }.joined(separator: "\n")
+        let overflow = rows.count > 4 ? "\n+\(rows.count - 4)" : ""
+        return "\n" + (copy["title"] ?? "") + "\n" + detail + overflow
     }
 
     /// The destination's lamp from the core's Private AI state label. A

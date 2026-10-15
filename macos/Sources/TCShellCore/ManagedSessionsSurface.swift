@@ -36,6 +36,18 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
     }
 }
 
+public struct ManagedToolAvailability: Decodable, Equatable, Identifiable, Sendable {
+    public let tool: String
+    public let installed: Bool
+    public let installURL: String
+    public var id: String { tool }
+    public var url: URL? {
+        guard let url = URL(string: installURL), url.scheme == "https" else { return nil }
+        return url
+    }
+    enum CodingKeys: String, CodingKey { case tool, installed; case installURL = "install_url" }
+}
+
 public struct ManagedSnapshot: Decodable, Equatable, Sendable {
     public struct Capabilities: Decodable, Equatable, Sendable {
         public let managedLaunch: Bool
@@ -45,6 +57,7 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
             case managedLaunch = "managed_launch", terminalLaunch = "terminal_launch", terminalDestination = "terminal_destination"
         }
     }
+    public let tools: [ManagedToolAvailability]?
     public let copy: [String: String]?
     public let revision: UInt64
     public let accounts: [ManagedAccount]
@@ -58,6 +71,20 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
 /// draws a raw wire value or a daemon error code. Every word is in the
 /// shared table (`managed/copy.rs`); this only picks the key.
 public enum ManagedSurface {
+    public static func visibleHarnesses(_ rows: [HarnessRow], tools: [ManagedToolAvailability]?) -> [HarnessRow] {
+        rows.filter { row in
+            // Saved routing and previous activity remain manageable after uninstall.
+            if row.connected || row.lastCallAt != nil { return true }
+            return tools?.first(where: { $0.tool == row.id })?.installed ?? row.installed
+        }
+    }
+
+    public static let supportedTools = ["claude", "codex", "opencode"]
+    public static func setupTools(_ tools: [ManagedToolAvailability]?) -> [String] {
+        guard let tools else { return supportedTools }
+        return supportedTools.filter { tool in tools.first(where: { $0.tool == tool })?.installed != false }
+    }
+
     /// The lifecycle values the daemon sends today.
     public static let sessionStates: Set<String> = ["starting", "running", "exited", "failed", "unknown"]
     /// The sign-in values the daemon sends today.
@@ -82,6 +109,8 @@ public enum ManagedSurface {
     /// code: a launch whose outcome is unknown asks for a refresh, anything
     /// else is the general failure.
     public static func errorKey(code: String?, message: String?) -> String {
+        if code == "managed-unsupported-version" || message == "managed-unsupported-version" { return "unsupported_version" }
+        if code == "tool-unavailable" || message == "tool-unavailable" || code == "managed-tool-unavailable" || message == "managed-tool-unavailable" { return "tool_unavailable" }
         let launchUnknown = ["launch-unknown", "managed-launch-unknown"]
         if launchUnknown.contains(code ?? "") || launchUnknown.contains(message ?? "") { return "launch_unknown" }
         return "action_failed"
@@ -89,6 +118,26 @@ public enum ManagedSurface {
 }
 
 public extension ManagedSnapshot {
+    /// A failed operation identifies its tool; old error payloads fall back
+    /// to installed tools, never an unrelated hardcoded provider.
+    func updateRecoveryTools(attemptedTool: String?) -> [ManagedToolAvailability] {
+        (tools ?? []).filter { availability in
+            guard ManagedSurface.toolKey(availability.tool) != nil else { return false }
+            if let attemptedTool { return availability.tool == attemptedTool }
+            return availability.installed
+        }
+    }
+
+    var setupTools: [String] {
+        ManagedSurface.setupTools(tools)
+    }
+    var needsToolInstallation: Bool {
+        tools != nil && setupTools.isEmpty
+    }
+    func canLaunch(tool: String) -> Bool {
+        ManagedSurface.toolKey(tool) != nil && tools?.first(where: { $0.tool == tool })?.installed != false
+    }
+
     /// A running, starting or unknown session holds its account: no sign-in,
     /// key change or removal while it does.
     func isHeld(_ account: ManagedAccount) -> Bool {

@@ -48,7 +48,7 @@ impl ManagedService {
             "managed_snapshot" => {
                 let sessions = self.sessions.views()?;
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"revision":self.sessions.revision(),"accounts":self.accounts.list(),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":([self.accounts.selection(ToolId::Claude),self.accounts.selection(ToolId::Codex),self.accounts.selection(ToolId::Opencode)].into_iter().flatten().collect::<Vec<_>>()),"sessions":sessions,"capabilities":{"managed_launch":true,"terminal_launch":crate::managed::terminal::destination().is_some(),"terminal_destination":crate::managed::terminal::destination()}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"revision":self.sessions.revision(),"accounts":self.accounts.list(),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":([self.accounts.selection(ToolId::Claude),self.accounts.selection(ToolId::Codex),self.accounts.selection(ToolId::Opencode)].into_iter().flatten().collect::<Vec<_>>()),"sessions":sessions,"capabilities":{"managed_launch":true,"terminal_launch":crate::managed::terminal::destination().is_some(),"terminal_destination":crate::managed::terminal::destination()}}),
                 )
             }
             "managed_account_add" => {
@@ -92,6 +92,8 @@ impl ManagedService {
                 if p.save_default {
                     return Err(ManagedError::InvalidRequest);
                 }
+                self.profiles
+                    .verify_version(&account, &find_native(p.tool)?)?;
                 Ok(json!(self.sessions.prepare(p, &account)?))
             }
             "managed_terminal_launch" => {
@@ -188,6 +190,8 @@ impl ManagedService {
                 if self.sessions.holds_profile(p.account_id) {
                     return Err(ManagedError::Conflict);
                 }
+                self.profiles
+                    .verify_version(&account, &find_native(account.tool)?)?;
                 let request = LaunchRequest {
                     model: None,
                     collect_traces: false,
@@ -256,6 +260,7 @@ pub fn handle(shared: &DaemonShared, request: &Request) -> Response {
                 ManagedError::NotFound => "managed-not-found",
                 ManagedError::AmbiguousAccount => "managed-ambiguous-account",
                 ManagedError::StorageUnavailable => "managed-storage-unavailable",
+                ManagedError::ToolUnavailable => "managed-tool-unavailable",
                 ManagedError::UnsupportedVersion => "managed-unsupported-version",
                 ManagedError::SignInRequired => "managed-sign-in-required",
                 ManagedError::DaemonUnavailable => "managed-daemon-unavailable",
