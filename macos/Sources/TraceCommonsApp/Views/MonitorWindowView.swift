@@ -912,16 +912,17 @@ private struct MonitorMapPane: View {
             // the core still answers; otherwise nothing is drawn as current.
             let harnesses = PrivateAIInspectorView.liveHarnesses(
                 model.harnesses, read: inference.harnesses, failure: inference.failures["harness_list"])
-            if let privateAILabel {
+            if let privateAILabel, case let scene = FlowMapScene.privateAI(
+                harnesses, destinationLabel: privateAILabel,
+                privateAI: traces.destinations?.privateAi ?? traces.status?.privateInferenceState?.state,
+                sentence: sentence,
+                state: { HarnessSurface.state($0, calls: model.harnessCalls) },
+                destinations: inference.failures["tool_destinations"] == nil ? inference.destinations : nil,
+                space: space)
+                .addingManagedRoutes(inference.failures["tool_destinations"] == nil ? inference.destinations : nil),
+                scene.drawsMap {
                 FlowMapView(
-                    scene: .privateAI(
-                        harnesses, destinationLabel: privateAILabel,
-                        privateAI: traces.destinations?.privateAi ?? traces.status?.privateInferenceState?.state,
-                        sentence: sentence,
-                        state: { HarnessSurface.state($0, calls: model.harnessCalls) },
-                        destinations: inference.failures["tool_destinations"] == nil ? inference.destinations : nil,
-                        space: space)
-                        .addingManagedRoutes(inference.failures["tool_destinations"] == nil ? inference.destinations : nil),
+                    scene: scene,
                     legend: [], zoomable: false, accessibilityName: privateAILabel)
             } else {
                 Color.clear

@@ -543,6 +543,10 @@ struct FlowMapScene: Equatable {
         return scene
     }
 
+    /// False for a scene with nothing to draw (an unread harness list and no
+    /// managed routes), so the pane stays blank as it was before managed routes.
+    var drawsMap: Bool { !nodes.isEmpty }
+
     /// Managed configuration has its own routes. A process being alive never
     /// animates a model call or lights the global Private AI destination.
     func addingManagedRoutes(_ destinations: DaemonData.ToolDestinations?) -> FlowMapScene {

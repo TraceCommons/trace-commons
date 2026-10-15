@@ -86,6 +86,12 @@ final class ManagedSessionsRenderTests: XCTestCase {
     }
 
     @MainActor
+    func testUnreadHarnessListWithoutManagedRoutesDrawsNoMap() throws {
+        let scene = FlowMapScene.privateAI(.none, destinationLabel: "Private AI", privateAI: "off", sentence: { _ in nil }, state: { _ in .unknown }).addingManagedRoutes(nil)
+        XCTAssertFalse(scene.drawsMap)
+    }
+
+    @MainActor
     func testManagedOpenCodeMapRender() throws {
         let copy = try XCTUnwrap(TCDiscovery.managedCopyJSON())
         let wire = "{\"tools\":[],\"managed_copy\":\(copy),\"managed_sessions\":[{\"id\":\"map-session\",\"tool\":\"opencode\",\"connection\":\"api_key\",\"provider\":\"openai\",\"model\":\"gpt-4.1\",\"state\":\"running\",\"collection_state\":\"pending\"}]}"
