@@ -477,8 +477,8 @@ public struct GlassLegendCell: View {
 }
 
 /// Label and value pairs, labels right-aligned in a 70pt column (the
-/// inspector's Path, Sessions, User), inset 6pt on each side (#1146
-/// `.tc-kv`).
+/// inspector's Path, Sessions, User), flush with its card (#1146
+/// `.tc-kv`, less its 6pt inset: owner, 2026-10-12).
 public struct GlassKeyValueList: View {
     public struct Item: Identifiable {
         public let label: String
@@ -503,9 +503,14 @@ public struct GlassKeyValueList: View {
         Grid(alignment: .topLeading, horizontalSpacing: 10, verticalSpacing: 6) {
             ForEach(items) { item in
                 GridRow {
+                    // Leading-aligned, the column as wide as its longest
+                    // label, flush with the card's other content (owner,
+                    // 2026-10-12: the fixed 70pt trailing column pushed the
+                    // values too far right).
                     Text(item.label)
                         .foregroundStyle(GlassColor.textTertiary)
-                        .frame(width: 70, alignment: .trailing)
+                        .fixedSize()
+                        .gridColumnAlignment(.leading)
                     Group {
                         if item.mono {
                             Text(item.value).glassType(GlassTokens.TypeScale.mono)
@@ -519,11 +524,8 @@ public struct GlassKeyValueList: View {
                 .accessibilityElement(children: .combine)
             }
         }
-        .padding(.horizontal, Self.inset)
         .glassType(GlassTokens.TypeScale.label.weight(.regular))
     }
-
-    static let inset: CGFloat = 6
 }
 
 /// A grid row inside a flush card: hairline above, never around.
@@ -607,21 +609,53 @@ public struct GlassNotice<Content: View>: View {
         self.content = content()
     }
 
-    static var titleGap: CGFloat { GlassTokens.Space.s3 }
+    static var titleGap: CGFloat { GlassTokens.Space.s2 }
+
+    /// The tone's icon, in place of a dot (owner, 2026-10-12: notices read
+    /// as notifications): a warning triangle for outside, an exclamation
+    /// for ask, a check for on, and information otherwise.
+    static func icon(_ tone: GlassStatus) -> String {
+        switch tone {
+        case .outside: "exclamationmark.triangle.fill"
+        case .ask: "exclamationmark.circle.fill"
+        case .on: "checkmark.circle.fill"
+        default: "info.circle.fill"
+        }
+    }
+
+    /// The box's fill: the tone's colour, faint, so the tone reads at a
+    /// glance; a neutral wash for a tone that is not a warning.
+    static func fill(_ tone: GlassStatus) -> Color {
+        switch tone {
+        case .outside, .ask, .on: tone.color.opacity(0.14)
+        default: GlassColor.ink(0.05)
+        }
+    }
 
     public var body: some View {
-        GlassCard(quiet: true) {
-            // Title to body: space-3 (#1146 `.tc-notice`); the title stays
-            // secondary text, its tone carried by the dot.
+        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
+            Image(systemName: Self.icon(tone))
+                .glassGlyph(13, weight: .semibold)
+                .foregroundStyle(tone.color)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: Self.titleGap) {
                 if let title {
-                    GlassStatusLabel(title, status: tone).fontWeight(.semibold)
+                    Text(title)
+                        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 content
                     .glassType(GlassTokens.TypeScale.label.weight(.regular))
                     .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            Spacer(minLength: 0)
         }
+        .padding(.vertical, GlassTokens.Space.s5)
+        .padding(.horizontal, GlassTokens.Space.s5)
+        .background(
+            RoundedRectangle(cornerRadius: GlassTier.cardQuiet.radius, style: .continuous).fill(Self.fill(tone)))
         .accessibilityElement(children: .contain)
     }
 }

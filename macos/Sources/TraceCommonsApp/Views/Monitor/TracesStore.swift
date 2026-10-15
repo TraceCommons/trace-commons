@@ -29,6 +29,14 @@ final class TracesStore {
         }
     }
 
+    /// The Traces search (owner, 2026-10-12): the tree narrows to the
+    /// folders and sessions whose words contain it, on this Mac's last read;
+    /// nothing is asked of the core. Empty shows the whole tree.
+    var searchText = ""
+
+    /// The tree as drawn: `tree` narrowed by `searchText`.
+    var shownTree: TracesTree { tree.matching(searchText) }
+
     // MARK: The nudge (re-engagement)
 
     /// The order chosen with the order control (`list_pending {order}`).

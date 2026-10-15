@@ -128,7 +128,8 @@ final class TracesParityTests: XCTestCase {
         let caveat = try Self.text("Views/ScrubbingCaveat.swift")
         let atCommitStart = try XCTUnwrap(caveat.range(of: "struct ScrubbingCaveatAtCommit")).lowerBound
         let atCommit = String(caveat[atCommitStart...])
-        for needle in ["GlassStatusLabel(ScrubbingCaveat.canonical, status: .ask)",
+        // A caution notice (owner, 2026-10-12: notices read as notifications).
+        for needle in ["GlassNotice(tone: .ask) { Text(ScrubbingCaveat.canonical) }",
                        ".accessibilityLabel(ScrubbingCaveat.beforeYouContribute + \" \" + ScrubbingCaveat.canonical)"] {
             XCTAssertTrue(atCommit.contains(needle), "ScrubbingCaveatAtCommit lacks \(needle)")
         }
@@ -553,7 +554,8 @@ final class TracesParityTests: XCTestCase {
             try summary(#"{"api_key":2,"residual_secret_at:events.3.correction":1}"#)))
         XCTAssertEqual(line, TCCoreCopy.residualSecretLine(
             count: RedactionLabels.survivorTotal(counts), sites: RedactionLabels.survivors(counts).map(\.site)))
-        XCTAssertTrue(line.contains("events.3.correction"), line)
+        // Plain words, no schema path (owner, 2026-10-12).
+        XCTAssertEqual(line, "1 secret is still in this trace")
     }
 
     /// The queue card's facts, drawn by the inspector from the same sources:
@@ -563,7 +565,7 @@ final class TracesParityTests: XCTestCase {
         let card = try Self.text("Views/Monitor/SessionReviewCard.swift")
         let inspector = try XCTUnwrap(card.range(of: "struct SessionReviewCard: View"))
         let body = card[inspector.lowerBound...]
-        for needle in ["TracesStore.survivorLine(summary)", "GlassStatusLabel(survivor, status: .ask)",
+        for needle in ["TracesStore.survivorLine(summary)", "GlassNotice(tone: .outside, title: survivor)",
                        "RedactionLabels.removedTotal(redactions)",
                        "ScrubbingCaveat.rowLine(redactionCount: removed)",
                        "ScrubbingCaveat.status(redactionCount: removed)",

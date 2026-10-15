@@ -43,6 +43,20 @@ final class ManagedSessionsTests: XCTestCase {
                        "your terminal isn't installed. Choose another terminal in Settings.")
     }
 
+    func testOpenCodeCollectionAndModelDecode() throws {
+        let session = try JSONDecoder().decode(ManagedSession.self, from: Data(#"{"id":"s","tool":"opencode","connection":"api_key","account_id":"a","account_label":"Work","project_label":"Project","cwd":"/tmp","state":"exited","purpose":"coding","model":"gpt-5","collection":"failed"}"#.utf8))
+        XCTAssertEqual(session.model, "gpt-5")
+        XCTAssertEqual(session.collection, "failed")
+        XCTAssertEqual(ManagedSurface.toolKey("opencode"), "opencode")
+    }
+
+    func testOpenCodeKeepsKeyConnectionsWithoutSignInLaunch() {
+        XCTAssertEqual(ManagedSurface.connectionOptions(signedIn: true, tool: "opencode"), ["api_key", "near_ai"])
+        XCTAssertEqual(ManagedSurface.connectionOptions(signedIn: false, tool: "opencode"), ["api_key", "near_ai"])
+        XCTAssertEqual(ManagedSurface.signInTools, ["claude", "codex"])
+        XCTAssertNil(ManagedSurface.startKey("opencode"))
+    }
+
     func testSurfaceNeverPicksARawValueOrDaemonCode() {
         XCTAssertEqual(ManagedSurface.stateKey("running"), "state_running")
         XCTAssertEqual(ManagedSurface.stateKey("future_state"), "state_unknown")

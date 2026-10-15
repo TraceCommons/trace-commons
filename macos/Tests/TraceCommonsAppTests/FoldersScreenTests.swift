@@ -88,6 +88,53 @@ final class FoldersScreenTests: XCTestCase {
         }
     }
 
+    func test_nativeOpenCodeDatabaseRequiresExplicitWatchAndPreservesExactPath() throws {
+        let candidate = SourceCandidate(
+            source: .opencode, path: "/synthetic/opencode/opencode.db", exists: true,
+            sessionCount: 2, mostRecent: nil, relocatedByEnv: false)
+        // Discovery includes missing required tools so roots can declare
+        // them off without inventing a contributor answer.
+        let candidates = [candidate, Self.candidate(.claudeCode, exists: false),
+                          Self.candidate(.codex, exists: false)]
+        var state = FirstRunState(step: .folders)
+        state.recordDiscovery(candidates)
+
+        XCTAssertEqual(ToolAnswerRowLayout.options(for: candidate, in: state), [.watch, .dontUse])
+        XCTAssertNil(ToolAnswerRowLayout.answer(in: state, for: candidate))
+        XCTAssertEqual(state.sessionRoots.opencode, .undecided)
+        XCTAssertNil(state.sessionRoots.opencode.settingsParams(for: .opencode))
+        XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
+
+        ToolAnswerRowLayout.select(.watch, for: candidate, in: &state)
+        XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: candidate), .watch)
+        XCTAssertEqual(ToolAnswerRowLayout.shownPath(in: state, for: candidate), "/synthetic/opencode/opencode.db")
+        XCTAssertEqual(state.sessionRoots.opencode, .watch(path: "/synthetic/opencode/opencode.db"))
+        let params = try XCTUnwrap(state.sessionRoots.opencode.settingsParams(for: .opencode))
+        XCTAssertEqual(params["opencode_source"] as? [String: String],
+                       ["mode": "watch", "path": "/synthetic/opencode/opencode.db"])
+        XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
+    }
+
+    func test_nativeOpenCodeDatabaseOffSurvivesRediscovery() throws {
+        let candidate = SourceCandidate(
+            source: .opencode, path: "/synthetic/opencode/opencode.db", exists: true,
+            sessionCount: 2, mostRecent: nil, relocatedByEnv: false)
+        // Discovery includes missing required tools so roots can declare
+        // them off without inventing a contributor answer.
+        let candidates = [candidate, Self.candidate(.claudeCode, exists: false),
+                          Self.candidate(.codex, exists: false)]
+        var state = FirstRunState(step: .folders)
+        state.recordDiscovery(candidates)
+        ToolAnswerRowLayout.select(.dontUse, for: candidate, in: &state)
+        state.recordDiscovery(candidates)
+
+        XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: candidate), .dontUse)
+        XCTAssertEqual(state.sessionRoots.opencode, .off)
+        let params = try XCTUnwrap(state.sessionRoots.opencode.settingsParams(for: .opencode))
+        XCTAssertEqual(params["opencode_source"] as? [String: String], ["mode": "off"])
+        XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
+    }
+
     func test_continueIsDisabledUntilEveryFoundRowIsAnswered() {
         let claude = Self.candidate(.claudeCode, exists: true)
         let codex = Self.candidate(.codex, exists: false)

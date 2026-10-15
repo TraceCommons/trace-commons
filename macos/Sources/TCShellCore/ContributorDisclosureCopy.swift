@@ -79,11 +79,15 @@ public struct ContributorDisclosureCopy: Decodable, Equatable, Sendable {
     /// Each folder mode's one name, keyed by wire mode (`notify_only`,
     /// `auto_upload`, `ignore`).
     public let folderModeLabels: [String: String]
+    /// Each consent scope's title by its id (`consent_scope_titles`), so a
+    /// scope is named in words, never by its id; nil from an older core.
+    public let consentScopeTitles: [String: String]?
 
     enum CodingKeys: String, CodingKey {
         case outcome
         case historyUi = "history_ui"
         case folderModeLabels = "folder_mode_labels"
+        case consentScopeTitles = "consent_scope_titles"
     }
 
     /// Decode the bundle, or nil if it will not parse, a word is empty, or

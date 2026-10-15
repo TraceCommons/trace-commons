@@ -4,7 +4,7 @@ import XCTest
 
 @testable import TraceCommonsApp
 
-/// Owner decision, 2026-10-02: a folder mode reads "Ask me", "Automatic" or
+/// Owner decision, 2026-10-02: a folder mode reads "Ask", "Automatic" or
 /// "Never" on every surface. `ProjectCopy.modeChoiceLabel(_:)`, which the
 /// legacy Settings picker and the glass screens call, reads the core's name
 /// from the pill's table (`tc_contribution_mode_copy_json`), never a Swift
@@ -17,7 +17,7 @@ final class ProjectModeWordsTests: XCTestCase {
         }
         XCTAssertEqual(
             [ProjectCopy.modeChoiceLabel(.ask), ProjectCopy.modeChoiceLabel(.autoUpload), ProjectCopy.modeChoiceLabel(.ignore)],
-            ["Ask me", "Automatic", "Never"]
+            ["Ask", "Automatic", "Never"]
         )
     }
 }

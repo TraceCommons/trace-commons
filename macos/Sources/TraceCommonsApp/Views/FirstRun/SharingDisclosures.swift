@@ -35,7 +35,7 @@ struct SharingDisclosureFlow: Equatable {
     static let unreadableLabel = "flow1-grant-request-unreadable"
 
     /// Whether Start goes through the disclosures: Automatic, on an account
-    /// that can choose it. Ask me and watching only start directly.
+    /// that can choose it. Ask and watching only start directly.
     static func isNeeded(for state: FirstRunState) -> Bool {
         state.sharing == .automatic && FirstRunNavigation.canChooseAutomatic(state)
     }
@@ -83,7 +83,7 @@ struct SharingDisclosureFlow: Equatable {
     /// The state Start commits, and the failure to show once it has run.
     /// Ready: Automatic stands, with the witness the core named, and
     /// `grantReady` set, the only place it is; the plan sends the grant on
-    /// nothing else. Anything else finishes on Ask me and says why; it never
+    /// nothing else. Anything else finishes on Ask and says why; it never
     /// claims Automatic.
     static func resolve(
         _ state: FirstRunState, request: Flow1GrantRequest?

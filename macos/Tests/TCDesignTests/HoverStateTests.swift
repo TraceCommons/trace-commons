@@ -102,8 +102,13 @@ final class HoverStateTests: XCTestCase {
         XCTAssertNil(GlassCard<EmptyView>.hoverFill(interactive: false))
     }
 
-    func test_theNoticeTitleSitsSixPointsOverItsBody() {
-        XCTAssertEqual(GlassNotice<EmptyView>.titleGap, 6)
+    /// A notice is a tinted box with its tone's icon, its title 4pt over
+    /// its body (owner, 2026-10-12: notices read as notifications).
+    func test_theNoticeIsAnIconBox() {
+        XCTAssertEqual(GlassNotice<EmptyView>.titleGap, 4)
+        XCTAssertEqual(GlassNotice<EmptyView>.icon(.outside), "exclamationmark.triangle.fill")
+        XCTAssertEqual(GlassNotice<EmptyView>.icon(.ask), "exclamationmark.circle.fill")
+        XCTAssertEqual(GlassNotice<EmptyView>.icon(.off), "info.circle.fill")
     }
 
     /// The pointer reaches the tabs, the crumbs, the round, pill-icon and

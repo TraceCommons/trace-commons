@@ -136,7 +136,7 @@ struct NotificationsSection: View {
     private var settingsLink: some View {
         Link(Notifier.copy?.systemSettings ?? "", destination: Notifier.systemSettingsURL)
             .glassType(GlassTokens.TypeScale.body)
-            .foregroundStyle(GlassColor.accentText)
+            .foregroundStyle(GlassTokens.Color.linkText.color)
     }
 
     private func requestAuthorization() {

@@ -22,6 +22,9 @@ struct TracesTreeView: View {
     /// A session's Review pill: select it and show the inspector its review
     /// lives in, so Review is never a press that does nothing visible.
     var onReview: (String) -> Void = { _ in }
+    /// Opens History on the Traces tab, from the button beside the order
+    /// control (owner, 2026-10-12).
+    var openHistory: (() -> Void)? = nil
 
     /// The folders opened: every folder starts collapsed (#1146
     /// `traces-workspace.tsx`, `expanded = []`), and one opens when a
@@ -105,7 +108,7 @@ struct TracesTreeView: View {
                         prompts
                         // A narrowed list that came back empty still says
                         // so, with its way out.
-                        if store.idleOnly { TracesListControls(store: store) }
+                        if store.idleOnly { TracesListControls(store: store, openHistory: openHistory) }
                         if store.phase == .loaded { emptyTree }
                     }
                 }
@@ -122,7 +125,7 @@ struct TracesTreeView: View {
                         PromptsShelf(cap: Self.promptsCap(paneHeight: pane.size.height)) {
                             prompts
                         }
-                        TracesListControls(store: store)
+                        TracesListControls(store: store, openHistory: openHistory)
                             .padding(.vertical, GlassTokens.Space.s2)
                         tree
                     }
@@ -156,7 +159,15 @@ struct TracesTreeView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: 2) {
-                    ForEach(store.tree.folders) { folderRows($0) }
+                    // The search narrows what is drawn, never the read.
+                    ForEach(store.shownTree.folders) { folderRows($0) }
+                    if store.shownTree.folders.isEmpty, let none = store.words?.tree.searchNone {
+                        Text(none)
+                            .glassType(GlassTokens.TypeScale.body)
+                            .foregroundStyle(GlassColor.textTertiary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, GlassTokens.Space.s6)
+                    }
                 }
                 // Folders are the top level: no tool level to indent past.
                 .environment(\.glassTreeRoot, .folder)
@@ -180,6 +191,12 @@ struct TracesTreeView: View {
             // The idle card's Review lists the sessions it named: their
             // folders open, so the list is the sessions, not closed folders.
             if store.idleOnly { expanded.formUnion(Self.idleFolders(store.tree)) }
+        }
+        // A search opens the folders it matched, so the matches are rows,
+        // not closed folders.
+        .onChange(of: store.searchText) { _, query in
+            guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            expanded.formUnion(store.shownTree.folders.map(\.id))
         }
         // #1146's tree name.
         .accessibilityLabel(store.words?.tree.treeLabel ?? "")
@@ -228,7 +245,7 @@ struct TracesTreeView: View {
     /// The route every folder mode change takes, from the tree's switch and
     /// menu and from the Folder inspector's picker alike. Arming always asks
     /// first, in the core's words; ignoring asks when it would clear waiting
-    /// sessions, with their count; Ask me is a direct call. With no words
+    /// sessions, with their count; Ask is a direct call. With no words
     /// from the core a change that needs them is not made: the confirmation
     /// is never shown without what it says.
     static func modeChange(_ folder: TracesTree.FolderNode, _ mode: ProjectMode) -> ModeChange {
@@ -294,8 +311,8 @@ struct TracesTreeView: View {
     private func reveal(_ selected: MonitorSelection?) {
         guard selected != revealed else { return }
         // Wait for a session the tree does not hold yet.
-        if case .session(let entryID) = selected, Self.folder(of: entryID, in: store.tree) == nil { return }
-        expanded = Self.revealing(selected, in: store.tree, expanded: expanded)
+        if case .session(let entryID) = selected, Self.folder(of: entryID, in: store.shownTree) == nil { return }
+        expanded = Self.revealing(selected, in: store.shownTree, expanded: expanded)
         revealed = selected
     }
 
@@ -316,7 +333,7 @@ struct TracesTreeView: View {
     private func move(_ direction: MoveCommandDirection) {
         switch direction {
         case .down, .up:
-            let rows = Self.visibleRows(in: store.tree, expanded: expanded)
+            let rows = Self.visibleRows(in: store.shownTree, expanded: expanded)
             if let next = Self.moved(from: selection, down: direction == .down, through: rows), next != selection {
                 selection = next
             }
@@ -330,7 +347,7 @@ struct TracesTreeView: View {
     /// folder; right expands it. The selection stays, so the two undo each
     /// other and the inspector keeps what it shows.
     private func disclose(_ selected: MonitorSelection, open: Bool) {
-        guard let folder = TracesTreeView.folder(of: selected, in: store.tree) else { return }
+        guard let folder = TracesTreeView.folder(of: selected, in: store.shownTree) else { return }
         if open {
             expanded.insert(folder)
         } else {
@@ -428,46 +445,27 @@ struct TracesTreeView: View {
     }
 
     /// What a folder says under its row, whether open or not: a refused
-    /// write; the one sentence for an armed folder's route (the card's own
-    /// `summary`, owner 2026-10-12), chosen by the daemon; and why the
-    /// bucket can never be armed. The long lines sit behind `folderInfo`.
+    /// write, and why the bucket can never be armed. An armed folder's
+    /// disclosure is not drawn on the row (owner, 2026-10-12: too much
+    /// text over the list); its inspector card says it in full.
     func folderNotes(_ folder: TracesTree.FolderNode) -> [String] {
         var lines: [String] = []
         if let refused = refusal(folder.id) { lines.append(refused) }
-        if let copy = store.armedDisclosure(folder.disclosure) { lines.append(copy.summary) }
         if folder.isBucket, let note = ProjectCopy.unresolvedBucketNote { lines.append(note) }
         return lines
     }
 
-    /// The info button beside an armed folder's summary: the core's "More
-    /// about {title}" label, the long lines as its text. Nil when the folder
-    /// is not armed or the core's words are unread; the long lines are then
-    /// not drawn on the row (the inspector card offers them).
-    func folderInfo(_ folder: TracesTree.FolderNode) -> (line: String, label: String, text: String)? {
-        guard let copy = store.armedDisclosure(folder.disclosure),
-              let title = store.words?.inspector.contributionRule,
-              let label = FolderInspector.moreAboutLabel(title) else { return nil }
-        return (copy.summary, label, copy.lines.joined(separator: "\n\n"))
-    }
-
     /// Caption lines under a row, indented to its content.
     @ViewBuilder
-    private func notes(
-        _ lines: [String], info: (line: String, label: String, text: String)? = nil, depth: GlassListRow.Depth
-    ) -> some View {
+    private func notes(_ lines: [String], depth: GlassListRow.Depth) -> some View {
         if !lines.isEmpty {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 ForEach(lines, id: \.self) { line in
-                    HStack(alignment: .top, spacing: GlassTokens.Space.s2) {
-                        Text(line)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            // #1146: tertiary, as a row's own sub line.
-                            .foregroundStyle(GlassColor.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        if let info, info.line == line {
-                            GlassInfoButton(info.label, text: info.text)
-                        }
-                    }
+                    Text(line)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        // #1146: tertiary, as a row's own sub line.
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -538,7 +536,7 @@ struct TracesTreeView: View {
             ? [] : offer.withheldLine.flatMap {
                 $0 == store.folderNotice ? nil : [Self.withheldNote($0, eligible: offer.count, words: words)]
             } ?? []
-        notes(folderNotes(folder) + withheld, info: folderInfo(folder), depth: .folder)
+        notes(folderNotes(folder) + withheld, depth: .folder)
         if isOpen(folder.id) {
             // #1146: a session under an ignored folder is drawn off too.
             ForEach(folder.sessions) { sessionRow($0, off: ignored) }

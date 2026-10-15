@@ -18,19 +18,21 @@ final class HomeViewTests: XCTestCase {
     func test_homeLinksToTraces() throws {
         let home = try Self.flat("Views/Monitor/HomeViews.swift")
         for needle in [
-            // The whole card opens Traces (owner, 2026-10-08), its words
-            // the hint.
-            "Button(action: openTraces) { GlassCard(interactive: true) {",
-            ".accessibilityHint(HomeFormat.openTracesWord)",
+            // The Watching card is gone (owner, 2026-10-12); the Waiting
+            // tile opens Traces.
             "static var openTracesWord: String { MonitorWords.table?.openTraces ?? \"\" }",
             "store: store, traces: traces, statusLabel: statusLabel, openTraces: openTraces, ",
             // Ron's Missions is the drafts; the catalogue and Insights sit
             // after his cards.
-            "openHistory: { page = .history }, openMissionDrafts: { page = .missionDrafts }, ",
+            // History lives on Traces (owner, 2026-10-12); Home's way in is
+            // the Contributed tile.
+            "openHistory: openHistory, openMissionDrafts: { page = .missionDrafts }, ",
             "openInsights: { page = .insights }, openMissions: { page = .missions })",
         ] {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")
         }
+        XCTAssertFalse(home.contains("Button(action: openTraces) { GlassCard(interactive: true) {"),
+                       "the Watching card is back on Home")
         let window = try Self.flat("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("openTraces: { tab = .traces },"))
     }
@@ -41,7 +43,6 @@ final class HomeViewTests: XCTestCase {
     /// line; each history row keeps its own bottom rule (L14).
     func test_theStatusLinesShareALeftEdgeAfterTheDot() throws {
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("VStack(alignment: .homeStatusText, spacing: GlassTokens.Space.s1) {"))
         // The status line is its own view, shared with the edge rail.
         let status = try XCTUnwrap(home.range(of: "struct HomeStatusLine: View {"))
         let statusEnd = try XCTUnwrap(home.range(of: "/// Rows inside a Home card", range: status.upperBound..<home.endIndex))
@@ -50,9 +51,6 @@ final class HomeViewTests: XCTestCase {
         XCTAssertEqual(texts.count, 6)
         XCTAssertEqual(body.components(separatedBy: ".alignmentGuide(.homeStatusText) { $0[.leading] }").count - 1,
                        texts.count, "a status line starts at the dot")
-        XCTAssertTrue(home.contains(".foregroundStyle(GlassColor.textSecondary)\n"
-            + "                                .alignmentGuide(.homeStatusText) { $0[.leading] }"),
-                      "the waiting line starts under the dot")
         XCTAssertTrue(home.contains(".overlay(alignment: .bottom) {\n            GlassHairline(GlassColor.hairline)"),
                       "a history row lost its rule")
     }
@@ -62,19 +60,30 @@ final class HomeViewTests: XCTestCase {
     func test_homeReadsWaitingFromOneStore() throws {
         let home = try Self.flat("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains(
-            "HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed))"))
+            "HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed), "
+                + "systemImage: HomeStatIcons.waiting, action: openTraces)"))
         XCTAssertFalse(home.contains("store.status?.decisionsOwed"), "Home reads waiting from a second store")
     }
 
     /// Ron's three stat cards; pending credit is a figure only beside the
-    /// commons' statement of what it waits on (D6), a dash otherwise.
+    /// commons' statement of what it waits on (D6), a dash otherwise. Each
+    /// opens where its number lives (owner, 2026-10-12).
     func test_homeStatCardsKeepD6() throws {
         let home = try Self.flat("Views/Monitor/HomeViews.swift")
+        // Credit is the total with its change since the last day this Mac
+        // saw (owner, 2026-10-12); the pending condition still sits under
+        // the tiles.
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: HomeFormat.creditPendingWord, "
-                + "value: HomeFormat.pendingFigure(freshRollup?.creditPending, condition: condition))"))
+                + "value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)), "
+                + "detail: delta?.text, detailInk: delta?.ink, systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
         XCTAssertTrue(home.contains(
-            "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted))"))
+            "HomeStatTile(label: words?.uncontributed ?? \"\", value: String(uncontributed.count), "
+                + "detail: uncontributed.detail(words), systemImage: HomeStatIcons.uncontributed, "
+                + "valueAccessory: uncontributed.size(words), action: openTraces)"))
+        XCTAssertTrue(home.contains(
+            "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted), "
+                + "systemImage: HomeStatIcons.contributed, action: openHistory)"))
         // The credit summary after a failed read is no summary (D6 then
         // shows a dash). The condition gates the figure but is not drawn
         // (owner, 2026-10-13).

@@ -133,7 +133,7 @@ public enum FirstRunNavigation {
     }
 
     /// The sharing paths the Uses picker offers, in Ron's #1030 order:
-    /// Automatic first, then Ask me. The default answer stays Ask me.
+    /// Automatic first, then Ask. The default answer stays Ask.
     public static func sharingPaths(for state: FirstRunState) -> [SharingPath] {
         canChooseAutomatic(state) ? [.automatic, .askMe] : [.askMe]
     }

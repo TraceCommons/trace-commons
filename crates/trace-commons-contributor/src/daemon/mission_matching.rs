@@ -843,7 +843,7 @@ mod tests {
         )
     }
 
-    /// A daemon with Claude Code on and Codex off, an Ask me folder that is
+    /// A daemon with Claude Code on and Codex off, an Ask folder that is
     /// a Rust repository, a Never folder that is a Python one, and sessions
     /// in both from both tools -- one with its project key not yet cached.
     fn seeded() -> (tempfile::TempDir, DaemonShared, tempfile::TempDir) {
@@ -918,7 +918,7 @@ mod tests {
     }
 
     /// Over IPC: the Never folder's sessions and the switched-off tool's
-    /// are not read, so only the mission the Ask me folder's Claude Code
+    /// are not read, so only the mission the Ask folder's Claude Code
     /// sessions fit matches, and the counts say one tool, one folder.
     #[test]
     fn mission_matches_reads_only_tools_on_in_folders_not_never() {
@@ -1421,7 +1421,7 @@ mod tests {
     }
 
     /// An entry from a switched-off adapter, or in a Never folder, fits
-    /// nothing, while an Ask me Claude Code entry fits the one matched
+    /// nothing, while an Ask Claude Code entry fits the one matched
     /// mission its criteria meet. The Python mission's only folder is
     /// Never, so it is never matched; `claude-3` asks for three sessions
     /// and only two are readable.
@@ -1561,7 +1561,7 @@ mod tests {
             &ask,
             "/s/claude-fresh.jsonl",
         );
-        // A third Claude Code session in the Ask me folder stays readable,
+        // A third Claude Code session in the Ask folder stays readable,
         // so the mission is matched and the fresh entry is the control.
         s.state.lock().unwrap().cwd_cache.insert(
             "/s/claude-fresh.jsonl".to_string(),
@@ -1697,7 +1697,7 @@ mod tests {
     /// `readable_sessions` would let the entry through. Under a languages
     /// catalogue, an entry in a Never folder and an entry whose adapter is
     /// off (codex, in a folder no readable session ran in) each leave their
-    /// folder unprobed, while an Ask me entry with its adapter on is probed.
+    /// folder unprobed, while an Ask entry with its adapter on is probed.
     #[test]
     fn waiting_entries_in_never_folders_or_off_adapters_are_not_language_probed() {
         let (_dir, s, work) = seeded();
@@ -1729,10 +1729,7 @@ mod tests {
         assert_eq!(fit_of(&listed, "sha256:never"), Some(0), "{listed}");
         assert_eq!(fit_of(&listed, "sha256:off"), Some(0), "{listed}");
         let cached = cached_languages(&s);
-        assert!(
-            cached.contains_key(&ask),
-            "Ask me folder probed: {cached:?}"
-        );
+        assert!(cached.contains_key(&ask), "Ask folder probed: {cached:?}");
         assert!(
             !cached.contains_key(&never),
             "Never folder probed: {cached:?}"

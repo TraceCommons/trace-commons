@@ -15084,9 +15084,11 @@ enum UploadRoute<'a> {
 /// retry is checked against no qualification. A refusal that only the receipt
 /// transaction finds (a routing row or a policy that changes after this read:
 /// a `contain` or a `suspend` that commits while the upload is in flight)
-/// comes after `attempt.processing`, as `main`'s quota refusal does: the
-/// attempt then stays `processing` until its lease ends, because
-/// `Attempt::finish` releases an attempt only from `reserved`. A legacy
+/// comes after `attempt.processing`, as `main`'s quota refusal does.
+/// `Attempt::finish` releases an attempt only from `reserved`, so
+/// `route_pipeline_receipt` releases it there, from `processing`, with
+/// `Attempt::finish_without_effect`: the receipt's refusal wrote nothing
+/// (#1237). The legacy quota refusal still keeps its charge. A legacy
 /// upload that passed this decision before a `contain` committed completes on
 /// the legacy path: the legacy claim reads no routing.
 async fn decide_upload_route<'a>(
@@ -15218,17 +15220,47 @@ async fn decide_upload_route<'a>(
 /// The text is compared whole: only the label itself, never an error that
 /// carries it.
 fn pipeline_receipt_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+    match pipeline_receipt_refusal_label(&error) {
+        Some(label) => api_error(StatusCode::SERVICE_UNAVAILABLE, label),
+        None => internal_error(error),
+    }
+}
+
+/// The label of a pipeline receipt error that `pipeline_receipt_error`
+/// answers as a `503`, or `None`. Each is raised before the receipt writes
+/// anything (the authority is resolved before any database work; a suspended
+/// policy is refused in the receipt's transaction, which writes nothing), so
+/// the upload's admission attempt is released without effect (#1237). Any
+/// other error's effects are not known.
+fn pipeline_receipt_refusal_label(error: &anyhow::Error) -> Option<&'static str> {
     let text = error.to_string();
-    for label in [
+    [
         PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
         trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL,
         trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_READ_FAILED_LABEL,
-    ] {
-        if text == label {
-            return api_error(StatusCode::SERVICE_UNAVAILABLE, label);
-        }
-    }
-    internal_error(error)
+    ]
+    .into_iter()
+    .find(|label| text == *label)
+}
+
+/// #1237: releases the upload's admission attempt, and gives back its cost
+/// bound or charge, for a pipeline receipt refused by a refusal that wrote
+/// nothing -- also when the attempt is already `processing`, which the
+/// handler's trailing `finish(false)` never releases. Called only from the
+/// refusal arms of `route_pipeline_receipt` that store nothing; a failure
+/// whose effects are not known keeps its charge.
+///
+/// The refusal is the upload's answer either way. A release the ledger
+/// refuses is logged under its admission label and leaves the attempt as it
+/// was, which is the behaviour from before this release existed.
+async fn release_attempt_without_effect(
+    state: &AppState,
+    admission: Option<&mut admission::Attempt>,
+) {
+    let (Some(attempt), Some(db)) = (admission, state.db_mirror.as_ref()) else {
+        return;
+    };
+    let _ = attempt.finish_without_effect(db.as_ref()).await;
 }
 
 /// Acts on the route `decide_upload_route` chose for a new upload: the legacy
@@ -15259,6 +15291,12 @@ fn pipeline_receipt_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) 
 /// pipeline-routed tenant never writes the legacy file record the ordinary
 /// `can_access_submission` check reads, so without this check here that
 /// check would never run against a receipt key at all.
+///
+/// `admission` is the upload's admission attempt, already `processing`. The
+/// refusals below that write nothing release it
+/// (`release_attempt_without_effect`, #1237); every other outcome leaves it
+/// to the handler's trailing `finish`.
+#[allow(clippy::too_many_arguments)]
 async fn route_pipeline_receipt(
     state: &AppState,
     tenant: &TenantCtx,
@@ -15267,6 +15305,7 @@ async fn route_pipeline_receipt(
     residual_risk_basis: &[ResidualRiskCondition],
     source_claim: Option<(Uuid, [u8; 32])>,
     route: UploadRoute<'_>,
+    mut admission: Option<&mut admission::Attempt>,
 ) -> ApiResult<Option<TraceSubmissionReceipt>> {
     let pipeline_service = match route {
         UploadRoute::Legacy { claim } => {
@@ -15276,7 +15315,7 @@ async fn route_pipeline_receipt(
         UploadRoute::Pipeline(pipeline_service) => pipeline_service,
     };
     let idempotency_key = envelope.submission_id.to_string();
-    let result = pipeline_service
+    let submitted = pipeline_service
         .submit(PipelineReceiptRequest {
             source_session: source_claim,
             tenant_id: tenant.tenant_id(),
@@ -15292,8 +15331,16 @@ async fn route_pipeline_receipt(
                 max_per_principal_per_hour: state.submission_quota.max_per_principal_per_hour,
             },
         })
-        .await
-        .map_err(pipeline_receipt_error)?;
+        .await;
+    let result = match submitted {
+        Ok(result) => result,
+        Err(error) => {
+            if pipeline_receipt_refusal_label(&error).is_some() {
+                release_attempt_without_effect(state, admission.take()).await;
+            }
+            return Err(pipeline_receipt_error(error));
+        }
+    };
     match result {
         PipelineReceiptResult::Created(run) => {
             state.pipeline_worker_wake.wake(tenant.tenant_id());
@@ -15372,10 +15419,17 @@ async fn route_pipeline_receipt(
         // transaction's own check. The transaction's answer is the one that
         // holds: a contained tenant is refused; one returned to the legacy
         // path is claimed for it.
-        PipelineReceiptResult::NotRouted(RoutingState::Contained) => Err(api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL,
-        )),
+        // Refused in the transaction, which wrote nothing, after the
+        // attempt was marked `processing` (#1237): the attempt is released
+        // and its cost bound or charge given back, so a retry is neither
+        // refused as in progress nor charged twice.
+        PipelineReceiptResult::NotRouted(RoutingState::Contained) => {
+            release_attempt_without_effect(state, admission.take()).await;
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL,
+            ))
+        }
         PipelineReceiptResult::NotRouted(RoutingState::Legacy) => {
             claim_legacy_receipt(state, tenant, envelope.submission_id, raw_body, true).await
         }
@@ -15865,6 +15919,7 @@ async fn submit_trace_handler(
             &residual_risk_basis,
             source_claim,
             upload_route,
+            admission.as_mut(),
         )
         .await?
         {
@@ -19763,6 +19818,8 @@ async fn account_trace_content_handler(
         Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => record,
         _ => return Err(not_found()),
     };
+    // After ownership, so a submission the caller does not own stays a 404.
+    refuse_a_pipeline_submission(state.as_ref(), &ctx.tenant_id, submission_id).await?;
     let record = trace_commons_record_from_storage_submission(record)
         .ok_or_else(not_found)?
         .map_err(internal_error)?;
@@ -19790,22 +19847,24 @@ async fn account_trace_content_handler(
 
     let audit_tenant = account_audit_tenant(&ctx);
 
-    // Read the envelope through the EXISTING KMS-bound path. On ANY failure
-    // (KMS unwrap/decrypt, hash mismatch, store error, missing config) fail
-    // closed: audit the FAILED read, then return a generic label-only 500. The
-    // error itself is hashed for logs; never surfaced to the caller.
-    let envelope = match read_envelope_by_record(state.as_ref(), &record) {
-        Ok(envelope) => envelope,
+    // Read the envelope through the active object ref (the KMS-bound path),
+    // or the file only where object-primary submit/review is off. On ANY
+    // failure (missing ref, KMS unwrap/decrypt, hash mismatch, store error,
+    // missing config) fail closed: audit the FAILED read, then return a
+    // generic label-only 500. The error itself is hashed for logs; never
+    // surfaced to the caller.
+    let body_read = match read_envelope_body_for_account(&state, &ctx.tenant_id, record).await {
+        Ok(body_read) => body_read,
         Err(error) => {
             tracing::warn!(
                 error_hash = %safe_display_error_hash(&error),
-                submission_id = %record.submission_id,
+                submission_id = %submission_id,
                 "Trace Commons account content read-back failed; failing closed"
             );
             return Err(audit_account_content_read_failure(
                 state.as_ref(),
                 &audit_tenant,
-                record.submission_id,
+                submission_id,
             )
             .await);
         }
@@ -19813,18 +19872,18 @@ async fn account_trace_content_handler(
 
     // Serialize the already-redacted stored envelope. A serialization failure is
     // also fail-closed and audited (it is still a failed content read).
-    let body = match serde_json::to_vec(&envelope) {
+    let body = match serde_json::to_vec(&body_read.envelope) {
         Ok(body) => body,
         Err(error) => {
             tracing::warn!(
                 error_hash = %safe_display_error_hash(&anyhow::Error::new(error)),
-                submission_id = %record.submission_id,
+                submission_id = %submission_id,
                 "Trace Commons account content read-back serialization failed; failing closed"
             );
             return Err(audit_account_content_read_failure(
                 state.as_ref(),
                 &audit_tenant,
-                record.submission_id,
+                submission_id,
             )
             .await);
         }
@@ -19837,7 +19896,7 @@ async fn account_trace_content_handler(
         if let Err(audit_error) = append_trace_content_read_audit_per_source(
             state.as_ref(),
             &audit_tenant,
-            record.submission_id,
+            submission_id,
             &[],
             "account_trace_content",
             Some("read_too_large"),
@@ -19846,7 +19905,7 @@ async fn account_trace_content_handler(
         {
             tracing::warn!(
                 error_hash = %safe_display_error_hash(&audit_error),
-                submission_id = %record.submission_id,
+                submission_id = %submission_id,
                 "Trace Commons account content read-back over-ceiling audit append failed"
             );
         }
@@ -19856,14 +19915,18 @@ async fn account_trace_content_handler(
         ));
     }
 
-    // Audit the SUCCESSFUL read (hash-only, per-source). The file-fallback read
-    // path resolves no DB object ref, so there is no object_ref id to attribute;
-    // an empty ref slice records a single source-less row.
+    // Audit the SUCCESSFUL read (hash-only, per-source), against the object
+    // ref it read. The file-fallback read resolves no object ref; its empty
+    // ref slice records a single source-less row.
+    let read_refs: &[Uuid] = match body_read.object_ref_id.as_ref() {
+        Some(id) => std::slice::from_ref(id),
+        None => &[],
+    };
     append_trace_content_read_audit_per_source(
         state.as_ref(),
         &audit_tenant,
-        record.submission_id,
-        &[],
+        submission_id,
+        read_refs,
         "account_trace_content",
         None,
     )
@@ -69140,6 +69203,58 @@ async fn read_envelope_body_for_review_decision(
         envelope: read_envelope_by_record(state, record)?,
         object_ref_id: None,
     })
+}
+
+/// Reads an owned submission's envelope for the account surfaces: the content
+/// read-back and the public-run session detail and publish routes (#1168).
+///
+/// The record these routes hold is built from the database row and carries no
+/// artifact receipt, so `read_envelope_by_record` alone can only read the
+/// plaintext file under `state.root`, which object-primary submit/review never
+/// writes. Where object-primary submit/review is on for the tenant, the active
+/// envelope object ref is read instead (a rescrubbed envelope ahead of the
+/// submitted one), as the object-primary review path does, and a missing ref
+/// fails closed. Where it is off, the file is read as before: a file-backed
+/// deployment rewrites that file in place (process evaluation), so its older
+/// file-store ref no longer matches the bytes.
+///
+/// The object-store read and decrypt run on the blocking pool.
+async fn read_envelope_body_for_account(
+    state: &Arc<AppState>,
+    tenant_id: &str,
+    record: TraceCommonsSubmissionRecord,
+) -> anyhow::Result<TraceEnvelopeBodyRead> {
+    anyhow::ensure!(
+        record.tenant_id == tenant_id,
+        "trace metadata tenant mismatch"
+    );
+    let object_ref = if state.object_primary_submit_review_for_tenant(tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("object-primary submit/review is enabled without a DB mirror")?;
+        let object_ref =
+            get_latest_active_envelope_object_ref(db.as_ref(), tenant_id, record.submission_id)
+                .await
+                .context("failed to read active envelope object ref for account read")?;
+        Some(object_ref.context("missing active envelope object ref for account read")?)
+    } else {
+        None
+    };
+    let read_state = Arc::clone(state);
+    let tenant_id = tenant_id.to_string();
+    tokio::task::spawn_blocking(move || match object_ref {
+        Some(object_ref) => Ok(TraceEnvelopeBodyRead {
+            envelope: read_envelope_from_object_ref(&read_state, &tenant_id, &object_ref)?,
+            object_ref_id: Some(object_ref.object_ref_id),
+        }),
+        None => Ok(TraceEnvelopeBodyRead {
+            envelope: read_envelope_by_record(&read_state, &record)?,
+            object_ref_id: None,
+        }),
+    })
+    .await
+    .context("account envelope read task failed")?
 }
 
 async fn read_envelope_body_for_replay_export(
