@@ -682,14 +682,10 @@ struct ManagedRemoveSheet: View {
 struct ManagedInstallLink: View {
     let tool: ManagedToolAvailability
     let copy: (String) -> String
-    var labelKey: String = "install"
-    var includeToolName = false
-    private var actionLabel: String { copy(labelKey).isEmpty ? copy("install") : copy(labelKey) }
-    private var label: String { includeToolName ? actionLabel + " " + copy(tool.tool) : actionLabel }
     var body: some View {
         if let url = tool.url {
-            Link(label, destination: url)
-                .accessibilityLabel(actionLabel + " " + copy(tool.tool))
+            Link(copy("install"), destination: url)
+                .accessibilityLabel(copy("install") + " " + copy(tool.tool))
                 .buttonStyle(GlassButtonStyle(.glass, small: true))
         }
     }

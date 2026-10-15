@@ -114,12 +114,14 @@ public sealed class ManagedSessionsView : UserControl
         actions.Children.Add(Button("launch", LaunchAsync, _snapshot.Capabilities.TerminalLaunch && _snapshot.Accounts.Any(a => _snapshot.CanLaunch(a.Tool))));
         // Hidden, not disabled, with no tool to add an account for (Ron, 2026-10-15).
         if (_snapshot.SetupTools.Length > 0) actions.Children.Add(Button("add", AddAsync));
-        // One bare refresh glyph; no per-tool copies.
-        actions.Children.Add(RefreshGlyph());
         _root.Children.Add(actions);
         if (_snapshot.InstallTools.Length > 0)
         {
-            _root.Children.Add(new TextBlock { Text = T("tools_title"), FontSize = 20 });
+            // One bare refresh glyph beside the heading; no per-tool copies.
+            var heading = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+            heading.Children.Add(new TextBlock { Text = T("tools_title"), FontSize = 20, VerticalAlignment = VerticalAlignment.Center });
+            heading.Children.Add(RefreshGlyph());
+            _root.Children.Add(heading);
             _root.Children.Add(new TextBlock { Text = T("tools_empty"), TextWrapping = TextWrapping.Wrap });
             foreach (var tool in _snapshot.InstallTools)
             {
@@ -138,10 +140,13 @@ public sealed class ManagedSessionsView : UserControl
             bool held = _snapshot.Sessions.Any(s => s.AccountId == account.Id && s.HoldsAccount);
             var row = new StackPanel { Spacing = 4 };
             row.Children.Add(new TextBlock { Text = $"{account.Label} · {T(account.Tool)} · {T(account.Connection)} · {account.AuthState}" });
-            if (!_snapshot.CanLaunch(account.Tool))
+            if (_snapshot.ToolMissing(account.Tool))
             {
                 row.Children.Add(new TextBlock { Text = _snapshot.ToolUnavailable(account.Tool), TextWrapping = TextWrapping.Wrap });
-                if (_snapshot.Tools?.FirstOrDefault(t => t.Tool == account.Tool) is ManagedTool tool) row.Children.Add(InstallButton(tool));
+                var recovery = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+                if (_snapshot.Tools?.FirstOrDefault(t => t.Tool == account.Tool) is ManagedTool tool) recovery.Children.Add(InstallButton(tool));
+                recovery.Children.Add(RefreshGlyph());
+                row.Children.Add(recovery);
             }
             var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
             controls.Children.Add(Button("use_default", async () => {

@@ -51,6 +51,23 @@ public sealed class ManagedSessionsTests
     }
 
     [Fact]
+    public void AnInstalledOpenCodeAccountIsNotReportedMissing()
+    {
+        var snapshot = ManagedSnapshot.Parse(SignedIn)! with {
+            Tools = [new("claude", true, "a"), new("codex", false, "b"), new("opencode", true, "c")],
+        };
+        var account = new ManagedAccount("oc", "opencode", "subscription", "Zed", "ready");
+        Assert.False(snapshot.ToolMissing("opencode"));
+        Assert.True(snapshot.ToolMissing("codex"));
+        Assert.False(snapshot.ToolMissing("claude"));
+        Assert.True((snapshot with { Tools = [new("opencode", false, "c")] }).ToolMissing("opencode"));
+        Assert.False(ManagedSnapshot.Parse(SignedIn)!.ToolMissing("opencode"));
+        // Launch and Reconnect stay out for OpenCode on this shell.
+        Assert.False(snapshot.CanLaunch("opencode"));
+        Assert.False(snapshot.OffersReconnect(account));
+    }
+
+    [Fact]
     public void EmptyInventoryAndOlderSnapshotsHaveDistinctBehavior()
     {
         var snapshot = ManagedSnapshot.Parse(SignedIn)!;

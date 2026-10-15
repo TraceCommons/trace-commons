@@ -39,6 +39,16 @@ fn install_block(snapshot: &Value) -> Vec<Value> {
         .cloned()
         .collect()
 }
+/// Whether the caption and Install belong on an account row: the tool is
+/// missing from the snapshot's inventory. This keys on installation, not on
+/// launchability, so an OpenCode account on a machine with OpenCode is clean.
+fn tool_missing(snapshot: &Value, tool: &str) -> bool {
+    snapshot["tools"].as_array().is_some_and(|tools| {
+        !tools
+            .iter()
+            .any(|t| t["tool"] == tool && t["installed"] == true)
+    })
+}
 /// Reconnect is hidden, not disabled, while the account's tool is missing.
 fn offers_reconnect(snapshot: &Value, account: &Value) -> bool {
     account["connection"] == "subscription"
@@ -155,7 +165,7 @@ pub fn refresh(app: &Rc<App>) {
             let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
             style::append_body(&row, format!("{} · {} · {} · {}", account["label"].as_str().unwrap_or_default(), text(account["tool"].as_str().unwrap_or_default()), text(account["connection"].as_str().unwrap_or_default()), account["auth_state"].as_str().unwrap_or_default()));
             let tool = account["tool"].as_str().unwrap_or_default();
-            if !can_launch(&snapshot, tool) {
+            if tool_missing(&snapshot, tool) {
                 style::append_meta(&row, tool_unavailable(tool));
                 let availability = snapshot["tools"].as_array().into_iter().flatten().find(|t| t["tool"] == tool);
                 if let Some(install) = availability.and_then(install_button) { row.append(&install); }
@@ -375,6 +385,24 @@ mod tests {
         assert_eq!(install_block(&none).len(), 2);
         assert!(install_block(&one).is_empty());
         assert!(install_block(&json!({})).is_empty());
+    }
+
+    /// An OpenCode account is not "missing" because GTK cannot launch it: the
+    /// caption and Install key on the inventory, and Launch and Reconnect stay
+    /// out for it (Ron, #1419).
+    #[test]
+    fn an_installed_opencode_account_is_not_reported_missing() {
+        let installed = json!({"tools":[{"tool":"claude","installed":true},{"tool":"opencode","installed":true}]});
+        let absent = json!({"tools":[{"tool":"claude","installed":true},{"tool":"opencode","installed":false}]});
+        let account = json!({"tool":"opencode","connection":"subscription"});
+        assert!(!tool_missing(&installed, "opencode"));
+        assert!(tool_missing(&absent, "opencode"));
+        assert!(!tool_missing(&json!({}), "opencode"));
+        assert!(!can_launch(&installed, "opencode"));
+        assert!(!offers_reconnect(&installed, &account));
+        assert!(
+            launch_accounts(&json!({"tools":installed["tools"],"accounts":[account]})).is_empty()
+        );
     }
 
     /// A missing tool's account keeps its row and caption, with the tool

@@ -47,6 +47,11 @@ public sealed record ManagedSnapshot(
     /// launches, and only while none is installed (Ron, 2026-10-15).</summary>
     public ManagedTool[] InstallTools => Tools is null || SetupTools.Length > 0 ? []
         : Tools.Where(t => ManagedSignIn.Tools.Contains(t.Tool)).ToArray();
+    /// <summary>Whether the caption and Install belong on an account row: the
+    /// inventory reports the tool missing. Keys on installation, not on
+    /// launchability, so an installed OpenCode account is not "missing".</summary>
+    public bool ToolMissing(string tool) =>
+        Tools is not null && !Tools.Any(t => t.Tool == tool && t.Installed);
     /// <summary>Reconnect is hidden, not disabled, while the tool is missing.</summary>
     public bool OffersReconnect(ManagedAccount account) =>
         account.Connection == "subscription" && CanLaunch(account.Tool);
