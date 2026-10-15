@@ -2166,11 +2166,19 @@ impl fmt::Debug for SealedIndexCommand {
 /// What a Score policy returns: the persisted result and the transient
 /// artifacts that its evidence names by hash. The server stores both
 /// artifacts encrypted before the Score outcome commits.
+///
+/// A policy may instead ask for the trace to be held for operator review
+/// rather than priced ([`Self::held_for_review`]): the output then awards
+/// nothing, proposes no index entry, and carries the policy's safe label
+/// ([`Self::hold_for_review`]). The server commits no Score outcome for
+/// it; it parks the run in its review hold state under that label. An
+/// output built with [`Self::new`] never holds.
 #[derive(Clone, PartialEq)]
 pub struct ScoreOutput {
     result: PhaseResult<ScoreDecision, ScoreEvidence, ScoreEvaluation>,
     index_command: Option<SealedIndexCommand>,
     neighbor_artifact: Option<Vec<u8>>,
+    hold_for_review: Option<ReasonCode>,
 }
 
 impl ScoreOutput {
@@ -2211,7 +2219,41 @@ impl ScoreOutput {
             result,
             index_command,
             neighbor_artifact,
+            hold_for_review: None,
         })
+    }
+
+    /// An output that asks for the trace to be held for operator review
+    /// under `label` instead of priced: no award (a decision bound to
+    /// `manifest` with an empty award set, and evidence and evaluation that
+    /// agree), no index command, and no neighbour artifact. `rule_id` names
+    /// the policy rule that asked for the hold.
+    pub fn held_for_review(
+        manifest: &BundleManifest,
+        label: ReasonCode,
+        rule_id: impl Into<String>,
+    ) -> Result<Self, ContractError> {
+        let awards = InstrumentAwards::default();
+        let mut output = Self::new(
+            PhaseResult {
+                decision: ScoreDecision::for_bundle(manifest, awards.clone())?,
+                evidence: ScoreEvidence::fixed(awards.clone()),
+                evaluation: ScoreEvaluation {
+                    rule_id: rule_id.into(),
+                    awards,
+                },
+            },
+            None,
+            None,
+        )?;
+        output.hold_for_review = Some(label);
+        Ok(output)
+    }
+
+    /// The label under which the policy asked for the trace to be held for
+    /// operator review, if it did.
+    pub fn hold_for_review(&self) -> Option<&ReasonCode> {
+        self.hold_for_review.as_ref()
     }
 
     pub fn result(&self) -> &PhaseResult<ScoreDecision, ScoreEvidence, ScoreEvaluation> {
@@ -2247,6 +2289,7 @@ impl fmt::Debug for ScoreOutput {
                 "neighbor_artifact_len",
                 &self.neighbor_artifact.as_ref().map(Vec::len),
             )
+            .field("hold_for_review", &self.hold_for_review)
             .finish()
     }
 }
@@ -4753,5 +4796,29 @@ mod tests {
             ScoreOutput::new(result, None, None).err(),
             Some(ContractError::InvalidAwardAdjustment)
         );
+    }
+
+    /// A Score policy asks for a trace to be held for operator review
+    /// instead of priced: the output awards nothing, proposes no index
+    /// entry, and carries the policy's safe label. An output built with
+    /// `ScoreOutput::new`, as every built-in policy builds one, never holds.
+    #[test]
+    fn a_held_score_output_awards_nothing_and_carries_its_label() {
+        let manifest = golden_manifest();
+        let label = ReasonCode::new("operator_review_requested").unwrap();
+        let held = ScoreOutput::held_for_review(&manifest, label.clone(), "held_rule").unwrap();
+        assert_eq!(held.hold_for_review(), Some(&label));
+        assert!(held.result().decision.awards().is_empty());
+        held.result().decision.require_bound(&manifest).unwrap();
+        assert_eq!(
+            held.result().evidence,
+            ScoreEvidence::fixed(InstrumentAwards::default())
+        );
+        assert_eq!(held.result().evaluation.rule_id, "held_rule");
+        assert!(held.index_command().is_none());
+        assert!(held.neighbor_artifact().is_none());
+
+        let priced = ScoreOutput::new(score_result(None, false), None, None).unwrap();
+        assert_eq!(priced.hold_for_review(), None);
     }
 }

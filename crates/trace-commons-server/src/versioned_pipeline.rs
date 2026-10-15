@@ -114,6 +114,25 @@ macro_rules! reviewable_submission_sql {
     };
 }
 
+/// The submission, aliased `s`, of a parked run, aliased `p`, is still one
+/// the hold applies to: a submission Review has not decided yet
+/// (`reviewable_submission_sql!`) for a run parked at Review, and an
+/// accepted one (`accepted_submission_sql!`, what Score needs) for a run its
+/// Score policy held for operator review at Score. A parked run whose
+/// submission fails this is released (`release_inoperable_parked_runs`) and
+/// left out of the review queue.
+macro_rules! parked_run_submission_sql {
+    () => {
+        concat!(
+            "((p.next_phase = 'score' AND ",
+            accepted_submission_sql!(),
+            ") OR (p.next_phase IS DISTINCT FROM 'score' AND ",
+            reviewable_submission_sql!(),
+            "))"
+        )
+    };
+}
+
 /// A run, aliased `p`, that waits for a human review: at Review, quarantined
 /// by Admission or escalated by the Review-start privacy pass, and idle
 /// (`pending`, `retry`, or `awaiting_review`). A run that needs the privacy
@@ -1190,7 +1209,9 @@ pub enum PipelineRunState {
     Retry,
     /// A run Review quarantined with no human assessment yet
     /// (`PgPipelineStore::mark_awaiting_review`, label
-    /// `review_assessment_required`). No claim query selects this state, so
+    /// `review_assessment_required`), or a run its Score policy held for
+    /// operator review instead of pricing it, parked at Score under the
+    /// policy's label (`PgPipelineStore::hold_score_for_review_on_tx`). No claim query selects this state, so
     /// the run does not retry hourly forever while it waits.
     /// `PgPipelineStore::record_review_assessment` moves it back to
     /// `Pending`, due at once, once an assessment lands (Ruling T3-3); a
@@ -1859,8 +1880,11 @@ pub struct StoredReviewAssessment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineReviewQueueEntry {
     pub run: PipelineRunRecord,
+    /// The Score policy's label for a run its Score policy held for operator
+    /// review (`run.next_phase` is Score,
+    /// `PgPipelineStore::hold_score_for_review_on_tx`);
     /// `privacy_pass_review_required` when the privacy pass escalated the
-    /// run, else the run's `admission_reason`.
+    /// run; else the run's `admission_reason`.
     pub hold_reason: Option<String>,
     pub assessment_superseded: bool,
 }
@@ -3748,7 +3772,7 @@ impl PgPipelineStore {
                                 WHERE s.tenant_id = p.tenant_id
                                   AND s.submission_id = p.submission_id
                                   AND ",
-                    reviewable_submission_sql!(),
+                    parked_run_submission_sql!(),
                     "
                            )
                          ORDER BY p.run_id
@@ -3784,6 +3808,14 @@ impl PgPipelineStore {
     /// helper mirror), applied here as a join and an anti-join rather than a
     /// per-row lock (this is a plain read, not a claim, so it must filter in
     /// SQL rather than call the helper row by row).
+    ///
+    /// A run whose Score policy held it for operator review
+    /// (`hold_score_for_review_on_tx`) is listed too, with `run.next_phase`
+    /// Score and the policy's label as its hold reason, whether or not an
+    /// earlier Review assessment exists for it, and never as superseded.
+    /// It is listed for visibility only: `claim_review` and
+    /// `record_review_assessment` act on runs waiting at Review, so a claim
+    /// of a Score hold is refused as not waiting for review.
     pub async fn list_review_queue(
         &self,
         tenant_id: &str,
@@ -3796,23 +3828,26 @@ impl PgPipelineStore {
             .query(
                 concat!(
                     "SELECT p.*,
-                            CASE WHEN p.privacy_pass_outcome = 'escalated'
+                            CASE WHEN p.next_phase = 'score' THEN p.last_error_label
+                                 WHEN p.privacy_pass_outcome = 'escalated'
                                  THEN 'privacy_pass_review_required'
                                  ELSE p.admission_reason
                             END AS queue_hold_reason,
-                            (a.run_id IS NOT NULL) AS queue_assessment_superseded
+                            (a.run_id IS NOT NULL AND p.next_phase = 'review')
+                                AS queue_assessment_superseded
                        FROM pipeline_runs p
                       JOIN trace_submissions s
                         ON s.tenant_id = p.tenant_id AND s.submission_id = p.submission_id
                       LEFT JOIN pipeline_review_assessments a
                         ON a.tenant_id = p.tenant_id AND a.run_id = p.run_id
-                      WHERE p.tenant_id = $1 AND ",
+                      WHERE p.tenant_id = $1 AND ((",
                     run_waiting_for_review_sql!(),
                     " AND (a.run_id IS NULL
                            OR (p.privacy_pass_outcome = 'escalated'
-                               AND a.recorded_at < p.privacy_pass_recorded_at))
+                               AND a.recorded_at < p.privacy_pass_recorded_at)))
+                        OR (p.next_phase = 'score' AND p.state = 'awaiting_review'))
                       AND ",
-                    reviewable_submission_sql!(),
+                    parked_run_submission_sql!(),
                     " ORDER BY p.created_at, p.run_id
                       LIMIT $2"
                 ),
@@ -6437,6 +6472,85 @@ impl PgPipelineStore {
             &[&run.tenant_id, &run.run_id, &lease_token],
         )
         .await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// Parks a run whose Score policy asked for its trace to be held for
+    /// operator review instead of priced (`ScoreOutput::hold_for_review`),
+    /// on the caller's transaction: the run moves to the review hold state
+    /// (`awaiting_review`) at Score, under the policy's safe label, with its
+    /// lease cleared and the claim's attempt given back, as
+    /// `mark_awaiting_review` parks a run at Review. Nothing of the Score is
+    /// committed, so no award is seeded and no settlement leg exists; the
+    /// rows a Score staged before its tenant lock (`staged`, no hash, under
+    /// this lease token) are deleted, as `release_score_lock_busy` deletes
+    /// them, since the held Score published nothing. Fenced by the lease
+    /// against the database clock.
+    ///
+    /// The same guards as `commit_score_in`, in the same lock order (run
+    /// row, submission row, policy row), refuse the hold and write nothing:
+    /// an inoperable submission with `PIPELINE_SUBMISSION_INOPERABLE_LABEL`,
+    /// so a held run whose submission was withdrawn and that an
+    /// invalidation pass released ends as any Score of such a run ends,
+    /// rather than parking again; and a Score policy that is no longer
+    /// runnable with `PIPELINE_POLICY_NOT_RUNNABLE_LABEL` (GRD-004).
+    pub async fn hold_score_for_review_on_tx(
+        tx: &Transaction<'_>,
+        run: &PipelineRunRecord,
+        label: &str,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        if run.next_phase != Some(Phase::Score) {
+            return Err(DatabaseError::Constraint(
+                "phase does not match run transition".to_string(),
+            ));
+        }
+        let lease_token = required_lease_token(run)?;
+        ensure_current_lease(tx, run, lease_token).await?;
+        if !Self::submission_guard_on_tx(tx, run).await?.operable {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+            ));
+        }
+        if !lock_runnable_policy(tx, &run.tenant_id, &run.bundle_id, Phase::Score).await? {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_POLICY_NOT_RUNNABLE_LABEL.to_string(),
+            ));
+        }
+        let row = tx
+            .query_opt(
+                "UPDATE pipeline_runs
+                    SET state = 'awaiting_review', lease_token = NULL, lease_expires_at = NULL,
+                        attempt_count = GREATEST(attempt_count - 1, 0),
+                        last_error_label = $3, updated_at = clock_timestamp()
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
+                    AND next_phase = 'score'
+                    AND lease_token = $4 AND lease_expires_at > clock_timestamp()
+                  RETURNING *",
+                &[&run.tenant_id, &run.run_id, &label, &lease_token],
+            )
+            .await?
+            .ok_or_else(stale_lease_error)?;
+        let updated = pipeline_run_from_row(&row)?;
+        tx.execute(
+            "DELETE FROM pipeline_attempt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                AND state = 'staged' AND ciphertext_sha256 IS NULL",
+            &[&run.tenant_id, &run.run_id, &lease_token],
+        )
+        .await?;
+        Ok(updated)
+    }
+
+    /// `hold_score_for_review_on_tx` in a tenant transaction of its own.
+    pub async fn hold_score_for_review(
+        &self,
+        run: &PipelineRunRecord,
+        label: &str,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let updated = Self::hold_score_for_review_on_tx(&tx, run, label).await?;
         tx.commit().await?;
         Ok(updated)
     }
@@ -13460,6 +13574,40 @@ impl PipelineService {
                 reviewed_artifact,
             })
             .await?;
+        // The policy asked for the trace to be held for operator review
+        // instead of priced: the run parks in the review hold state at
+        // Score under the policy's label, and nothing of the Score is
+        // committed, so no award is seeded. On the tenant lock's own
+        // transaction when the Score holds one, so the hold commits under
+        // the lock and the Score still holds one pooled connection.
+        if let Some(label) = output.hold_for_review() {
+            output
+                .result()
+                .decision
+                .require_bound(&bundle.package.manifest)
+                .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
+            let label = label.as_str().to_string();
+            let held = match lock {
+                Some(lock) => {
+                    match PgPipelineStore::hold_score_for_review_on_tx(&lock, run, &label).await {
+                        Ok(updated) => lock.commit().await.map(|()| updated).map_err(Into::into),
+                        Err(error) => Err(error),
+                    }
+                }
+                None => self.store.hold_score_for_review(run, &label).await,
+            };
+            // As for a refused Score commit below: the labels the
+            // classification allowlist expects are re-raised bare.
+            return held.map_err(|error| match error {
+                DatabaseError::Constraint(label)
+                    if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
+                        || label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL =>
+                {
+                    anyhow::anyhow!(label)
+                }
+                error => error.into(),
+            });
+        }
         let (result, command, neighbor) = output.into_parts();
         // Before any artifact is stored, the decision must be bound to the
         // run's bundle: it records the bound manifest's bundle identifier,

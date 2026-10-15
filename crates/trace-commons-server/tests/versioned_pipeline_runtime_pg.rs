@@ -50210,6 +50210,9 @@ struct RegisteredTestScoreFactory {
     trace_credit_event: PipelineTraceCreditEvent,
     /// Award adjustments the policy records on its Score evidence.
     award_adjustments: Vec<trace_commons_gate_api::pipeline::AwardAdjustment>,
+    /// When set, the policy asks for every trace to be held for operator
+    /// review under this label instead of pricing it.
+    hold: Option<&'static str>,
 }
 
 impl trace_commons_server::versioned_pipeline_score_registry::ScorePolicyFactory
@@ -50238,6 +50241,12 @@ impl trace_commons_server::versioned_pipeline_score_registry::ScorePolicyFactory
                 dependencies.index_reader,
             )
             .map_err(|_| "substituted_configuration_invalid")?;
+        if let Some(label) = self.hold {
+            return Ok(Arc::new(HoldingScorePolicy {
+                manifest: dependencies.manifest.clone(),
+                label,
+            }));
+        }
         if self.award_adjustments.is_empty() {
             return Ok(Arc::new(policy));
         }
@@ -50245,6 +50254,33 @@ impl trace_commons_server::versioned_pipeline_score_registry::ScorePolicyFactory
             inner: Arc::new(policy),
             award_adjustments: self.award_adjustments.clone(),
         }))
+    }
+}
+
+/// A registered Score policy that asks for every trace to be held for
+/// operator review instead of pricing it.
+struct HoldingScorePolicy {
+    manifest: trace_commons_gate_api::pipeline::BundleManifest,
+    label: &'static str,
+}
+
+#[async_trait::async_trait]
+impl trace_commons_gate_api::pipeline::ScorePolicy for HoldingScorePolicy {
+    async fn execute(
+        &self,
+        _input: &trace_commons_gate_api::pipeline::ScoreInput,
+    ) -> Result<
+        trace_commons_gate_api::pipeline::ScoreOutput,
+        trace_commons_gate_api::pipeline::PolicyError,
+    > {
+        Ok(
+            trace_commons_gate_api::pipeline::ScoreOutput::held_for_review(
+                &self.manifest,
+                ReasonCode::new(self.label).expect("a safe hold label"),
+                "substituted_hold_test_only_v1",
+            )
+            .expect("a held output is consistent"),
+        )
     }
 }
 
@@ -50323,6 +50359,28 @@ fn registered_score_service_with(
     trace_credit_event: PipelineTraceCreditEvent,
     award_adjustments: Vec<trace_commons_gate_api::pipeline::AwardAdjustment>,
 ) -> Arc<PipelineService> {
+    registered_score_service_holding(
+        backend,
+        artifact_store,
+        config,
+        checks,
+        trace_credit_event,
+        award_adjustments,
+        None,
+    )
+}
+
+/// `registered_score_service_with`, with a policy that holds every trace
+/// for operator review under `hold` when it is set.
+fn registered_score_service_holding(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+    checks: PipelineNoveltyUtilityChecks,
+    trace_credit_event: PipelineTraceCreditEvent,
+    award_adjustments: Vec<trace_commons_gate_api::pipeline::AwardAdjustment>,
+    hold: Option<&'static str>,
+) -> Arc<PipelineService> {
     let index = IsolatedPipelineIndex::new();
     let package = registered_score_package(&config);
     let registry = SettlementAdapterRegistry::new(vec![RecordingSettlementAdapter::new(
@@ -50338,6 +50396,7 @@ fn registered_score_service_with(
                 Arc::new(RegisteredTestScoreFactory {
                     trace_credit_event,
                     award_adjustments,
+                    hold,
                 }),
             )
             .expect("register the test factory");
@@ -50589,5 +50648,197 @@ async fn a_registered_score_policy_award_adjustments_persist_with_its_evidence()
     assert_eq!(
         gate_decision_rows(&tenant, run.submission_id).await.len(),
         1
+    );
+}
+
+/// A registered Score policy that asks for a trace to be held for operator
+/// review parks the run in the existing review hold state
+/// (`awaiting_review`) at Score, uncharged, under the policy's label:
+/// nothing is committed for the Score, so no award is seeded and no leg can
+/// pay, no attempt row is left staged, and the run is listed in the
+/// pipeline review queue with the label as its hold reason. The
+/// compatibility policy never holds: under the same configuration its run
+/// goes on to Settle.
+#[tokio::test]
+async fn a_registered_score_policy_can_hold_a_trace_for_operator_review() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let label = "operator_review_requested";
+    let service = registered_score_service_holding(
+        backend.clone(),
+        artifact_store(&dir),
+        CompatibilityBundleConfig::local_reference(),
+        issuing_checks(),
+        PipelineTraceCreditEvent::PipelineScore,
+        Vec::new(),
+        Some(label),
+    );
+    let tenant = format!("registered-hold-{}", uuid::Uuid::new_v4());
+    let reviewed = compatibility_run_past_review(&service, &tenant).await;
+    let held = service
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the Score is claimed");
+    assert_eq!(
+        (
+            held.state,
+            held.next_phase,
+            held.last_error_label.as_deref(),
+            held.attempt_count,
+        ),
+        (
+            PipelineRunState::AwaitingReview,
+            Some(Phase::Score),
+            Some(label),
+            reviewed.attempt_count,
+        ),
+        "a held trace parks at Score, uncharged, under the policy's label"
+    );
+    assert!(
+        service
+            .store()
+            .outcome_for_phase(&tenant, held.run_id, Phase::Score)
+            .await
+            .unwrap()
+            .is_none(),
+        "a held Score commits no outcome"
+    );
+    assert!(
+        service
+            .store()
+            .list_settlements(&tenant, held.run_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a held Score seeds no settlement leg"
+    );
+    assert_eq!(
+        credit_ledger_event_for_run(&backend, &tenant, held.run_id).await,
+        None
+    );
+    assert_eq!(
+        score_attempt_rows_with_hashes(&backend, &tenant, held.run_id).await,
+        Vec::new(),
+        "a held Score leaves no staged attempt row"
+    );
+    // Nothing claims a parked run.
+    assert!(
+        service
+            .process_run(&tenant, held.run_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a held run is not claimed again"
+    );
+    let queue = service
+        .store()
+        .list_review_queue(&tenant, 10)
+        .await
+        .unwrap();
+    let entry = queue
+        .iter()
+        .find(|entry| entry.run.run_id == held.run_id)
+        .expect("the held run is in the review queue");
+    assert_eq!(entry.hold_reason.as_deref(), Some(label));
+    assert_eq!(entry.run.next_phase, Some(Phase::Score));
+    // The worker's invalidation step leaves a hold whose submission is
+    // still operable parked.
+    assert_eq!(
+        service
+            .release_inoperable_parked_runs(&tenant, 32)
+            .await
+            .unwrap(),
+        0,
+        "an operable Score hold is not released"
+    );
+    assert_eq!(
+        service
+            .store()
+            .get_run(&tenant, held.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        PipelineRunState::AwaitingReview
+    );
+
+    // The compatibility policy, over the same configuration, never holds.
+    let compatibility = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("compat-no-hold-{}", uuid::Uuid::new_v4());
+    let reviewed = compatibility_run_past_review(&compatibility, &tenant).await;
+    let scored = compatibility
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the Score is claimed");
+    assert_eq!(
+        (scored.state, scored.next_phase),
+        (PipelineRunState::Pending, Some(Phase::Settle)),
+        "{scored:?}"
+    );
+}
+
+/// A Score hold whose submission is withdrawn does not park again: the
+/// worker's invalidation step releases it
+/// (`release_inoperable_parked_runs`), and the released Score refuses the
+/// hold under the same submission guard a Score commit takes, so the run
+/// ends as `submission_inoperable` instead of cycling between the hold and
+/// the release.
+#[tokio::test]
+async fn a_withdrawn_score_hold_ends_instead_of_parking_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = registered_score_service_holding(
+        backend.clone(),
+        artifact_store(&dir),
+        CompatibilityBundleConfig::local_reference(),
+        issuing_checks(),
+        PipelineTraceCreditEvent::PipelineScore,
+        Vec::new(),
+        Some("operator_review_requested"),
+    );
+    let tenant = format!("registered-hold-withdrawn-{}", uuid::Uuid::new_v4());
+    let reviewed = compatibility_run_past_review(&service, &tenant).await;
+    let held = service
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the Score is claimed");
+    assert_eq!(held.state, PipelineRunState::AwaitingReview, "{held:?}");
+
+    withdraw_submission(&backend, &tenant, held.submission_id).await;
+    assert_eq!(
+        service
+            .release_inoperable_parked_runs(&tenant, 32)
+            .await
+            .unwrap(),
+        1,
+        "the worker releases the held run"
+    );
+    let ended = service
+        .process_run(&tenant, held.run_id)
+        .await
+        .unwrap()
+        .expect("the runner claims the released run");
+    assert_eq!(
+        (ended.state, ended.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+        ),
+        "{ended:?}"
+    );
+    assert!(
+        service
+            .store()
+            .list_settlements(&tenant, held.run_id)
+            .await
+            .unwrap()
+            .is_empty()
     );
 }

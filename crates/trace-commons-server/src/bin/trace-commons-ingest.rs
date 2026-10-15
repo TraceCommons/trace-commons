@@ -44194,8 +44194,14 @@ struct PipelineReviewQueueItem {
     run_id: Uuid,
     submission_id: Uuid,
     admission_reason: Option<String>,
-    /// What holds the run: `privacy_pass_review_required` when the
-    /// Review-start privacy pass escalated it, else `admission_reason`.
+    /// The phase the run is held at: `review` for a run waiting for a
+    /// reviewer's assessment, `score` for a run its Score policy held for
+    /// operator review instead of pricing it. A `score` hold is listed for
+    /// visibility only and cannot be claimed.
+    phase: &'static str,
+    /// What holds the run: the Score policy's label for a `score` hold;
+    /// `privacy_pass_review_required` when the Review-start privacy pass
+    /// escalated it; else `admission_reason`.
     hold_reason: Option<String>,
     /// The run's assessment was recorded before the privacy pass escalated
     /// it, so Review ignores it; such a run cannot be claimed again.
@@ -44205,7 +44211,8 @@ struct PipelineReviewQueueItem {
 
 /// `GET /v1/review/pipeline/quarantine?limit=N`: pipeline runs waiting for a
 /// human assessment (quarantined by Admission or escalated by the privacy
-/// pass), oldest first, each with its hold reason (labels only). `PgPipelineStore::
+/// pass), and runs a Score policy held for operator review (`phase`
+/// `score`), oldest first, each with its hold reason (labels only). `PgPipelineStore::
 /// list_review_queue` already excludes a run whose submission is no longer
 /// operable (Ruling T3-6).
 async fn pipeline_review_quarantine_handler(
@@ -44227,6 +44234,11 @@ async fn pipeline_review_quarantine_handler(
             run_id: entry.run.run_id,
             submission_id: entry.run.submission_id,
             admission_reason: entry.run.admission_reason,
+            phase: if entry.run.next_phase == Some(trace_commons_gate_api::pipeline::Phase::Score) {
+                "score"
+            } else {
+                "review"
+            },
             hold_reason: entry.hold_reason,
             assessment_superseded: entry.assessment_superseded,
             created_at: entry.run.created_at,
