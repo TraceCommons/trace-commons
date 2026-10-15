@@ -18,13 +18,23 @@ public sealed record ManagedSession(
     [JsonIgnore] public bool HoldsAccount => State != "exited" && State != "failed";
 }
 
+/// <summary>A terminal a managed session can open in, as the daemon names
+/// it: its wire id and the app's own name.</summary>
+public sealed record ManagedTerminalChoice(string Id, string Name);
+
 /// <param name="NearAiSignin">Whether the daemon holds a NEAR AI sign-in: a
 /// bool, never the credential. Absent from an older daemon, which reads as no.</param>
+/// <param name="TerminalCurrent">The chosen terminal's id; null from an older
+/// daemon, or for a stored choice the daemon does not know.</param>
+/// <param name="TerminalChoices">The terminals the daemon found on this
+/// computer; absent from an older daemon.</param>
 public sealed record ManagedCapabilities(
     [property: JsonPropertyName("managed_launch")] bool ManagedLaunch,
     [property: JsonPropertyName("terminal_launch")] bool TerminalLaunch,
     [property: JsonPropertyName("terminal_destination")] string? TerminalDestination,
-    [property: JsonPropertyName("near_ai_signin")] bool NearAiSignin = false);
+    [property: JsonPropertyName("near_ai_signin")] bool NearAiSignin = false,
+    [property: JsonPropertyName("terminal_current")] string? TerminalCurrent = null,
+    [property: JsonPropertyName("terminal_choices")] ManagedTerminalChoice[]? TerminalChoices = null);
 
 /// <param name="SignInAccounts">One entry per tool, derived from the NEAR AI
 /// sign-in and never saved. Empty, or absent from an older daemon, without one.</param>
@@ -38,6 +48,16 @@ public sealed record ManagedSnapshot(
 
     /// <summary>Whether the daemon holds a NEAR AI sign-in.</summary>
     [JsonIgnore] public bool NearAiSignedIn => Capabilities.NearAiSignin;
+
+    /// <summary>The terminals the Open sessions in picker offers: the ones
+    /// the daemon found, none from an older daemon.</summary>
+    [JsonIgnore] public ManagedTerminalChoice[] TerminalChoices => Capabilities.TerminalChoices ?? [];
+
+    /// <summary>The position of the current choice among
+    /// <see cref="TerminalChoices"/>, or -1 when it is not among them, so a
+    /// choice no longer found selects nothing rather than the first.</summary>
+    [JsonIgnore] public int TerminalSelectedIndex =>
+        System.Array.FindIndex(TerminalChoices, c => c.Id == Capabilities.TerminalCurrent);
 
     /// <summary>The tool's NEAR AI sign-in entry, only while signed in.</summary>
     public ManagedAccount? SignInEntry(string tool) => NearAiSignedIn
@@ -88,7 +108,20 @@ public static class ManagedSignIn
         template.Replace("{destination}", destination ?? fallback);
 
     /// <summary>The line for a failed managed action: the sign-in prompt
-    /// when the daemon refused for want of a NEAR AI sign-in.</summary>
-    public static string ErrorKey(string? code) =>
-        code == "managed-near-ai-sign-in-required" ? "sign_in_needed" : "action_failed";
+    /// when the daemon refused for want of a NEAR AI sign-in, and the
+    /// not-found line when the chosen terminal was not found.</summary>
+    public static string ErrorKey(string? code) => code switch
+    {
+        "managed-near-ai-sign-in-required" => "sign_in_needed",
+        "managed-terminal-not-found" => "terminal_not_found",
+        _ => "action_failed",
+    };
+
+    /// <summary>
+    /// A line with <c>{terminal}</c> filled from the terminal the daemon
+    /// reports; <paramref name="fallback"/> (the core's "your terminal") when
+    /// it reports none.
+    /// </summary>
+    public static string FillTerminal(string template, string? terminal, string fallback) =>
+        template.Replace("{terminal}", terminal ?? fallback);
 }

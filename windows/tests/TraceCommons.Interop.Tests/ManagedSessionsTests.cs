@@ -76,5 +76,41 @@ public sealed class ManagedSessionsTests
         Assert.Equal("sign_in_needed", ManagedSignIn.ErrorKey("managed-near-ai-sign-in-required"));
         Assert.Equal("action_failed", ManagedSignIn.ErrorKey("managed-conflict"));
         Assert.Equal("action_failed", ManagedSignIn.ErrorKey(null));
+        Assert.Equal("terminal_not_found", ManagedSignIn.ErrorKey("managed-terminal-not-found"));
+    }
+
+    [Fact]
+    public void SnapshotCarriesTheTerminalChoiceAndTheFoundTerminals()
+    {
+        var snapshot = ManagedSnapshot.Parse("""
+        {"revision":2,"accounts":[],"sessions":[],"generations":{},"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Windows Terminal","terminal_current":"windows_terminal","terminal_choices":[{"id":"windows_terminal","name":"Windows Terminal"}]},"copy":{"terminal_choice":"Open sessions in"}}
+        """);
+        Assert.NotNull(snapshot);
+        Assert.Equal("windows_terminal", snapshot.Capabilities.TerminalCurrent);
+        Assert.Equal(new[] { new ManagedTerminalChoice("windows_terminal", "Windows Terminal") }, snapshot.TerminalChoices);
+        Assert.Equal(0, snapshot.TerminalSelectedIndex);
+        Assert.Equal("Open sessions in", snapshot.Text("terminal_choice"));
+    }
+
+    [Fact]
+    public void AnOlderSnapshotOffersNoTerminalChoice()
+    {
+        var snapshot = ManagedSnapshot.Parse("""
+        {"revision":1,"accounts":[],"sessions":[],"generations":{},"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Windows Terminal"},"copy":{}}
+        """);
+        Assert.NotNull(snapshot);
+        Assert.Null(snapshot.Capabilities.TerminalCurrent);
+        Assert.Empty(snapshot.TerminalChoices);
+        Assert.Equal(-1, snapshot.TerminalSelectedIndex);
+    }
+
+    [Fact]
+    public void AMissingTerminalHasItsOwnLine()
+    {
+        const string line = "{terminal} wasn't found on this computer. Choose another in Settings.";
+        Assert.Equal("Windows Terminal wasn't found on this computer. Choose another in Settings.",
+            ManagedSignIn.FillTerminal(line, "Windows Terminal", "your terminal"));
+        Assert.Equal("your terminal wasn't found on this computer. Choose another in Settings.",
+            ManagedSignIn.FillTerminal(line, null, "your terminal"));
     }
 }

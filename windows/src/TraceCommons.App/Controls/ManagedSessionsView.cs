@@ -80,7 +80,14 @@ public sealed class ManagedSessionsView : UserControl
         _busy = true;
         _error.Text = string.Empty;
         try { await action(); }
-        catch (Refused refused) { _error.Text = T(ManagedSignIn.ErrorKey(refused.Code)); }
+        catch (Refused refused)
+        {
+            // `{terminal}` is the chosen terminal the daemon names.
+            _error.Text = ManagedSignIn.FillTerminal(
+                T(ManagedSignIn.ErrorKey(refused.Code)),
+                _snapshot?.Capabilities.TerminalDestination,
+                T("terminal"));
+        }
         catch { _error.Text = T("action_failed"); }
         finally { _busy = false; await RefreshAsync(); }
     }
