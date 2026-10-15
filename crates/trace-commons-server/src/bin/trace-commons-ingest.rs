@@ -4246,10 +4246,15 @@ impl AppState {
         let pipeline_activation = db_connections.as_ref().map(|connections| {
             Arc::new(PipelineActivationStore::new(connections.postgres.clone()))
         });
+        // The qualification store qualifies the Score policies the pipeline
+        // service can bind: the registry the assembled service holds (empty
+        // in the open build).
         let pipeline_qualification = db_connections.as_ref().map(|connections| {
-            Arc::new(PipelineQualificationStore::new(
-                connections.postgres.clone(),
-            ))
+            let store = PipelineQualificationStore::new(connections.postgres.clone());
+            Arc::new(match pipeline_service.as_ref() {
+                Some(service) => store.with_score_policies(service.score_policies().clone()),
+                None => store,
+            })
         });
         // Task 10: the two trust stores the qualification and activation
         // routes verify against. A set variable whose file does not hold a
@@ -44138,6 +44143,18 @@ async fn release_review_lease_handler(
 /// `reviewer_sha256:` plus the lowercase hex SHA-256 of the authenticated
 /// reviewer principal -- the `pipeline_review_claims.reviewer_principal_ref`
 /// shape `PgPipelineStore::claim_review` requires.
+/// The audit label of a reviewer's resolution of a Score hold. Score runs on
+/// an accepted submission and settles it either way, so the resolution
+/// changes no corpus status; the event records the status the submission
+/// keeps, and this label says which way the hold was resolved.
+fn score_hold_audit_reason(approved: bool) -> &'static str {
+    if approved {
+        "score_hold_approved"
+    } else {
+        "score_hold_rejected"
+    }
+}
+
 fn pipeline_reviewer_principal_ref(principal_ref: &str) -> String {
     format!(
         "reviewer_sha256:{}",
@@ -44194,8 +44211,16 @@ struct PipelineReviewQueueItem {
     run_id: Uuid,
     submission_id: Uuid,
     admission_reason: Option<String>,
-    /// What holds the run: `privacy_pass_review_required` when the
-    /// Review-start privacy pass escalated it, else `admission_reason`.
+    /// The phase the run is held at: `review` for a run waiting for a
+    /// reviewer's assessment, `score` for a run its Score policy held for
+    /// operator review instead of pricing it. Both are claimed and assessed
+    /// through the same routes and the same reviewer credential; a `score`
+    /// approval must resolve the hold reason, and a `score` rejection
+    /// settles the run with no credit.
+    phase: &'static str,
+    /// What holds the run: the Score policy's label for a `score` hold;
+    /// `privacy_pass_review_required` when the Review-start privacy pass
+    /// escalated it; else `admission_reason`.
     hold_reason: Option<String>,
     /// The run's assessment was recorded before the privacy pass escalated
     /// it, so Review ignores it; such a run cannot be claimed again.
@@ -44205,7 +44230,8 @@ struct PipelineReviewQueueItem {
 
 /// `GET /v1/review/pipeline/quarantine?limit=N`: pipeline runs waiting for a
 /// human assessment (quarantined by Admission or escalated by the privacy
-/// pass), oldest first, each with its hold reason (labels only). `PgPipelineStore::
+/// pass), and runs a Score policy held for operator review (`phase`
+/// `score`), oldest first, each with its hold reason (labels only). `PgPipelineStore::
 /// list_review_queue` already excludes a run whose submission is no longer
 /// operable (Ruling T3-6).
 async fn pipeline_review_quarantine_handler(
@@ -44227,6 +44253,11 @@ async fn pipeline_review_quarantine_handler(
             run_id: entry.run.run_id,
             submission_id: entry.run.submission_id,
             admission_reason: entry.run.admission_reason,
+            phase: if entry.run.next_phase == Some(trace_commons_gate_api::pipeline::Phase::Score) {
+                "score"
+            } else {
+                "review"
+            },
             hold_reason: entry.hold_reason,
             assessment_superseded: entry.assessment_superseded,
             created_at: entry.run.created_at,
@@ -44467,10 +44498,7 @@ async fn pipeline_review_assessment_handler(
         // stored claim -- not against this field.
         lease_expires_at: Utc::now(),
     };
-    let resulting_status = match recommendation {
-        ReviewRecommendation::Approve => TraceCorpusStatus::Accepted,
-        ReviewRecommendation::Reject => TraceCorpusStatus::Rejected,
-    };
+    let approved = recommendation == ReviewRecommendation::Approve;
     // Zaki review 1, round 2, N-2: the privileged-action consent check
     // `main`'s review decision applies (`apply_review_decision`): the
     // reviewer's claims and the tenant's current policy must allow a
@@ -44493,13 +44521,33 @@ async fn pipeline_review_assessment_handler(
     }
     // The audit row's labels, formed before the commit, so nothing that can
     // fail without an append stands between the commit and the answer.
-    let audit_row =
-        review_decision_audit_row(resulting_status, &reason_label, None).map_err(internal_error)?;
-    let assessment = pipeline_service
+    // Both phases' rows are formed here, the one that applies chosen once the
+    // hold's phase is known.
+    let review_status = if approved {
+        TraceCorpusStatus::Accepted
+    } else {
+        TraceCorpusStatus::Rejected
+    };
+    let review_row =
+        review_decision_audit_row(review_status, &reason_label, None).map_err(internal_error)?;
+    let score_label = score_hold_audit_reason(approved);
+    let score_row = review_decision_audit_row(TraceCorpusStatus::Accepted, score_label, None)
+        .map_err(internal_error)?;
+    let (assessment, at_score) = pipeline_service
         .store()
-        .record_review_assessment(&claim, recommendation, reason, resolved_quarantine_reasons)
+        .record_review_assessment_for_hold(
+            &claim,
+            recommendation,
+            reason,
+            resolved_quarantine_reasons,
+        )
         .await
         .map_err(pipeline_review_db_error)?;
+    let (resulting_status, event_reason, audit_row) = if at_score {
+        (TraceCorpusStatus::Accepted, score_label, score_row)
+    } else {
+        (review_status, reason_label.as_str(), review_row)
+    };
     // Zaki review 1, minor item M-a: the audit row `main`'s review decision
     // appends: the reason as a hash, and labels only in the metadata. The
     // status is the one the recommendation leads to once Review runs.
@@ -44518,7 +44566,7 @@ async fn pipeline_review_assessment_handler(
             &tenant,
             submission_id,
             resulting_status,
-            Some(&trace_free_text_audit_reason(&reason_label)),
+            Some(&trace_free_text_audit_reason(event_reason)),
         );
         event.event_id = assessment.assessment_id;
         append_audit_event_mirrored(state.as_ref(), &tenant, event, audit_row, "audit event")

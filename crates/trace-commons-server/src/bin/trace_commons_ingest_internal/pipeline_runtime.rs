@@ -1713,13 +1713,25 @@ async fn append_pipeline_review_audit_item(
         )
         .await?;
     }
-    if let Some(assessment) = &item.assessment {
+    for assessment in &item.assessments {
         if db
             .get_trace_audit_event_by_id(tenant_id, assessment.assessment_id)
             .await?
             .is_none()
         {
-            let (status, _) = review_audit_status(assessment.approved)?;
+            // A Score hold's resolution changes no corpus status: the event
+            // records the accepted status the submission keeps.
+            let (status, reason_label) = if assessment.at_score {
+                (
+                    TraceCorpusStatus::Accepted,
+                    score_hold_audit_reason(assessment.approved),
+                )
+            } else {
+                (
+                    review_audit_status(assessment.approved)?.0,
+                    assessment.reason_code.as_str(),
+                )
+            };
             let reviewer = TenantAuth {
                 principal_ref: assessment.reviewer_principal_ref.clone(),
                 ..system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF)
@@ -1728,7 +1740,7 @@ async fn append_pipeline_review_audit_item(
                 &reviewer,
                 item.submission_id,
                 status,
-                Some(&trace_free_text_audit_reason(&assessment.reason_code)),
+                Some(&trace_free_text_audit_reason(reason_label)),
             );
             event.event_id = assessment.assessment_id;
             event.actor_role = None;
@@ -1736,7 +1748,7 @@ async fn append_pipeline_review_audit_item(
                 state,
                 &reviewer,
                 event,
-                review_decision_audit_row(status, &assessment.reason_code, Some("reviewer"))?,
+                review_decision_audit_row(status, reason_label, Some("reviewer"))?,
                 "pipeline review assessment audit event",
             )
             .await?;
