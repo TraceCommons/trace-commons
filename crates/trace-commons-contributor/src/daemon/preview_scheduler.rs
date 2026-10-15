@@ -105,6 +105,21 @@ pub const MAX_PREVIEW_SESSION_BYTES: u64 = 64 * 1024 * 1024;
 /// answer.
 pub const PREVIEW_CACHE_CAP: usize = 4096;
 
+/// Revision of a SQLite backing file, including absence after checkpointing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DatabaseFileRevision {
+    bytes: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+fn database_file_revision(path: &Path) -> Option<DatabaseFileRevision> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(DatabaseFileRevision {
+        bytes: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
 /// What identifies the artifact a cached preview describes.
 ///
 /// `(path, file size, file mtime, group size, config fingerprint)`. The
@@ -114,7 +129,7 @@ pub const PREVIEW_CACHE_CAP: usize = 4096;
 /// -- anyone able to backdate an mtime can equally well write whatever they
 /// like into the file.
 ///
-/// The last two are why this key is not simply `(path, size, mtime)`:
+/// The group and config fields extend the file observation:
 ///
 /// - `group_bytes` is the queue entry's own `size_bytes`, which for a
 ///   Claude Code session covers the primary file **plus every delegated
@@ -127,6 +142,9 @@ pub const PREVIEW_CACHE_CAP: usize = 4096;
 ///   consent scopes, the identity, or the privacy-filter settings
 ///   invalidates every cached preview rather than leaving the contributor
 ///   looking at a card built under the old configuration.
+///
+/// Database sessions additionally key on both the database and WAL metadata,
+/// so a commit or checkpoint invalidates previews before the next watcher poll.
 ///
 /// The residual, stated rather than buried: a subagent transcript written
 /// between one watcher poll and the next is not reflected until that poll
@@ -144,6 +162,9 @@ pub struct PreviewKey {
     pub file_modified: Option<(i64, u32)>,
     pub group_bytes: u64,
     pub config_fingerprint: String,
+    /// Virtual OpenCode sessions have no file to stat. Observe both SQLite
+    /// files: commits may touch only the WAL, and checkpoints may remove it.
+    pub database_revision: Option<[Option<DatabaseFileRevision>; 2]>,
 }
 
 impl PreviewKey {
@@ -171,12 +192,36 @@ impl PreviewKey {
             }
             Err(_) => (0, None),
         };
+        let database_revision = path
+            .parent()
+            .filter(|database| {
+                database
+                    .file_name()
+                    .is_some_and(|name| name == "opencode.db")
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|id| {
+                            !id.is_empty()
+                                && id
+                                    .bytes()
+                                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                        })
+            })
+            .map(|database| {
+                let wal = database.with_file_name("opencode.db-wal");
+                [
+                    database_file_revision(database),
+                    database_file_revision(&wal),
+                ]
+            });
         Self {
             path: path.to_path_buf(),
             file_bytes,
             file_modified,
             group_bytes,
             config_fingerprint,
+            database_revision,
         }
     }
 }
@@ -675,6 +720,7 @@ mod tests {
             file_modified: Some((1_700_000_000, 0)),
             group_bytes: n,
             config_fingerprint: "fp".to_string(),
+            database_revision: None,
         }
     }
 
@@ -1172,6 +1218,43 @@ mod tests {
             "an entry asked for again while running is delivered after all"
         );
         assert_eq!(sched.cache_len(), 1);
+    }
+
+    #[test]
+    fn virtual_preview_key_tracks_database_and_wal_revisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("opencode.db");
+        let wal = dir.path().join("opencode.db-wal");
+        let path = database.join("ses_one");
+        std::fs::write(&database, b"database").unwrap();
+        let key = || PreviewKey::for_entry(&path, 100, "fp".into());
+        let before = key();
+        assert_eq!(before, key(), "unchanged stores retain a stable cache key");
+        std::fs::write(&wal, b"one").unwrap();
+        let with_wal = key();
+        assert_ne!(before, with_wal);
+        std::fs::write(&wal, b"two").unwrap();
+        // Set the mtime explicitly so the test does not depend on filesystem
+        // clock resolution or sleeps, while keeping the WAL length identical.
+        let file = std::fs::OpenOptions::new().write(true).open(&wal).unwrap();
+        file.set_times(
+            std::fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+            ),
+        )
+        .unwrap();
+        let rewritten = key();
+        assert_ne!(with_wal, rewritten);
+        std::fs::write(&database, b"new database").unwrap();
+        let checkpoint = key();
+        assert_ne!(rewritten, checkpoint);
+        std::fs::remove_file(wal).unwrap();
+        assert_ne!(checkpoint, key());
+        assert!(
+            PreviewKey::for_entry(&dir.path().join("export.json"), 100, "fp".into())
+                .database_revision
+                .is_none()
+        );
     }
 
     #[test]

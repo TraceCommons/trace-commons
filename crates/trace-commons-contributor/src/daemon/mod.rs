@@ -1184,7 +1184,9 @@ async fn drain_approved(
                 uploaded_this_pass = true;
             }
             uploader::UploadDecision::Superseded { new_hash } => {
-                let size = std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(0);
+                // The adapter's fresh observation covers grouped transcripts and
+                // virtual database sessions, neither of which a path stat sizes.
+                let size = session_ref.size_bytes;
                 if let Some(fresh) = q.supersede(entry.entry_id, &new_hash, size, now) {
                     let max = shared
                         .settings
