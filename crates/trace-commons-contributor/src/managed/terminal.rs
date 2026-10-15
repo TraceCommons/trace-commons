@@ -168,6 +168,39 @@ pub fn installed() -> Vec<TerminalApp> {
     }
 }
 
+/// The last answer to "which terminal apps are installed", reused for
+/// [`InstalledCache::FRESH`] so a snapshot does not start a probe process
+/// each time a shell asks. A launch in an app the answer lacks asks again,
+/// so an app installed a moment ago is not refused for the window's length.
+#[derive(Debug, Default)]
+pub struct InstalledCache {
+    answer: Option<(std::time::Instant, Vec<TerminalApp>)>,
+}
+
+impl InstalledCache {
+    pub const FRESH: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// The installed apps at `now`. `launching` is the app a launch is
+    /// about to open, if any; `probe` asks the OS.
+    pub fn get(
+        &mut self,
+        now: std::time::Instant,
+        launching: Option<TerminalApp>,
+        probe: impl FnOnce() -> Vec<TerminalApp>,
+    ) -> Vec<TerminalApp> {
+        if let Some((at, apps)) = &self.answer {
+            let fresh = now.saturating_duration_since(*at) <= Self::FRESH;
+            let covers = launching.is_none_or(|app| apps.contains(&app));
+            if fresh && covers {
+                return apps.clone();
+            }
+        }
+        let apps = probe();
+        self.answer = Some((now, apps.clone()));
+        apps
+    }
+}
+
 /// A JavaScript for Automation script printing one line per app in
 /// [`TerminalApp::ALL`]: its bundle's path, or an empty line. Built only
 /// from the fixed bundle ids.
@@ -594,6 +627,46 @@ mod tests {
         for app in TerminalApp::ALL {
             assert!(probe.contains(app.bundle_id()));
         }
+    }
+
+    /// The probe runs once per freshness window, however many snapshots
+    /// ask; a launch whose app the cached answer lacks asks again, so an
+    /// app installed a moment ago is not refused for the window's length.
+    #[test]
+    fn the_installed_apps_are_probed_once_per_window() {
+        use std::cell::Cell;
+        use std::time::{Duration, Instant};
+        let probes = Cell::new(0);
+        let answer = std::cell::RefCell::new(vec![TerminalApp::Terminal]);
+        let probe = || {
+            probes.set(probes.get() + 1);
+            answer.borrow().clone()
+        };
+        let mut cache = InstalledCache::default();
+        let start = Instant::now();
+        assert_eq!(cache.get(start, None, probe), [TerminalApp::Terminal]);
+        assert_eq!(
+            cache.get(start + Duration::from_secs(5), None, probe),
+            [TerminalApp::Terminal]
+        );
+        assert_eq!(probes.get(), 1, "a fresh answer is reused");
+        // Terminal is in the answer: a launch in it does not ask again.
+        cache.get(start, Some(TerminalApp::Terminal), probe);
+        assert_eq!(probes.get(), 1);
+        // Ghostty was installed since: a launch in it asks once more.
+        *answer.borrow_mut() = vec![TerminalApp::Terminal, TerminalApp::Ghostty];
+        assert_eq!(
+            cache.get(start, Some(TerminalApp::Ghostty), probe),
+            [TerminalApp::Terminal, TerminalApp::Ghostty]
+        );
+        assert_eq!(probes.get(), 2);
+        // Past the window, a snapshot asks again.
+        cache.get(
+            start + InstalledCache::FRESH + Duration::from_secs(1),
+            None,
+            probe,
+        );
+        assert_eq!(probes.get(), 3);
     }
 
     /// The real probe on a Mac: Terminal ships with macOS, so LaunchServices

@@ -31,9 +31,12 @@ pub struct ManagedService {
     /// Proxies the daemon hosts for sessions on the NEAR AI sign-in, by
     /// session id. Only the daemon holds the sign-in credential.
     routes: std::collections::HashMap<Uuid, ManagedRoute>,
-    /// Which terminal apps are installed, asked at each snapshot and launch.
-    /// A field so tests answer it without asking the OS.
+    /// Which terminal apps are installed. A field so tests answer it
+    /// without asking the OS; asked through `installed_cache`.
     installed_terminals: fn() -> Vec<TerminalApp>,
+    /// The last answer, reused for a short window so a snapshot does not
+    /// start a probe process each time a shell asks.
+    installed_cache: terminal::InstalledCache,
 }
 
 #[derive(Deserialize)]
@@ -53,7 +56,16 @@ impl ManagedService {
             secrets: SecretStore::new(store),
             routes: std::collections::HashMap::new(),
             installed_terminals: terminal::installed,
+            installed_cache: terminal::InstalledCache::default(),
         })
+    }
+
+    /// The installed terminal apps, from the cache when it is fresh and
+    /// holds `launching`.
+    fn installed_terminals(&mut self, launching: Option<TerminalApp>) -> Vec<TerminalApp> {
+        let probe = self.installed_terminals;
+        self.installed_cache
+            .get(std::time::Instant::now(), launching, probe)
     }
 
     /// Redeem a ticket. A session on the NEAR AI sign-in is refused without
@@ -128,7 +140,8 @@ impl ManagedService {
                 let defaults =
                     signin::defaults(saved, sign_in, |tool| self.accounts.generation(tool));
                 // The installed apps, for a shell's picker; empty off macOS.
-                let choices: Vec<Value> = (self.installed_terminals)()
+                let choices: Vec<Value> = self
+                    .installed_terminals(None)
                     .into_iter()
                     .map(|app| json!({"id":app.id(),"name":app.name()}))
                     .collect();
@@ -199,7 +212,7 @@ impl ManagedService {
                 }
                 let p: Params = parse(request)?;
                 self.sessions.validate_ticket(p.session_id, &p.ticket)?;
-                let installed = (self.installed_terminals)();
+                let installed = self.installed_terminals(choice.app());
                 terminal::launch(
                     choice,
                     &installed,
