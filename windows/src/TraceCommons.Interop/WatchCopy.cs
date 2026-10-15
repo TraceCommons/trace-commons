@@ -42,7 +42,7 @@ public static class WatchCopy
     /// The core's one name for a folder mode, by wire mode: the disclosure
     /// bundle's <c>folder_mode_labels</c>
     /// (<c>project_copy::FOLDER_MODE_LABELS</c>). Owner decision, 2026-10-02:
-    /// a mode reads by one name, Ask me, Automatic or Never, on every surface of every
+    /// a mode reads by one name, Ask, Automatic or Never, on every surface of every
     /// shell, and this shell types none of the three. <c>ask</c>, this shell's
     /// spelling of <c>notify_only</c> (<see cref="ProjectManualMode"/>), reads
     /// as it. Empty for a mode the table does not name, or if the core could

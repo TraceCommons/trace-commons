@@ -69,7 +69,7 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertEqual(checked(nil), [])
         let before = try await client.status()
         XCTAssertEqual(before.contributionMode, "notify_only")
-        XCTAssertEqual(checked(before), ["notify_only"], "every folder on Ask me checks Ask me, not Mixed")
+        XCTAssertEqual(checked(before), ["notify_only"], "every folder on Ask checks Ask, not Mixed")
         XCTAssertEqual(checked(try Self.status(before, contributionMode: "mixed")), [nil])
         XCTAssertEqual(checked(try Self.status(before, contributionMode: "auto_upload")), ["auto_upload"])
         XCTAssertEqual(checked(before, stale: true), [])
@@ -386,8 +386,8 @@ final class MenuBarGlassPanelTests: XCTestCase {
 
     /// Under an Automatic override, clearing starts no new unattended
     /// sending (a folder set to Automatic already sends under its own
-    /// arming, and Ask me folders go back to asking), so Mixed clears at
-    /// once; under Ask me or Never it is still confirmed (#1256 review).
+    /// arming, and Ask folders go back to asking), so Mixed clears at
+    /// once; under Ask or Never it is still confirmed (#1256 review).
     func test_mixedClearsAnAutomaticOverrideAtOnce() async throws {
         let ask = ProjectRow(projectId: "a", projectLabel: "a", mode: .ignore, folderMode: .ask)
         let auto = ProjectRow(projectId: "u", projectLabel: "u", mode: .ignore, folderMode: .autoUpload)

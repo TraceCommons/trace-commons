@@ -76,7 +76,7 @@ public class WatchCopyTests
 
     /// <summary>
     /// The note REPLACES the state line rather than joining it: "you'll always
-    /// be asked" already says what "Ask me" says, and a row carrying both
+    /// be asked" already says what "Ask" says, and a row carrying both
     /// says the same thing twice.
     /// </summary>
     [Fact]
@@ -166,7 +166,7 @@ public class WatchCopyTests
     }
 
     /// <summary>
-    /// An armed row says it is armed. Reporting "Ask me" there would
+    /// An armed row says it is armed. Reporting "Ask" there would
     /// state the opposite of what the daemon does with the next session, and
     /// rendering nothing leaves the row that most needs a state line without
     /// one -- which is what this screen did while the armed mode had no arm.

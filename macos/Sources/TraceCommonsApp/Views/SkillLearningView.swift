@@ -457,7 +457,7 @@ private struct SkillTrialRow: View {
                 .fixedSize(horizontal: false, vertical: true)
             Link(copy.openFixtureSource, destination: trial.sourceURL)
                 .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.accentText)
+                .foregroundStyle(GlassTokens.Color.linkText.color)
                 .frame(minHeight: 44, alignment: .leading)
                 .contentShape(Rectangle())
                 .accessibilityLabel("\(copy.openFixtureSource): \(trial.taskID)")

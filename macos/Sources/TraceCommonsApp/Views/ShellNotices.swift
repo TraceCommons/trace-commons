@@ -78,7 +78,7 @@ struct ShellNotices: View {
                 )
             }
             // A finished first run's last word (Automatic was refused, so
-            // sharing is on Ask me). Here because the first-run host is gone
+            // sharing is on Ask). Here because the first-run host is gone
             // by the time it can be read.
             if let notice = model.firstRunNotice {
                 GlassNotice(tone: .ask, title: notice) {
@@ -403,7 +403,7 @@ struct ArmingRewordedNoticeCard: View {
     let notice: ArmingRewordedNotice
     let refused: Bool
     let onAcknowledge: () -> Void
-    /// Present only when the Rust offered "Ask me" and the element
+    /// Present only when the Rust offered "Ask" and the element
     /// names a project.
     let onAskFirst: (() -> Void)?
 

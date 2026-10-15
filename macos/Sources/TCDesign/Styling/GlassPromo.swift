@@ -91,6 +91,18 @@ public struct GlassPromoCard<Content: View>: View {
     static var hoverDark: Double { 0.06 }
     static var hoverLight: Double { 0.07 }
 
+    /// The ground under the tint: the card's own fill in the dark theme,
+    /// and white in light, so the brand tint reads clean rather than muddy
+    /// over the grey pane (owner, 2026-10-12).
+    @ViewBuilder
+    static func base(_ scheme: ColorScheme, shape: RoundedRectangle) -> some View {
+        if scheme == .dark {
+            GlassTier.card.fill(in: shape)
+        } else {
+            shape.fill(Color.white)
+        }
+    }
+
     public var body: some View {
         let shape = RoundedRectangle(cornerRadius: GlassTier.card.radius, style: .continuous)
         let strength = Self.strength(colorScheme)
@@ -100,7 +112,7 @@ public struct GlassPromoCard<Content: View>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
                 ZStack {
-                    GlassTier.card.fill(in: shape)
+                    Self.base(colorScheme, shape: shape)
                     GlassPromoTint(strength: strength)
                     GlassPromoLight(
                         treatment: treatment, pointer: pointer, strength: strength, still: reduceMotion)

@@ -980,7 +980,7 @@ A `Pending` entry in an `ignore` folder does not count (setting `ignore`
 refuses what was waiting, so one there is only a transient, and the
 contributor has already said "never offer these"), unless it is
 `held_for_review` or returned from Keep. Manual Scrub check does not override
-Ignore. `notify_only` ("Ask me") counts every `Pending` entry.
+Ignore. `notify_only` ("Ask") counts every `Pending` entry.
 
 Computed fresh on every `status` (and therefore on `snapshot`, since
 `subscribe` sends `status` inside it) from the queue, policy and Scrub check
@@ -2152,7 +2152,7 @@ The picker's Continue: approve exactly the sessions named, as a person's
 approval. Each one is pinned to a preview and held for the undo window
 exactly as a click on a card is (`approve` and this method share one
 implementation), and it is recorded as the person's own, so a later change
-of the folder's rule -- back to Ask me, or to Never -- does not take it back.
+of the folder's rule -- back to Ask, or to Never -- does not take it back.
 "Include every past session in {folder}" is a selection of every id the
 listing returned (at most 500, see `not_listed`), never `include_backlog`.
 
@@ -2248,7 +2248,7 @@ approval does not land the offer it leaves still waits for a person.
 ### The contribution override
 
 The menu-bar Contribution mode pill (R13, #1202; requested on #1173) offers
-three global overrides: **Ask me** (`notify_only`), **Auto contribute**
+three global overrides: **Ask** (`notify_only`), **Auto contribute**
 (`auto_upload`) and **Never** (`ignore`). `set_contribution_override` sets
 one; `clear_contribution_override` clears it.
 
@@ -2259,7 +2259,7 @@ back on exactly the mode it had. `set_project_mode` still works while an
 override is in force: it sets the folder's own mode (`list_projects`
 `folder_mode`), and the override still decides `mode` until it clears. Its
 reply then carries `overridden_by`: the override's mode when the override
-still decides that folder (for example a folder set to Ask me under Auto
+still decides that folder (for example a folder set to Ask under Auto
 contribute, whose new sessions are still approved unattended), and `null`
 when the folder now resolves to what was set -- always so with no override,
 and always so for Never, which every override leaves alone. A shell shows
@@ -2267,11 +2267,11 @@ the change as saved but not yet in effect when `overridden_by` is present.
 
 What each override does, with the stricter rule winning:
 
-| Override | Folder set to Automatic | Folder set to Ask me, or never ruled on | Folder set to Never | Unresolved bucket |
+| Override | Folder set to Automatic | Folder set to Ask, or never ruled on | Folder set to Never | Unresolved bucket |
 |---|---|---|---|---|
 | `ignore` | Never | Never | Never | Never |
-| `notify_only` | Ask me | Ask me | **Never** | Ask me (or Never if set) |
-| `auto_upload` | Automatic, under its own holds | **Automatic from now** | **Never** | Ask me (or Never if set) |
+| `notify_only` | Ask | Ask | **Never** | Ask (or Never if set) |
+| `auto_upload` | Automatic, under its own holds | **Automatic from now** | **Never** | Ask (or Never if set) |
 
 - **Never** queues and sends nothing from any folder (#1208). Nothing
   waiting is refused: entries already `pending` stay `pending` (they leave
@@ -2287,7 +2287,7 @@ What each override does, with the stricter rule winning:
   finished while it is in force are not queued; once it clears, the next
   pass offers them under each folder's own mode -- an Automatic folder
   sends them unattended.
-- **Ask me** leaves nothing to go unattended. Every unattended approval not
+- **Ask** leaves nothing to go unattended. Every unattended approval not
   yet sent in a folder that no longer resolves to Automatic goes back to
   `pending` (counted in `returned`), and the send path returns any that
   comes back from `uploading`. A folder set to Never stays Never.
@@ -2376,7 +2376,7 @@ status is unread or the daemon is down. `tc_contribution_override_confirm_json(m
 confirmation; for `auto_upload` it carries `arming`, the Flow 1 grant
 screens' disclosure table for the configuration in `config_dir`. For
 `mode` `"clear"` it returns the confirmation a shell shows before
-`clear_contribution_override` when the override in force is Ask me or Never
+`clear_contribution_override` when the override in force is Ask or Never
 and any folder's own setting is Automatic, or the folder list or a folder's
 own setting is unknown (under an Automatic override clearing resumes nothing,
 so it is not confirmed): its `mode` is
@@ -2849,13 +2849,13 @@ file says `auto_upload`, because the daemon refuses to act on that.
 #### `unpurposed_traces` (K7)
 
 A top-level count beside `projects[]`, for the design's suggestion: "27 scrubbed
-sessions are sitting on this Mac under folders set to Ask me. None has been
+sessions are sitting on this Mac under folders set to Ask. None has been
 decided." It is the number of queue entries that are, all three:
 
 - **`Pending`** -- undecided. An entry already `Approved`, `Uploaded`,
   `Refused`, `Expired`, or `Superseded` has already been decided, one way or
   another, and is not part of a backlog waiting on a person.
-- **In a project whose mode resolves to `notify_only`** ("Ask me"). An
+- **In a project whose mode resolves to `notify_only`** ("Ask"). An
   **armed** (`auto_upload`) project is excluded on its resolved mode, not on
   the entry's own approval state -- a gate-held armed session is also
   `Pending` with nothing decided about it (see the design's note that

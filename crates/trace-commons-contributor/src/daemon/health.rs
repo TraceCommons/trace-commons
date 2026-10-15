@@ -154,7 +154,7 @@ pub fn precedence(label: &str) -> u8 {
         LABEL_WITNESS_SATURATED => 8,
         // Below a busy witness, which concerns sessions already approved,
         // and above the budgets: it stops a whole armed folder, and the
-        // contributor can act on it by switching the folder to Ask me.
+        // contributor can act on it by switching the folder to Ask.
         // `status.automatic_contribution_held` reports it whatever holds
         // this slot.
         LABEL_AUTOMATIC_CONTRIBUTION_HELD => 9,

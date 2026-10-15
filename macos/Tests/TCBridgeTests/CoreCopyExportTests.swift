@@ -190,21 +190,18 @@ final class CoreCopyExportTests: XCTestCase {
 
     // MARK: - The surviving-secret line
 
-    /// The line never names a number of secrets: it counts detection sites,
-    /// and names them.
-    func testTheSurvivorLineInflectsAndNamesItsSites() {
-        XCTAssertEqual(
-            TCCoreCopy.residualSecretLine(count: 1, sites: []),
-            "A secret found here is still in what would be sent"
-        )
-        XCTAssertEqual(
-            TCCoreCopy.residualSecretLine(count: 2, sites: []),
-            "Secrets found in 2 places are still in what would be sent"
-        )
+    /// The line inflects, in plain words (owner, 2026-10-12): schema paths
+    /// are left to Look inside, and a scan that could not run is said as
+    /// that, never as a count.
+    func testTheSurvivorLineInflectsInPlainWords() {
+        XCTAssertEqual(TCCoreCopy.residualSecretLine(count: 1, sites: []), "1 secret is still in this trace")
+        XCTAssertEqual(TCCoreCopy.residualSecretLine(count: 2, sites: []), "2 secrets are still in this trace")
         XCTAssertEqual(
             TCCoreCopy.residualSecretLine(count: 2, sites: ["events.1.x", "events.9.y"]),
-            "Secrets found in 2 places are still in what would be sent (events.1.x, events.9.y)"
-        )
+            "2 secrets are still in this trace")
+        XCTAssertEqual(
+            TCCoreCopy.residualSecretLine(count: 1, sites: ["{scan_unavailable}"]),
+            "This trace could not be checked for leftover secrets, so treat it as holding one.")
     }
 
     // MARK: - The extra privacy scan

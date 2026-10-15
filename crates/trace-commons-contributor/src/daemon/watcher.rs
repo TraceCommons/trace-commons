@@ -1559,7 +1559,7 @@ fn visit_session(
     // whatever the folder's mode (`from_trajectory`).
     let mode = if mode == ProjectMode::NotifyOnly && !from_trajectory {
         // The grant arms the folder's own mode; what is in force is then
-        // read again, so a contribution override ("Ask me") still governs
+        // read again, so a contribution override ("Ask") still governs
         // a folder the grant has just armed (#1173).
         arm_by_default(shared, ctx, source, &project_key, &obs.path);
         shared
@@ -1684,7 +1684,7 @@ fn visit_session(
         );
     }
     // The Manual Scrub check arms nothing either (K4 of #1118): the session
-    // is queued `Pending` for a person, like any in an Ask me folder.
+    // is queued `Pending` for a person, like any in an Ask folder.
     let would_arm = mode == ProjectMode::AutoUpload
         && ctx.consent_chosen
         && !ctx.scrub_check_manual
@@ -3936,7 +3936,7 @@ mod tests {
     /// a file somebody added, not a session of an agent store the grant
     /// covers, and the session itself always waits for a person. An export
     /// naming an unrecorded project writes no `armed-by-default` row and
-    /// leaves that folder on Ask me.
+    /// leaves that folder on Ask.
     #[tokio::test]
     async fn a_trajectory_export_does_not_arm_a_folder_under_the_grant() {
         let f = WatcherFixture::new();
@@ -3983,7 +3983,7 @@ mod tests {
     }
 
     /// #1173: the Flow 1 grant arms a newly discovered folder's own mode, but
-    /// an "Ask me" contribution override still governs it -- the mode in
+    /// an "Ask" contribution override still governs it -- the mode in
     /// force is read again after `arm_by_default`, so the new session waits
     /// for a person. Clearing the override leaves the folder armed.
     #[tokio::test]
@@ -5955,7 +5955,7 @@ mod tests {
     }
 
     /// The selection is a person's decision: it outlives the folder's rule
-    /// going back to Ask me, which retracts only unattended approvals.
+    /// going back to Ask, which retracts only unattended approvals.
     #[tokio::test]
     async fn include_survives_switching_the_folder_to_ask_me() {
         let f = WatcherFixture::new();
@@ -6396,7 +6396,7 @@ mod tests {
     }
 
     /// Kristi N5: a Never set after the include does not take the person's
-    /// approval back, any more than Ask me does.
+    /// approval back, any more than Ask does.
     #[tokio::test]
     async fn include_survives_switching_the_folder_to_never() {
         let f = WatcherFixture::new();

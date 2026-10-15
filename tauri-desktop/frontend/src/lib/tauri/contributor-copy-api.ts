@@ -187,7 +187,7 @@ export type ContributorDisclosureCopy = {
   project_automatic_unavailable: string;
   /**
    * Each folder mode's one name, by wire mode
-   * (`project_copy::FOLDER_MODE_LABELS`): "Ask me", "Automatic", "Never".
+   * (`project_copy::FOLDER_MODE_LABELS`): "Ask", "Automatic", "Never".
    */
   folder_mode_labels: Record<string, string>;
   near_ai_enroll: {

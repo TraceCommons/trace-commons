@@ -2591,7 +2591,7 @@ impl DaemonShared {
             "decisions_owed": decisions_owed,
             // Additive (nudge U1). The count `list_projects` carries as
             // `unpurposed_traces`, from the same `queue::unpurposed_traces`:
-            // previewed `Pending` entries in folders set to Ask me. Every one
+            // previewed `Pending` entries in folders set to Ask. Every one
             // is also in `decisions_owed`; never a badge number of its own.
             "unpurposed_traces": unpurposed_traces,
             // Additive (nudge S3). Which in-app suggestion leads, if any:
@@ -4922,7 +4922,7 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
     }
     // Arming sends on the contributor's behalf, so it needs scopes they
-    // chose. Ask me and Never only ever stop sends, and stay allowed.
+    // chose. Ask and Never only ever stop sends, and stay allowed.
     if mode == ProjectMode::AutoUpload {
         let cfg = shared.store.load_config().ok().flatten();
         if let Some(label) = crate::config::consent_hold(cfg.as_ref()) {
@@ -5172,7 +5172,7 @@ fn contribution_mode_value(policy: &ProjectPolicy, queue: &super::queue::Queue) 
 }
 
 /// Put back to waiting every unattended approval that a stopping override
-/// ("Ask me", "Never") leaves with no standing yes: one in a folder that no
+/// ("Ask", "Never") leaves with no standing yes: one in a folder that no
 /// longer resolves to `AutoUpload`. Never refused, so clearing the override
 /// restores them. Call with the policy lock held and the queue lock taken
 /// after it.
@@ -11259,7 +11259,7 @@ mod tests {
         );
     }
 
-    /// An old install without a settings file whose folders are all Ask me
+    /// An old install without a settings file whose folders are all Ask
     /// has no Scrub check provenance to save, but its notification offers
     /// must still reach disk before startup marks the policy migrated, or
     /// the next start reads it as a new install.
@@ -11288,7 +11288,7 @@ mod tests {
         }
     }
 
-    /// Kristi's #1300 review, finding 2: an Ask me install that ran a build
+    /// Kristi's #1300 review, finding 2: an Ask install that ran a build
     /// after #1162 has its policy marked migrated and no settings file.
     /// Startup still treats it as existing and saves the offers, so the new
     /// kinds never come on for it unasked.
@@ -12096,7 +12096,7 @@ mod tests {
     }
 
     /// K7's suggestion: "27 scrubbed sessions are sitting on this Mac under
-    /// folders set to Ask me. None has been decided." Three entries, each
+    /// folders set to Ask. None has been decided." Three entries, each
     /// failing exactly one of the three conditions the count requires, so a
     /// broken filter shows up as a wrong number rather than a coincidence:
     ///
@@ -17861,7 +17861,7 @@ mod tests {
         assert!(o.claim.is_some());
     }
 
-    /// "Ask me" puts what went unattended back to waiting, and says so on
+    /// "Ask" puts what went unattended back to waiting, and says so on
     /// both events; clearing restores the folder's own mode and the watcher
     /// may approve again.
     #[test]
@@ -18079,7 +18079,7 @@ mod tests {
         );
     }
 
-    /// The backlog an "Automatic" override found waiting in an Ask me
+    /// The backlog an "Automatic" override found waiting in an Ask
     /// folder still needs a person: the badge does not drop.
     #[test]
     fn an_auto_override_leaves_the_backlog_on_the_badge() {
@@ -18159,7 +18159,7 @@ mod tests {
     /// Under an enrollment whose scopes nobody chose, every way of sending is
     /// refused with one fixed label, before anything is approved, armed or
     /// recorded: `approve` in all three forms, arming a folder, and an
-    /// `auto_upload` contribution override. What only stops sends -- Ask me,
+    /// `auto_upload` contribution override. What only stops sends -- Ask,
     /// Never -- is still allowed.
     #[tokio::test]
     async fn every_send_path_is_refused_while_consent_scopes_are_not_chosen() {
@@ -19602,7 +19602,7 @@ mod tests {
         }
 
         /// A leading backlog nudge counts its own subjects: the previewed
-        /// Ask me entries `unpurposed_traces` counts.
+        /// Ask entries `unpurposed_traces` counts.
         #[test]
         fn status_nudge_mission_fit_counts_the_backlog_when_it_leads() {
             let s = live();
