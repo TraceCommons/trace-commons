@@ -1,4 +1,4 @@
-//! Explicit OpenCode JSON export reader, qualified against 1.18.29.
+//! Explicit OpenCode JSON export reader, qualified against 1.18.29 and 1.19.0.
 //!
 //! No native database discovery, credential access, network requests or receipt
 //! inference. The export is a local transcript, never verbatim provider evidence.
@@ -77,15 +77,39 @@ fn export_header(path: &Path) -> Option<ExportHeader> {
 
 pub struct OpenCodeSource {
     root: PathBuf,
+    additional: Option<PathBuf>,
+    managed: bool,
 }
 impl OpenCodeSource {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            additional: None,
+            managed: false,
+        }
+    }
+    /// Managed staging holds one explicitly collected export per launch.
+    pub(crate) fn managed(root: PathBuf) -> Self {
+        Self {
+            root,
+            additional: None,
+            managed: true,
+        }
+    }
+    pub fn also_managed(mut self, root: PathBuf) -> Self {
+        if root != self.root {
+            self.additional = Some(root);
+        }
+        self
     }
     fn address(&self, path: &Path) -> Option<PathBuf> {
-        let path = real_file_within_root(&self.root, path)?;
-        (path.parent() == Some(self.root.as_path()) && path.extension()?.to_str()? == "json")
-            .then_some(path)
+        std::iter::once(&self.root)
+            .chain(self.additional.iter())
+            .find_map(|root| {
+                let path = real_file_within_root(root, path)?;
+                (path.parent() == Some(root.as_path()) && path.extension()?.to_str()? == "json")
+                    .then_some(path)
+            })
     }
     fn reference(&self, path: &Path) -> Option<SessionRef> {
         let path = self.address(path)?;
@@ -119,16 +143,23 @@ impl TraceSource for OpenCodeSource {
         SOURCE_OPENCODE
     }
     fn discover(&self) -> Result<Vec<SessionRef>> {
-        let Some(entries) = super::read_dir_for_discovery(&self.root)? else {
-            return Ok(Vec::new());
-        };
         let mut refs = Vec::new();
-        for (index, entry) in entries.enumerate() {
-            if index >= DISCOVERY_ENTRY_BUDGET {
-                bail!("opencode-discovery-entry-budget");
-            }
-            if let Some(reference) = entry.ok().and_then(|e| self.reference(&e.path())) {
-                refs.push(reference);
+        for root in std::iter::once(&self.root).chain(self.additional.iter()) {
+            let Some(entries) = super::read_dir_for_discovery(root)? else {
+                continue;
+            };
+            let budget = if self.managed || self.additional.as_ref() == Some(root) {
+                65_536
+            } else {
+                DISCOVERY_ENTRY_BUDGET
+            };
+            for (index, entry) in entries.enumerate() {
+                if index >= budget {
+                    bail!("opencode-discovery-entry-budget");
+                }
+                if let Some(reference) = entry.ok().and_then(|e| self.reference(&e.path())) {
+                    refs.push(reference);
+                }
             }
         }
         refs.sort_by(|a, b| a.path.cmp(&b.path));
@@ -257,7 +288,7 @@ fn parse_export_with_record_budget(
         serde_json::from_slice(bytes).map_err(|_| anyhow!("opencode_malformed_json"))?;
     let info = &doc["info"];
     let session_id = id(info, "id")?;
-    if field(info, "version")? != QUALIFIED_VERSION {
+    if ![QUALIFIED_VERSION, "1.19.0"].contains(&field(info, "version")?) {
         return Err(UnsupportedExportVersion.into());
     }
     let cwd = field(info, "directory")?.to_owned();
@@ -436,7 +467,7 @@ fn parse_export_with_record_budget(
     Ok(SessionTranscript {
         source_session: super::native_session_identity(SOURCE_OPENCODE, Some(session_id)),
         source: Cow::Borrowed(SOURCE_OPENCODE),
-        agent_version: Some(QUALIFIED_VERSION.into()),
+        agent_version: Some(field(info, "version")?.into()),
         model: if models.len() == 1 {
             models.into_iter().next()
         } else {

@@ -27,9 +27,11 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
     public let state: String
     public let purpose: String
     public let exitCode: Int?
+    public let model: String?
+    public let collection: String?
     public var holdsAccount: Bool { state != "exited" && state != "failed" }
     enum CodingKeys: String, CodingKey {
-        case id, tool, connection, cwd, state, purpose
+        case id, tool, connection, cwd, state, purpose, model, collection
         case accountID = "account_id", accountLabel = "account_label", projectLabel = "project_label", exitCode = "exit_code"
     }
 }
@@ -73,7 +75,7 @@ public enum ManagedSurface {
 
     /// The tool's name key, or nil for a tool this shell does not know.
     public static func toolKey(_ tool: String) -> String? {
-        ["claude", "codex"].contains(tool) ? tool : nil
+        ["claude", "codex", "opencode"].contains(tool) ? tool : nil
     }
 
     /// A failed action is said in the shared copy, never as the daemon's

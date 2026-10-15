@@ -1216,6 +1216,7 @@ impl DaemonSettings {
     /// work; see [`crate::source::SourceRoots::with_routing`].
     pub fn source_roots(&self, store: &ConfigStore) -> crate::source::SourceRoots {
         crate::source::SourceRoots::new()
+            .with_managed_opencode(store.dir().join(crate::managed::opencode::STAGING))
             .declare(
                 crate::source::SOURCE_CLAUDE_CODE,
                 self.claude_source.clone(),

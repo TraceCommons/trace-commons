@@ -48,7 +48,7 @@ impl ManagedService {
             "managed_snapshot" => {
                 let sessions = self.sessions.views()?;
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"revision":self.sessions.revision(),"accounts":self.accounts.list(),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex)},"defaults":([self.accounts.selection(ToolId::Claude),self.accounts.selection(ToolId::Codex)].into_iter().flatten().collect::<Vec<_>>()),"sessions":sessions,"capabilities":{"managed_launch":true,"terminal_launch":crate::managed::terminal::destination().is_some(),"terminal_destination":crate::managed::terminal::destination()}}),
+                    json!({"copy":crate::managed::copy::copy(),"revision":self.sessions.revision(),"accounts":self.accounts.list(),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":([self.accounts.selection(ToolId::Claude),self.accounts.selection(ToolId::Codex),self.accounts.selection(ToolId::Opencode)].into_iter().flatten().collect::<Vec<_>>()),"sessions":sessions,"capabilities":{"managed_launch":true,"terminal_launch":crate::managed::terminal::destination().is_some(),"terminal_destination":crate::managed::terminal::destination()}}),
                 )
             }
             "managed_account_add" => {
@@ -189,6 +189,8 @@ impl ManagedService {
                     return Err(ManagedError::Conflict);
                 }
                 let request = LaunchRequest {
+                    model: None,
+                    collect_traces: false,
                     request_id: Uuid::new_v4(),
                     purpose: LaunchPurpose::Login,
                     tool: account.tool,

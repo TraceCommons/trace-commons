@@ -1243,6 +1243,18 @@ impl ConfigStore {
         // Token review payloads belong to this enrollment. Never traverse a
         // substituted link into an agent's session directory. Remaining raw
         // capture leases expire independently in Ironwire's bounded spool.
+        // Collected exports belong to this contributor, while the native
+        // OpenCode profiles remain local session history. Never follow a
+        // substituted staging symlink into someone else's files.
+        let staged = self.dir.join(crate::managed::opencode::STAGING);
+        match std::fs::symlink_metadata(&staged) {
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+                std::fs::remove_dir_all(&staged).context("removing managed exports")?
+            }
+            Ok(_) => std::fs::remove_file(&staged).context("removing managed export link")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("reading managed exports"),
+        }
         let bundles = self.dir.join("token-bundles");
         match std::fs::symlink_metadata(&bundles) {
             Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
@@ -1990,6 +2002,23 @@ mod tests {
         assert!(!store.dir.join("token-bundles").exists());
         assert_eq!(
             std::fs::read(store.dir.join("agent-session.jsonl")).unwrap(),
+            b"original"
+        );
+    }
+
+    #[test]
+    fn wipe_removes_managed_exports_but_keeps_native_profiles() {
+        let (_d, store) = store();
+        let staged = store.dir.join(crate::managed::opencode::STAGING);
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(staged.join("trace.json"), b"private").unwrap();
+        let profile = store.dir.join("managed-profiles");
+        std::fs::create_dir(&profile).unwrap();
+        std::fs::write(profile.join("native-session"), b"original").unwrap();
+        store.wipe().unwrap();
+        assert!(!staged.exists());
+        assert_eq!(
+            std::fs::read(profile.join("native-session")).unwrap(),
             b"original"
         );
     }

@@ -766,6 +766,7 @@ pub enum TrajectorySelection {
 ///   [`Undeclared`] policy, not one rule for everybody.
 #[derive(Clone, Default)]
 pub struct SourceRoots {
+    managed_opencode: Option<PathBuf>,
     declared: BTreeMap<&'static str, SourceDeclaration>,
     trajectory: TrajectorySelection,
     /// A routing overlay to attach to every adapter these roots build.
@@ -798,6 +799,14 @@ impl std::fmt::Debug for SourceRoots {
 }
 
 impl SourceRoots {
+    /// Only exports explicitly requested at managed launch enter this folder.
+    pub fn with_managed_opencode(mut self, root: PathBuf) -> Self {
+        if root.is_dir() {
+            self.managed_opencode = Some(root);
+        }
+        self
+    }
+
     /// What each source these roots build reads from: its name and the root
     /// `all_sources` would give it. For the daemon's automatic grant, which
     /// records what is on disk per source, so a harness connected after the
@@ -817,6 +826,15 @@ impl SourceRoots {
             if let Some(root) = root {
                 out.insert(spec.name, root.to_string_lossy().to_string());
             }
+        }
+        if let Some(managed) = &self.managed_opencode
+            && !matches!(
+                self.declared.get(SOURCE_OPENCODE),
+                Some(SourceDeclaration::Off)
+            )
+        {
+            let identity = out.entry(SOURCE_OPENCODE).or_default();
+            identity.push_str(&format!(" managed:{}", managed.to_string_lossy()));
         }
         let trajectory = match &self.trajectory {
             TrajectorySelection::None => None,
@@ -988,6 +1006,20 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
     let mut sources: Vec<Box<dyn TraceSource>> = Vec::new();
 
     for spec in NATIVE_SOURCES {
+        if spec.name == SOURCE_OPENCODE
+            && !matches!(roots.declared.get(spec.name), Some(SourceDeclaration::Off))
+        {
+            if let Some(managed) = &roots.managed_opencode {
+                let source = match roots.declared.get(spec.name) {
+                    Some(SourceDeclaration::Watch { path }) => {
+                        opencode::OpenCodeSource::new(path.clone()).also_managed(managed.clone())
+                    }
+                    _ => opencode::OpenCodeSource::managed(managed.clone()),
+                };
+                sources.push(Box::new(source));
+                continue;
+            }
+        }
         match roots.declared.get(spec.name) {
             Some(SourceDeclaration::Off) => {}
             Some(SourceDeclaration::Watch { path }) => sources.push((spec.build)(path.clone())),

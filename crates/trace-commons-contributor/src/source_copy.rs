@@ -162,9 +162,9 @@ pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
     let name = tool.name();
     if tool == SourceTool::OpenCode {
         return match source_mode {
-            "watch" => "OpenCode export folder selected; only saved exports are read",
+            "watch" => "OpenCode export folder selected; saved exports and sessions you collect through managed launches can be read",
             "off" => "OpenCode exports turned off. Previously queued sessions are not removed",
-            "unset" => "No OpenCode export folder selected; no exports are read",
+            "unset" => "No OpenCode export folder selected; only sessions you collect through managed launches can be read",
             _ => "OpenCode export-folder settings could not be confirmed",
         }
         .into();
@@ -183,7 +183,7 @@ pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
 
 /// Export-only importer refusal, shared by all native health surfaces.
 pub const OPENCODE_VERSION_TITLE: &str = "This OpenCode export version isn't supported.";
-pub const OPENCODE_VERSION_DETAIL: &str = "This importer supports sessions created with OpenCode 1.18.29. For other versions, wait for an importer update. Choose the folder containing opencode export SESSION_ID JSON files; the live session store is not read.";
+pub const OPENCODE_VERSION_DETAIL: &str = "This importer supports sessions created with OpenCode 1.18.29 or 1.19.0. For other versions, wait for an importer update. Choose the folder containing opencode export SESSION_ID JSON files; the live session store is not read.";
 
 /// Shared copy and source-policy metadata for editable native settings rows.
 #[derive(serde::Serialize)]
@@ -261,7 +261,7 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
                 // already names the tool, so the button need not.
                 decline: if tool == SourceTool::OpenCode { "Don't read".into() } else { "Not used".into() },
                 explanation: (tool == SourceTool::OpenCode).then_some(
-                    "Choose a folder of JSON files saved with opencode export SESSION_ID. Only those exports are read; this does not read OpenCode's live session store or configure model calls."),
+                    "Choose a folder of JSON files saved with opencode export SESSION_ID. Those exports and sessions you collect through managed launches can be read. This does not scan OpenCode's live session store or configure model calls."),
                 choose_folder: (tool == SourceTool::OpenCode).then_some("Choose an exports folder…"),
                 unset_scans_conventional: undeclared_scans_conventional(tool.adapter_name()),
             },
@@ -371,7 +371,11 @@ mod tests {
             assert!(line.contains("could not be confirmed"));
             assert_ne!(line, source_check_line(SourceTool::OpenCode, "off"));
         }
-        assert!(source_check_line(SourceTool::OpenCode, "unset").contains("no exports are read"));
+        assert!(
+            source_check_line(SourceTool::OpenCode, "unset")
+                .contains("only sessions you collect through managed launches")
+        );
+        assert!(source_check_line(SourceTool::OpenCode, "off").contains("turned off"));
         assert!(OPENCODE_VERSION_DETAIL.contains("1.18.29"));
         assert!(OPENCODE_VERSION_DETAIL.contains("live session store is not read"));
         assert_eq!(SourceTool::from_key("opencode"), Some(SourceTool::OpenCode));

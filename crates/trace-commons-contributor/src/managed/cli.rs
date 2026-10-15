@@ -21,6 +21,12 @@ pub struct LaunchArgs {
     pub connection: Option<ConnectionKind>,
     #[arg(long)]
     pub cwd: Option<PathBuf>,
+    /// Explicit model ID for a managed OpenCode session.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Collect this OpenCode session on exit for the usual review pipeline.
+    #[arg(long)]
+    pub collect_traces: bool,
 }
 
 #[derive(Subcommand)]
@@ -146,6 +152,8 @@ pub async fn launch(store: &ConfigStore, args: LaunchArgs) -> anyhow::Result<i32
         .copied()
         .unwrap_or_default();
     let request = LaunchRequest {
+        model: args.model,
+        collect_traces: args.collect_traces,
         purpose: super::sessions::LaunchPurpose::Coding,
         request_id: Uuid::new_v4(),
         tool: args.tool,
