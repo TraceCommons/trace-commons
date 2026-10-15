@@ -834,17 +834,16 @@ mod tests {
         assert!(!super::super::undeclared_scans_conventional(
             SOURCE_OPENCODE
         ));
+        let data = home.path().join("data");
+        assert!(data.is_absolute());
         let relocated = probe(home.path(), |key| {
-            (key == "XDG_DATA_HOME").then(|| "/synthetic/data".to_owned())
+            (key == "XDG_DATA_HOME").then(|| data.to_string_lossy().into_owned())
         });
         let row = relocated
             .iter()
             .find(|c| c.source == SOURCE_OPENCODE)
             .unwrap();
-        assert_eq!(
-            row.path,
-            PathBuf::from("/synthetic/data/opencode/opencode.db")
-        );
+        assert_eq!(row.path, data.join("opencode/opencode.db"));
         assert!(row.relocated_by_env);
     }
 

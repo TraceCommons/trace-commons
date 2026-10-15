@@ -500,17 +500,18 @@ mod tests {
     fn missing_database_and_conventional_root() {
         let dir = tempfile::tempdir().unwrap();
         assert!(discover(dir.path()).unwrap().is_empty());
+        let home = dir.path().join("home");
+        let data = dir.path().join("data");
+        let fallback = home.join(".local/share/opencode");
+        assert!(data.is_absolute());
+        assert_eq!(conventional_root(&home, |_| None), fallback);
         assert_eq!(
-            conventional_root(Path::new("/home/test"), |_| None),
-            Path::new("/home/test/.local/share/opencode")
+            conventional_root(&home, |_| Some(data.to_string_lossy().into_owned())),
+            data.join("opencode")
         );
         assert_eq!(
-            conventional_root(Path::new("/home/test"), |_| Some("/data".into())),
-            Path::new("/data/opencode")
-        );
-        assert_eq!(
-            conventional_root(Path::new("/home/test"), |_| Some("relative".into())),
-            Path::new("/home/test/.local/share/opencode")
+            conventional_root(&home, |_| Some("relative".into())),
+            fallback
         );
     }
     #[cfg(unix)]
