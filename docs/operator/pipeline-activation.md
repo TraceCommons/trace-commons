@@ -1927,15 +1927,48 @@ factory is one more dependency of each bundle that names it:
 A built-in bundle reports no `score_policy`, and its qualification serializes
 exactly as before.
 
-Two limits apply for now:
+A registered policy runs under the same Score runtime controls as the
+compatibility policy. Every Score policy that can bind does, except the
+minimal reference (`score_runs_under_runtime_controls`):
 
-- `PipelineQualificationStore::qualify_bundle` still accepts only the
-  compatibility family (`validate_production_package`). A package with a
-  registered Score policy can pass the startup gate, but it cannot be recorded
-  as a qualified tenant bundle until that allow-list is deliberately widened.
-- The Score lock, the `trace_gate_decisions` row, and the duplicate verdict
-  are keyed to the compatibility Score id. A registered policy runs Score and
-  Settle the way the minimal family does, without any of the three.
+- Its Score takes the tenant's Score lock, the same lock under the same name,
+  and is released uncharged as `score_lock_busy` when it finds the lock held.
+- `main`'s duplicate short-circuits (`skipped_duplicate`, then `cached`)
+  decide its Settle selection. A duplicate is kept out of the index, and its
+  Trace Credit leg completes withheld under the label with no ledger row, for
+  either Trace Credit event the factory declares. A duplicate earns nothing.
+- Settle writes its `trace_gate_decisions` row from its Score evidence. The
+  row needs `perplexity_micros`, `tail_fraction_micros`,
+  `novelty_score_micros`, `quality_passed`, `novelty_passed`, and
+  `nearest_neighbor_hash`. A registered policy whose evidence lacks one of
+  them fails its run at Settle under
+  `pipeline_gate_decision_evidence_incomplete` before any leg pays. The server
+  never fills one in.
+
+A registered policy can also record two more things on its Score output:
+
+- `award_adjustments` on its Score evidence: each entry is a safe label, a
+  factor in micros from 0 to 1,000,000, and an optional basis in micros.
+  They are listed in the order the policy applied them, so an auditor can
+  recompute the award from the policy's base amount. An empty list is not
+  serialized, so evidence without adjustments, and every stored Score outcome
+  hash, is unchanged.
+- A hold for operator review (`ScoreOutput::held_for_review`) in place of an
+  award. The run parks in `awaiting_review` at Score, uncharged, under the
+  policy's label. No Score outcome is committed, so no award and no
+  settlement leg exist. `GET /v1/review/pipeline/quarantine` lists the run
+  with `phase` `score` and the label as `hold_reason`. A Score hold cannot be
+  claimed or assessed yet: the claim answers 404, "pipeline run is not
+  waiting for review". Its exits are a withdrawal (the worker releases it,
+  and the Score then ends the run as `submission_inoperable`) or operator
+  containment, the same exits as a superseded assessment (below). The
+  built-in policies never hold.
+
+One limit applies for now: `PipelineQualificationStore::qualify_bundle` still
+accepts only the compatibility family (`validate_production_package`). A
+package with a registered Score policy can pass the startup gate, but it
+cannot be recorded as a qualified tenant bundle until that allow-list is
+deliberately widened.
 
 ## Per-phase claim lease
 

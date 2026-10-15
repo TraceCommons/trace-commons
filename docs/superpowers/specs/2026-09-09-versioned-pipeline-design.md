@@ -274,6 +274,23 @@ policy. The registry supplies only code for an id. The manifest, which the
 package signature covers, still pins the id, the configuration, and the
 dependencies.
 
+A registered Score policy runs under the compatibility policy's Score runtime
+controls: the tenant's Score lock, the `trace_gate_decisions` row that Settle
+writes from the Score evidence, and `main`'s duplicate short-circuits, which
+withhold a duplicate's Trace Credit leg whichever event the bundle settles
+under. Only the minimal reference runs without them. The gate decision row
+needs six fields of the Score evidence (`perplexity_micros`,
+`tail_fraction_micros`, `novelty_score_micros`, `quality_passed`,
+`novelty_passed`, `nearest_neighbor_hash`); a registered policy that leaves
+one out fails its run closed at Settle before any leg pays. A Score policy may
+record `award_adjustments` on its evidence (a safe label, a factor in micros
+no larger than one whole, an optional basis in micros), which is not
+serialized when empty. It may also return a hold for operator review instead
+of an award (`ScoreOutput::held_for_review`). The run then parks in
+`awaiting_review` at Score under the policy's label with no Score outcome
+committed, and the review queue lists it. Claiming and assessing a Score hold
+is not built yet.
+
 The bundle package contains the manifest and deployable artifacts. The ingest
 service makes sure that the package matches its bundle identifier before use.
 
