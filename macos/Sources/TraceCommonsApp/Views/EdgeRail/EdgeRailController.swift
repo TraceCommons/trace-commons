@@ -23,13 +23,11 @@ final class EdgeRailController {
     private var panel: EdgeRailPanel?
     private let state = EdgeRailState()
     private weak var model: AppModel?
-    private var compute: ComputeModel?
     private var screenObserver: NSObjectProtocol?
 
-    /// Hands the rail the app's models, and shows it if the switch is on.
-    func attach(model: AppModel, compute: ComputeModel) {
+    /// Hands the rail the app's model, and shows it if the switch is on.
+    func attach(model: AppModel) {
         self.model = model
-        self.compute = compute
         apply(EdgeRailPreference.isEnabled())
     }
 
@@ -45,17 +43,18 @@ final class EdgeRailController {
     }
 
     private func show() {
-        guard panel == nil, let model, let compute else { return }
+        guard panel == nil, let model else { return }
         let panel = EdgeRailPanel()
-        let root = EdgeRailView(state: state, onOpenChange: { [weak self] open in self?.place(open: open) })
+        let root = EdgeRailView(state: state, onOpenChange: Self.deferred { [weak self] open in self?.place(open: open) })
             .environmentObject(model)
-            .environment(compute)
             .tint(GlassTokens.Color.purpleSoft.color)
+            // No focus ring drawn round controls (owner, 2026-10-11).
+            .focusEffectDisabled()
             // The panel never becomes key, but the rail is what the person
             // is using while it is open: it draws in focus, without the
             // flat theme's out-of-focus dim (`inactiveDim`).
             .environment(\.controlActiveState, .key)
-        panel.contentView = NSHostingView(rootView: root)
+        panel.contentView = Self.hostingView(root)
         self.panel = panel
         state.open = false
         place(open: false)
@@ -76,6 +75,28 @@ final class EdgeRailController {
         state.open = false
     }
 
+    /// The rail's hosting view, which never sizes its window. The panel's
+    /// frame is `place(open:)`'s alone: a hosting view on its default
+    /// sizing options also sizes the window to its SwiftUI content, and the
+    /// two fought inside one layout pass until AppKit threw from
+    /// `_postWindowNeedsUpdateConstraints` and the app aborted. The rail is
+    /// borderless at a screen edge, so it takes no safe-area insets either,
+    /// which keeps the insets' invalidation out of that pass as well.
+    static func hostingView<Content: View>(_ root: Content) -> NSHostingView<Content> {
+        let hosting = NSHostingView(rootView: root)
+        hosting.sizingOptions = []
+        hosting.safeAreaRegions = []
+        return hosting
+    }
+
+    /// Runs a placement on the next turn of the run loop. Opening and
+    /// closing are asked for from inside SwiftUI's hover handling and
+    /// animation, and a window frame set there re-enters the layout pass
+    /// that is already running.
+    static func deferred(_ place: @escaping @MainActor (Bool) -> Void) -> (Bool) -> Void {
+        { open in DispatchQueue.main.async { MainActor.assumeIsolated { place(open) } } }
+    }
+
     /// Moves the panel to the main display's right edge, at the size the
     /// rail's state needs.
     private func place(open: Bool) {
@@ -90,49 +111,52 @@ final class EdgeRailController {
 @MainActor
 final class EdgeRailState {
     var open = false
-    var peek: EdgeRailPeek = .waiting
+    var peek: EdgeRailPeek = .home
 }
 
-/// The rail's icons, top to bottom.
+/// The rail's icons, top to bottom (owner, 2026-10-11): one per tab of
+/// the app, each peek a compact summary of that tab. The app's own tile
+/// closes the rail.
 enum EdgeRailPeek: CaseIterable, Identifiable {
-    case waiting, tools, balance, privateAI, compute, privacy
+    case home, privateAI, traces
 
     var id: Self { self }
 
-    var symbol: String {
+    /// The icon: a house, a shield for Private AI (owner, 2026-10-11, in
+    /// place of the key), and the Trace mark for Traces.
+    var icon: EdgeRailIcon {
         switch self {
-        case .waiting: "tray"
-        case .tools: "terminal"
-        case .balance: "creditcard"
-        case .privateAI: "key"
-        case .compute: "cpu"
-        case .privacy: "lock"
+        case .home: .symbol("house")
+        case .privateAI: .symbol("shield")
+        case .traces: .traceMark
         }
     }
 
-    /// The icon's name: Settings' name for a section Settings has, the
-    /// rail's own for the rest.
-    func name(_ rail: MonitorEdgeRailCopy?, nav: MonitorSettingsNavCopy?) -> String {
+    /// The icon's name and its peek's title: the app's tab names.
+    func name(nav: MonitorSettingsNavCopy?, shell: MonitorShellCopy?) -> String {
         switch self {
-        case .waiting: rail?.waiting ?? ""
-        case .tools: nav?.tools ?? ""
-        case .balance: rail?.balance ?? ""
+        case .home: shell?.tabHome ?? ""
         case .privateAI: nav?.privateAI ?? ""
-        case .compute: nav?.compute ?? ""
-        case .privacy: rail?.privacy ?? ""
+        case .traces: shell?.tabTraces ?? ""
         }
     }
 
-    /// Where the peek's link goes in the app.
+    /// The tab the peek's link opens.
     var destination: MonitorDestination {
         switch self {
-        case .waiting: .traces(entryId: nil)
-        case .tools: .settings(.tools)
-        case .balance, .privateAI: .inference
-        case .compute: .settings(.compute)
-        case .privacy: .settings(.watching)
+        case .home: .home(.overview)
+        case .privateAI: .inference
+        case .traces: .traces(entryId: nil)
         }
     }
+}
+
+/// What a rail icon draws: an SF Symbol, or the Trace mark.
+enum EdgeRailIcon: Equatable {
+    case symbol(String)
+    /// The Trace logo's live-trace mark (`GlassTraceMark`, Claude Design
+    /// 1c, owner 2026-10-12).
+    case traceMark
 }
 
 /// A borderless panel that floats over every app on every Space and never

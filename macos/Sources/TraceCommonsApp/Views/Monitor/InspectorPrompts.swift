@@ -26,10 +26,14 @@ struct InspectorPrompts: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            // A failed action: the line, unboxed, and its Dismiss a link
+            // after it (Ron, 2026-10-09).
             if let error = model.lastActionError {
-                GlassNotice(tone: .outside, title: error) {
+                HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                    GlassAlert(error)
                     Button(dismissWord) { model.lastActionError = nil }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.link))
+                        .fixedSize()
                 }
             }
             if let notice = model.lastActionNotice {
@@ -117,8 +121,10 @@ struct InspectorPrompts: View {
                 Button(dismissWord) { store.dismissContributed() }
                     .buttonStyle(GlassButtonStyle(.link))
                     .disabled(busy)
+            } refusal: {
+                // A refused undo, in the card under its buttons.
+                TracesRefusal(store: store, entryId: contributed.entryId)
             }
-            TracesRefusal(store: store, entryId: contributed.entryId)
         }
         if let folder = store.lastContributedFolder, let words = store.words {
             let busy = store.writing.contains(folder.projectId)
@@ -182,38 +188,56 @@ private struct UndoDetail: View {
 
 /// Ron's `UndoBar` card (`undo-bar.tsx`): the eyebrow, the line that says
 /// what was approved and the lines under it on the left, its buttons on the
-/// right, Undo then the Dismiss link. Every word is the caller's, from the
-/// core.
-private struct UndoBarCard<Detail: View, Actions: View>: View {
+/// right, Undo then the Dismiss link. A refused undo is said in the card,
+/// under the row that holds its buttons. Every word is the caller's, from
+/// the core.
+private struct UndoBarCard<Detail: View, Actions: View, Refusal: View>: View {
     let eyebrow: String?
     let title: String
     @ViewBuilder let detail: () -> Detail
     @ViewBuilder let actions: () -> Actions
+    @ViewBuilder let refusal: () -> Refusal
 
     var body: some View {
         GlassCard {
-            HStack(alignment: .center, spacing: GlassTokens.Space.s8) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    if let eyebrow {
-                        Text(eyebrow)
-                            .glassType(GlassTokens.TypeScale.eyebrow)
-                            .foregroundStyle(GlassColor.textTertiary)
-                    }
-                    Text(title)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) { detail() }
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .layoutPriority(1)
-                HStack(spacing: GlassTokens.Space.s4) { actions() }
-                    .lineLimit(1)
-                    .fixedSize()
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                row
+                refusal()
             }
         }
         .accessibilityElement(children: .contain)
+    }
+
+    private var row: some View {
+        HStack(alignment: .center, spacing: GlassTokens.Space.s8) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                if let eyebrow {
+                    Text(eyebrow)
+                        .glassType(GlassTokens.TypeScale.eyebrow)
+                        .foregroundStyle(GlassColor.textTertiary)
+                }
+                Text(title)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) { detail() }
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .layoutPriority(1)
+            HStack(spacing: GlassTokens.Space.s4) { actions() }
+                .lineLimit(1)
+                .fixedSize()
+        }
+    }
+}
+
+extension UndoBarCard where Refusal == EmptyView {
+    init(
+        eyebrow: String?, title: String,
+        @ViewBuilder detail: @escaping () -> Detail, @ViewBuilder actions: @escaping () -> Actions
+    ) {
+        self.init(eyebrow: eyebrow, title: title, detail: detail, actions: actions, refusal: { EmptyView() })
     }
 }

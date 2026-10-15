@@ -41,6 +41,16 @@
   </ItemGroup>
 
   <!--
+    The Insights analytics responses, shared with the GTK shell's tests and
+    produced by the local service itself; see the README beside them.
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../../tests/fixtures/insights-analytics/*.json"
+          Link="insights-analytics/%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
     Copy the Rust cdylib next to the test assembly so .NET's default probing
     finds it without an NATIVE_DLL_SEARCH_DIRECTORIES dance.
 

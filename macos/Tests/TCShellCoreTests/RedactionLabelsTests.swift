@@ -133,8 +133,9 @@ final class RedactionLabelsTests: XCTestCase {
     /// actually arrives most often.
     ///
     /// `redactions_distinct` is derived from the placeholder map, and
-    /// `apply_placeholder_regex` mints a numbered placeholder for exactly two
-    /// labels: `local_path` and `private_email`. Secrets are replaced with
+    /// the placeholder map mints a numbered placeholder only for
+    /// `local_path`, `private_email` and the #1362 tool-output labels.
+    /// Secrets are replaced with
     /// fixed tokens and mint none. So a secrets-only session carries an EMPTY
     /// distinct map -- and because `PreviewSummary.redactionsDistinct` has no
     /// `skip_serializing_if`, a shell reading a preview always sees the key,

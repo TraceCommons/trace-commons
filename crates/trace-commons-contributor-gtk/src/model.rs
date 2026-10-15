@@ -89,7 +89,7 @@ pub struct ArmingRewordingCard {
     pub id: Option<u64>,
     /// The core's words.
     pub notice: trace_commons_contributor::consent_copy::ArmingRewordedNoticeCopy,
-    /// The project "Ask me" switches, present only when the core
+    /// The project "Ask" switches, present only when the core
     /// offered the button.
     pub ask_first_project_id: Option<String>,
 }
@@ -493,10 +493,12 @@ pub struct PreviewSummary {
     /// is two hundred occurrences and one value. See
     /// [`crate::redaction_labels::line`].
     ///
-    /// **Only two labels can ever appear here.** Distinct counts come from
-    /// the placeholder map, and `apply_placeholder_regex` mints a numbered
-    /// placeholder for `local_path` and `private_email` and nothing else --
-    /// secrets are replaced with a bare `[REDACTED]`. So a secrets-only
+    /// **Only placeholder-minting labels can appear here.** Distinct counts
+    /// come from the placeholder map, which mints a numbered placeholder for
+    /// `local_path`, `private_email` and, since #1362, the tool-output labels
+    /// (`git_author`, `ip_address`, `private_hostname`, `os_username`,
+    /// `phone_number`) and nothing else -- secrets are replaced with a bare
+    /// `[REDACTED]`. So a secrets-only
     /// session reports occurrences and an EMPTY map here, and a missing or
     /// zero entry means "not measured", never "no distinct values".
     #[serde(default)]

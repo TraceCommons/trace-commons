@@ -31,7 +31,7 @@ pub const QUIT_TITLE: &str = concat!("Quit ", crate::app_name!(), "?");
 pub const QUIT_HOSTING_BODY: &str = concat!(
     "Quitting stops ",
     crate::app_name!(),
-    " watching for finished sessions. Nothing is queued or sent until you open it again. \
+    " watching for finished traces. Nothing is queued or sent until you open it again. \
      Anything already waiting stays waiting."
 );
 
@@ -48,7 +48,7 @@ pub const QUIT_HOSTING_BODY: &str = concat!(
 /// automatically, so no shell has to know the project policy to say it. "Unless it's paused" is there because
 /// pause is the one state in which the watcher does neither.
 pub const QUIT_ATTACHED_BODY: &str = "The background watcher keeps running after you quit. \
-     Unless it's paused, it keeps sending sessions you've already approved, and any session \
+     Unless it's paused, it keeps sending traces you've already approved, and any trace \
      from a project set to contribute automatically, including ones that finish after you \
      quit. Everything else waits for you.";
 
@@ -118,7 +118,11 @@ mod tests {
     /// Only the hosting process may say quitting stops the watcher.
     #[test]
     fn only_hosting_claims_quitting_stops_watching() {
-        assert!(QUIT_HOSTING_BODY.starts_with("Quitting stops Trace Commons watching"));
+        assert!(QUIT_HOSTING_BODY.starts_with(concat!(
+            "Quitting stops ",
+            crate::app_name!(),
+            " watching"
+        )));
         for role in [QuitRole::Attached, QuitRole::Unavailable] {
             let body = quit_prompt(role).body;
             assert!(
@@ -176,7 +180,7 @@ mod tests {
     fn role_serializes_as_a_fixed_label() {
         let value = serde_json::to_value(quit_prompt(QuitRole::Unavailable)).unwrap();
         assert_eq!(value["role"], "unavailable");
-        assert_eq!(value["title"], "Quit Trace Commons?");
+        assert_eq!(value["title"], concat!("Quit ", crate::app_name!(), "?"));
         assert_eq!(value["confirm"], "Quit");
         assert_eq!(value["cancel"], "Cancel");
         assert_eq!(serde_json::to_value(QuitRole::Hosting).unwrap(), "hosting");

@@ -107,9 +107,9 @@ final class CoreCopyExportTests: XCTestCase {
     func testTheArmingBodyIsTheAgreedWording() throws {
         XCTAssertEqual(
             try armingCopy(0).body,
-            "Sessions from this project will be scrubbed and contributed without asking "
-                + "you, from now on. You won't review them first. Sessions already on this Mac "
-                + "keep waiting for you to pick them.\n\nNo session is sent until it has been "
+            "Traces from this project will be scrubbed and contributed without asking "
+                + "you, from now on. You won't review them first. Traces already on this Mac "
+                + "keep waiting for you to pick them.\n\nNo trace is sent until it has been "
                 + "quiet for a day.\n\nYou can turn this off at any time. Anything it hasn't "
                 + "sent yet goes back to waiting for you, and anything already sent stays sent."
         )
@@ -190,21 +190,18 @@ final class CoreCopyExportTests: XCTestCase {
 
     // MARK: - The surviving-secret line
 
-    /// The line never names a number of secrets: it counts detection sites,
-    /// and names them.
-    func testTheSurvivorLineInflectsAndNamesItsSites() {
-        XCTAssertEqual(
-            TCCoreCopy.residualSecretLine(count: 1, sites: []),
-            "A secret found here is still in what would be sent"
-        )
-        XCTAssertEqual(
-            TCCoreCopy.residualSecretLine(count: 2, sites: []),
-            "Secrets found in 2 places are still in what would be sent"
-        )
+    /// The line inflects, in plain words (owner, 2026-10-12): schema paths
+    /// are left to Look inside, and a scan that could not run is said as
+    /// that, never as a count.
+    func testTheSurvivorLineInflectsInPlainWords() {
+        XCTAssertEqual(TCCoreCopy.residualSecretLine(count: 1, sites: []), "1 secret is still in this trace")
+        XCTAssertEqual(TCCoreCopy.residualSecretLine(count: 2, sites: []), "2 secrets are still in this trace")
         XCTAssertEqual(
             TCCoreCopy.residualSecretLine(count: 2, sites: ["events.1.x", "events.9.y"]),
-            "Secrets found in 2 places are still in what would be sent (events.1.x, events.9.y)"
-        )
+            "2 secrets are still in this trace")
+        XCTAssertEqual(
+            TCCoreCopy.residualSecretLine(count: 1, sites: ["{scan_unavailable}"]),
+            "This trace could not be checked for leftover secrets, so treat it as holding one.")
     }
 
     // MARK: - The extra privacy scan
@@ -227,7 +224,7 @@ final class CoreCopyExportTests: XCTestCase {
         let prompt = try XCTUnwrap(QuitPrompt.decode(
             fromJSON: TCCoreCopy.quitPromptWithoutWatcherJSON()))
         XCTAssertEqual(prompt.role, "unavailable")
-        XCTAssertEqual(prompt.title, "Quit Trace Commons?")
+        XCTAssertEqual(prompt.title, "Quit Near.ai?")
         XCTAssertFalse(prompt.body.contains("Quitting stops"), prompt.body)
         XCTAssertFalse(prompt.body.contains("stays waiting"), prompt.body)
     }
@@ -302,9 +299,10 @@ final class CoreCopyExportTests: XCTestCase {
         XCTAssertTrue(prompt.contains("cannot be recalled"), prompt)
     }
 
-    /// Exported for the screens macOS does not have yet (the legacy invite
-    /// migration panel, the connecting-inference step, the Flow 1 grant
-    /// screens), so they arrive with the core's words rather than their own.
+    /// Exported for the screens macOS does not have yet (the
+    /// connecting-inference step, the Flow 1 grant screens), so they arrive
+    /// with the core's words rather than their own, and for the legacy
+    /// invite migration offer (`LegacyMigrationNoticeBridgeTests`).
     func testTheRemainingTablesCrossAsJSONObjects() throws {
         for (name, json) in [
             ("legacy migration offer", TCCoreCopy.legacyMigrationOfferJSON()),

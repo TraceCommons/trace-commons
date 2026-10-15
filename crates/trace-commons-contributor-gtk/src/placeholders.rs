@@ -12,10 +12,11 @@
 //! `trace_contribution.rs`:
 //!
 //! * `<PRIVATE_LOCAL_PATH_1>` -- a numbered placeholder, minted by
-//!   `apply_placeholder_regex` for exactly two labels, `local_path` and
-//!   `private_email`. One token per DISTINCT value, reused wherever that
-//!   value recurs, so the same ordinal twice is the same original string
-//!   twice. This is the only form carrying an ordinal.
+//!   the placeholder map for `local_path`, `private_email` and, since #1362,
+//!   the tool-output labels (`git_author`, `ip_address`, `private_hostname`,
+//!   `os_username`, `phone_number`). One token per DISTINCT value, reused
+//!   wherever that value recurs, so the same ordinal twice is the same
+//!   original string twice. This is the only form carrying an ordinal.
 //! * `[REDACTED:private_email]` -- carries a label and no ordinal.
 //!   `privacy_filter:{label}`, `tool_sensitive_field` and
 //!   `tool_sensitive_field:{action}` all land here.

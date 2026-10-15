@@ -15,7 +15,7 @@ export function useOnboardingNearAi(onEnrolled: () => void) {
   const core = useCoreStatus();
   const queryClient = useQueryClient();
   const [commons, setCommons] = useState("");
-  const [provider, setProvider] = useState("github");
+  const [provider, setProvider] = useState("near");
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
   const credential = useQuery<CredentialStatus>({
     queryKey: privateAiKeys.credential(core.scope),

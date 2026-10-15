@@ -87,6 +87,12 @@ pub struct AccountAdmissionReservation {
     pub lease_id: Uuid,
     pub policy: BoundedPolicy,
     pub lease_seconds: i64,
+    /// The caller verified fresh NEAR AI admission evidence for this exact
+    /// account and body (`admission_evidence::verify_admission_evidence`).
+    /// A new reservation made on it debits no allowance and is recorded as
+    /// `authority_kind = 'attested'`. Ignored for a submission that already
+    /// has a row: the kind its first reservation recorded is kept.
+    pub attested: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +102,41 @@ pub struct AccountAdmissionStatus {
     pub policy_version: String,
     pub ready: bool,
     pub retry_after_seconds: Option<i64>,
+    /// The account's own earned-growth view: present only for `bounded`
+    /// authority under a `tiered-v1` policy (spec rule 7). It is advisory and
+    /// read from the same transaction as `ready`, which it never changes.
+    pub growth: Option<AccountGrowthStatus>,
+}
+
+/// One account's allowance under a `tiered-v1` policy, read the way a
+/// reservation reads it: tier 0 at the base allowance unless a fresh,
+/// generation-current applied evaluation says otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountGrowthStatus {
+    pub tier: i32,
+    pub effective_allowance: i64,
+    /// Spend in the current period, across policy versions sharing it.
+    pub period_spend: i64,
+    /// The fixed period's next boundary; `None` for a lifetime period.
+    pub period_resets_at: Option<DateTime<Utc>>,
+    /// The applied evaluation the tier came from; `None` when none applied.
+    pub evaluation: Option<AppliedEvaluationProgress>,
+}
+
+/// Counts from the applied evaluation the account's tier came from, as of
+/// its `as_of`. Counts only: no fact, submission or source identifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedEvaluationProgress {
+    pub as_of: DateTime<Utc>,
+    pub units: i32,
+    pub active_weeks: i32,
+    /// `None` for a row written before V126 stored it.
+    pub age_seconds: Option<i64>,
+    pub attested_units: i32,
+    /// When the account last reached a different tier under this policy:
+    /// the newest applied evaluation, at or before this one, whose tier
+    /// differed from the evaluation before it. `None` if it never moved.
+    pub tier_changed_at: Option<DateTime<Utc>>,
 }
 
 /// Decision and advisory metadata observed in the same transaction as the debit.
@@ -149,6 +190,104 @@ pub enum AdmissionDecision {
 fn database_refused() -> DatabaseError {
     DatabaseError::Pool("admission_database_unavailable".into())
 }
+
+/// One operator log line naming the check that refused an admission.
+///
+/// Label-only by construction: the argument is a `&'static str`, so no
+/// tenant, account, principal, submission, header value or database error
+/// text can reach the line. The client still sees only `admission_refused`.
+pub fn log_admission_refusal(label: &'static str) {
+    tracing::warn!(admission_refusal = label, "admission refused");
+}
+
+/// A `Refused` decision from `reserve_account_admission`, logged by check.
+fn refused_at(label: &'static str) -> AccountAdmissionResult {
+    log_admission_refusal(label);
+    AdmissionDecision::Refused.into()
+}
+
+/// [`database_refused`], logged by stage. The error text is never logged.
+fn database_refused_at(stage: &'static str) -> DatabaseError {
+    log_admission_refusal(stage);
+    database_refused()
+}
+
+/// Logs the stage of an error some other function produced, and passes the
+/// error through unchanged.
+fn logged_at(stage: &'static str) -> impl FnOnce(DatabaseError) -> DatabaseError {
+    move |error| {
+        log_admission_refusal(stage);
+        error
+    }
+}
+
+/// The static label for a ledger function's result that maps to `Refused`.
+/// The SQL text itself is never logged; an unrecognised value gets its own
+/// label rather than being echoed.
+fn sql_refusal_label(ledger: SqlLedger, result: &str) -> &'static str {
+    match (ledger, result) {
+        (SqlLedger::Evidence, "refused") => "evidence_ledger_sql:refused",
+        (SqlLedger::Evidence, "configuration_changed") => {
+            "evidence_ledger_sql:configuration_changed"
+        }
+        (SqlLedger::Evidence, "evidence_refused") => "evidence_ledger_sql:evidence_refused",
+        (SqlLedger::Evidence, _) => "evidence_ledger_sql:unrecognised_result",
+        (SqlLedger::LegacyResume, "refused") => "legacy_resume_sql:refused",
+        (SqlLedger::LegacyResume, "configuration_changed") => {
+            "legacy_resume_sql:configuration_changed"
+        }
+        (SqlLedger::LegacyResume, "evidence_refused") => "legacy_resume_sql:evidence_refused",
+        (SqlLedger::LegacyResume, _) => "legacy_resume_sql:unrecognised_result",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqlLedger {
+    Evidence,
+    LegacyResume,
+}
+
+/// Every label this module logs, for the uniqueness test.
+#[cfg(test)]
+const LEDGER_REFUSAL_LABELS: &[&str] = &[
+    "account_args_invalid",
+    "account_live_missing",
+    "device_not_live",
+    "trust_row_missing",
+    "trust_authority_invalid",
+    "trust_version_mismatch",
+    "bounded_with_active_grant",
+    "budget_policy_frozen_mismatch",
+    "db_error:account_pool",
+    "db_error:account_begin",
+    "db_error:account_live_query",
+    "db_error:account_device_query",
+    "db_error:account_trust_insert",
+    "db_error:account_trust_select",
+    "db_error:account_grant_query",
+    "db_error:account_trust_version_overflow",
+    "db_error:account_trust_update",
+    "db_error:account_policy_period",
+    "db_error:account_prior_select",
+    "db_error:account_effective_allowance",
+    "db_error:account_budget_insert",
+    "db_error:account_budget_select",
+    "db_error:account_period_spend",
+    "db_error:account_budget_overflow",
+    "db_error:account_budget_update",
+    "db_error:account_lease_clock",
+    "db_error:account_submission_update",
+    "db_error:account_submission_insert",
+    "db_error:account_commit",
+    "evidence_ledger_sql:refused",
+    "evidence_ledger_sql:configuration_changed",
+    "evidence_ledger_sql:evidence_refused",
+    "evidence_ledger_sql:unrecognised_result",
+    "legacy_resume_sql:refused",
+    "legacy_resume_sql:configuration_changed",
+    "legacy_resume_sql:evidence_refused",
+    "legacy_resume_sql:unrecognised_result",
+];
 
 async fn account_policy_period(
     tx: &Transaction<'_>,
@@ -270,7 +409,10 @@ impl PgBackend {
             "busy" => AdmissionDecision::Busy,
             "budget_exhausted" | "window_exhausted" => AdmissionDecision::Exhausted,
             "conflict" => AdmissionDecision::Conflict,
-            _ => AdmissionDecision::Refused,
+            other => {
+                log_admission_refusal(sql_refusal_label(SqlLedger::LegacyResume, other));
+                AdmissionDecision::Refused
+            }
         };
         tx.commit().await.map_err(|_| database_refused())?;
         Ok(decision)
@@ -335,6 +477,7 @@ impl PgBackend {
             }
         }
         let used = account_period_spend(&tx, tenant, account_id, &raw_period_id).await?;
+        let mut growth = None;
         let ready = if authority == "invited" {
             true
         } else {
@@ -346,6 +489,23 @@ impl PgBackend {
                 FrontierRead::Advisory,
             )
             .await?;
+            if policy
+                .external_growth()
+                .is_some_and(|g| g.source == crate::account_trust::GrowthSource::TieredV1)
+            {
+                growth = Some(
+                    account_growth_status(
+                        &tx,
+                        tenant,
+                        account_id,
+                        policy,
+                        &allowance,
+                        used,
+                        &raw_period_id,
+                    )
+                    .await?,
+                );
+            }
             used.checked_add(policy.processing_cost_bound())
                 .is_some_and(|next| next <= allowance.limit)
         };
@@ -356,6 +516,7 @@ impl PgBackend {
             policy_version: policy.version().into(),
             ready,
             retry_after_seconds: if ready { None } else { retry_after_seconds },
+            growth,
         }))
     }
 
@@ -374,7 +535,7 @@ impl PgBackend {
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
             || !(1..=86400).contains(&r.lease_seconds)
         {
-            return Ok(AdmissionDecision::Refused.into());
+            return Ok(refused_at("account_args_invalid"));
         }
         let tenant = r.account.tenant_id();
         let account = r.account.account_id();
@@ -382,8 +543,10 @@ impl PgBackend {
             .trace_pool()
             .get()
             .await
-            .map_err(|_| database_refused())?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+            .map_err(|_| database_refused_at("db_error:account_pool"))?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant)
+            .await
+            .map_err(logged_at("db_error:account_begin"))?;
         let account_live = tx
             .query_opt(
                 "SELECT 1 FROM trace_accounts WHERE tenant_id=$1 AND account_id=$2
@@ -391,9 +554,9 @@ impl PgBackend {
                 &[&tenant, &account],
             )
             .await
-            .map_err(|_| database_refused())?;
+            .map_err(|_| database_refused_at("db_error:account_live_query"))?;
         if account_live.is_none() {
-            return Ok(AdmissionDecision::Refused.into());
+            return Ok(refused_at("account_live_missing"));
         }
         // A separate statement sees revocation committed while we waited for
         // the account lock. Row locks serialize any later revoke/unlink with
@@ -404,10 +567,10 @@ impl PgBackend {
                 &[&tenant, &account, &r.principal_ref],
             )
             .await
-            .map_err(|_| database_refused())?
+            .map_err(|_| database_refused_at("db_error:account_device_query"))?
             .get(0);
         if !device_live {
-            return Ok(AdmissionDecision::Refused.into());
+            return Ok(refused_at("device_not_live"));
         }
 
         // A verified first use creates bounded trust only with a fully parsed,
@@ -418,7 +581,7 @@ impl PgBackend {
             &[&tenant, &account],
         )
         .await
-        .map_err(|_| database_refused())?;
+        .map_err(|_| database_refused_at("db_error:account_trust_insert"))?;
         let trust = tx
             .query_opt(
                 "SELECT authority,trust_version FROM trace_account_trust
@@ -426,18 +589,18 @@ impl PgBackend {
                 &[&tenant, &account],
             )
             .await
-            .map_err(|_| database_refused())?;
+            .map_err(|_| database_refused_at("db_error:account_trust_select"))?;
         let Some(trust) = trust else {
-            return Ok(AdmissionDecision::Refused.into());
+            return Ok(refused_at("trust_row_missing"));
         };
         let mut authority: String = trust.get(0);
         let mut version: i64 = trust.get(1);
         if version <= 0 || !matches!(authority.as_str(), "bounded" | "invited") {
-            return Ok(AdmissionDecision::Refused.into());
+            return Ok(refused_at("trust_authority_invalid"));
         }
         if let Some(expected) = r.expected_trust_version {
             if expected != version {
-                return Ok(AdmissionDecision::Refused.into());
+                return Ok(refused_at("trust_version_mismatch"));
             }
         }
         let active_grant: bool = tx
@@ -446,25 +609,28 @@ impl PgBackend {
                 &[&tenant, &account],
             )
             .await
-            .map_err(|_| database_refused())?
+            .map_err(|_| database_refused_at("db_error:account_grant_query"))?
             .get(0);
         if authority == "invited" && !active_grant {
-            version = version.checked_add(1).ok_or_else(database_refused)?;
-            tx.execute("UPDATE trace_account_trust SET authority='bounded',trust_version=$3,updated_at=clock_timestamp() WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account,&version]).await.map_err(|_|database_refused())?;
+            version = version
+                .checked_add(1)
+                .ok_or_else(|| database_refused_at("db_error:account_trust_version_overflow"))?;
+            tx.execute("UPDATE trace_account_trust SET authority='bounded',trust_version=$3,updated_at=clock_timestamp() WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account,&version]).await.map_err(|_|database_refused_at("db_error:account_trust_update"))?;
             authority = "bounded".into();
         } else if authority == "bounded" && active_grant {
-            return Ok(AdmissionDecision::Refused.into());
+            return Ok(refused_at("bounded_with_active_grant"));
         }
-        let (raw_period_id, retry_after_seconds) =
-            account_policy_period(&tx, r.policy.period()).await?;
+        let (raw_period_id, retry_after_seconds) = account_policy_period(&tx, r.policy.period())
+            .await
+            .map_err(logged_at("db_error:account_policy_period"))?;
         let period_id = format!("{}:{raw_period_id}", r.policy.version());
         // Every submission ID binds once to an account and exact body, even
         // when a lease expires or the policy changes.
         let prior = tx.query_opt(
-            "SELECT account_id,body_hash,status,lease_expires_at > clock_timestamp() FROM trace_account_admission_submissions
+            "SELECT account_id,body_hash,status,lease_expires_at > clock_timestamp(),authority_kind FROM trace_account_admission_submissions
              WHERE tenant_id=$1 AND submission_id=$2 FOR UPDATE",
             &[&tenant, &r.submission_id],
-        ).await.map_err(|_| database_refused())?;
+        ).await.map_err(|_| database_refused_at("db_error:account_prior_select"))?;
         if let Some(ref prior) = prior {
             if prior.get::<_, Uuid>(0) != account || prior.get::<_, String>(1) != r.body_hash {
                 return Ok(AdmissionDecision::Conflict.into());
@@ -478,31 +644,44 @@ impl PgBackend {
                 return Ok(AdmissionDecision::Busy.into());
             }
         }
-        let charged = authority != "invited";
+        // The admitting authority is fixed by the first reservation, like the
+        // account and body binding: a retry neither gains nor loses it.
+        let attested = match prior {
+            Some(ref prior) => prior.get::<_, String>(4) == "attested",
+            None => r.attested,
+        };
+        let authority_kind = if attested { "attested" } else { "account" };
+        // Attested uploads buy volume directly: no budget row is created or
+        // read, so neither the allowance nor its freeze rule below applies.
+        let charged = authority != "invited" && !attested;
         let allowance = if charged {
             account_effective_allowance(&tx, tenant, account, &r.policy, FrontierRead::Locked)
-                .await?
+                .await
+                .map_err(logged_at("db_error:account_effective_allowance"))?
         } else {
             EffectiveAllowance {
                 limit: r.policy.bounded_allowance(),
                 tier: None,
                 digest: None,
+                evaluation_id: None,
             }
         };
         if charged {
-            tx.execute("INSERT INTO trace_account_admission_budget(tenant_id,account_id,period_id,policy_version,cost_limit,cost_bound) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", &[&tenant,&account,&period_id,&r.policy.version(),&r.policy.bounded_allowance(),&r.policy.processing_cost_bound()]).await.map_err(|_|database_refused())?;
-            let budget = tx.query_one("SELECT cost_used,cost_limit,cost_bound,policy_version FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2 AND period_id=$3 FOR UPDATE", &[&tenant,&account,&period_id]).await.map_err(|_|database_refused())?;
+            tx.execute("INSERT INTO trace_account_admission_budget(tenant_id,account_id,period_id,policy_version,cost_limit,cost_bound) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", &[&tenant,&account,&period_id,&r.policy.version(),&r.policy.bounded_allowance(),&r.policy.processing_cost_bound()]).await.map_err(|_|database_refused_at("db_error:account_budget_insert"))?;
+            let budget = tx.query_one("SELECT cost_used,cost_limit,cost_bound,policy_version FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2 AND period_id=$3 FOR UPDATE", &[&tenant,&account,&period_id]).await.map_err(|_|database_refused_at("db_error:account_budget_select"))?;
             let used: i64 = budget.get(0);
             if budget.get::<_, i64>(1) != r.policy.bounded_allowance()
                 || budget.get::<_, i64>(2) != r.policy.processing_cost_bound()
                 || budget.get::<_, String>(3) != r.policy.version()
             {
-                return Ok(AdmissionDecision::Refused.into());
+                return Ok(refused_at("budget_policy_frozen_mismatch"));
             }
-            let total_used = account_period_spend(&tx, tenant, account, &raw_period_id).await?;
+            let total_used = account_period_spend(&tx, tenant, account, &raw_period_id)
+                .await
+                .map_err(logged_at("db_error:account_period_spend"))?;
             let next = total_used
                 .checked_add(r.policy.processing_cost_bound())
-                .ok_or_else(database_refused)?;
+                .ok_or_else(|| database_refused_at("db_error:account_budget_overflow"))?;
             if next > allowance.limit {
                 return Ok(AccountAdmissionResult {
                     decision: AdmissionDecision::Exhausted,
@@ -511,7 +690,7 @@ impl PgBackend {
                     period_spend: Some(total_used),
                 });
             }
-            tx.execute("UPDATE trace_account_admission_budget SET cost_used=$4 WHERE tenant_id=$1 AND account_id=$2 AND period_id=$3", &[&tenant,&account,&period_id,&(used + r.policy.processing_cost_bound())]).await.map_err(|_|database_refused())?;
+            tx.execute("UPDATE trace_account_admission_budget SET cost_used=$4 WHERE tenant_id=$1 AND account_id=$2 AND period_id=$3", &[&tenant,&account,&period_id,&(used + r.policy.processing_cost_bound())]).await.map_err(|_|database_refused_at("db_error:account_budget_update"))?;
         }
         let lease_expires: DateTime<Utc> = tx
             .query_one(
@@ -519,19 +698,27 @@ impl PgBackend {
                 &[&r.lease_seconds],
             )
             .await
-            .map_err(|_| database_refused())?
+            .map_err(|_| database_refused_at("db_error:account_lease_clock"))?
             .get(0);
         if prior.is_some() {
             tx.execute("UPDATE trace_account_admission_submissions SET status='reserved',lease_id=$3,lease_expires_at=$4,last_cost_bound=$5,last_charged=$6,trust_version=$7,policy_version=$8,period_id=$9,earned_tier=$10,trust_evaluation_digest=$11 WHERE tenant_id=$1 AND submission_id=$2",
-                &[&tenant,&r.submission_id,&r.lease_id,&lease_expires,&r.policy.processing_cost_bound(),&charged,&version,&r.policy.version(),&period_id,&allowance.tier,&allowance.digest]).await.map_err(|_|database_refused())?;
+                &[&tenant,&r.submission_id,&r.lease_id,&lease_expires,&r.policy.processing_cost_bound(),&charged,&version,&r.policy.version(),&period_id,&allowance.tier,&allowance.digest]).await.map_err(|_|database_refused_at("db_error:account_submission_update"))?;
         } else {
-            tx.execute("INSERT INTO trace_account_admission_submissions(tenant_id,submission_id,account_id,body_hash,authority_kind,trust_version,policy_version,period_id,status,lease_id,lease_expires_at,last_cost_bound,last_charged,earned_tier,trust_evaluation_digest) VALUES($1,$2,$3,$4,'account',$5,$6,$7,'reserved',$8,$9,$10,$11,$12,$13)",
-                &[&tenant,&r.submission_id,&account,&r.body_hash,&version,&r.policy.version(),&period_id,&r.lease_id,&lease_expires,&r.policy.processing_cost_bound(),&charged,&allowance.tier,&allowance.digest]).await.map_err(|_|database_refused())?;
+            tx.execute("INSERT INTO trace_account_admission_submissions(tenant_id,submission_id,account_id,body_hash,authority_kind,trust_version,policy_version,period_id,status,lease_id,lease_expires_at,last_cost_bound,last_charged,earned_tier,trust_evaluation_digest) VALUES($1,$2,$3,$4,$14,$5,$6,$7,'reserved',$8,$9,$10,$11,$12,$13)",
+                &[&tenant,&r.submission_id,&account,&r.body_hash,&version,&r.policy.version(),&period_id,&r.lease_id,&lease_expires,&r.policy.processing_cost_bound(),&charged,&allowance.tier,&allowance.digest,&authority_kind]).await.map_err(|_|database_refused_at("db_error:account_submission_insert"))?;
         }
-        tx.commit().await.map_err(|_| database_refused())?;
+        tx.commit()
+            .await
+            .map_err(|_| database_refused_at("db_error:account_commit"))?;
         Ok(AccountAdmissionResult {
             decision: AdmissionDecision::Reserved,
-            authority: Some(if charged { "bounded" } else { "invited" }),
+            authority: Some(if attested {
+                "attested"
+            } else if charged {
+                "bounded"
+            } else {
+                "invited"
+            }),
             retry_after_seconds: None,
             period_spend: None,
         })
@@ -608,7 +795,14 @@ impl PgBackend {
                 tx.execute("UPDATE trace_account_admission_submissions SET status='completed' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&submission]).await.map_err(|_|database_refused())?;
                 true
             }
-            "released" if status == "reserved" => {
+            // `released` gives a `reserved` attempt's charge back. A
+            // `processing` attempt keeps its charge, unless the caller knows
+            // the upload's refusal wrote nothing (`released_without_effect`,
+            // #1237): then it is released and refunded the same way.
+            "released" | "released_without_effect"
+                if (next == "released" && status == "reserved")
+                    || (next == "released_without_effect" && status == "processing") =>
+            {
                 let charged: bool = prior.get(5);
                 if charged {
                     let period_id: String = prior.get(6);
@@ -907,7 +1101,10 @@ impl PgBackend {
             "busy" => AdmissionDecision::Busy,
             "budget_exhausted" | "window_exhausted" => AdmissionDecision::Exhausted,
             "conflict" => AdmissionDecision::Conflict,
-            _ => AdmissionDecision::Refused,
+            other => {
+                log_admission_refusal(sql_refusal_label(SqlLedger::Evidence, other));
+                AdmissionDecision::Refused
+            }
         };
         tx.commit().await.map_err(|_| database_refused())?;
         Ok(decision)
@@ -942,6 +1139,8 @@ struct EffectiveAllowance {
     limit: i64,
     tier: Option<i32>,
     digest: Option<String>,
+    /// The applied evaluation the limit came from, when one applied.
+    evaluation_id: Option<Uuid>,
 }
 
 /// How a read binds to the account's input frontier.
@@ -968,6 +1167,7 @@ async fn account_effective_allowance(
         limit: policy.bounded_allowance(),
         tier: None,
         digest: None,
+        evaluation_id: None,
     };
     let Some(growth) = policy.external_growth() else {
         return Ok(allowance);
@@ -990,7 +1190,8 @@ async fn account_effective_allowance(
     let row = tx
         .query_opt(
             "SELECT effective_allowance,tier,facts_digest,
-                extract(epoch FROM (transaction_timestamp()-as_of)) <= $4::bigint::numeric
+                extract(epoch FROM (transaction_timestamp()-as_of)) <= $4::bigint::numeric,
+                evaluation_id
          FROM trace_account_trust_evaluations
          WHERE tenant_id=$1 AND account_id=$2 AND growth_policy_version=$3 AND mode='applied'
            AND as_of <= transaction_timestamp() AND isfinite(as_of) AND input_generation=$5
@@ -1011,6 +1212,142 @@ async fn account_effective_allowance(
             .clamp(policy.bounded_allowance(), growth.allowance_ceiling);
         allowance.tier = Some(row.get(1));
         allowance.digest = Some(row.get(2));
+        allowance.evaluation_id = Some(row.get(4));
     }
     Ok(allowance)
+}
+
+/// The account's own growth view (spec rule 7), inside the status
+/// transaction. Reads only this account's evaluation rows, under the
+/// caller's tenant RLS; nothing about another account.
+async fn account_growth_status(
+    tx: &deadpool_postgres::Transaction<'_>,
+    tenant: &str,
+    account: Uuid,
+    policy: &BoundedPolicy,
+    allowance: &EffectiveAllowance,
+    period_spend: i64,
+    raw_period_id: &str,
+) -> Result<AccountGrowthStatus, DatabaseError> {
+    let period_resets_at = match policy.period() {
+        PolicyPeriod::Lifetime => None,
+        PolicyPeriod::Fixed { seconds } => raw_period_id
+            .rsplit(':')
+            .next()
+            .and_then(|bucket| bucket.parse::<i64>().ok())
+            .and_then(|bucket| bucket.checked_add(1)?.checked_mul(*seconds))
+            .and_then(|at| DateTime::<Utc>::from_timestamp(at, 0)),
+    };
+    let evaluation = match allowance.evaluation_id {
+        None => None,
+        Some(evaluation_id) => {
+            let row = tx
+                .query_one(
+                    "SELECT e.as_of, COALESCE(e.units,0), COALESCE(e.active_weeks,0),
+                            e.age_seconds, COALESCE(e.attested_units,0),
+                            (SELECT max(c.as_of) FROM trace_account_trust_evaluations c
+                              WHERE c.tenant_id=e.tenant_id AND c.account_id=e.account_id
+                                AND c.growth_policy_version=e.growth_policy_version
+                                AND c.mode='applied' AND c.as_of <= e.as_of
+                                AND c.tier IS DISTINCT FROM COALESCE(c.previous_tier,0))
+                       FROM trace_account_trust_evaluations e
+                      WHERE e.tenant_id=$1 AND e.account_id=$2 AND e.evaluation_id=$3",
+                    &[&tenant, &account, &evaluation_id],
+                )
+                .await
+                .map_err(|_| database_refused())?;
+            Some(AppliedEvaluationProgress {
+                as_of: row.get(0),
+                units: row.get(1),
+                active_weeks: row.get(2),
+                age_seconds: row.get(3),
+                attested_units: row.get(4),
+                tier_changed_at: row.get(5),
+            })
+        }
+    };
+    Ok(AccountGrowthStatus {
+        tier: allowance.tier.unwrap_or(0),
+        effective_allowance: allowance.limit,
+        period_spend,
+        period_resets_at,
+        evaluation,
+    })
+}
+
+#[cfg(test)]
+mod refusal_label_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// Every `<helper>("label")` literal in this file's production code.
+    /// Scanning the source is what ties the list to the call sites: a site
+    /// added with a copied label fails here.
+    fn source_labels() -> Vec<String> {
+        let source = include_str!("admission_ledger.rs");
+        let production = source
+            .split(concat!("mod refusal_label", "_tests"))
+            .next()
+            .unwrap();
+        let mut found = Vec::new();
+        for needle in [
+            concat!("Ok(refused_at", "(\""),
+            concat!("database_refused_at", "(\""),
+            concat!("logged_at", "(\""),
+        ] {
+            let mut rest = production;
+            while let Some(at) = rest.find(needle) {
+                let tail = &rest[at + needle.len()..];
+                let end = tail.find('"').unwrap();
+                found.push(tail[..end].to_string());
+                rest = &tail[end..];
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn every_ledger_refusal_has_its_own_listed_label() {
+        let listed: BTreeSet<&str> = LEDGER_REFUSAL_LABELS.iter().copied().collect();
+        assert_eq!(listed.len(), LEDGER_REFUSAL_LABELS.len(), "duplicate label");
+        let mut seen = BTreeSet::new();
+        for label in source_labels() {
+            assert!(listed.contains(label.as_str()), "{label} is not listed");
+            assert!(seen.insert(label.clone()), "{label} names two sites");
+        }
+        let mut sql = BTreeSet::new();
+        for ledger in [SqlLedger::Evidence, SqlLedger::LegacyResume] {
+            for result in ["refused", "configuration_changed", "evidence_refused", "x"] {
+                let label = sql_refusal_label(ledger, result);
+                assert!(sql.insert(label), "{label} names two results");
+                assert!(listed.contains(label), "{label} is not listed");
+                assert!(!seen.contains(label), "{label} is also a call site");
+            }
+        }
+        assert_eq!(
+            seen.len() + sql.len(),
+            listed.len(),
+            "a listed label is unused"
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_sql_result_is_never_echoed() {
+        assert_eq!(
+            sql_refusal_label(SqlLedger::Evidence, "tenant-secret-value"),
+            "evidence_ledger_sql:unrecognised_result"
+        );
+    }
+
+    #[test]
+    fn a_labelled_refusal_is_still_the_same_refusal() {
+        assert_eq!(
+            refused_at("device_not_live").decision,
+            AdmissionDecision::Refused
+        );
+        assert!(matches!(
+            database_refused_at("db_error:account_pool"),
+            DatabaseError::Pool(ref label) if label == "admission_database_unavailable"
+        ));
+    }
 }

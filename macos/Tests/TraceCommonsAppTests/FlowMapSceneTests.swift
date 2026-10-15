@@ -171,12 +171,10 @@ final class FlowMapSceneTests: XCTestCase {
         // Unset is never said as off; unknown is said as neither.
         XCTAssertEqual(words.tool(.unknown, waiting: 0), words.toolNothingWaiting)
         XCTAssertNotEqual(words.tool(.unset, waiting: 0), words.toolOff)
-        XCTAssertEqual(words.folder(path: "/a", rule: "Ask me", waiting: 1, contributed: 2),
-                       "/a. Rule: Ask me. 1 session waiting, 2 contributed.")
+        XCTAssertEqual(words.folder(path: "/a", rule: "Ask", waiting: 1, contributed: 2),
+                       "/a. Rule: Ask. 1 trace waiting, 2 contributed.")
         XCTAssertEqual(words.folder(path: nil, rule: nil, waiting: 3, contributed: nil),
-                       "Rule: not set. 3 sessions waiting, \u{2014} contributed.")
-        XCTAssertNil(FlowMapView.hint(pinned: true))
-        XCTAssertEqual(FlowMapView.hint(pinned: false), words.hint)
+                       "Rule: not set. 3 traces waiting, \u{2014} contributed.")
     }
 
     /// The cards' contributed counts are a whole count or a dash: a page
@@ -296,15 +294,15 @@ final class FlowMapSceneTests: XCTestCase {
         }
     }
 
-    /// Folders past the first four are counted, not drawn.
+    /// Folders past the most a tool shows are counted, not drawn.
     func test_extraFoldersAreCounted() {
-        let folders = (0 ..< 6).map {
+        let folders = (0 ..< 9).map {
             TracesTree.FolderNode(id: "f\($0)", label: "f\($0)", mode: .ask, sessions: [])
         }
         let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: folders)], unplaced: [])
         let scene = FlowMapScene.traces(tree, gate: .init(state: .loading))
         XCTAssertEqual(scene.nodes.filter { if case .folder = $0.kind { true } else { false } }.count, FlowMapScene.foldersShown)
-        XCTAssertEqual(scene.overflows.map(\.count), [2])
+        XCTAssertEqual(scene.overflows.map(\.count), [3])
     }
 
     /// P13: a tool that has contributed is joined to the commons by a

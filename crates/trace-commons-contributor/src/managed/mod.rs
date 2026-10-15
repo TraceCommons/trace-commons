@@ -6,6 +6,7 @@ pub mod opencode;
 pub mod profiles;
 pub mod secrets;
 pub mod sessions;
+pub mod signin;
 pub mod supervisor;
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,11 @@ pub enum ConnectionKind {
     NearAi,
     Subscription,
     ApiKey,
+    /// Runs on the app's NEAR AI sign-in. Derived, never saved: see
+    /// [`signin`]. Not offered on the command line's `--connection`.
+    #[serde(rename = "near_ai_signin")]
+    #[value(skip)]
+    NearAiSignIn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,7 +96,9 @@ pub enum ManagedError {
     UnsupportedVersion,
     #[error("sign in to this account before launching")]
     SignInRequired,
-    #[error("start the Trace Commons daemon before launching")]
+    #[error("sign in to NEAR AI before launching")]
+    NearAiSignInRequired,
+    #[error("start the {} daemon before launching", crate::brand::APP_NAME)]
     DaemonUnavailable,
     #[error("launch status unknown; reconcile before retrying")]
     LaunchUnknown,

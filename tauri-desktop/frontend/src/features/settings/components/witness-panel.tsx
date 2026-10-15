@@ -81,7 +81,7 @@ export function WitnessPanel({
         </Button>
       </div>
       <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
-        A witness receives raw sessions only after local consent and measurement
+        A witness receives raw traces only after local consent and measurement
         verification. A configured witness without a valid pin refuses
         submissions; no witness keeps local redaction.
       </p>

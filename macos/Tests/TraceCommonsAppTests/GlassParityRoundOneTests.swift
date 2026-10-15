@@ -71,7 +71,7 @@ final class GlassParityRoundOneTests: XCTestCase {
     /// The Traces legend and the credential node take the core's words.
     func test_theMapWordsAreTheCores() throws {
         let words = try XCTUnwrap(FlowMapScene.words)
-        XCTAssertEqual(words.legendNotWatched, "Tool not watched")
+        XCTAssertEqual(words.legendNotWatched, "Not watched")
         XCTAssertEqual(words.credential, "NEAR AI credential")
         XCTAssertEqual(words.noneFound, "No configured tools found.")
         let empty = FlowMapScene.privateAI(
@@ -89,10 +89,9 @@ final class GlassParityRoundOneTests: XCTestCase {
         XCTAssertNil(MonitorWindowView.mapTab(for: .home))
     }
 
-    /// The Inference inspector reads the same tool list as the Local tools
-    /// card and the map; a list not read is nil, never no tools.
+    /// The Inference summary reads no tool list of its own (owner,
+    /// 2026-10-12: its tools row is gone), and the map reads the one list.
     func test_theInferenceInspectorReadsTheOneToolList() throws {
-        XCTAssertNil(PrivateAIInspectorView.rows(.none))
         // The Inference store's read is consulted only for whether the list
         // is current (`liveHarnesses`), never for its rows.
         let source = try TracesParityTests.text("Views/Monitor/InferenceViews.swift")
@@ -117,7 +116,6 @@ final class GlassParityRoundOneTests: XCTestCase {
                        "a list this client never read is drawn as current")
         XCTAssertEqual(PrivateAIInspectorView.liveHarnesses(list, read: list, failure: .unreachable), .none,
                        "a list the core stopped answering for is drawn as current")
-        XCTAssertNil(PrivateAIInspectorView.rows(PrivateAIInspectorView.liveHarnesses(list, read: nil, failure: nil)))
 
         // A store on a live client has read it; a new client forgets it.
         let store = InferenceStore(client: SampleDaemonClient(.normalDay))
@@ -131,7 +129,7 @@ final class GlassParityRoundOneTests: XCTestCase {
         XCTAssertEqual(PrivateAIInspectorView.liveHarnesses(
             list, read: store.harnesses, failure: store.failures["harness_list"]), .none)
 
-        // The inspector's rows and the map both read through it.
+        // The map reads through it.
         let source = try TracesParityTests.text("Views/Monitor/InferenceViews.swift")
         XCTAssertFalse(source.contains("Self.rows(model.harnesses)"), "the inspector reads the list unguarded")
         let window = try TracesParityTests.text("Views/MonitorWindowView.swift")

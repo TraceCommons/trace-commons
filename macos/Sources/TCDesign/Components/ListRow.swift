@@ -6,6 +6,8 @@ public struct GlassListRow: View {
     public enum Depth: Int, Sendable { case tool = 0, folder = 1, session = 2 }
     public enum Flag: Sendable, Equatable { case ask, on }
 
+    /// The tree's top level (`glassTreeRoot`): rows at it sit flush left.
+    @Environment(\.glassTreeRoot) private var treeRoot
     private let depth: Depth
     private let tile: GlassToolTile.Kind
     private let title: String
@@ -130,8 +132,8 @@ public struct GlassListRow: View {
             Group {
                 if let expanded, let onToggleExpand {
                     Button(action: onToggleExpand) {
-                        Text("›")
-                            .glassGlyph(14)
+                        Image(systemName: "chevron.right")
+                            .glassGlyph(10, weight: .semibold)
                             .foregroundStyle(selected ? Self.selectedInk.color : GlassTokens.Color.statusOff.color)
                             .rotationEffect(.degrees(expanded ? 90 : 0))
                             .glassPressedFill()
@@ -215,7 +217,7 @@ public struct GlassListRow: View {
             .frame(width: 22)
         }
         .foregroundStyle(selected ? Self.selectedInk.color : GlassColor.textPrimary)
-        .padding(.leading, 8 + CGFloat(depth.rawValue) * 18)
+        .padding(.leading, Self.leadingInset(depth, root: treeRoot))
         .padding(.trailing, 6)
         .frame(minHeight: GlassTokens.Size.listRow)
         .background(
@@ -242,6 +244,14 @@ public struct GlassListRow: View {
         .accessibilityHeading(Self.heading(depth))
     }
 
+    /// A row's leading inset: 8, and 18 for each level below the tree's
+    /// top level. A tree without a tool level (the Traces tree, whose
+    /// top level is folders) starts its folders flush left (owner,
+    /// 2026-10-11), not one level in.
+    static func leadingInset(_ depth: Depth, root: Depth) -> CGFloat {
+        8 + CGFloat(max(0, depth.rawValue - root.rawValue)) * 18
+    }
+
     static func heading(_ depth: Depth) -> AccessibilityHeadingLevel {
         switch depth {
         case .tool: .h1
@@ -258,4 +268,10 @@ public struct GlassListRow: View {
         case nil: Self.plainSubInk(off: off).color
         }
     }
+}
+
+public extension EnvironmentValues {
+    /// The depth a tree's top-level rows have: `.tool` by default, `.folder`
+    /// for a tree with no tool level.
+    @Entry var glassTreeRoot: GlassListRow.Depth = .tool
 }

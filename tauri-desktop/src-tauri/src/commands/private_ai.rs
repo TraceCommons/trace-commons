@@ -14,7 +14,7 @@ pub(crate) async fn start_private_ai_credential(
     call_daemon(
         shared_state(&state)?,
         "near_ai_credential_start",
-        serde_json::json!({ "provider": provider.unwrap_or_else(|| "github".to_owned()) }),
+        serde_json::json!({ "provider": provider.unwrap_or_else(|| "near".to_owned()) }),
     )
     .await
 }

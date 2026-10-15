@@ -14,7 +14,7 @@ export const Pinned: Story = {
       state: "pinned",
       state_code: 1,
       state_line:
-        "In use. Each session is redacted by the pinned witness, which signs a record of what it removed and the risk it judged was left.",
+        "In use. Each trace is redacted by the pinned witness, which signs a record of what it removed and the risk it judged was left.",
       refusal: null,
       url: "https://witness.example",
       signing_address: "0xabc",
@@ -35,7 +35,7 @@ export const LocalOnly: Story = {
       state: "absent",
       state_code: 0,
       state_line:
-        "Not in use. Sessions are redacted on this machine before they are sent, which is the normal arrangement.",
+        "Not in use. Traces are redacted on this machine before they are sent, which is the normal arrangement.",
       refusal: null,
       url: null,
       signing_address: null,

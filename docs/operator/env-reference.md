@@ -131,7 +131,9 @@ procedure.
 | `TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST` | optional | — | Page cap for export endpoints. |
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR` | optional | — | Rate-limit budget per tenant. |
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR` | optional | — | Rate-limit budget per principal. |
-| `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS` | optional | `false` | When `true`, accepts medium residual-risk submissions after server-side re-scrub. High residual-risk submissions still quarantine. Intended for tightly scoped pilots where message text/tool payloads are included. |
+| `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN` | optional | `30` | In-process `POST /v1/traces` limit per authenticated principal per 60 s fixed window, applied before any other submit work. Integer `1`–`600`; anything else refuses startup. Over it, ingest answers `429` `{"error":"submit_rate_limited","retry_after_seconds":N}` with a matching `Retry-After: N` header, where `N` is the whole seconds until the principal's window turns (at least 1). Read once at startup; single-instance only. |
+| `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY` | optional | `2` | `POST /v1/traces` requests one principal may have in flight at once. Integer `1`–`4`; anything else refuses startup. The ceiling is the large-body upload middleware's own per-principal cap of 4, which runs first: a higher submit cap could never be reached. Over it, the same `429` `submit_rate_limited` answer with `retry_after_seconds` `2` and `Retry-After: 2`; the large-body middleware's own in-flight refusal (submit and token-bundle uploads) answers the same way. |
+| `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS` | optional | `false` | When `true`, accepts medium residual-risk submissions after server-side re-scrub. High residual-risk submissions still quarantine. Intended for tightly scoped pilots where message text/tool payloads are included. Governs both paths: the legacy path accepts every Medium; a tenant routed to the versioned pipeline has Admission admit only a Medium whose server-side basis is `found_and_removed` (alone or with `consent_content_flag`), recorded under the Admission rule `minimal_admission_v1_accept_found_and_removed`; any other Medium is still quarantined `privacy_review_required`. See [`pipeline-activation.md`](pipeline-activation.md#admission-and-trace_commons_accept_medium_risk_submissions). |
 | `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME` | optional, emergency only | `false` | When `true`, `POST /v1/admin/audit-chain-repair` may resume the DB audit chain across a legacy segment (`"accept_legacy_segment": true`) after a rollback to a pre-#1043 build. Off, a non-dry run that asks for it is refused `409` `legacy_segment_resume_disabled` and writes nothing; the dry run still diagnoses `file_ahead_through_legacy_rows`. Read once at startup. Off by default since 2026-10-02, when the pilot's pre-#1043 rollback target was retired. See [`audit-trail-forensics.md`](audit-trail-forensics.md). |
 | `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` | optional | (none, driver fails closed) | Separate connection string for the narrow `trace_gate_driver` role pool used by the perplexity-scoring driver (Task 5/6). Mirrors `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`'s shape: points at a LOGIN role granted membership in `trace_gate_driver` (V36 policies + V42 column-scoped SELECT). See [`perplexity-scoring-driver.md`](perplexity-scoring-driver.md). |
 | `TRACE_COMMONS_PII_BACKSTOP_DRIVER_DATABASE_URL` | R when `TRACE_COMMONS_PII_BACKSTOP_ENABLED=true` | (none, refuses boot) | Separate connection string for the narrow `trace_pii_backstop_driver` role pool (migration V38). Mirrors `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`'s shape: points at a LOGIN role granted membership in `trace_pii_backstop_driver`. See [`pii-backstop.md`](pii-backstop.md). |
@@ -347,8 +349,8 @@ runbook, including why the floor stays 0.
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_INTERVAL_SECONDS` | optional | `45` | Cadence between enumeration batches. Clamped to `[5, 86400]`. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_BATCH_SIZE` | optional | `5` | Submissions enumerated per tick. Clamped to `[1, 1000]`. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_MAX_ATTEMPTS` | optional | `5` | Bounded attempt counter per submission before the driver stops retrying it. Clamped to `[1, 1000]`. |
-| `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES` | optional | `true` | Skip-duplicate cache cost control. Falsy values (`0`, `false`, `no`, `off`) disable it. |
-| `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS` | optional | `900000` | Novelty-score threshold (micros) above which a submission is treated as a cache-cost duplicate and skipped. Clamped to `[0, 1000000]`. |
+| `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES` | optional | `true` | Skip-duplicate cache cost control. Falsy values (`0`, `false`, `no`, `off`) disable it. An assembled pipeline runtime reads this and the threshold below even with the driver off, and applies both to compatibility runs' gate decision rows (`docs/operator/pipeline-activation.md`). |
+| `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS` | optional | `900000` | Duplicate-score threshold (micros): a submission whose precheck duplicate score, in micros, is at or above it is recorded as `skipped_duplicate` without scoring. Clamped to `[0, 1000000]`. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS` | optional | `30` | Base backoff (seconds) applied after a scoring failure, before the bounded attempt counter allows a retry. Clamped to `[0, 86400]`. |
 
 ### 12b. Server-side NEAR AI PII backstop driver
@@ -519,7 +521,7 @@ credentials and adds two of its own. See
 |---|---|---|---|
 | `TRACE_COMMONS_ACCOUNT_ADMISSION_ENABLED` | optional | `false` | Explicit replacement switch. Off retains legacy evidence behavior. |
 | `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION` | R when enabled | (none) | Reviewed policy version allowed at startup. |
-| `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON` | R when enabled | (none) | Explicit bounded allowance, cost bound, period, and `growth_rule: none`. |
+| `TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON` | R when enabled | (none) | Explicit bounded allowance, cost bound, period, and `growth_rule`: `none` (flat), `external` (V114), or `tiered-v1` with a `growth` object (earned trust, live). |
 | `TRACE_COMMONS_ACCOUNT_ADMISSION_LEASE_SECONDS` | R when enabled | (none) | Positive processing lease, at most 86400 seconds. |
 | `TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_PROVIDER_SIGNERS` | See below | (none) | Comma-separated trusted provider-TEE signer keys. At least this or gateway signers must be configured. |
 | `TRACE_COMMONS_ACCOUNT_ADMISSION_EVIDENCE_GATEWAY_SIGNERS` | See below | (none) | Comma-separated trusted gateway signer keys; optional when provider signers are configured. |
@@ -532,7 +534,34 @@ With none set, a complete legacy `TRACE_COMMONS_ADMISSION_*` evidence policy is
 required instead. Evidence verification is required whenever account admission
 is enabled; the legacy minimum-byte setting does not toggle it on or off.
 
+With account admission enabled, the V59 evidence ledger's own policy is
+required too: `TRACE_COMMONS_ADMISSION_ENABLED` with its limits
+(`_WINDOW_ATTEMPTS`, `_ACCOUNT_COST_LIMIT`, `_GLOBAL_COST_LIMIT`,
+`_PROCESSING_COST_BOUND`, `_LEASE_SECONDS`, `_CHALLENGE_TTL_SECONDS`) and
+provider settings, which in turn need the witness bypass. The reason: an upload with verified evidence and no
+`source_session` is admitted on that ledger, exactly as with account admission
+off. Without it ingest refuses to start with
+`account_admission_requires_legacy_evidence_policy`. An upload whose evidence
+verifies and that carries `source_session` is admitted without debiting the
+bounded allowance.
+
 See [account trust](./account-trust.md) for the activation and response contract.
+
+## Earned account trust
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_JSON` | optional | (none) | A candidate `tiered-v1` policy evaluated in `shadow`; never read by admission. Set with the version or not at all. |
+| `TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_VERSION` | R with the JSON | (none) | Must equal the candidate's `version`. |
+| `TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_ENABLED` | optional | `false` | Toggle. `true` without the token refuses startup. |
+| `TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_TOKEN` | R when enabled | (none) | Bearer the scheduler presents to the record and evaluate routes. Must authenticate as role `account_trust_worker` (or `admin`, not recommended); anything else refuses startup. Never logged. |
+| `TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_INTERVAL_SECONDS` | optional | `21600` | Cadence, 60 to 86400. Must be shorter than every configured policy's `evaluation_max_age_seconds`, or startup refuses. |
+| `TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_LIMIT` | optional | `10000` | Sources per recorder pass, 1 to 10000. A tick makes at most 10 passes, then evaluates. |
+
+Each scheduler tick records missing facts, then evaluates `applied` when the
+admission policy names `tiered-v1` and `shadow` when a shadow policy is set.
+Startup refuses a scheduler with neither. Its liveness name is
+`account_trust_scheduler`. See [account trust](./account-trust.md#earned-growth-live-tiered-v1).
 
 ## Legacy invite linking (default off)
 

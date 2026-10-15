@@ -182,6 +182,7 @@ fn rust_surface() -> BTreeMap<String, Signature> {
         "src/compute.rs",
         "src/insights.rs",
         "src/mission_drafts.rs",
+        "src/nudge.rs",
     ]
     .map(|path| {
         std::fs::read_to_string(ffi_crate_dir().join(path)).expect("failed to read FFI source")

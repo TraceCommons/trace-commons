@@ -179,8 +179,9 @@ public class RedactionLabelsTests
 
     /// <summary>
     /// The ordinary case for most labels, not an edge one. Distinct counts
-    /// come from the placeholder map, which is filled for exactly two labels
-    /// (<c>local_path</c> and <c>private_email</c>), so <c>3 secret</c> will
+    /// come from the placeholder map, which is filled only for
+    /// <c>local_path</c>, <c>private_email</c> and the #1362 tool-output
+    /// labels, so <c>3 secret</c> will
     /// never carry a distinct suffix. Printing "(0 distinct)" beside a
     /// non-zero occurrence count would read as "nothing was removed".
     /// </summary>

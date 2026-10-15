@@ -104,6 +104,7 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
         public let extraScanConfigured: String
         public let sessionFinishedAfter: String
         public let atMostOneNotification: String
+        public let atMostOneNotificationOne: String
         public let undecidedDropped: String
         public let stateYes: String
         public let stateNo: String

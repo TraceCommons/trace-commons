@@ -361,7 +361,7 @@ public sealed class SessionRootsTests
             MostRecent = DateTimeOffset.UtcNow,
         });
 
-        Assert.Contains("1 session,", sentence, StringComparison.Ordinal);
+        Assert.Contains("1 trace,", sentence, StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -176,6 +176,48 @@ final class ActivityMissionsContractTests: XCTestCase {
         XCTAssertThrowsError(try decodeStatus(negative))
     }
 
+    /// The daemon returns the catalogue with each mission's `predicate` as
+    /// published, so the shell's key set mirrors the protocol: a version-1
+    /// block is checked against its own key set, a later version is carried
+    /// unread, and anything without a positive integer version is refused.
+    func testMissionPredicatesAreReadAsTheProtocolReadsThem() throws {
+        func catalogue(predicate: Any) throws -> String {
+            var configuredPolicy = try json(policy)
+            var missions = try XCTUnwrap(configuredPolicy["missions"] as? [[String: Any]])
+            missions[0]["predicate"] = predicate
+            configuredPolicy["missions"] = missions
+            var catalogue = try json(unconfigured)
+            catalogue["state"] = "configured"
+            catalogue["policy_sha256"] = String(repeating: "a", count: 64)
+            catalogue["policy"] = configuredPolicy
+            return try serialized(catalogue)
+        }
+        let v1: [String: Any] = ["version": 1, "tools": ["claude-code"], "tool_families": [String](), "languages": ["rust"], "min_sessions": 2]
+        let read = try decodeCatalogue(catalogue(predicate: v1))
+        XCTAssertEqual(read.catalogue.policy?.missions.first?.requiredContributions, 2)
+        XCTAssertNoThrow(try decodeCatalogue(catalogue(predicate: ["version": 1, "languages": ["rust"], "min_sessions": 1])))
+        XCTAssertNoThrow(try decodeCatalogue(catalogue(predicate: NSNull())))
+        XCTAssertNoThrow(try decodeCatalogue(catalogue(predicate: ["version": 2, "repo_size": "large", "weights": ["a": [1, 2]]])))
+
+        var unknownField = v1
+        unknownField["repo_size"] = "large"
+        var listOfNumbers = v1
+        listOfNumbers["tools"] = [1]
+        var noMinimum = v1
+        noMinimum.removeValue(forKey: "min_sessions")
+        for refused: Any in [
+            unknownField, listOfNumbers, noMinimum,
+            ["tools": ["claude-code"], "min_sessions": 1],
+            ["version": 0, "min_sessions": 1],
+            ["version": 1.5, "min_sessions": 1],
+            ["version": "1", "min_sessions": 1],
+            ["claude-code"],
+            "claude-code",
+        ] {
+            XCTAssertThrowsError(try decodeCatalogue(catalogue(predicate: refused)), "\(refused)")
+        }
+    }
+
     private func decodeCatalogue(_ raw: String) throws -> DaemonData.ActivityMissionsCatalogue {
         try DaemonDataDecoding.decoder().decode(DaemonData.ActivityMissionsCatalogue.self, from: Data(#"{"catalogue":\#(raw),"disclosure":"SAMPLE"}"#.utf8))
     }

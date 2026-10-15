@@ -45,7 +45,7 @@ final class OriginalSearchOutcomeTests: XCTestCase {
     }
 
     func testTheSentencesSayWhichCaseItIs() {
-        XCTAssertEqual(OriginalSearchOutcome.absent.sentence, "0 matches -- not in this session")
+        XCTAssertEqual(OriginalSearchOutcome.absent.sentence, "0 matches -- not in this trace")
         XCTAssertEqual(
             OriginalSearchOutcome.allRemoved(3).sentence,
             "3 matches -- all 3 were removed"

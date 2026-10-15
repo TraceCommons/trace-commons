@@ -237,6 +237,7 @@ async fn external_evaluation_scope_freshness_clamps_and_spend() {
         lease_id: Uuid::new_v4(),
         policy: policy.clone(),
         lease_seconds: 60,
+        attested: false,
     };
     let first = request();
     assert_eq!(

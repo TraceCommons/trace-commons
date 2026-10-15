@@ -67,16 +67,25 @@ enum Command {
         #[arg(long)]
         cwd: String,
     },
-    /// Enroll this device, with an instance-signed grant or an invite link
+    /// Enroll this device: sign in with NEAR AI in your browser, or use an
+    /// invite link or an instance-signed grant
+    ///
+    /// With no --invite and no --grant, opens near.ai in your browser to sign
+    /// in, then enrolls this device. No invite needed.
     Login {
-        /// Base64 enrollment grant minted by your instance; omit to print this device's key id
+        /// Base64 enrollment grant minted by your instance
         #[arg(long)]
         grant: Option<String>,
         /// Invite link you were handed, e.g. https://issuer.example.ai/onboard#CODE.
         /// Registers this device and writes the config in one step. Spends one
-        /// use of the invite, so run it once.
+        /// use of the invite, so run it once. TRACE_COMMONS_INVITE works too,
+        /// and keeps the link out of your shell history.
         #[arg(long, conflicts_with = "grant")]
         invite: Option<String>,
+        /// Print this device's key id for an instance operator to mint a
+        /// grant against, and enroll nothing
+        #[arg(long, conflicts_with_all = ["grant", "invite", "allowed_hosts", "scopes", "default_consent"])]
+        key_id: bool,
         /// CSV of allowed issuer hosts (default: $TRACE_COMMONS_ALLOWED_HOSTS); persisted for later commands
         #[arg(long)]
         allowed_hosts: Option<String>,
@@ -220,6 +229,15 @@ enum Command {
     },
     /// Print local identity (no network)
     Whoami,
+    /// Dev-only: compare the local credit estimate with the credit this
+    /// machine's scored sessions were given. Reads local files only and
+    /// sends nothing; prints aggregate counts.
+    #[command(hide = true)]
+    EstimateCheck {
+        /// A local estimate table file to check instead of the built-in one
+        #[arg(long)]
+        table: Option<PathBuf>,
+    },
     /// Check for a newer release, verify it, and install it
     ///
     /// Refuses anything it cannot verify: the manifest signature, the
@@ -546,13 +564,21 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             .await?;
             std::process::exit(code);
         }
+        Command::Login { key_id: true, .. } => commands::key_id(&store),
         Command::Login {
             grant,
             invite,
+            key_id: false,
             allowed_hosts,
             scopes,
             default_consent,
         } => {
+            commands::refuse_json_sign_in(
+                cli.json,
+                grant.as_deref(),
+                invite.as_deref(),
+                std::env::var("TRACE_COMMONS_INVITE").ok().as_deref(),
+            )?;
             commands::login(
                 &store,
                 grant.as_deref(),
@@ -631,6 +657,18 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             .await
         }
         Command::Whoami => commands::whoami(&store, cli.json),
+        Command::EstimateCheck { table } => {
+            let table = crate::credit_estimate_check::table_from(table.as_deref())?;
+            let report = crate::credit_estimate_check::run(&store, &table)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                for line in crate::credit_estimate_check::render(&report) {
+                    println!("{line}");
+                }
+            }
+            Ok(())
+        }
         Command::Update { stage_only } => commands::update(&store, stage_only, cli.json).await,
         Command::Logout { yes } => commands::logout(&store, yes),
         Command::Unenroll { yes } => commands::unenroll(&store, yes, cli.json),
@@ -745,6 +783,62 @@ mod tests {
             parse(&["unenroll", "--yes"]).command,
             Command::Unenroll { yes: true }
         ));
+    }
+
+    #[test]
+    fn bare_login_parses_as_the_near_ai_route_and_key_id_is_explicit() {
+        assert!(matches!(
+            parse(&["login"]).command,
+            Command::Login {
+                grant: None,
+                invite: None,
+                key_id: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["login", "--key-id"]).command,
+            Command::Login { key_id: true, .. }
+        ));
+        match parse(&["login", "--invite", "https://i.example/onboard#C"]).command {
+            Command::Login {
+                invite: Some(i),
+                key_id: false,
+                ..
+            } => assert_eq!(i, "https://i.example/onboard#C"),
+            _ => panic!("login --invite"),
+        }
+    }
+
+    #[test]
+    fn key_id_does_not_combine_with_an_enrollment_flag() {
+        for other in [
+            &["--grant", "g"][..],
+            &["--invite", "https://i.example/onboard#C"],
+            &["--scopes", "model_training"],
+            &["--default"],
+            &["--allowed-hosts", "i.example"],
+        ] {
+            let args: Vec<&str> = ["trace-commons-contributor", "login", "--key-id"]
+                .into_iter()
+                .chain(other.iter().copied())
+                .collect();
+            assert!(Cli::try_parse_from(args).is_err(), "{other:?}");
+        }
+    }
+
+    /// The invite route stays discoverable from `login --help`.
+    #[test]
+    fn login_help_names_the_invite_option() {
+        use clap::CommandFactory;
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("login")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--invite <INVITE>"), "{help}");
+        assert!(help.contains("--key-id"), "{help}");
     }
 
     #[test]

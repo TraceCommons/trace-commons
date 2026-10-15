@@ -118,6 +118,7 @@ fn jittery_privacy_filter(generation: Arc<AtomicUsize>) -> Router {
                             "start": start,
                             "end": start + value.chars().count(),
                             "score": 0.99,
+                            "text": value,
                         }));
                     }
                 }
@@ -130,6 +131,7 @@ fn jittery_privacy_filter(generation: Arc<AtomicUsize>) -> Router {
                         "start": 0,
                         "end": end.min(chars.len()),
                         "score": 0.9,
+                        "text": chars[..end.min(chars.len())].iter().collect::<String>(),
                     }));
                 }
                 Json(serde_json::json!({ "data": [{ "spans": spans }] }))

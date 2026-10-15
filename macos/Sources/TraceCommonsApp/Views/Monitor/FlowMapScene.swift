@@ -58,6 +58,16 @@ struct FlowMapScene: Equatable {
         /// A second line under the label (#1146: the credential's tools).
         var sublabel: String? = nil
 
+        /// Whether the label sits to the left of the node, on its line,
+        /// rather than under it: folders and the Private AI tools, the
+        /// nodes that come in long lists (owner, 2026-10-14).
+        var labelBeside: Bool {
+            switch kind {
+            case .folder, .harness: true
+            default: false
+            }
+        }
+
         var cardTitle: String { title ?? label }
     }
 
@@ -131,18 +141,100 @@ struct FlowMapScene: Equatable {
     var nodes: [Node] = []
     var arcs: [Arc] = []
     var overflows: [Overflow] = []
+    /// The design space this scene is laid out in: #1146's 580×760 by
+    /// default, or one shaped like the pane (`space(for:)`).
+    var space: CGSize = FlowMapScene.size
 
     static let size = CGSize(width: 580, height: 760)
+
+    /// A design space with the pane's proportions and #1146's area, so the
+    /// map fills the pane rather than letterboxing in it, at much the same
+    /// scale (owner, 2026-10-14: reflow for the space there is). Very tall
+    /// or very wide panes are held to a sensible shape.
+    static func space(for pane: CGSize) -> CGSize {
+        guard pane.width > 0, pane.height > 0 else { return size }
+        let aspect = min(max(pane.width / pane.height, 0.42), 1.7)
+        let area = size.width * size.height
+        return CGSize(width: (area * aspect).squareRoot(), height: (area / aspect).squareRoot())
+    }
+
+    /// The band nodes are laid out in: clear of the view switch at the top
+    /// and the legend and zoom controls at the bottom.
+    static func band(_ space: CGSize) -> ClosedRange<CGFloat> {
+        (space.height * 0.13) ... (space.height * 0.87)
+    }
+
+    /// Positions for `weights` stacked down the band, each given room in
+    /// proportion to its weight, no more than `maxStep` per unit and at
+    /// least `minStep`, the group centred on the band. Returns each
+    /// item's centre and the room it was given.
+    static func stack(
+        _ weights: [CGFloat], in band: ClosedRange<CGFloat>, maxStep: CGFloat, minStep: CGFloat = 0
+    ) -> [(y: CGFloat, room: CGFloat)] {
+        guard !weights.isEmpty else { return [] }
+        let units = weights.reduce(0, +)
+        let length = band.upperBound - band.lowerBound
+        let step = max(minStep, min(maxStep, length / max(units, 1)))
+        let total = step * units
+        var y = (band.lowerBound + band.upperBound) / 2 - total / 2
+        return weights.map { weight in
+            let room = step * weight
+            defer { y += room }
+            return (y + room / 2, room)
+        }
+    }
 
     /// Anything moving, so the timeline can stop when nothing is.
     var flows: Bool { arcs.contains { $0.style == .flowing } }
 
     // MARK: Traces
 
-    static let hubPoint = CGPoint(x: 290, y: 400)
-    static let libraryPoint = CGPoint(x: 470, y: 150)
-    /// Folders drawn under one tool; the rest are counted.
-    static let foldersShown = 4
+    static let hubPoint = hub(in: size)
+    static let libraryPoint = library(in: size)
+
+    /// The columns, left to right: folders (their names to the left of
+    /// their dots, so the column sits far enough in for a 14-character
+    /// name), tools, this computer, and the commons above it.
+    static func folderX(_ space: CGSize) -> CGFloat { max(124, space.width * 0.3) }
+    static func toolX(_ space: CGSize) -> CGFloat { space.width * 0.5 }
+    static func hub(in space: CGSize) -> CGPoint {
+        let band = band(space)
+        return CGPoint(x: space.width * 0.72, y: (band.lowerBound + band.upperBound) / 2)
+    }
+    static func library(in space: CGSize) -> CGPoint {
+        CGPoint(x: space.width * 0.84, y: band(space).lowerBound + space.height * 0.04)
+    }
+
+    /// A folder line's least and most height, and the room left between
+    /// tools and under a "+N".
+    static let folderStepRange: ClosedRange<CGFloat> = 22 ... 34
+    static let toolGap: CGFloat = 0.9
+    static let overflowLine: CGFloat = 0.7
+
+    /// How many folders each tool shows: the most, up to `foldersShown`,
+    /// that let every tool's folders fit the band at the least line
+    /// height; the rest are counted as "+N" (owner, 2026-10-14: a loaded
+    /// map must not run off the pane).
+    static func folderCap(_ tools: [TracesTree.ToolNode], band: ClosedRange<CGFloat>) -> Int {
+        let length = band.upperBound - band.lowerBound
+        for cap in stride(from: foldersShown, to: 1, by: -1)
+        where units(tools, cap: cap) * folderStepRange.lowerBound <= length {
+            return cap
+        }
+        return 1
+    }
+
+    /// The lines a tool takes at `cap` folders: its folders (one at
+    /// least), a "+N" when some are not shown, and the gap after it.
+    static func units(_ tool: TracesTree.ToolNode, cap: Int) -> CGFloat {
+        CGFloat(max(1, min(tool.folders.count, cap))) + (tool.folders.count > cap ? overflowLine : 0) + toolGap
+    }
+
+    static func units(_ tools: [TracesTree.ToolNode], cap: Int) -> CGFloat {
+        tools.reduce(0) { $0 + units($1, cap: cap) }
+    }
+    /// The most folders drawn beside one tool; the rest are counted.
+    static let foldersShown = 6
 
     /// What decides whether sessions move to the commons, as the core
     /// reports it. Anything unread is closed: a missing signal never draws
@@ -200,9 +292,11 @@ struct FlowMapScene: Equatable {
     /// `selectedTool` is the selection's tool: the others are faded, their
     /// library arcs most of all, and it is ringed (#1146 `TracesMap`).
     static func traces(
-        _ tree: TracesTree, gate: CommonsGate, contributed: Contributions = .unread, selectedTool: String? = nil
+        _ tree: TracesTree, gate: CommonsGate, contributed: Contributions = .unread, selectedTool: String? = nil,
+        space: CGSize = FlowMapScene.size
     ) -> FlowMapScene {
         var scene = FlowMapScene()
+        scene.space = space
         let tools = mapTools(tree).filter { entry in
             guard let destinations = gate.destinations,
                   destinations.tools.contains(where: { $0.installed == true }) else { return true }
@@ -212,11 +306,26 @@ struct FlowMapScene: Equatable {
             let row = destinations.tools.first { $0.tool == entry.tool.id }
             return row?.installed != false || (row?.counts?.sessions ?? 0) > 0
         }
-        let step = tools.count > 1 ? 460 / CGFloat(tools.count - 1) : 0
+        let hubPoint = hub(in: space)
+        let libraryPoint = library(in: space)
+        let folderX = folderX(space)
+        // Each tool's room in the band is in proportion to the lines it
+        // takes, so a tool with many folders never crowds its neighbour,
+        // and the folders shown are as many as fit (`folderCap`).
+        let band = band(space)
+        let cap = folderCap(tools.map(\.tool), band: band)
+        let slots = stack(
+            tools.map { units($0.tool, cap: cap) }, in: band,
+            maxStep: folderStepRange.upperBound, minStep: folderStepRange.lowerBound)
+        let lineStep = slots.first.map { $0.room / units(tools[0].tool, cap: cap) } ?? folderStepRange.upperBound
         var flowing = false
 
         for (index, (tool, watched)) in tools.enumerated() {
-            let at = CGPoint(x: 150, y: tools.count > 1 ? 170 + CGFloat(index) * step : hubPoint.y)
+            // The tool on its folders' middle line, the gap after them.
+            let shownCount = CGFloat(max(1, min(tool.folders.count, cap)))
+            let top = slots[index].y - slots[index].room / 2 + lineStep / 2
+            let at = CGPoint(x: toolX(space), y: top + (shownCount - 1) * lineStep / 2)
+            let folderGap = lineStep
             let off = tool.mode == .off
             let faded = selectedTool != nil && selectedTool != tool.id
             let toolDim = (off ? 0.4 : 1) * (faded ? 0.3 : 1)
@@ -237,12 +346,13 @@ struct FlowMapScene: Equatable {
                 from: at, control1: CGPoint(x: midX, y: at.y), control2: CGPoint(x: midX, y: hubPoint.y),
                 to: CGPoint(x: hubPoint.x - 16, y: hubPoint.y), style: .quiet, dim: toolDim))
 
-            let shown = Array(tool.folders.prefix(foldersShown))
+            let shown = Array(tool.folders.prefix(cap))
             for (folderIndex, folder) in shown.enumerated() {
-                let point = CGPoint(x: 58, y: at.y + (CGFloat(folderIndex) - CGFloat(shown.count - 1) / 2) * 46)
+                let point = CGPoint(x: folderX, y: at.y + (CGFloat(folderIndex) - CGFloat(shown.count - 1) / 2) * folderGap)
+                let bend = (at.x + point.x) / 2
                 scene.arcs.append(Arc(
-                    from: CGPoint(x: at.x - 13, y: at.y), control1: CGPoint(x: at.x - 42, y: at.y),
-                    control2: CGPoint(x: at.x - 42, y: point.y), to: CGPoint(x: point.x + 8, y: point.y),
+                    from: CGPoint(x: at.x - 13, y: at.y), control1: CGPoint(x: bend, y: at.y),
+                    control2: CGPoint(x: bend, y: point.y), to: CGPoint(x: point.x + 8, y: point.y),
                     style: .quiet, dim: toolDim))
                 scene.nodes.append(Node(
                     id: "folder:\(folder.id)", kind: .folder(folder.mode), at: point, radius: 7,
@@ -250,7 +360,12 @@ struct FlowMapScene: Equatable {
                     dim: toolDim))
             }
             if tool.folders.count > shown.count {
-                scene.overflows.append(Overflow(at: CGPoint(x: 58, y: at.y + 118), count: tool.folders.count - shown.count))
+                scene.overflows.append(Overflow(
+                    // Under the last name, in the names' column.
+                    at: CGPoint(
+                        x: folderX - 24,
+                        y: at.y + (CGFloat(shown.count - 1) / 2 + overflowLine + 0.15) * folderGap),
+                    count: tool.folders.count - shown.count))
             }
             scene.nodes.append(Node(
                 id: "tool:\(tool.id)", kind: .tool(TracesTreeView.glassTool(tool.kind), off: off), at: at, radius: 13,
@@ -311,7 +426,18 @@ struct FlowMapScene: Equatable {
 
     // MARK: Private AI
 
-    static let destinationPoint = CGPoint(x: 290, y: 380)
+    static let destinationPoint = destination(in: size)
+
+    /// The destination, right of centre on the band's middle; the tools in
+    /// a column to its left, their names to the left of their icons.
+    static func destination(in space: CGSize) -> CGPoint {
+        let band = band(space)
+        return CGPoint(x: space.width * 0.68, y: (band.lowerBound + band.upperBound) / 2)
+    }
+    static func harnessX(_ space: CGSize) -> CGFloat { max(150, space.width * 0.36) }
+
+    /// A tool line's least and most height in the Private AI map.
+    static let harnessStepRange: ClosedRange<CGFloat> = 30 ... 72
 
     /// Each tool that can send model calls here, joined to the destination,
     /// drawn from the core's state for it (`HarnessState`), never from
@@ -331,12 +457,14 @@ struct FlowMapScene: Equatable {
         privateAI: String?,
         sentence: (HarnessRow) -> String?,
         state: (HarnessRow) -> HarnessState,
-        destinations: DaemonData.ToolDestinations? = nil
+        destinations: DaemonData.ToolDestinations? = nil,
+        space: CGSize = FlowMapScene.size
     ) -> FlowMapScene {
         // An unreadable global harness list is not an empty configured list.
         // The caller can still append independently read managed routes.
-        guard harnesses != .none else { return FlowMapScene() }
         var scene = FlowMapScene()
+        scene.space = space
+        guard harnesses != .none else { return scene }
         let hasInstalled = destinations?.tools.contains(where: { $0.installed == true }) == true
             || harnesses.harnesses.contains(where: \.installed)
         let rows = harnesses.harnesses.filter { row in
@@ -344,12 +472,24 @@ struct FlowMapScene: Equatable {
             let source = row.id == "claude" ? "claude-code" : row.id
             return destinations?.tools.first(where: { $0.tool == source })?.installed ?? row.installed
         }
-        let step = rows.count > 1 ? 420 / CGFloat(rows.count - 1) : 0
+        let destinationPoint = destination(in: space)
+        let x = harnessX(space)
+        // Evenly down the band, no further apart than reads as one group,
+        // centred on the destination; as many as fit at the least line
+        // height, the rest counted as "+N" under them.
+        let band = band(space)
+        let fit = max(1, Int((band.upperBound - band.lowerBound) / harnessStepRange.lowerBound))
+        let shown = rows.count > fit ? Array(rows.prefix(fit - 1)) : rows
+        let weights = Array(repeating: CGFloat(1), count: shown.count) + (shown.count < rows.count ? [0.7] : [])
+        let slots = stack(weights, in: band, maxStep: harnessStepRange.upperBound, minStep: harnessStepRange.lowerBound)
+        if shown.count < rows.count, let last = slots.last {
+            scene.overflows.append(Overflow(at: CGPoint(x: x - 24, y: last.y), count: rows.count - shown.count))
+        }
         var anyAnswering = false
         var connected = 0
 
-        for (index, row) in rows.enumerated() {
-            let y = rows.count > 1 ? 170 + CGFloat(index) * step : destinationPoint.y
+        for (index, row) in shown.enumerated() {
+            let y = slots[index].y
             let style: Arc.Style
             switch state(row) {
             case .answering:
@@ -365,14 +505,29 @@ struct FlowMapScene: Equatable {
             case .notConnected: style = .dashed
             case .unknown: style = .unknown
             }
+            let bend = (x + destinationPoint.x) / 2
             scene.arcs.append(Arc(
-                from: CGPoint(x: 118, y: y), control1: CGPoint(x: 200, y: y),
-                control2: CGPoint(x: 210, y: destinationPoint.y), to: destinationPoint,
+                from: CGPoint(x: x + 12, y: y), control1: CGPoint(x: bend, y: y),
+                control2: CGPoint(x: bend, y: destinationPoint.y), to: destinationPoint,
                 style: style))
             scene.nodes.append(Node(
-                id: "harness:\(row.id)", kind: .harness(glassTool(harness: row.id), installed: row.installed),
-                at: CGPoint(x: 106, y: y), radius: 13, label: row.name, detail: sentence(row) ?? "—",
+                id: "harness:\(row.id)",
+                kind: .harness(glassTool(harness: row.id) ?? .other(initials: initials(row.name)), installed: row.installed),
+                at: CGPoint(x: x, y: y), radius: 13, label: row.name, detail: sentence(row) ?? "—",
                 dim: row.installed ? 1 : 0.5))
+        }
+        // The tools counted as "+N" still count: the credential says how
+        // many are connected and whether any is answered, drawn or not.
+        for row in rows.dropFirst(shown.count) {
+            switch state(row) {
+            case .answering:
+                anyAnswering = true
+                connected += 1
+            case .connectedNoCalls, .activityShared:
+                connected += 1
+            case .notConnected, .unknown:
+                break
+            }
         }
         let lamp = lamp(privateAI, answering: anyAnswering)
         // #1146's credential card: how many tools are connected, in a
@@ -398,14 +553,21 @@ struct FlowMapScene: Equatable {
         let keys = groups.keys.sorted()
         for (index, key) in keys.enumerated() {
             guard let rows = groups[key], let first = rows.first else { continue }
-            let y = keys.count > 1 ? 130 + CGFloat(index) * 530 / CGFloat(keys.count - 1) : 560
-            let start = CGPoint(x: 390, y: y)
-            let end = CGPoint(x: 520, y: y)
+            // Right of the global destination, down the band; a single
+            // route sits low so it never reads as the destination's own.
+            let band = Self.band(scene.space)
+            let y = keys.count > 1
+                ? band.lowerBound + CGFloat(index) * (band.upperBound - band.lowerBound) / CGFloat(keys.count - 1)
+                : band.lowerBound + (band.upperBound - band.lowerBound) * 0.85
+            let start = CGPoint(x: scene.space.width * 0.8, y: y)
+            let end = CGPoint(x: scene.space.width * 0.93, y: y)
             let details = rows.prefix(4).map { $0.detail(copy: copy) }.joined(separator: "\n")
             let overflow = rows.count > 4 ? "\n+\(rows.count - 4)" : ""
             let detail = [copy["map_scope"], details + overflow].compactMap { $0 }.joined(separator: "\n")
             scene.nodes.append(Node(
-                id: "managed:" + key, kind: .harness(Self.glassTool(harness: first.tool), installed: true),
+                id: "managed:" + key, kind: .harness(
+                    Self.glassTool(harness: first.tool) ?? .other(initials: Self.initials(copy[first.tool] ?? first.tool)),
+                    installed: true),
                 at: start, radius: 13, label: copy[first.tool] ?? first.tool, detail: detail,
                 title: copy["title"], sublabel: copy["title"].map { Self.dotPair($0, rows.count) }))
             scene.nodes.append(Node(
@@ -433,6 +595,19 @@ struct FlowMapScene: Equatable {
         case "off": .off
         default: .unknown
         }
+    }
+
+    /// A tool with no artwork is drawn as two letters of its name (owner,
+    /// 2026-10-14: a long list of blank circles reads as one): a word's
+    /// first two ("Cursor" is "Cu"), or the first letters of its first two
+    /// words ("GitHub Copilot CLI" is "GC").
+    static func initials(_ name: String) -> String {
+        let words = name.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        guard let first = words.first else { return "?" }
+        if words.count > 1, let second = words.dropFirst().first?.first {
+            return String(first.prefix(1)).uppercased() + String(second).uppercased()
+        }
+        return String(first.prefix(1)).uppercased() + String(first.dropFirst().prefix(1)).lowercased()
     }
 
     /// IronWire's harness ids to the tools that have artwork. The table is

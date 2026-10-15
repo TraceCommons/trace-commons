@@ -159,6 +159,8 @@ struct GlassSourceRow: View {
                         Text(secondary).glassType(GlassTokens.TypeScale.body)
                             .foregroundStyle(GlassColor.textSecondary)
                     }
+                    // The actions first, the decline last as a link (Ron,
+                    // 2026-10-09).
                     HStack(spacing: GlassTokens.Space.s3) {
                         if let candidate, candidate.exists {
                             Button(copy.watchCandidate) { onWatchCandidate(candidate) }
@@ -169,7 +171,7 @@ struct GlassSourceRow: View {
                             if let path = FolderPanel.choose() { onChoose(path) }
                         }
                         Button(tool.decline) { onDecline() }
-                            .buttonStyle(GlassButtonStyle(.glass))
+                            .buttonStyle(GlassButtonStyle(.link))
                             .disabled(choice == .off)
                         Spacer(minLength: 0)
                     }

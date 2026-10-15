@@ -174,6 +174,42 @@ pub(crate) const REASON_TRANSIENT_REDACTION_EXHAUSTED: &str = "privacy-filter-tr
 /// Also the daemon's health label for the condition
 /// (`daemon::health::LABEL_WITNESS_SATURATED`), so one fact has one spelling.
 pub const REASON_WITNESS_SATURATED: &str = "witness-saturated";
+/// Ingest turned the upload away with `429` because this device is sending
+/// faster than its per-principal limit (30 a minute by default). Nothing was
+/// judged and nothing is lost: like [`REASON_WITNESS_SATURATED`], the daemon
+/// keeps the approval and tries again after the server's
+/// `retry_after_seconds` (or [`RATE_LIMIT_DEFAULT_RETRY_SECS`] without one),
+/// and the CLI reports it as its own outcome rather than a failure label.
+///
+/// Recognised from any `429` on `POST /v1/traces` that is not one of the
+/// admission refusals (`admission_limit_reached`, `account_limit_reached`),
+/// which keep their own handling: the current server's
+/// `{"error":"submit_rate_limited","retry_after_seconds":N}`, an older
+/// server's bare `{"error":"rate limited"}`, and a 429 with no JSON body at
+/// all from something in front of ingest.
+pub const REASON_RATE_LIMITED: &str = "rate-limited";
+/// Ingest could not be reached once the in-call retries ran out, or answered
+/// with a `5xx` (Caddy's 502/503 while ingest restarts during a deploy, a
+/// 500 from a passing database error). Nothing was judged and nothing is
+/// lost: the daemon keeps the approval and retries with a bounded backoff
+/// (#1358).
+///
+/// Also the daemon's health label for the condition
+/// (`daemon::health::LABEL_INGEST_UNREACHABLE`), so one fact has one
+/// spelling, and the queue row reads the copy that label already has.
+pub const REASON_INGEST_UNREACHABLE: &str = crate::daemon::health::LABEL_INGEST_UNREACHABLE;
+/// The wait used when a rate-limit refusal carries no usable
+/// `retry_after_seconds`: the server's whole fixed window.
+pub const RATE_LIMIT_DEFAULT_RETRY_SECS: u32 = 60;
+/// The longest a server's `retry_after_seconds` is honoured for. A larger
+/// hint is clamped, so a misbehaving answer cannot park a session for days.
+pub const RATE_LIMIT_MAX_RETRY_SECS: u32 = 15 * 60;
+/// What `submit` prints for a session the rate limit turned away. The CLI
+/// does not wait and retry inside the run: it says plainly that nothing was
+/// sent or lost and that running it again sends it. No receipt is written
+/// for a refused upload, so a re-run picks the session up as new.
+pub const RATE_LIMITED_CLI_LINE: &str = "rate-limited (the commons asked this device to slow \
+     down; this session was not sent and nothing is lost. Run submit again in a minute to send it)";
 
 impl std::fmt::Display for SubmitPreconditionFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -676,6 +712,10 @@ pub struct SubmitContext<'a> {
     /// `last_receipt_shipped`. Atomic only because `witness_envelope`
     /// borrows the context immutably; there is no concurrency here.
     last_witness_retry_after: std::sync::atomic::AtomicU32,
+    /// The wait ingest's rate limit asked for on the last submission, in
+    /// seconds; zero for none. Reset like `last_witness_retry_after`. See
+    /// [`REASON_RATE_LIMITED`].
+    last_rate_limit_retry_after: std::sync::atomic::AtomicU32,
     /// Stands in for a fetched provider receipt, tests only.
     ///
     /// `receipt_for_attested_call` refuses a plaintext endpoint before it
@@ -757,6 +797,7 @@ impl<'a> SubmitContext<'a> {
             background_witness: false,
             upload_provenance: None,
             last_witness_retry_after: std::sync::atomic::AtomicU32::new(0),
+            last_rate_limit_retry_after: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
             receipt_override: None,
             #[cfg(test)]
@@ -1425,6 +1466,19 @@ impl<'a> SubmitContext<'a> {
         .filter(|secs| *secs > 0)
     }
 
+    /// The wait, in seconds, ingest's rate limit asked for on the most recent
+    /// submission, or `None` if it was not rate limited. Meaningful
+    /// immediately after a submission returns `Failed` with
+    /// [`REASON_RATE_LIMITED`].
+    #[must_use]
+    pub fn last_rate_limit_retry_after(&self) -> Option<u32> {
+        Some(
+            self.last_rate_limit_retry_after
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .filter(|secs| *secs > 0)
+    }
+
     pub async fn submit_one(
         &mut self,
         source: &dyn TraceSource,
@@ -1463,6 +1517,8 @@ impl<'a> SubmitContext<'a> {
         self.last_receipt_shipped = ReceiptShipped::NoCall;
         self.last_sent_witness = None;
         self.last_witness_retry_after
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.last_rate_limit_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
         let opts = self.opts;
         // Taken up front, not at the point it is used below: several paths
@@ -1887,7 +1943,8 @@ impl<'a> SubmitContext<'a> {
             .device
             .as_ref()
             .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
-        match upload_with_retry(
+        let mut rate_limit_retry_after = None;
+        let uploaded = upload_with_retry(
             self.cfg,
             &self.issuer,
             device,
@@ -1895,9 +1952,14 @@ impl<'a> SubmitContext<'a> {
             &mut envelope,
             &self.effective_cfg,
             witnessed.as_ref(),
+            &mut rate_limit_retry_after,
         )
-        .await
-        {
+        .await;
+        if let Some(seconds) = rate_limit_retry_after {
+            self.last_rate_limit_retry_after
+                .store(seconds, std::sync::atomic::Ordering::Relaxed);
+        }
+        match uploaded {
             Ok(receipt) => {
                 let r = Receipt {
                     submission_id: envelope.submission_id,
@@ -2650,6 +2712,13 @@ pub(crate) fn build_ingest_client(
 /// the body at all. A re-mint retries only if all certified permissions match
 /// the fresh grant exactly. Otherwise it refuses; it never restamps signed
 /// bytes or sends the raw session to the witness a second time.
+///
+/// # Rate limit
+///
+/// A `429` that is ingest's per-principal rate limit returns
+/// [`REASON_RATE_LIMITED`] at once, with the server's wait written to
+/// `rate_limit_retry_after`; it is never retried here.
+#[allow(clippy::too_many_arguments)]
 async fn upload_with_retry(
     cfg: &ContributorConfig,
     issuer: &IssuerClient,
@@ -2658,6 +2727,7 @@ async fn upload_with_retry(
     envelope: &mut TraceContributionEnvelope,
     effective_cfg: &ContributorConfig,
     witnessed: Option<&WitnessedEnvelope>,
+    rate_limit_retry_after: &mut Option<u32>,
 ) -> std::result::Result<TraceSubmissionReceipt, String> {
     let mut transport_attempts: u32 = 0;
     let mut remint_attempted = false;
@@ -2733,7 +2803,7 @@ async fn upload_with_retry(
             Err(OcError::Transport { .. }) => {
                 transport_attempts += 1;
                 if transport_attempts >= 3 {
-                    return Err("transport".to_string());
+                    return Err(REASON_INGEST_UNREACHABLE.to_string());
                 }
                 let delay_secs = if transport_attempts == 1 { 1 } else { 4 };
                 tokio::time::sleep(StdDuration::from_secs(delay_secs)).await;
@@ -2745,6 +2815,17 @@ async fn upload_with_retry(
                 // string the server sent.
                 if let Some(refusal) = admission_refusal(&e) {
                     return Err(refusal.label().to_string());
+                }
+                // Sending too fast is not a verdict on the session. The
+                // caller keeps it and tries again after the server's wait.
+                if let Some(retry_after_secs) = upload_rate_limit(&e) {
+                    *rate_limit_retry_after = Some(retry_after_secs);
+                    return Err(REASON_RATE_LIMITED.to_string());
+                }
+                // Ingest, or something in front of it, is down or failing.
+                // Not a verdict either; the daemon retries it with backoff.
+                if ingest_unavailable(&e) {
+                    return Err(REASON_INGEST_UNREACHABLE.to_string());
                 }
                 if !is_auth_failure(&e) {
                     return Err(e.kind().to_string());
@@ -2787,6 +2868,50 @@ fn admission_refusal(e: &OcError) -> Option<AdmissionRefusal> {
     }
 }
 
+/// The seconds to wait if this error is ingest's per-principal upload rate
+/// limit, `None` if it is anything else. See [`REASON_RATE_LIMITED`].
+///
+/// Any `429` that is not an admission refusal this client recognises counts:
+/// those keep their own handling, and must be checked first by the caller as
+/// well. The wait is the body's `retry_after_seconds` clamped to
+/// `1..=RATE_LIMIT_MAX_RETRY_SECS`, or [`RATE_LIMIT_DEFAULT_RETRY_SECS`] when
+/// the body has none (an older server, or something in front of ingest).
+fn upload_rate_limit(e: &OcError) -> Option<u32> {
+    if admission_refusal(e).is_some() {
+        return None;
+    }
+    let body = match e {
+        OcError::ServerLabel { status, body, .. } | OcError::HttpFailure { status, body, .. }
+            if status.as_u16() == 429 =>
+        {
+            body
+        }
+        _ => return None,
+    };
+    let hint = serde_json::from_str::<serde_json::Value>(body.trim())
+        .ok()
+        .and_then(|value| value.get("retry_after_seconds")?.as_u64())
+        .map(|seconds| u32::try_from(seconds).unwrap_or(u32::MAX));
+    Some(
+        hint.unwrap_or(RATE_LIMIT_DEFAULT_RETRY_SECS)
+            .clamp(1, RATE_LIMIT_MAX_RETRY_SECS),
+    )
+}
+
+/// Whether this answer says ingest is down or failing rather than judging the
+/// upload: any `5xx`, labelled or not. See [`REASON_INGEST_UNREACHABLE`].
+///
+/// Only the status decides. A `4xx` is a verdict on this request and stays
+/// with the caller's terminal handling.
+fn ingest_unavailable(e: &OcError) -> bool {
+    match e {
+        OcError::ServerLabel { status, .. } | OcError::HttpFailure { status, .. } => {
+            status.is_server_error()
+        }
+        _ => false,
+    }
+}
+
 /// Whether this is the expired credential a remint answers.
 ///
 /// **Fail closed.** A `403` stays an authentication failure unless the body
@@ -2812,6 +2937,122 @@ mod tests {
     use crate::config::WitnessSettings;
     use axum::{Json, Router, routing::post};
     use std::sync::{Arc, Mutex};
+
+    fn labelled(status: u16, label: &str, body: &str) -> OcError {
+        OcError::ServerLabel {
+            url: "http://127.0.0.1/v1/traces".into(),
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            label: label.into(),
+            body: body.into(),
+        }
+    }
+
+    /// Any 5xx, labelled or bare, is ingest being unavailable (#1358); no
+    /// 4xx is, including the 409s and 429s that keep their own handling.
+    #[test]
+    fn only_a_5xx_reads_as_ingest_unavailable() {
+        let bare = |status: u16| OcError::HttpFailure {
+            url: "http://127.0.0.1/v1/traces".into(),
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            body: "Bad Gateway".into(),
+        };
+        for status in [500, 502, 503, 504] {
+            assert!(ingest_unavailable(&labelled(
+                status,
+                "x",
+                "{\"error\":\"x\"}"
+            )));
+            assert!(ingest_unavailable(&bare(status)));
+        }
+        for status in [400, 401, 403, 404, 409, 413, 422, 429] {
+            assert!(!ingest_unavailable(&labelled(
+                status,
+                "x",
+                "{\"error\":\"x\"}"
+            )));
+            assert!(!ingest_unavailable(&bare(status)));
+        }
+    }
+
+    /// The CLI names the outcome for what it is and says what to do, rather
+    /// than `failed (server-label)`.
+    #[test]
+    fn the_cli_line_for_a_rate_limited_session_is_distinct_and_says_to_rerun() {
+        assert!(RATE_LIMITED_CLI_LINE.starts_with("rate-limited "));
+        assert!(RATE_LIMITED_CLI_LINE.contains("not sent and nothing is lost"));
+        assert!(RATE_LIMITED_CLI_LINE.contains("Run submit again"));
+        assert!(!RATE_LIMITED_CLI_LINE.contains("server-label"));
+    }
+
+    /// Any 429 on the upload that is not an admission refusal is the
+    /// per-principal rate limit, current or legacy, with the server's hint
+    /// clamped to `[1, RATE_LIMIT_MAX_RETRY_SECS]` and the whole window
+    /// without one.
+    #[test]
+    fn a_429_that_is_not_an_admission_refusal_is_the_upload_rate_limit() {
+        assert_eq!(
+            upload_rate_limit(&labelled(
+                429,
+                "submit_rate_limited",
+                r#"{"error":"submit_rate_limited","retry_after_seconds":17}"#,
+            )),
+            Some(17)
+        );
+        assert_eq!(
+            upload_rate_limit(&labelled(
+                429,
+                "rate limited",
+                r#"{"error":"rate limited"}"#
+            )),
+            Some(RATE_LIMIT_DEFAULT_RETRY_SECS),
+            "a server without the labelled refusal"
+        );
+        assert_eq!(
+            upload_rate_limit(&OcError::HttpFailure {
+                url: "http://127.0.0.1/v1/traces".into(),
+                status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+                body: "Too Many Requests".into(),
+            }),
+            Some(RATE_LIMIT_DEFAULT_RETRY_SECS),
+            "a proxy in front of ingest"
+        );
+        assert_eq!(
+            upload_rate_limit(&labelled(
+                429,
+                "submit_rate_limited",
+                r#"{"error":"submit_rate_limited","retry_after_seconds":86400}"#,
+            )),
+            Some(RATE_LIMIT_MAX_RETRY_SECS)
+        );
+        assert_eq!(
+            upload_rate_limit(&labelled(
+                429,
+                "submit_rate_limited",
+                r#"{"error":"submit_rate_limited","retry_after_seconds":0}"#,
+            )),
+            Some(1)
+        );
+        for label in ["account_limit_reached", "admission_limit_reached"] {
+            assert_eq!(
+                upload_rate_limit(&labelled(
+                    429,
+                    label,
+                    &format!(r#"{{"error":"{label}","retry_after_seconds":60}}"#),
+                )),
+                None,
+                "{label} keeps its admission handling"
+            );
+        }
+        assert_eq!(
+            upload_rate_limit(&labelled(
+                503,
+                "rate limited",
+                r#"{"error":"rate limited"}"#
+            )),
+            None,
+            "only a 429"
+        );
+    }
 
     #[test]
     fn admission_projection_omits_unsigned_history_but_preserves_submission_identity() {
@@ -6982,6 +7223,7 @@ mod tests {
             &mut envelope,
             &cfg,
             witnessed,
+            &mut None,
         )
         .await;
         let captured = captured.lock().unwrap().clone();

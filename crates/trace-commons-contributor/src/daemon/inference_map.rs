@@ -24,9 +24,11 @@
 //! text field, `model`: the model name as the proxy recorded it, up to 128
 //! characters of the characters a model id uses, else `unknown`. Never a
 //! prompt, a response, a body reference, a body digest, the provider's
-//! exchange identifier, a native session id, a token or a URL. The separate
-//! managed-session projection includes its local registry ID. Nothing here is
-//! logged.
+//! exchange identifier, a native session id, a credential or a URL. The
+//! separate managed-session projection includes its local registry ID.
+//! Nothing here is logged. While the Insights ledger feed is on (the default;
+//! owner decision D3, settled 2026-10-09), each call also carries its four
+//! token counts as recorded.
 //!
 //! # Every unknown is `unknown`
 //!
@@ -180,6 +182,20 @@ fn vendor(source: &str) -> &'static str {
     crate::source::source_default_family(source)
         .filter(|family| crate::source::vendor_label(family).is_some())
         .unwrap_or(UNKNOWN)
+}
+
+/// The display name this table gives a source id (`"claude-code"` reads
+/// "Claude Code"), or `None` for a source it has no row for, such as
+/// `trajectory`. Pass a queue entry's `displayed_source()`, so a declared
+/// source is named before the adapter that stored it. Nudge U4 names the
+/// tools idle sessions came from with it; an unknown source is left
+/// unnamed rather than shown as its raw id.
+#[must_use]
+pub fn tool_display_name(source: &str) -> Option<&'static str> {
+    TOOLS
+        .iter()
+        .find(|spec| spec.source == source)
+        .map(|spec| spec.name)
 }
 
 /// The source id a harness row is the same tool as, or `None`.
@@ -341,7 +357,7 @@ fn speakers_from_links(harness: &[(String, HarnessLink)]) -> Speakers {
 }
 
 /// The speakers among the harness rows `harness_list` computes.
-fn speakers_from_rows(harness: &[HarnessRow]) -> Speakers {
+pub(crate) fn speakers_from_rows(harness: &[HarnessRow]) -> Speakers {
     harness
         .iter()
         .filter(|row| row.connected)
@@ -814,7 +830,10 @@ fn endpoint_tool(facade: &str, path: &str) -> Option<&'static str> {
 /// A tool pointed at the proxy by hand, speaking the same API at the same
 /// facade as a tool this daemon connects, is indistinguishable in the row
 /// and reads as that tool. Nothing in the row can tell them apart.
-fn attribute(row: &RoutedExchange, speakers: &[(&'static str, &'static str)]) -> &'static str {
+pub(crate) fn attribute(
+    row: &RoutedExchange,
+    speakers: &[(&'static str, &'static str)],
+) -> &'static str {
     let facade = row.facade.as_str();
     if let Some(path) = row.path.as_deref().filter(|path| !path.is_empty()) {
         let Some(tool) = endpoint_tool(facade, path) else {
@@ -851,6 +870,28 @@ pub fn calls_page(
     before: Option<(i64, i64)>,
     limit: usize,
 ) -> (Vec<serde_json::Value>, Option<String>) {
+    calls_page_with(rows, speakers, before, limit, false)
+}
+
+/// A recorded count, or `null` when missing, negative or out of range.
+fn token_count(recorded: Option<i64>) -> serde_json::Value {
+    recorded
+        .and_then(|n| u32::try_from(n).ok())
+        .map_or(serde_json::Value::Null, serde_json::Value::from)
+}
+
+/// [`calls_page`], and with `tokens` each row also carries the ledger's four
+/// token counters as recorded, each `null` when not known. Only while the
+/// Insights ledger feed is on (the default; owner decision D3, settled
+/// 2026-10-09); a shell never sums them, and nothing here reads them as cost.
+#[must_use]
+pub fn calls_page_with(
+    rows: &[RoutedExchange],
+    speakers: &[(&'static str, &'static str)],
+    before: Option<(i64, i64)>,
+    limit: usize,
+    tokens: bool,
+) -> (Vec<serde_json::Value>, Option<String>) {
     let mut ordered: Vec<((i64, i64), &RoutedExchange)> = rows
         .iter()
         .filter_map(|row| {
@@ -871,7 +912,7 @@ pub fn calls_page(
         .into_iter()
         .map(|(_, row)| {
             let micros = priced_micros(row);
-            serde_json::json!({
+            let mut call = serde_json::json!({
                 "id": row.id,
                 "at": row.started_at.to_rfc3339(),
                 "tool": attribute(row, speakers),
@@ -882,7 +923,16 @@ pub fn calls_page(
                 // work a monthly plan already paid for.
                 "cost": { "known": micros.is_some(), "priced_micros": micros },
                 "proof": proof_label(row),
-            })
+            });
+            if tokens {
+                call["tokens"] = serde_json::json!({
+                    "input": token_count(row.input_tokens),
+                    "cache_read": token_count(row.cache_read_tokens),
+                    "cache_write": token_count(row.cache_write_tokens),
+                    "output": token_count(row.output_tokens),
+                });
+            }
+            call
         })
         .collect();
     (calls, next)
@@ -974,7 +1024,11 @@ pub fn handle_calls(shared: &DaemonShared, req: &Request) -> Response {
         );
     };
     let speakers = speakers_from_rows(&super::harness::rows_now(shared));
-    let (calls, next) = calls_page(&rows, &speakers, before, limit);
+    let tokens = shared
+        .settings
+        .lock()
+        .is_ok_and(|settings| settings.insights_ledger_feed);
+    let (calls, next) = calls_page_with(&rows, &speakers, before, limit, tokens);
     Response::ok(
         req.id,
         serde_json::json!({
@@ -998,6 +1052,25 @@ mod tests {
     const REQUEST_DIGEST: &str = "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11";
     const RESPONSE_DIGEST: &str =
         "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22";
+
+    /// Nudge U4 names tools from this table: a known source by its
+    /// display name, an unknown one not at all.
+    #[test]
+    fn tool_display_names_come_from_the_table() {
+        assert_eq!(
+            tool_display_name(crate::source::SOURCE_CLAUDE_CODE),
+            Some("Claude Code")
+        );
+        assert_eq!(
+            tool_display_name(crate::source::SOURCE_CODEX),
+            Some("Codex")
+        );
+        assert_eq!(tool_display_name(crate::source::SOURCE_TRAJECTORY), None);
+        assert_eq!(tool_display_name("antigravity"), None);
+        for spec in TOOLS {
+            assert_eq!(tool_display_name(spec.source), Some(spec.name));
+        }
+    }
 
     fn row(id: i64, offset: i64, proof: Option<ProofStatus>) -> RoutedExchange {
         RoutedExchange {
@@ -1959,6 +2032,128 @@ mod tests {
         .unwrap();
         assert_eq!(value["ledger_readable"], false);
         assert_eq!(value["observed_destinations"], serde_json::json!([]));
+    }
+
+    /// With the Insights ledger feed turned off a row carries no `tokens`
+    /// key at all; on, it carries the four counters as
+    /// recorded, each `null` when not known. No sum, no cost.
+    #[test]
+    fn tokens_ride_on_a_call_only_with_the_ledger_feed_on() {
+        let mut known = row(1, 0, None);
+        known.input_tokens = Some(1_000);
+        known.cache_read_tokens = Some(600);
+        known.cache_write_tokens = Some(0);
+        known.output_tokens = Some(25);
+        let mut doubtful = row(2, 1, None);
+        doubtful.input_tokens = Some(-4);
+        doubtful.cache_read_tokens = None;
+        doubtful.cache_write_tokens = Some(i64::MAX);
+        doubtful.output_tokens = Some(3);
+        let rows = vec![known, doubtful];
+
+        let (off, _) = calls_page(&rows, &[], None, 10);
+        assert!(off.iter().all(|call| call.get("tokens").is_none()));
+
+        let (on, _) = calls_page_with(&rows, &[], None, 10, true);
+        assert_eq!(
+            on[1]["tokens"],
+            serde_json::json!({"input": 1_000, "cache_read": 600, "cache_write": 0, "output": 25})
+        );
+        assert_eq!(
+            on[0]["tokens"],
+            serde_json::json!({"input": null, "cache_read": null, "cache_write": null, "output": 3}),
+            "a negative or out-of-range count is not known, never zero"
+        );
+        for call in &on {
+            let mut without = call.clone();
+            without.as_object_mut().unwrap().remove("tokens");
+            let (plain, _) = calls_page(&rows, &[], None, 10);
+            assert!(plain.contains(&without), "only `tokens` is added");
+        }
+    }
+
+    /// The tokened calls the shells pin, recorded whole: printed by
+    /// `cargo test ... a_recorded_tokened_call_for_the_shells -- --nocapture`
+    /// and pasted into the Swift wire tests, never reconstructed by hand. The
+    /// rows are those of `tokens_ride_on_a_call_only_with_the_ledger_feed_on`:
+    /// one call fully known with a measured zero, one with counters that are
+    /// not known.
+    #[test]
+    fn a_recorded_tokened_call_for_the_shells() {
+        let mut known = row(1, 0, None);
+        known.input_tokens = Some(1_000);
+        known.cache_read_tokens = Some(600);
+        known.cache_write_tokens = Some(0);
+        known.output_tokens = Some(25);
+        let mut doubtful = row(2, 1, None);
+        doubtful.input_tokens = Some(-4);
+        doubtful.cache_read_tokens = None;
+        doubtful.cache_write_tokens = Some(i64::MAX);
+        doubtful.output_tokens = Some(3);
+        let rows = vec![known, doubtful];
+
+        let (on, next) = calls_page_with(&rows, &[], None, 10, true);
+        assert_eq!(next, None);
+        assert_eq!(
+            on,
+            vec![
+                serde_json::json!({
+                    "id": 2,
+                    "at": "2027-01-15T08:00:01+00:00",
+                    "tool": "unknown",
+                    "family": "openai",
+                    "model": MODEL,
+                    "route": "unknown",
+                    "cost": {"known": true, "priced_micros": 12_300},
+                    "proof": "unrecorded",
+                    "tokens": {"input": null, "cache_read": null, "cache_write": null, "output": 3},
+                }),
+                serde_json::json!({
+                    "id": 1,
+                    "at": "2027-01-15T08:00:00+00:00",
+                    "tool": "unknown",
+                    "family": "openai",
+                    "model": MODEL,
+                    "route": "unknown",
+                    "cost": {"known": true, "priced_micros": 12_300},
+                    "proof": "unrecorded",
+                    "tokens": {"input": 1_000, "cache_read": 600, "cache_write": 0, "output": 25},
+                }),
+            ]
+        );
+        for call in &on {
+            println!("{}", serde_json::to_string(call).unwrap());
+        }
+    }
+
+    #[test]
+    fn inference_calls_carries_tokens_only_while_the_setting_is_on() {
+        let (_dir, s) = shared();
+        let mut r = recent(1);
+        r.input_tokens = Some(7);
+        s.install_routing_ledger_for_test(
+            crate::routing::ironwire::IronWireLedger::with_rows_for_test(vec![r]),
+        );
+        let page =
+            super::super::ipc::handle_request(&s, &call("inference_calls", serde_json::json!({})))
+                .result
+                .unwrap();
+        assert_eq!(
+            page["calls"][0]["tokens"]["input"], 7,
+            "on by default (owner decision D3, settled 2026-10-09)"
+        );
+        s.settings.lock().unwrap().insights_ledger_feed = false;
+        let page =
+            super::super::ipc::handle_request(&s, &call("inference_calls", serde_json::json!({})))
+                .result
+                .unwrap();
+        assert!(page["calls"][0].get("tokens").is_none());
+        s.settings.lock().unwrap().insights_ledger_feed = true;
+        let page =
+            super::super::ipc::handle_request(&s, &call("inference_calls", serde_json::json!({})))
+                .result
+                .unwrap();
+        assert_eq!(page["calls"][0]["tokens"]["input"], 7);
     }
 
     #[test]

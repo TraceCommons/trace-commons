@@ -87,9 +87,9 @@ export function WitnessReviewOverlay({
               checked={confirmed}
               onCheckedChange={(value) => setConfirmed(value === true)}
               disabled={mutation.isPending || (mutation.isSuccess && !busy)}
-              aria-label="Confirm sending unredacted session to witness"
+              aria-label="Confirm sending unredacted trace to witness"
             />
-            <span>I understand and want to send this session for review.</span>
+            <span>I understand and want to send this trace for review.</span>
           </label>
         )}
         {mutation.isPending && copy.data && (

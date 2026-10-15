@@ -460,11 +460,17 @@ pub(crate) async fn pipeline_readiness_handler(
 /// also when the run's locks are released while a write goes on (a lost
 /// database session, an abort past the shutdown grace period, the process
 /// exit): the fence then expires on its own, at most the run deadline plus
-/// the margin (90 seconds at the defaults) after it was last set. This holds
-/// as long as each index call returns within the write fence margin
-/// (`PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`): a write starts only before
-/// the run's deadline, and the fence reaches the deadline plus the margin. A
-/// fence write that fails stops the rebuild with `503`
+/// the margin (90 seconds at the defaults) after it was last set. A write
+/// starts only before the run's deadline, and the fence reaches the deadline
+/// plus the margin (`PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`). An index
+/// call has no time limit of its own, so one can outlast the fence, and an
+/// invalidation claimed after the fence expired can run before that write
+/// lands. The late write is awaited until it returns and then reopens the
+/// run's invalidation, so the withdrawn revision is removed again (issue
+/// #1233, `reopen_invalidation_after_index_writes` in `versioned_pipeline`,
+/// which states the invariant). The fence keeps the removal from racing the
+/// writes it covers; the reopen covers a write that outlasts it. A fence
+/// write that fails stops the rebuild with `503`
 /// `index_rebuild_fence_unavailable`.
 ///
 /// It still refuses, with `409` `pipeline_index_rebuild_tenant_active`, a
@@ -697,16 +703,19 @@ async fn rebuild_index_and_audit(
 }
 
 /// Maps `rebuild_index_from_authoritative_commands`'s anyhow errors to their
-/// HTTP shape. `index_command_invalid` -- a sealed command that failed
-/// validation against its run or its own committed Score evidence -- is
-/// surfaced as 409 Conflict, a state of the store rather than a transient
-/// service fault. `index_unavailable` -- a run's writes that passed their
-/// deadline -- and `index_rebuild_fence_unavailable` -- a fence write that
-/// failed before a run's writes (V113) -- are 503. Everything else falls
-/// back to the generic hash-only internal error.
+/// HTTP shape. `index_command_invalid` -- a sealed command that the store
+/// read and that failed validation against its run or its own committed
+/// Score evidence -- is surfaced as 409 Conflict, a state of the store
+/// rather than a transient service fault. `index_command_unreadable` -- a
+/// failure the artifact store reported, a missing object or a wrong key
+/// included (plan RB-D6) -- `index_unavailable` -- a run's writes that
+/// passed their deadline -- and `index_rebuild_fence_unavailable` -- a fence
+/// write that failed before a run's writes (V113) -- are 503. Everything
+/// else falls back to the generic hash-only internal error.
 pub(crate) fn pipeline_index_rebuild_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
     use trace_commons_server::versioned_pipeline::{
-        PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL, PIPELINE_INDEX_UNAVAILABLE_LABEL,
+        PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL, PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL,
+        PIPELINE_INDEX_UNAVAILABLE_LABEL,
     };
     if error.to_string() == "index_command_invalid" {
         return api_error(StatusCode::CONFLICT, "index_command_invalid");
@@ -717,6 +726,7 @@ pub(crate) fn pipeline_index_rebuild_error(error: anyhow::Error) -> (StatusCode,
     // a rerun is safe too.
     for label in [
         PIPELINE_INDEX_UNAVAILABLE_LABEL,
+        PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL,
         PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL,
     ] {
         if error.to_string() == label {
@@ -732,10 +742,10 @@ pub(crate) fn pipeline_index_rebuild_error(error: anyhow::Error) -> (StatusCode,
 /// shutdown grace period -- to confirm it actually did. `ready` is the same
 /// `Arc<AtomicBool>` as `AppState::pipeline_worker_ready`, so the readiness
 /// handler and the worker share one flag rather than needing to agree on two.
-struct PipelineWorkerHandle {
-    stop: tokio::sync::watch::Sender<bool>,
-    join: tokio::task::JoinHandle<()>,
-    ready: Arc<std::sync::atomic::AtomicBool>,
+pub(crate) struct PipelineWorkerHandle {
+    pub(crate) stop: tokio::sync::watch::Sender<bool>,
+    pub(crate) join: tokio::task::JoinHandle<()>,
+    pub(crate) ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// How many runs of one tenant's pipeline queue the worker drains before
@@ -804,6 +814,8 @@ const PIPELINE_WORKER_CREDIT_AUDIT_INTERVAL: StdDuration = StdDuration::from_sec
 /// The most `CreditMutate` audit events the worker appends for one tenant
 /// in one pass.
 const PIPELINE_WORKER_MAX_CREDIT_AUDITS_PER_TENANT: usize = 32;
+/// The review audit events one pass appends for a tenant (V118).
+const PIPELINE_WORKER_MAX_REVIEW_AUDITS_PER_TENANT: usize = 32;
 
 /// A follow-up step of a tenant's drain, after its runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -812,6 +824,9 @@ pub(crate) enum PipelineFollowUpStep {
     Payouts,
     CreditAudits,
     LostFollowUps,
+    /// The receipt and attempt-artifact sweeps, on the concurrent worker
+    /// only (`PipelineWorkerSweeps::OnCadence`).
+    Sweeps,
 }
 
 /// When the worker last ran each tenant's follow-up steps, so an idle
@@ -907,6 +922,22 @@ impl PipelineFollowUpCadence {
         )
     }
 
+    /// Whether the concurrent worker's receipt and attempt-artifact sweeps
+    /// run for `tenant_id` at `now` (`PipelineWorkerSweeps::OnCadence`).
+    /// Due on the tenant's first drain, once `PIPELINE_WORKER_SWEEP_INTERVAL`
+    /// has passed since they last ran, and on the next drain after a sweep
+    /// used its whole limit (`run_again`). Nothing wakes them: a staged
+    /// receipt or attempt row is due only once its `cleanup_after` passes.
+    pub(crate) fn sweeps_due(&mut self, tenant_id: &str, now: std::time::Instant) -> bool {
+        self.take_due(
+            tenant_id,
+            PipelineFollowUpStep::Sweeps,
+            false,
+            PIPELINE_WORKER_SWEEP_INTERVAL,
+            now,
+        )
+    }
+
     fn take_due(
         &mut self,
         tenant_id: &str,
@@ -933,6 +964,20 @@ impl PipelineFollowUpCadence {
         self.last_run.remove(&(tenant_id.to_string(), step));
     }
 }
+
+/// How often the concurrent worker sweeps a tenant's staged receipts and
+/// phase attempt artifacts (`PipelineWorkerSweeps::OnCadence`). The
+/// sequential pass sweeps on every pass; the concurrent worker drains a
+/// tenant far more often, and a staged row is due only once its
+/// `cleanup_after` has passed, so the sweep has no latency to keep.
+const PIPELINE_WORKER_SWEEP_INTERVAL: StdDuration = StdDuration::from_secs(10);
+
+/// How long the concurrent worker leaves a tenant whose last drain advanced
+/// no run before draining it again, unless a receipt for the tenant wakes
+/// it first (`PipelineWorkerWake`). Without it every idle tenant would be
+/// claimed on every 200 ms tick -- several times the sequential pass's
+/// idle database load once there are many tenants.
+pub(crate) const PIPELINE_WORKER_IDLE_BACKOFF: StdDuration = StdDuration::from_secs(1);
 
 /// How long the worker sleeps between iterations when `stop` does not fire
 /// first.
@@ -1055,30 +1100,88 @@ pub(crate) async fn drain_pipeline_tenant(
     cadence: Arc<std::sync::Mutex<PipelineFollowUpCadence>>,
 ) {
     for _ in 0..PIPELINE_WORKER_MAX_RUNS_PER_TENANT {
-        match service.process_one(&tenant_id).await {
-            // Multi-lens review L3-2: another Score holds this tenant's Score
-            // lock, so this replica moves on to its other tenants for the pass.
-            Ok(Some(run))
-                if run.last_error_label.as_deref()
-                    == Some(
-                        trace_commons_server::versioned_pipeline::PIPELINE_SCORE_LOCK_BUSY_LABEL,
-                    ) =>
-            {
-                break;
-            }
-            Ok(Some(_)) => {}
-            Ok(None) => break,
-            Err(error) => {
-                tracing::warn!(
-                    error_class = "PipelineWorkerRunFailed",
-                    tenant_storage_ref = %tenant_storage_ref(&tenant_id),
-                    error_hash = %safe_display_error_hash(&error),
-                    "pipeline worker run failed"
-                );
-                break;
-            }
+        if pipeline_worker_step(&service, &tenant_id).await != PipelineWorkerStep::Advanced {
+            break;
         }
     }
+    run_pipeline_tenant_follow_ups(
+        state,
+        service,
+        tenant_id,
+        cadence,
+        PipelineWorkerSweeps::EveryPass,
+    )
+    .await;
+}
+
+/// When a tenant's follow-up steps run the receipt and attempt-artifact
+/// sweeps (`run_pipeline_tenant_follow_ups`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PipelineWorkerSweeps {
+    /// On every drain: the sequential pass.
+    EveryPass,
+    /// Once per `PIPELINE_WORKER_SWEEP_INTERVAL` per tenant, and again on the
+    /// next drain while a sweep used its whole limit: the concurrent
+    /// worker, which drains an idle tenant far more often than the
+    /// sequential pass reaches it.
+    OnCadence,
+}
+
+/// What one `PipelineService::process_one` call of the worker did for a
+/// tenant (`pipeline_worker_step`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PipelineWorkerStep {
+    /// A run was claimed and advanced (or ended) one phase.
+    Advanced,
+    /// Multi-lens review L3-2: another Score holds this tenant's Score lock;
+    /// the claimed run went back uncharged.
+    ScoreLockBusy,
+    /// No run of the tenant is due.
+    Idle,
+    /// The call failed; logged by label.
+    Failed,
+}
+
+/// Claims and advances one due run of `tenant_id` (`process_one`) and says
+/// what happened. A failure is logged with a label and the tenant's
+/// `tenant_storage_ref` -- never the tenant id or the error's own text.
+pub(crate) async fn pipeline_worker_step(
+    service: &PipelineService,
+    tenant_id: &str,
+) -> PipelineWorkerStep {
+    match service.process_one(tenant_id).await {
+        Ok(Some(run))
+            if run.last_error_label.as_deref()
+                == Some(
+                    trace_commons_server::versioned_pipeline::PIPELINE_SCORE_LOCK_BUSY_LABEL,
+                ) =>
+        {
+            PipelineWorkerStep::ScoreLockBusy
+        }
+        Ok(Some(_)) => PipelineWorkerStep::Advanced,
+        Ok(None) => PipelineWorkerStep::Idle,
+        Err(error) => {
+            tracing::warn!(
+                error_class = "PipelineWorkerRunFailed",
+                tenant_storage_ref = %tenant_storage_ref(tenant_id),
+                error_hash = %safe_display_error_hash(&error),
+                "pipeline worker run failed"
+            );
+            PipelineWorkerStep::Failed
+        }
+    }
+}
+
+/// The part of a tenant's drain after its runs (`drain_pipeline_tenant`):
+/// the lost follow-up recovery, the follow-up steps `cadence` finds due, and
+/// the receipt and attempt sweeps.
+pub(crate) async fn run_pipeline_tenant_follow_ups(
+    state: Arc<AppState>,
+    service: Arc<PipelineService>,
+    tenant_id: String,
+    cadence: Arc<std::sync::Mutex<PipelineFollowUpCadence>>,
+    sweeps: PipelineWorkerSweeps,
+) {
     let lock_cadence = || {
         cadence
             .lock()
@@ -1192,11 +1295,43 @@ pub(crate) async fn drain_pipeline_tenant(
             }
         }
     }
-    if due.payouts {
-        match service
-            .process_payouts(&tenant_id, PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT)
-            .await
+    if due.credit_audits {
+        match append_pipeline_review_audit_events(
+            state.as_ref(),
+            service.as_ref(),
+            &tenant_id,
+            PIPELINE_WORKER_MAX_REVIEW_AUDITS_PER_TENANT,
+        )
+        .await
         {
+            Ok(pass) => {
+                if pass.used_its_limit(PIPELINE_WORKER_MAX_REVIEW_AUDITS_PER_TENANT) {
+                    lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::CreditAudits);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "pipeline_worker_review_audit_failed",
+                    tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker review audit failed"
+                );
+            }
+        }
+    }
+    if due.payouts {
+        let mut tally = trace_commons_server::versioned_pipeline::PipelinePayoutTally::default();
+        let result = service
+            .process_payouts_tallied(
+                &tenant_id,
+                PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT,
+                &mut tally,
+            )
+            .await;
+        // Appended on an error too: the lines that changed before it are
+        // changed for good.
+        append_pipeline_payout_audit_events(state.as_ref(), &tenant_id, &tally).await;
+        match result {
             Ok(processed) => {
                 if processed >= PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT {
                     lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::Payouts);
@@ -1212,10 +1347,20 @@ pub(crate) async fn drain_pipeline_tenant(
             }
         }
     }
-    if let Err(error) = service
-        .sweep_staged_receipts(&tenant_id, PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT)
-        .await
+    if sweeps == PipelineWorkerSweeps::OnCadence
+        && !lock_cadence().sweeps_due(&tenant_id, std::time::Instant::now())
     {
+        return;
+    }
+    let receipts_swept = service
+        .sweep_staged_receipts(&tenant_id, PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT)
+        .await;
+    if let Ok(swept) = &receipts_swept {
+        if *swept >= PIPELINE_WORKER_MAX_SWEPT_RECEIPTS_PER_TENANT {
+            lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::Sweeps);
+        }
+    }
+    if let Err(error) = receipts_swept {
         tracing::warn!(
             error_class = "pipeline_worker_receipt_sweep_failed",
             tenant_storage_ref = %tenant_storage_ref(&tenant_id),
@@ -1232,7 +1377,14 @@ pub(crate) async fn drain_pipeline_tenant(
         )
         .await
     {
-        Ok(pass) => lock_cadence().record_attempt_sweep(&tenant_id, pass.resume_after),
+        Ok(pass) => {
+            let mut cadence = lock_cadence();
+            // A pass that stopped part way has more due rows to examine.
+            if pass.resume_after.is_some() {
+                cadence.run_again(&tenant_id, PipelineFollowUpStep::Sweeps);
+            }
+            cadence.record_attempt_sweep(&tenant_id, pass.resume_after);
+        }
         Err(error) => {
             tracing::warn!(
                 error_class = "pipeline_worker_attempt_sweep_failed",
@@ -1308,12 +1460,379 @@ pub(crate) async fn append_pipeline_credit_audit_events(
     }
 }
 
+/// The review audit events of the runs the tenant's review audit markers
+/// name (V118, `review_audit_pending_at`): a run has up to three audit events
+/// (a hold of the privacy pass, the human assessment, the committed Review
+/// decision), or the one event of a failed privacy classification, and the
+/// marker is cleared once each event of the run exists. The order is the hold or the failure, the assessment, then
+/// the Review commit. The hold event (the privacy pass escalated the run) and
+/// the failure event (the run ended `failed` under
+/// `privacy_classification_failed`) are `lifecycle_status_change` events with
+/// the status `quarantined`; their ids derive from the run, with the labels
+/// `pipeline-privacy-pass-hold-audit` and
+/// `pipeline-privacy-classification-failed-audit`. A run that ended `failed`
+/// before Review decided it, and moved its `received` submission to
+/// `rejected` (#1346), has one `lifecycle_status_change` event with the
+/// status `rejected` and the reason `pipeline_processing_failed`, its id
+/// derived with the label `pipeline-processing-failed-audit`. The assessment event's id
+/// is the assessment's, so the route's own append and this repair of a missed
+/// one are the same event; the automatic Review's event takes the id of the
+/// Review `phase_outcomes` row. Each event is read by id
+/// and appended only when absent, so a pass that stopped before it cleared a
+/// marker finds the events again and only clears it. That holds only in the
+/// required order, the database row first and the file line second
+/// (`require_db_mirror_writes`): with a mirror that is not required the file
+/// line comes first, and a failed mirror write would leave an event the read
+/// cannot see. The pass therefore appends nothing in that configuration and
+/// returns `pipeline_review_audit_mirror_not_required`. After a failed file
+/// append the row exists: the next pass finds it by id and clears the marker,
+/// and the audit-chain repair writes the file line.
+///
+/// As the credit pass does: an item that fails keeps its marker and does not
+/// stop the items after it, the failure is logged by label with a hash of
+/// the run id, and the pass returns the first error only when it cleared no
+/// marker and one failed.
+pub(crate) async fn append_pipeline_review_audit_events(
+    state: &AppState,
+    service: &PipelineService,
+    tenant_id: &str,
+    limit: usize,
+) -> anyhow::Result<PipelineCreditAuditPass> {
+    let items = service
+        .store()
+        .list_pending_review_audits(tenant_id, i64::try_from(limit).unwrap_or(i64::MAX))
+        .await?;
+    if items.is_empty() {
+        return Ok(PipelineCreditAuditPass {
+            audited: 0,
+            failed: 0,
+        });
+    }
+    let db = match state.db_mirror.as_ref() {
+        Some(db) if state.require_db_mirror_writes => db,
+        _ => anyhow::bail!("pipeline_review_audit_mirror_not_required"),
+    };
+    let mut audited = 0;
+    let mut failed = 0;
+    let mut first_error = None;
+    for item in &items {
+        match append_pipeline_review_audit_item(state, db.as_ref(), service, tenant_id, item).await
+        {
+            Ok(()) => audited += 1,
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "pipeline_worker_review_audit_item_failed",
+                    tenant_storage_ref = %tenant_storage_ref(tenant_id),
+                    run_ref_hash = %sha256_prefixed(&item.run_id.to_string()),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker review audit event failed"
+                );
+                failed += 1;
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) if audited == 0 => Err(error),
+        _ => Ok(PipelineCreditAuditPass { audited, failed }),
+    }
+}
+
+/// The label of the purpose in the payout audit events of a pass, hashed
+/// into `purpose_hash` as `main` hashes the purpose of its own workers.
+const PIPELINE_PAYOUT_AUDIT_PURPOSE: &str = "pipeline_near_payout";
+
+/// Appends `main`'s two payout audit kinds for a payout pass that changed an
+/// outbox line: `near_credit_outbox_confirm` when the pass confirmed or
+/// failed a line on chain, `near_credit_outbox_submit` when it submitted a
+/// line or its submit failed. Each event holds counts only. A pass that
+/// changed no line appends nothing: a leg that waits for a NEAR account is
+/// listed again each interval and changes none. A failed append is logged by
+/// label with a hash of the error, and the step goes on; the lost event is
+/// not appended again.
+async fn append_pipeline_payout_audit_events(
+    state: &AppState,
+    tenant_id: &str,
+    tally: &trace_commons_server::versioned_pipeline::PipelinePayoutTally,
+) {
+    let events = [
+        (
+            "near_credit_outbox_confirm",
+            [
+                ("confirmed", tally.confirmed),
+                ("failed", tally.chain_failed),
+            ],
+        ),
+        (
+            "near_credit_outbox_submit",
+            [
+                ("submitted", tally.submitted),
+                ("failed", tally.submit_failed),
+            ],
+        ),
+    ];
+    for (kind, counts) in events {
+        if counts.iter().all(|(_, count)| *count == 0) {
+            continue;
+        }
+        if let Err(error) = append_pipeline_payout_audit_event(state, tenant_id, kind, counts).await
+        {
+            tracing::warn!(
+                error_class = "pipeline_worker_payout_audit_failed",
+                tenant_storage_ref = %tenant_storage_ref(tenant_id),
+                audit_kind = kind,
+                error_hash = %safe_display_error_hash(&error),
+                "pipeline worker payout audit event failed"
+            );
+        }
+    }
+}
+
+/// One event of `append_pipeline_payout_audit_events`, in the shape of
+/// `append_near_credit_outbox_submit_audit` and
+/// `append_near_credit_outbox_confirm_audit`.
+async fn append_pipeline_payout_audit_event(
+    state: &AppState,
+    tenant_id: &str,
+    kind: &'static str,
+    counts: [(&'static str, u64); 2],
+) -> anyhow::Result<()> {
+    let action_counts = counts
+        .iter()
+        .map(|(name, count)| {
+            (
+                (*name).to_string(),
+                (*count).min(u64::from(u32::MAX)) as u32,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let changed = counts.iter().map(|(_, count)| *count).sum::<u64>();
+    let purpose_hash = sha256_prefixed(PIPELINE_PAYOUT_AUDIT_PURPOSE);
+    let actor = system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF);
+    let event = TraceCommonsAuditEvent {
+        event_id: Uuid::new_v4(),
+        tenant_id: tenant_id.to_string(),
+        submission_id: Uuid::nil(),
+        kind: kind.to_string(),
+        created_at: Utc::now(),
+        status: None,
+        actor_role: None,
+        actor_principal_ref: Some(actor.principal_ref.clone()),
+        reason: Some(trace_maintenance_audit_reason(
+            Some(&purpose_hash),
+            false,
+            &action_counts,
+        )),
+        export_count: Some(usize::try_from(changed).unwrap_or(usize::MAX)),
+        export_id: None,
+        decision_inputs_hash: None,
+        previous_event_hash: None,
+        event_hash: None,
+    };
+    append_audit_event_mirrored(
+        state,
+        &actor,
+        event,
+        AuditRowMirror {
+            action: StorageTraceAuditAction::Retain,
+            metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                surface: Some(kind.to_string()),
+                purpose_hash: Some(purpose_hash),
+                dry_run: false,
+                action_counts,
+            },
+            object_ref_id: None,
+            actor_role_label: Some("system"),
+            pipeline_receipt: false,
+        },
+        "pipeline payout audit event",
+    )
+    .await?;
+    Ok(())
+}
+
+/// One item of `append_pipeline_review_audit_events`: appends each event of
+/// `item` that is absent, then clears its marker.
+async fn append_pipeline_review_audit_item(
+    state: &AppState,
+    db: &dyn Database,
+    service: &PipelineService,
+    tenant_id: &str,
+    item: &trace_commons_server::versioned_pipeline::PipelineReviewAuditItem,
+) -> anyhow::Result<()> {
+    if item.privacy_pass_escalated {
+        append_pipeline_lifecycle_audit_event(
+            state,
+            db,
+            tenant_id,
+            item.submission_id,
+            deterministic_trace_uuid_for(
+                "pipeline-privacy-pass-hold-audit",
+                tenant_id,
+                item.run_id,
+            ),
+            TraceCorpusStatus::Quarantined,
+            trace_commons_server::versioned_pipeline::PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL,
+            "pipeline privacy pass hold audit event",
+        )
+        .await?;
+    }
+    if item.privacy_classification_failed {
+        append_pipeline_lifecycle_audit_event(
+            state,
+            db,
+            tenant_id,
+            item.submission_id,
+            deterministic_trace_uuid_for(
+                "pipeline-privacy-classification-failed-audit",
+                tenant_id,
+                item.run_id,
+            ),
+            TraceCorpusStatus::Quarantined,
+            trace_commons_server::versioned_pipeline_authority::PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
+            "pipeline privacy classification audit event",
+        )
+        .await?;
+    }
+    if item.submission_rejected {
+        // #1346: the run failed before Review decided it, and its
+        // transaction moved the `received` submission to `rejected`.
+        append_pipeline_lifecycle_audit_event(
+            state,
+            db,
+            tenant_id,
+            item.submission_id,
+            deterministic_trace_uuid_for(
+                "pipeline-processing-failed-audit",
+                tenant_id,
+                item.run_id,
+            ),
+            TraceCorpusStatus::Rejected,
+            trace_commons_server::trace_corpus_storage::PIPELINE_PROCESSING_FAILED_STATUS_REASON,
+            "pipeline processing failure audit event",
+        )
+        .await?;
+    }
+    if let Some(assessment) = &item.assessment {
+        if db
+            .get_trace_audit_event_by_id(tenant_id, assessment.assessment_id)
+            .await?
+            .is_none()
+        {
+            let (status, _) = review_audit_status(assessment.approved)?;
+            let reviewer = TenantAuth {
+                principal_ref: assessment.reviewer_principal_ref.clone(),
+                ..system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF)
+            };
+            let mut event = TraceCommonsAuditEvent::review_decision(
+                &reviewer,
+                item.submission_id,
+                status,
+                Some(&trace_free_text_audit_reason(&assessment.reason_code)),
+            );
+            event.event_id = assessment.assessment_id;
+            event.actor_role = None;
+            append_audit_event_mirrored(
+                state,
+                &reviewer,
+                event,
+                review_decision_audit_row(status, &assessment.reason_code, Some("reviewer"))?,
+                "pipeline review assessment audit event",
+            )
+            .await?;
+        }
+    }
+    if let Some(outcome) = &item.outcome {
+        let (status, _) = review_audit_status(outcome.approved)?;
+        let reason_label = if outcome.approved {
+            "pipeline_review_approved"
+        } else {
+            "pipeline_review_rejected"
+        };
+        append_pipeline_lifecycle_audit_event(
+            state,
+            db,
+            tenant_id,
+            item.submission_id,
+            outcome.outcome_id,
+            status,
+            reason_label,
+            "pipeline review audit event",
+        )
+        .await?;
+    }
+    service
+        .store()
+        .clear_review_audit_pending(tenant_id, item)
+        .await?;
+    Ok(())
+}
+
+/// Appends the system `lifecycle_status_change` event `event_id` of
+/// `submission_id`, with `status` and `reason_label`, when the database has no
+/// row of that id.
+#[allow(clippy::too_many_arguments)]
+async fn append_pipeline_lifecycle_audit_event(
+    state: &AppState,
+    db: &dyn Database,
+    tenant_id: &str,
+    submission_id: Uuid,
+    event_id: Uuid,
+    status: TraceCorpusStatus,
+    reason_label: &'static str,
+    context: &'static str,
+) -> anyhow::Result<()> {
+    if db
+        .get_trace_audit_event_by_id(tenant_id, event_id)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let actor = system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF);
+    let mut event = TraceCommonsAuditEvent::lifecycle_status_change(
+        &actor,
+        LifecycleAuditActor::System,
+        submission_id,
+        status,
+        reason_label,
+    );
+    event.event_id = event_id;
+    append_audit_event_mirrored(
+        state,
+        &actor,
+        event,
+        AuditRowMirror {
+            action: lifecycle_status_audit_action(status),
+            metadata: lifecycle_status_audit_metadata(status, Some(reason_label))?,
+            object_ref_id: None,
+            actor_role_label: Some("system"),
+            pipeline_receipt: false,
+        },
+        context,
+    )
+    .await?;
+    Ok(())
+}
+
+/// The corpus status a Review decision leads to, and its storage label.
+fn review_audit_status(approved: bool) -> anyhow::Result<(TraceCorpusStatus, String)> {
+    let status = if approved {
+        TraceCorpusStatus::Accepted
+    } else {
+        TraceCorpusStatus::Rejected
+    };
+    let label = serde_storage_string(&storage_corpus_status(status))?;
+    Ok((status, label))
+}
+
 /// What one pass of `append_pipeline_credit_audit_events` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PipelineCreditAuditPass {
-    /// Legs whose event is in the audit log and that are now marked.
+    /// Legs (or, for the review audit pass, runs) whose event is in the audit
+    /// log and that are now marked.
     pub(crate) audited: usize,
-    /// Legs whose event failed; they stay unmarked for the next pass.
+    /// Legs (or runs) whose event failed; they stay unmarked for the next pass.
     pub(crate) failed: usize,
 }
 
@@ -1416,6 +1935,7 @@ async fn append_pipeline_credit_audit_event(
             },
             object_ref_id: None,
             actor_role_label,
+            pipeline_receipt: false,
         };
         match in_file {
             Some(event) => {
@@ -1548,36 +2068,572 @@ pub(crate) async fn validate_pipeline_tenant_bundles(
 /// first list onto the second keeps its runs in flight, index
 /// invalidations, payouts and confirmations, and staged receipt sweeps
 /// processed, while no receipt of its is routed (Zaki review 1, item 7).
+///
+/// With pipeline default routing (spec 2026-10-10), the tenants it admitted
+/// to the routed-tenant cache too: the list is built again on every pass, so
+/// a tenant routed after start is drained without a restart.
 pub(crate) fn pipeline_worker_tenant_ids(state: &AppState) -> Vec<String> {
     let mut tenant_ids = state
         .tenant_rollout_gates
         .tenant_ids(TraceTenantRolloutFeature::PipelineReceipts);
     tenant_ids.extend(state.pipeline_drain_tenant_ids.iter().cloned());
+    if let Some(default_routing) = state.pipeline_default_routing.as_deref() {
+        tenant_ids.extend(default_routing.routed_tenants());
+    }
     tenant_ids.into_iter().collect()
 }
 
+/// The most pipeline work units -- a run's phase, or a tenant's follow-up
+/// steps -- one process may set `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY`
+/// to run at once.
+pub(crate) const PIPELINE_WORKER_MAX_CONCURRENCY: usize = 16;
+
+/// `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY` unset: one run at a time,
+/// through the sequential pass (`run_pipeline_worker_pass`).
+pub(crate) const PIPELINE_WORKER_DEFAULT_CONCURRENCY: usize = 1;
+
+/// Safe label of a `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY` that is not a
+/// whole number from 1 to `PIPELINE_WORKER_MAX_CONCURRENCY`; ingest refuses
+/// to start under it.
+pub(crate) const PIPELINE_WORKER_CONCURRENCY_INVALID_LABEL: &str =
+    "pipeline_worker_concurrency_invalid";
+
+/// Parses `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY`'s value: unset or
+/// blank is `PIPELINE_WORKER_DEFAULT_CONCURRENCY`; a whole number from 1 to
+/// `PIPELINE_WORKER_MAX_CONCURRENCY` is itself; anything else is refused
+/// with `pipeline_worker_concurrency_invalid`, never with the value.
+pub(crate) fn parse_pipeline_worker_concurrency(raw: Option<&str>) -> anyhow::Result<usize> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(PIPELINE_WORKER_DEFAULT_CONCURRENCY);
+    };
+    match raw.parse::<usize>() {
+        Ok(value) if (1..=PIPELINE_WORKER_MAX_CONCURRENCY).contains(&value) => Ok(value),
+        _ => Err(anyhow::anyhow!(PIPELINE_WORKER_CONCURRENCY_INVALID_LABEL)),
+    }
+}
+
+/// How long a concurrent tenant drain's first lane claims alone, counted
+/// from when it holds its permit, before the tenant's other lanes start
+/// claiming
+/// (`drain_pipeline_tenant_runs_concurrently`). A claim that finds nothing
+/// due returns in milliseconds, so an idle tenant costs one claim per
+/// drain, as it does in the sequential pass; a first lane still busy after
+/// this long has claimed a run, and the rest start without waiting for it
+/// to finish.
+const PIPELINE_WORKER_LANE_RAMP_DELAY: StdDuration = StdDuration::from_millis(250);
+
+/// Tenants this process received a pipeline run for since the concurrent
+/// worker last looked (`route_pipeline_receipt`): the worker drains them on
+/// its next tick even while they are backing off as idle
+/// (`run_concurrent_pipeline_worker`). In memory only, never logged; a
+/// receipt on another replica reaches this one's worker after the backoff.
+#[derive(Default)]
+pub(crate) struct PipelineWorkerWake {
+    tenants: std::sync::Mutex<BTreeSet<String>>,
+    notify: tokio::sync::Notify,
+}
+
+impl PipelineWorkerWake {
+    /// Marks `tenant_id` as having work and wakes the worker's sleep.
+    pub(crate) fn wake(&self, tenant_id: &str) {
+        self.tenants
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(tenant_id.to_string());
+        self.notify.notify_one();
+    }
+
+    /// The tenants woken since the last call.
+    fn take(&self) -> BTreeSet<String> {
+        std::mem::take(
+            &mut *self
+                .tenants
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+}
+
+/// What a concurrent tenant drain's lanes share.
+struct PipelineWorkerLanes {
+    /// Claims left of the drain's `PIPELINE_WORKER_MAX_RUNS_PER_TENANT`.
+    budget: std::sync::atomic::AtomicUsize,
+    /// Set when a lane found nothing due or failed: no lane claims again in
+    /// this drain, as the sequential drain stops at its first such step.
+    done: std::sync::atomic::AtomicBool,
+    /// Whether the waiting lanes may start.
+    ramp: tokio::sync::watch::Sender<bool>,
+}
+
+/// Opens a drain's ramp when the lane holding it ends, however it ends.
+struct RampOnExit(Arc<PipelineWorkerLanes>);
+
+impl Drop for RampOnExit {
+    fn drop(&mut self) {
+        self.0.ramp.send_replace(true);
+    }
+}
+
+/// One tenant's runs, with up to `lanes` of them in flight at once
+/// (`TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY` above 1). Each lane loops:
+/// it takes a permit from `permits` -- the process's pool of
+/// `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY` slots, which every tenant's
+/// lanes share and which hands permits out first come, first served -- runs
+/// one `step` (`pipeline_worker_step` in production), and gives the permit
+/// back before it queues for the next, so a tenant with a backlog never
+/// holds a slot another tenant is waiting for between runs. The lanes
+/// together claim at most `PIPELINE_WORKER_MAX_RUNS_PER_TENANT` runs, as the
+/// sequential drain does.
+///
+/// A lane that finds nothing due, or fails, ends the drain's claims (no
+/// lane claims again; the ones in flight finish). A lane whose run found
+/// the tenant's Score lock busy ends alone: the lane that holds the lock
+/// goes on, and so do lanes advancing other phases. `stop` is checked
+/// before every claim.
+///
+/// The first lane starts at once; the others wait until a step has
+/// returned, or until the first lane has held its permit and been claiming
+/// for `PIPELINE_WORKER_LANE_RAMP_DELAY`, so an idle tenant costs a single
+/// claim however long it waited for the permit. A lane's panic ends the drain once its
+/// other lanes have finished, and is raised again here, unread, for the
+/// supervisor to log by its fixed label. Returns how many runs advanced.
+pub(crate) async fn drain_pipeline_tenant_runs_concurrently<Step, StepFuture>(
+    tenant_id: String,
+    lanes: usize,
+    permits: Arc<tokio::sync::Semaphore>,
+    stop: tokio::sync::watch::Receiver<bool>,
+    step: Step,
+) -> usize
+where
+    Step: Fn(String) -> StepFuture + Clone + Send + 'static,
+    StepFuture: std::future::Future<Output = PipelineWorkerStep> + Send + 'static,
+{
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let (ramp, _) = tokio::sync::watch::channel(false);
+    let shared = Arc::new(PipelineWorkerLanes {
+        budget: std::sync::atomic::AtomicUsize::new(PIPELINE_WORKER_MAX_RUNS_PER_TENANT),
+        done: std::sync::atomic::AtomicBool::new(false),
+        ramp,
+    });
+    let advanced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut set = tokio::task::JoinSet::new();
+    for lane in 0..lanes.clamp(1, PIPELINE_WORKER_MAX_RUNS_PER_TENANT) {
+        let tenant_id = tenant_id.clone();
+        let permits = permits.clone();
+        let stop = stop.clone();
+        let step = step.clone();
+        let shared = shared.clone();
+        let advanced = advanced.clone();
+        let mut ramp = shared.ramp.subscribe();
+        set.spawn(async move {
+            // However this lane ends, the waiting lanes may go on (and
+            // find the drain done or stopped).
+            let _ramp_on_exit = RampOnExit(shared.clone());
+            if lane > 0 && ramp.wait_for(|ramp| *ramp).await.is_err() {
+                return;
+            }
+            let ended = || *stop.borrow() || shared.done.load(SeqCst);
+            loop {
+                if ended() {
+                    return;
+                }
+                let Ok(permit) = permits.clone().acquire_owned().await else {
+                    return;
+                };
+                // The wait for a permit may have been long.
+                if ended() || !take_one_claim(&shared.budget) {
+                    return;
+                }
+                // Review of #1356, finding 2: the ramp delay counts from
+                // here, with the permit held and the claim under way, not
+                // from the drain's start, so a wait for a permit does not
+                // start the other lanes before the first claim answers.
+                let mut claim = std::pin::pin!(step(tenant_id.clone()));
+                let outcome = if *shared.ramp.borrow() {
+                    claim.await
+                } else {
+                    tokio::select! {
+                        outcome = &mut claim => outcome,
+                        _ = tokio::time::sleep(PIPELINE_WORKER_LANE_RAMP_DELAY) => {
+                            shared.ramp.send_replace(true);
+                            claim.await
+                        }
+                    }
+                };
+                drop(permit);
+                match outcome {
+                    PipelineWorkerStep::Advanced => {
+                        advanced.fetch_add(1, SeqCst);
+                        shared.ramp.send_replace(true);
+                    }
+                    PipelineWorkerStep::ScoreLockBusy => {
+                        shared.ramp.send_replace(true);
+                        return;
+                    }
+                    PipelineWorkerStep::Idle | PipelineWorkerStep::Failed => {
+                        shared.done.store(true, SeqCst);
+                        shared.ramp.send_replace(true);
+                        return;
+                    }
+                }
+            }
+        });
+    }
+    let mut panic = None;
+    while let Some(joined) = set.join_next().await {
+        if let Err(join_error) = joined {
+            if join_error.is_panic() {
+                shared.done.store(true, SeqCst);
+                shared.ramp.send_replace(true);
+                panic.get_or_insert(join_error.into_panic());
+            }
+        }
+    }
+    if let Some(panic) = panic {
+        std::panic::resume_unwind(panic);
+    }
+    advanced.load(SeqCst)
+}
+
+/// The worker loop when `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY` is above
+/// 1: a supervisor that keeps at most one drain task in flight per tenant
+/// and runs the tenants' drains side by side, all of their work bounded by
+/// one pool of `concurrency` permits
+/// (`drain_pipeline_tenant_runs_concurrently`).
+///
+/// Every `PIPELINE_WORKER_POLL_INTERVAL`, or at once when `stop` fires, it
+/// runs `probe` in its own task, collects the drains that finished, reads
+/// the tenant list again (`tenants`), and starts a drain (`drain`) for each
+/// listed tenant that has none in flight. There is no pass barrier: a
+/// tenant whose drain advanced a run is drained again on the next tick,
+/// whatever another tenant's slow run is doing. A tenant whose drain
+/// advanced nothing waits `PIPELINE_WORKER_IDLE_BACKOFF` first, unless a
+/// receipt for it (`wake`) ends the wait; a wake also cuts the tick's sleep
+/// short. Its follow-up steps' sweeps run on their own cadence
+/// (`PipelineWorkerSweeps::OnCadence`).
+///
+/// A tenant never has two drains in flight in this process, so its
+/// follow-up steps and `PipelineFollowUpCadence` entries are used by one
+/// task at a time, as in the sequential pass; only its runs are claimed
+/// concurrently, through `claim_next`'s `FOR UPDATE SKIP LOCKED`, exactly as
+/// two replicas claim them.
+///
+/// Supervision matches `run_pipeline_worker_pass`: a drain that panics is
+/// logged by a fixed label and the tenant's `tenant_storage_ref` (never
+/// the panic's text), and `ready` goes false at once. The tenant stays
+/// counted as failed until one of its later drains finishes, so a drain
+/// that panics on every tick keeps the worker not ready rather than
+/// flapping. `ready` goes true on a tick whose probe succeeded with no
+/// tenant failed, unless `stop` has fired.
+///
+/// `stats` records the tick's tenant count and the longer of the tick's own
+/// duration and the age of the oldest drain still in flight.
+///
+/// Once `stop` fires it starts no drain, and waits for the ones in flight:
+/// each lane stops at its next claim, and a drain skips its follow-up
+/// steps. The caller bounds the wait
+/// (`join_or_abort`); aborting this task drops the drains' `JoinSet`, which
+/// aborts every drain and its lanes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_concurrent_pipeline_worker<
+    Probe,
+    ProbeFuture,
+    Tenants,
+    Drain,
+    DrainFuture,
+>(
+    concurrency: usize,
+    probe: Probe,
+    tenants: Tenants,
+    drain: Drain,
+    ready: Arc<std::sync::atomic::AtomicBool>,
+    stats: Arc<super::pipeline_default_routing::PipelineWorkerPassStats>,
+    wake: Arc<PipelineWorkerWake>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) where
+    Probe: Fn() -> ProbeFuture,
+    ProbeFuture: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+    Tenants: Fn() -> Vec<String>,
+    Drain: Fn(String, Arc<tokio::sync::Semaphore>) -> DrainFuture,
+    DrainFuture: std::future::Future<Output = bool> + Send + 'static,
+{
+    use std::sync::atomic::Ordering::Relaxed;
+
+    type InFlight = HashMap<tokio::task::Id, (String, std::time::Instant)>;
+    type IdleUntil = HashMap<String, std::time::Instant>;
+    let reap = |joined: Result<(tokio::task::Id, bool), tokio::task::JoinError>,
+                in_flight: &mut InFlight,
+                failed: &mut BTreeSet<String>,
+                idle_until: &mut IdleUntil| {
+        let id = match &joined {
+            Ok((id, _)) => *id,
+            Err(join_error) => join_error.id(),
+        };
+        let Some((tenant_id, _)) = in_flight.remove(&id) else {
+            return;
+        };
+        match joined {
+            Ok((_, advanced)) => {
+                failed.remove(&tenant_id);
+                if advanced {
+                    idle_until.remove(&tenant_id);
+                } else {
+                    idle_until.insert(
+                        tenant_id,
+                        std::time::Instant::now() + PIPELINE_WORKER_IDLE_BACKOFF,
+                    );
+                }
+            }
+            Err(join_error) => {
+                ready.store(false, Relaxed);
+                tracing::warn!(
+                    error_class = pipeline_worker_task_failure_class(&join_error),
+                    tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    "pipeline worker tenant batch did not finish"
+                );
+                failed.insert(tenant_id);
+            }
+        }
+    };
+    let permits = Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
+    let mut drains = tokio::task::JoinSet::new();
+    let mut in_flight = InFlight::new();
+    let mut failed = BTreeSet::new();
+    let mut idle_until = IdleUntil::new();
+    while !*stop.borrow() {
+        let started = std::time::Instant::now();
+        let probe_ready = match tokio::spawn(probe()).await {
+            Ok(Ok(())) => true,
+            Ok(Err(error)) => {
+                ready.store(false, Relaxed);
+                tracing::warn!(
+                    error_class = "PipelineWorkerReadinessProbeFailed",
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker readiness probe failed"
+                );
+                false
+            }
+            Err(join_error) => {
+                ready.store(false, Relaxed);
+                tracing::warn!(
+                    error_class = pipeline_worker_task_failure_class(&join_error),
+                    "pipeline worker readiness probe did not finish"
+                );
+                false
+            }
+        };
+        while let Some(joined) = drains.try_join_next_with_id() {
+            reap(joined, &mut in_flight, &mut failed, &mut idle_until);
+        }
+        // A receipt ends its tenant's idle backoff.
+        for tenant_id in wake.take() {
+            idle_until.remove(&tenant_id);
+        }
+        let tenant_ids = tenants();
+        let tenant_count = tenant_ids.len();
+        // A tenant no longer listed is no longer drained, and its failure no
+        // longer holds the worker not ready.
+        failed.retain(|tenant_id| tenant_ids.contains(tenant_id));
+        idle_until.retain(|tenant_id, _| tenant_ids.contains(tenant_id));
+        let now = std::time::Instant::now();
+        for tenant_id in tenant_ids {
+            if *stop.borrow() {
+                break;
+            }
+            if in_flight.values().any(|(running, _)| *running == tenant_id) {
+                continue;
+            }
+            // Review of #1356, finding 1: an idle tenant waits out its
+            // backoff.
+            if idle_until.get(&tenant_id).is_some_and(|until| now < *until) {
+                continue;
+            }
+            let handle = drains.spawn(drain(tenant_id.clone(), permits.clone()));
+            in_flight.insert(handle.id(), (tenant_id, std::time::Instant::now()));
+        }
+        if probe_ready && failed.is_empty() && !*stop.borrow() {
+            ready.store(true, Relaxed);
+        }
+        let oldest_drain = in_flight
+            .values()
+            .map(|(_, drain_started)| drain_started.elapsed())
+            .max()
+            .unwrap_or_default();
+        stats.record(tenant_count, started.elapsed().max(oldest_drain));
+
+        tokio::select! {
+            _ = tokio::time::sleep(PIPELINE_WORKER_POLL_INTERVAL) => {},
+            _ = wake.notify.notified() => {},
+            _ = stop.changed() => {},
+        }
+    }
+    while let Some(joined) = drains.join_next_with_id().await {
+        reap(joined, &mut in_flight, &mut failed, &mut idle_until);
+    }
+}
+
+/// One tenant's concurrent drain (`run_concurrent_pipeline_worker`): its
+/// runs through `drain_pipeline_tenant_runs_concurrently`, then its
+/// follow-up steps (`run_pipeline_tenant_follow_ups`) under one permit of
+/// the same pool, so `concurrency` bounds every unit of pipeline work this
+/// process runs at once.
+async fn drain_pipeline_tenant_concurrently(
+    state: Arc<AppState>,
+    service: Arc<PipelineService>,
+    tenant_id: String,
+    cadence: Arc<std::sync::Mutex<PipelineFollowUpCadence>>,
+    concurrency: usize,
+    permits: Arc<tokio::sync::Semaphore>,
+    stop: tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    let step_service = service.clone();
+    let follow_up_tenant = tenant_id.clone();
+    drain_tenant_then_follow_ups(
+        tenant_id,
+        concurrency,
+        permits,
+        stop,
+        move |tenant_id| {
+            let service = step_service.clone();
+            async move { pipeline_worker_step(&service, &tenant_id).await }
+        },
+        move || {
+            run_pipeline_tenant_follow_ups(
+                state,
+                service,
+                follow_up_tenant,
+                cadence,
+                PipelineWorkerSweeps::OnCadence,
+            )
+        },
+    )
+    .await
+}
+
+/// One tenant's concurrent drain with its steps and follow-ups given: the
+/// runs through `drain_pipeline_tenant_runs_concurrently`, then
+/// `follow_ups` under one permit of `permits`. Returns whether any run
+/// advanced, which `run_concurrent_pipeline_worker` reads to back off an
+/// idle tenant.
+pub(crate) async fn drain_tenant_then_follow_ups<Step, StepFuture, FollowUps, FollowUpsFuture>(
+    tenant_id: String,
+    lanes: usize,
+    permits: Arc<tokio::sync::Semaphore>,
+    stop: tokio::sync::watch::Receiver<bool>,
+    step: Step,
+    follow_ups: FollowUps,
+) -> bool
+where
+    Step: Fn(String) -> StepFuture + Clone + Send + 'static,
+    StepFuture: std::future::Future<Output = PipelineWorkerStep> + Send + 'static,
+    FollowUps: FnOnce() -> FollowUpsFuture,
+    FollowUpsFuture: std::future::Future<Output = ()>,
+{
+    let advanced = drain_pipeline_tenant_runs_concurrently(
+        tenant_id,
+        lanes,
+        permits.clone(),
+        stop.clone(),
+        step,
+    )
+    .await;
+    // Review of #1356, finding 3: once stop has fired, a drain does not go
+    // on to its follow-up steps, before or after its wait for a permit, so
+    // a shutdown waits only for the runs in flight. The steps run on the
+    // tenant's next drain after the restart.
+    if *stop.borrow() {
+        return advanced > 0;
+    }
+    let Ok(_permit) = permits.acquire_owned().await else {
+        return advanced > 0;
+    };
+    if *stop.borrow() {
+        return advanced > 0;
+    }
+    follow_ups().await;
+    advanced > 0
+}
+
+/// Takes one claim from a drain's shared budget, refusing at zero. A
+/// compare-exchange loop, not `fetch_update`: newer toolchains deprecate
+/// that name for `try_update`, which older ones lack, and CI builds with
+/// `-D warnings` on stable.
+fn take_one_claim(budget: &std::sync::atomic::AtomicUsize) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut left = budget.load(SeqCst);
+    loop {
+        let Some(next) = left.checked_sub(1) else {
+            return false;
+        };
+        match budget.compare_exchange(left, next, SeqCst, SeqCst) {
+            Ok(_) => return true,
+            Err(actual) => left = actual,
+        }
+    }
+}
 /// Starts the owned pipeline worker loop. `None` when no pipeline runtime is
 /// injected -- there is nothing to drain, and the repository binary injects
 /// none.
 ///
-/// Each iteration runs one `run_pipeline_worker_pass` over
-/// `pipeline_worker_tenant_ids` (the `PipelineReceipts` rollout tenants and
-/// the drain list, read once at start), then sleeps
-/// `PIPELINE_WORKER_POLL_INTERVAL` or until `stop` fires.
-fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
+/// With `TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY` at its default of 1,
+/// each iteration runs one `run_pipeline_worker_pass` over
+/// `pipeline_worker_tenant_ids` (the `PipelineReceipts` rollout tenants, the
+/// drain list, and the tenants pipeline default routing admitted, read again
+/// for each pass), records the pass's tenant count and duration, then sleeps
+/// `PIPELINE_WORKER_POLL_INTERVAL` or until `stop` fires. Above 1, the loop
+/// is `run_concurrent_pipeline_worker` over the same tenant list.
+pub(crate) fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
     let service = state.pipeline_service.clone()?;
-    let tenant_ids = pipeline_worker_tenant_ids(&state);
     let cadence = Arc::new(std::sync::Mutex::new(PipelineFollowUpCadence::default()));
     let ready = state.pipeline_worker_ready.clone();
     let worker_ready = ready.clone();
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+    let concurrency = state.pipeline_worker_concurrency;
+    if concurrency > PIPELINE_WORKER_DEFAULT_CONCURRENCY {
+        let join = tokio::spawn(async move {
+            let drain_stop = stop_rx.clone();
+            run_concurrent_pipeline_worker(
+                concurrency,
+                || {
+                    let service = service.clone();
+                    async move { service.readiness().await }
+                },
+                || pipeline_worker_tenant_ids(&state),
+                |tenant_id, permits| {
+                    drain_pipeline_tenant_concurrently(
+                        state.clone(),
+                        service.clone(),
+                        tenant_id,
+                        cadence.clone(),
+                        concurrency,
+                        permits,
+                        drain_stop.clone(),
+                    )
+                },
+                worker_ready,
+                state.pipeline_worker_pass_stats.clone(),
+                state.pipeline_worker_wake.clone(),
+                stop_rx,
+            )
+            .await;
+        });
+        return Some(PipelineWorkerHandle {
+            stop: stop_tx,
+            join,
+            ready,
+        });
+    }
     let join = tokio::spawn(async move {
         while !*stop_rx.borrow() {
             let probe_service = service.clone();
             let drain_service = service.clone();
+            let tenant_ids = pipeline_worker_tenant_ids(&state);
+            let tenant_count = tenant_ids.len();
+            let started = std::time::Instant::now();
             run_pipeline_worker_pass(
                 async move { probe_service.readiness().await },
-                tenant_ids.clone(),
+                tenant_ids,
                 |tenant_id| {
                     drain_pipeline_tenant(
                         state.clone(),
@@ -1590,6 +2646,9 @@ fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
                 &stop_rx,
             )
             .await;
+            state
+                .pipeline_worker_pass_stats
+                .record(tenant_count, started.elapsed());
 
             tokio::select! {
                 _ = tokio::time::sleep(PIPELINE_WORKER_POLL_INTERVAL) => {},
@@ -1673,7 +2732,17 @@ pub async fn run_pipeline_app(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     register_default_bundles_for_rollout_tenants(&state).await?;
+    // Spec 2026-10-10: before the listener opens, pipeline default routing
+    // reads its arming and fills its routed-tenant cache, within the start
+    // check's time limit; then its loop runs beside the worker.
+    super::pipeline_default_routing::prepare_default_routing(
+        &state,
+        super::pipeline_activation::PIPELINE_START_CHECK_TIMEOUT,
+    )
+    .await;
     let worker = spawn_pipeline_worker(state.clone());
+    let default_routing =
+        super::pipeline_default_routing::spawn_default_routing_loop(state.clone());
     let rebuilds = state.pipeline_index_rebuilds.clone();
     let grace = parse_usize_env(
         TRACE_COMMONS_SHUTDOWN_GRACE_SECONDS,
@@ -1694,8 +2763,18 @@ pub async fn run_pipeline_app(
             join_or_abort(worker.join, StdDuration::from_secs(grace)).await;
         }
     };
+    let stop_default_routing = async {
+        if let Some(default_routing) = default_routing {
+            let _ = default_routing.stop.send(true);
+            join_or_abort(default_routing.join, StdDuration::from_secs(grace)).await;
+        }
+    };
     // Zaki's re-review of #1166, Low: an index rebuild whose client has gone
     // still runs; it gets the worker's grace period, at the same time.
-    tokio::join!(stop_worker, rebuilds.drain(StdDuration::from_secs(grace)));
+    tokio::join!(
+        stop_worker,
+        stop_default_routing,
+        rebuilds.drain(StdDuration::from_secs(grace))
+    );
     result
 }

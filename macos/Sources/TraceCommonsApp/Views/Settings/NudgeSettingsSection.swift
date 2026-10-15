@@ -1,0 +1,258 @@
+import Observation
+import SwiftUI
+import TCBridge
+import TCDesign
+import TCShellCore
+
+/// The suggestion and notification switches (nudge A2), read and written
+/// through `DaemonDataClient`. Every word is the core's
+/// (`tc_nudge_copy_json`); a switch is drawn only for a value the daemon
+/// reported.
+@MainActor
+@Observable
+final class NudgeSettingsStore {
+    private(set) var settings: DaemonData.Settings?
+    /// The last read that failed; nil once one succeeds.
+    private(set) var readError: DaemonDataError?
+    /// The last write the core refused, until the next write.
+    private(set) var writeError: DaemonDataError?
+    /// The kind of the offer whose answer was refused, so the refusal is
+    /// said under that offer's buttons; nil when the refused write was a
+    /// switch.
+    private(set) var refusedOfferKind: String?
+    /// A write in flight.
+    private(set) var writing = false
+    private(set) var client: (any DaemonDataClient)?
+    /// The core's fixed nudge words, decoded once.
+    let copy: NudgeCopy? = NudgeCopy.decode(fromJSON: TCCoreCopy.nudgeCopyJSON())
+
+    init(client: (any DaemonDataClient)?) {
+        self.client = client
+    }
+
+    /// Follows a new client: nothing the old one said is drawn.
+    func attach(_ client: (any DaemonDataClient)?) {
+        self.client = client
+        settings = nil
+        readError = nil
+        writeError = nil
+        refusedOfferKind = nil
+        writing = false
+    }
+
+    var rows: [NudgeSettings.Row] { NudgeSettings.rows(settings, copy: copy, digestHelp: digestHelp) }
+    /// The digest switch's help, composed by the core for the schedule the
+    /// daemon reported.
+    private var digestHelp: String? {
+        guard let input = NudgeSettings.digestHelpInput(settings) else { return nil }
+        return NudgeSettings.digestHelp(fromJSON: TCCoreCopy.nudgeDigestHelpJSON(settingsJSON: input))
+    }
+    var offers: [NudgeSettings.Offer] { NudgeSettings.offers(settings, copy: copy) }
+    /// The offer `place` draws (`NudgeSettings.offers(_:copy:on:)`).
+    func offers(on place: NudgeSurface.Place) -> [NudgeSettings.Offer] {
+        NudgeSettings.offers(settings, copy: copy, on: place)
+    }
+    var footnote: String? { rows.isEmpty ? nil : NudgeSettings.footnote(copy: copy) }
+
+    func load() async {
+        guard let client else {
+            settings = nil
+            readError = .unreachable
+            return
+        }
+        do {
+            settings = try await client.settings()
+            readError = nil
+        } catch {
+            // Unknown, never off: no switch is drawn from a failed read.
+            settings = nil
+            readError = error as? DaemonDataError ?? .undecodable(method: "get_settings")
+        }
+    }
+
+    /// One switch, then a fresh read: the switch shows what the daemon
+    /// stored, never a guess.
+    func set(_ id: NudgeSettings.Switch, on: Bool) async {
+        await write { try await NudgeSettings.write(id, on: on, through: $0) }
+    }
+
+    /// A one-time offer. Enable writes the kind on, which also ends the
+    /// offer; No thanks clears the offer's marker and changes nothing else.
+    /// Answers whether the daemon took the write.
+    @discardableResult
+    func answer(_ offer: NudgeSettings.Offer, accept: Bool) async -> Bool {
+        let taken = await write { client in
+            if accept {
+                try await client.setNotifyKind(offer.kind, on: true)
+            } else {
+                try await client.dismissNotifyOffer(kind: offer.kind)
+            }
+        }
+        if writeError != nil { refusedOfferKind = offer.kind }
+        return taken
+    }
+
+    /// Enable, then `prompt` -- the system's permission prompt -- only if
+    /// the daemon took the write: a refused one leaves the kind off, and a
+    /// prompt for it would ask permission for nothing. Answers whether the
+    /// write was taken.
+    @discardableResult
+    func accept(_ offer: NudgeSettings.Offer, then prompt: () async -> Void) async -> Bool {
+        guard await answer(offer, accept: true) else { return false }
+        await prompt()
+        return true
+    }
+
+    /// Answers whether the write was sent and taken.
+    @discardableResult
+    private func write(_ body: (any DaemonDataClient) async throws -> Void) async -> Bool {
+        guard !writing else { return false }
+        writing = true
+        defer { writing = false }
+        writeError = nil
+        refusedOfferKind = nil
+        guard let client else {
+            writeError = .unreachable
+            return false
+        }
+        do {
+            try await body(client)
+        } catch {
+            writeError = error as? DaemonDataError ?? .undecodable(method: "set_settings")
+            return false
+        }
+        await load()
+        return true
+    }
+}
+
+/// The switches, inside the Notifications card: the suggestions switch and
+/// the mark under it, the master switch and each kind under it, then the
+/// core's line on the caps. The held kinds are never drawn, and neither are
+/// the one-time offers: History and Traces draw those (`NudgeOfferCards`).
+struct NudgeSettingsSection: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var store = NudgeSettingsStore(client: nil)
+
+    /// Where the `get_settings` read stands, in the shared Settings terms:
+    /// the spinner while it is in flight, the core's failure line with a
+    /// retry once it failed or the core is down.
+    private var settingsRead: SettingsRead {
+        SettingsRead.resolve(answered: store.settings != nil, failed: store.readError != nil, startup: model.startup)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            // The daemon has not answered: its state, never a switch read
+            // from a default.
+            if store.settings == nil {
+                SettingsReadNotice(settingsRead, retry: reload)
+            }
+            ForEach(store.rows, id: \.id) { row in
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                    Toggle(row.label, isOn: Binding(
+                        get: { row.isOn },
+                        set: { on in Task { await store.set(row.id, on: on) } }))
+                        .toggleStyle(GlassToggleStyle(.settings))
+                        .disabled(!row.enabled || store.writing)
+                    if let help = row.help {
+                        Text(help)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.leading, Self.indent(row.id))
+            }
+            if let footnote = store.footnote {
+                Text(footnote)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // A refused switch write, under the switches it is about. A
+            // failed read is the notice above.
+            if let error = store.writeError, let line = MonitorWords.table?.line(for: error) {
+                GlassAlert(line)
+            }
+        }
+        .task(id: model.liveData.map(ObjectIdentifier.init)) {
+            store.attach(model.daemonData)
+            await store.load()
+        }
+    }
+
+    private func reload() {
+        Task { await store.load() }
+    }
+
+    /// A finer switch sits under the broader one it follows.
+    static func indent(_ id: NudgeSettings.Switch) -> CGFloat {
+        switch id {
+        case .suggestions, .notifications: 0
+        case .menuBarMark, .notify: GlassTokens.Space.s6
+        }
+    }
+}
+
+/// One one-time offer: the core's sentence and its two answers. Enable
+/// asks for the system's permission afterwards, only once the daemon took
+/// the write.
+struct NudgeOfferCard: View {
+    let offer: NudgeSettings.Offer
+    let store: NudgeSettingsStore
+    var requestAuthorization: () async -> Void
+
+    var body: some View {
+        GlassCard(quiet: true) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                Text(offer.text)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                // The accept first as a button, the decline after it as a
+                // link: every card's order (Ron, 2026-10-09).
+                HStack(spacing: GlassTokens.Space.s4) {
+                    Button(offer.accept) {
+                        Task { await store.accept(offer) { await requestAuthorization() } }
+                    }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                    Button(offer.decline) { Task { await store.answer(offer, accept: false) } }
+                        .buttonStyle(GlassButtonStyle(.link))
+                }
+                .disabled(store.writing)
+                // A refused answer, under the buttons it is about (Ron,
+                // 2026-10-09).
+                if store.refusedOfferKind == offer.kind, let error = store.writeError,
+                   let line = MonitorWords.table?.line(for: error) {
+                    GlassAlert(line)
+                }
+            }
+        }
+    }
+}
+
+/// The one-time offer for a page's own kind -- the verdicts offer on
+/// History, the idle one on Traces -- for an install that existed before
+/// the two kinds. The same settings, words and answers as Settings; once
+/// answered either way the daemon clears it and it is not drawn again. A
+/// refused answer is said in the core's line under that card's buttons.
+struct NudgeOfferCards: View {
+    let place: NudgeSurface.Place
+    @EnvironmentObject private var model: AppModel
+    @State private var store = NudgeSettingsStore(client: nil)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            ForEach(Array(store.offers(on: place).enumerated()), id: \.offset) { _, offer in
+                NudgeOfferCard(offer: offer, store: store) {
+                    _ = await Notifier.shared.requestAuthorizationIfNeverAsked()
+                }
+            }
+        }
+        .task(id: model.liveData.map(ObjectIdentifier.init)) {
+            store.attach(model.daemonData)
+            await store.load()
+        }
+    }
+}

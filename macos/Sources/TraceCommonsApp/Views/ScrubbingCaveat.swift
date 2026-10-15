@@ -105,8 +105,9 @@ struct ScrubbingCaveatNote: View {
 /// past. Weighted to be read: the ask status dot leads it.
 struct ScrubbingCaveatAtCommit: View {
     var body: some View {
-        GlassStatusLabel(ScrubbingCaveat.canonical, status: .ask)
-            .fixedSize(horizontal: false, vertical: true)
+        // A notice with its icon and tint, read as a caution rather than a
+        // dotted line (owner, 2026-10-12).
+        GlassNotice(tone: .ask) { Text(ScrubbingCaveat.canonical) }
             .accessibilityElement(children: .combine)
             .accessibilityLabel(ScrubbingCaveat.beforeYouContribute + " " + ScrubbingCaveat.canonical)
     }

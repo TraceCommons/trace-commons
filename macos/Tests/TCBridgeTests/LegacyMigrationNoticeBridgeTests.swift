@@ -33,6 +33,27 @@ final class LegacyMigrationNoticeBridgeTests: XCTestCase {
         XCTAssertEqual(object.keys.sorted(), LegacyMigrationNotice.consumedFields.sorted())
     }
 
+    /// The offer's exported field set is exactly what this shell decodes,
+    /// and every word arrives.
+    func testTheOfferIsTheRustsAndEveryFieldIsConsumed() throws {
+        let json = try XCTUnwrap(TCCoreCopy.legacyMigrationOfferJSON())
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        XCTAssertEqual(object.keys.sorted(), LegacyMigrationOffer.consumedFields.sorted())
+        let offer = try XCTUnwrap(LegacyMigrationOffer.decode(fromJSON: json))
+        XCTAssertTrue(offer.title.contains("NEAR AI account"))
+        XCTAssertNotEqual(offer.dismiss, offer.action)
+    }
+
+    /// The refusal that asks for the invite is worded by the Rust, under the
+    /// label this shell watches for.
+    func testTheInviteNeededRefusalIsWorded() throws {
+        let line = try XCTUnwrap(
+            TCCoreCopy.legacyMigrationRefusalLine(label: LegacyMigrationOffer.inviteNeededLabel))
+        let generic = try XCTUnwrap(TCCoreCopy.legacyMigrationRefusalLine(label: "no-such-label"))
+        XCTAssertNotEqual(line, generic)
+    }
+
     func testNullIsNothingToShow() {
         XCTAssertNil(TCConsentCopy.legacyMigrationNoticeJSON(forNotice: "null"))
     }

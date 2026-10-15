@@ -6,11 +6,13 @@
 
 use std::{collections::BTreeSet, time::Duration};
 
-use chrono::Datelike;
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc};
 use serde::de::DeserializeOwned;
 use trace_commons_protocol::{
     ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
-    activity_missions::{ActivityCatalogue, ActivityProgress},
+    activity_missions::{
+        ActivityCatalogue, ActivityProgress, MAX_PREDICATE_TITLE_CHARS, MAX_PREDICATE_VALUES,
+    },
 };
 
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
@@ -294,5 +296,217 @@ async fn fetch<T: DeserializeOwned>(
     Call {
         result: serde_json::from_slice(&bytes).map_err(|_| ()),
         rotated_token,
+    }
+}
+
+// ---- the contribution-mission slot ----
+
+// Whatever a published version-1 predicate may carry, the client catalogue
+// accepts, so a policy the server publishes cannot make `receive_catalogue`
+// refuse (and empty) the slot.
+const _: () = assert!(MAX_PREDICATE_VALUES <= crate::contribution_missions::MAX_CRITERION_VALUES);
+const _: () = assert!(MAX_PREDICATE_TITLE_CHARS <= crate::contribution_missions::MAX_TEXT_CHARS);
+
+/// How often the published activity catalogue is fetched for the
+/// contribution-mission slot: four times inside
+/// [`super::mission_matching::MISSION_CATALOGUE_MAX_AGE`], so one or two
+/// failed fetches do not let a live slot age out.
+pub(crate) const MISSION_SLOT_REFRESH: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// When the slot's next fetch is due. A local of the daemon's tick loop.
+///
+/// Its inputs are the clock and whether a config exists, nothing about the
+/// queue or local activity, so when it runs says nothing about this Mac's
+/// work. Due at once on start; after an attempt, whatever its outcome, not
+/// again for [`MISSION_SLOT_REFRESH`], so an unreachable server is not asked
+/// on every tick. Without a config it stays due, and a schedule kept for one
+/// enrollment does not carry over to the next, so the first tick after
+/// enrollment fetches.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MissionSlotSchedule {
+    next_at: Option<DateTime<Utc>>,
+    /// The enrollment `next_at` was set for: its ingest URL and device key
+    /// id. Memory only, never logged. A new enrollment mints a new device
+    /// key, so enrolling again between two ticks still reads as a change.
+    enrollment: Option<(String, String)>,
+    /// The live catalogue as the last tick saw it, so a change no fetch
+    /// makes -- the slot ageing out, its policy ending, `unenroll` -- is
+    /// still published. Memory only.
+    seen: Option<crate::contribution_missions::ContributionMissionCatalogue>,
+}
+
+impl MissionSlotSchedule {
+    pub(crate) fn due(&self, now: DateTime<Utc>) -> bool {
+        let Some(next_at) = self.next_at else {
+            return true;
+        };
+        let interval = chrono::TimeDelta::from_std(MISSION_SLOT_REFRESH).unwrap_or_default();
+        // A clock that moved back would otherwise postpone the next fetch
+        // past the slot's own age limit.
+        now >= next_at || next_at - now > interval
+    }
+
+    pub(crate) fn attempted(&mut self, now: DateTime<Utc>) {
+        self.next_at = chrono::TimeDelta::from_std(MISSION_SLOT_REFRESH)
+            .ok()
+            .and_then(|interval| now.checked_add_signed(interval));
+    }
+
+    pub(crate) fn unconfigured(&mut self) {
+        self.next_at = None;
+        self.enrollment = None;
+    }
+
+    /// Note the enrollment this tick runs under. One that differs from the
+    /// enrollment the schedule was kept for makes it due at once; the
+    /// return value says whether it differed.
+    pub(crate) fn enrolled(&mut self, config: &ContributorConfig) -> bool {
+        let current = (config.ingest_url.clone(), config.device_key_id.clone());
+        if self.enrollment.as_ref() == Some(&current) {
+            return false;
+        }
+        self.next_at = None;
+        self.enrollment = Some(current);
+        true
+    }
+}
+
+/// The contribution-mission catalogue a published activity catalogue gives
+/// the local matcher, as [`super::mission_matching::receive_catalogue`]
+/// reads it: one mission per activity mission that carries a supported
+/// predicate, with the predicate as its criteria.
+///
+/// `None` when there is nothing to match on -- the policy is unconfigured,
+/// `today` is outside its dates, or no mission carries a supported
+/// predicate. A mission without one is left out rather than read as "no
+/// criteria", which would fit every session.
+pub(crate) fn contribution_catalogue(
+    catalogue: &ActivityCatalogue,
+    today: NaiveDate,
+) -> Option<serde_json::Value> {
+    let policy = catalogue.policy.as_ref()?;
+    if today < policy.starts_on || today >= policy.ends_before {
+        return None;
+    }
+    let missions: Vec<serde_json::Value> = policy
+        .missions
+        .iter()
+        .filter_map(|mission| {
+            let predicate = mission.supported_predicate()?;
+            Some(serde_json::json!({
+                "mission_id": mission.id,
+                "title": mission.title,
+                "criteria": {
+                    "tools": predicate.tools,
+                    "tool_families": predicate.tool_families,
+                    "languages": predicate.languages,
+                    "min_sessions": predicate.min_sessions,
+                },
+            }))
+        })
+        .collect();
+    if missions.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "schema_version": crate::contribution_missions::CONTRIBUTION_MISSION_CATALOGUE_SCHEMA_VERSION,
+        "missions": missions,
+    }))
+}
+
+/// Refresh the contribution-mission slot from the published activity
+/// catalogue, when [`MissionSlotSchedule`] says so.
+///
+/// The same anonymous `GET /v1/activity-missions` every contributor sends,
+/// through the same origin, scheme and allowlist checks as
+/// `activity_missions_catalogue`; nothing local goes with it, and matching
+/// stays on this Mac. Three outcomes:
+///
+/// - **Fetch failed** (transport, status, bounds, a digest that does not
+///   verify): the slot is left as it is and ages out on its own after
+///   `MISSION_CATALOGUE_MAX_AGE`, never kept past it.
+/// - **Nothing to match on**: the slot is emptied, so `mission_fit` is
+///   absent, never a zero standing for "fits nothing".
+/// - **Missions with a supported predicate**: they replace the slot.
+///
+/// Nothing is logged: the slot is the whole of its effect. Shells are told
+/// through the queue and status events when what they render could change:
+/// every tick, due or not, compares the live catalogue with the one the
+/// previous tick saw, so a slot that ages out or outlives its policy between
+/// fetches is published too.
+pub(crate) async fn refresh_mission_slot(
+    shared: &DaemonShared,
+    now: DateTime<Utc>,
+    schedule: &mut MissionSlotSchedule,
+) {
+    fetch_into_mission_slot(shared, now, schedule).await;
+    let live = super::mission_matching::live_catalogue(&shared.mission_catalogue, now);
+    if live != schedule.seen {
+        schedule.seen = live;
+        shared.publish(super::ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+        shared.publish(super::ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
+}
+
+async fn fetch_into_mission_slot(
+    shared: &DaemonShared,
+    now: DateTime<Utc>,
+    schedule: &mut MissionSlotSchedule,
+) {
+    use super::mission_matching::{clear_catalogue, receive_catalogue_until};
+    // The config is read before the schedule is consulted: an unenroll
+    // between two due attempts must still reset it, or enrolling again
+    // inside the interval would wait out the old enrollment's schedule.
+    //
+    // With no config the slot is emptied too. `unenroll` empties it as
+    // well, but a fetch that passed its enrollment re-check below just
+    // before `unenroll` ran can write it just after; this undoes that on
+    // the next tick, and the caller publishes the change.
+    let Ok(Some(config)) = shared.store.load_config() else {
+        schedule.unconfigured();
+        clear_catalogue(&shared.mission_catalogue);
+        return;
+    };
+    // A slot filled under another enrollment is not this one's: emptied
+    // before the first fetch under this one, so a failure of that fetch
+    // leaves mission fit unknown rather than the old enrollment's.
+    if schedule.enrolled(&config) {
+        clear_catalogue(&shared.mission_catalogue);
+    }
+    if !schedule.due(now) {
+        return;
+    }
+    schedule.attempted(now);
+    let call = fetch::<ActivityCatalogue>(&config, "/v1/activity-missions", None).await;
+    let Ok(catalogue) = call.result else {
+        return;
+    };
+    if !valid_catalogue(&catalogue) {
+        return;
+    }
+    // An unenroll, or a move to another server, while the request was in
+    // flight: what came back belongs to an enrollment that is gone.
+    let still_enrolled = shared
+        .store
+        .load_config()
+        .ok()
+        .flatten()
+        .is_some_and(|current| current.ingest_url == config.ingest_url);
+    if !still_enrolled {
+        return;
+    }
+    match contribution_catalogue(&catalogue, now.date_naive()) {
+        // A refusal empties the slot inside `receive_catalogue`; the bounds
+        // asserted above keep a published predicate from causing one.
+        Some(raw) => {
+            // Its missions are on offer only until the policy ends, which a
+            // slot filled shortly before then would otherwise outlive.
+            let not_after = catalogue
+                .policy
+                .as_ref()
+                .map(|policy| policy.ends_before.and_time(NaiveTime::MIN).and_utc());
+            let _ = receive_catalogue_until(&shared.mission_catalogue, &raw, now, not_after);
+        }
+        None => clear_catalogue(&shared.mission_catalogue),
     }
 }

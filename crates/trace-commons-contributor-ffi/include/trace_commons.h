@@ -2133,6 +2133,26 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * a typed result plus shared rendered text. It is a read-only local operation;
  * an empty selection creates no absent store. Questions are recorded_activity,
  * episode_outcomes, observed_models, and estimated_cost.
+ * Token week (feed S): week_overview {week_start?,tz} and card_inputs
+ * {card:tokens|cache_share|sessions,week_start?,tz} read saved snapshots by
+ * their own recorded dates. tz is the UTC offset in seconds east; a bad one
+ * is insights_tz_invalid. Reads create no absent store; no week comparison.
+ * Patterns (feed S): patterns {week_start?,weeks?,tz} returns four cards
+ * with weekly bars (an absent week is null, never 0) and the re-read table as
+ * letters plus extensions; weeks is 1-6, else insights_weeks_invalid.
+ * pattern_sessions {pattern,week_start?,tz} lists one card's sessions.
+ * Sessions (feed S): session_drill {snapshot_id,tz} returns one saved
+ * session's per-turn counters (an unknown turn is null, never 0) and lettered
+ * markers; Codex series is null as not_recorded. No path, digest or what-if.
+ * Comparisons (feed T): comparisons {counter_weeks?,week_start?,tz,
+ * recap_card_enabled?} marks each goal over the daemon's insights_week
+ * history passed through, and returns the lever and the weekly summary card;
+ * without counter_weeks nothing is compared. goal_set {id?,goal},
+ * goal_delete {id}, lever_feedback {kind,week_start,action?} and
+ * recap_opened {week_start} write rule IDs and Monday dates only.
+ * lever_card {enabled} is the Settings switch for the lever's card; on, it
+ * turns back on every kind repeated "Not useful" turned off. Its state is
+ * comparisons' lever.card_enabled.
  * Episodes: episode_create {snapshot_ids}, episode_list, episode_explain {id}.
  * Episode edits require {id,expected_revision}: episode_replace_members also
  * takes snapshot_ids; episode_annotate takes category,outcome;
@@ -2165,6 +2185,32 @@ char*       tc_insights_call(const uint8_t* request, size_t request_len, char** 
 /* Stateless shared Insights UI vocabulary. Opens no store. Owned JSON string;
  * free with tc_string_free. Returns NULL only after a caught panic. */
 char*       tc_insights_copy_json(void);
+/* Every re-engagement nudge string as one JSON object of key to text,
+ * including both candidates of each pending wording choice and every
+ * singular form. Opens no store. Sentences with counts arrive composed on
+ * status.nudge.text / mark_text, reengage_due and digest_due; this table is
+ * for the fixed strings. Owned JSON string; free with tc_string_free.
+ * Returns NULL only after a caught panic. DRAFT, NEEDS APPROVAL. */
+char*       tc_nudge_copy_json(void);
+/* A Traces row's tags, worded by the core from the row's own list_pending
+ * fields. entry_json is a borrowed UTF-8 JSON object carrying the entry's
+ * mission_fit and credit_estimate as the daemon sent them. Returns an owned
+ * JSON object with mission_fit, estimate_band, estimate_tier and
+ * estimate_explainer, each present only when there is something true to
+ * draw: the mission tag above zero, the estimate only while drawn is true.
+ * NULL, unreadable or mistyped input answers {}, which draws nothing. Free
+ * with tc_string_free. Returns NULL only after a caught panic. DRAFT, NEEDS
+ * APPROVAL. */
+char*       tc_nudge_entry_tags_json(const char* entry_json);
+/* The digest switch's Settings help, composed by the core. settings_json is
+ * a borrowed UTF-8 JSON object carrying digest_schedule and
+ * digest_interval_secs as get_settings sent them. Returns an owned JSON
+ * object with digest_help, present only when there is a line to draw: the
+ * evening line, or the interval in whole hours, singular at one. NULL,
+ * unreadable or mistyped input answers {}, which draws nothing. Free with
+ * tc_string_free. Returns NULL only after a caught panic. DRAFT, NEEDS
+ * APPROVAL. */
+char*       tc_nudge_digest_help_json(const char* settings_json);
 
 /* Handle-free local mission draft inbox, available before enrollment.
  * Synchronous local IO; schedule off the UI thread. Request is borrowed UTF-8
@@ -2199,6 +2245,20 @@ char*       tc_mission_drafts_call(const uint8_t* request, size_t request_len, c
  * "daemon-not-running".
  */
 uint64_t    tc_subscribe(tc_handle*, void (*cb)(const char* event_json, void* ctx), void* ctx);
+
+/* tc_subscribe, declaring which opt-in events this subscriber can render
+ * (subscribe's `accepts`), so it receives them. accepts_json is a borrowed
+ * UTF-8 JSON array of event names, such as ["reengage_due"]; names this
+ * build does not know are ignored. NULL declares none and is exactly
+ * tc_subscribe. On the in-process path the subscription counts as a renderer
+ * until tc_unsubscribe returns, so the daemon posts a standalone
+ * re-engagement notification only while some subscriber can draw it.
+ *
+ * Returns 0 on failure with every tc_last_error label tc_subscribe records,
+ * plus "subscribe-accepts-invalid" when accepts_json is not a JSON array of
+ * strings. Lifetime rules for cb and ctx are tc_subscribe's.
+ */
+uint64_t    tc_subscribe_with_accepts(tc_handle*, const char* accepts_json, void (*cb)(const char* event_json, void* ctx), void* ctx);
 
 /* Cancel a subscription returned by tc_subscribe. Blocks until that
  * subscription's callback is guaranteed to no longer fire before
@@ -2419,7 +2479,7 @@ char*       tc_arming_offer_copy_json(const char* project_label, uint32_t count)
 
 /* The menu-bar Contribution mode pill (#1173, project_copy::
  * contribution_mode_copy): {title, mixed, choices, override_active, clear},
- * choices being [{mode, label, line}] for Ask me, Automatic and Never.
+ * choices being [{mode, label, line}] for Ask, Automatic and Never.
  * NULL only on a caught panic.
  */
 char*       tc_contribution_mode_copy_json(void);

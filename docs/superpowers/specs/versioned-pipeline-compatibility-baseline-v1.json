@@ -61,9 +61,9 @@
       "score": "skipped",
       "settle": "skipped"
     },
-    "privacy_risk_rejected": {
-      "admission": "reject",
-      "review": "skipped",
+    "privacy_high_risk_review_rejected": {
+      "admission": "quarantine",
+      "review": "rejected",
       "score": "skipped",
       "settle": "skipped"
     }

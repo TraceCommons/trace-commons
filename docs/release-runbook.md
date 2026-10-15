@@ -15,9 +15,12 @@ The macOS app and CLI are distributed via a Homebrew tap:
 `TraceCommons/homebrew-tap` (public, on GitHub), consumed as
 `brew tap TraceCommons/tap`.
 
-- `Casks/trace-commons.rb` installs the notarized `TraceCommons.app` from the
-  DMG published as `TraceCommons-<version>.dmg` on releases of
-  `TraceCommons/trace-commons` tagged `app-v<version>`.
+- `Casks/trace-commons.rb` installs the notarized `Near.ai.app` from the
+  DMG published as `Near.ai-<version>.dmg` on releases of
+  `TraceCommons/trace-commons` tagged `app-v<version>`. Releases before the
+  rename published `TraceCommons-<version>.dmg` holding `TraceCommons.app`;
+  the cask bump step rewrites the cask's `url` and `app` stanzas to the new
+  names and refuses to push a cask that still names the old ones.
 - `Formula/trace-commons-contributor.rb` installs the signed CLI from the
   zips published as `trace-commons-contributor-<target>.zip` on releases
   tagged `contributor-v<version>`, for both `aarch64-apple-darwin` and
@@ -31,7 +34,7 @@ The macOS app and CLI are distributed via a Homebrew tap:
 `aarch64-apple-darwin` and `x86_64-apple-darwin`, `lipo`s them into one
 dylib, and passes `swift build --arch arm64 --arch x86_64` so the app
 executable is universal too; it verifies both with `lipo -archs` and fails
-loudly if either is thin. `TraceCommons-<version>.dmg` therefore runs on both
+loudly if either is thin. `Near.ai-<version>.dmg` therefore runs on both
 Apple silicon and Intel Macs, and the cask carries no `depends_on arch:`.
 
 The CLI (`Formula/trace-commons-contributor.rb`) ships separate
@@ -203,7 +206,7 @@ Expect friction in roughly this order:
   refusing to publish, but worth confirming): the guard added in this task
   should prevent `gh release create` from running with nothing to attach.
   Confirm this in practice, not just by reading the condition.
-- **The macOS checksum sidecar path.** `dist/macos-dmg/TraceCommons-$V.dmg.sha256`
+- **The macOS checksum sidecar path.** `dist/macos-dmg/Near.ai-$V.dmg.sha256`
   assumes the exact filename the macOS job produces. Any future rename of
   that job's output (`Rename and checksum` step) silently breaks this glob
   with no test coverage catching it — `release_pipeline.rs` checks text

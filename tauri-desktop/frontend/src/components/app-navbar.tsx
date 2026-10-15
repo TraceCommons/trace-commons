@@ -37,7 +37,7 @@ export function AppNavbar({
         <BrandMarkIcon size={24} />
         <div>
           <span className="text-sm font-semibold tracking-tight">
-            Trace Commons
+            Near.ai
           </span>
           <span className="block text-xs text-muted-foreground">
             Contributor workspace

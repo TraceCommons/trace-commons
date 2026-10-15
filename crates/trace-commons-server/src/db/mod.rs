@@ -363,6 +363,11 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
         Ok(false)
     }
+    /// The extra grants a `tiered-v1` admission policy's in-process
+    /// evaluator needs (V126). See `db/postgres_account_trust_growth.rs`.
+    async fn tiered_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
     async fn enable_external_account_trust_growth(&self) -> Result<(), DatabaseError> {
         Err(DatabaseError::Pool(
             "external_account_trust_unavailable".into(),
@@ -496,7 +501,19 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "account_trust_worker_unavailable".into(),
         ))
     }
-    /// Stores one evaluation (shadow only); returns whether the tier changed.
+    /// Evaluates one account under the admission policy's growth rule and
+    /// stores an `applied` row bound to its input generation, in one
+    /// snapshot. `None` when the account has no facts.
+    async fn evaluate_and_record_applied_account_trust(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+        _policy: &crate::account_trust_rule::GrowthPolicy,
+    ) -> Result<Option<(crate::account_trust_rule::Evaluation, bool)>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_trust_worker_unavailable".into(),
+        ))
+    }
+    /// Stores one shadow evaluation; returns whether the tier changed.
     async fn record_account_trust_evaluation(
         &self,
         _account: &crate::account_trust::TrustAccount,
@@ -1933,6 +1950,21 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         &self,
         _limit: i64,
     ) -> Result<Vec<crate::trace_corpus_storage::DedupRederiveRow>, DatabaseError> {
+        Ok(Vec::new())
+    }
+
+    /// Enumerate decision identifiers and times, cross-tenant, NEWEST first
+    /// (`decided_at DESC, decision_id DESC`), capped at `limit`: the credit
+    /// estimate eval's enumeration. Newest first so a capped run reads the
+    /// most recent decisions, and so every submission it reaches has its
+    /// latest decision among the rows -- the decision its label comes from.
+    /// Reads through the gate-driver reader pool with NO tenant GUC; every
+    /// column is granted to `trace_gate_driver` by V45. Default: empty (test
+    /// doubles / backends without a gate-driver pool).
+    async fn list_recent_gate_decision_keys(
+        &self,
+        _limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateDecisionKeyRow>, DatabaseError> {
         Ok(Vec::new())
     }
 

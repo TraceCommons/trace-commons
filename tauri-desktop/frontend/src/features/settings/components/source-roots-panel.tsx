@@ -44,7 +44,7 @@ export function SourceRootsPanel({
           <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
             {copy?.heading ?? "Source settings"}
           </span>
-          <h2>Session folders</h2>
+          <h2>Trace folders</h2>
         </div>
         <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start bg-muted text-muted-foreground">
           Explicit
@@ -190,7 +190,7 @@ function SourceRootRow({
         {modeValue === "watch" && (
           <>
             <label>
-              <span className="sr-only">{label} sessions folder</span>
+              <span className="sr-only">{label} traces folder</span>
               <Input
                 {...form.register("path")}
                 placeholder={

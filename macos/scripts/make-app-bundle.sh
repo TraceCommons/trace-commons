@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assemble TraceCommons.app around the SwiftPM executable.
+# Assemble Near.ai.app around the SwiftPM executable.
 #
 # SwiftPM produces a bare Mach-O; the app needs a bundle so that an Info.plist
 # and a bundle identifier (UNUserNotificationCenter) exist at all. The app is a
@@ -22,7 +22,7 @@ CONFIG="${1:-debug}"
 # passes the tag's version explicitly; see release-apps.yml.
 SHORT_VERSION="${2:-0.0.0-dev}"
 BUILD_VERSION="${3:-1}"
-APP="$PACKAGE_DIR/.build/TraceCommons.app"
+APP="$PACKAGE_DIR/.build/Near.ai.app"
 DYLIB_NAME="libtrace_commons_contributor_ffi.dylib"
 
 RUST_TARGETS=(aarch64-apple-darwin x86_64-apple-darwin)

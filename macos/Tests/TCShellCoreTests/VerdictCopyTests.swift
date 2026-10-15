@@ -16,7 +16,7 @@ import XCTest
 /// shells at once.
 final class VerdictCopyTests: XCTestCase {
     func testTheQuestionIsTheSharedWording() {
-        XCTAssertEqual(VerdictCopy.question, "Did this session do what you asked?")
+        XCTAssertEqual(VerdictCopy.question, "Did this trace do what you asked?")
     }
 
     func testTheThreeAnswersAreTheSharedWording() {
@@ -28,7 +28,7 @@ final class VerdictCopyTests: XCTestCase {
     func testTheDisclosureCaptionIsIntact() {
         XCTAssertEqual(
             VerdictCopy.caption,
-            "Optional. This is recorded as the trace outcome; the preview above does not show it."
+            "Optional. Recorded with the trace; not shown in the preview."
         )
     }
 
@@ -36,7 +36,7 @@ final class VerdictCopyTests: XCTestCase {
         XCTAssertEqual(VerdictCopy.submitAllAs, "Submit as...")
         XCTAssertEqual(
             VerdictCopy.submitAllAsTooltip,
-            "Record the same outcome for every session in this group."
+            "Record the same outcome for every trace in this group."
         )
     }
 }

@@ -1,7 +1,11 @@
-//! Source-bound Codex usage evidence extracted from exact selected bytes.
+//! Source-bound Codex and Claude Code usage evidence extracted from exact
+//! selected bytes.
 //!
-//! Cumulative counters before the first observed snapshot remain explicitly
-//! unpriced. This module records no path, source body, or native session ID.
+//! Codex: cumulative counters before the first observed snapshot remain
+//! explicitly unpriced. Claude Code: counters are stated per message and
+//! summed once per message ID; they carry no cumulative interval, so nothing
+//! here prices them. This module records no path, source body, or native
+//! session or message ID.
 
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Utc};
@@ -12,7 +16,11 @@ use sha2::{Digest, Sha256};
 use super::SourceFormat;
 use super::usage::{NativeTokenCounts, UsageSource};
 
-pub const USAGE_EVIDENCE_SCHEMA_VERSION: u32 = 1;
+/// Schema 2 added Claude Code evidence, whose counts carry the 5-minute and
+/// 1-hour cache-write split. Codex evidence written at schema 1 is the same
+/// shape and stays readable.
+pub const USAGE_EVIDENCE_SCHEMA_VERSION: u32 = 2;
+const CODEX_FIRST_SCHEMA_VERSION: u32 = 1;
 pub const MAX_USAGE_RECORD_REFS: usize = 64;
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_MODEL_BYTES: usize = 96;
@@ -74,6 +82,9 @@ pub enum IntervalUnavailableReason {
     InsufficientBaseline,
     MissingOrInvalidTimestamp,
     Overflow,
+    /// Claude Code states counters per message, not cumulatively, so there is
+    /// no first-to-last interval. Never a Codex reason.
+    PerMessageCounters,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -134,7 +145,7 @@ fn digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn safe_model(value: &str) -> bool {
+pub(crate) fn safe_model(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_MODEL_BYTES
         && value
@@ -166,9 +177,22 @@ impl PersistedUsageEvidence {
         let retained = u64::try_from(self.record_refs.len()).map_err(|_| invalid())?;
         let refs_complete = retained.checked_add(self.omitted_record_refs);
         let expected_retained = self.complete_records.min(MAX_USAGE_RECORD_REFS as u64);
-        if self.schema_version != USAGE_EVIDENCE_SCHEMA_VERSION
-            || self.source != UsageSource::Codex
-            || self.source_format != SourceFormat::Codex
+        let shape_valid = match (self.source, self.source_format) {
+            (UsageSource::Codex, SourceFormat::Codex) => {
+                (CODEX_FIRST_SCHEMA_VERSION..=USAGE_EVIDENCE_SCHEMA_VERSION)
+                    .contains(&self.schema_version)
+                    && self.interval_unavailable_reason
+                        != Some(IntervalUnavailableReason::PerMessageCounters)
+            }
+            (UsageSource::ClaudeCode, SourceFormat::ClaudeCode) => {
+                self.schema_version == USAGE_EVIDENCE_SCHEMA_VERSION
+                    && self.interval.is_none()
+                    && self.interval_unavailable_reason
+                        == Some(IntervalUnavailableReason::PerMessageCounters)
+            }
+            _ => false,
+        };
+        if !shape_valid
             || !digest(&self.source_digest)
             || complete_plus_incomplete != Some(self.candidate_records)
             || self.candidate_records > MAX_SOURCE_BYTES as u64
@@ -191,7 +215,11 @@ impl PersistedUsageEvidence {
         }
         if let Some(counts) = &self.aggregate_counts {
             counts.validate_accounting().map_err(|_| invalid())?;
-            if fields(counts).is_none()
+            let matches_source = match self.source {
+                UsageSource::Codex => fields(counts).is_some(),
+                UsageSource::ClaudeCode => matches!(counts, NativeTokenCounts::ClaudeCode { .. }),
+            };
+            if !matches_source
                 || self.candidate_records == 0
                 || self.complete_records != self.candidate_records
             {
@@ -486,6 +514,170 @@ pub fn extract_codex_usage_evidence(bytes: &[u8]) -> Result<PersistedUsageEviden
         interval,
         interval_unavailable_reason,
         attribution: model_attribution,
+    };
+    evidence.validate()?;
+    Ok(evidence)
+}
+
+/// Extract persisted evidence from one already-selected Claude Code JSONL
+/// file. Every assistant record is a candidate; its counters are read only
+/// through `source::claude_code::claude_stated_usage`. A message ID repeated
+/// across content-block records is counted once, with its latest counters,
+/// and only when the repeats never regress or change model. Message IDs are
+/// compared in memory and discarded before return.
+pub fn extract_claude_usage_evidence(bytes: &[u8]) -> Result<PersistedUsageEvidence> {
+    if bytes.len() > MAX_SOURCE_BYTES {
+        bail!("insights_usage_evidence_source_too_large");
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
+    let mut candidate_records = 0u64;
+    let mut complete_records = 0u64;
+    let mut duplicate_records = 0u64;
+    let mut refs = Vec::new();
+    let mut aggregate_problem = None;
+    // Message ID -> (latest counters, declared model). Dropped at return.
+    let mut messages: std::collections::BTreeMap<String, ([u64; 5], Option<String>)> =
+        std::collections::BTreeMap::new();
+    let mut declarations = std::collections::BTreeSet::new();
+    let mut declaration_missing = false;
+
+    for (offset, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let index = u64::try_from(offset + 1).map_err(|_| invalid())?;
+        let row: Value = serde_json::from_str(line).map_err(|_| invalid())?;
+        if !row.is_object() {
+            return Err(invalid());
+        }
+        if row.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        candidate_records = candidate_records.checked_add(1).ok_or_else(invalid)?;
+        let stated = row
+            .pointer("/message/usage")
+            .and_then(crate::source::claude_code::claude_stated_usage);
+        let id = row
+            .pointer("/message/id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= 256);
+        let model = row
+            .pointer("/message/model")
+            .and_then(Value::as_str)
+            .filter(|model| safe_model(model))
+            .map(str::to_owned);
+        let (Some(stated), Some(id)) = (stated, id) else {
+            aggregate_problem.get_or_insert(AggregateUnavailableReason::IncompleteOrInvalidUsage);
+            continue;
+        };
+        let current = [
+            u64::from(stated.input),
+            u64::from(stated.cache_read),
+            u64::from(stated.output),
+            u64::from(stated.cache_write_5m),
+            u64::from(stated.cache_write_1h),
+        ];
+        let repeated = match messages.get(id) {
+            Some((previous, previous_model)) => {
+                if current
+                    .iter()
+                    .zip(previous)
+                    .any(|(now, before)| now < before)
+                    || previous_model != &model
+                {
+                    aggregate_problem
+                        .get_or_insert(AggregateUnavailableReason::IncompleteOrInvalidUsage);
+                    continue;
+                }
+                true
+            }
+            None => false,
+        };
+        complete_records = complete_records.checked_add(1).ok_or_else(invalid)?;
+        if repeated {
+            duplicate_records = duplicate_records.checked_add(1).ok_or_else(invalid)?;
+        }
+        if refs.len() < MAX_USAGE_RECORD_REFS {
+            refs.push(UsageRecordRef {
+                record_index: index,
+            });
+        }
+        match &model {
+            Some(model) => {
+                declarations.insert(model.clone());
+            }
+            None => declaration_missing = true,
+        }
+        messages.insert(id.to_owned(), (current, model));
+    }
+
+    if candidate_records == 0 {
+        aggregate_problem = Some(AggregateUnavailableReason::NoUsage);
+    } else if complete_records != candidate_records && aggregate_problem.is_none() {
+        aggregate_problem = Some(AggregateUnavailableReason::IncompleteOrInvalidUsage);
+    }
+    let mut aggregate_counts = None;
+    if aggregate_problem.is_none() {
+        let mut total = [0u64; 5];
+        let mut overflow = false;
+        for (counts, _) in messages.values() {
+            for (sum, count) in total.iter_mut().zip(counts) {
+                match sum.checked_add(*count) {
+                    Some(value) => *sum = value,
+                    None => overflow = true,
+                }
+            }
+        }
+        match total[3].checked_add(total[4]) {
+            Some(created) if !overflow => {
+                aggregate_counts = Some(NativeTokenCounts::ClaudeCode {
+                    input: total[0],
+                    cache_read_input: total[1],
+                    cache_creation_input: created,
+                    cache_creation_5m: total[3],
+                    cache_creation_1h: total[4],
+                    output: total[2],
+                });
+            }
+            _ => aggregate_problem = Some(AggregateUnavailableReason::Overflow),
+        }
+    }
+    let attribution = if declaration_missing || messages.is_empty() {
+        UsageModelAttribution::Unavailable {
+            reason: ModelAttributionUnavailableReason::MissingOrInvalidDeclaration,
+        }
+    } else if declarations.len() == 1 {
+        UsageModelAttribution::SingleDeclaredModel {
+            model: declarations.into_iter().next().expect("one declaration"),
+        }
+    } else {
+        UsageModelAttribution::Unavailable {
+            reason: ModelAttributionUnavailableReason::ModelChanged,
+        }
+    };
+    let omitted_record_refs = complete_records
+        .checked_sub(u64::try_from(refs.len()).map_err(|_| invalid())?)
+        .ok_or_else(invalid)?;
+    let evidence = PersistedUsageEvidence {
+        schema_version: USAGE_EVIDENCE_SCHEMA_VERSION,
+        source: UsageSource::ClaudeCode,
+        scope: UsageEvidenceScope::ExactSourceFile,
+        source_format: SourceFormat::ClaudeCode,
+        source_digest: format!("{:x}", Sha256::digest(bytes)),
+        coordinates: UsageRecordCoordinates::JsonlPhysicalLinesOneBased,
+        candidate_records,
+        complete_records,
+        incomplete_records: candidate_records
+            .checked_sub(complete_records)
+            .ok_or_else(invalid)?,
+        duplicate_records,
+        record_refs: refs,
+        omitted_record_refs,
+        aggregate_counts,
+        aggregate_unavailable_reason: aggregate_problem,
+        interval: None,
+        interval_unavailable_reason: Some(IntervalUnavailableReason::PerMessageCounters),
+        attribution,
     };
     evidence.validate()?;
     Ok(evidence)
@@ -995,6 +1187,8 @@ mod tests {
             input: 10,
             cache_read_input: 2,
             cache_creation_input: 0,
+            cache_creation_5m: 0,
+            cache_creation_1h: 0,
             output: 4,
         });
         assert!(wrong_accounting.validate().is_err());
@@ -1013,6 +1207,195 @@ mod tests {
         assert!(!json.contains("session_id"));
         assert!(!json.contains("path"));
         assert!(!json.contains("payload"));
+    }
+
+    fn claude_turn(id: &str, model: &str, input: u64, m5: u64, h1: u64) -> Value {
+        json!({
+            "type":"assistant","timestamp":"2026-09-12T12:00:00Z",
+            "message":{"id":id,"model":model,"content":[{"type":"text","text":"PRIVATE_BODY"}],
+                "usage":{"input_tokens":input,"output_tokens":4,"cache_read_input_tokens":10,
+                    "cache_creation_input_tokens":m5 + h1,
+                    "cache_creation":{"ephemeral_5m_input_tokens":m5,"ephemeral_1h_input_tokens":h1}}}
+        })
+    }
+
+    fn claude_counts(input: u64, read: u64, m5: u64, h1: u64, output: u64) -> NativeTokenCounts {
+        NativeTokenCounts::ClaudeCode {
+            input,
+            cache_read_input: read,
+            cache_creation_input: m5 + h1,
+            cache_creation_5m: m5,
+            cache_creation_1h: h1,
+            output,
+        }
+    }
+
+    #[test]
+    fn claude_evidence_sums_distinct_messages_with_the_split() {
+        let replay = claude_turn("msg_PRIVATE_A", "claude-fixture", 3, 20, 5);
+        let bytes = source(vec![
+            json!({"type":"user","message":{"content":"PRIVATE_BODY"}}),
+            replay.clone(),
+            replay,
+            claude_turn("msg_PRIVATE_B", "claude-fixture", 7, 0, 0),
+        ]);
+        let evidence = extract_claude_usage_evidence(&bytes).unwrap();
+        evidence.validate().unwrap();
+        evidence
+            .validate_binding(
+                SourceFormat::ClaudeCode,
+                &format!("{:x}", Sha256::digest(&bytes)),
+            )
+            .unwrap();
+        assert_eq!(evidence.schema_version, 2);
+        assert_eq!(evidence.source, UsageSource::ClaudeCode);
+        assert_eq!(evidence.candidate_records, 3);
+        assert_eq!(evidence.complete_records, 3);
+        assert_eq!(evidence.duplicate_records, 1);
+        assert_eq!(
+            evidence
+                .record_refs
+                .iter()
+                .map(|r| r.record_index)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+        assert_eq!(
+            evidence.aggregate_counts,
+            Some(claude_counts(10, 20, 20, 5, 8))
+        );
+        assert!(evidence.interval.is_none());
+        assert_eq!(
+            evidence.interval_unavailable_reason,
+            Some(IntervalUnavailableReason::PerMessageCounters)
+        );
+        assert_eq!(
+            evidence.attribution,
+            UsageModelAttribution::SingleDeclaredModel {
+                model: "claude-fixture".into()
+            }
+        );
+        // Per-message counters carry no observed interval, so nothing is
+        // priced from them.
+        assert!(!evidence.has_attributed_interval());
+        let json = serde_json::to_string(&evidence).unwrap();
+        assert!(!json.contains("PRIVATE"));
+    }
+
+    #[test]
+    fn claude_evidence_is_unknown_when_any_record_is_unstated() {
+        let mut no_split = claude_turn("msg_b", "claude-fixture", 1, 4, 0);
+        no_split["message"]["usage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_creation");
+        let mut priority = claude_turn("msg_c", "claude-fixture", 1, 0, 0);
+        priority["message"]["usage"]["service_tier"] = json!("priority");
+        for unstated in [no_split, priority] {
+            let evidence = extract_claude_usage_evidence(&source(vec![
+                claude_turn("msg_a", "claude-fixture", 1, 0, 0),
+                unstated,
+            ]))
+            .unwrap();
+            assert_eq!(evidence.candidate_records, 2);
+            assert_eq!(evidence.complete_records, 1);
+            assert_eq!(evidence.incomplete_records, 1);
+            assert_eq!(evidence.aggregate_counts, None);
+            assert_eq!(
+                evidence.aggregate_unavailable_reason,
+                Some(AggregateUnavailableReason::IncompleteOrInvalidUsage)
+            );
+        }
+        let none = extract_claude_usage_evidence(&source(vec![
+            json!({"type":"user","message":{"content":"hi"}}),
+        ]))
+        .unwrap();
+        assert_eq!(
+            none.aggregate_unavailable_reason,
+            Some(AggregateUnavailableReason::NoUsage)
+        );
+        let mixed = extract_claude_usage_evidence(&source(vec![
+            claude_turn("msg_a", "claude-one", 1, 0, 0),
+            claude_turn("msg_b", "claude-two", 1, 0, 0),
+        ]))
+        .unwrap();
+        assert!(mixed.aggregate_counts.is_some());
+        assert_eq!(
+            mixed.attribution,
+            UsageModelAttribution::Unavailable {
+                reason: ModelAttributionUnavailableReason::ModelChanged
+            }
+        );
+    }
+
+    #[test]
+    fn validate_admits_claude_only_under_its_own_invariants() {
+        let valid = extract_claude_usage_evidence(&source(vec![claude_turn(
+            "msg_a",
+            "claude-fixture",
+            1,
+            2,
+            3,
+        )]))
+        .unwrap();
+        valid.validate().unwrap();
+
+        let mut old_schema = valid.clone();
+        old_schema.schema_version = 1;
+        assert!(old_schema.validate().is_err());
+
+        let mut crossed = valid.clone();
+        crossed.source_format = SourceFormat::Codex;
+        assert!(crossed.validate().is_err());
+
+        let mut codex_shaped = valid.clone();
+        codex_shaped.aggregate_counts = Some(codex(1, 0, 4, 0));
+        assert!(codex_shaped.validate().is_err());
+
+        let mut bad_split = valid.clone();
+        bad_split.aggregate_counts = Some(NativeTokenCounts::ClaudeCode {
+            input: 1,
+            cache_read_input: 10,
+            cache_creation_input: 5,
+            cache_creation_5m: 1,
+            cache_creation_1h: 1,
+            output: 4,
+        });
+        assert!(bad_split.validate().is_err());
+
+        let mut wrong_reason = valid.clone();
+        wrong_reason.interval_unavailable_reason =
+            Some(IntervalUnavailableReason::InsufficientBaseline);
+        assert!(wrong_reason.validate().is_err());
+
+        let codex_valid = extract_codex_usage_evidence(&source(vec![
+            meta(),
+            context(Some("gpt-6")),
+            usage(Some("2026-01-01T00:00:00Z"), 0, 0, 0, 0),
+        ]))
+        .unwrap();
+        let mut codex_per_message = codex_valid.clone();
+        codex_per_message.interval = None;
+        codex_per_message.interval_unavailable_reason =
+            Some(IntervalUnavailableReason::PerMessageCounters);
+        assert!(codex_per_message.validate().is_err());
+    }
+
+    /// Codex evidence saved before schema 2 stays readable: the split only
+    /// changed the Claude shape.
+    #[test]
+    fn codex_evidence_at_schema_one_still_validates() {
+        let mut evidence = extract_codex_usage_evidence(&source(vec![
+            meta(),
+            context(Some("gpt-6")),
+            usage(Some("2026-01-01T00:00:00Z"), 0, 0, 0, 0),
+        ]))
+        .unwrap();
+        assert_eq!(evidence.schema_version, USAGE_EVIDENCE_SCHEMA_VERSION);
+        evidence.schema_version = 1;
+        evidence.validate().unwrap();
+        evidence.schema_version = 3;
+        assert!(evidence.validate().is_err());
     }
 
     fn codex(

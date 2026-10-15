@@ -18,7 +18,7 @@ use std::sync::Mutex;
 #[cfg_attr(not(unix), allow(unused_imports))]
 use trace_commons_contributor_ffi::{
     tc_call, tc_daemon_attach, tc_daemon_start, tc_daemon_stop, tc_handle, tc_handle_free,
-    tc_preview_open, tc_string_free, tc_subscribe,
+    tc_last_error, tc_preview_open, tc_string_free, tc_subscribe, tc_subscribe_with_accepts,
 };
 
 fn cstr(p: &Path) -> CString {
@@ -239,6 +239,44 @@ fn an_attached_subscriber_receives_the_snapshot_push() {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     assert!(seen, "no snapshot push reached an attached subscriber");
+
+    unsafe { tc_daemon_stop(attached) };
+    unsafe { tc_handle_free(attached) };
+    unsafe { tc_daemon_stop(started) };
+    unsafe { tc_handle_free(started) };
+}
+
+/// An `accepts` array holding something other than a string is refused
+/// before any subscription is made, on the attached path as on the
+/// in-process one. The daemon refuses it too, but over the socket that
+/// refusal used to come back as a live token: the caller then got no events
+/// and no `tc_last_error`.
+#[test]
+#[cfg(unix)]
+fn an_attached_subscriber_with_a_non_string_accept_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let started = start(dir.path());
+
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let attached = unsafe { tc_daemon_attach(cstr(dir.path()).as_ptr(), &mut err) };
+    assert!(!attached.is_null());
+
+    for handle in [attached, started] {
+        let bad = cstr_str("[\"reengage_due\", 1]");
+        let token = unsafe {
+            tc_subscribe_with_accepts(
+                handle,
+                bad.as_ptr(),
+                Some(record_event),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(token, 0, "a non-string accept got a live token");
+        assert_eq!(
+            unsafe { CStr::from_ptr(tc_last_error()) }.to_str().unwrap(),
+            trace_commons_contributor::daemon::ipc::ERR_SUBSCRIBE_ACCEPTS_INVALID
+        );
+    }
 
     unsafe { tc_daemon_stop(attached) };
     unsafe { tc_handle_free(attached) };

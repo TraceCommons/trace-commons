@@ -1764,6 +1764,69 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "pipeline_gate_decision_rows",
         include_str!("../../../../migrations/V116__pipeline_gate_decision_rows.sql"),
     ),
+    // V117 (spec 2026-10-09, async privacy rescrub) records the Review-start
+    // privacy pass on pipeline_runs: the pass object, the hashes of its input
+    // and output, its residual-risk labels and outcome, and the link from a
+    // human approval of an escalated run; and admits the `privacy-pass`
+    // attempt artifact.
+    (
+        117,
+        "pipeline_privacy_pass",
+        include_str!("../../../../migrations/V117__pipeline_privacy_pass.sql"),
+    ),
+    // V118 adds the marker of a review audit event that the worker must still
+    // append: `pipeline_runs.review_audit_pending_at`, with its work index
+    // and the runtime role's column grant.
+    (
+        118,
+        "pipeline_review_audit_marker",
+        include_str!("../../../../migrations/V118__pipeline_review_audit_marker.sql"),
+    ),
+    // V123 (#1346) records on a failed run that its failure moved the
+    // run's `received` submission to `rejected`:
+    // `pipeline_runs.submission_rejected_at`, the CHECK that only a failed
+    // run carries it, and the runtime role's column grant.
+    (
+        123,
+        "pipeline_failed_run_submission_rejection",
+        include_str!("../../../../migrations/V123__pipeline_failed_run_submission_rejection.sql"),
+    ),
+    // V124 (spec 2026-10-10, pipeline default routing): the two cross-tenant
+    // reads default routing makes, tenant ids only, through SECURITY DEFINER
+    // functions owned by a NOLOGIN, NOBYPASSRLS guard (the V85 pattern), with
+    // EXECUTE granted to trace_ingest_runtime. V123 is #1346's.
+    (
+        124,
+        "pipeline_default_routing",
+        include_str!("../../../../migrations/V124__pipeline_default_routing.sql"),
+    ),
+    // V125 (owner decision 2026-10-11): an account reservation admitted on
+    // verified NEAR AI evidence is recorded as authority_kind 'attested' and
+    // debits no allowance. Widens the V77 CHECK only; no grant changes.
+    (
+        125,
+        "account_admission_attested_kind",
+        include_str!("../../../../migrations/V125__account_admission_attested_kind.sql"),
+    ),
+    // V126 (decided 2026-10-11): earned trust goes live with attested
+    // inference. The attested_submission fact kind verified from V76's
+    // witness evidence, first-in-cluster for it, an attested_units count on
+    // evaluations, and the writer the in-process evaluator uses for shadow
+    // and applied rows, bound to V114's input generation.
+    (
+        126,
+        "account_trust_live_attested",
+        include_str!("../../../../migrations/V126__account_trust_live_attested.sql"),
+    ),
+    // V127 (#1237): `trace_transition_admission` also releases a
+    // `processing` attempt, cost bound included, for a caller that knows the
+    // upload's refusal wrote nothing (`released_without_effect`). Replaces
+    // the function in place; its owner and grants are unchanged.
+    (
+        127,
+        "admission_release_without_effect",
+        include_str!("../../../../migrations/V127__admission_release_without_effect.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus
@@ -1867,6 +1930,14 @@ impl Database for PgBackend {
         evaluation: &crate::account_trust_rule::Evaluation,
     ) -> Result<bool, DatabaseError> {
         PgBackend::record_account_trust_evaluation(self, account, mode, evaluation).await
+    }
+
+    async fn evaluate_and_record_applied_account_trust(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        policy: &crate::account_trust_rule::GrowthPolicy,
+    ) -> Result<Option<(crate::account_trust_rule::Evaluation, bool)>, DatabaseError> {
+        PgBackend::evaluate_and_record_applied_account_trust(self, account, policy).await
     }
 
     async fn latest_account_trust_evaluation(
@@ -2029,6 +2100,10 @@ impl Database for PgBackend {
 
     async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
         PgBackend::external_account_trust_runtime_ready(self).await
+    }
+
+    async fn tiered_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        PgBackend::tiered_account_trust_runtime_ready(self).await
     }
 
     async fn enable_external_account_trust_growth(&self) -> Result<(), DatabaseError> {
@@ -5633,6 +5708,39 @@ impl Database for PgBackend {
             .collect())
     }
 
+    async fn list_recent_gate_decision_keys(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateDecisionKeyRow>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant GUC: the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize this read. The four columns are in the
+        // role's V45 column grants, so the query needs no migration.
+        let rows = client
+            .query(
+                "SELECT tenant_id, submission_id, decision_id, decided_at
+                 FROM trace_gate_decisions
+                 ORDER BY decided_at DESC, decision_id DESC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::GateDecisionKeyRow {
+                tenant_id: row.get("tenant_id"),
+                submission_id: row.get("submission_id"),
+                decision_id: row.get("decision_id"),
+                decided_at: row.get("decided_at"),
+            })
+            .collect())
+    }
+
     async fn list_dedup_rederive_rows(
         &self,
         limit: i64,
@@ -6109,13 +6217,9 @@ fn onboarding_device_tenant_access_grant_id(tenant_id: &str, device_key_id: &str
     )
 }
 
+/// One derivation for provisioning, the issuer and ingest's account lookup.
 fn onboarding_device_principal_ref(tenant_id: &str, device_key_id: &str) -> String {
-    let digest = Sha256::digest(format!(
-        "device:{}:{}",
-        tenant_id.trim(),
-        device_key_id.trim()
-    ));
-    format!("principal_sha256:{}", hex::encode(digest))
+    crate::account_trust::device_principal_ref(tenant_id, device_key_id)
 }
 
 fn sha256_prefixed(input: &str) -> String {

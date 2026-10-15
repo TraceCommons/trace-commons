@@ -83,7 +83,9 @@ final class SessionReviewCardTests: XCTestCase {
 
     /// The correction field is drawn only under Partly or Failed, and what
     /// was written under them is never sent once the verdict moves to Worked
-    /// or to none. A draft for one session is never another session's.
+    /// or to none. The text is kept, though: the arrow keys step through
+    /// Worked on the way from Partly to Failed, and that step never wipes
+    /// what was typed. A draft for one session is never another session's.
     func test_theCorrectionShowsOnlyUnderPartlyOrFailed() throws {
         var draft = SessionReviewDraft(entryId: "A")
         XCTAssertNil(draft.verdict)
@@ -100,10 +102,16 @@ final class SessionReviewCardTests: XCTestCase {
         draft.choose(.worked)
         XCTAssertFalse(draft.correctionOffered)
         XCTAssertNil(draft.correctionToSend, "a correction is never sent under Worked")
-        XCTAssertEqual(draft.correction, "", "leaving Partly or Failed clears what was written")
+        draft.choose(.failed)
+        XCTAssertEqual(draft.correctionToSend, "It never ran the tests.",
+                       "passing through Worked keeps what was typed")
+        draft.choose(.worked)
         // Choosing the chosen answer again takes it back.
         draft.choose(.worked)
         XCTAssertNil(draft.verdict)
+        XCTAssertNil(draft.correctionToSend, "a correction is never sent with no answer")
+        draft.choose(.partly)
+        XCTAssertEqual(draft.correctionToSend, "It never ran the tests.")
 
         // The core's limit is held at the keyboard.
         var long = SessionReviewDraft(entryId: "A")
@@ -192,7 +200,9 @@ final class SessionReviewCardTests: XCTestCase {
         XCTAssertTrue(card.contains(": Self.coreDownHelp)"))
     }
 
-    /// Native's Keep stays on the card, and its Undo stays in the prompts.
+    /// Keep and its Undo still work in the store, and Undo stays in the
+    /// prompts; the card itself offers neither Keep nor Dismiss (owner,
+    /// 2026-10-12).
     func test_keepAndUndoKeepRemain() async throws {
         let store = TracesStore(client: SampleDaemonClient(.normalDay))
         await store.load()
@@ -204,9 +214,9 @@ final class SessionReviewCardTests: XCTestCase {
         XCTAssertNil(store.actionError?.error)
 
         let card = try Self.text(Self.card)
-        for needle in ["Button(words.keep) { act(.keep, entry) }", "Button(words.dismissAction) { act(.dismiss, entry) }",
-                       "Button(review.lookInside) {"] {
-            XCTAssertTrue(card.contains(needle), "the card lacks \(needle)")
+        XCTAssertTrue(card.contains("Button(review.lookInside) {"), "the card lacks Look inside")
+        for gone in ["Button(words.keep)", "Button(words.dismissAction)"] {
+            XCTAssertFalse(card.contains(gone), "the card still offers \(gone)")
         }
         let prompts = try Self.text("Views/Monitor/InspectorPrompts.swift")
         XCTAssertTrue(prompts.contains("store.perform(.undoKeep, on: kept)"))
@@ -256,23 +266,27 @@ final class SessionReviewCardTests: XCTestCase {
         let kept = try XCTUnwrap(card.range(of: "keptLines(entry)\n"))
         XCTAssertLessThan(preview.lowerBound, kept.lowerBound)
         XCTAssertFalse(card.contains("Text(summary?.title ?? TracesTreeView.when(entry))"), "the old title heads the card")
-        // One line: Look inside a link, then Dismiss and Contribute, none
+        // One line, left-aligned: Contribute first, then Look inside as a
+        // link (owner, 2026-10-12: no Dismiss or Keep on the card), neither
         // wrapping or shortened; only when Contribute's label is too long
-        // for the line does Look inside move up a line. Keep sits under.
+        // for the line does Look inside move down.
         let actions = try XCTUnwrap(card.range(of: "private func actions("))
         let body = String(card[actions.lowerBound...])
         let flat = body.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         XCTAssertTrue(flat.contains(
-            "HStack(spacing: 0) { lookInside(entry, review) Spacer(minLength: GlassTokens.Space.s2)"
-                + " HStack(spacing: GlassTokens.Space.s4) { dismiss(entry, words) contribute(entry, words) } }"),
-            "the one-line row comes first")
-        let oneLine = try XCTUnwrap(body.range(of: "HStack(spacing: 0) {"))
-        let twoLines = try XCTUnwrap(body.range(of: "VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {\n                        lookInside"))
-        XCTAssertLessThan(oneLine.lowerBound, twoLines.lowerBound, "ViewThatFits tries the one line first")
+            "ViewThatFits(in: .horizontal) { HStack(spacing: GlassTokens.Space.s5) {"
+                + " contribute(entry, words) lookInside(entry, review) }"),
+            "the one-line row comes first, Contribute leading")
+        XCTAssertTrue(flat.contains(
+            "VStack(alignment: .leading, spacing: GlassTokens.Space.s3) { contribute(entry, words) lookInside(entry, review) }"),
+            "the two-line form keeps Contribute first and moves Look inside down")
+        XCTAssertTrue(flat.contains(".frame(maxWidth: .infinity, alignment: .leading) .disabled(busy)"),
+                      "the buttons are left-aligned")
+        // A refusal is said under the buttons, never above them.
         let fits = try XCTUnwrap(body.range(of: "ViewThatFits("))
-        let keep = try XCTUnwrap(body.range(of: "Button(words.keep)"))
-        XCTAssertLessThan(fits.lowerBound, keep.lowerBound, "Keep sits under the row")
-        for button in ["Button(review.lookInside)", "Button(words.dismissAction)", "Button(Self.contributeLabel("] {
+        let refusal = try XCTUnwrap(body.range(of: "TracesRefusal(store: store, entryId: entry.entryId)"))
+        XCTAssertLessThan(fits.lowerBound, refusal.lowerBound, "the refusal sits above the buttons")
+        for button in ["Button(review.lookInside)", "Button(Self.contributeLabel("] {
             let start = try XCTUnwrap(body.range(of: button))
             let tail = body[start.upperBound...].prefix(600)
             XCTAssertTrue(tail.contains(".lineLimit(1)") && tail.contains(".fixedSize()"), "\(button) can wrap or clip")
@@ -289,7 +303,8 @@ final class SessionReviewCardTests: XCTestCase {
         let body = String(card[kept.lowerBound..<actions.lowerBound])
         XCTAssertTrue(body.contains("if let line = summary?.tokenDistributionSummary, !line.isEmpty"),
                       "the card's kept facts lack the token distribution line")
-        XCTAssertTrue(body.contains("caption(line)"), "the token distribution line is not drawn as a caption")
+        // In the card's one reading face (owner, 2026-10-12).
+        XCTAssertTrue(body.contains("self.line(line)"), "the token distribution line is not drawn as a card line")
         let sheet = try Self.text("Views/PreviewSheet.swift")
         XCTAssertFalse(sheet.contains("tokenDistributionSummary"), "Look inside still draws the token distribution")
     }
@@ -300,9 +315,13 @@ final class SessionReviewCardTests: XCTestCase {
     /// Not enrolled the muted one.
     func test_theVerdictAndChipAreRons() throws {
         let card = try Self.text(Self.card)
-        XCTAssertTrue(card.contains(".buttonStyle(GlassButtonStyle(.glass, selected: selected))"))
+        // The answers are radios, one at most (owner, 2026-10-10).
+        XCTAssertTrue(card.contains("GlassRadioRow(\n                outcome.verdictQuestion, selection: draft.verdict,"))
+        // Assistive tech's "none" choice is named in the core's words.
+        XCTAssertTrue(card.contains("none: outcome.verdictNone"), "the verdict's none choice is not the core's word")
+        XCTAssertFalse(card.contains(".buttonStyle(GlassButtonStyle(.glass, selected: selected))"), "the pressed-button answers are back")
         XCTAssertFalse(card.contains(".glassTier(selected ? .controlSelected : .control)"), "the custom verdict pill is back")
-        XCTAssertFalse(card.contains("Image(systemName: \"checkmark\")"), "the chosen answer is the purple button, not a mark")
+        XCTAssertFalse(card.contains("Image(systemName: \"checkmark\")"), "the chosen answer is a radio, not a mark")
         XCTAssertTrue(card.contains(".glassType(GlassTokens.TypeScale.label.weight(.semibold))"))
         XCTAssertTrue(card.contains("GlassChip(glass: summary.enrolled == true ? review.enrolled : review.notEnrolled,"))
         XCTAssertTrue(card.contains("muted: summary.enrolled != true)"), "unknown enrolment reads as not enrolled")

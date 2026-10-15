@@ -763,7 +763,11 @@ async fn receive_wallet(listener: tokio::net::TcpListener, state: &str) -> Resul
             Err(anyhow!("near_signup_callback_invalid"))
         };
         let body = if result.is_ok() {
-            "The signed request was received. Return to Trace Commons while it verifies your account."
+            concat!(
+                "The signed request was received. Return to ",
+                crate::app_name!(),
+                " while it verifies your account."
+            )
         } else {
             "This callback was not accepted."
         };

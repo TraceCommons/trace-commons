@@ -36,18 +36,21 @@ struct NearAccountConnectView: View {
                             .disabled(pending)
                     }
                     if busy { GlassSpinner(standalone: true) }
-                    if transportFailed { notice(copy.failed, glyph: copy.refusedGlyph) }
-                    else if flow.tone == "refused" { notice(flow.message, glyph: flow.glyph) }
-                    else if !flow.message.isEmpty {
+                    if !transportFailed, flow.tone != "refused", !flow.message.isEmpty {
                         Text(flow.message)
                             .glassType(GlassTokens.TypeScale.label.weight(.regular))
                             .foregroundStyle(GlassColor.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    // Cancel is the secondary action: a link (Ron,
+                    // 2026-10-09).
                     if flow.canCancel {
                         Button(copy.cancel, role: .cancel) { run("cancel") }
-                            .buttonStyle(GlassButtonStyle(.glass))
+                            .buttonStyle(GlassButtonStyle(.link))
                     }
+                    // A failure, under the buttons it is about.
+                    if transportFailed { notice(copy.failed, glyph: copy.refusedGlyph) }
+                    else if flow.tone == "refused" { notice(flow.message, glyph: flow.glyph) }
                 }
             }
         }
@@ -58,10 +61,10 @@ struct NearAccountConnectView: View {
         .onChange(of: busy) { _, value in onBusyChanged(value) }
         .onDisappear { closed = true; Task { await cancel() } }
     }
-    /// A refusal: the core's glyph beside its sentence, in the outside tone.
+    /// A refusal: the core's glyph beside its sentence, as the failed
+    /// request's red line.
     private func notice(_ message: String, glyph: String) -> some View {
-        GlassStatusLabel([glyph, message].filter { !$0.isEmpty }.joined(separator: " "), status: .outside)
-            .fixedSize(horizontal: false, vertical: true)
+        GlassAlert([glyph, message].filter { !$0.isEmpty }.joined(separator: " "))
     }
 
     private func cancel() async {

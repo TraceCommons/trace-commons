@@ -57,10 +57,13 @@ final class TracesInspectorHostTests: XCTestCase {
     /// that is down. On Traces they are above the tree, not repeated here.
     func test_healthBannersStayVisibleWithASessionSelected() throws {
         XCTAssertFalse(MonitorWindowView.promptsInInspector(.traces), "Traces draws them above the tree")
+        // History on Traces has no tree, so they go to the inspector, as on
+        // Home (owner, 2026-10-12: History moved to Traces).
+        XCTAssertTrue(MonitorWindowView.promptsInInspector(.traces, tracesPage: .history))
         XCTAssertTrue(MonitorWindowView.promptsInInspector(.home))
         XCTAssertFalse(MonitorWindowView.promptsInInspector(.inference), "Inference draws them atop its page")
         let host = try Self.inspectorColumn()
-        let guarded = try XCTUnwrap(host.range(of: "if Self.promptsInInspector(shownTab) {"))
+        let guarded = try XCTUnwrap(host.range(of: "if Self.promptsInInspector(shownTab, tracesPage: tracesPage) {"))
         let header = try XCTUnwrap(host.range(of: "InspectorPromptsHeader(traces: traces)"))
         let history = try XCTUnwrap(host.range(of: "HistoryInspectorPane(row: row)"))
         let selection = try XCTUnwrap(host.range(of: "TracesInspectorHost(traces: traces, home: home, selection: selection)"))
@@ -123,7 +126,7 @@ final class TracesInspectorHostTests: XCTestCase {
         let treeUse = try XCTUnwrap(body.range(of: "tree\n", range: afterShelf.upperBound..<body.endIndex))
         XCTAssertLessThan(afterShelf.lowerBound, treeUse.lowerBound, "the prompts precede the tree")
         let scroll = try XCTUnwrap(body.range(of: "ScrollViewReader { proxy in"))
-        let folders = try XCTUnwrap(body.range(of: "ForEach(store.tree.folders)", range: scroll.upperBound..<body.endIndex))
+        let folders = try XCTUnwrap(body.range(of: "ForEach(store.shownTree.folders)", range: scroll.upperBound..<body.endIndex))
         XCTAssertNil(body.range(of: "prompts\n", range: scroll.upperBound..<folders.lowerBound),
                      "the prompts are inside the tree's scroll again, where they can fill it")
         // Every use of the prompts in the view body is inside a ScrollView.
@@ -243,7 +246,7 @@ final class TracesInspectorHostTests: XCTestCase {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertFalse(window.contains("PrivateAIInspectorView("))
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
-        XCTAssertEqual(views.components(separatedBy: "PrivateAIInspectorView(\n").count - 1, 1)
+        XCTAssertEqual(views.components(separatedBy: "PrivateAIInspectorView(store: store)").count - 1, 1)
     }
 
     /// The column draws the host; an opened History row shows in
@@ -329,7 +332,8 @@ final class TracesInspectorHostTests: XCTestCase {
         // and may open (not on Home's page, where they head the main pane).
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains(
-            ".union(Self.promptsInInspector(shownTab) && inspectorAvailable ? InspectorDemand.offerKeys(model: model) : [])"))
+            ".union(Self.promptsInInspector(shownTab, tracesPage: tracesPage) && inspectorAvailable\n"
+                + "                ? InspectorDemand.offerKeys(model: model) : [])"))
         XCTAssertTrue(MonitorWindowView.inspectorAvailable(.home, homePage: .history))
         XCTAssertFalse(MonitorWindowView.inspectorAvailable(.home, homePage: .overview))
         XCTAssertTrue(MonitorWindowView.inspectorAvailable(.traces, homePage: .overview))
@@ -412,8 +416,9 @@ final class TracesInspectorHostTests: XCTestCase {
             XCTAssertTrue(prompts.contains(needle), "InspectorPrompts.swift lacks \(needle)")
         }
         // Ron's `UndoBar`: Undo a glass button, Dismiss a link, beside the
-        // words rather than under them.
-        XCTAssertEqual(prompts.components(separatedBy: ".buttonStyle(GlassButtonStyle(.link))").count - 1, 3)
+        // words rather than under them. The fourth link is a failed
+        // action's Dismiss, after its unboxed line (Ron, 2026-10-09).
+        XCTAssertEqual(prompts.components(separatedBy: ".buttonStyle(GlassButtonStyle(.link))").count - 1, 4)
         XCTAssertFalse(prompts.contains("GlassButtonStyle(.primary)"), "Undo is a glass button, as Ron's")
         XCTAssertTrue(prompts.contains("HStack(alignment: .center, spacing: GlassTokens.Space.s8) {"))
         for rel in ["Views/Monitor/TracesInspectorHost.swift", "Views/Monitor/InspectorPrompts.swift"] {

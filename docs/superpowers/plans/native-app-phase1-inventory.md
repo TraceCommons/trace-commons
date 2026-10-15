@@ -128,7 +128,7 @@ Main registers **163** commands (`tauri-desktop/src-tauri/src/commands/mod.rs`).
 
 | Command | macOS route | macOS uses? | Logic flag (P2) |
 |---|---|---|---|
-| start_private_ai_credential | IPC `near_ai_credential_start` | yes | Tauri defaults the provider to `"github"`. |
+| start_private_ai_credential | IPC `near_ai_credential_start` | yes | Tauri defaults the provider to `"near"`. |
 | private_ai_credential_status | IPC `near_ai_credential_status` + FFI `tc_near_ai_credential_state_line` / `_action` | yes | **P2:** the `keychain` block (state, key_prefix, minted_at, session_expires_at, migration) comes from `DaemonSettings::load_with_cloud_credentials` in Tauri, and **no core route serves it**. The `view` assembly also happens here. |
 | private_ai_balance | IPC `near_ai_balance` + FFI `tc_near_ai_balance_*` | yes | View assembly. |
 | private_ai_funding | IPC `near_ai_funding` | yes | Param shaping (both values or neither). |
@@ -404,7 +404,7 @@ The 11 with no route are residual_secret_line, redaction_summary_copy, project_i
 7. **Private AI.**
    - Restyle the existing SwiftUI credential, balance, funding and harness screens into the Inference tab.
    - Move the `keychain` block that Tauri builds in `private_ai_credential_status` (key prefix, minted time, session expiry, migration) into the daemon's `near_ai_credential_status`. No route serves it today.
-   - Move the default provider ("github") and `can_commit` into the core.
+   - Move the default provider ("near") and `can_commit` into the core.
 8. **Updater.** Tauri only reports managed/unmanaged and has no feed. macOS is ahead (`TCUpdates`, `UpdateController`). Wire the design's "Check now" to `UpdateController`. Retire Tauri's `update_state` on macOS.
 9. **Wallet, witness preview and admission.** These already work on macOS. Restyle them only, and keep the single-use browser URL authorisation behaviour.
 10. **Release.** Retire the Tauri macOS bundle from `tauri-desktop.yml`, `test-verify-macos-entitlements.sh`, `check-release-credential-store.sh` and `macos_signing.rs`. Keep the native entitlements checks.

@@ -80,7 +80,7 @@ pub fn post(summary: &str, body: &str) -> Option<Action> {
 /// Carries counts and project labels only. Never trace content: the preview
 /// exemption does not extend to notification text.
 pub fn digest_body(pending: usize, project_labels: &[String]) -> String {
-    let sessions = if pending == 1 { "session" } else { "sessions" };
+    let sessions = if pending == 1 { "trace" } else { "traces" };
     let projects = match project_labels {
         [] => String::new(),
         [one] => format!(" from {one}"),
@@ -97,7 +97,7 @@ pub fn digest_body(pending: usize, project_labels: &[String]) -> String {
 /// one.
 ///
 /// `None` when nothing did -- the caller then has only the waiting half, or
-/// nothing to say at all. A line reading "0 sessions contributed" is worse
+/// nothing to say at all. A line reading "0 traces contributed" is worse
 /// than no line.
 ///
 /// The daemon composes the same sentence for its own local notifier
@@ -115,11 +115,7 @@ pub fn contribution_body(
     if contributed == 0 {
         return None;
     }
-    let sessions = if contributed == 1 {
-        "session"
-    } else {
-        "sessions"
-    };
+    let sessions = if contributed == 1 { "trace" } else { "traces" };
     let named: std::collections::BTreeSet<&str> = project_labels
         .iter()
         .map(String::as_str)
@@ -156,7 +152,7 @@ mod tests {
     #[test]
     fn the_contribution_line_names_the_one_project_and_never_a_path() {
         let line = contribution_body(3, &["trace-commons-server".to_string()], 0.0).unwrap();
-        assert_eq!(line, "3 sessions contributed from trace-commons-server.");
+        assert_eq!(line, "3 traces contributed from trace-commons-server.");
         assert!(!line.contains('/'), "{line}");
     }
 
@@ -166,7 +162,7 @@ mod tests {
     fn the_contribution_line_matches_the_design_examples() {
         assert_eq!(
             contribution_body(1, &["orchard-api".to_string()], 6.0).as_deref(),
-            Some("1 session contributed from orchard-api. 6.0 credit pending.")
+            Some("1 trace contributed from orchard-api. 6.0 credit pending.")
         );
         assert_eq!(
             contribution_body(
@@ -175,14 +171,14 @@ mod tests {
                 10.5
             )
             .as_deref(),
-            Some("2 sessions contributed. 10.5 credit pending.")
+            Some("2 traces contributed. 10.5 credit pending.")
         );
     }
 
     #[test]
     fn one_contributed_session_is_singular() {
         let line = contribution_body(1, &["a".to_string()], 0.0).unwrap();
-        assert!(line.starts_with("1 session contributed from a."), "{line}");
+        assert!(line.starts_with("1 trace contributed from a."), "{line}");
     }
 
     #[test]
@@ -192,11 +188,11 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         let line = contribution_body(9, &labels, 0.0).unwrap();
-        assert_eq!(line, "9 sessions contributed.");
+        assert_eq!(line, "9 traces contributed.");
         // Duplicates and blanks do not make a second project.
         let labels: Vec<String> = ["a", "a", ""].iter().map(|s| s.to_string()).collect();
         let line = contribution_body(2, &labels, 0.0).unwrap();
-        assert_eq!(line, "2 sessions contributed from a.");
+        assert_eq!(line, "2 traces contributed from a.");
     }
 
     #[test]
@@ -223,14 +219,14 @@ mod tests {
                 3,
                 &["trace-commons-server".to_string(), "dotfiles".to_string()]
             ),
-            "3 sessions ready from trace-commons-server and dotfiles.\n\
+            "3 traces ready from trace-commons-server and dotfiles.\n\
              Nothing is sent until you review them."
         );
     }
 
     #[test]
     fn one_session_is_singular() {
-        assert!(digest_body(1, &["a".to_string()]).starts_with("1 session ready from a."));
+        assert!(digest_body(1, &["a".to_string()]).starts_with("1 trace ready from a."));
     }
 
     #[test]

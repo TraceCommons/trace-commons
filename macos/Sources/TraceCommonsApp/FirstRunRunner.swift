@@ -93,7 +93,7 @@ enum FirstRunFailure: Equatable {
     /// A folder rule or a past-session include was not saved.
     case rulesFailed
     case privateAIFailed
-    /// Automatic was refused; setup finished on Ask me.
+    /// Automatic was refused; setup finished on Ask.
     case grantRefused(label: String)
     /// Every call succeeded but the completion marker was not written, so
     /// the first run is not over. Outranks `grantRefused`.
@@ -147,7 +147,7 @@ final class FirstRunRunner: ObservableObject {
 
     /// The daemon refused the grant during the last commit. `failure` says
     /// so too, unless `completeFailed` outranked it; this keeps the refusal
-    /// for the retry that finishes on Ask me.
+    /// for the retry that finishes on Ask.
     @Published private(set) var refusedGrant: FirstRunFailure?
 
     /// The `unenroll` a sign-out on Join started, while it runs. A commit
@@ -296,7 +296,7 @@ final class FirstRunRunner: ObservableObject {
             guard await daemon.setPrivateAI(on) else { return fail(.privateAIFailed) }
         case .grantAutomatic(let witness):
             // The one call that does not stop the run: a refused grant
-            // finishes on Ask me, and says so.
+            // finishes on Ask, and says so.
             if case .refused(let label) = await daemon.grantAutomatic(witness: witness) {
                 state.sharing = .askMe
                 failure = .grantRefused(label: label)

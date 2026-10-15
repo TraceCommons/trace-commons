@@ -20,7 +20,7 @@
 //! - the arming copy each disclosure is given ([`project_arming_claim`]).
 //!
 //! Today every folder armed from a project's arming offer was shown
-//! `project_copy::ARMING_BODY`, "Sessions from this project will be scrubbed
+//! `project_copy::ARMING_BODY`, "Traces from this project will be scrubbed
 //! and contributed", whatever the disclosure, and every shell still shows it.
 //! So [`project_arming_claim`] answers [`ArmingClaim::ModelScrubbed`] for
 //! both disclosures, and no notice is raised: nothing has been reworded yet,
@@ -181,7 +181,7 @@ mod tests {
                 .take(7)
                 .collect::<Vec<_>>()
                 .join(" "),
-            "Sessions from this project will be scrubbed",
+            "Traces from this project will be scrubbed",
             "if the arming offer stops saying this, project_arming_claim must change with it"
         );
     }

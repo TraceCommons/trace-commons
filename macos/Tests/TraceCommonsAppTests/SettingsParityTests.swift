@@ -137,18 +137,33 @@ final class SettingsParityTests: XCTestCase {
                 confirmations: ["FolderPanel.choose()"],
                 accessibility: ["GlassToggleStyle(.settings)", ".accessibilityLabel(copy.portTitle)",
                                 ".accessibilityLabel(copy.folderTitle)", ".accessibilityElement(children: .combine)"]),
+        Section(glass: "Views/Settings/InsightsSettingsCard.swift",
+                bindings: ["settings.insightsCounterPass", "settings.insightsRecapCardEnabled", "lever.enabled",
+                           "model.setInsightsSwitch(.counterPass,", "model.setInsightsSwitch(.recapCard,",
+                           "lever.set(", "model.insightsSwitchBusy", "model.insightsSwitchRefusal", "lever.busy",
+                           "lever.refusal", "model.refreshSettings()", "lever.load()"],
+                copySources: ["TCInsights.copy()", "\"analytics_setting_counter_pass\"",
+                              "\"analytics_setting_recap_card\"", "\"analytics_setting_lever\"", "text(\"title\")"],
+                confirmations: [],
+                accessibility: ["GlassToggleStyle(.settings)"]),
         Section(glass: "Views/Settings/PrivateAISection.swift",
-                bindings: ["model.privateInferenceCopy", "OpenMonitor.request(.inference)",
-                           "model.routeDisclosureState", "model.routeDisclosureUnreadableCopy", "model.refreshRouteDisclosure()"],
-                copySources: ["copy.settingsTitle", "copy.settingsMoved", "copy.destination",
-                              "copy.route", "copy.localFilter", "witness.heading", "witness.addressLabel", "witness.signingLabel",
+                bindings: ["PrivateAISettingsPanels(store: store)", "store.attach(", "await store.run()",
+                           "model.routeDisclosureState", "model.routeDisclosureUnreadableCopy", "model.refreshRouteDisclosure()",
+                           // The Insights ledger feed's off switch (on by
+                           // default, owner ruling 2026-10-09; moved here
+                           // from Tools, Ron's #1287 review), after first run.
+                           "model.daemonSettings?.insightsLedgerFeed", "model.setInsightsLedgerFeed(",
+                           "model.insightsLedgerFeedBusy", "model.insightsLedgerFeedRefusal",
+                           "!model.requiresOnboarding"],
+                copySources: ["copy.route", "copy.localFilter", "witness.heading", "witness.addressLabel", "witness.signingLabel",
                               "witness.measurementsLabel", "witness.check", "witness.classifier", "witness.origin",
                               "copy.attestedBodies", "copy.receipts", "facts.url", "facts.signingAddress", "facts.pinnedMeasurements",
                               "disclosure.copy.title", "model.routeDisclosureUnreadableCopy?.title",
                               "model.routeDisclosureUnreadableCopy?.panel", "MonitorScreensCopy.decode(",
-                              "monitorScreensCopyJSON()"],
+                              "monitorScreensCopyJSON()",
+                              "TCInsights.copy()", "\"analytics_setting_ledger_feed\"", "\"analytics_feed_ledger\""],
                 confirmations: [],
-                accessibility: [".accessibilityElement(children: .combine)"]),
+                accessibility: [".accessibilityElement(children: .combine)", "GlassToggleStyle(.settings)"]),
         Section(glass: "Views/Settings/WitnessSection.swift",
                 bindings: ["model.witnessCopy", "= model.witnessState\n", "model.witnessStateCode", "model.witnessStatus?.refusal",
                            "model.witnessStatus?.pinnedMeasurementLine", "model.witnessLabel", "model.witnessBusy", "model.witnessCalls",
@@ -209,7 +224,7 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertEqual(SettingsLegacyWords.optionalEachOne, "Optional data use")
         XCTAssertEqual(SettingsLegacyWords.alwaysOn, "required")
         XCTAssertTrue(SettingsLegacyWords.appliesFromNow.hasPrefix("Applies to traces sent from now on."))
-        XCTAssertEqual(SettingsLegacyWords.sessionFinishedAfter(30), "A session counts as finished after 30 seconds of quiet.")
+        XCTAssertEqual(SettingsLegacyWords.sessionFinishedAfter(30), "A trace counts as finished after 30 seconds of quiet.")
         XCTAssertEqual(SettingsLegacyWords.auditSentence("armed-auto-upload", project: "demo"),
                        "Automatic contributing turned on for demo")
         XCTAssertEqual(SettingsLegacyWords.auditSentence("a-future-action", project: nil), "Changed")
@@ -270,13 +285,13 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertTrue(source.contains(".disabled(copy.tokenHeading == nil)"))
         XCTAssertEqual(source.components(separatedBy: ".glassModal(isPresented:").count - 1, 4)
         XCTAssertFalse(source.contains(".confirmationDialog("))
-        // A save failure keeps the core's refusal glyph and tone, as legacy
-        // `NativeFlowNotice` did; a missing wallet copy is still a refusal.
+        // A save failure is the failed request's red line, unboxed, under
+        // the Enable and Disable it is about (Ron, 2026-10-09).
         XCTAssertFalse(source.contains("GlassNotice(tone: .outside)"), "the save failure's tone is chosen in Swift")
         XCTAssertTrue(source.contains(
-            "GlassFlowNotice(message: copy.inferenceSaveFailed, glyph: copy.wallet?.refusedGlyph ?? \"\", tone: copy.wallet?.refusedTone)"))
+            "if model.inferenceEvidenceSaveFailed {\n                    GlassAlert(copy.inferenceSaveFailed)"))
         XCTAssertTrue(source.contains(
-            "GlassFlowNotice(message: copy.tokenSaveFailed ?? \"\", glyph: copy.wallet?.refusedGlyph ?? \"\", tone: copy.wallet?.refusedTone)"))
+            "if model.tokenContributionSaveFailed {\n                    GlassAlert(copy.tokenSaveFailed ?? \"\")"))
         XCTAssertEqual(GlassFlowNotice.status(forTone: "refused"), .outside)
         XCTAssertEqual(GlassFlowNotice.status(forTone: "neutral"), .off)
         XCTAssertEqual(GlassFlowNotice.status(forTone: ""), .off)
@@ -307,8 +322,10 @@ final class SettingsParityTests: XCTestCase {
                      "struct RouteDisclosureUnreadableGlassLine: View"] {
             XCTAssertEqual(source.components(separatedBy: name).count - 1, 1, "\(name) is not declared exactly once")
         }
-        XCTAssertTrue(source.contains("Button(copy.destination)"))
-        XCTAssertTrue(source.contains(".buttonStyle(GlassButtonStyle(.link))"))
+        // The panels are the section's own now (owner, 2026-10-10): no
+        // pointer back to the Monitor.
+        XCTAssertFalse(source.contains("Button(copy.destination)"))
+        XCTAssertTrue(source.contains("PrivateAISettingsPanels(store: store)"))
         for arm in ["case .shown(let disclosure):", "case .loading:", "case .unreadable:"] {
             XCTAssertEqual(source.components(separatedBy: arm).count - 1, 1, "\(arm) is not drawn exactly once")
         }
@@ -368,9 +385,10 @@ final class SettingsParityTests: XCTestCase {
     }
 
     /// Sections that read nothing from the daemon: the appearance, the
-    /// login item, the system's notification permission and the update feed
-    /// are all local.
-    static let localOnlySections: Set<SettingsSection> = [.general, .startup, .notifications, .updates]
+    /// login item and the update feed are all local. Notifications is not:
+    /// beside the system's permission it draws the nudge switches, which
+    /// read `get_settings`.
+    static let localOnlySections: Set<SettingsSection> = [.general, .startup, .updates]
 
     /// Each daemon-reading section's branch for "the daemon has not answered",
     /// and what that branch draws. Every branch is the absent case written
@@ -381,6 +399,7 @@ final class SettingsParityTests: XCTestCase {
             ("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead"),
         ]),
         .watching: ("WatchingSection", [("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead")]),
+        .notifications: ("NudgeSettingsSection", [("if store.settings == nil {", "SettingsReadNotice(settingsRead")]),
         .consent: ("ConsentSection", [("if model.statusRead != .answered {", "SettingsReadNotice(model.statusRead")]),
         .publicProfile: ("PublicProfileSection", [
             ("} else if model.publicProfileRead != .answered {", "SettingsReadNotice(model.publicProfileRead"),
@@ -491,6 +510,6 @@ final class SettingsParityTests: XCTestCase {
             XCTAssertFalse(source.contains(".tcScreen()"), rel)
         }
         let modal = try Self.text("Views/Monitor/SettingsModal.swift")
-        XCTAssertTrue(modal.contains("GlassSettingsContent(navigation: navigation, section: item, onPrivateAI: onPrivateAI)"))
+        XCTAssertTrue(modal.contains("GlassSettingsContent(navigation: navigation, section: item)"))
     }
 }

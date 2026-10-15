@@ -17,7 +17,7 @@ final class MonitorHomeInsightsTests: XCTestCase {
         XCTAssertTrue(nav.contains("case insights\n"))
         XCTAssertTrue(nav.contains("case missionDrafts\n"))
         let home = try MonitorNavigationTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("InsightsView(storeSelection: insightsStoreSelection)"))
+        XCTAssertTrue(home.contains("InsightsView(storeSelection: insightsStoreSelection, daemon: store.client)"))
         XCTAssertTrue(home.contains("MissionDraftsView(model: missionDrafts)"))
         XCTAssertTrue(home.contains("openInsights: { page = .insights }"))
         XCTAssertTrue(home.contains("openMissionDrafts: { page = .missionDrafts }"))
@@ -40,7 +40,8 @@ final class MonitorHomeInsightsTests: XCTestCase {
         // `HomeTabView.hostedHeading` (Ron's breadcrumb, #1241).
         XCTAssertEqual(home.components(separatedBy: #"Self.insightsCopy?["title"]"#).count - 1, 1)
         XCTAssertTrue(home.contains("case .missionDrafts: HomeFormat.cardHeading(MonitorWords.missions)"))
-        XCTAssertTrue(home.contains("hostedCard(catalogue, action: openMissions)"))
+        XCTAssertTrue(home.contains("systemImage: Self.catalogueIcon, title: catalogue,"))
+        XCTAssertTrue(home.contains("subtitle: words?.catalogueSubtitle, action: openMissions)"))
         XCTAssertNil(HomeFormat.cardHeading(nil))
         XCTAssertNil(HomeFormat.cardHeading(""))
         XCTAssertEqual(HomeFormat.cardHeading("Insights"), "Insights")

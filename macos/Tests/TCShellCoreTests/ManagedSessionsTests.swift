@@ -20,6 +20,13 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.toolKey("opencode"), "opencode")
     }
 
+    func testOpenCodeKeepsKeyConnectionsWithoutSignInLaunch() {
+        XCTAssertEqual(ManagedSurface.connectionOptions(signedIn: true, tool: "opencode"), ["api_key", "near_ai"])
+        XCTAssertEqual(ManagedSurface.connectionOptions(signedIn: false, tool: "opencode"), ["api_key", "near_ai"])
+        XCTAssertEqual(ManagedSurface.signInTools, ["claude", "codex"])
+        XCTAssertNil(ManagedSurface.startKey("opencode"))
+    }
+
     func testSurfaceNeverPicksARawValueOrDaemonCode() {
         XCTAssertEqual(ManagedSurface.stateKey("running"), "state_running")
         XCTAssertEqual(ManagedSurface.stateKey("future_state"), "state_unknown")
@@ -37,5 +44,53 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertFalse(snapshot.isHeld(snapshot.accounts[1]))
         XCTAssertTrue(snapshot.isDefault(snapshot.accounts[0]))
         XCTAssertFalse(snapshot.isDefault(snapshot.accounts[1]))
+    }
+
+    private static let signedIn = #"{"revision":1,"accounts":[],"sign_in_accounts":[{"id":"c","tool":"claude","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready"},{"id":"x","tool":"codex","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready"}],"defaults":[{"tool":"claude","connection":"near_ai_signin","account_id":"c","generation":4},{"tool":"codex","connection":"near_ai_signin","account_id":"x","generation":0}],"generations":{"claude":4},"sessions":[],"capabilities":{"managed_launch":true,"near_ai_signin":true,"terminal_launch":true}}"#
+
+    func testAnOlderSnapshotReadsAsSignedOut() throws {
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":1,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true}}"#.utf8))
+        XCTAssertFalse(snapshot.nearAiSignedIn)
+        XCTAssertNil(snapshot.signInEntry("claude"))
+        XCTAssertNil(snapshot.signInLaunchParams(tool: "claude", cwd: "/tmp", requestID: "r"))
+    }
+
+    func testTheSignInEntriesLaunchWithNoSavedAccount() throws {
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(Self.signedIn.utf8))
+        XCTAssertTrue(snapshot.nearAiSignedIn)
+        XCTAssertEqual(snapshot.signInEntry("codex")?.id, "x")
+        let params = try XCTUnwrap(snapshot.signInLaunchParams(tool: "claude", cwd: "/tmp/p", requestID: "r"))
+        XCTAssertEqual(params["connection"] as? String, "near_ai_signin")
+        XCTAssertEqual(params["account_id"] as? String, "c")
+        XCTAssertEqual(params["tool"] as? String, "claude")
+        XCTAssertEqual(params["cwd"] as? String, "/tmp/p")
+        XCTAssertEqual(params["request_id"] as? String, "r")
+        XCTAssertEqual(params["purpose"] as? String, "coding")
+        XCTAssertEqual(params["expected_generation"] as? UInt64, 4)
+        XCTAssertEqual(params["save_default"] as? Bool, false)
+        XCTAssertNil(snapshot.signInLaunchParams(tool: "future_tool", cwd: "/tmp", requestID: "r"))
+    }
+
+    func testEntriesAreIgnoredWithoutTheSignInCapability() throws {
+        let stale = Self.signedIn.replacingOccurrences(of: #""near_ai_signin":true"#, with: #""near_ai_signin":false"#)
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(stale.utf8))
+        XCTAssertFalse(snapshot.nearAiSignedIn)
+        XCTAssertNil(snapshot.signInLaunchParams(tool: "claude", cwd: "/tmp", requestID: "r"))
+    }
+
+    func testTheSignInSurfacePicksCoreKeys() {
+        let line = "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose."
+        XCTAssertEqual(ManagedSurface.signInScope(line, destination: "Terminal", fallback: "your terminal"),
+                       "Uses your NEAR AI sign-in. Runs in Terminal, in the folder you choose.")
+        XCTAssertEqual(ManagedSurface.signInScope(line, destination: nil, fallback: "your terminal"),
+                       "Uses your NEAR AI sign-in. Runs in your terminal, in the folder you choose.")
+        XCTAssertEqual(ManagedSurface.startKey("claude"), "start_claude")
+        XCTAssertEqual(ManagedSurface.startKey("codex"), "start_codex")
+        XCTAssertNil(ManagedSurface.startKey("future_tool"))
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-near-ai-sign-in-required", message: "managed-near-ai-sign-in-required"), "sign_in_needed")
+        // Signed in, the sheet does not offer a NEAR AI key: the sign-in
+        // entries already run on it. Signed out, the key stays the fallback.
+        XCTAssertEqual(ManagedSurface.connectionOptions(signedIn: true), ["subscription", "api_key"])
+        XCTAssertEqual(ManagedSurface.connectionOptions(signedIn: false), ["subscription", "api_key", "near_ai"])
     }
 }
