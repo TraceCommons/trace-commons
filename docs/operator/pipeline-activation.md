@@ -2501,9 +2501,14 @@ answers `404` when no pipeline runtime is injected:
 - `GET /v1/review/pipeline/quarantine?limit=N` lists the tenant's
   quarantined or escalated runs that wait for an assessment, oldest first,
   with each run's Admission reason (default 50 runs). Each item also has
-  `hold_reason`, what holds the run (`privacy_pass_review_required` when
-  the privacy pass escalated it, else the Admission reason), and
-  `assessment_superseded` (below).
+  `phase`, `hold_reason`, and `assessment_superseded` (below). `phase` is
+  `review` for a run waiting for an assessment, and `score` for a run that a
+  registered Score policy held for operator review instead of pricing it
+  ("A registered Score policy"). A `score` hold is listed only so that an
+  operator can see it: a claim of it answers `404`. `hold_reason` is what
+  holds the run: the Score policy's label for a `score` hold,
+  `privacy_pass_review_required` when the privacy pass escalated the run,
+  else the Admission reason.
 - `POST /v1/review/pipeline/runs/{run_id}/claim` claims a run for the
   reviewer for 30 minutes and returns a `lease_token`. `404` means the run is
   not waiting for review (it is not at Review, neither quarantined nor
