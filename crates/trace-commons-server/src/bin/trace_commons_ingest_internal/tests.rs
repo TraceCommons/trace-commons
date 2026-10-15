@@ -92931,6 +92931,8 @@ struct NativeAuthTestDb {
     binding_read_fails: std::sync::atomic::AtomicBool,
     rotate_to: std::sync::Mutex<Option<String>>,
     account_audits: std::sync::Mutex<Vec<(String, String, serde_json::Value)>>,
+    object_refs: std::sync::Mutex<Vec<StorageTraceObjectRefRecord>>,
+    trace_audit_events: std::sync::Mutex<Vec<StorageTraceAuditEventRecord>>,
 }
 
 impl NativeAuthTestDb {
@@ -92960,6 +92962,10 @@ impl NativeAuthTestDb {
 
     fn insert_trace_submission(&self, record: StorageTraceSubmissionRecord) {
         self.submissions.lock().unwrap().push(record);
+    }
+
+    fn insert_object_ref(&self, object_ref: StorageTraceObjectRefRecord) {
+        self.object_refs.lock().unwrap().push(object_ref);
     }
 }
 
@@ -93591,11 +93597,25 @@ impl_ingest_test_corpus_store! {
 
         async fn get_latest_active_trace_object_ref(
             &self,
-            _: &str,
-            _: Uuid,
-            _: StorageTraceObjectArtifactKind,
+            tenant_id: &str,
+            submission_id: Uuid,
+            artifact_kind: StorageTraceObjectArtifactKind,
         ) -> Result<Option<StorageTraceObjectRefRecord>, DatabaseError> {
-            todo!("stub")
+            // Same predicate + ordering as the Postgres query.
+            Ok(self
+                .object_refs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| {
+                    r.tenant_id == tenant_id
+                        && r.submission_id == submission_id
+                        && r.artifact_kind == artifact_kind
+                        && r.invalidated_at.is_none()
+                        && r.deleted_at.is_none()
+                })
+                .max_by_key(|r| r.created_at)
+                .cloned())
         }
 
         async fn list_trace_derived_records(
@@ -93615,9 +93635,30 @@ impl_ingest_test_corpus_store! {
         }
         async fn append_trace_audit_event(
             &self,
-            _: StorageTraceAuditEventWrite,
+            write: StorageTraceAuditEventWrite,
         ) -> Result<(), DatabaseError> {
-            todo!("stub")
+            let mut rows = self.trace_audit_events.lock().unwrap();
+            let audit_sequence = rows.len() as i64 + 1;
+            rows.push(StorageTraceAuditEventRecord {
+                audit_event_id: write.audit_event_id,
+                tenant_id: write.tenant_id,
+                audit_sequence,
+                actor_principal_ref: write.actor_principal_ref,
+                actor_role: write.actor_role,
+                action: write.action,
+                reason: write.reason,
+                request_id: write.request_id,
+                submission_id: write.submission_id,
+                object_ref_id: write.object_ref_id,
+                export_manifest_id: write.export_manifest_id,
+                decision_inputs_hash: write.decision_inputs_hash,
+                previous_event_hash: write.previous_event_hash,
+                event_hash: write.event_hash,
+                canonical_event_json: write.canonical_event_json,
+                metadata: write.metadata,
+                occurred_at: Utc::now(),
+            });
+            Ok(())
         }
         async fn list_trace_audit_events(
             &self,
@@ -93625,19 +93666,27 @@ impl_ingest_test_corpus_store! {
         ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
             todo!("stub")
         }
+        /// No hash chain is kept; an empty tail makes every appended event
+        /// the chain head, as in the other audited-read doubles.
         async fn list_recent_trace_audit_events(
             &self,
             _: &str,
             _: usize,
         ) -> Result<Vec<StorageTraceAuditEventRecord>, DatabaseError> {
-            todo!("stub")
+            Ok(Vec::new())
         }
         async fn get_trace_audit_event_by_id(
             &self,
-            _: &str,
-            _: Uuid,
+            tenant_id: &str,
+            audit_event_id: Uuid,
         ) -> Result<Option<StorageTraceAuditEventRecord>, DatabaseError> {
-            todo!("stub")
+            Ok(self
+                .trace_audit_events
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|row| row.tenant_id == tenant_id && row.audit_event_id == audit_event_id)
+                .cloned())
         }
 
         async fn upsert_trace_revocation_propagation_item(

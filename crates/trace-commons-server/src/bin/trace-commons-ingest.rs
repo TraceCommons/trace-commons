@@ -19763,6 +19763,8 @@ async fn account_trace_content_handler(
         Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => record,
         _ => return Err(not_found()),
     };
+    // After ownership, so a submission the caller does not own stays a 404.
+    refuse_a_pipeline_submission(state.as_ref(), &ctx.tenant_id, submission_id).await?;
     let record = trace_commons_record_from_storage_submission(record)
         .ok_or_else(not_found)?
         .map_err(internal_error)?;
@@ -19790,22 +19792,24 @@ async fn account_trace_content_handler(
 
     let audit_tenant = account_audit_tenant(&ctx);
 
-    // Read the envelope through the EXISTING KMS-bound path. On ANY failure
-    // (KMS unwrap/decrypt, hash mismatch, store error, missing config) fail
-    // closed: audit the FAILED read, then return a generic label-only 500. The
-    // error itself is hashed for logs; never surfaced to the caller.
-    let envelope = match read_envelope_by_record(state.as_ref(), &record) {
-        Ok(envelope) => envelope,
+    // Read the envelope through the active object ref (the KMS-bound path),
+    // or the file only where object-primary submit/review is off. On ANY
+    // failure (missing ref, KMS unwrap/decrypt, hash mismatch, store error,
+    // missing config) fail closed: audit the FAILED read, then return a
+    // generic label-only 500. The error itself is hashed for logs; never
+    // surfaced to the caller.
+    let body_read = match read_envelope_body_for_account(&state, &ctx.tenant_id, record).await {
+        Ok(body_read) => body_read,
         Err(error) => {
             tracing::warn!(
                 error_hash = %safe_display_error_hash(&error),
-                submission_id = %record.submission_id,
+                submission_id = %submission_id,
                 "Trace Commons account content read-back failed; failing closed"
             );
             return Err(audit_account_content_read_failure(
                 state.as_ref(),
                 &audit_tenant,
-                record.submission_id,
+                submission_id,
             )
             .await);
         }
@@ -19813,18 +19817,18 @@ async fn account_trace_content_handler(
 
     // Serialize the already-redacted stored envelope. A serialization failure is
     // also fail-closed and audited (it is still a failed content read).
-    let body = match serde_json::to_vec(&envelope) {
+    let body = match serde_json::to_vec(&body_read.envelope) {
         Ok(body) => body,
         Err(error) => {
             tracing::warn!(
                 error_hash = %safe_display_error_hash(&anyhow::Error::new(error)),
-                submission_id = %record.submission_id,
+                submission_id = %submission_id,
                 "Trace Commons account content read-back serialization failed; failing closed"
             );
             return Err(audit_account_content_read_failure(
                 state.as_ref(),
                 &audit_tenant,
-                record.submission_id,
+                submission_id,
             )
             .await);
         }
@@ -19837,7 +19841,7 @@ async fn account_trace_content_handler(
         if let Err(audit_error) = append_trace_content_read_audit_per_source(
             state.as_ref(),
             &audit_tenant,
-            record.submission_id,
+            submission_id,
             &[],
             "account_trace_content",
             Some("read_too_large"),
@@ -19846,7 +19850,7 @@ async fn account_trace_content_handler(
         {
             tracing::warn!(
                 error_hash = %safe_display_error_hash(&audit_error),
-                submission_id = %record.submission_id,
+                submission_id = %submission_id,
                 "Trace Commons account content read-back over-ceiling audit append failed"
             );
         }
@@ -19856,14 +19860,18 @@ async fn account_trace_content_handler(
         ));
     }
 
-    // Audit the SUCCESSFUL read (hash-only, per-source). The file-fallback read
-    // path resolves no DB object ref, so there is no object_ref id to attribute;
-    // an empty ref slice records a single source-less row.
+    // Audit the SUCCESSFUL read (hash-only, per-source), against the object
+    // ref it read. The file-fallback read resolves no object ref; its empty
+    // ref slice records a single source-less row.
+    let read_refs: &[Uuid] = match body_read.object_ref_id.as_ref() {
+        Some(id) => std::slice::from_ref(id),
+        None => &[],
+    };
     append_trace_content_read_audit_per_source(
         state.as_ref(),
         &audit_tenant,
-        record.submission_id,
-        &[],
+        submission_id,
+        read_refs,
         "account_trace_content",
         None,
     )
@@ -69140,6 +69148,58 @@ async fn read_envelope_body_for_review_decision(
         envelope: read_envelope_by_record(state, record)?,
         object_ref_id: None,
     })
+}
+
+/// Reads an owned submission's envelope for the account surfaces: the content
+/// read-back and the public-run session detail and publish routes (#1168).
+///
+/// The record these routes hold is built from the database row and carries no
+/// artifact receipt, so `read_envelope_by_record` alone can only read the
+/// plaintext file under `state.root`, which object-primary submit/review never
+/// writes. Where object-primary submit/review is on for the tenant, the active
+/// envelope object ref is read instead (a rescrubbed envelope ahead of the
+/// submitted one), as the object-primary review path does, and a missing ref
+/// fails closed. Where it is off, the file is read as before: a file-backed
+/// deployment rewrites that file in place (process evaluation), so its older
+/// file-store ref no longer matches the bytes.
+///
+/// The object-store read and decrypt run on the blocking pool.
+async fn read_envelope_body_for_account(
+    state: &Arc<AppState>,
+    tenant_id: &str,
+    record: TraceCommonsSubmissionRecord,
+) -> anyhow::Result<TraceEnvelopeBodyRead> {
+    anyhow::ensure!(
+        record.tenant_id == tenant_id,
+        "trace metadata tenant mismatch"
+    );
+    let object_ref = if state.object_primary_submit_review_for_tenant(tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("object-primary submit/review is enabled without a DB mirror")?;
+        let object_ref =
+            get_latest_active_envelope_object_ref(db.as_ref(), tenant_id, record.submission_id)
+                .await
+                .context("failed to read active envelope object ref for account read")?;
+        Some(object_ref.context("missing active envelope object ref for account read")?)
+    } else {
+        None
+    };
+    let read_state = Arc::clone(state);
+    let tenant_id = tenant_id.to_string();
+    tokio::task::spawn_blocking(move || match object_ref {
+        Some(object_ref) => Ok(TraceEnvelopeBodyRead {
+            envelope: read_envelope_from_object_ref(&read_state, &tenant_id, &object_ref)?,
+            object_ref_id: Some(object_ref.object_ref_id),
+        }),
+        None => Ok(TraceEnvelopeBodyRead {
+            envelope: read_envelope_by_record(&read_state, &record)?,
+            object_ref_id: None,
+        }),
+    })
+    .await
+    .context("account envelope read task failed")?
 }
 
 async fn read_envelope_body_for_replay_export(
