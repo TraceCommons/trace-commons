@@ -437,6 +437,19 @@ impl SessionRegistry {
         Ok(())
     }
 
+    /// The folder a session with a valid ticket starts in, for a terminal
+    /// that takes a working directory. Validates the ticket as
+    /// [`Self::validate_ticket`] does.
+    pub fn launch_cwd(&self, session_id: Uuid, ticket: &str) -> Result<PathBuf, ManagedError> {
+        self.validate_ticket(session_id, ticket)?;
+        self.data
+            .entries
+            .iter()
+            .find(|e| e.view.id == session_id)
+            .map(|e| e.view.cwd.clone())
+            .ok_or(ManagedError::NotFound)
+    }
+
     pub fn redeem(
         &mut self,
         session_id: Uuid,

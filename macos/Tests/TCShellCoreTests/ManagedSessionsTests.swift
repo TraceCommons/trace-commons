@@ -35,12 +35,12 @@ final class ManagedSessionsTests: XCTestCase {
     }
 
     func testAMissingTerminalHasItsOwnLine() {
-        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-terminal-not-installed", message: "managed-terminal-not-installed"), "terminal_not_installed")
-        let line = "{terminal} isn't installed. Choose another terminal in Settings."
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-terminal-not-found", message: "managed-terminal-not-found"), "terminal_not_found")
+        let line = "{terminal} wasn't found on this computer. Choose another in Settings."
         XCTAssertEqual(ManagedSurface.fillTerminal(line, terminal: "Ghostty", fallback: "your terminal"),
-                       "Ghostty isn't installed. Choose another terminal in Settings.")
+                       "Ghostty wasn't found on this computer. Choose another in Settings.")
         XCTAssertEqual(ManagedSurface.fillTerminal(line, terminal: nil, fallback: "your terminal"),
-                       "your terminal isn't installed. Choose another terminal in Settings.")
+                       "your terminal wasn't found on this computer. Choose another in Settings.")
     }
 
     func testOpenCodeCollectionAndModelDecode() throws {

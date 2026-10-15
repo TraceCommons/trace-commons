@@ -142,10 +142,10 @@ public enum ManagedSurface {
         // No NEAR AI sign-in: the line that asks for one.
         let signInNeeded = "managed-near-ai-sign-in-required"
         if code == signInNeeded || message == signInNeeded { return "sign_in_needed" }
-        // The chosen terminal app is not installed: the line that says so
+        // The chosen terminal app was not found: the line that says so
         // and points at Settings.
-        let notInstalled = "managed-terminal-not-installed"
-        if code == notInstalled || message == notInstalled { return "terminal_not_installed" }
+        let notFound = "managed-terminal-not-found"
+        if code == notFound || message == notFound { return "terminal_not_found" }
         return "action_failed"
     }
 

@@ -5822,8 +5822,8 @@ fn handle_set_bool_setting(shared: &DaemonShared, req: &Request, key: &'static s
 }
 
 /// `set_managed_terminal {terminal}`: the terminal app managed sessions open
-/// in on macOS, one of `terminal`, `ghostty` or `iterm2`. Anything else is
-/// refused here, before any write. Writes through `set_settings` as
+/// in, one of this platform's ids (`TerminalApp::offered`). Anything else,
+/// another platform's id included, is refused here, before any write. Writes through `set_settings` as
 /// `handle_set_bool_setting` does, then moves the managed revision so every
 /// shell re-reads the snapshot (`managed_changed`), whose destination and
 /// picker follow the choice.
@@ -19317,37 +19317,44 @@ mod tests {
                 }
                 saw
             };
+            use crate::managed::terminal::{TerminalApp, TerminalSetting};
+            let default = TerminalSetting::default().app().unwrap().id();
+            // This platform's last app, so the choice moves off the default.
+            let chosen = *TerminalApp::offered().last().unwrap();
             let s = live();
             let snapshot = |s: &DaemonShared| {
                 handle_request(s, &req("managed_snapshot", serde_json::json!({})))
                     .result
                     .expect("snapshot")
             };
-            assert_eq!(snapshot(&s)["capabilities"]["terminal_current"], "terminal");
+            assert_eq!(snapshot(&s)["capabilities"]["terminal_current"], default);
             let mut rx = s.events.subscribe();
             let r = handle_request(
                 &s,
                 &req(
                     "set_managed_terminal",
-                    serde_json::json!({"terminal": "ghostty"}),
+                    serde_json::json!({"terminal": chosen.id()}),
                 ),
             );
             assert_eq!(
                 r.result.expect("set answers"),
-                serde_json::json!({"managed_terminal": "ghostty"})
+                serde_json::json!({"managed_terminal": chosen.id()})
             );
             assert!(saw_managed(&mut rx));
             let settings = handle_request(&s, &req("get_settings", serde_json::json!({})))
                 .result
                 .unwrap();
-            assert_eq!(settings["managed_terminal"], "ghostty");
+            assert_eq!(settings["managed_terminal"], chosen.id());
             assert_eq!(
                 crate::daemon::settings::DaemonSettings::load(&s.store)
                     .unwrap()
                     .managed_terminal,
-                crate::managed::terminal::TerminalSetting::Ghostty
+                TerminalSetting::from(chosen)
             );
-            assert_eq!(snapshot(&s)["capabilities"]["terminal_current"], "ghostty");
+            assert_eq!(
+                snapshot(&s)["capabilities"]["terminal_current"],
+                chosen.id()
+            );
 
             for bad in [
                 serde_json::json!({}),
@@ -19355,6 +19362,7 @@ mod tests {
                 serde_json::json!({"terminal": "/Applications/Warp.app"}),
                 serde_json::json!({"terminal": "open -a Calculator"}),
                 serde_json::json!({"terminal": null}),
+                serde_json::json!({"terminal": "windows_terminal; konsole"}),
             ] {
                 let r = handle_request(&s, &req("set_managed_terminal", bad.clone()));
                 let err = r.error.expect("refused");
@@ -19362,7 +19370,10 @@ mod tests {
                 assert_eq!(err.message, "terminal-unrecognized", "{bad}");
             }
             assert!(!saw_managed(&mut rx), "a refusal publishes nothing");
-            assert_eq!(snapshot(&s)["capabilities"]["terminal_current"], "ghostty");
+            assert_eq!(
+                snapshot(&s)["capabilities"]["terminal_current"],
+                chosen.id()
+            );
         }
 
         /// Nudge A2: `set_notify_kind {kind, on}` takes the digest or an

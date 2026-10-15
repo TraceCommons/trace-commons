@@ -50,10 +50,11 @@ an explicit new selection before a CLI launch without `--account`.
 - Supported native adapter versions begin at Claude Code 2.1.289 (major 2) and
   Codex 0.160.0 (major 0). Older or unrecognized versions are refused before
   login, logout, or managed use.
-- App terminal adapters target Terminal on macOS, Windows Terminal when found,
-  and `x-terminal-emulator` on an unsandboxed Linux installation. The packaged
-  `near-ai` helper must be present. Flatpak host-terminal launching is unavailable;
-  it requires an explicit host bridge. No terminal-focus operation is advertised.
+- App sessions open in the terminal chosen at Settings > Private AI > **Open
+  sessions in** (see "Terminal choice" below). The packaged `near-ai` helper
+  must be present. Flatpak host-terminal launching is unavailable; it requires
+  an explicit host bridge, so under Flatpak the picker offers nothing and is
+  not drawn. No terminal-focus operation is advertised.
 - Each NEAR AI session owns an isolated IronWire proxy and key. It waits for
   NEAR's model catalogue and pins its own proxy to the first advertised model.
   It never changes the standard proxy or falls back to another provider/account.
@@ -72,6 +73,65 @@ an explicit new selection before a CLI launch without `--account`.
 No real subscription sign-in or provider-key validation is performed by the
 fixture test suite. Native sign-in and external-terminal behavior must also be
 smoke-tested on each release platform.
+
+## Terminal choice
+
+Decided in #1406 (design owner, 2026-10-14): the choice lives in Settings >
+Private AI on every shell, the Start buttons are unchanged, and Windows and
+Linux get the same choice as macOS, as an exception to the #1173 D13 freeze.
+
+**The test.** A terminal is offered only if it accepts both a command and a
+working directory from its scripting interface or command line, documented
+by its vendor. On Windows and Linux the command reaches it as an argv vector:
+the folder, the helper's path, the config folder and the ticket are each one
+argument and no shell parses them. On macOS the command is one escaped
+AppleScript string literal in a fixed template, and the helper starts the
+tool in the session's folder itself.
+
+The settings key is `managed_terminal`; a daemon refuses another platform's
+id. The default is what shipped before the choice: Terminal on macOS and
+Windows Terminal on Windows. Linux shipped `x-terminal-emulator`, which fails
+the test, so the Linux default is GNOME Terminal; on a computer without it a
+launch is refused with "{terminal} wasn't found on this computer. Choose
+another in Settings." until another is chosen.
+
+| Platform | Terminal | id | How the command and folder reach it | Evidence |
+| --- | --- | --- | --- | --- |
+| macOS | Terminal | `terminal` | AppleScript `do script` | unchanged from before the choice |
+| macOS | Ghostty | `ghostty` | AppleScript `new surface configuration`, `command`, `wait after command` | Ghostty AppleScript dictionary |
+| macOS | iTerm2 | `iterm2` | AppleScript `create window with default profile command` | iTerm2 AppleScript dictionary |
+| Windows | Windows Terminal | `windows_terminal` | `wt.exe new-tab --title "NEAR AI" -d <folder> <helper> <args>` | `new-tab --startingDirectory, -d` and `commandline` ("Executable with optional arguments"), <https://learn.microsoft.com/en-us/windows/terminal/command-line-arguments> |
+| Linux | GNOME Terminal | `gnome_terminal` | `gnome-terminal --working-directory=<folder> -- <helper> <args>` | `--working-directory=DIRNAME` "Set the terminal's working directory"; `--` "interpret all subsequent options as a program and arguments" (`-e` and `-x` are deprecated), gnome-terminal(1), <https://manpages.debian.org/testing/gnome-terminal/gnome-terminal.1.en.html> |
+| Linux | Konsole | `konsole` | `konsole --workdir <folder> --hold -e <helper> <args>` | `--workdir dir` "Open with dir as the initial working directory"; `-e` "will catch all following arguments ... and execute it as command"; `--hold` "Do not close the initial session automatically when it ends", <https://docs.kde.org/stable_kf6/en/konsole/konsole/command-line-options.html> |
+| Linux | Ghostty | `ghostty` | `ghostty --working-directory=<folder> --wait-after-command=true -e <helper> <args>` | "Every configuration key is a valid CLI flag", <https://ghostty.org/docs/config>; `working-directory`, `wait-after-command`, and `-e` sets `initial-command` and "Disables shell expansion since the input is expected to already be shell-expanded", <https://ghostty.org/docs/config/reference> |
+
+Windows Terminal reads `;` anywhere in its command line as the start of a new
+command (same page: "Commands provide the action, or list of actions separated
+by semicolons"). A launch whose folder, helper path or config folder holds a
+`;` is refused there rather than escaped.
+
+**Left out.**
+
+- `x-terminal-emulator` (Debian alternatives, the previous Linux
+  destination) and xterm: `-e` takes a command, but there is no common flag
+  for a working directory.
+- The Windows console host, through PowerShell or directly: `powershell.exe`
+  takes a command only as PowerShell source (`-Command`, or `-EncodedCommand`
+  for the same text in base64), so the folder would have to be quoted into a
+  script; `-WorkingDirectory` exists only in PowerShell 7 (`pwsh`), which is
+  not on every Windows computer. Starting the helper directly with
+  `CREATE_NEW_CONSOLE` passes the test on paper, but whether the new console
+  or the daemon's own standard handles reach the session depends on how the
+  daemon was started, and that cannot be checked without a Windows run. It
+  can be added once a Windows smoke test shows the session gets the console.
+  `cmd.exe` takes its command only as one string.
+- Other Linux terminals (kitty, Alacritty, WezTerm, foot, xfce4-terminal,
+  Tilix) were not evaluated in this change; each can be added once its
+  documented flags are checked against the test above.
+
+Every launch path except macOS Terminal still needs the release smoke test
+below on its platform: none of the Windows or Linux terminals is started by
+the test suite.
 
 ## OpenCode sessions
 

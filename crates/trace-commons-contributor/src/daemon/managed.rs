@@ -140,7 +140,7 @@ impl ManagedService {
                 .collect::<Vec<_>>();
                 let defaults =
                     signin::defaults(saved, sign_in, |tool| self.accounts.generation(tool));
-                // The installed apps, for a shell's picker; empty off macOS.
+                // The offered apps found here, for a shell's picker.
                 let choices: Vec<Value> = self
                     .installed_terminals(None)
                     .into_iter()
@@ -212,12 +212,13 @@ impl ManagedService {
                     ticket: String,
                 }
                 let p: Params = parse(request)?;
-                self.sessions.validate_ticket(p.session_id, &p.ticket)?;
+                let cwd = self.sessions.launch_cwd(p.session_id, &p.ticket)?;
                 let installed = self.installed_terminals(choice.app());
                 terminal::launch(
                     choice,
                     &installed,
                     &self.config_dir,
+                    &cwd,
                     p.session_id,
                     &p.ticket,
                 )?;
@@ -568,7 +569,7 @@ fn label(error: ManagedError) -> &'static str {
         ManagedError::DaemonUnavailable => "managed-daemon-unavailable",
         ManagedError::LaunchUnknown => "managed-launch-unknown",
         ManagedError::InvalidRequest => "managed-invalid-request",
-        ManagedError::TerminalNotInstalled => "managed-terminal-not-installed",
+        ManagedError::TerminalNotFound => "managed-terminal-not-found",
     }
 }
 
@@ -581,7 +582,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
         let mut service = ManagedService::open(&store).unwrap();
-        service.installed_terminals = || vec![TerminalApp::Terminal, TerminalApp::Ghostty];
+        service.installed_terminals = || TerminalApp::offered().to_vec();
         (home, store, service)
     }
 
@@ -591,7 +592,7 @@ mod tests {
         params: Value,
         sign_in: bool,
     ) -> Result<Value, ManagedError> {
-        call_with(service, method, params, sign_in, TerminalSetting::Terminal)
+        call_with(service, method, params, sign_in, TerminalSetting::default())
     }
 
     fn call_with(
@@ -834,24 +835,27 @@ mod tests {
     #[test]
     fn the_snapshot_carries_the_terminal_choice_and_the_installed_apps() {
         let (_home, _store, mut service) = service();
+        // This platform's last app, so the choice is not the default.
+        let chosen = *TerminalApp::offered().last().expect("an offered app");
         let snapshot = call_with(
             &mut service,
             "managed_snapshot",
             json!({}),
             false,
-            TerminalSetting::Ghostty,
+            TerminalSetting::from(chosen),
         )
         .unwrap();
         let capabilities = &snapshot["capabilities"];
-        assert_eq!(capabilities["terminal_current"], "ghostty");
-        assert_eq!(
-            capabilities["terminal_choices"],
-            json!([{"id":"terminal","name":"Terminal"},{"id":"ghostty","name":"Ghostty"}])
-        );
+        assert_eq!(capabilities["terminal_current"], chosen.id());
+        let offered: Vec<Value> = TerminalApp::offered()
+            .iter()
+            .map(|app| json!({"id":app.id(),"name":app.name()}))
+            .collect();
+        assert_eq!(capabilities["terminal_choices"], json!(offered));
         // Named only where a helper ships beside the daemon; where one
-        // does, on macOS, the name follows the choice.
-        if terminal::helper_path().is_ok() && cfg!(target_os = "macos") {
-            assert_eq!(capabilities["terminal_destination"], "Ghostty");
+        // does, the name follows the choice.
+        if terminal::helper_path().is_ok() && terminal::launch_available() {
+            assert_eq!(capabilities["terminal_destination"], chosen.name());
         }
 
         let unknown = call_with(
@@ -869,8 +873,8 @@ mod tests {
     #[test]
     fn the_terminal_refusal_has_its_own_label() {
         assert_eq!(
-            label(ManagedError::TerminalNotInstalled),
-            "managed-terminal-not-installed"
+            label(ManagedError::TerminalNotFound),
+            "managed-terminal-not-found"
         );
     }
 

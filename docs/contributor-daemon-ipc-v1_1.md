@@ -684,7 +684,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `nudge_opened` | `kind` (**required**: `idle_sessions`, `review_backlog` or `verdicts_landed`); `subject` (reserved, as above) | `opened: true` | sent only from the suggestion's own action, never for being shown; for `verdicts_landed` it acknowledges the news; local only; publishes `status_changed`; see "`status.nudge`" below |
 | `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
 | `set_menu_bar_mark_enabled` | `on` (**required**, boolean) | `menu_bar_mark_enabled` | the menu-bar news mark and halo switch; writes `menu_bar_mark_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
-| `set_managed_terminal` | `terminal` (**required**: `terminal`, `ghostty` or `iterm2`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in on macOS; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
+| `set_managed_terminal` | `terminal` (**required**: one of this platform's ids -- macOS `terminal`, `ghostty`, `iterm2`; Windows `windows_terminal`; Linux `gnome_terminal`, `konsole`, `ghostty`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
 | `set_notifications_enabled` | `on` (**required**, boolean) | `notifications_enabled` | "Notifications from Trace Commons", the master switch; writes `notifications_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
 | `set_notify_kind` | `kind` (**required**: `digest`, `idle_sessions`, `verdicts_landed`, `weekly_recap` or `insights_tip`), `on` (**required**, boolean) | `kind`, `on` | one notification kind's switch; writes `notify.<kind>` through `set_settings`; answering `verdicts_landed` or `idle_sessions` ends that kind's one-time offer; publishes `status_changed` when it changes; see "Notification settings" below |
 | `subscribe` | `accepts[]` (optional: opt-in event names) | `subscribed: true`, plus `accepts[]` when the request carried `accepts`; then a `snapshot` event | see "Opt-in events" below |
@@ -4756,19 +4756,21 @@ and a change by either route publishes `status_changed`, because
 settings; see ["Notification settings"](#notification-settings) for their
 defaults and refusals.
 
-`managed_terminal` (string, default `terminal`) is the terminal app a
-managed session opens in on macOS: `terminal`, `ghostty` or `iterm2`, and
-nothing else. Any other value, `null` included, is `bad_params` /
-`settings-invalid-value`; no app name, path or command is ever accepted. A
+`managed_terminal` (string) is the terminal app a managed session opens
+in, one of this platform's ids and nothing else: on macOS `terminal`
+(the default), `ghostty` or `iterm2`; on Windows `windows_terminal` (the
+default); on Linux `gnome_terminal` (the default), `konsole` or
+`ghostty`. Another platform's id is refused like any other. Any other
+value, `null` included, is `bad_params` / `settings-invalid-value`; no app name, path or command is ever accepted. A
 settings file holding a value this build does not know loads it as
 unrecognized: `managed_snapshot` then reports no `terminal_current` and no
 `terminal_destination`, a launch is refused, and nothing falls back to
-Terminal. `set_managed_terminal` writes the same setting. Windows and Linux
-ignore it. The managed snapshot's `capabilities` carries
-`terminal_current` (the chosen id, or `null`), `terminal_choices`
-(`[{id, name}]` of the apps installed on this Mac; empty elsewhere) and
-`terminal_destination` (the chosen app's name). A launch whose chosen app
-is not installed is refused with `managed-terminal-not-installed`.
+the default. `set_managed_terminal` writes the same setting. The managed
+snapshot's `capabilities` carries `terminal_current` (the chosen id, or
+`null`), `terminal_choices` (`[{id, name}]` of the offered apps found on
+this computer; empty under Flatpak) and `terminal_destination` (the
+chosen app's name). A launch whose chosen app was not found is refused
+with `managed-terminal-not-found`.
 
 #### Notification settings
 
