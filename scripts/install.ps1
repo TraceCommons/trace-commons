@@ -224,6 +224,7 @@ unexpected signing identity on $asset
     $dest = Join-Path $Dir 'trace-commons-contributor.exe'
     try {
         Move-Item -Path $exePath -Destination $dest -Force
+        Copy-Item -Path $dest -Destination (Join-Path $Dir 'near-ai.exe') -Force
     } catch {
         Die @"
 could not write $dest
@@ -247,7 +248,7 @@ not replace a file that is in use.
     }
 
     Write-Host ''
-    Write-Host 'next: trace-commons-contributor login --invite <url>'
+    Write-Host 'next: near-ai login --invite <url>'
     Write-Host 'docs: https://docs.tracecommons.ai/cli/quickstart/'
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue

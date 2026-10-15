@@ -4,7 +4,7 @@ import { parseQuitConfirmationCopy } from "./quit-confirmation-copy.ts";
 
 const prompt = (role, body) => ({
   role,
-  title: "Quit Trace Commons?",
+  title: "Quit Near.ai?",
   body,
   confirm: "Quit",
   cancel: "Cancel",
@@ -15,7 +15,7 @@ test("each watcher role keeps the sentence Rust chose for it", () => {
     const parsed = parseQuitConfirmationCopy(prompt(role, `${role} body`));
     assert.equal(parsed.role, role);
     assert.equal(parsed.body, `${role} body`);
-    assert.equal(parsed.title, "Quit Trace Commons?");
+    assert.equal(parsed.title, "Quit Near.ai?");
     assert.equal(parsed.confirm, "Quit");
     assert.equal(parsed.cancel, "Cancel");
   }

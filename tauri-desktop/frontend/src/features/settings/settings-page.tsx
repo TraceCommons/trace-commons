@@ -2,6 +2,7 @@ import { Button } from "@/components/ui/button";
 import { PageHeader } from "../../components/page-header";
 import { RouteDisclosurePanel } from "../../components/route-disclosure";
 import { useCoreStatus } from "../../lib/tauri/use-core-status";
+import { useShellStatusLines } from "../../lib/tauri/use-contributor-copy";
 import { AuditPanel } from "./components/audit-panel";
 import { AutomaticGrantPanel } from "./components/automatic-grant-panel";
 import { BehaviorSettingsPanel } from "./components/behavior-settings-panel";
@@ -42,6 +43,7 @@ export function SettingsPage({
   /** Opens the Flow 1 grant screens again (K10). */
   onTurnOnAutomaticContributing?: () => void;
 } = {}) {
+  const lines = useShellStatusLines();
   const settings = useSettings();
   const core = useCoreStatus();
   const daemon = useDaemonControl();
@@ -75,7 +77,7 @@ export function SettingsPage({
       )}
       {settings.state === "error" && (
         <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
-          Settings unavailable. Refresh after Rust core starts.
+          {lines.readUnavailable}
         </p>
       )}
       {core.data && (
@@ -95,7 +97,7 @@ export function SettingsPage({
           </div>
           <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
             Pausing stops contribution processing. It does not delete queued
-            sessions or change consent.
+            traces or change consent.
           </p>
           {daemon.error && (
             <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
@@ -130,7 +132,7 @@ export function SettingsPage({
                 <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
                   WATCHER
                 </span>
-                <h2>Session discovery</h2>
+                <h2>Trace discovery</h2>
               </div>
               <Button
                 className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"

@@ -219,26 +219,62 @@ public enum GlassTier: Sendable, Equatable {
 
 public extension View {
     /// Put this view on a material tier: its fill, its edge, its radius.
-    func glassTier(_ tier: GlassTier, radius: CGFloat? = nil) -> some View {
-        modifier(GlassTierModifier(tier: tier, radius: radius))
+    ///
+    /// `hover` is the fill the tier takes under the pointer while enabled:
+    /// it replaces the tier's own fill, as #1146's `:hover` background does
+    /// (owner ruling, 2026-10-07: hover states from #1146), and never stacks
+    /// on it. `edge` replaces the tier's edge (the map's `mapEdge`).
+    func glassTier(
+        _ tier: GlassTier, radius: CGFloat? = nil, hover: GlassRGBA? = nil, edge: [GlassShadow]? = nil
+    ) -> some View {
+        modifier(GlassTierModifier(tier: tier, radius: radius, hover: hover, edge: edge))
+    }
+}
+
+/// Which fill a tier draws: its own, or its hover fill in its place.
+enum GlassTierFill: Equatable {
+    case tier
+    case hover(GlassRGBA)
+
+    static func choose(hover: GlassRGBA?, hovering: Bool, enabled: Bool) -> GlassTierFill {
+        guard let hover, GlassHover.shows(hovering: hovering, enabled: enabled) else { return .tier }
+        return .hover(hover)
     }
 }
 
 private struct GlassTierModifier: ViewModifier {
     let tier: GlassTier
     let radius: CGFloat?
-    @Environment(\.glassPaneIsContent) private var paneIsContent
+    let hover: GlassRGBA?
+    let edge: [GlassShadow]?
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: radius ?? tier.radius, style: .continuous)
-        let material = GlassMaterial.current(content: paneIsContent)
+        let fill = GlassTierFill.choose(hover: hover, hovering: hovering, enabled: isEnabled)
         // Clip the content and fill first; the edge's drop shadows fall
-        // outside the shape and must not be clipped with them.
+        // outside the shape and must not be clipped with them. Every tier
+        // draws its edge, a pane on Liquid Glass too, as #1146's `.tc-pane`
+        // keeps `--tc-pane-edge` over native glass (owner ruling, 2026-10-07).
         return content
-            .background { tier.fill(in: shape).glassPressedFill() }
+            .background {
+                ZStack {
+                    tier.fill(in: shape).opacity(fill == .tier ? 1 : 0)
+                    if let hover {
+                        shape.fill(hover.color).opacity(fill == .tier ? 0 : 1)
+                    }
+                }
+                .glassPressedFill()
+                .animation(GlassMotion.fast(reduceMotion), value: fill)
+            }
             .clipShape(shape)
-            .glassEdge(tier.drawsOwnEdge(on: material) ? tier.edge : [], in: shape)
+            .glassEdge(edge ?? tier.edge, in: shape)
             .contentShape(shape)
+            .onHover { inside in
+                if hover != nil { hovering = inside }
+            }
     }
 }
 
@@ -260,79 +296,54 @@ private struct GlassSurfaceModifier: ViewModifier {
     let tier: GlassTier
     let radius: CGFloat?
     let floating: Bool?
+    let hover: GlassRGBA?
     @Environment(\.glassLayer) private var layer
 
     func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: radius ?? tier.radius, style: .continuous)
-        // Reduce Transparency is the system's to apply: Liquid Glass frosts
-        // and the HUD blur turns opaque by themselves (R14).
+        // Reduce Transparency is the system's to apply: the HUD blur turns
+        // opaque by itself (R14).
         switch GlassSurfaceBacking.choose(floating: floating ?? (layer == .floating)) {
-        case .liquidGlass:
-            if #available(macOS 26.0, *) {
-                // The interactive glass gives the press its own response, so
-                // no tier fill is drawn to darken here.
-                content
-                    .clipShape(shape)
-                    .glassEffect(tier.floatingGlass, in: shape)
-                    .contentShape(shape)
-            } else {
-                content.glassTier(tier, radius: radius)
-            }
         case .blur:
-            // Before 26: the painted tier over a real blur of what it
-            // floats on, so a popover or node card reads as glass and
-            // not as a flat translucent fill.
+            // The painted tier over a real blur of what it floats on, so a
+            // popover or node card reads as glass and not as a flat
+            // translucent fill: #1146's fill, edge and backdrop blur, on
+            // macOS 26 too (owner ruling, 2026-10-07).
             content
-                .glassTier(tier, radius: radius)
+                .glassTier(tier, radius: radius, hover: hover)
                 .background { GlassFloatingBlur(cornerRadius: radius ?? tier.radius) }
         case .painted:
-            content.glassTier(tier, radius: radius)
+            content.glassTier(tier, radius: radius, hover: hover)
         }
     }
 }
 
 /// What a surface is drawn over.
 enum GlassSurfaceBacking: Equatable {
-    /// Liquid Glass (macOS 26, floating).
-    case liquidGlass
-    /// The painted tier over a within-window blur (before 26, floating).
+    /// The painted tier over a within-window blur (floating), as #1146
+    /// draws its floating controls, popovers, menus and node cards: their
+    /// fill and edge over `backdrop-filter`, on every macOS (owner ruling,
+    /// 2026-10-07).
     case blur
     /// The painted tier alone, inside a pane that is its backing.
     case painted
 
     /// What a surface floats on. Reduce Transparency does not change it:
-    /// under it Liquid Glass turns frostier and `NSVisualEffectView` draws
-    /// opaque by itself, so floating text never shows the map through
-    /// (Apple's Liquid Glass guidance; R14).
+    /// under it `NSVisualEffectView` draws opaque by itself, so floating
+    /// text never shows the map through (R14).
     static func choose(floating: Bool) -> GlassSurfaceBacking {
-        guard floating else { return .painted }
-        if #available(macOS 26.0, *) { return .liquidGlass }
-        return .blur
-    }
-}
-
-extension GlassTier {
-    /// The Liquid Glass a floating surface of this tier gets: the regular
-    /// variant, which keeps what is on it legible by itself. Controls react
-    /// to the pointer. Untinted: Apple keeps tint for primary actions, not
-    /// for legibility or brand (R14).
-    @available(macOS 26.0, *)
-    var floatingGlass: Glass {
-        switch self {
-        case .control, .controlSelected, .well:
-            .regular.interactive()
-        case .pane, .card, .cardQuiet, .popover, .menu, .nodeCard:
-            .regular
-        }
+        floating ? .blur : .painted
     }
 }
 
 public extension View {
     /// Put this view on a tier that may float. `floating: nil` follows the
     /// surrounding `glassLayer`; `true` or `false` fixes it (a menu always
-    /// floats; a well never does).
-    func glassSurface(_ tier: GlassTier, radius: CGFloat? = nil, floating: Bool? = nil) -> some View {
-        modifier(GlassSurfaceModifier(tier: tier, radius: radius, floating: floating))
+    /// floats; a well never does). `hover` replaces the tier's fill under
+    /// the pointer (`glassTier`).
+    func glassSurface(
+        _ tier: GlassTier, radius: CGFloat? = nil, floating: Bool? = nil, hover: GlassRGBA? = nil
+    ) -> some View {
+        modifier(GlassSurfaceModifier(tier: tier, radius: radius, floating: floating, hover: hover))
     }
 }
 
@@ -361,11 +372,3 @@ public struct GlassFloatingGroup<Content: View>: View {
     }
 }
 
-extension GlassTier {
-    /// Whether this tier draws its own edge. A pane on Liquid Glass does
-    /// not: `NSGlassEffectView` draws its own rim, and ours on top doubles
-    /// it. Everything else, and every tier before macOS 26, draws its edge.
-    func drawsOwnEdge(on material: GlassMaterial) -> Bool {
-        !(self == .pane && material == .liquidGlass)
-    }
-}

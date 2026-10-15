@@ -40,9 +40,10 @@
 //!   of writes a day, for bytes identical to the ones already on disk. That
 //!   one is now elided when nothing moved; see `DaemonState::save`.
 //!
-//! The trajectory source is not watched: trajectory files have no
-//! conventional local store to poll, so they stay a deliberate `submit
-//! --trajectory` action.
+//! Trajectory files have no conventional local store. The daemon reads
+//! only the staging folder and a folder the contributor declared
+//! (`trajectory_source`), and never arms a session found in either: it
+//! always waits for a person.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -219,17 +220,107 @@ fn tick_over(
             visit_session(shared, &ctx, *source, session_ref, &mut out);
         }
     }
+    // Insights feed T, after the offers: a full pass only, and only while
+    // the contributor has switched it on.
+    counter_pass(shared, now, &discovered);
     // Only when every source listed cleanly: a source whose discovery failed
     // would otherwise lose its sessions from the count until it recovers.
     if discovered.len() == sources.len() {
         prune_cwd_cache(shared, &discovered);
     }
 
+    backfill_estimate_features(shared, &discovered, &mut out);
+
     let held_by_project = std::mem::take(&mut out.gate_blocked_by_project);
     let report = finish_pass(shared, out, true)?;
     report_gate(shared, &ctx.gate, &report);
     record_gate_held(shared, &ctx, &report, held_by_project);
     Ok(report)
+}
+
+/// The Insights counter pass (feed T), gated on the `insights_counter_pass`
+/// setting (owner decision D4, open). Off, it returns before reading
+/// anything. On, it hands every Claude Code and Codex session this pass
+/// discovered to `insights_week`, which reads only quiet sessions whose rows
+/// are missing or stale, within a per-poll budget. It is not tied to
+/// eligibility: a session already offered, uploaded, kept or declined still
+/// counts for the contributor's own Insights, which never leave this machine.
+/// A folder that is Never is the exception, by its own rule or a global
+/// Never override (owner decision D4); see `insights_week`.
+fn counter_pass(
+    shared: &DaemonShared,
+    now: DateTime<Utc>,
+    discovered: &[(&dyn TraceSource, Vec<SessionRef>)],
+) {
+    let (enabled, quiescence_secs) = {
+        let s = shared.settings.lock().expect("settings lock");
+        (s.insights_counter_pass, s.quiescence_secs)
+    };
+    if !enabled {
+        return;
+    }
+    let mut origins: Vec<(&dyn TraceSource, &SessionRef, Observation)> = Vec::new();
+    let mut candidates = Vec::new();
+    for (source, refs) in discovered {
+        if !matches!(
+            source.name(),
+            crate::source::SOURCE_CLAUDE_CODE | crate::source::SOURCE_CODEX
+        ) {
+            continue;
+        }
+        for session_ref in refs {
+            let modified_at = match session_ref.group_modified_at {
+                Some(at) => at,
+                None => match std::fs::metadata(&session_ref.path).and_then(|m| m.modified()) {
+                    Ok(at) => DateTime::<Utc>::from(at),
+                    Err(_) => continue,
+                },
+            };
+            candidates.push(super::insights_week::CounterCandidate {
+                origin: origins.len(),
+                source: session_ref.source,
+                path: session_ref.path.clone(),
+                size_bytes: session_ref.size_bytes,
+                modified_at,
+                started_at: session_ref.started_at,
+                group_member_count: session_ref.group_member_count,
+            });
+            origins.push((
+                *source,
+                session_ref,
+                Observation {
+                    path: session_ref.path.clone(),
+                    size_bytes: session_ref.size_bytes,
+                    modified_at,
+                },
+            ));
+        }
+    }
+    let never_keys =
+        super::insights_week::never_folders(&shared.policy.lock().expect("policy lock"));
+    // Asked only for a session about to be read. The folder's resolved
+    // rule, the contribution override included (owner decision D4): a
+    // global Never leaves every folder out, as it does from sending.
+    let mut project_of = |candidate: &super::insights_week::CounterCandidate| {
+        let (source, session_ref, obs) = &origins[candidate.origin];
+        let cwd = resolve_cwd(shared, *source, session_ref, obs);
+        let (project_key, _) = project_for(cwd.as_deref());
+        let never = shared
+            .policy
+            .lock()
+            .expect("policy lock")
+            .resolve(&project_key)
+            == ProjectMode::Ignore;
+        (project_key, never)
+    };
+    // Failures are logged inside, by fixed label only.
+    let _ = shared.insights_counter.run_pass(
+        &candidates,
+        &never_keys,
+        now,
+        quiescence_secs,
+        &mut project_of,
+    );
 }
 
 /// Record what is on disk for the Flow 1 grant `grant`, per source: each
@@ -583,6 +674,227 @@ fn tick_over_paths(
     Ok(report)
 }
 
+/// Queue each of `refs` as a `Pending` offer because a person chose it in
+/// the first-run picker, answering per session with its entry id or a fixed
+/// refusal label, in the order given.
+///
+/// Not `visit_session`, on purpose. That path waits for two observations of
+/// the same size (an unseen session is `Unstable` on first sight), honours
+/// the queue cap, and in an armed folder creates the entry `Approved`
+/// unattended -- an approval `set_project_mode notify_only` would retract.
+/// None of that fits an explicit selection: the caller has already checked
+/// quiescence, a person's choice is not the watcher offering more, and the
+/// approval that follows is the person's own. Everything else is the
+/// watcher's: the same pass lock, the same cwd resolution and keying, and
+/// the same entry (`new_entry`), never armed.
+///
+/// A session that resolves to a project other than `project_key` once read
+/// is refused `session-project-changed`, not filed elsewhere: the person
+/// chose it under this folder. A session in a folder whose rule is Never is
+/// refused `project-mode-never`. One walk of the declared sources finds the
+/// adapter for every ref; a ref no source lists any more is
+/// `session-file-vanished`. Labels only -- no path reaches a log line.
+pub(crate) fn offer_for_a_person(
+    shared: &DaemonShared,
+    now: DateTime<Utc>,
+    refs: &[SessionRef],
+    project_key: &str,
+) -> Vec<std::result::Result<uuid::Uuid, &'static str>> {
+    let source_roots = shared.source_roots_with_routing();
+    let sources = all_sources(&source_roots);
+    // path -> the source that lists it and the ref it lists now, from one
+    // walk. The fresh ref, not the caller's, is what is judged and read: a
+    // grouped session's members and their newest mtime are the ones on disk
+    // now, so a delegated transcript written since the caller's walk still
+    // reads as a session being written.
+    let mut owner: std::collections::HashMap<PathBuf, (usize, SessionRef)> =
+        std::collections::HashMap::new();
+    for (i, source) in sources.iter().enumerate() {
+        let Ok(found) = source.discover() else {
+            continue;
+        };
+        for r in found {
+            owner.entry(r.path.clone()).or_insert((i, r));
+        }
+    }
+    let _pass = shared.pass_lock.lock().expect("pass lock");
+    // No cap: see the doc. The rest of the context is the pass's own.
+    let ctx = PassContext::read(shared, now, usize::MAX, source_roots.source_identities());
+    let quiescence_secs = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .quiescence_secs;
+    let mut out = Vec::with_capacity(refs.len());
+    let mut changed = false;
+    for session_ref in refs {
+        let offered = owner
+            .get(&session_ref.path)
+            .map(|(i, fresh)| (sources[*i].as_ref(), fresh))
+            .ok_or(super::past_sessions::LABEL_SESSION_FILE_VANISHED)
+            .and_then(|(source, fresh)| {
+                offer_one(shared, &ctx, source, fresh, project_key, quiescence_secs)
+            });
+        if offered.is_ok() {
+            changed = true;
+        }
+        out.push(offered);
+    }
+    if changed {
+        let queue = shared.queue.lock().expect("queue lock");
+        // The approval that follows saves again; a failure here leaves the
+        // offers in memory for that save, and costs nothing that matters.
+        if queue.save(&shared.store).is_err() {
+            tracing::warn!("could not persist a chosen past session's offer");
+        }
+    }
+    out
+}
+
+/// One session of [`offer_for_a_person`].
+fn offer_one(
+    shared: &DaemonShared,
+    ctx: &PassContext,
+    source: &dyn TraceSource,
+    session_ref: &SessionRef,
+    project_key: &str,
+    quiescence_secs: u64,
+) -> std::result::Result<uuid::Uuid, &'static str> {
+    let modified_at = session_modified_at(session_ref)
+        .ok_or(super::past_sessions::LABEL_SESSION_FILE_VANISHED)?;
+    let obs = Observation {
+        path: session_ref.path.clone(),
+        size_bytes: session_ref.size_bytes,
+        modified_at,
+    };
+    // Judged again at the read, not only at the caller's walk: a session
+    // written to in between is still not read half-written.
+    if ctx.now.signed_duration_since(obs.modified_at).num_seconds() < quiescence_secs as i64 {
+        return Err(super::past_sessions::LABEL_SESSION_STILL_ACTIVE);
+    }
+    {
+        let queue = shared.queue.lock().expect("queue lock");
+        if queue.dismissed_at_path(&obs.path) {
+            return Err(super::past_sessions::LABEL_SESSION_DISMISSED);
+        }
+        if queue.kept_at_path(&obs.path) {
+            return Err(super::past_sessions::LABEL_SESSION_KEPT);
+        }
+        // Offered since the caller looked (a pass ran in between): that
+        // offer is the one to approve, if it still waits.
+        if let Some(live) = queue.all().iter().rev().find(|e| {
+            e.path == obs.path && matches!(e.state, QueueState::Pending | QueueState::Approved)
+        }) {
+            return match live.state {
+                QueueState::Pending => Ok(live.entry_id),
+                _ => Err(super::past_sessions::LABEL_NOT_PENDING),
+            };
+        }
+    }
+    let cwd = resolve_cwd(shared, source, session_ref, &obs);
+    let (resolved_key, project_path) = project_for(cwd.as_deref());
+    if resolved_key != project_key {
+        return Err(super::past_sessions::LABEL_SESSION_PROJECT_CHANGED);
+    }
+    if shared
+        .policy
+        .lock()
+        .expect("policy lock")
+        .resolve(&resolved_key)
+        == ProjectMode::Ignore
+    {
+        return Err(super::past_sessions::LABEL_PROJECT_MODE_NEVER);
+    }
+    let transcript = source.load(session_ref).map_err(|err| {
+        if err
+            .downcast_ref::<crate::source::SessionTooLarge>()
+            .is_some()
+        {
+            super::queue::REASON_TOO_LARGE
+        } else {
+            // No `err` in the log: its `Display` can carry a path.
+            tracing::debug!("a chosen past session could not be read");
+            super::past_sessions::LABEL_SESSION_UNREADABLE
+        }
+    })?;
+    // As `visit_session` does in an armed folder: content older than an
+    // arming from now is recorded on that arming, so if the person's
+    // approval below does not land, the offer it leaves still waits for a
+    // person rather than going out unattended.
+    if shared
+        .policy
+        .lock()
+        .expect("policy lock")
+        .resolve(&resolved_key)
+        == ProjectMode::AutoUpload
+    {
+        hold_if_older_than_arming(
+            shared,
+            ctx,
+            source,
+            &resolved_key,
+            &obs.path,
+            transcript.started_at,
+        );
+    }
+    let (known, returned_from_keep) = {
+        let policy = shared.policy.lock().expect("policy lock");
+        let queue = shared.queue.lock().expect("queue lock");
+        (
+            known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone())),
+            queue.returned_from_keep_at_path(&obs.path),
+        )
+    };
+    let placement = Placement {
+        project_label: disambiguated_label(&resolved_key, project_path.as_deref(), &known),
+        project_key: resolved_key,
+        project_path,
+        cwd,
+    };
+    let entry = new_entry(
+        ctx,
+        session_ref,
+        &obs,
+        &transcript,
+        placement,
+        false,
+        returned_from_keep,
+    );
+    let entry_id = entry.entry_id;
+    let session_hash = entry.session_hash.clone();
+    // Policy before queue. The folder's rule is read again under the lock
+    // that inserts: Never set while this session was read must not be met
+    // by a new offer, since setting it refused only what was waiting then.
+    let policy = shared.policy.lock().expect("policy lock");
+    if policy.holds_every_send() || policy.resolve(project_key) == ProjectMode::Ignore {
+        return Err(super::past_sessions::LABEL_PROJECT_MODE_NEVER);
+    }
+    let mut queue = shared.queue.lock().expect("queue lock");
+    drop(policy);
+    // No cap (`usize::MAX`): a person's choice lands in a full queue, and
+    // once approved it does not count against the watcher's cap
+    // (`queue::counts_against_the_cap`). The queue-full label is left as it
+    // stands -- the watcher's offers are still refused.
+    let outcome = queue
+        .replace_live_at_path(entry, usize::MAX)
+        .map_err(|_| super::health::LABEL_QUEUE_FULL)?;
+    if outcome.inserted {
+        return Ok(entry_id);
+    }
+    // Already tracked under this hash: approve that offer if it waits, or
+    // offer it again if it aged out -- the person chose it.
+    match queue
+        .all()
+        .iter()
+        .find(|e| e.session_hash == session_hash)
+        .map(|e| (e.entry_id, e.state))
+    {
+        Some((id, QueueState::Pending)) => Ok(id),
+        Some((id, QueueState::Expired)) if queue.revive_expired(id, ctx.now) => Ok(id),
+        _ => Err(super::past_sessions::LABEL_NOT_PENDING),
+    }
+}
+
 /// Release holds whose cause has gone, before any session is visited.
 ///
 /// Today the only hold is for token-distribution review, which exists only
@@ -882,6 +1194,12 @@ struct PassContext {
     /// waiting for a requirement to be met, everything is waiting for a
     /// person, as the contributor asked.
     scrub_check_manual: bool,
+    /// Whether anything may be approved on the contributor's behalf under
+    /// the enrollment this pass reads: false while its scopes were saved by
+    /// enrollment and never chosen (`config::consent_hold`). Such a session
+    /// waits for a person, whose `approve` is refused for the same reason
+    /// until the scopes are chosen. Not a gate hold, and not counted as one.
+    consent_chosen: bool,
     /// R1's disclosure for this contributor, from the same config: what the
     /// Flow 1 grant screen claimed, recorded when the grant arms a project.
     /// The K5 sweep reads each folder's own disclosure instead; see
@@ -957,10 +1275,12 @@ impl PassContext {
             shared.account_admission.current(cfg.as_ref()),
         );
         let disclosure = super::automatic_gate::disclosure(cfg.as_ref());
+        let consent_chosen = crate::config::consent_hold(cfg.as_ref()).is_none();
         Self {
             now,
             max_queue_entries,
             consent_scopes,
+            consent_chosen,
             approval_inputs,
             admission_evidence,
             gate,
@@ -1003,6 +1323,17 @@ impl PassOutcome {
     }
 }
 
+/// Sources backed by a database have stable virtual paths, so their own
+/// modification time is authoritative. File sources retain the stat fallback.
+fn session_modified_at(session_ref: &SessionRef) -> Option<DateTime<Utc>> {
+    session_ref.group_modified_at.or_else(|| {
+        std::fs::metadata(&session_ref.path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .map(DateTime::<Utc>::from)
+    })
+}
+
 /// Everything one session costs: observe, evaluate, ask the queue, and load
 /// and hash only if all three still warrant it.
 ///
@@ -1017,10 +1348,7 @@ fn visit_session(
     out: &mut PassOutcome,
 ) {
     out.report.observed += 1;
-    let Ok(meta) = std::fs::metadata(&session_ref.path) else {
-        return;
-    };
-    let Ok(modified) = meta.modified() else {
+    let Some(modified_at) = session_modified_at(session_ref) else {
         return;
     };
     // Size and mtime come from the `SessionRef`, not from a re-stat
@@ -1038,10 +1366,26 @@ fn visit_session(
     let obs = Observation {
         path: session_ref.path.clone(),
         size_bytes: session_ref.size_bytes,
-        modified_at: session_ref
-            .group_modified_at
-            .unwrap_or_else(|| DateTime::<Utc>::from(modified)),
+        modified_at,
     };
+
+    // A trajectory session is never armed, whatever the project mode says --
+    // on first sight (`would_arm` below) or on any later pass that re-applies
+    // a standing opt-in to an entry already queued (the skip-load path).
+    //
+    // The daemon's trajectory scopes are the staging directory and the
+    // folder of exports a contributor may declare (`trajectory_source`; see
+    // `DaemonSettings::source_roots`), so a trajectory ref reaching this
+    // function IS an import or an export somebody added. Auto-uploading on
+    // first sight would send something the contributor may not remember
+    // adding, with no prompt. They armed a watched agent store; this is not
+    // one, so every such session waits for a person.
+    //
+    // The check is on the adapter rather than on `declared_source` on
+    // purpose: it must hold for every trajectory, including one a
+    // contributor dropped in by hand, not only for the ones that name
+    // themselves.
+    let from_trajectory = session_ref.source == crate::source::SOURCE_TRAJECTORY;
 
     let (previous_size, prior) = {
         let state = shared.state.lock().expect("state lock");
@@ -1166,9 +1510,12 @@ fn visit_session(
         // the grant holds back would not be approved either way, so it is
         // not counted as one the gate holds; nor is one held for a person.
         // Nor under the Manual Scrub check, where everything waits for a
-        // person (K4 of #1118).
+        // person (K4 of #1118). Nor for a trajectory session, which always
+        // waits for a person (see `from_trajectory`).
         let would_approve = mode == ProjectMode::AutoUpload
+            && ctx.consent_chosen
             && !ctx.scrub_check_manual
+            && !from_trajectory
             && state == QueueState::Pending
             && !held_for_review
             && !waits_for_a_person(shared, ctx, source, &project_key, &obs.path);
@@ -1210,9 +1557,12 @@ fn visit_session(
         let policy = shared.policy.lock().expect("policy lock");
         policy.resolve(&project_key)
     };
-    let mode = if mode == ProjectMode::NotifyOnly {
+    // Never for a trajectory export: it is a file somebody added, not a
+    // session of an agent store the grant covers, and it waits for a person
+    // whatever the folder's mode (`from_trajectory`).
+    let mode = if mode == ProjectMode::NotifyOnly && !from_trajectory {
         // The grant arms the folder's own mode; what is in force is then
-        // read again, so a contribution override ("Ask me") still governs
+        // read again, so a contribution override ("Ask") still governs
         // a folder the grant has just armed (#1173).
         arm_by_default(shared, ctx, source, &project_key, &obs.path);
         shared
@@ -1307,30 +1657,18 @@ fn visit_session(
     // one dropped is a session sent unattended that should not have been, so
     // they are ANDed rather than either replacing the other.
 
-    // A staged trajectory is never armed, whatever the project mode says.
-    //
-    // The daemon's only trajectory scope is the staging directory (see
-    // `DaemonSettings::source_roots`), so a trajectory ref reaching this
-    // point IS an import. It was invisible to this daemon until the staging
-    // scope existed, and auto-uploading on first sight would send something
-    // the contributor may not remember importing, with no prompt. They
-    // armed a watched source they had declared; this is not one.
-    //
-    // The check is on the adapter rather than on `declared_source` on
-    // purpose: it must hold for every staged trajectory, including one a
-    // contributor dropped in by hand, not only for the ones that name
-    // themselves.
-    let from_staging = session_ref.source == crate::source::SOURCE_TRAJECTORY;
-
     // A fresh entry from an armed project is queued `Pending` until it has
     // settled, not `Approved` on sight. The next poll promotes it once the
     // window has elapsed (site above), and a session that grows in the
     // meantime supersedes this entry -- free, where the same growth after an
     // upload would cost one of three re-uploads and a duplicate penalty.
-    // Through the automatic-contribution gate. `armed` decides both paths
+    // Through the automatic-contribution gate. `armed` decides the two paths
     // below that approve on the contributor's behalf -- a fresh entry created
     // `Approved`, and an already-queued one re-approved -- so gating it here
-    // gates both. See `automatic_gate`.
+    // gates both. It does not cover the skip-load path above, which re-applies
+    // a standing opt-in to an unchanged entry without reaching this point and
+    // so applies its own holds (`from_trajectory`, the Manual Scrub check,
+    // `waits_for_a_person`) and the gate itself. See `automatic_gate`.
     // Defence in depth for an arming from now (K5), whose record reads "on
     // disk at the arming" by path: content that predates the arming but
     // turns up at a new path -- a resumed conversation in a fresh file, a
@@ -1349,10 +1687,11 @@ fn visit_session(
         );
     }
     // The Manual Scrub check arms nothing either (K4 of #1118): the session
-    // is queued `Pending` for a person, like any in an Ask me folder.
+    // is queued `Pending` for a person, like any in an Ask folder.
     let would_arm = mode == ProjectMode::AutoUpload
+        && ctx.consent_chosen
         && !ctx.scrub_check_manual
-        && !from_staging
+        && !from_trajectory
         && !returned_from_keep
         && armed_settle_elapsed(obs.modified_at, ctx.now)
         && !waits_for_a_person(shared, ctx, source, &project_key, &obs.path);
@@ -1361,105 +1700,21 @@ fn visit_session(
     // armed folder without saying so.
     let gate_held = would_arm && ctx.gate.blocks();
 
-    // Two questions off one transcript load. The mark is answered for every
-    // contributor; the eligibility verdict is a derivation from it that stays
-    // silent unless the signup flag applies. Both are free here and nowhere
-    // else -- see `QueueEntry::attestation`.
-    let attestation = super::attestation_mark::evaluate(
-        &transcript.routing,
-        transcript.attested_call.as_deref(),
-        transcript.attested_refusal,
-    );
-    let eligibility = super::contribution_eligibility::evaluate(
-        ctx.admission_evidence,
-        &transcript.routing,
-        transcript.attested_call.as_deref(),
-        transcript.attested_refusal,
-    );
-
-    let entry = QueueEntry {
-        entry_id: entry_id_for(&transcript.session_hash),
-        // Follows `armed`, because the `state` below is `Approved` on the
-        // same condition: a settled session in an armed project is approved
-        // here on first sight, without ever being `Pending`. That is the
-        // backlog case retraction exists for, so recording it as the
-        // contributor's own would make `retract_unattended_for_project` skip
-        // exactly the entries it is meant to reach.
-        approved_unattended: armed,
-        session_hash: transcript.session_hash.clone(),
-        source: session_ref.source.to_string(),
-        declared_source: session_ref.declared_source.clone(),
-        project_key: project_key.clone(),
-        // The unfolded spelling of the same directory, for rendering only.
-        project_path: project_path.clone(),
-        // The raw recorded cwd, which `project_key_for` normalized away.
-        session_cwd: cwd.clone(),
+    let placement = Placement {
         project_label: disambiguated_label(&project_key, project_path.as_deref(), &known),
-        path: obs.path.clone(),
-        size_bytes: obs.size_bytes,
-        discovered_at: ctx.now,
-        review_started_at: None,
-        state: if armed {
-            // Opted in, so it needs no decision; the uploader picks it
-            // up on its next pass.
-            QueueState::Approved
-        } else {
-            QueueState::Pending
-        },
-        reason_label: returned_from_keep
-            .then(|| super::queue::REASON_RETURNED_FROM_KEEP.to_string()),
-        attempts: 0,
-        retry_after: None,
-        transient_redaction_failures: 0,
-        submission_id: None,
-        approved_scopes: armed.then(|| ctx.consent_scopes.clone()),
-        // A fresh entry has no answer to give yet, armed or not: it is
-        // either newly discovered (`Pending`) or auto-approved without
-        // a contributor ever seeing it, so there is no verdict to
-        // record.
-        approved_verdict: None,
-        approved_correction: None,
-        // `None` when the config could not be read, which the
-        // uploader treats as "unknown, re-ask": fail-closed.
-        approved_inputs: armed.then(|| ctx.approval_inputs.clone()).flatten(),
-        // An armed project's sessions are never previewed, so there
-        // is no shown artifact to pin to. The input fingerprint is
-        // the guard that applies to them.
-        previewed_envelope_digest: None,
-        // Same reason as `previewed_envelope_digest` immediately above:
-        // nothing was previewed, so there is no measured size to report.
-        would_send_bytes: None,
-        // No post-approval hold on a standing opt-in: it is a
-        // decision taken in advance, separately audited, with no
-        // click to take back and no client counting down for it.
-        // See `Queue::approve`.
-        approved_at: None,
-        subagent_count: transcript.subagent_count,
-        subagents_dropped: transcript.subagents_dropped,
-        shape: Some(super::queue::SessionShape::of(&transcript)),
-        // K9: built from the same raw transcript, at the same moment, for
-        // the same reason -- see `queue::title_of`.
-        title: super::queue::title_of(&transcript),
-        // The observation this entry is made of, so the next poll
-        // can recognize it without reading the group again. See
-        // `QueueEntry::observed_modified_at`.
-        observed_modified_at: Some(obs.modified_at),
-        // Free here and nowhere else. The load above already joined this
-        // session's ledger hops and, where a body store is configured,
-        // already ran the full attested check; recording what they said
-        // costs two labels. A list that asked the question instead would
-        // pay for a re-read and re-hash of every captured body in the
-        // queue, every time anything called it.
-        eligibility: eligibility.map(|v| v.state.to_string()),
-        eligibility_reason: eligibility.and_then(|v| v.reason).map(str::to_string),
-        attestation: Some(attestation.state.to_string()),
-        attestation_reason: attestation.reason.map(str::to_string),
-        attested_inference: None,
-        kept_from_reason: None,
-        // Not yet scrubbed: nothing has previewed this offer. Never zero,
-        // which would read as "nothing matched". See `second_look::Scrub`.
-        scrub: None,
+        project_key: project_key.clone(),
+        project_path,
+        cwd,
     };
+    let entry = new_entry(
+        ctx,
+        session_ref,
+        &obs,
+        &transcript,
+        placement,
+        armed,
+        returned_from_keep,
+    );
     let entry_id = entry.entry_id;
 
     let mut queue = shared.queue.lock().expect("queue lock");
@@ -1546,6 +1801,213 @@ fn visit_session(
         Err(_) => {
             let mut health = shared.health.lock().expect("health lock");
             health.fail(health::LABEL_QUEUE_FULL, ctx.now);
+        }
+    }
+}
+
+/// Where a session was filed: its project and how the queue shows it.
+struct Placement {
+    project_key: String,
+    project_path: Option<String>,
+    cwd: Option<String>,
+    project_label: String,
+}
+
+/// The queue entry for a session just loaded: `Approved` unattended when
+/// `armed`, else `Pending`. The single construction both offers use -- the
+/// watcher's pass and the first-run picker's `offer_for_a_person` -- so an
+/// entry a person chose carries every field one the watcher found does.
+fn new_entry(
+    ctx: &PassContext,
+    session_ref: &SessionRef,
+    obs: &Observation,
+    transcript: &crate::source::SessionTranscript,
+    placement: Placement,
+    armed: bool,
+    returned_from_keep: bool,
+) -> QueueEntry {
+    // Two questions off one transcript load. The mark is answered for every
+    // contributor; the eligibility verdict is a derivation from it that stays
+    // silent unless the signup flag applies. Both are free here and nowhere
+    // else -- see `QueueEntry::attestation`.
+    let attestation = super::attestation_mark::evaluate(
+        &transcript.routing,
+        transcript.attested_call.as_deref(),
+        transcript.attested_refusal,
+    );
+    let eligibility = super::contribution_eligibility::evaluate(
+        ctx.admission_evidence,
+        &transcript.routing,
+        transcript.attested_call.as_deref(),
+        transcript.attested_refusal,
+    );
+
+    QueueEntry {
+        entry_id: entry_id_for(&transcript.session_hash),
+        // Follows `armed`, because the `state` below is `Approved` on the
+        // same condition: a settled session in an armed project is approved
+        // here on first sight, without ever being `Pending`. That is the
+        // backlog case retraction exists for, so recording it as the
+        // contributor's own would make `retract_unattended_for_project` skip
+        // exactly the entries it is meant to reach.
+        approved_unattended: armed,
+        // Marked by the approval, not the offer: see `QueueEntry::person_included`.
+        person_included: false,
+        session_hash: transcript.session_hash.clone(),
+        source: session_ref.source.to_string(),
+        declared_source: session_ref.declared_source.clone(),
+        project_key: placement.project_key,
+        // The unfolded spelling of the same directory, for rendering only.
+        project_path: placement.project_path,
+        // The raw recorded cwd, which `project_key_for` normalized away.
+        session_cwd: placement.cwd,
+        project_label: placement.project_label,
+        path: obs.path.clone(),
+        size_bytes: obs.size_bytes,
+        discovered_at: ctx.now,
+        review_started_at: None,
+        state: if armed {
+            // Opted in, so it needs no decision; the uploader picks it
+            // up on its next pass.
+            QueueState::Approved
+        } else {
+            QueueState::Pending
+        },
+        reason_label: returned_from_keep
+            .then(|| super::queue::REASON_RETURNED_FROM_KEEP.to_string()),
+        attempts: 0,
+        retry_after: None,
+        transient_redaction_failures: 0,
+        transient_upload_failures: 0,
+        submission_id: None,
+        approved_scopes: armed.then(|| ctx.consent_scopes.clone()),
+        // A fresh entry has no answer to give yet, armed or not: it is
+        // either newly discovered (`Pending`) or auto-approved without
+        // a contributor ever seeing it, so there is no verdict to
+        // record.
+        approved_verdict: None,
+        approved_correction: None,
+        // `None` when the config could not be read, which the
+        // uploader treats as "unknown, re-ask": fail-closed.
+        approved_inputs: armed.then(|| ctx.approval_inputs.clone()).flatten(),
+        // An armed project's sessions are never previewed, so there
+        // is no shown artifact to pin to. The input fingerprint is
+        // the guard that applies to them.
+        previewed_envelope_digest: None,
+        // Same reason as `previewed_envelope_digest` immediately above:
+        // nothing was previewed, so there is no measured size to report.
+        would_send_bytes: None,
+        // No post-approval hold on a standing opt-in: it is a
+        // decision taken in advance, separately audited, with no
+        // click to take back and no client counting down for it.
+        // See `Queue::approve`.
+        approved_at: None,
+        subagent_count: transcript.subagent_count,
+        subagents_dropped: transcript.subagents_dropped,
+        shape: Some(super::queue::SessionShape::of(transcript)),
+        // Nudge value addendum, 4.4: the local-estimate features, from the
+        // same transcript at the same moment -- no extra read, lock or
+        // network. Local-only, like `shape`.
+        estimate_features: Some(super::queue::estimate_features_of(transcript)),
+        // K9: built from the same raw transcript, at the same moment, for
+        // the same reason -- see `queue::title_of`.
+        title: super::queue::title_of(transcript),
+        // The observation this entry is made of, so the next poll
+        // can recognize it without reading the group again. See
+        // `QueueEntry::observed_modified_at`.
+        observed_modified_at: Some(obs.modified_at),
+        // The same instant, kept for a different question: how long the
+        // session has been idle. Unlike the match key above it survives a
+        // re-offer. Local-only. See `QueueEntry::last_modified_at`.
+        last_modified_at: Some(obs.modified_at),
+        // Free here and nowhere else. The load above already joined this
+        // session's ledger hops and, where a body store is configured,
+        // already ran the full attested check; recording what they said
+        // costs two labels. A list that asked the question instead would
+        // pay for a re-read and re-hash of every captured body in the
+        // queue, every time anything called it.
+        eligibility: eligibility.map(|v| v.state.to_string()),
+        eligibility_reason: eligibility.and_then(|v| v.reason).map(str::to_string),
+        attestation: Some(attestation.state.to_string()),
+        attestation_reason: attestation.reason.map(str::to_string),
+        attested_inference: None,
+        kept_from_reason: None,
+        // Not yet scrubbed: nothing has previewed this offer. Never zero,
+        // which would read as "nothing matched". See `second_look::Scrub`.
+        scrub: None,
+    }
+}
+
+/// How many waiting entries without local-estimate features one full pass
+/// re-reads to give them some.
+///
+/// OWNER DECISION E13: 4 per pass, never while a preview builds.
+pub const ESTIMATE_BACKFILL_PER_PASS: usize = 4;
+
+/// Give waiting entries minted before `estimate_features` existed their
+/// features (nudge value addendum, 4.4; OWNER DECISION E13).
+///
+/// At most [`ESTIMATE_BACKFILL_PER_PASS`] per full pass, oldest first, and
+/// none while a preview builds or waits to: a preview is a person waiting,
+/// and this is not. Each is re-read through the adapter this pass's own
+/// discovery found it under, the load a re-offer makes, and its features
+/// are recorded only while its content is still the bytes it was minted
+/// for (`Queue::backfill_estimate_features`). One the pass cannot read, or
+/// whose bytes moved, is remembered in memory and not tried again by this
+/// daemon. Nothing is logged.
+fn backfill_estimate_features(
+    shared: &DaemonShared,
+    discovered: &[(&dyn TraceSource, Vec<SessionRef>)],
+    out: &mut PassOutcome,
+) {
+    if shared.preview_building() {
+        return;
+    }
+    let candidates: Vec<(uuid::Uuid, PathBuf, String)> = {
+        let queue = shared.queue.lock().expect("queue lock");
+        let tried = shared.backfill_tried.lock().expect("backfill lock");
+        let mut waiting: Vec<&QueueEntry> = queue
+            .pending()
+            .into_iter()
+            .filter(|e| {
+                e.estimate_features.is_none()
+                    && e.submission_id.is_none()
+                    && !tried.contains(&e.entry_id)
+            })
+            .collect();
+        waiting.sort_by_key(|e| (e.discovered_at, e.entry_id));
+        waiting
+            .into_iter()
+            .take(ESTIMATE_BACKFILL_PER_PASS)
+            .map(|e| (e.entry_id, e.path.clone(), e.session_hash.clone()))
+            .collect()
+    };
+    for (entry_id, path, session_hash) in candidates {
+        // A preview asked for while this pass was loading goes first.
+        if shared.preview_building() {
+            return;
+        }
+        let features = discovered
+            .iter()
+            .find_map(|(source, refs)| refs.iter().find(|r| r.path == path).map(|r| (*source, r)))
+            .and_then(|(source, session_ref)| source.load(session_ref).ok())
+            .filter(|transcript| transcript.session_hash == session_hash)
+            .map(|transcript| super::queue::estimate_features_of(&transcript));
+        let recorded = features.is_some_and(|features| {
+            shared
+                .queue
+                .lock()
+                .expect("queue lock")
+                .backfill_estimate_features(entry_id, &session_hash, features)
+        });
+        if recorded {
+            out.changed = true;
+        } else {
+            shared
+                .backfill_tried
+                .lock()
+                .expect("backfill lock")
+                .insert(entry_id);
         }
     }
 }
@@ -1788,6 +2250,37 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn session_observation_accepts_virtual_paths_and_preserves_file_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let modified = Utc::now();
+        let mut session = SessionRef {
+            source: crate::source::SOURCE_OPENCODE,
+            declared_source: None,
+            path: dir.path().join("opencode.db/session-one"),
+            project: None,
+            cwd: None,
+            started_at: None,
+            size_bytes: 100,
+            group_modified_at: Some(modified),
+            group_member_count: 0,
+        };
+        assert_eq!(session_modified_at(&session), Some(modified));
+        session.group_modified_at = None;
+        assert_eq!(session_modified_at(&session), None);
+        session.path = dir.path().join("export.json");
+        std::fs::write(&session.path, b"{}").unwrap();
+        let filesystem_modified = DateTime::<Utc>::from(
+            std::fs::metadata(&session.path)
+                .unwrap()
+                .modified()
+                .unwrap(),
+        );
+        assert_eq!(session_modified_at(&session), Some(filesystem_modified));
+        session.group_modified_at = Some(modified);
+        assert_eq!(session_modified_at(&session), Some(modified));
+    }
 
     /// A real source with a counter around its `load`.
     ///
@@ -2191,6 +2684,113 @@ mod tests {
         assert_eq!(f.states(), vec![QueueState::Pending]);
     }
 
+    /// Insights feed T (owner decision D4, open): with the setting on, a
+    /// full pass stores counter rows for quiet sessions, leaving out a Never
+    /// folder; with it off, nothing is read and no key is made.
+    #[tokio::test]
+    async fn the_counter_pass_runs_only_when_switched_on_and_skips_never_folders() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.write_session("quiet", "22222222-2222-2222-2222-222222222222", 0);
+        f.write_session("skip", "33333333-3333-3333-3333-333333333333", 0);
+        f.set_mode("skip", ProjectMode::Ignore);
+        let later = Utc::now() + chrono::Duration::hours(2);
+        let stored = |f: &WatcherFixture| {
+            f.shared.insights_counter.week_value(
+                true,
+                None,
+                chrono::FixedOffset::east_opt(0).unwrap(),
+                later,
+                &crate::daemon::insights_week::NeverFolders::NONE,
+                crate::daemon::insights_week::WeekOptions::default(),
+            )["sessions_stored"]
+                .clone()
+        };
+
+        f.settle(later).await;
+        assert!(
+            !f.shared
+                .store
+                .daemon_path(super::super::insights_week::COUNTER_ROWS_FILE)
+                .exists()
+        );
+        assert_eq!(stored(&f), 0);
+
+        f.shared.settings.lock().unwrap().insights_counter_pass = true;
+        tick(&f.shared, later).await.unwrap();
+        assert_eq!(stored(&f), 2, "the Never folder is left out");
+
+        // A folder set to Never later loses its rows on the next pass.
+        f.set_mode("quiet", ProjectMode::Ignore);
+        tick(&f.shared, later).await.unwrap();
+        assert_eq!(stored(&f), 1);
+    }
+
+    /// A global Never override leaves every folder out of the counter pass
+    /// (owner decision D4): one whose own rule is Ask, and one with no rule
+    /// at all. Their stored rows drop, and clearing the override reads them
+    /// again.
+    #[tokio::test]
+    async fn a_global_never_override_leaves_every_folder_out_of_the_counter_pass() {
+        let f = WatcherFixture::new();
+        f.write_session("ask", "11111111-1111-1111-1111-111111111111", 0);
+        f.write_session("unruled", "22222222-2222-2222-2222-222222222222", 0);
+        f.set_mode("ask", ProjectMode::NotifyOnly);
+        let later = Utc::now() + chrono::Duration::hours(2);
+        let stored = |f: &WatcherFixture| {
+            f.shared.insights_counter.week_value(
+                true,
+                None,
+                chrono::FixedOffset::east_opt(0).unwrap(),
+                later,
+                &crate::daemon::insights_week::NeverFolders::NONE,
+                crate::daemon::insights_week::WeekOptions::default(),
+            )["sessions_stored"]
+                .clone()
+        };
+        f.settle(later).await;
+        f.shared.settings.lock().unwrap().insights_counter_pass = true;
+        tick(&f.shared, later).await.unwrap();
+        assert_eq!(stored(&f), 2);
+
+        f.shared
+            .policy
+            .lock()
+            .unwrap()
+            .set_contribution_override(ProjectMode::Ignore, later, None)
+            .unwrap();
+        tick(&f.shared, later).await.unwrap();
+        assert_eq!(stored(&f), 0, "every folder is Never under the override");
+
+        assert!(
+            f.shared
+                .policy
+                .lock()
+                .unwrap()
+                .clear_contribution_override()
+        );
+        tick(&f.shared, later).await.unwrap();
+        assert_eq!(stored(&f), 2, "read again once the override is cleared");
+    }
+
+    /// A session still being written is not read by the counter pass.
+    #[tokio::test]
+    async fn the_counter_pass_waits_for_quiescence() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.shared.settings.lock().unwrap().insights_counter_pass = true;
+        tick(&f.shared, Utc::now()).await.unwrap();
+        let value = f.shared.insights_counter.week_value(
+            true,
+            None,
+            chrono::FixedOffset::east_opt(0).unwrap(),
+            Utc::now(),
+            &crate::daemon::insights_week::NeverFolders::NONE,
+            crate::daemon::insights_week::WeekOptions::default(),
+        );
+        assert_eq!(value["sessions_stored"], 0);
+    }
+
     #[tokio::test]
     async fn a_session_still_being_written_is_not_queued() {
         // Only one tick, so size stability was never confirmed.
@@ -2232,6 +2832,73 @@ mod tests {
         assert_eq!(report.auto_ready, 1, "{report:?}");
         assert_eq!(report.queued, 0);
         assert_eq!(f.states(), vec![QueueState::Approved]);
+    }
+
+    /// A session in a declared trajectory folder waits for a person even
+    /// when its project is armed -- the same rule as a staged import. The
+    /// folder holds exports somebody added, not an agent store they armed.
+    /// Paired with the test above: the same arming approves a Claude Code
+    /// session in the same pass, so what holds this one is the rule.
+    #[tokio::test]
+    async fn a_declared_trajectory_session_is_never_armed() {
+        let f = WatcherFixture::new();
+        let exports = f._dir.path().join("exports");
+        std::fs::create_dir_all(&exports).unwrap();
+        f.shared.settings.lock().unwrap().trajectory_source =
+            Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: exports.clone(),
+            });
+        let cwd = abs("Users/testuser/code/proj");
+        std::fs::write(
+            exports.join("exported.json"),
+            serde_json::json!([
+                {"role": "meta", "source": "letta", "cwd": cwd},
+                {"role": "user", "content": "hello", "timestamp": "2026-08-08T10:00:00Z"},
+                {"role": "assistant", "content": "hi", "timestamp": "2026-08-08T10:00:05Z"}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.set_mode("proj", ProjectMode::AutoUpload);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+
+        let entries = f.shared.queue.lock().unwrap().all().to_vec();
+        let state_of = |source: &str| {
+            entries
+                .iter()
+                .filter(|e| e.source == source)
+                .map(|e| e.state)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            state_of(crate::source::SOURCE_CLAUDE_CODE),
+            vec![QueueState::Approved],
+            "the arming itself works: {entries:?}"
+        );
+        assert_eq!(
+            state_of(crate::source::SOURCE_TRAJECTORY),
+            vec![QueueState::Pending],
+            "an armed project must not arm a declared trajectory session: {entries:?}"
+        );
+
+        // A later pass sees the same file unchanged and takes the skip-load
+        // path, which re-applies a standing opt-in to a `Pending` entry. That
+        // path must hold a trajectory session too, on every later pass.
+        for now in ["2030-01-02T00:00:00Z", "2030-01-03T00:00:00Z"] {
+            f.settle(at(now)).await;
+            let entries = f.shared.queue.lock().unwrap().all().to_vec();
+            let trajectory = entries
+                .iter()
+                .filter(|e| e.source == crate::source::SOURCE_TRAJECTORY)
+                .map(|e| e.state)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                trajectory,
+                vec![QueueState::Pending],
+                "a later pass must not re-approve a trajectory session at {now}: {entries:?}"
+            );
+        }
     }
 
     /// Arming is a standing yes to sending *finished* work unattended, not
@@ -2942,7 +3609,7 @@ mod tests {
     fn grant_test_cfg(scopes: &[&str]) -> crate::config::ContributorConfig {
         crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: true,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
@@ -3300,8 +3967,58 @@ mod tests {
         assert_eq!(armed[0].project_label.as_deref(), Some("new"));
     }
 
+    /// A trajectory export never arms a folder under the Flow 1 grant: it is
+    /// a file somebody added, not a session of an agent store the grant
+    /// covers, and the session itself always waits for a person. An export
+    /// naming an unrecorded project writes no `armed-by-default` row and
+    /// leaves that folder on Ask.
+    #[tokio::test]
+    async fn a_trajectory_export_does_not_arm_a_folder_under_the_grant() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let exports = f._dir.path().join("exports");
+        std::fs::create_dir_all(&exports).unwrap();
+        f.shared.settings.lock().unwrap().trajectory_source =
+            Some(crate::daemon::settings::SourceDeclaration::Watch {
+                path: exports.clone(),
+            });
+        grant_automatic(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+
+        let cwd = abs("Users/testuser/code/exported");
+        std::fs::write(
+            exports.join("exported.json"),
+            serde_json::json!([
+                {"role": "meta", "source": "letta", "cwd": cwd},
+                {"role": "user", "content": "hello", "timestamp": "2026-08-08T10:00:00Z"},
+                {"role": "assistant", "content": "hi", "timestamp": "2026-08-08T10:00:05Z"}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+
+        assert_eq!(mode_of(&f, "exported"), (ProjectMode::NotifyOnly, false));
+        let audit = crate::daemon::audit::load(&f.shared.store).unwrap();
+        assert!(
+            !audit.iter().any(|e| e.action == "armed-by-default"),
+            "{audit:?}"
+        );
+        let queue = f.shared.queue.lock().unwrap();
+        let export: Vec<_> = queue
+            .all()
+            .iter()
+            .filter(|e| e.source == crate::source::SOURCE_TRAJECTORY)
+            .map(|e| e.state)
+            .collect();
+        assert_eq!(export, vec![QueueState::Pending]);
+    }
+
     /// #1173: the Flow 1 grant arms a newly discovered folder's own mode, but
-    /// an "Ask me" contribution override still governs it -- the mode in
+    /// an "Ask" contribution override still governs it -- the mode in
     /// force is read again after `arm_by_default`, so the new session waits
     /// for a person. Clearing the override leaves the folder armed.
     #[tokio::test]
@@ -4490,6 +5207,68 @@ mod tests {
         assert_eq!(row.project_label.as_deref(), Some("proj"));
     }
 
+    /// Set the saved config's scope-choice record, as an enrollment, a choice,
+    /// or a config that predates the record would leave it.
+    fn set_chosen(f: &WatcherFixture, chosen: Option<bool>) {
+        let mut cfg = f.shared.store.load_config().unwrap().unwrap();
+        cfg.consent_scopes_chosen = chosen;
+        f.shared.store.save_config(&cfg).unwrap();
+    }
+
+    /// An armed folder approves nothing on anyone's behalf while the
+    /// enrollment's scopes were never chosen -- an arming left from before a
+    /// new enrollment, say. The session waits for a person (whose `approve`
+    /// is refused too), and once the scopes are chosen the next pass
+    /// approves it as in any armed folder.
+    #[tokio::test]
+    async fn an_unchosen_enrolment_approves_nothing_unattended() {
+        let f = WatcherFixture::new();
+        // The folder is known to the daemon before it is armed.
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        arm_via_ipc(&f, "proj", false);
+        // A pass records what was on disk at the arming (K5).
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        set_chosen(&f, Some(false));
+        let fresh = f.write_session_started(
+            "proj",
+            "33333333-3333-3333-3333-333333333333",
+            0,
+            &Utc::now().to_rfc3339(),
+        );
+        let first = f.settle(at("2030-01-04T00:00:00Z")).await;
+        let later = f.settle(at("2030-01-05T00:00:00Z")).await;
+        assert_eq!((first.auto_ready, later.auto_ready), (0, 0), "{later:?}");
+        assert_eq!(state_at(&f, &fresh), (QueueState::Pending, false));
+
+        set_chosen(&f, Some(true));
+        f.settle(at("2030-01-06T00:00:00Z")).await;
+        assert_eq!(state_at(&f, &fresh), (QueueState::Approved, true));
+    }
+
+    /// The same armed folder under a config that predates the record sends
+    /// as it always did: the migration rule reaches the watcher too.
+    #[tokio::test]
+    async fn a_legacy_config_still_approves_unattended() {
+        let f = WatcherFixture::new();
+        // The folder is known to the daemon before it is armed.
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        arm_via_ipc(&f, "proj", false);
+        // A pass records what was on disk at the arming (K5).
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        set_chosen(&f, None);
+        let fresh = f.write_session_started(
+            "proj",
+            "33333333-3333-3333-3333-333333333333",
+            0,
+            &Utc::now().to_rfc3339(),
+        );
+        let pass = f.settle(at("2030-01-04T00:00:00Z")).await;
+        assert_eq!(pass.auto_ready, 1, "{pass:?}");
+        assert_eq!(state_at(&f, &fresh), (QueueState::Approved, true));
+    }
+
     /// K6: a full pass can move `status.decisions_owed` with no queue change.
     /// Until a pass records what was on disk for an arming from now, the
     /// hold covers every session in the folder, so a waiting entry there
@@ -4923,6 +5702,905 @@ mod tests {
         }
     }
 
+    /// Push a session file's mtime a day back, so a call answered at the
+    /// wall clock (every IPC handler) reads it as quiescent.
+    fn backdate(path: &Path) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(86_400))
+            .unwrap();
+    }
+
+    fn alpha_key() -> String {
+        project_key_for(Some(&abs("Users/testuser/code/alpha")))
+    }
+
+    fn row_states(rows: &[serde_json::Value]) -> Vec<String> {
+        let mut states: Vec<String> = rows
+            .iter()
+            .map(|r| r["state"].as_str().unwrap().to_string())
+            .collect();
+        states.sort();
+        states
+    }
+
+    /// The first-run picker lists a folder's past sessions whatever the
+    /// queue knows of them: one waiting, one aged out, one never visited.
+    /// The unvisited one carries date and size only -- nothing is loaded
+    /// before the person chooses.
+    #[tokio::test]
+    async fn list_past_sessions_lists_queued_expired_and_unqueued_sessions() {
+        let f = WatcherFixture::new();
+        f.write_session("alpha", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        f.write_session("alpha", "22222222-2222-2222-2222-222222222222", 0);
+        f.settle(at("2030-02-01T00:00:00Z")).await;
+        let expired = f
+            .shared
+            .queue
+            .lock()
+            .unwrap()
+            .expire(at("2030-02-05T00:00:00Z"), 30, false);
+        assert_eq!(expired, 1);
+        f.write_session("alpha", "33333333-3333-3333-3333-333333333333", 0);
+
+        let rows = super::super::past_sessions::list_past_sessions(
+            &f.shared,
+            &alpha_key(),
+            at("2030-02-06T00:00:00Z"),
+        );
+        let rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| serde_json::to_value(r).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(row_states(&rows), vec!["expired", "not_queued", "pending"]);
+        for row in &rows {
+            assert_eq!(row["selectable"], true, "{row}");
+            assert!(row["session_id"].as_str().is_some_and(|s| !s.is_empty()));
+            if row["state"] == "not_queued" {
+                assert!(row["title"].is_null(), "{row}");
+                assert!(row["duration_secs"].is_null(), "{row}");
+                assert!(row["entry_id"].is_null(), "{row}");
+                assert!(row["started_at"].is_string(), "{row}");
+                assert!(row["size_bytes"].as_u64().unwrap() > 0, "{row}");
+            } else {
+                assert!(row["entry_id"].is_string(), "{row}");
+            }
+        }
+    }
+
+    /// Review Focus 5: Rules can be shown seconds after Folders started the
+    /// daemon, before any pass has run. The listing walks the declared
+    /// sources itself, so the folder is known and its sessions are there.
+    #[tokio::test]
+    async fn list_past_sessions_lists_sessions_the_watcher_has_not_seen() {
+        let f = WatcherFixture::new();
+        for name in [
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+        ] {
+            backdate(&f.write_session("alpha", name, 0));
+        }
+        assert!(f.shared.queue.lock().unwrap().all().is_empty());
+        let project_id = super::super::policy::project_id_for(&alpha_key());
+        let listed = ipc_ok(
+            &f,
+            "list_past_sessions",
+            serde_json::json!({"project_id": project_id}),
+        );
+        let rows = listed["sessions"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "{listed}");
+        assert_eq!(listed["total"], 2);
+        assert_eq!(listed["project_mode"], "notify_only");
+        assert_eq!(row_states(rows), vec!["not_queued", "not_queued"]);
+        assert!(rows.iter().all(|r| r["selectable"] == true));
+    }
+
+    /// Fail closed: an id the daemon cannot place is refused, never answered
+    /// with an empty list a shell would draw as "no past sessions".
+    #[tokio::test]
+    async fn list_past_sessions_refuses_an_unknown_project() {
+        let f = WatcherFixture::new();
+        f.write_session("alpha", "11111111-1111-1111-1111-111111111111", 0);
+        for (params, label) in [
+            (
+                serde_json::json!({"project_id": "proj_0000000000000000"}),
+                "project-id-unrecognized",
+            ),
+            (
+                serde_json::json!({"project_id": "p-unknown"}),
+                "project-id-unrecognized",
+            ),
+            (serde_json::json!({"project_id": 7}), "project_id-invalid"),
+            (serde_json::json!({}), "project_id-invalid"),
+        ] {
+            let resp = ipc_call(&f, "list_past_sessions", params.clone());
+            assert_eq!(resp.error.unwrap().message, label, "{params}");
+        }
+    }
+
+    /// A folder set to Never still lists its sessions, so the picker can say
+    /// "rule is Never", but none of them can be ticked.
+    #[tokio::test]
+    async fn list_past_sessions_marks_a_never_folder_unselectable() {
+        let f = WatcherFixture::new();
+        f.write_session("alpha", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        backdate(&f.write_session("alpha", "22222222-2222-2222-2222-222222222222", 0));
+        ipc_ok(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_key": alpha_key(), "mode": "ignore"}),
+        );
+        let project_id = super::super::policy::project_id_for(&alpha_key());
+        let listed = ipc_ok(
+            &f,
+            "list_past_sessions",
+            serde_json::json!({"project_id": project_id}),
+        );
+        let rows = listed["sessions"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "{listed}");
+        assert_eq!(listed["project_mode"], "ignore");
+        assert!(
+            rows.iter()
+                .all(|r| r["state"] == "never" && r["selectable"] == false),
+            "{listed}"
+        );
+    }
+
+    /// A session written moments ago may still be growing: it lists, but as
+    /// `still_active`, and cannot be ticked.
+    #[tokio::test]
+    async fn list_past_sessions_marks_a_session_still_being_written() {
+        let f = WatcherFixture::new();
+        f.write_session("alpha", "11111111-1111-1111-1111-111111111111", 0);
+        let project_id = super::super::policy::project_id_for(&alpha_key());
+        let listed = ipc_ok(
+            &f,
+            "list_past_sessions",
+            serde_json::json!({"project_id": project_id}),
+        );
+        let rows = listed["sessions"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{listed}");
+        assert_eq!(rows[0]["state"], "still_active");
+        assert_eq!(rows[0]["selectable"], false);
+    }
+
+    /// Hash-only on the wire: no session path, no folder path, no cwd.
+    #[tokio::test]
+    async fn list_past_sessions_puts_no_path_in_the_response() {
+        let f = WatcherFixture::new();
+        f.write_session("alpha", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        backdate(&f.write_session("alpha", "22222222-2222-2222-2222-222222222222", 0));
+        let project_id = super::super::policy::project_id_for(&alpha_key());
+        let resp = ipc_call(
+            &f,
+            "list_past_sessions",
+            serde_json::json!({"project_id": project_id}),
+        );
+        assert!(resp.error.is_none(), "{resp:?}");
+        assert_eq!(
+            resp.result.as_ref().unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let wire = serde_json::to_string(&resp).unwrap();
+        let tmp = f._dir.path().to_string_lossy().to_string();
+        assert!(!wire.contains(&tmp), "{wire}");
+        assert!(!wire.contains("Users/testuser"), "{wire}");
+        assert!(!wire.contains("11111111-1111"), "{wire}");
+        assert!(!wire.contains(".jsonl"), "{wire}");
+    }
+
+    // -- `include_past_sessions`: the picker's Continue --------------------
+
+    /// `include_past_sessions` for the alpha fixture project, through the
+    /// real async dispatcher.
+    async fn include(f: &WatcherFixture, ids: &[String]) -> super::super::ipc::Response {
+        include_in(f, &alpha_key(), ids).await
+    }
+
+    async fn include_in(
+        f: &WatcherFixture,
+        project_key: &str,
+        ids: &[String],
+    ) -> super::super::ipc::Response {
+        super::super::ipc::handle_request_async(
+            &f.shared,
+            &super::super::ipc::Request {
+                id: 1,
+                method: "include_past_sessions".to_string(),
+                params: serde_json::json!({
+                    "project_id": super::super::policy::project_id_for(project_key),
+                    "session_ids": ids,
+                }),
+            },
+        )
+        .await
+    }
+
+    fn sid(path: &Path) -> String {
+        super::super::past_sessions::session_id_for(path)
+    }
+
+    /// A quiescent alpha session, written and backdated a day.
+    fn past(f: &WatcherFixture, name: &str) -> PathBuf {
+        let path = f.write_session("alpha", name, 0);
+        backdate(&path);
+        path
+    }
+
+    fn included_rows(f: &WatcherFixture) -> Vec<super::super::audit::AuditEntry> {
+        super::super::audit::load(&f.shared.store)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.action == "past-sessions-included")
+            .collect()
+    }
+
+    /// The latest entry at `path` that is not superseded, if any.
+    fn entry_at(f: &WatcherFixture, path: &Path) -> Option<QueueEntry> {
+        f.shared
+            .queue
+            .lock()
+            .unwrap()
+            .all()
+            .iter()
+            .rev()
+            .find(|e| e.path == path && e.state != QueueState::Superseded)
+            .cloned()
+    }
+
+    const S1: &str = "11111111-1111-1111-1111-111111111111";
+    const S2: &str = "22222222-2222-2222-2222-222222222222";
+    const S3: &str = "33333333-3333-3333-3333-333333333333";
+
+    /// The person ticks two of three: exactly those two are approved, as a
+    /// person's approval, and one audit row says how many.
+    #[tokio::test]
+    async fn include_approves_only_the_chosen_subset() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let (a, b, c) = (past(&f, S1), past(&f, S2), past(&f, S3));
+        // One already offered, two never visited.
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let c_entry = entry_at(&f, &c).expect("settled");
+        assert_eq!(c_entry.state, QueueState::Pending);
+
+        let r = include(&f, &[sid(&a), sid(&b)]).await;
+        assert!(r.error.is_none(), "{r:?}");
+        let v = r.result.unwrap();
+        assert_eq!(v["approved"], 2, "{v}");
+        assert_eq!(v["skipped"].as_array().unwrap().len(), 0, "{v}");
+        for path in [&a, &b] {
+            let e = entry_at(&f, path).expect("approved entry");
+            assert_eq!(e.state, QueueState::Approved);
+            assert!(!e.approved_unattended, "a person's approval");
+            assert!(e.previewed_envelope_digest.is_some(), "pinned to a preview");
+            assert!(e.approved_at.is_some(), "held for the undo window");
+        }
+        assert_eq!(entry_at(&f, &c).unwrap().state, QueueState::Pending);
+        let rows = included_rows(&f);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].detail.as_deref(), Some("2"));
+        assert_eq!(rows[0].project_label.as_deref(), Some("alpha"));
+    }
+
+    /// The selection is a person's decision: it outlives the folder's rule
+    /// going back to Ask, which retracts only unattended approvals.
+    #[tokio::test]
+    async fn include_survives_switching_the_folder_to_ask_me() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let a = past(&f, S1);
+        // Known to the daemon, so the folder can be armed.
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        arm_via_ipc(&f, "alpha", false);
+        let r = include(&f, &[sid(&a)]).await;
+        assert!(r.error.is_none(), "{r:?}");
+        assert_eq!(r.result.unwrap()["approved"], 1);
+        ipc_ok(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_key": alpha_key(), "mode": "notify_only"}),
+        );
+        let e = entry_at(&f, &a).unwrap();
+        assert_eq!(e.state, QueueState::Approved);
+        assert!(!e.approved_unattended);
+    }
+
+    /// Review Focus 1: today's session, ticked while the agent still writes
+    /// it, is skipped by name and never queued half-written.
+    #[tokio::test]
+    async fn include_skips_a_session_that_is_not_quiescent() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let done = past(&f, S1);
+        let live = f.write_session("alpha", S2, 0);
+        let r = include(&f, &[sid(&done), sid(&live)]).await;
+        assert!(r.error.is_none(), "{r:?}");
+        let v = r.result.unwrap();
+        assert_eq!(v["approved"], 1, "{v}");
+        let skipped = v["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1, "{v}");
+        assert_eq!(skipped[0]["session_id"], sid(&live));
+        assert_eq!(skipped[0]["label"], "session-still-active");
+        assert!(entry_at(&f, &live).is_none(), "nothing queued for it");
+    }
+
+    /// Review Focus 2: the folder turned Never between the listing and
+    /// Continue. Every session is refused and no record of an inclusion is
+    /// written.
+    #[tokio::test]
+    async fn include_is_refused_after_the_folder_turns_never() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let a = past(&f, S1);
+        let b = past(&f, S2);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let listed = ipc_ok(
+            &f,
+            "list_past_sessions",
+            serde_json::json!({"project_id": super::super::policy::project_id_for(&alpha_key())}),
+        );
+        assert_eq!(listed["total"], 2);
+        ipc_ok(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_key": alpha_key(), "mode": "ignore"}),
+        );
+        let r = include(&f, &[sid(&a), sid(&b)]).await;
+        assert_eq!(r.error.unwrap().message, "project-mode-never");
+        assert!(included_rows(&f).is_empty());
+        assert!(
+            !f.states().contains(&QueueState::Approved),
+            "{:?}",
+            f.states()
+        );
+    }
+
+    /// Review Focus 4: one id from another folder, a path, or an empty
+    /// string refuses the whole call before anything is approved.
+    #[tokio::test]
+    async fn include_refuses_the_whole_call_on_one_foreign_id() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let a = past(&f, S1);
+        let foreign = f.write_session("beta", S2, 0);
+        backdate(&foreign);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        for bad in [
+            sid(&foreign),
+            a.to_string_lossy().to_string(),
+            String::new(),
+            "sess_0000".to_string(),
+        ] {
+            let r = include(&f, &[sid(&a), bad.clone()]).await;
+            let err = r.error.unwrap_or_else(|| panic!("{bad:?} must refuse"));
+            assert_eq!(err.message, "session-id-unrecognized", "{bad:?}");
+        }
+        assert!(included_rows(&f).is_empty());
+        assert!(!f.states().contains(&QueueState::Approved));
+    }
+
+    /// An offer that aged out is offered again and approved: the person
+    /// chose it, so expiry is no answer.
+    #[tokio::test]
+    async fn include_revives_an_expired_session() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let a = past(&f, S1);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let entry_id = entry_at(&f, &a).unwrap().entry_id;
+        assert_eq!(
+            f.shared
+                .queue
+                .lock()
+                .unwrap()
+                .expire(at("2030-03-01T00:00:00Z"), 30, false),
+            1
+        );
+        let r = include(&f, &[sid(&a)]).await;
+        assert!(r.error.is_none(), "{r:?}");
+        assert_eq!(r.result.unwrap()["approved"], 1);
+        let e = entry_at(&f, &a).unwrap();
+        assert_eq!(e.entry_id, entry_id, "the same offer, revived");
+        assert_eq!(e.state, QueueState::Approved);
+    }
+
+    /// The queue cap stops the watcher offering more; it does not stop a
+    /// person choosing a session they can see.
+    #[tokio::test]
+    async fn include_lands_past_the_queue_cap() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let cap = f.shared.settings.lock().unwrap().max_queue_entries;
+        assert_eq!(cap, 500, "the default cap, DEFAULT_MAX_QUEUE_ENTRIES");
+        {
+            let mut queue = f.shared.queue.lock().unwrap();
+            for i in 0..cap {
+                queue
+                    .upsert(
+                        QueueEntry {
+                            entry_id: uuid::Uuid::new_v4(),
+                            session_hash: format!("sha256:filler-{i}"),
+                            source: "claude-code".into(),
+                            project_key: "/elsewhere".into(),
+                            project_label: "elsewhere".into(),
+                            path: f._dir.path().join(format!("filler-{i}.jsonl")),
+                            size_bytes: 1,
+                            discovered_at: Utc::now(),
+                            ..Default::default()
+                        },
+                        cap,
+                    )
+                    .unwrap();
+            }
+            assert!(!queue.load_can_land(&f._dir.path().join("new"), cap));
+        }
+        let a = past(&f, S1);
+        let r = include(&f, &[sid(&a)]).await;
+        assert!(r.error.is_none(), "{r:?}");
+        assert_eq!(r.result.unwrap()["approved"], 1);
+        assert_eq!(entry_at(&f, &a).unwrap().state, QueueState::Approved);
+    }
+
+    /// The record is written before anything moves: an audit log that cannot
+    /// be written approves nothing, revives nothing and queues nothing.
+    #[tokio::test]
+    async fn include_writes_the_audit_row_first() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let a = past(&f, S1);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let b = past(&f, S2);
+        f.shared
+            .store
+            .write_daemon_file(crate::config::DAEMON_AUDIT_FILE, &[0xff, 0xfe, 0xff])
+            .unwrap();
+        let r = include(&f, &[sid(&a), sid(&b)]).await;
+        assert_eq!(r.error.unwrap().message, "audit-write-failed");
+        assert_eq!(entry_at(&f, &a).unwrap().state, QueueState::Pending);
+        assert!(entry_at(&f, &b).is_none(), "nothing queued");
+    }
+
+    /// Including past sessions approves them, so it is refused whole under
+    /// an enrollment whose scopes nobody chose: nothing is revived, queued,
+    /// approved or recorded.
+    #[tokio::test]
+    async fn include_is_refused_while_consent_scopes_are_not_chosen() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        set_chosen(&f, Some(false));
+        let a = past(&f, S1);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let b = past(&f, S2);
+        let r = include(&f, &[sid(&a), sid(&b)]).await;
+        assert_eq!(
+            r.error.map(|e| e.message),
+            Some(crate::config::CONSENT_SCOPES_NOT_CHOSEN.to_string())
+        );
+        assert_eq!(entry_at(&f, &a).unwrap().state, QueueState::Pending);
+        assert!(entry_at(&f, &b).is_none(), "nothing queued");
+        assert!(included_rows(&f).is_empty(), "nothing recorded");
+    }
+
+    /// The first-run bug, at the daemon: an enrollment is held and its scopes
+    /// were never chosen, and a watch-only Start sends what Custom collected
+    /// -- an Automatic rule left on a folder and past-session picks -- then
+    /// approves everything. Every call is refused, and no pass approves or
+    /// sends anything.
+    #[tokio::test]
+    async fn a_watch_only_start_under_an_unchosen_enrolment_sends_nothing() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        set_chosen(&f, Some(false));
+        let a = past(&f, S1);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let b = past(&f, S2);
+        let project_id = super::super::policy::project_id_for(&alpha_key());
+
+        let rule = ipc_call(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_id": project_id, "mode": "auto_upload"}),
+        );
+        let picks = include(&f, &[sid(&a), sid(&b)]).await;
+        let all = super::super::ipc::handle_request_async(
+            &f.shared,
+            &super::super::ipc::Request {
+                id: 1,
+                method: "approve".to_string(),
+                params: serde_json::json!({"all": true}),
+            },
+        )
+        .await;
+        for r in [rule, picks, all] {
+            assert_eq!(
+                r.error.map(|e| e.message),
+                Some(crate::config::CONSENT_SCOPES_NOT_CHOSEN.to_string())
+            );
+        }
+        // Nothing approved means nothing for the uploader to send; an entry
+        // approved before the hold is held there (see `daemon::tests`).
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        let queue = f.shared.queue.lock().unwrap();
+        assert!(
+            queue
+                .all()
+                .iter()
+                .all(|e| e.state == QueueState::Pending && e.approved_scopes.is_none()),
+            "nothing approved: {:?}",
+            queue.all().iter().map(|e| e.state).collect::<Vec<_>>()
+        );
+    }
+
+    /// `include_past_sessions` called directly over a walk taken now, as
+    /// the IPC handler takes one.
+    async fn include_direct(
+        f: &WatcherFixture,
+        ids: &[String],
+        now: DateTime<Utc>,
+    ) -> super::super::past_sessions::IncludeOutcome {
+        let discovered = super::super::past_sessions::discover_sessions(&f.shared);
+        super::super::past_sessions::include_past_sessions(
+            &f.shared,
+            &discovered,
+            &alpha_key(),
+            ids,
+            now,
+        )
+        .await
+        .expect("include")
+    }
+
+    /// Kristi b#3: the undo window runs from when the approval lands, not
+    /// from when the call began. An include that took longer than the hold
+    /// (here, one whose clock started an hour ago) still leaves the whole
+    /// window, and says when it ends and which entries it covers, so a shell
+    /// can offer Undo.
+    #[tokio::test]
+    async fn include_holds_for_the_undo_window_from_when_the_approval_lands() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        f.shared.settings.lock().unwrap().approval_hold_secs = 600;
+        let a = past(&f, S1);
+        let started = Utc::now();
+        let outcome = include_direct(&f, &[sid(&a)], started - chrono::Duration::hours(1)).await;
+        assert_eq!(outcome.approved, 1, "{outcome:?}");
+        let e = entry_at(&f, &a).unwrap();
+        assert_eq!(outcome.approved_entry_ids, vec![e.entry_id]);
+        assert!(e.approved_at.unwrap() >= started, "{:?}", e.approved_at);
+        let hold_until = outcome.hold_until.expect("a hold to undo within");
+        assert!(hold_until > Utc::now(), "{hold_until}");
+        assert_eq!(Some(hold_until), e.hold_until(600));
+    }
+
+    /// Kristi a#1: for an evidence-admitted contributor, an include leaves
+    /// out what a group approve leaves out. A queued session marked
+    /// ineligible lists unselectable, and naming it anyway skips it with
+    /// its own label, as does a never-offered one found ineligible on read.
+    #[tokio::test]
+    async fn include_leaves_out_an_ineligible_session_for_an_evidence_admitted_contributor() {
+        let f = WatcherFixture::new();
+        f.admitted_on_evidence();
+        let queued = past(&f, S1);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(
+            entry_at(&f, &queued).unwrap().eligibility.as_deref(),
+            Some(crate::daemon::contribution_eligibility::STATE_INELIGIBLE_PERMANENT)
+        );
+        let fresh = past(&f, S2);
+        let listed = ipc_ok(
+            &f,
+            "list_past_sessions",
+            serde_json::json!({"project_id": super::super::policy::project_id_for(&alpha_key())}),
+        );
+        let row = listed["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["session_id"] == sid(&queued))
+            .unwrap()
+            .clone();
+        assert_eq!(row["state"], "ineligible", "{row}");
+        assert_eq!(row["selectable"], false, "{row}");
+
+        let r = include(&f, &[sid(&queued), sid(&fresh)]).await;
+        assert!(r.error.is_none(), "{r:?}");
+        let v = r.result.unwrap();
+        assert_eq!(v["approved"], 0, "{v}");
+        let mut labels: Vec<_> = v["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["label"].as_str().unwrap().to_string())
+            .collect();
+        labels.sort();
+        assert_eq!(labels, vec!["session-ineligible", "session-ineligible"]);
+        assert!(!f.states().contains(&QueueState::Approved));
+    }
+
+    /// Kristi a#3: an offer held for a person's review lists unselectable,
+    /// since an include always skips it; the picker's count stays true.
+    #[tokio::test]
+    async fn list_past_sessions_marks_a_held_offer_unselectable() {
+        let f = WatcherFixture::new();
+        let a = past(&f, S1);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        {
+            let mut queue = f.shared.queue.lock().unwrap();
+            let id = queue.all()[0].entry_id;
+            queue.set_state(
+                id,
+                QueueState::Pending,
+                Some(crate::daemon::queue::REASONS_NEEDING_A_PERSON[0].to_string()),
+            );
+            assert!(queue.get(id).unwrap().held_for_review());
+        }
+        let listed = ipc_ok(
+            &f,
+            "list_past_sessions",
+            serde_json::json!({"project_id": super::super::policy::project_id_for(&alpha_key())}),
+        );
+        let rows = listed["sessions"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{listed}");
+        assert_eq!(rows[0]["session_id"], sid(&a));
+        assert_eq!(rows[0]["state"], "held_for_review");
+        assert_eq!(rows[0]["selectable"], false);
+    }
+
+    /// Kristi a#5: a revive is the person's choice and stands even when the
+    /// approval cannot land -- here, watching only, with no enrollment to
+    /// approve under. The session waits again, and the badge counts it.
+    #[tokio::test]
+    async fn include_revives_an_expired_session_even_when_the_approval_cannot_land() {
+        let f = WatcherFixture::new();
+        let a = past(&f, S1);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        f.shared
+            .queue
+            .lock()
+            .unwrap()
+            .expire(at("2030-03-01T00:00:00Z"), 30, false);
+        let r = include(&f, &[sid(&a)]).await;
+        assert!(r.error.is_none(), "{r:?}");
+        let v = r.result.unwrap();
+        assert_eq!(v["approved"], 0, "{v}");
+        assert_eq!(v["skipped"][0]["label"], "not-enrolled", "{v}");
+        assert_eq!(entry_at(&f, &a).unwrap().state, QueueState::Pending);
+        let owed = crate::daemon::queue::decisions_owed(
+            &f.shared.queue.lock().unwrap(),
+            &f.shared.policy.lock().unwrap(),
+            crate::daemon::settings::ScrubCheck::Automatic,
+        );
+        assert_eq!(owed, 1, "the revived session is a decision owed");
+    }
+
+    /// Kristi b#14: two sessions with identical bytes are one queue entry.
+    /// The include approves it once, and names the second session a
+    /// duplicate, so every session asked for is answered exactly once.
+    #[tokio::test]
+    async fn include_answers_two_sessions_with_identical_bytes_once_each() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let a = past(&f, S1);
+        let b = a.with_file_name(format!("{S2}.jsonl"));
+        std::fs::copy(&a, &b).unwrap();
+        backdate(&b);
+        let r = include(&f, &[sid(&a), sid(&b)]).await;
+        assert!(r.error.is_none(), "{r:?}");
+        let v = r.result.unwrap();
+        assert_eq!(v["approved"], 1, "{v}");
+        let skipped = v["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1, "{v}");
+        assert_eq!(skipped[0]["label"], "session-duplicate", "{v}");
+        assert_eq!(v["approved_entry_ids"].as_array().unwrap().len(), 1, "{v}");
+    }
+
+    /// Kristi b#4: Never set while an include is under way. The approval is
+    /// the last barrier: an entry whose folder turned Never before the
+    /// approval lands is skipped, never approved.
+    #[tokio::test]
+    async fn an_approval_skips_an_entry_whose_folder_turned_never() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let a = past(&f, S1);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let id = entry_at(&f, &a).unwrap().entry_id;
+        // The policy alone, not `set_project_mode`: the entry stays
+        // `Pending`, as one an include created after its own check would.
+        f.set_mode("alpha", ProjectMode::Ignore);
+        let r = super::super::ipc::handle_request_async(
+            &f.shared,
+            &super::super::ipc::Request {
+                id: 1,
+                method: "approve".to_string(),
+                params: serde_json::json!({"entry_id": id.to_string()}),
+            },
+        )
+        .await;
+        assert!(r.error.is_none(), "{r:?}");
+        let v = r.result.unwrap();
+        assert_eq!(v["approved"], 0, "{v}");
+        assert_eq!(v["skipped"][0]["reason_label"], "project-mode-never", "{v}");
+        assert_eq!(entry_at(&f, &a).unwrap().state, QueueState::Pending);
+    }
+
+    /// Kristi N5: a Never set after the include does not take the person's
+    /// approval back, any more than Ask does.
+    #[tokio::test]
+    async fn include_survives_switching_the_folder_to_never() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let a = past(&f, S1);
+        let r = include(&f, &[sid(&a)]).await;
+        assert_eq!(r.result.unwrap()["approved"], 1);
+        ipc_ok(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_key": alpha_key(), "mode": "ignore"}),
+        );
+        let e = entry_at(&f, &a).unwrap();
+        assert_eq!(e.state, QueueState::Approved);
+        assert!(!e.approved_unattended);
+    }
+
+    /// Owner decision (2026-10-05): sessions a person included do not count
+    /// against the watcher's queue cap, so a large include never starves the
+    /// folders the watcher offers from.
+    #[tokio::test]
+    async fn an_included_session_does_not_count_against_the_watchers_cap() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        f.set_max_queue_entries(1);
+        let a = past(&f, S1);
+        let r = include(&f, &[sid(&a)]).await;
+        assert_eq!(r.result.unwrap()["approved"], 1);
+        let e = entry_at(&f, &a).unwrap();
+        assert!(e.person_included, "{e:?}");
+        assert!(
+            f.shared
+                .queue
+                .lock()
+                .unwrap()
+                .load_can_land(&f._dir.path().join("new.jsonl"), 1),
+            "the watcher still has its one place"
+        );
+        f.write_session("alpha", S2, 0);
+        let report = f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(report.queued, 1, "{report:?}");
+    }
+
+    /// Owner decision (2026-10-05): live person-included entries have a
+    /// total limit. An include that could go past it is refused as a whole,
+    /// with a fixed label, before any record or change.
+    #[tokio::test]
+    async fn include_is_refused_above_the_live_included_limit() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let limit = super::super::past_sessions::MAX_LIVE_INCLUDED_SESSIONS;
+        {
+            let mut queue = f.shared.queue.lock().unwrap();
+            for i in 0..limit {
+                queue
+                    .upsert(
+                        QueueEntry {
+                            entry_id: uuid::Uuid::new_v4(),
+                            session_hash: format!("sha256:included-{i}"),
+                            source: "claude-code".into(),
+                            project_key: "/elsewhere".into(),
+                            project_label: "elsewhere".into(),
+                            path: f._dir.path().join(format!("included-{i}.jsonl")),
+                            size_bytes: 1,
+                            discovered_at: Utc::now(),
+                            state: QueueState::Approved,
+                            person_included: true,
+                            ..Default::default()
+                        },
+                        usize::MAX,
+                    )
+                    .unwrap();
+            }
+        }
+        let a = past(&f, S1);
+        let r = include(&f, &[sid(&a)]).await;
+        assert_eq!(r.error.unwrap().message, "included-sessions-limit");
+        assert!(included_rows(&f).is_empty());
+        assert!(entry_at(&f, &a).is_none());
+    }
+
+    /// Owner decision (2026-10-05): the picker lists a folder's newest
+    /// sessions up to the per-include limit and says how many more there
+    /// are, so "Include every past session" is one call that fits.
+    #[tokio::test]
+    async fn list_past_sessions_lists_the_newest_up_to_the_limit_and_counts_the_rest() {
+        let f = WatcherFixture::new();
+        let limit = super::super::past_sessions::MAX_SESSIONS_PER_INCLUDE;
+        for i in 0..limit + 2 {
+            past(&f, &format!("{:08x}-1111-4111-8111-111111111111", i));
+        }
+        let listed = ipc_ok(
+            &f,
+            "list_past_sessions",
+            serde_json::json!({"project_id": super::super::policy::project_id_for(&alpha_key())}),
+        );
+        assert_eq!(listed["sessions"].as_array().unwrap().len(), limit);
+        assert_eq!(listed["total"], limit);
+        assert_eq!(listed["not_listed"], 2);
+    }
+
+    /// Kristi b#17: an uploaded, unchanged session is not offered again by
+    /// an include: it answers `not-pending`.
+    #[tokio::test]
+    async fn include_refuses_an_uploaded_unchanged_session() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let a = past(&f, S1);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        {
+            let mut queue = f.shared.queue.lock().unwrap();
+            let id = queue.all()[0].entry_id;
+            queue.set_state(id, QueueState::Uploaded, None);
+        }
+        let r = include(&f, &[sid(&a)]).await;
+        let v = r.result.unwrap();
+        assert_eq!(v["approved"], 0, "{v}");
+        assert_eq!(v["skipped"][0]["label"], "not-pending", "{v}");
+    }
+
+    /// Kristi b#13: an expired offer whose session changed since is not
+    /// revived with its old hash; the session is read again and offered
+    /// fresh, so what is approved is what is there now.
+    #[tokio::test]
+    async fn include_reoffers_an_expired_session_that_changed() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let a = past(&f, S1);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let old = entry_at(&f, &a).unwrap();
+        f.shared
+            .queue
+            .lock()
+            .unwrap()
+            .expire(at("2030-03-01T00:00:00Z"), 30, false);
+        f.append_to_session(&a, "alpha", S1);
+        backdate(&a);
+        let r = include(&f, &[sid(&a)]).await;
+        assert_eq!(r.result.unwrap()["approved"], 1);
+        let e = entry_at(&f, &a).unwrap();
+        assert_ne!(e.entry_id, old.entry_id);
+        assert_ne!(e.session_hash, old.session_hash);
+        assert_eq!(e.state, QueueState::Approved);
+    }
+
+    /// Kristi a#4: whether a grouped session is still being written is
+    /// judged at the read from a fresh walk, not from the walk the caller
+    /// took before: a delegated transcript written in between holds it.
+    #[tokio::test]
+    async fn include_judges_a_grouped_session_from_a_fresh_walk() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        let a = past(&f, S1);
+        let stale = super::super::past_sessions::discover_sessions(&f.shared);
+        f.write_subagent("alpha", S1, "agent-1");
+        let outcome = super::super::past_sessions::include_past_sessions(
+            &f.shared,
+            &stale,
+            &alpha_key(),
+            &[sid(&a)],
+            Utc::now(),
+        )
+        .await
+        .expect("include");
+        assert_eq!(outcome.approved, 0, "{outcome:?}");
+        assert_eq!(outcome.skipped[0].label, "session-still-active");
+        assert!(entry_at(&f, &a).is_none());
+    }
+
     #[tokio::test]
     async fn a_dismissed_session_is_not_re_offered_after_it_grows() {
         // "Not this one" is a decision about the conversation, not about the
@@ -5094,14 +6772,14 @@ mod tests {
         assert_eq!(count(&c), 0, "a declined session must not be re-read");
     }
 
-    /// Enrol the fixture, so `approve` has a config to build an envelope
+    /// Enroll the fixture, so `approve` has a config to build an envelope
     /// against. Without one it skips every entry `not-enrolled` and never
     /// reaches the size check at all.
     fn enrol(f: &WatcherFixture) {
         let device = crate::identity::DeviceIdentity::load_or_generate(&f.shared.store).unwrap();
         let cfg = crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
@@ -5463,6 +7141,180 @@ mod tests {
         assert_ne!(queue.pending()[0].session_hash, first_hash);
     }
 
+    /// Nudge value addendum, 4.4: an entry is minted with its local-estimate
+    /// features, and a session that grew is minted afresh, so the
+    /// replacement's features describe the new content and the old entry's
+    /// are left behind with it.
+    #[tokio::test]
+    async fn a_grown_sessions_replacement_carries_fresh_estimate_features() {
+        let f = WatcherFixture::new();
+        let name = "11111111-1111-1111-1111-111111111111";
+        let path = f.write_session("proj", name, 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let first = {
+            let queue = f.shared.queue.lock().unwrap();
+            queue.all()[0].clone()
+        };
+        let first_features = first
+            .estimate_features
+            .clone()
+            .expect("a minted entry carries features");
+        assert!(first_features.content_bytes > 0, "{first_features:?}");
+
+        f.append_to_session(&path, "proj", name);
+        let c = loads();
+        f.settle_counted(at("2030-01-02T00:00:00Z"), &c);
+
+        let queue = f.shared.queue.lock().unwrap();
+        let fresh = queue.pending()[0];
+        assert_ne!(fresh.session_hash, first.session_hash);
+        let fresh_features = fresh
+            .estimate_features
+            .as_ref()
+            .expect("the replacement is minted with features");
+        assert!(
+            fresh_features.content_bytes > first_features.content_bytes,
+            "{fresh_features:?} vs {first_features:?}"
+        );
+    }
+
+    /// Six waiting sessions, settled, then stripped of their features as an
+    /// entry queued before the field existed would be.
+    async fn six_without_features() -> WatcherFixture {
+        let f = WatcherFixture::new();
+        for i in 1..=6_u8 {
+            let name = format!("{i}{i}{i}{i}{i}{i}{i}{i}-1111-1111-1111-111111111111");
+            f.write_session("proj", &name, 0);
+        }
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        f.shared
+            .queue
+            .lock()
+            .unwrap()
+            .clear_estimate_features_for_test();
+        f
+    }
+
+    fn with_features(f: &WatcherFixture) -> usize {
+        f.shared
+            .queue
+            .lock()
+            .unwrap()
+            .pending()
+            .iter()
+            .filter(|e| e.estimate_features.is_some())
+            .count()
+    }
+
+    /// OWNER DECISION E13: entries without features are backfilled at most
+    /// `ESTIMATE_BACKFILL_PER_PASS` per pass, each re-read through its own
+    /// adapter, so a large old queue costs a few loads a pass, not all of
+    /// them at once.
+    #[tokio::test]
+    async fn backfill_loads_at_most_the_bound_per_pass() {
+        let f = six_without_features().await;
+        assert_eq!(with_features(&f), 0);
+        assert_eq!(f.shared.queue.lock().unwrap().pending().len(), 6);
+
+        let c = loads();
+        f.tick_counted(at("2030-01-02T00:00:00Z"), &c);
+        assert_eq!(count(&c), ESTIMATE_BACKFILL_PER_PASS);
+        assert_eq!(with_features(&f), ESTIMATE_BACKFILL_PER_PASS);
+
+        let c = loads();
+        f.tick_counted(at("2030-01-02T00:01:00Z"), &c);
+        assert_eq!(count(&c), 6 - ESTIMATE_BACKFILL_PER_PASS);
+        assert_eq!(with_features(&f), 6);
+
+        // Nothing left to backfill: an unchanged queue is not re-read.
+        let c = loads();
+        f.tick_counted(at("2030-01-02T00:02:00Z"), &c);
+        assert_eq!(count(&c), 0);
+
+        // The backfilled features are the ones a fresh mint records, and
+        // they persist with the queue.
+        let reloaded = crate::daemon::queue::Queue::load(&f.shared.store).unwrap();
+        assert_eq!(
+            reloaded
+                .pending()
+                .iter()
+                .filter(|e| e.estimate_features.is_some())
+                .count(),
+            6
+        );
+    }
+
+    /// Never while a preview builds or waits to: the preview has the
+    /// machine first (OWNER DECISION E13).
+    #[tokio::test]
+    async fn backfill_waits_while_a_preview_builds() {
+        let f = six_without_features().await;
+        let entry_id = f.shared.queue.lock().unwrap().pending()[0].entry_id;
+        f.shared.previews.request(
+            entry_id,
+            crate::daemon::preview_scheduler::PreviewKey::for_entry(
+                std::path::Path::new("/tmp/previewing.jsonl"),
+                1,
+                "fingerprint".to_string(),
+            ),
+            1,
+        );
+        let c = loads();
+        f.tick_counted(at("2030-01-02T00:00:00Z"), &c);
+        assert_eq!(count(&c), 0, "queued preview");
+        let job = f.shared.previews.take_next().unwrap();
+        f.tick_counted(at("2030-01-02T00:01:00Z"), &c);
+        assert_eq!(count(&c), 0, "running preview");
+        assert_eq!(with_features(&f), 0);
+        f.shared.previews.finish(
+            &job,
+            crate::daemon::preview_scheduler::PreviewOutcome::Failed {
+                code: "test",
+                label: "test",
+            },
+        );
+
+        // A preview built directly, outside the scheduler, holds it too.
+        {
+            let _building = f.shared.preview_build_started();
+            f.tick_counted(at("2030-01-02T00:02:00Z"), &c);
+            assert_eq!(count(&c), 0, "direct preview");
+        }
+        f.tick_counted(at("2030-01-02T00:03:00Z"), &c);
+        assert_eq!(count(&c), ESTIMATE_BACKFILL_PER_PASS);
+    }
+
+    /// A session whose bytes moved since the entry was minted is not given
+    /// features from the new bytes: the watcher's own path supersedes it,
+    /// and the replacement is minted with its own.
+    #[tokio::test]
+    async fn backfill_never_attaches_features_of_other_bytes() {
+        let f = WatcherFixture::new();
+        let name = "11111111-1111-1111-1111-111111111111";
+        let path = f.write_session("proj", name, 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let old_hash = f.shared.queue.lock().unwrap().pending()[0]
+            .session_hash
+            .clone();
+        f.shared
+            .queue
+            .lock()
+            .unwrap()
+            .clear_estimate_features_for_test();
+        f.append_to_session(&path, "proj", name);
+        let c = loads();
+        f.settle_counted(at("2030-01-02T00:00:00Z"), &c);
+        let queue = f.shared.queue.lock().unwrap();
+        let old = queue
+            .all()
+            .iter()
+            .find(|e| e.session_hash == old_hash)
+            .unwrap();
+        assert!(old.estimate_features.is_none());
+        assert_eq!(old.state, QueueState::Superseded);
+        assert!(queue.pending()[0].estimate_features.is_some());
+    }
+
     #[tokio::test]
     async fn a_new_subagent_reloads_even_though_the_parent_files_own_stat_is_unchanged() {
         // The trap a naive pre-check falls into. A delegated transcript
@@ -5540,6 +7392,41 @@ mod tests {
         let report = f.tick_counted(at("2030-01-01T00:01:00Z"), &c);
         assert_eq!(report.ignored, 1, "{report:?}");
         assert_eq!(count(&c), 0);
+    }
+
+    /// U4a: an offer records when its session was last written, from the
+    /// same observation it was judged on -- for a claude-code session, the
+    /// group's newest write, so a conversation whose delegated transcript
+    /// was written after its parent went quiet is idle only from then.
+    #[tokio::test]
+    async fn a_minted_entry_records_the_groups_last_write() {
+        let f = WatcherFixture::new();
+        let session = "11111111-1111-1111-1111-111111111111";
+        let parent = f.write_session("proj", session, 0);
+        let sub = f.write_subagent("proj", session, "agent-a");
+        let set = |path: &Path, days: u64| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400),
+                )
+                .unwrap();
+            DateTime::<Utc>::from(std::fs::metadata(path).unwrap().modified().unwrap())
+        };
+        let parent_written = set(&parent, 3);
+        let sub_written = set(&sub, 2);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+
+        let queue = f.shared.queue.lock().unwrap();
+        let e = &queue.all()[0];
+        assert_eq!(e.last_modified_at, Some(sub_written));
+        assert_ne!(e.last_modified_at, Some(parent_written));
+        assert_eq!(
+            e.last_modified_at, e.observed_modified_at,
+            "minted from the one observation the offer was judged on"
+        );
     }
 
     #[tokio::test]

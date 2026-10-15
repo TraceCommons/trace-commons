@@ -15,7 +15,7 @@ public struct ContributionModeCopy: Decodable, Equatable, Sendable {
 
     public let title: String
     public let mixed: String
-    /// Ask me, Automatic, Never, in that order.
+    /// Ask, Automatic, Never, in that order.
     public let choices: [Choice]
     /// Said while a contribution override is in force.
     public let overrideActive: String
@@ -74,6 +74,11 @@ public struct ContributionOverrideConfirmCopy: Decodable, Equatable, Sendable {
 
     /// The payload fields this shell decodes, by wire name.
     public static let consumedFields = ["arming", "body", "cancel", "confirm", "mode", "title"]
+
+    /// The `mode` of the confirmation before `clear_contribution_override`
+    /// (`project_copy::CONTRIBUTION_OVERRIDE_CLEAR_MODE`). Never a
+    /// `ProjectMode`, and never sent to `set_contribution_override`.
+    public static let clearMode = "clear"
 
     /// Decode the payload, or nil if it will not parse, a word is empty, or
     /// an `auto_upload` confirmation arrives without its arming disclosure:

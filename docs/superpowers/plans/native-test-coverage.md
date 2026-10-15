@@ -219,7 +219,7 @@ decode, and the gate statement read from the core, never authored locally.
 Carry forward: wherever the admission-evidence control lands in the redesign
 (a footer, a persistent toolbar, whatever the three-pane layout uses), it
 must be reachable from every preview, not only a failure path, and must stay
-gated on the same enrolment check.
+gated on the same enrollment check.
 
 ### `TCShellCoreTests/ShellWordingTests.swift` (both files, by line count only)
 

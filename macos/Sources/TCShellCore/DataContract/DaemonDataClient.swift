@@ -14,9 +14,13 @@ import Foundation
 /// replacing it: K1 moves the remaining calls across, and Ron's screens
 /// are written against this one from the start.
 ///
-/// One `async throws` method per IPC method a screen needs. Methods marked
-/// PROVISIONAL are network methods that do not exist on main yet (Zaki's C3);
-/// the live client throws `DaemonDataError.notAvailableYet` for them.
+/// One `async throws` method per IPC method a screen needs. The network
+/// methods (C3, #1187) are routed. Two methods marked PROVISIONAL keep the
+/// earlier shapes the screens were written against, and the live client
+/// throws `DaemonDataError.notAvailableYet` for them; their real replies are
+/// `networkInferenceSummary()` and `networkMissionCatalogue(limit:before:)`.
+/// A method an older attached daemon does not have keeps the daemon's
+/// `unknown_method` refusal; no sample data substitutes for live data.
 public protocol DaemonDataClient: Sendable {
     // MARK: Status and the queue
 
@@ -27,7 +31,15 @@ public protocol DaemonDataClient: Sendable {
     /// `.daemon(code: "bad_params", message: "project-id-unrecognized")`,
     /// never answered with `[]`, so a stale id cannot read as "nothing
     /// waiting".
-    func listPending(projectId: String?) async throws -> [DaemonData.QueueEntry]
+    ///
+    /// `filter` narrows it to the idle candidates the idle card named;
+    /// `order` sorts what is selected (`.suggested`: mission fit, then the
+    /// estimate tier, then size and recency, all decided by the daemon).
+    /// `nil` and `.queue` send neither, so the request is the one before
+    /// these existed.
+    func listPending(
+        projectId: String?, filter: DaemonData.PendingFilter?, order: DaemonData.PendingOrder?
+    ) async throws -> [DaemonData.QueueEntry]
     /// `list_kept`.
     func listKept() async throws -> [DaemonData.QueueEntry]
 
@@ -93,8 +105,14 @@ public protocol DaemonDataClient: Sendable {
     /// of the rest -- `skipped[]` per entry, `excludedHeld` (held for a
     /// person's review) and `excludedIneligible` (cannot be contributed),
     /// neither of which is part of `skipped`. An id the daemon does not
-    /// know is refused with `project-id-unrecognized`.
-    func approveFolder(projectId: String) async throws -> ApproveResponse
+    /// know is refused with `project-id-unrecognized`. A `verdict` is the
+    /// opt-in "Submit all as" answer, sent as `outcome`; `nil` sends none.
+    /// A `filter` narrows the folder to what `listPending` lists under the
+    /// same filter, so Submit under the idle filter sends what is shown;
+    /// `nil` sends none and the whole folder is meant.
+    func approveFolder(
+        projectId: String, verdict: ContributorVerdict?, filter: DaemonData.PendingFilter?
+    ) async throws -> ApproveResponse
     /// `cancel` for one entry: Undo inside the hold window (R7). Only an
     /// entry still `approved` can be cancelled, which the hold guarantees
     /// until it ends; any other is refused with `not-cancelable`. The entry
@@ -112,6 +130,29 @@ public protocol DaemonDataClient: Sendable {
     /// `dismiss`: permanent.
     func dismiss(entryId: String) async throws
 
+    // MARK: Nudges
+
+    /// `nudge_opened {kind}`: sent only from a suggestion's own action
+    /// (Review, See history, the panel row), never for being shown. For
+    /// `verdicts_landed` it acknowledges the news.
+    func nudgeOpened(_ kind: NudgeSurface.Kind) async throws
+    /// `nudge_decline {kind}`: the in-app "Not now". `verdicts_landed` is
+    /// refused by the daemon (`nudge-kind-not-declinable`).
+    func nudgeDecline(_ kind: NudgeSurface.Kind) async throws
+    /// `set_suggestions_enabled {on}`: the cards, the panel row and the mark.
+    func setSuggestionsEnabled(_ on: Bool) async throws
+    /// `set_menu_bar_mark_enabled {on}`: the news ring and the idle halo.
+    func setMenuBarMarkEnabled(_ on: Bool) async throws
+    /// `set_notifications_enabled {on}`: "Notifications from Trace Commons".
+    func setNotificationsEnabled(_ on: Bool) async throws
+    /// `set_notify_kind {kind, on}`. Answering `verdicts_landed` or
+    /// `idle_sessions` either way also ends that kind's one-time offer.
+    func setNotifyKind(_ kind: String, on: Bool) async throws
+    /// `set_settings {<kind>_offer_pending: false}`: a one-time offer
+    /// dismissed without turning the kind on. Only `verdicts_landed` and
+    /// `idle_sessions` have one; any other kind throws and sends nothing.
+    func dismissNotifyOffer(kind: String) async throws
+
     // MARK: Projects and tools
 
     /// `list_projects`.
@@ -127,7 +168,7 @@ public protocol DaemonDataClient: Sendable {
     /// arming disclosure. Automatic without it is refused
     /// (`bad_params` / `confirm-required`), and is refused without grant
     /// terms in force (`unavailable` / `arming-terms-unavailable`) before
-    /// anything is recorded. Ask me and Never take no confirmation on the
+    /// anything is recorded. Ask and Never take no confirmation on the
     /// wire. Read `status` afterwards; the pill never shows a local guess.
     func setContributionOverride(mode: ProjectMode, confirm: Bool) async throws
         -> DaemonData.ContributionOverrideResult
@@ -148,10 +189,26 @@ public protocol DaemonDataClient: Sendable {
 
     /// `get_settings`.
     func settings() async throws -> DaemonData.Settings
+    /// Z1.5, the Private AI switch: `get_settings`' `private_inference`,
+    /// its offer marker and the listener's state.
+    func privateAI() async throws -> DaemonData.PrivateAISwitch
+    /// Z1.5, `set_settings` with `private_inference` and the offer marker.
+    /// Answers what the daemon echoed; nothing is confirmed here, the caller
+    /// confirms with the core's rule (`TCPrivateInference.writeConfirmed`).
+    func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch
     /// `set_settings` with `scrub_check`.
     func setScrubCheck(_ mode: DaemonData.ScrubCheckMode) async throws -> DaemonData.Settings
     /// `set_settings` with `local_notifications`.
     func setLocalNotifications(_ on: Bool) async throws -> DaemonData.Settings
+    /// `set_settings { insights_recap_card_enabled }`: the Insights weekly
+    /// summary card's only switch. The card's "Hide" sends false; the
+    /// Settings switch (`analytics_setting_recap_card`) sends either, so
+    /// "Hide" can be undone.
+    func setInsightsRecapCard(_ on: Bool) async throws -> DaemonData.Settings
+    /// `set_settings { insights_ledger_feed }`: whether Insights may read
+    /// the proxy ledger for the glance and per-call tokens (owner decision D3, settled
+    /// 2026-10-09: on by default, this turns it off). Draw only the confirmed value from the reply.
+    func setInsightsLedgerFeed(_ on: Bool) async throws -> DaemonData.Settings
     /// `set_settings` with `digest_schedule`.
     func setDigestSchedule(_ schedule: DaemonData.DigestSchedule) async throws -> DaemonData.Settings
 
@@ -172,26 +229,67 @@ public protocol DaemonDataClient: Sendable {
     /// `inference_calls`. `limit` 1-200; `cursor` is the previous page's `nextCursor`.
     func inferenceCalls(limit: Int, cursor: String?) async throws -> DaemonData.InferenceCallPage
 
-    // MARK: PROVISIONAL network methods (Zaki's C3)
+    // MARK: Insights
 
-    /// Z1.1, per-model summary. PROVISIONAL.
-    func inferenceSummary() async throws -> DaemonData.InferenceSummary
-    /// Z1.2, `inference_call_proof`. PROVISIONAL.
+    /// `insights_week`: one local ISO week (`YYYY-Www`; `nil` is the current
+    /// week) from the daemon's counter pass, Insights feed T (owner decision
+    /// D4, open). Answers `enabled: false` while the setting is off; an older
+    /// daemon refuses it as `unknown_method`. Either way, and on any failed
+    /// read, the window shows the saved-imports feed instead, never both.
+    func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek
+    /// `insights_glance`: today's routed calls per tool from the proxy
+    /// ledger (on by default; owner decision D3, settled 2026-10-09). `tzSeconds` is the local UTC offset
+    /// (`TimeZone.current.secondsFromGMT()`). `enabled: false`, an older
+    /// daemon's `unknown_method` and any failed read all mean no glance,
+    /// never a zero and never a failed popover.
+    func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance
+
+    // MARK: Network methods (C3, #1187)
+
+    /// Z1.1, `inference_summary`: IronWire's upstream grouped summary;
+    /// registry-priced cost is not billed spend.
+    func networkInferenceSummary() async throws -> DaemonData.NetworkInferenceSummary
+    /// Z1.2, `inference_call_proof`.
     func inferenceCallProof(callId: Int64) async throws -> DaemonData.InferenceProofDetail
-    /// Z1.3, billed spend per model. PROVISIONAL.
+    /// Z1.3, billed spend by model for the entire NEAR AI organization, not this Mac.
     func modelSpend() async throws -> DaemonData.ModelSpend
-    /// Z1.5, the Private AI switch's state and disclosure. PROVISIONAL.
-    func privateAI() async throws -> DaemonData.PrivateAISwitch
-    /// Z1.5, turning Private AI on or off. PROVISIONAL.
-    func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch
-    /// Z2.2, the mission catalogue. PROVISIONAL.
-    func missionCatalogue() async throws -> DaemonData.MissionCatalogue
-    /// Z3.1, invite lookup. PROVISIONAL.
+    /// Z1.5, `private_ai`: the Private AI switch's state with the core's
+    /// disclosure.
+    func networkPrivateAI() async throws -> DaemonData.NetworkPrivateAISwitch
+    /// Z1.5, `set_private_ai`: turning Private AI on or off.
+    /// `consent` is built only from the `NetworkPrivateAISwitch` whose
+    /// disclosure the caller showed (`PrivateAIConsent(acknowledging:)`).
+    /// Enabling with `nil` is refused before anything is sent; the daemon
+    /// gets `confirmed: true` only when a consent is held. Turning off needs
+    /// none.
+    func setNetworkPrivateAI(on: Bool, consent: DaemonData.PrivateAIConsent?) async throws
+        -> DaemonData.NetworkPrivateAISwitch
+    /// Z2.2, one page of the mission catalogue (`MissionCatalogQuery`):
+    /// at most `limit` entries (the daemon's default when `nil`), older than
+    /// the mission id `before`. Pass a page's `catalogue.nextCursor` as
+    /// `before` for the next; `nil` there means the last page.
+    func networkMissionCatalogue(limit: Int?, before: String?) async throws -> DaemonData.NetworkMissionCatalogue
+    /// Z3.1, invite lookup. `code` carries the full invite URL.
     func lookupInvite(code: String) async throws -> DaemonData.InviteLookup
-    /// Z3.2, passkey binding state. PROVISIONAL.
+    /// Z3.2, passkey binding state.
     func passkeyState() async throws -> DaemonData.PasskeyState
-    /// Z3.4, `account_session_status`. PROVISIONAL.
+    /// Z3.4, `account_session_status`.
     func accountState() async throws -> DaemonData.AccountState
+    /// Read-only shared trace_activity policy; no matching/profile input leaves the Mac.
+    func activityMissionsCatalogue() async throws -> DaemonData.ActivityMissionsCatalogue
+    /// Authenticated server contribution facts; unavailable never becomes zero progress.
+    func activityMissionsStatus() async throws -> DaemonData.ActivityMissionsStatus
+
+    // MARK: PROVISIONAL shapes the screens still read
+
+    /// Z1.1, per-model summary. PROVISIONAL: the Inference screen's shape.
+    /// The live client throws `notAvailableYet`; the real reply is
+    /// `networkInferenceSummary()`.
+    func inferenceSummary() async throws -> DaemonData.InferenceSummary
+    /// Z2.2, the mission catalogue. PROVISIONAL: the Missions screen's
+    /// shape. The live client throws `notAvailableYet`; the real reply is
+    /// `networkMissionCatalogue(limit:before:)`.
+    func missionCatalogue() async throws -> DaemonData.MissionCatalogue
 
     // MARK: Live updates
 
@@ -206,9 +304,29 @@ public protocol DaemonDataClient: Sendable {
 }
 
 extension DaemonDataClient {
+    /// `list_pending` in queue order, every pending entry or one project's.
+    public func listPending(projectId: String?) async throws -> [DaemonData.QueueEntry] {
+        try await listPending(projectId: projectId, filter: nil, order: nil)
+    }
+
     /// `approve` for one entry with no verdict.
     public func approve(entryId: String) async throws -> ApproveResponse {
         try await approve(entryId: entryId, verdict: nil, correction: nil)
+    }
+
+    /// `approveFolder` with no verdict.
+    public func approveFolder(projectId: String) async throws -> ApproveResponse {
+        try await approveFolder(projectId: projectId, verdict: nil)
+    }
+
+    /// `approveFolder` over the whole folder.
+    public func approveFolder(projectId: String, verdict: ContributorVerdict?) async throws -> ApproveResponse {
+        try await approveFolder(projectId: projectId, verdict: verdict, filter: nil)
+    }
+
+    /// The first page of the mission catalogue, at the daemon's default size.
+    public func networkMissionCatalogue() async throws -> DaemonData.NetworkMissionCatalogue {
+        try await networkMissionCatalogue(limit: nil, before: nil)
     }
 }
 
@@ -222,6 +340,9 @@ public enum DaemonDataEvent: Equatable, Sendable {
     /// `digest_due`, with the contribution counts a notification is built
     /// from.
     case digestDue(DaemonData.DigestDue)
+    /// `reengage_due`: one standalone re-engagement notification, in the
+    /// daemon's words. Delivered only to a subscriber that accepts it.
+    case reengageDue(DaemonData.ReengageDue)
     /// A scheduled preview reached a terminal state. Read `state`: only
     /// `.ready` carries a summary; `.tooLarge` and `.failed` are answers
     /// too, and must be drawn as what they are, never as ready.
@@ -231,6 +352,10 @@ public enum DaemonDataEvent: Equatable, Sendable {
     /// `inference_call_added`, so the map pulses per real call.
     // PROVISIONAL: event not on main yet; shape follows #1203's `call_added`.
     case inferenceCallAdded(DaemonData.InferenceCallAdded)
+    /// `usage_changed`: the ledger read added a call this tick, while the
+    /// Insights ledger feed is on. A pulse with no payload: re-read
+    /// `insights_glance`.
+    case usageChanged
     case unknown(String)
 }
 
@@ -264,6 +389,11 @@ public enum DaemonDataEventParser {
                 return .unknown(name)
             }
             return .digestDue(digest)
+        case "reengage_due":
+            guard let due = try? decoder.decode(DaemonData.ReengageDue.self, from: payloadData) else {
+                return .unknown(name)
+            }
+            return .reengageDue(due)
         case "preview_ready":
             guard let outcome = try? decoder.decode(DaemonData.PreviewRequestOutcome.self, from: payloadData)
             else { return .unknown(name) }
@@ -274,6 +404,7 @@ public enum DaemonDataEventParser {
                 return .unknown(name)
             }
             return .inferenceCallAdded(call)
+        case "usage_changed": return .usageChanged
         default: return .unknown(name)
         }
     }

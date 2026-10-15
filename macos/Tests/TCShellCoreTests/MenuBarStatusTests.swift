@@ -9,7 +9,7 @@ final class MenuBarStatusTests: XCTestCase {
         XCTAssertNil(MenuBarStatus.badgeText(decisionsOwed: nil))
         XCTAssertEqual(MenuBarStatus.state(decisionsOwed: nil, unhealthy: false, paused: false), .attention)
         let label = MenuBarStatus.accessibilityLabel(decisionsOwed: nil, unhealthy: false, paused: true)
-        XCTAssertTrue(label.contains("Decision count unavailable"))
+        XCTAssertTrue(label.contains("Decisions owed unavailable"))
         XCTAssertFalse(label.contains("Nothing waiting"))
         XCTAssertTrue(label.hasSuffix("Paused."))
     }
@@ -60,7 +60,7 @@ final class MenuBarStatusTests: XCTestCase {
     func testPausedCountKeepsDimmingAndAccessiblePause() {
         let state = MenuBarStatus.state(decisionsOwed: 3, unhealthy: false, paused: true)
         XCTAssertTrue(state.isPaused)
-        XCTAssertTrue(MenuBarStatus.accessibilityLabel(decisionsOwed: 123, unhealthy: false, paused: true).contains("123 sessions"))
+        XCTAssertTrue(MenuBarStatus.accessibilityLabel(decisionsOwed: 123, unhealthy: false, paused: true).contains("123 traces"))
         XCTAssertTrue(MenuBarStatus.accessibilityLabel(decisionsOwed: 3, unhealthy: false, paused: true).hasSuffix("Paused."))
     }
 

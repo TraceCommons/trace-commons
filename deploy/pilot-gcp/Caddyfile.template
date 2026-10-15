@@ -13,16 +13,60 @@
 #
 # Both daemons bind loopback only; Caddy is the public TLS edge. Admin
 # endpoints (e.g. issuer's :8081) stay loopback and are not exposed.
-
 {
 	email ${TC_LE_EMAIL}
+	# Reverse-proxy failures use the default/error logger rather than either
+	# site access logger. Filter it too, or an ordinary upstream restart can
+	# persist a login code to stderr/journald even while access logs are safe.
+	# All three loggers share one policy: the login code is replaced, tenant
+	# identifiers in admin query strings are hashed, and client addresses are
+	# kept only to their /24 (IPv4) or /48 (IPv6) network.
+	log default {
+		format filter {
+			request>uri query {
+				replace code REDACTED
+				hash tenant_id
+				hash tenant_storage_ref
+				hash tenant
+			}
+			request>remote_ip ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			request>client_ip ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			# Client-sent, so not trusted for rate limits, but it can still
+			# carry a real address from a proxy in front of the caller.
+			request>headers>X-Forwarded-For ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			wrap json
+		}
+	}
 	servers {
 		max_header_size 32KB
+		timeouts {
+			# Bounds slow request bodies before they can hold an ingest slot.
+			# This is one deadline for the whole body, and it is global, so it
+			# must fit the largest upload: a 16 MB envelope plus the 4 MiB
+			# slack ingest accepts (~20.2 MB). 300s needs ~0.55 Mbit/s of
+			# upstream; 60s would have refused any uplink below ~2.7 Mbit/s.
+			read_body 300s
+		}
 	}
 }
 
 ingest.${TC_PUBLIC_HOST} {
 	encode gzip
+	# Edge ceiling just above ingest's largest accepted body (a 16 MB
+	# envelope plus 4 MiB of framing, ~20.2 MB; Caddy's MB is decimal), so an
+	# oversized upload is refused here before it reaches ingest at all.
+	request_body {
+		max_size 21MB
+	}
 	reverse_proxy 127.0.0.1:3907 {
 		header_up Host {host}
 		header_up X-Forwarded-For {remote_host}
@@ -30,7 +74,31 @@ ingest.${TC_PUBLIC_HOST} {
 	}
 	log {
 		output file /var/log/caddy/ingest-access.log
-		format json
+		# Login codes arrive only on the legacy browser hand-off query. Keep
+		# the route observable without persisting the single-use credential.
+		format filter {
+			request>uri query {
+				replace code REDACTED
+				hash tenant_id
+				hash tenant_storage_ref
+				hash tenant
+			}
+			request>remote_ip ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			request>client_ip ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			# Client-sent, so not trusted for rate limits, but it can still
+			# carry a real address from a proxy in front of the caller.
+			request>headers>X-Forwarded-For ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			wrap json
+		}
 	}
 }
 
@@ -55,6 +123,30 @@ issuer.${TC_PUBLIC_HOST} {
 	}
 	log {
 		output file /var/log/caddy/issuer-access.log
-		format json
+		# Defensive parity with ingest: no public access log may retain a
+		# parameter named `code`, even if routing changes later.
+		format filter {
+			request>uri query {
+				replace code REDACTED
+				hash tenant_id
+				hash tenant_storage_ref
+				hash tenant
+			}
+			request>remote_ip ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			request>client_ip ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			# Client-sent, so not trusted for rate limits, but it can still
+			# carry a real address from a proxy in front of the caller.
+			request>headers>X-Forwarded-For ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			wrap json
+		}
 	}
 }

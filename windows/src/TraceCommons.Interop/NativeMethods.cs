@@ -304,6 +304,24 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? noticeJson);
 
     /// <summary>
+    /// The offer to move a legacy invite identity to a NEAR AI account, as an
+    /// owned JSON object of the offer's sentences. Free it the way
+    /// <see cref="TakeOwnedString"/> does. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_legacy_migration_offer_json();
+
+    /// <summary>
+    /// The sentence for a refused <c>legacy_invite_migrate</c>, from the IPC
+    /// error's label. A label this build does not know gets the core's own
+    /// fallback sentence. Free it the way <see cref="TakeOwnedString"/> does.
+    /// NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_legacy_migration_refusal_text(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
+
+    /// <summary>
     /// The notice for approved sessions held on a busy privacy witness, from
     /// <c>status.witness_capacity</c>, as an owned JSON object (title, body,
     /// next_check). Free it the way <see cref="TakeOwnedString"/> does. NULL
@@ -672,7 +690,7 @@ internal static class NativeMethods
     /// reading. Passing the negation would swap both readings and compile.
     /// </remarks>
     /// <summary>
-    /// The sentence for one NEAR AI login-enrolment control name.
+    /// The sentence for one NEAR AI login-enrollment control name.
     /// </summary>
     /// <remarks>
     /// Ten labels, ten sentences, and anything else reaching the generic one.
@@ -1128,6 +1146,23 @@ internal static class NativeMethods
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_contributor_disclosure_copy_json();
+
+    /// <summary>
+    /// The monitor's other screens' words
+    /// (<c>preview_copy::monitor_screens_copy</c>) as an owned JSON object.
+    /// This shell reads only <c>shell</c> from it today
+    /// (<see cref="MonitorShellCopy"/>). NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_monitor_screens_copy_json();
+
+    /// <summary>
+    /// The decisions-owed badge's text (<c>preview_copy::decisions_owed_text</c>)
+    /// as an owned string; a negative count is an unknown one. Empty for
+    /// zero. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_decisions_owed_text(long decisionsOwed);
 
     /// <summary>
     /// The quit prompt true for the process holding <paramref name="handle"/>

@@ -71,7 +71,7 @@ fn enrolled_config() -> trace_commons_contributor::config::ContributorConfig {
         trace_commons_protocol::onboarding::derive_user_tenant_id("instance-test", "user-test");
     trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
-        consent_scopes_chosen: false,
+        consent_scopes_chosen: Some(true),
         witness_origin: None,
         inference_receipt_check_attestation: false,
         schema_version: "trace_commons.contributor_config.v1".to_string(),
@@ -104,7 +104,7 @@ fn write_enrolled_config(config_dir: &Path) {
 fn unenrolled_preview_config() -> trace_commons_contributor::config::ContributorConfig {
     trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
-        consent_scopes_chosen: false,
+        consent_scopes_chosen: Some(true),
         witness_origin: None,
         inference_receipt_check_attestation: false,
         schema_version: "trace_commons.contributor_config.v1".to_string(),
@@ -274,7 +274,8 @@ fn spawn_http_counter() -> (
                                     "category": category,
                                     "start": start,
                                     "end": start + needle.len(),
-                                    "score": 0.99
+                                    "score": 0.99,
+                                    "text": needle
                                 })
                             })
                         })
@@ -676,9 +677,18 @@ fn unenrolled_real_submit_still_requires_login() {
     let output = run_submit(config_dir.path(), &trajectory, false, false);
     let stderr = String::from_utf8(output.stderr).unwrap();
 
+    // No terminal (stdin is closed for `output()`), so no sign-in starts:
+    // the refusal names both ways to enroll.
     assert!(!output.status.success());
     assert!(
-        stderr.contains("not logged in; run `login` first"),
+        stderr.contains(
+            "This device isn't enrolled. Run `trace-commons-contributor login` to sign in \
+             with NEAR AI, or pass an invite with `--invite <link>`."
+        ),
+        "stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("near.ai in your browser"),
         "stderr={stderr}"
     );
 }

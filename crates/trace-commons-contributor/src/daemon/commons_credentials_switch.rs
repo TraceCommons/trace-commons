@@ -230,12 +230,14 @@ pub(crate) fn switch_identity(
     }
 
     let device_record = Record {
+        account_lifecycle: None,
         commons_credential_version: 1,
         kind: Kind::Device,
         reference: CredentialReference::allocate(),
         authority: None,
     };
     let account_record = Record {
+        account_lifecycle: Some(uuid::Uuid::new_v4().to_string()),
         commons_credential_version: 1,
         kind: Kind::Account,
         reference: CredentialReference::allocate(),

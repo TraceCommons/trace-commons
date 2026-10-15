@@ -68,6 +68,14 @@ final class DaemonClient {
         self.daemon = daemon
     }
 
+    func managedSnapshot() throws -> ManagedSnapshot {
+        try call("managed_snapshot", as: ManagedSnapshot.self)
+    }
+
+    func managedAction(_ method: String, params: [String: Any]) throws -> [String: Any] {
+        try resultObject(method, params: params)
+    }
+
     // MARK: - Read
 
     func nativeWalletFlow(action: String, flowID: String, commons: String, account: String) throws -> NativeWalletView {
@@ -85,8 +93,44 @@ final class DaemonClient {
         try call("near_ai_account_enroll", params: ["ingest_url": commons], as: NearAiEnrollment.self)
     }
 
+    /// The same, naming no commons: the daemon enrolls against the native
+    /// account's commons (the first run's near.ai sign-in without an
+    /// invite).
+    func nearAiAccountEnroll() throws -> NearAiEnrollment {
+        try call("near_ai_account_enroll", as: NearAiEnrollment.self)
+    }
+
     func prepareAdmissionSession(entryID: String, backend: String) throws -> AdmissionPreparation {
         try call("prepare_admission_session", params: ["entry_id": entryID, "backend": backend, "confirmed": true], as: AdmissionPreparation.self)
+    }
+
+    struct ContributionAccount: Decodable {
+        struct Status: Decodable {
+            let authority: String
+            let ready: Bool
+            let policyVersion: String?
+            let refusalLabel: String?
+            let retryAfterSeconds: Int?
+            private enum CodingKeys: String, CodingKey {
+                case authority, ready
+                case policyVersion = "policy_version"
+                case refusalLabel = "refusal_label"
+                case retryAfterSeconds = "retry_after_seconds"
+            }
+        }
+        let status: Status
+        let line: String
+        let accountScope: String
+        private enum CodingKeys: String, CodingKey {
+            case status, line
+            case accountScope = "account_scope"
+        }
+    }
+    func contributionStatus(scope: String) throws -> ContributionAccount {
+        try call("account_contribution_status", params: ["account_scope":scope], as: ContributionAccount.self)
+    }
+    func redeemInvite(code: String, idempotencyKey: String, scope: String) throws -> ContributionAccount {
+        try call("account_invite_redeem", params: ["invite_code": code, "idempotency_key": idempotencyKey, "account_scope":scope], as: ContributionAccount.self)
     }
 
     func status() throws -> DaemonStatus {
@@ -197,8 +241,11 @@ final class DaemonClient {
         try call("history_rollup", as: HistoryRollup.self)
     }
 
-    func refreshHistory() throws {
-        _ = try rawResult("refresh_history")
+    /// Asks the daemon's poller to check the server sooner. True when the
+    /// daemon says the refresh was requested.
+    func refreshHistory() throws -> Bool {
+        struct Reply: Decodable { let requested: Bool? }
+        return try call("refresh_history", as: Reply.self).requested == true
     }
 
     func sessionDetail(submissionID: String) throws -> SessionDetail {
@@ -621,7 +668,7 @@ final class DaemonClient {
     /// the contract only ever reports `unavailable` / `enroll-failed` for
     /// this method, on purpose, because the underlying issuer response can
     /// carry a URL or a response body that must never reach a UI. See
-    /// `OnboardingConnectView`.
+    /// `AppModel.enroll(invite:scopes:)` and `FoldersScreenLayout.notice`.
     func enroll(invite: String, scopes: [String] = []) throws -> EnrollResult {
         var params: [String: Any] = ["invite": invite]
         if !scopes.isEmpty { params["scopes"] = scopes }
@@ -643,6 +690,16 @@ final class DaemonClient {
         _ = try rawResult("acknowledge_legacy_invite_migration", params: [:])
     }
 
+    /// Moves this legacy invite identity to the contributor's NEAR AI
+    /// account, because they pressed Move. Blocks for the whole move. A
+    /// refusal throws a `Failure` whose message is a `legacy_migration_*`
+    /// label; `invite` is sent only after `legacy_migration_invite_needed`.
+    func migrateLegacyInvite(invite: String?) throws {
+        var params: [String: Any] = [:]
+        if let invite { params["invite"] = invite }
+        _ = try rawResult("legacy_invite_migrate", params: params)
+    }
+
     /// Records that the void notices with these ids were shown -- see "Void
     /// notices" in the contract. Only the ids actually drawn: there is no
     /// "all", so a void raised after the shell drew is never cleared unseen.
@@ -661,10 +718,10 @@ final class DaemonClient {
     /// Replaces the enrolled device's consent scopes. Local config write
     /// only -- no network I/O -- and requires an existing enrollment
     /// (`unavailable` / `not-logged-in` otherwise, per the contract). Used
-    /// by the onboarding consent screen: `enroll` is always called with no
-    /// scopes (floor scope only), and this call is what actually applies
-    /// whatever the contributor ticked on `ConsentScopesView`, once they
-    /// confirm it -- see "### `set_consent_scopes`" in the contract.
+    /// by the first run's Start: `enroll` is always called with no scopes
+    /// (floor scope only), and this call is what actually applies whatever
+    /// the contributor ticked on the Uses screen, once they press Start --
+    /// see "### `set_consent_scopes`" in the contract.
     @discardableResult
     func setConsentScopes(_ scopes: [String]) throws -> [String] {
         struct Wrapper: Decodable {
@@ -941,6 +998,15 @@ final class DaemonClient {
         try daemon.openPreview(entryID: entryID)
     }
 
+    /// The turn index over the body whose digest is `bodyDigest`, or nil
+    /// when the core refused (a changed body among them) or this client is
+    /// not over a live daemon. Nil is never an empty index.
+    func previewTurns(entryID: String, bodyDigest: String) -> PreviewTurns? {
+        guard let live = daemon as? TCDaemon else { return nil }
+        return PreviewTurns.decode(
+            fromJSON: TCPreviewTurns.turnsJSON(daemon: live, entryID: entryID, bodyDigest: bodyDigest))
+    }
+
     #if DEBUG
     /// K2 (#1173): whether this daemon is running a developer dry run, as
     /// its own `status` reports it. False when the call fails.
@@ -1044,6 +1110,11 @@ enum DaemonEventParser {
                 creditPending: payload["credit_pending"] as? Double ?? 0,
                 text: payload["text"] as? String ?? ""
             )
+        case "reengage_due":
+            guard let payloadData = try? JSONSerialization.data(withJSONObject: payload),
+                  let due = try? DaemonDataDecoding.decoder().decode(DaemonData.ReengageDue.self, from: payloadData)
+            else { return .unknown(name) }
+            return .reengageDue(due)
         case "resync_required":
             return .resyncRequired
         case "lagged":

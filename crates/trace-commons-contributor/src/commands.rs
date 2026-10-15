@@ -78,7 +78,7 @@ pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
         // receipt fetch would disclose an exchange to the provider for a
         // submission that is not going to happen.
         inference_receipt_endpoint: None,
-        consent_scopes_chosen: false,
+        consent_scopes_chosen: Some(false),
         witness_origin: None,
         inference_receipt_check_attestation: false,
     }
@@ -113,7 +113,7 @@ pub(crate) enum EnrollOutcome {
 ///
 /// This is the single enrollment implementation shared by the interactive
 /// `login` command and the daemon's `enroll` IPC method, so a socket caller
-/// (a native application) and a terminal caller enrol identically rather
+/// (a native application) and a terminal caller enroll identically rather
 /// than through two hand-maintained copies of the same network calls.
 ///
 /// When `allowed_hosts` is provided it takes precedence over the
@@ -125,6 +125,10 @@ pub(crate) async fn enroll_core(
     invite: Option<&str>,
     allowed_hosts: Option<&str>,
     consent_scopes: Vec<String>,
+    // Whether the person chose `consent_scopes` (the CLI's own consent
+    // question, answered) rather than having them saved for them. Recorded
+    // as `consent_scopes_chosen`; see `ContributorConfig`.
+    consent_chosen: bool,
 ) -> Result<EnrollOutcome> {
     if grant_b64.is_some() && invite.is_some() {
         anyhow::bail!("--grant and --invite are alternative enrollment paths; pass only one");
@@ -135,8 +139,15 @@ pub(crate) async fn enroll_core(
         .context("loading device identity")?;
 
     if let Some(invite) = invite {
-        let cfg =
-            enroll_with_invite_core(store, invite, allowed_hosts, &device, consent_scopes).await?;
+        let cfg = enroll_with_invite_core(
+            store,
+            invite,
+            allowed_hosts,
+            &device,
+            consent_scopes,
+            consent_chosen,
+        )
+        .await?;
         return Ok(EnrollOutcome::Enrolled(Box::new(cfg)));
     }
 
@@ -157,9 +168,7 @@ pub(crate) async fn enroll_core(
         .context("loading contributor config")?
         .is_some()
     {
-        anyhow::bail!(
-            "this device is already enrolled; run `logout` first if you intend to re-enroll"
-        );
+        anyhow::bail!(ALREADY_ENROLLED);
     }
 
     let grant = EnrollmentGrant::decode(grant_b64).context("decoding enrollment grant")?;
@@ -195,7 +204,7 @@ pub(crate) async fn enroll_core(
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
-        consent_scopes_chosen: false,
+        consent_scopes_chosen: Some(consent_chosen),
         witness_origin: crate::config::environment_witness_origin(env_witness.as_ref()),
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
@@ -206,13 +215,81 @@ pub(crate) async fn enroll_core(
     Ok(EnrollOutcome::Enrolled(Box::new(cfg)))
 }
 
-/// Enroll this device with an instance-signed grant, or (with no grant)
-/// print this device's key id so an instance operator can mint one.
+/// The refusal every enrollment route gives a device that already has a
+/// config. Nothing is overwritten; `logout` first to re-enroll.
+pub(crate) const ALREADY_ENROLLED: &str =
+    "this device is already enrolled; run `logout` first if you intend to re-enroll";
+
+/// Which enrollment route a `login` takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LoginRoute {
+    /// `--grant`: an instance-signed enrollment grant.
+    Grant,
+    /// An invite link, from `--invite` or `TRACE_COMMONS_INVITE`.
+    Invite(String),
+    /// Neither: the NEAR AI browser sign-in, then enrollment.
+    NearAi,
+}
+
+/// Pick the route: a grant wins, then an invite (the flag before the
+/// environment), and with neither, the NEAR AI sign-in. The invite is
+/// sourced through [`auto_enroll_invite`], as `submit` sources it.
+pub(crate) fn login_route(
+    grant_b64: Option<&str>,
+    invite: Option<&str>,
+    env_invite: Option<&str>,
+) -> LoginRoute {
+    if grant_b64.is_some() {
+        return LoginRoute::Grant;
+    }
+    match auto_enroll_invite(invite, env_invite, false) {
+        Some(invite) => LoginRoute::Invite(invite),
+        None => LoginRoute::NearAi,
+    }
+}
+
+/// Refuse `login --json` when it would take the NEAR AI route: a `--json`
+/// caller parses stdout and has nobody at a browser, which is why
+/// `submit --json` never starts a sign-in either.
+pub(crate) fn refuse_json_sign_in(
+    json: bool,
+    grant_b64: Option<&str>,
+    invite: Option<&str>,
+    env_invite: Option<&str>,
+) -> Result<()> {
+    if json && login_route(grant_b64, invite, env_invite) == LoginRoute::NearAi {
+        anyhow::bail!(crate::near_ai_login::JSON_REFUSED);
+    }
+    Ok(())
+}
+
+/// Print this device's key id, for an instance operator to mint a grant
+/// against (`login --key-id`). Enrolls nothing.
+pub fn key_id(store: &ConfigStore) -> Result<()> {
+    print_key_id(store, &mut std::io::stdout())
+}
+
+pub(crate) fn print_key_id(store: &ConfigStore, out: &mut impl std::io::Write) -> Result<()> {
+    let device = DeviceIdentity::load_or_generate(store).context("loading device identity")?;
+    writeln!(out, "device_key_id: {}", device.device_key_id)?;
+    writeln!(
+        out,
+        "give this to your instance to mint an enrollment grant, then re-run \
+         `login --grant <grant>` -- or, if you were handed an invite link, run \
+         `login --invite <url>`"
+    )?;
+    Ok(())
+}
+
+/// Enroll this device: with an instance-signed grant, with an invite link
+/// (`--invite` or `TRACE_COMMONS_INVITE`), or -- with neither -- through
+/// the NEAR AI browser sign-in.
 ///
 /// `scopes` (a CSV of wire-name consent scopes) is validated before any
 /// network call. When absent, an interactive terminal prompts for consent
 /// choices; a non-interactive session, or one passing `default_consent`,
-/// falls back to the `debugging_evaluation` floor only.
+/// falls back to the `debugging_evaluation` floor only. The same answers
+/// are recorded on every route.
 pub async fn login(
     store: &ConfigStore,
     grant_b64: Option<&str>,
@@ -221,17 +298,71 @@ pub async fn login(
     scopes: Option<&str>,
     default_consent: bool,
 ) -> Result<()> {
-    let consent_scopes = resolve_consent_scopes(scopes, default_consent)?;
-    let used_invite = invite.is_some();
-    match enroll_core(store, grant_b64, invite, allowed_hosts, consent_scopes).await? {
-        EnrollOutcome::AwaitingGrant { device_key_id } => {
-            println!("device_key_id: {device_key_id}");
-            println!(
-                "give this to your instance to mint an enrollment grant, then re-run \
-                 `login --grant <grant>` -- or, if you were handed an invite link, run \
-                 `login --invite <url>`"
-            );
+    let env_invite = std::env::var("TRACE_COMMONS_INVITE").ok();
+    login_with(
+        store,
+        grant_b64,
+        invite,
+        env_invite.as_deref(),
+        allowed_hosts,
+        scopes,
+        default_consent,
+        &mut |store, consent| crate::near_ai_login::run(store, consent),
+    )
+    .await
+}
+
+/// [`login`] with the environment's invite and the NEAR AI sign-in passed
+/// in, so the routing is testable without a browser.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn login_with(
+    store: &ConfigStore,
+    grant_b64: Option<&str>,
+    invite: Option<&str>,
+    env_invite: Option<&str>,
+    allowed_hosts: Option<&str>,
+    scopes: Option<&str>,
+    default_consent: bool,
+    near_ai: &mut dyn FnMut(&ConfigStore, &crate::near_ai_login::Consent) -> Result<()>,
+) -> Result<()> {
+    let invite = match login_route(grant_b64, invite, env_invite) {
+        LoginRoute::NearAi => {
+            // The daemon derives the sign-in's host list from
+            // TRACE_COMMONS_ALLOWED_HOSTS; a flag it cannot see would be
+            // silently ignored.
+            if allowed_hosts.is_some() {
+                anyhow::bail!(crate::near_ai_login::ALLOWED_HOSTS_REFUSED);
+            }
+            // Before the consent questions and before the browser: an
+            // enrolled device has nothing to sign in for.
+            if store
+                .load_config()
+                .context("loading contributor config")?
+                .is_some()
+            {
+                anyhow::bail!(ALREADY_ENROLLED);
+            }
+            let (scopes, chosen) = resolve_consent_scopes(scopes, default_consent)?;
+            return near_ai(store, &crate::near_ai_login::Consent { scopes, chosen });
         }
+        LoginRoute::Invite(invite) => Some(invite),
+        LoginRoute::Grant => invite.map(str::to_string),
+    };
+    let (consent_scopes, consent_chosen) = resolve_consent_scopes(scopes, default_consent)?;
+    let used_invite = invite.is_some();
+    match enroll_core(
+        store,
+        grant_b64,
+        invite.as_deref(),
+        allowed_hosts,
+        consent_scopes,
+        consent_chosen,
+    )
+    .await?
+    {
+        // Not reached from `login`, which routes a bare call to NEAR AI;
+        // kept for completeness of the shared enrollment outcome.
+        EnrollOutcome::AwaitingGrant { .. } => print_key_id(store, &mut std::io::stdout())?,
         EnrollOutcome::Enrolled(cfg) if used_invite => {
             println!("enrolled: tenant_id={}", cfg.tenant_id);
             println!("this invite use is now spent");
@@ -265,6 +396,16 @@ enum ConsentSource<'a> {
     Prompt,
 }
 
+impl ConsentSource<'_> {
+    /// Whether the scopes this source yields are the person's choice: an
+    /// explicit `--scopes`, or answers to the menu. Default answers are taken
+    /// for them, so they are not, and the enrollment records no choice
+    /// (`ContributorConfig::consent_scopes_chosen`).
+    fn is_a_choice(&self) -> bool {
+        matches!(self, ConsentSource::Explicit(_) | ConsentSource::Prompt)
+    }
+}
+
 /// Decide where consent answers come from, given the flags and whether
 /// stdin is a terminal. Split out from [`resolve_consent_scopes`] so the
 /// precedence is testable without a real terminal.
@@ -293,22 +434,30 @@ fn consent_source(
 ///
 /// The default answers are deliberately the most restrictive ones: nothing
 /// beyond the always-on floor is granted unless someone said so.
-fn resolve_consent_scopes(scopes: Option<&str>, default_consent: bool) -> Result<Vec<String>> {
+///
+/// Also answers whether the scopes are the person's choice
+/// ([`ConsentSource::is_a_choice`]).
+fn resolve_consent_scopes(
+    scopes: Option<&str>,
+    default_consent: bool,
+) -> Result<(Vec<String>, bool)> {
     use std::io::IsTerminal;
-    match consent_source(scopes, default_consent, std::io::stdin().is_terminal()) {
+    let source = consent_source(scopes, default_consent, std::io::stdin().is_terminal());
+    let resolved = match source {
         ConsentSource::Explicit(csv) => {
             let names: Vec<String> = csv.split(',').map(|s| s.trim().to_string()).collect();
-            validate_scopes(&names).context("invalid --scopes value")
+            validate_scopes(&names).context("invalid --scopes value")?
         }
-        ConsentSource::DefaultAnswers => Ok(scopes_from_answers(ConsentAnswers::default())),
+        ConsentSource::DefaultAnswers => scopes_from_answers(ConsentAnswers::default()),
         ConsentSource::Prompt => {
             let mut stdin = std::io::stdin().lock();
             let mut stdout = std::io::stdout();
             let answers = prompt_consent_answers(&mut stdin, &mut stdout)
                 .context("reading interactive consent answers")?;
-            Ok(scopes_from_answers(answers))
+            scopes_from_answers(answers)
         }
-    }
+    };
+    Ok((resolved, source.is_a_choice()))
 }
 
 /// Print local identity: never the raw `user_subject`, only its hash.
@@ -396,23 +545,72 @@ pub async fn account_login(store: &ConfigStore, no_browser: bool, json: bool) ->
     Ok(())
 }
 
-/// Report whether a live account session is stored, WITHOUT printing it.
-pub fn account_status(store: &ConfigStore, json: bool) -> Result<()> {
-    let expires_at = crate::account_auth::session_status(store);
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "schema_version": "trace_commons.account_status.v1",
-                "signed_in": expires_at.is_some(),
-                "expires_at": expires_at,
-            }))?
+/// Report whether a live account session is stored, and when it expires,
+/// WITHOUT printing it; then, when enrolled, fetch contribution readiness.
+///
+/// The local half never depends on the network. If the fetch fails -- ingest
+/// unreachable, a refusal, the session changing mid-call -- the report keeps
+/// `signed_in` and `expires_at`, sets `contribution_status` to null, and names
+/// the failure in `contribution_status_error` by label only.
+pub(crate) async fn account_status_value(store: &ConfigStore) -> Result<serde_json::Value> {
+    let loaded =
+        crate::daemon::run_blocking(|| crate::account_auth::try_load_session_with_snapshot(store))?;
+    let Some(loaded) = loaded else {
+        return Ok(
+            serde_json::json!({"schema_version":"trace_commons.account_status.v1", "signed_in":false, "expires_at":null, "contribution_status":null, "contribution_status_error":null}),
         );
+    };
+    let (status, error) = match store.load_config()? {
+        Some(cfg) => match contribution_status_for(store, &cfg, &loaded.snapshot).await {
+            Ok(status) => (Some(status), None),
+            Err(error) => (None, Some(contribution_status_error_label(&error))),
+        },
+        None => (None, None),
+    };
+    Ok(
+        serde_json::json!({"schema_version":"trace_commons.account_status.v1", "signed_in":true, "expires_at":loaded.session.expires_at, "contribution_status":status, "contribution_status_error":error}),
+    )
+}
+
+async fn contribution_status_for(
+    store: &ConfigStore,
+    cfg: &crate::config::ContributorConfig,
+    snapshot: &crate::daemon::commons_credentials::Snapshot,
+) -> Result<crate::account_contribution::ContributionStatus> {
+    let scope = crate::daemon::commons_credentials::scope_for_snapshot(snapshot)?;
+    let operation = crate::account_contribution::Operation::open(store, cfg).await?;
+    if operation.scope != scope {
+        anyhow::bail!("account-session-changed");
+    }
+    operation.status().await
+}
+
+/// A fixed label, never the error's own text: that can carry a URL or a
+/// transport message.
+fn contribution_status_error_label(error: &anyhow::Error) -> &'static str {
+    match error.to_string().as_str() {
+        "account-session-changed" => "account-session-changed",
+        "account-sign-in-required" => "account-sign-in-required",
+        "account-contribution-refused" => "account-contribution-refused",
+        _ => "account-contribution-unavailable",
+    }
+}
+pub async fn account_status(store: &ConfigStore, json: bool) -> Result<()> {
+    let value = account_status_value(store).await?;
+    print_account_status(value, json)
+}
+fn print_account_status(value: serde_json::Value, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else if let Ok(status) = serde_json::from_value::<
+        crate::account_contribution::ContributionStatus,
+    >(value["contribution_status"].clone())
+    {
+        println!("{}", status.line());
+    } else if value["signed_in"] == true {
+        println!("signed in; session expires {}", value["expires_at"]);
     } else {
-        match expires_at {
-            Some(at) => println!("signed in; session expires {at}"),
-            None => println!("not signed in; run `account login`"),
-        }
+        println!("not signed in; run `account login`");
     }
     Ok(())
 }
@@ -525,7 +723,7 @@ pub(crate) fn logout_summary_lines(inv: &LogoutInventory) -> Vec<String> {
             .unwrap_or_else(|| "unknown (unreadable state)".to_string())
     };
     vec![
-        "about to log out and delete this device's local Trace Commons state:".to_string(),
+        concat!("about to log out and delete this device's local ", crate::app_name!(), " state:").to_string(),
         format!(
             "  receipts   : {} receipt(s), the local record of what this device submitted",
             inv.receipts
@@ -806,6 +1004,33 @@ fn resolve_undecided_project_refs(
         .collect()
 }
 
+/// Runs `discover` on each source `source_filter` admits. A source named by
+/// `source_filter` that fails is an error, since the caller asked for it.
+/// Without a filter, a failing source is returned in the second list and
+/// skipped, as the daemon's watcher does: one unreadable store (an OpenCode
+/// database that is busy or of an unknown version) must not stop `submit`
+/// for every other source.
+fn discover_across_sources(
+    sources: impl IntoIterator<Item = Box<dyn TraceSource>>,
+    source_filter: Option<&str>,
+) -> Result<(Vec<SessionRef>, Vec<(&'static str, anyhow::Error)>)> {
+    let mut refs = Vec::new();
+    let mut skipped = Vec::new();
+    for source in sources {
+        if source_filter.is_some_and(|sf| source.name() != sf) {
+            continue;
+        }
+        match source.discover() {
+            Ok(found) => refs.extend(found),
+            Err(err) if source_filter.is_some() => {
+                return Err(err.context("discovering local sessions"));
+            }
+            Err(err) => skipped.push((source.name(), err)),
+        }
+    }
+    Ok((refs, skipped))
+}
+
 /// Discover every locally discoverable session across all sources, applying
 /// optional `source`/`project`/`since` filters. `project` matches the
 /// session's true decoded working directory when available; otherwise falls
@@ -843,14 +1068,10 @@ fn discover_filtered(
     };
     let project_filter = resolved_project.as_deref();
 
-    let mut refs = Vec::new();
-    for source in all_sources(&cli_source_roots(trajectory)) {
-        if let Some(sf) = source_filter {
-            if source.name() != sf {
-                continue;
-            }
-        }
-        refs.extend(source.discover().context("discovering local sessions")?);
+    let (mut refs, skipped) =
+        discover_across_sources(all_sources(&cli_source_roots(trajectory)), source_filter)?;
+    for (name, err) in &skipped {
+        eprintln!("Skipped {name} sessions: {err:#}");
     }
 
     let now = Utc::now();
@@ -1091,6 +1312,32 @@ pub(crate) fn auto_enroll_invite(
         .map(str::to_string)
 }
 
+/// Enroll an unenrolled machine before a `submit` that means to upload.
+///
+/// An invite (`--invite` or `TRACE_COMMONS_INVITE`) enrolls through the
+/// invite route. Without one, a person at a terminal signs in with NEAR AI
+/// (`near_ai`); anyone else -- no terminal, or `--json`, whose surface never
+/// acquires a sign-in -- is refused with the hint naming both routes.
+pub(crate) async fn enroll_before_submit(
+    store: &ConfigStore,
+    sel: &SubmitSelection<'_>,
+    env_invite: Option<&str>,
+    interactive: bool,
+    near_ai: &mut dyn FnMut(&ConfigStore) -> Result<()>,
+) -> Result<()> {
+    if let Some(invite) = auto_enroll_invite(sel.invite, env_invite, sel.json) {
+        // Consent is asked in full here, exactly as `login` asks it.
+        // Pre-seeding scopes from an invite would be a dark pattern.
+        return login(store, None, Some(&invite), None, None, false)
+            .await
+            .context("enrolling with the supplied invite");
+    }
+    if sel.json || !interactive {
+        anyhow::bail!(crate::near_ai_login::UNENROLLED_HINT);
+    }
+    near_ai(store)
+}
+
 /// How a `submit` run decides which of the discovered sessions to send.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SubmitSelectionMode {
@@ -1318,25 +1565,31 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
     )?;
 
     let mut saved_cfg = store.load_config().context("loading contributor config")?;
-    // Auto-enroll only when there is nothing to lose by it: no config yet, an
-    // invite actually supplied, and a run that means to upload. A dry run
-    // changes nothing server-side by definition, so it must not spend an
-    // invite use; it keeps the unenrolled-preview path below.
+    // Enroll first only when there is nothing to lose by it: no config yet
+    // and a run that means to upload. A dry run changes nothing server-side
+    // by definition, so it must not spend an invite use or start a sign-in;
+    // it keeps the unenrolled-preview path below.
     if saved_cfg.is_none() && !sel.dry_run {
         let env_invite = std::env::var("TRACE_COMMONS_INVITE").ok();
-        if let Some(invite) = auto_enroll_invite(sel.invite, env_invite.as_deref(), sel.json) {
-            // Consent is asked in full here, exactly as `login` asks it.
-            // Pre-seeding scopes from an invite would be a dark pattern.
-            login(store, None, Some(&invite), None, None, false)
-                .await
-                .context("enrolling with the supplied invite")?;
-            saved_cfg = store.load_config().context("loading contributor config")?;
-        }
+        let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+        enroll_before_submit(
+            store,
+            sel,
+            env_invite.as_deref(),
+            interactive,
+            &mut |store| {
+                // Consent is asked in full here, exactly as `login` asks it.
+                let (scopes, chosen) = resolve_consent_scopes(None, false)?;
+                crate::near_ai_login::run(store, &crate::near_ai_login::Consent { scopes, chosen })
+            },
+        )
+        .await?;
+        saved_cfg = store.load_config().context("loading contributor config")?;
     }
     let (cfg, unenrolled_preview) = match saved_cfg {
         Some(cfg) => (cfg, false),
         None if sel.dry_run => (unenrolled_preview_config(), true),
-        None => anyhow::bail!("not logged in; run `login` first"),
+        None => anyhow::bail!(crate::near_ai_login::UNENROLLED_HINT),
     };
 
     let selected_filter = sel.pii_filter.or(cfg.pii_filter.as_deref());
@@ -1576,6 +1829,13 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
                 } else {
                     println!("{preview_prefix}refused ({reason_label}) session={session_ref}");
                 }
+            }
+            SubmitOutcome::Failed { reason_label }
+                if reason_label == submit::REASON_RATE_LIMITED =>
+            {
+                // Not a verdict on the session, and nothing was recorded for
+                // it, so running `submit` again sends it.
+                println!("{preview_prefix}{}", submit::RATE_LIMITED_CLI_LINE);
             }
             SubmitOutcome::Failed { reason_label } => {
                 println!("{preview_prefix}failed ({reason_label})");
@@ -2162,10 +2422,25 @@ mod tests {
         );
     }
 
+    /// Only an answer the person gave is a choice: an explicit `--scopes`,
+    /// or the interactive menu. Default answers are taken for them.
+    #[test]
+    fn only_an_answered_consent_question_is_a_choice() {
+        assert!(ConsentSource::Explicit("debugging_evaluation").is_a_choice());
+        assert!(ConsentSource::Prompt.is_a_choice());
+        assert!(!ConsentSource::DefaultAnswers.is_a_choice());
+        assert!(!resolve_consent_scopes(None, true).unwrap().1);
+        assert!(
+            resolve_consent_scopes(Some("debugging_evaluation"), false)
+                .unwrap()
+                .1
+        );
+    }
+
     #[test]
     fn default_consent_grants_only_the_floor_scope() {
         assert_eq!(
-            resolve_consent_scopes(None, true).unwrap(),
+            resolve_consent_scopes(None, true).unwrap().0,
             vec!["debugging_evaluation".to_string()]
         );
     }
@@ -2175,7 +2450,7 @@ mod tests {
         // `cargo test` runs with stdin that is not a terminal, so this
         // exercises the non-interactive silent-default branch rather than
         // the interactive prompt path.
-        let scopes = resolve_consent_scopes(None, false).unwrap();
+        let (scopes, _) = resolve_consent_scopes(None, false).unwrap();
         assert_eq!(scopes, vec!["debugging_evaluation".to_string()]);
     }
 
@@ -2227,7 +2502,7 @@ mod tests {
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
         let existing = ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
@@ -2374,7 +2649,7 @@ mod tests {
     fn enrolled_with_a_claimed_handle(device_key_id: &str) -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
@@ -2445,6 +2720,7 @@ mod tests {
             None,
             &device,
             vec!["debugging_evaluation".to_string()],
+            false,
         )
         .await
         .unwrap_err();
@@ -2474,6 +2750,7 @@ mod tests {
             success: None,
         };
         let mut t = crate::source::SessionTranscript {
+            source_session: None,
             source: std::borrow::Cow::Borrowed("claude-code"),
             agent_version: None,
             model: None,
@@ -2503,13 +2780,309 @@ mod tests {
 }
 
 #[cfg(test)]
+mod login_route_tests {
+    use super::*;
+    use crate::near_ai_login::{ALLOWED_HOSTS_REFUSED, Consent, UNENROLLED_HINT};
+
+    fn store() -> (tempfile::TempDir, ConfigStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        (dir, store)
+    }
+
+    /// A bare invite code, which the invite route refuses before any network
+    /// call -- so reaching that refusal proves the invite route was taken.
+    const BARE_CODE: &str = "VQWWPGYSG8Y4LTP6";
+
+    fn never(_: &ConfigStore, _: &Consent) -> Result<()> {
+        panic!("the NEAR AI sign-in must not start")
+    }
+
+    fn never_submit(_: &ConfigStore) -> Result<()> {
+        panic!("the NEAR AI sign-in must not start")
+    }
+
+    #[test]
+    fn the_route_is_grant_then_invite_then_near_ai() {
+        assert_eq!(login_route(None, None, None), LoginRoute::NearAi);
+        assert_eq!(login_route(None, None, Some("  ")), LoginRoute::NearAi);
+        assert_eq!(login_route(Some("g"), None, None), LoginRoute::Grant);
+        assert_eq!(login_route(Some("g"), None, Some("env")), LoginRoute::Grant);
+        assert_eq!(
+            login_route(None, Some("flag"), Some("env")),
+            LoginRoute::Invite("flag".into())
+        );
+        assert_eq!(
+            login_route(None, None, Some("env")),
+            LoginRoute::Invite("env".into())
+        );
+    }
+
+    /// A `--json` caller parses stdout and has nobody at a browser, so it
+    /// never starts the NEAR AI sign-in, as `submit --json` never does.
+    /// A grant or an invite still enrolls.
+    #[test]
+    fn json_login_refuses_only_the_near_ai_route() {
+        let error = refuse_json_sign_in(true, None, None, None).unwrap_err();
+        assert_eq!(error.to_string(), crate::near_ai_login::JSON_REFUSED);
+        assert!(refuse_json_sign_in(true, Some("g"), None, None).is_ok());
+        assert!(refuse_json_sign_in(true, None, Some("flag"), None).is_ok());
+        assert!(refuse_json_sign_in(true, None, None, Some("env")).is_ok());
+        assert!(refuse_json_sign_in(false, None, None, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn bare_login_takes_the_near_ai_route_with_the_consent_answers() {
+        let (_d, store) = store();
+        let mut seen = Vec::new();
+        login_with(
+            &store,
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            &mut |_, consent| {
+                seen.push(consent.clone());
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        login_with(
+            &store,
+            None,
+            None,
+            None,
+            None,
+            Some("debugging_evaluation,model_training"),
+            false,
+            &mut |_, consent| {
+                seen.push(consent.clone());
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            seen,
+            [
+                Consent {
+                    scopes: vec!["debugging_evaluation".into()],
+                    chosen: false,
+                },
+                Consent {
+                    scopes: vec!["debugging_evaluation".into(), "model_training".into()],
+                    chosen: true,
+                },
+            ]
+        );
+    }
+
+    /// An invite, from the flag or from `TRACE_COMMONS_INVITE`, enrolls
+    /// through the invite route and never starts the NEAR AI sign-in.
+    #[tokio::test]
+    async fn an_invite_takes_the_invite_route_and_never_the_near_ai_one() {
+        let (_d, store) = store();
+        for (flag, env) in [(Some(BARE_CODE), None), (None, Some(BARE_CODE))] {
+            let err = login_with(&store, None, flag, env, None, None, true, &mut never)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("full invite URL"),
+                "{flag:?} {env:?}: {err:#}"
+            );
+        }
+    }
+
+    /// A real `/v1/onboard` responder on an ephemeral `127.0.0.1` port.
+    async fn spawn_onboard_mock() -> String {
+        use axum::{Json, Router, routing::post};
+        let router = Router::new().route(
+            "/v1/onboard",
+            post(|| async move {
+                Json(serde_json::json!({
+                    "schema_version": "trace_commons.onboard_response.v1",
+                    "tenant_id": "tenant-mock",
+                    "ingest_url": "https://ingest.invalid",
+                    "issuer_url": "https://issuer.invalid",
+                    "audience": "trace-commons-upload",
+                    "device_key_id": "sha256:mockdevice",
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// The invite route still enrolls, from the flag or the environment,
+    /// with the same consent recording as before, and the NEAR AI sign-in
+    /// is never started.
+    #[tokio::test]
+    async fn an_invite_still_enrolls_through_the_invite_route() {
+        let base = spawn_onboard_mock().await;
+        let invite = format!("{base}/onboard#SOME-CODE");
+        for (flag, env) in [(Some(invite.as_str()), None), (None, Some(invite.as_str()))] {
+            let (_d, store) = store();
+            login_with(&store, None, flag, env, None, None, true, &mut never)
+                .await
+                .unwrap();
+            let cfg = store.load_config().unwrap().expect("enrolled");
+            assert_eq!(cfg.tenant_id, "tenant-mock", "{flag:?} {env:?}");
+            assert_eq!(cfg.consent_scopes, vec!["debugging_evaluation"]);
+            assert_eq!(cfg.consent_scopes_chosen, Some(false));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_enrolled_device_says_so_and_does_not_sign_in() {
+        let (_d, store) = store();
+        let device = DeviceIdentity::load_or_generate(&store).unwrap();
+        store
+            .save_config(&ContributorConfig {
+                schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+                issuer_url: "https://issuer.example".into(),
+                ingest_url: "https://ingest.example".into(),
+                audience: "aud".into(),
+                tenant_id: "tenant-a".into(),
+                instance_id: "instance-a".into(),
+                user_subject: "alice".into(),
+                device_key_id: device.device_key_id,
+                consent_scopes: vec!["debugging_evaluation".into()],
+                pii_filter: None,
+                allowed_hosts: None,
+                display_handle: None,
+                public_bio: None,
+                public_since: None,
+                witness: None,
+                inference_receipt_endpoint: None,
+                consent_scopes_chosen: Some(false),
+                witness_origin: None,
+                inference_receipt_check_attestation: false,
+            })
+            .unwrap();
+        let err = login_with(&store, None, None, None, None, None, true, &mut never)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), ALREADY_ENROLLED);
+    }
+
+    #[tokio::test]
+    async fn allowed_hosts_is_refused_on_the_near_ai_route() {
+        let (_d, store) = store();
+        let err = login_with(
+            &store,
+            None,
+            None,
+            None,
+            Some("issuer.example"),
+            None,
+            true,
+            &mut never,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), ALLOWED_HOSTS_REFUSED);
+    }
+
+    #[test]
+    fn key_id_prints_this_devices_key_id() {
+        let (_d, store) = store();
+        let mut out = Vec::new();
+        print_key_id(&store, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        let device = DeviceIdentity::load(&store).unwrap().unwrap();
+        assert!(
+            out.starts_with(&format!("device_key_id: {}\n", device.device_key_id)),
+            "{out}"
+        );
+        assert!(store.load_config().unwrap().is_none(), "nothing enrolled");
+    }
+
+    fn selection(json: bool) -> SubmitSelection<'static> {
+        SubmitSelection {
+            all: false,
+            since: None,
+            project: None,
+            source: None,
+            yes: false,
+            pick: false,
+            dry_run: false,
+            pii_filter: None,
+            manifest: None,
+            attest_out: None,
+            attest_post: None,
+            trajectory: None,
+            json,
+            no_reasoning: false,
+            remediate_quarantined: false,
+            verdict: None,
+            invite: None,
+        }
+    }
+
+    /// Unenrolled with nobody at a terminal (or under `--json`, which never
+    /// acquires a sign-in): refused with the one-line hint naming both routes.
+    #[tokio::test]
+    async fn unenrolled_submit_without_a_terminal_refuses_with_the_hint() {
+        let (_d, store) = store();
+        for (json, interactive) in [(false, false), (true, false), (true, true)] {
+            let err = enroll_before_submit(
+                &store,
+                &selection(json),
+                None,
+                interactive,
+                &mut never_submit,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.to_string(), UNENROLLED_HINT, "{json} {interactive}");
+            assert!(UNENROLLED_HINT.contains("trace-commons-contributor login"));
+            assert!(UNENROLLED_HINT.contains("--invite"));
+        }
+    }
+
+    #[tokio::test]
+    async fn unenrolled_submit_at_a_terminal_signs_in() {
+        let (_d, store) = store();
+        let mut called = 0;
+        enroll_before_submit(&store, &selection(false), None, true, &mut |_| {
+            called += 1;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(called, 1);
+    }
+
+    #[tokio::test]
+    async fn unenrolled_submit_with_an_invite_takes_the_invite_route() {
+        let (_d, store) = store();
+        let err = enroll_before_submit(
+            &store,
+            &selection(false),
+            Some(BARE_CODE),
+            true,
+            &mut never_submit,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("full invite URL"), "{err:#}");
+    }
+}
+
+#[cfg(test)]
 mod project_filter_tests {
     use super::{
-        cwd_matches_project, project_filter_undecided, resolve_undecided_project_refs, session_row,
-        submit_picker_row,
+        cwd_matches_project, discover_across_sources, project_filter_undecided,
+        resolve_undecided_project_refs, session_row, submit_picker_row,
     };
-    use crate::source::SessionRef;
-    use std::path::Path;
+    use crate::source::{SessionRef, TraceSource};
+    use anyhow::Result;
+    use std::path::{Path, PathBuf};
 
     #[tokio::test]
     async fn manifest_with_dry_run_is_refused_before_any_upload() {
@@ -2619,6 +3192,65 @@ mod project_filter_tests {
             Path::new("/Users/dev/.claude/projects/-Users-dev-code-my-hack/s.jsonl"),
             Path::new("/Users/dev/code/my-hack"),
         ));
+    }
+
+    /// A source whose `discover` either lists one ref or fails.
+    struct StubSource {
+        name: &'static str,
+        fails: bool,
+    }
+
+    impl TraceSource for StubSource {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn discover(&self) -> Result<Vec<SessionRef>> {
+            if self.fails {
+                anyhow::bail!("{} store unreadable", self.name);
+            }
+            Ok(vec![undecided_ref(PathBuf::from(self.name))])
+        }
+        fn load(&self, _r: &SessionRef) -> Result<crate::source::SessionTranscript> {
+            unreachable!("discovery only")
+        }
+    }
+
+    fn stub_sources() -> Vec<Box<dyn TraceSource>> {
+        vec![
+            Box::new(StubSource {
+                name: "opencode",
+                fails: true,
+            }),
+            Box::new(StubSource {
+                name: "claude_code",
+                fails: false,
+            }),
+        ]
+    }
+
+    /// One unreadable store (a busy or newer OpenCode database) must not
+    /// stop `submit` for every other source: it is skipped and named.
+    #[test]
+    fn a_failing_source_is_skipped_when_none_was_named() {
+        let (refs, skipped) = discover_across_sources(stub_sources(), None).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].path, PathBuf::from("claude_code"));
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].0, "opencode");
+    }
+
+    /// `--source opencode` asked for that store, so its failure is the
+    /// command's failure, not an empty result.
+    #[test]
+    fn a_failing_source_named_by_the_filter_is_an_error() {
+        let err = discover_across_sources(stub_sources(), Some("opencode")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("opencode store unreadable"),
+            "{err:#}"
+        );
+        let (refs, skipped) = discover_across_sources(stub_sources(), Some("claude_code")).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert!(skipped.is_empty());
     }
 
     /// A ref that can never be decided against `--project` from the cheap
@@ -2838,6 +3470,7 @@ async fn enroll_with_invite_core(
     allowed_hosts: Option<&str>,
     device: &DeviceIdentity,
     consent_scopes: Vec<String>,
+    consent_chosen: bool,
 ) -> Result<ContributorConfig> {
     let parsed = parse_invite(invite)?;
 
@@ -2897,7 +3530,7 @@ async fn enroll_with_invite_core(
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
-        consent_scopes_chosen: false,
+        consent_scopes_chosen: Some(consent_chosen),
         witness_origin: crate::config::environment_witness_origin(env_witness.as_ref()),
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
@@ -3073,11 +3706,30 @@ pub(crate) fn parse_invite(raw: &str) -> Result<ParsedInvite> {
 /// sentence, so the distinction between "not a URL" and "no code in it" is
 /// one the interface must not draw anyway.
 pub fn invite_issuer_host(raw: &str) -> Option<String> {
+    let (_, url) = acceptable_invite(raw)?;
+    url.host_str().map(str::to_string)
+}
+
+/// `raw` parsed as an invite the daemon's `invite_lookup` would ask its
+/// issuer about, with the issuer URL; `None` for anything it refuses. One
+/// check for both, so a shell never shows a host for an invite the lookup
+/// then refuses: https, or http to a literal loopback address only; no
+/// userinfo; a code of at most 256 characters with no control character.
+/// A port is accepted.
+pub(crate) fn acceptable_invite(raw: &str) -> Option<(ParsedInvite, reqwest::Url)> {
     let parsed = parse_invite(raw).ok()?;
-    reqwest::Url::parse(&parsed.issuer_url)
-        .ok()?
-        .host_str()
-        .map(str::to_string)
+    let url = reqwest::Url::parse(&parsed.issuer_url).ok()?;
+    let literal_loopback = match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        _ => false,
+    };
+    let acceptable = (url.scheme() == "https" || (url.scheme() == "http" && literal_loopback))
+        && url.username().is_empty()
+        && url.password().is_none()
+        && parsed.code.len() <= 256
+        && !parsed.code.chars().any(char::is_control);
+    acceptable.then_some((parsed, url))
 }
 
 /// The invite inside a `tracecommons://enroll?invite=…` deep link, or
@@ -3173,6 +3825,34 @@ mod invite_tests {
         assert_eq!(
             invite_issuer_host("https://issuer.tracecommons.ai/onboard"),
             None
+        );
+    }
+
+    /// Kristi b#16: the host a shell shows is only ever one the daemon's
+    /// `invite_lookup` would go on to ask. http (but to a literal loopback
+    /// address), userinfo, and a code too long or holding a control
+    /// character are refused here as they are there; a port is accepted by
+    /// both.
+    #[test]
+    fn issuer_host_refuses_what_invite_lookup_refuses() {
+        for bad in [
+            "http://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
+            "https://someone@issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
+            "https://someone:secret@issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
+        ] {
+            assert_eq!(invite_issuer_host(bad), None, "{bad}");
+            assert!(super::acceptable_invite(bad).is_none(), "{bad}");
+        }
+        let long = format!("https://issuer.tracecommons.ai/onboard#{}", "A".repeat(257));
+        assert_eq!(invite_issuer_host(&long), None);
+        assert_eq!(
+            invite_issuer_host("https://issuer.tracecommons.ai:8443/onboard#VQWWPGYSG8Y4LTP6")
+                .as_deref(),
+            Some("issuer.tracecommons.ai")
+        );
+        assert_eq!(
+            invite_issuer_host("http://127.0.0.1:8080/onboard#VQWWPGYSG8Y4LTP6").as_deref(),
+            Some("127.0.0.1")
         );
     }
 
@@ -3763,7 +4443,12 @@ pub fn daemon_set_project(
     // disambiguation happens at render time (here, and in `daemon projects`
     // / the queue) against the current known-key set, so a stored label
     // never goes stale when a colliding project shows up later.
-    let label = crate::daemon::policy::project_label_for(&key);
+    // The daemon stores the key normalized (#992): case-folded on macOS and
+    // Windows and walked up to the repository root. The label it derives is
+    // that root's, in the case on disk, so derive it the same way here.
+    let label = crate::daemon::policy::project_label_for(
+        &crate::daemon::policy::display_path_for_key(&key).unwrap_or_else(|| key.clone()),
+    );
     let resp = daemon_call(
         store,
         "set_project_mode",
@@ -4151,14 +4836,19 @@ mod daemon_command_tests {
     #[test]
     fn setting_a_project_to_auto_from_the_cli_is_persisted() {
         let (_d, store) = crate::config::tests_support::temp_store();
-        // Arming records the terms in force, so it needs a config.
-        store.save_config(&unenrolled_preview_config()).unwrap();
+        // Arming records the terms in force, so it needs a config, and
+        // scopes the contributor chose.
+        let mut cfg = unenrolled_preview_config();
+        cfg.consent_scopes_chosen = Some(true);
+        store.save_config(&cfg).unwrap();
         let project = tempfile::tempdir().unwrap();
         daemon_set_project(&store, project.path(), "auto", false, false).unwrap();
-        let key = std::fs::canonicalize(project.path())
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        // The key a session in that directory resolves to (#992).
+        let key = crate::daemon::policy::project_key_for(Some(
+            &std::fs::canonicalize(project.path())
+                .unwrap()
+                .to_string_lossy(),
+        ));
         let policy = crate::daemon::policy::ProjectPolicy::load(&store).unwrap();
         assert_eq!(policy.resolve(&key), ProjectMode::AutoUpload);
     }
@@ -4964,4 +5654,473 @@ pub fn daemon_token_storage(
             println!("{line}");
         }
     })
+}
+
+pub async fn account_redeem(
+    store: &ConfigStore,
+    code: &str,
+    key: uuid::Uuid,
+    json: bool,
+) -> Result<()> {
+    let cfg = store
+        .load_config()?
+        .context("account-enrollment-required")?;
+    let operation = crate::account_contribution::Operation::open(store, &cfg).await?;
+    let status = operation.redeem_and_status(code, key).await?;
+    print_account_status(
+        serde_json::json!({"schema_version":"trace_commons.account_status.v1", "signed_in":true, "expires_at":operation.expires_at, "contribution_status":status}),
+        json,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// `unenroll` and `consent scopes`
+// ---------------------------------------------------------------------------
+
+/// One daemon request, as `daemon_call` answers it. A parameter so the two
+/// commands below can be tested against a recording daemon.
+pub(crate) type DaemonCaller<'a> = &'a mut dyn FnMut(&str, serde_json::Value) -> Result<Response>;
+
+/// Remove this Mac's enrollment through the daemon (`unenroll`). Asks first
+/// unless `yes`; a non-interactive session must pass `--yes`.
+pub fn unenroll(store: &ConfigStore, yes: bool, json: bool) -> Result<()> {
+    if !yes && !std::io::stdin().is_terminal() {
+        anyhow::bail!("unenroll requires confirmation; use --yes in non-interactive mode");
+    }
+    unenroll_with(
+        yes,
+        json,
+        &mut std::io::stdin(),
+        &mut std::io::stdout(),
+        &mut |method, params| daemon_call(store, method, params),
+    )
+}
+
+/// What `unenroll` is about to do, for the confirmation. The core has no
+/// words for this, so these follow `logout`'s summary.
+pub(crate) fn unenroll_summary_lines() -> [&'static str; 3] {
+    [
+        "about to unenroll this Mac: its contributor config, device key and account session are deleted here.",
+        "nothing is sent to the server: the account stays, and submitted traces stay where they are.",
+        "approved sessions not yet sent go back to waiting; history, receipts, settings and folder rules stay.",
+    ]
+}
+
+/// `unenroll` over explicit streams and an explicit daemon, so the
+/// confirmation and the call are testable.
+pub(crate) fn unenroll_with(
+    yes: bool,
+    json: bool,
+    reader: &mut impl std::io::Read,
+    writer: &mut impl std::io::Write,
+    call: DaemonCaller<'_>,
+) -> Result<()> {
+    if !yes {
+        for line in unenroll_summary_lines() {
+            writeln!(writer, "{line}").context("writing unenroll summary")?;
+        }
+        if !read_yes_no("unenroll this Mac? [y/N] ", reader, writer)? {
+            writeln!(writer, "unenroll cancelled; nothing removed")
+                .context("writing unenroll outcome")?;
+            anyhow::bail!("unenroll cancelled; nothing removed");
+        }
+    }
+    let resp = call("unenroll", serde_json::json!({}))?;
+    render_into(resp, json, writer, |v, w| {
+        if v["removed"] == true {
+            writeln!(w, "unenrolled; this Mac is no longer enrolled")?;
+            let returned = v["approvals_returned"].as_u64().unwrap_or(0);
+            if returned > 0 {
+                writeln!(w, "{returned} approved session(s) went back to waiting")?;
+            }
+        } else {
+            writeln!(w, "not enrolled; nothing to remove")?;
+        }
+        Ok(())
+    })
+}
+
+/// `render`, onto `writer`.
+fn render_into<W: std::io::Write>(
+    resp: Response,
+    json: bool,
+    writer: &mut W,
+    table: impl FnOnce(&serde_json::Value, &mut W) -> std::io::Result<()>,
+) -> Result<()> {
+    if let Some(err) = resp.error {
+        if json {
+            writeln!(
+                writer,
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": "trace_commons.cli_error.v1",
+                    "error": err.code,
+                    "detail": err.message,
+                }))?
+            )?;
+        }
+        anyhow::bail!("{}: {}", err.code, err.message);
+    }
+    let result = resp.result.unwrap_or(serde_json::Value::Null);
+    if json {
+        writeln!(writer, "{}", serde_json::to_string_pretty(&result)?)?;
+    } else {
+        table(&result, writer)?;
+    }
+    Ok(())
+}
+
+/// Choose the consent scopes (`set_consent_scopes`), from `--scopes` or the
+/// core's consent menu. Recorded as the person's choice, which lifts the
+/// consent hold a `login --default` or headless enrollment leaves.
+pub fn consent_scopes(store: &ConfigStore, scopes: Option<&str>, json: bool) -> Result<()> {
+    let interactive = std::io::stdin().is_terminal();
+    consent_scopes_with(
+        scopes,
+        interactive,
+        json,
+        &mut std::io::stdin().lock(),
+        &mut std::io::stdout(),
+        &mut |method, params| daemon_call(store, method, params),
+    )
+}
+
+/// `consent scopes` over explicit streams and an explicit daemon.
+///
+/// The request always names the floor scope, even when nothing else was
+/// ticked: `set_consent_scopes` records a choice only for a non-empty list,
+/// and answering no to every optional use is a choice.
+pub(crate) fn consent_scopes_with(
+    scopes: Option<&str>,
+    interactive: bool,
+    json: bool,
+    reader: &mut impl std::io::BufRead,
+    writer: &mut impl std::io::Write,
+    call: DaemonCaller<'_>,
+) -> Result<()> {
+    let options = crate::daemon::enroll::consent_options();
+    let chosen = match scopes {
+        Some(csv) => {
+            let names: Vec<String> = csv.split(',').map(|s| s.trim().to_string()).collect();
+            validate_scopes(&names).context("invalid --scopes value")?
+        }
+        None if interactive => prompt_consent_scopes(&options, reader, writer)?,
+        // Nobody to ask, and choosing for the person is what the consent
+        // hold exists to prevent.
+        None => anyhow::bail!("consent scopes needs --scopes when not run in a terminal"),
+    };
+    let resp = call(
+        "set_consent_scopes",
+        serde_json::json!({ "scopes": chosen }),
+    )?;
+    render_into(resp, json, writer, |v, w| {
+        writeln!(
+            w,
+            "{}:",
+            crate::first_run_copy::first_run_copy().uses.eyebrow
+        )?;
+        let saved = v["consent_scopes"].as_array().cloned().unwrap_or_default();
+        for scope in options["scopes"].as_array().into_iter().flatten() {
+            if saved.contains(&scope["name"]) {
+                writeln!(w, "  {}", scope["title"].as_str().unwrap_or_default())?;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// The consent menu in the core's words (`consent_options`): each scope's
+/// title, tag and description, and one y/N per optional scope. The floor
+/// scope is shown and not asked. Only an explicit yes is a yes.
+fn prompt_consent_scopes(
+    options: &serde_json::Value,
+    reader: &mut impl std::io::BufRead,
+    writer: &mut impl std::io::Write,
+) -> Result<Vec<String>> {
+    writeln!(
+        writer,
+        "{}",
+        crate::first_run_copy::first_run_copy().uses.eyebrow
+    )?;
+    let mut names = Vec::new();
+    for scope in options["scopes"].as_array().into_iter().flatten() {
+        let title = scope["title"].as_str().unwrap_or_default();
+        let tag = scope["tag"].as_str().unwrap_or_default();
+        let description = scope["description"].as_str().unwrap_or_default();
+        writeln!(writer, "  {title}  [{tag}]")?;
+        writeln!(writer, "      {description}")?;
+        if scope["always_on"] == true {
+            continue;
+        }
+        write!(writer, "  [y/N] ")?;
+        writer.flush()?;
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let answer = line.trim();
+        if answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes") {
+            if let Some(name) = scope["name"].as_str() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    // Adds the floor scope and orders the list as the protocol does.
+    validate_scopes(&names)
+}
+
+#[cfg(test)]
+mod enrollment_command_tests {
+    use super::*;
+    use crate::daemon::ipc::ERR_BUSY;
+
+    /// A daemon that records every call and answers each with `answer`.
+    fn recorder<'a>(
+        calls: &'a mut Vec<(String, serde_json::Value)>,
+        answer: impl Fn(&str, &serde_json::Value) -> Response + 'a,
+    ) -> impl FnMut(&str, serde_json::Value) -> Result<Response> + 'a {
+        move |method, params| {
+            let response = answer(method, &params);
+            calls.push((method.to_string(), params));
+            Ok(response)
+        }
+    }
+
+    fn ok(v: serde_json::Value) -> Response {
+        Response::ok(1, v)
+    }
+
+    #[test]
+    fn unenroll_with_yes_calls_the_daemon_without_asking() {
+        let mut calls = Vec::new();
+        let mut out = Vec::new();
+        unenroll_with(
+            true,
+            false,
+            &mut std::io::empty(),
+            &mut out,
+            &mut recorder(&mut calls, |_, _| {
+                ok(serde_json::json!({"unenrolled": true, "removed": true, "approvals_returned": 0}))
+            }),
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "unenroll");
+        let printed = String::from_utf8(out).unwrap();
+        assert!(!printed.contains("[y/N]"), "{printed}");
+    }
+
+    #[test]
+    fn unenroll_asks_and_a_yes_calls_the_daemon() {
+        let mut calls = Vec::new();
+        let mut out = Vec::new();
+        unenroll_with(
+            false,
+            false,
+            &mut std::io::Cursor::new(b"y\n".to_vec()),
+            &mut out,
+            &mut recorder(&mut calls, |_, _| {
+                ok(serde_json::json!({"unenrolled": true, "removed": true, "approvals_returned": 2}))
+            }),
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "unenroll");
+        let printed = String::from_utf8(out).unwrap();
+        assert!(printed.contains("[y/N]"), "{printed}");
+    }
+
+    #[test]
+    fn unenroll_declined_or_closed_stdin_calls_nothing() {
+        for input in [&b"n\n"[..], &b""[..]] {
+            let mut calls = Vec::new();
+            let r = unenroll_with(
+                false,
+                false,
+                &mut std::io::Cursor::new(input.to_vec()),
+                &mut Vec::new(),
+                &mut recorder(&mut calls, |_, _| ok(serde_json::json!({}))),
+            );
+            assert!(r.is_err());
+            assert!(calls.is_empty(), "a no is a no: {input:?}");
+        }
+    }
+
+    #[test]
+    fn unenroll_reports_a_refusal_as_an_error() {
+        let mut calls = Vec::new();
+        let r = unenroll_with(
+            true,
+            false,
+            &mut std::io::empty(),
+            &mut Vec::new(),
+            &mut recorder(&mut calls, |_, _| {
+                Response::err(1, ERR_BUSY, crate::daemon::unenroll::ERR_UPLOAD_IN_FLIGHT)
+            }),
+        );
+        assert!(
+            r.unwrap_err()
+                .to_string()
+                .contains(crate::daemon::unenroll::ERR_UPLOAD_IN_FLIGHT)
+        );
+    }
+
+    #[test]
+    fn explicit_scopes_are_sent_with_the_floor_scope() {
+        let mut calls = Vec::new();
+        consent_scopes_with(
+            Some("model_training"),
+            false,
+            false,
+            &mut std::io::empty(),
+            &mut Vec::new(),
+            &mut recorder(&mut calls, |_, p| {
+                ok(serde_json::json!({"consent_scopes": p["scopes"].clone()}))
+            }),
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "set_consent_scopes");
+        assert_eq!(
+            calls[0].1["scopes"],
+            serde_json::json!(["debugging_evaluation", "model_training"])
+        );
+    }
+
+    #[test]
+    fn an_unknown_scope_is_refused_before_the_daemon_is_asked() {
+        let mut calls = Vec::new();
+        let r = consent_scopes_with(
+            Some("training"),
+            false,
+            false,
+            &mut std::io::empty(),
+            &mut Vec::new(),
+            &mut recorder(&mut calls, |_, _| ok(serde_json::json!({}))),
+        );
+        assert!(r.is_err());
+        assert!(calls.is_empty());
+    }
+
+    /// Answering no to everything is still a choice: the floor scope is
+    /// named in the request, so the daemon records it as one.
+    #[test]
+    fn the_menu_shows_the_cores_words_and_a_floor_only_answer_names_the_floor() {
+        let mut calls = Vec::new();
+        let mut out = Vec::new();
+        consent_scopes_with(
+            None,
+            true,
+            false,
+            &mut std::io::Cursor::new(b"n\nn\nn\nn\n".to_vec()),
+            &mut out,
+            &mut recorder(&mut calls, |_, p| {
+                ok(serde_json::json!({"consent_scopes": p["scopes"].clone()}))
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            calls[0].1["scopes"],
+            serde_json::json!(["debugging_evaluation"])
+        );
+        let printed = String::from_utf8(out).unwrap();
+        assert!(printed.contains(crate::first_run_copy::first_run_copy().uses.eyebrow));
+        for scope in crate::daemon::enroll::consent_options()["scopes"]
+            .as_array()
+            .unwrap()
+        {
+            assert!(
+                printed.contains(scope["title"].as_str().unwrap()),
+                "{printed}"
+            );
+            assert!(printed.contains(scope["description"].as_str().unwrap()));
+            assert!(printed.contains(scope["tag"].as_str().unwrap()));
+            // The wire name is never shown.
+            assert!(!printed.contains(scope["name"].as_str().unwrap()));
+        }
+    }
+
+    #[test]
+    fn the_menu_sends_what_was_ticked() {
+        let mut calls = Vec::new();
+        consent_scopes_with(
+            None,
+            true,
+            false,
+            // benchmark, ranking, training, attribution
+            &mut std::io::Cursor::new(b"y\nn\nyes\nn\n".to_vec()),
+            &mut Vec::new(),
+            &mut recorder(&mut calls, |_, p| {
+                ok(serde_json::json!({"consent_scopes": p["scopes"].clone()}))
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            calls[0].1["scopes"],
+            serde_json::json!(["debugging_evaluation", "benchmark_only", "model_training"])
+        );
+    }
+
+    #[test]
+    fn without_a_terminal_scopes_must_be_named() {
+        let mut calls = Vec::new();
+        let r = consent_scopes_with(
+            None,
+            false,
+            false,
+            &mut std::io::empty(),
+            &mut Vec::new(),
+            &mut recorder(&mut calls, |_, _| ok(serde_json::json!({}))),
+        );
+        assert!(r.is_err());
+        assert!(calls.is_empty(), "no choice is made for the person");
+    }
+
+    /// End to end against a stopped daemon's state: an enrollment that
+    /// holds on unchosen scopes is released by `consent scopes`.
+    #[test]
+    fn consent_scopes_lifts_the_consent_hold() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let mut cfg = unenrolled_preview_config();
+        cfg.consent_scopes_chosen = Some(false);
+        store.save_config(&cfg).unwrap();
+        assert!(crate::config::consent_hold(store.load_config().unwrap().as_ref()).is_some());
+
+        consent_scopes_with(
+            None,
+            true,
+            false,
+            &mut std::io::Cursor::new(b"\n\n\n\n".to_vec()),
+            &mut Vec::new(),
+            &mut |method, params| {
+                let shared = daemon_shared(&store)?;
+                Ok(handle_local(&shared, method, params))
+            },
+        )
+        .unwrap();
+        let after = store.load_config().unwrap().unwrap();
+        assert_eq!(after.consent_scopes_chosen, Some(true));
+        assert_eq!(crate::config::consent_hold(Some(&after)), None);
+    }
+
+    /// End to end: `unenroll --yes` against a stopped daemon's state.
+    #[test]
+    fn unenroll_against_saved_state_reads_not_logged_in_after() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        store.save_config(&unenrolled_preview_config()).unwrap();
+        assert!(crate::daemon::uploader::enrollment_is_live(&store));
+
+        unenroll_with(
+            true,
+            false,
+            &mut std::io::empty(),
+            &mut Vec::new(),
+            &mut |method, params| {
+                let shared = daemon_shared(&store)?;
+                Ok(handle_local(&shared, method, params))
+            },
+        )
+        .unwrap();
+        assert!(!crate::daemon::uploader::enrollment_is_live(&store));
+        assert!(store.load_config().unwrap().is_none());
+    }
 }

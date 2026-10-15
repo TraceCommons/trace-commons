@@ -12,6 +12,7 @@ import {
   parseSelectResult,
   type SelectResult,
 } from "../inference-connection";
+import { parseConsentOptions } from "../consent-options";
 import type { ConsentOption } from "../types";
 
 export type NativeWalletView = {
@@ -46,21 +47,7 @@ function boolean(value: Record<string, unknown>, key: string) {
 }
 
 export async function getConsentOptions(): Promise<ConsentOption[]> {
-  const response = record(
-    await invokeTauri("consent_options"),
-    "consent response",
-  );
-  if (!Array.isArray(response.scopes))
-    throw new Error("Invalid onboarding scopes");
-  return response.scopes.map((value) => {
-    const scope = record(value, "scope");
-    return {
-      name: string(scope, "name"),
-      description: string(scope, "description"),
-      always_on: boolean(scope, "always_on"),
-      grants_data_use: boolean(scope, "grants_data_use"),
-    };
-  });
+  return parseConsentOptions(await invokeTauri("consent_options"));
 }
 export function enrollWithInvite(invite: string): Promise<void> {
   return invokeTauriDiscardResult("enroll_with_invite", { invite });

@@ -26,7 +26,7 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
-    Title="Trace Commons">
+    Title="Near.ai">
 
     <Grid RowDefinitions="Auto,*" Background="{ThemeResource TcWindowBackgroundBrush}">
 
@@ -94,7 +94,7 @@
                                 Margin="0,0,8,0"
                                 VerticalAlignment="Center" />
             <TextBlock Grid.Column="1"
-                       Text="Trace Commons"
+                       Text="Near.ai"
                        Style="{StaticResource TcChromeTitleTextStyle}"
                        VerticalAlignment="Center" />
         </Grid>
@@ -405,7 +405,7 @@
                             Style="{StaticResource TcPrimaryButtonStyle}"
                             Click="OnApplyUpdateClick"
                             IsEnabled="{x:Bind ViewModel.IsUpdateApplyEnabled, Mode=OneWay}"
-                            AutomationProperties.Name="Install the update and restart Trace Commons" />
+                            AutomationProperties.Name="Install the update and restart Near.ai" />
                 </InfoBar.ActionButton>
             </InfoBar>
 
@@ -500,7 +500,7 @@
                 model scrubs it (K5), not yet shown by any shell. Every string
                 is bound and comes from the Rust through
                 tc_arming_reworded_notice. Got it records that the notice was
-                shown; Ask me is the Settings call.
+                shown; Ask is the Settings call.
             -->
             <ItemsControl ItemsSource="{x:Bind ViewModel.ArmingRewordingCards, Mode=OneWay}">
                 <ItemsControl.ItemTemplate>
@@ -666,6 +666,18 @@
                             Click="OnAcknowledgeLegacyMigration" />
                 </Grid>
             </Border>
+
+            <!--
+                The offer to move a legacy invite identity to the
+                contributor's NEAR AI account, among the notices for the same
+                reason the notice after the move sits here. It can be put away
+                for good on this device; Settings keeps the move. Every string
+                is bound, from the Rust.
+            -->
+            <controls:LegacyMigrationOfferView Offer="{x:Bind ViewModel.LegacyOffer}"
+                                               ShowsDismiss="True"
+                                               Margin="0,0,0,8"
+                                               Visibility="{x:Bind ViewModel.LegacyOffer.ShowsCard, Mode=OneWay}" />
 
             <!--
                 The offer to answer model calls on this computer.
@@ -863,7 +875,7 @@
                 banner of its own for the reason the witness banner is: a
                 higher label can hold the health slot while folders are held.
                 No dismiss button: it goes when the hold does. Each folder has
-                an Ask me button, the Settings call.
+                an Ask button, the Settings call.
             -->
             <Border Visibility="{x:Bind ViewModel.HasGateHeldBanner, Mode=OneWay}"
                     Padding="14,12"
@@ -1040,17 +1052,17 @@
 
                     <Button Grid.Column="2"
                             Style="{StaticResource TcSecondaryButtonStyle}"
-                            Content="Pause"
+                            Content="{x:Bind interop:MonitorShellCopy.PauseWatcher}"
                             Visibility="{x:Bind ViewModel.IsWatching, Mode=OneWay}"
                             IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
                             VerticalAlignment="Center"
                             AutomationProperties.Name="Pause watching">
                         <Button.Flyout>
                             <MenuFlyout>
-                                <MenuFlyoutItem Text="For 1 hour" Click="OnPauseForHour" />
-                                <MenuFlyoutItem Text="Until tomorrow morning"
+                                <MenuFlyoutItem Text="1 hour" Click="OnPauseForHour" />
+                                <MenuFlyoutItem Text="Until morning"
                                                 Click="OnPauseUntilTomorrow" />
-                                <MenuFlyoutItem Text="Until I turn it back on"
+                                <MenuFlyoutItem Text="Until resumed"
                                                 Click="OnPauseUntilResumed" />
                             </MenuFlyout>
                         </Button.Flyout>
@@ -1058,7 +1070,7 @@
 
                     <Button Grid.Column="2"
                             Style="{StaticResource TcSecondaryButtonStyle}"
-                            Content="Resume watching"
+                            Content="{x:Bind interop:MonitorShellCopy.ResumeWatcher}"
                             Visibility="{x:Bind ViewModel.IsPaused, Mode=OneWay}"
                             IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
                             Click="OnResumeWatching"
@@ -1246,7 +1258,7 @@
                                             Content="{x:Bind SubmitAllText}"
                                             Visibility="{x:Bind ShowSubmitAll}"
                                             Tag="{x:Bind}"
-                                            ToolTipService.ToolTip="Sends every session waiting in this project, in one call. Scrubbing still runs, and Undo follows for a few seconds."
+                                            ToolTipService.ToolTip="Sends every trace waiting in this project, in one call. Scrubbing still runs, and Undo follows for a few seconds."
                                             Click="OnSubmitAll" />
                                     <!--
                                         The opt-in path for answering the
@@ -1485,7 +1497,7 @@
                                         Manifest strip. The design carries four
                                         things here; two of them have a source.
 
-                                        The size is labelled "Session on disk",
+                                        The size is labelled "Trace on disk",
                                         which is the label the macOS client
                                         already uses for this exact figure, and
                                         deliberately NOT the design's "Would
@@ -1864,7 +1876,7 @@
                                                 <Button Style="{StaticResource TcSecondaryButtonStyle}"
                                                         Content="Not this one"
                                                         Tag="{x:Bind}"
-                                                        ToolTipService.ToolTip="Skips this session for good, even if you keep working in it. This project will keep being offered."
+                                                        ToolTipService.ToolTip="Skips this trace for good, even if you keep working in it. This project will keep being offered."
                                                         Click="OnNotThisOne" />
                                                 <!--
                                                     Drawn only where the
@@ -1883,7 +1895,7 @@
                                                         Content="Submit"
                                                         Tag="{x:Bind}"
                                                         Visibility="{x:Bind CanContribute, Mode=OneWay}"
-                                                        ToolTipService.ToolTip="Sends this session without opening it. Scrubbing still runs, and Undo follows for a few seconds."
+                                                        ToolTipService.ToolTip="Sends this trace without opening it. Scrubbing still runs, and Undo follows for a few seconds."
                                                         Click="OnSubmitEntry" />
                                             </StackPanel>
                                         </StackPanel>
@@ -1914,7 +1926,7 @@
                     <TextBlock Text="Nothing waiting"
                                Style="{StaticResource TcTitleCardTextStyle}"
                                HorizontalAlignment="Center" />
-                    <TextBlock Text="When a session finishes and goes quiet, it shows up here. Nothing is sent unless you say so."
+                    <TextBlock Text="When a trace finishes and goes quiet, it shows up here. Nothing is sent unless you say so."
                                Style="{StaticResource TcCaptionTextStyle}"
                                TextWrapping="Wrap"
                                MaxWidth="360"
@@ -1977,7 +1989,7 @@
                             <TextBlock Text="{x:Bind ViewModel.UndoHeadline, Mode=OneWay}"
                                        Style="{StaticResource TcTitleCardTextStyle}"
                                        TextWrapping="Wrap" />
-                            <TextBlock Text="Approved sessions will send automatically. You can undo until uploading starts."
+                            <TextBlock Text="Approved traces will send automatically. You can undo until uploading starts."
                                        Style="{StaticResource TcCaptionTextStyle}"
                                        TextWrapping="Wrap" />
                         </StackPanel>

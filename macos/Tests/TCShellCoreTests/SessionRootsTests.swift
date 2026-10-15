@@ -311,4 +311,39 @@ final class SessionRootsTests: XCTestCase {
                        ["mode": "off"])
     }
 
+    func test_trajectoryWatchEncodesItsKey() throws {
+        var roots = SessionRoots(claude: .off, codex: .off)
+        XCTAssertEqual(roots.trajectory, .undecided)
+        XCTAssertNil(try decode(try XCTUnwrap(roots.settingsJSON()))["trajectory_source"],
+            "an unanswered folder is never sent, not even as off")
+        roots.trajectory = .watch(path: "/Users/someone/letta-exports")
+        XCTAssertEqual(try declaration(decode(XCTUnwrap(roots.settingsJSON())), "trajectory_source"),
+                       ["mode": "watch", "path": "/Users/someone/letta-exports"])
+        XCTAssertEqual(roots.claude, .off)
+        XCTAssertEqual(roots.codex, .off)
+        roots.trajectory = .off
+        XCTAssertEqual(try declaration(decode(XCTUnwrap(roots.settingsJSON())), "trajectory_source"),
+                       ["mode": "off"])
+
+        let unfinished = SessionRoots(trajectory: .watch(path: "/Users/someone/letta-exports"))
+        XCTAssertFalse(unfinished.isComplete, "a trajectory folder cannot stand in for claude and codex")
+        XCTAssertNil(unfinished.settingsJSON())
+    }
+
+    /// The declaration is compared as bytes: `FirstRunCall.startDaemon` is
+    /// equal only when its JSON is, and a Swift dictionary's key order varies
+    /// between two equal dictionaries, so the keys are sorted.
+    func test_settingsJSONIsKeySorted() throws {
+        let roots = SessionRoots(
+            claude: .watch(path: "/Users/someone/.claude/projects"),
+            codex: .watch(path: "/Users/someone/.codex/sessions"),
+            gemini: .watch(path: "/Users/someone/.gemini/tmp"),
+            cline: .watch(path: "/Users/someone/cline/tasks"),
+            opencode: .watch(path: "/Users/someone/opencode-exports"),
+            trajectory: .watch(path: "/Users/someone/letta-exports")
+        )
+        let json = try XCTUnwrap(roots.settingsJSON())
+        let sorted = try JSONSerialization.data(withJSONObject: decode(json), options: [.sortedKeys])
+        XCTAssertEqual(json, String(decoding: sorted, as: UTF8.self))
+    }
 }

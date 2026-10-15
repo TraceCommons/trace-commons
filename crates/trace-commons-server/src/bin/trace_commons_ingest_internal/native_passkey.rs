@@ -41,7 +41,8 @@
 //! checked at `finish`.
 //!
 //! Nothing is logged or audited but fixed labels: no ceremony id, credential
-//! id, challenge, token or label.
+//! id, challenge, token or label. `login/finish` returns the authenticating
+//! passkey's own label in its body (`passkey_label`) and nowhere else.
 
 use super::*;
 use trace_commons_server::account_binding::AccountBindingState;
@@ -112,6 +113,13 @@ struct NativePasskeyStartResponse<T: Serialize> {
 /// `NativeTokenResponse` shape plus the account's binding state. The token is
 /// a SECRET: it appears in this body only, never in a log or audit row, and
 /// only its hash reached the database.
+///
+/// `passkey_label` is set by `login/finish` only: the label the signed-in
+/// account gave the passkey that just authenticated, so a Mac that first uses
+/// a passkey by signing in can name it. Absent (not null) when the passkey
+/// has no label or it could not be read, which is also what an older server
+/// sends; an older client ignores it. Like the token it appears in this body
+/// only, never in a log or audit row.
 #[derive(Serialize)]
 struct NativePasskeySessionResponse {
     access_token: String,
@@ -119,6 +127,8 @@ struct NativePasskeySessionResponse {
     expires_in_secs: i64,
     account_id: String,
     binding_state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    passkey_label: Option<String>,
 }
 
 fn no_store(mut response: axum::response::Response) -> axum::response::Response {
@@ -145,6 +155,7 @@ fn session_response(
     secret: &str,
     account_id: uuid::Uuid,
     binding: AccountBindingState,
+    passkey_label: Option<String>,
 ) -> axum::response::Response {
     no_store(
         Json(NativePasskeySessionResponse {
@@ -153,6 +164,7 @@ fn session_response(
             expires_in_secs: NATIVE_SESSION_TTL_HOURS * 3600,
             account_id: account_id.to_string(),
             binding_state: binding.label(),
+            passkey_label,
         })
         .into_response(),
     )
@@ -164,7 +176,7 @@ fn within_rate_limits(headers: &HeaderMap, bucket: &str) -> bool {
     ACCOUNT_RATE_LIMITER.check(
         &format!("native-passkey-{bucket}-ip:{client_ip}"),
         NATIVE_PASSKEY_PER_IP_LIMIT,
-    ) && ACCOUNT_RATE_LIMITER.check(
+    ) && ACCOUNT_RATE_LIMITER.check_global(
         &format!("native-passkey-{bucket}-global"),
         NATIVE_PASSKEY_GLOBAL_LIMIT,
     )
@@ -342,6 +354,7 @@ async fn native_passkey_create_finish_inner(
         &secret,
         account_id,
         AccountBindingState::Unbound,
+        None,
     )
 }
 
@@ -450,7 +463,16 @@ async fn native_passkey_login_finish_inner(
     {
         return native_generic_deny();
     }
-    session_response(&tenant, &secret, account_id, binding)
+    // The label this account gave the passkey that just authenticated, read
+    // by tenant, account AND credential, all three from the verified
+    // assertion, never from the request. Cosmetic: a failed read omits it
+    // rather than refusing a sign-in that already succeeded.
+    let passkey_label = db
+        .credential_label_for_account(&tenant, account_id, &credential_id)
+        .await
+        .ok()
+        .flatten();
+    session_response(&tenant, &secret, account_id, binding, passkey_label)
 }
 
 /// The authenticated native routes take a native session only. A browser
@@ -473,7 +495,7 @@ pub(crate) async fn account_passkey_native_register_start_handler(
     require_native_session(&ctx)?;
     // Before the gate, which reads the database and may write an audit row:
     // a start that is going to be refused anyway costs nothing past here.
-    if !ACCOUNT_RATE_LIMITER.check(
+    if !ACCOUNT_RATE_LIMITER.check_principal(
         &format!(
             "native-passkey-register-start-account:{}",
             ctx.account_id.as_uuid()
@@ -580,4 +602,49 @@ pub(crate) async fn account_passkey_native_register_finish_handler(
     .await
     .map_err(internal_error)?;
     Ok(Json(serde_json::json!({ "credential_id": credential_id })))
+}
+
+#[cfg(test)]
+mod session_response_tests {
+    use super::*;
+
+    async fn body(passkey_label: Option<String>) -> serde_json::Value {
+        let response = session_response(
+            "tenant-a",
+            "secret",
+            uuid::Uuid::nil(),
+            AccountBindingState::Bound,
+            passkey_label,
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    /// `passkey_label` is additive: present only when there is a label, and
+    /// otherwise the exact keys an older server sent.
+    #[tokio::test]
+    async fn the_passkey_label_is_present_only_when_there_is_one() {
+        let labeled = body(Some("Studio".to_string())).await;
+        assert_eq!(labeled["passkey_label"], "Studio");
+        let unlabeled = body(None).await;
+        let mut keys: Vec<&str> = unlabeled
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "access_token",
+                "account_id",
+                "binding_state",
+                "expires_in_secs",
+                "token_type"
+            ]
+        );
+    }
 }

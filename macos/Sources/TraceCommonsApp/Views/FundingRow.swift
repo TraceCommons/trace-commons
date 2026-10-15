@@ -1,4 +1,5 @@
-// INTEGRATION: add FundingRow(copy:) inside CredentialSection. AppModel supplies
+// INTEGRATION: FundingRow(copy:) is its own card on the Inference tab, after the
+// balance panel (#1146's funding panel). AppModel supplies
 // nearAiFunding(expected: FundingDestination?) async -> FundingStatus? and must
 // return nil after awaiting if its captured client is no longer current or the
 // task was cancelled. PrivateInferenceCopy supplies fundingTitle, fundingWhat,
@@ -9,6 +10,7 @@
 
 import Foundation
 import SwiftUI
+import TCDesign
 import TCShellCore
 
 /// The exact Cloud organization and credential revision displayed to the user.
@@ -113,24 +115,27 @@ struct FundingRow: View {
     @State private var visible = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.sm) {
-            TCSectionHeader(title: copy.fundingTitle)
-            Text(status?.view.message ?? copy.fundingUnavailable)
-                .font(TC.Font_.body)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(copy.fundingWhat)
-                .font(TC.Font_.meta)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Button {
-                load(opening: status?.destination)
-            } label: {
-                Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)
-                    .frame(minHeight: 44)
-            }
-            .buttonStyle(.bordered)
-            .disabled(model.credentialBusy || request != nil)
-        }
+        // #1146's funding panel, its own card after the balance, under its
+        // icon (owner, 2026-10-10): the state in the head with the button
+        // on the right, and what the button opens behind the info icon.
+        GlassIconCard(
+            systemImage: "creditcard", title: copy.fundingTitle,
+            subtitle: [status?.view.message ?? copy.fundingUnavailable],
+            // What the button opens, behind the info icon (owner, 2026-10-10).
+            info: copy.fundingWhat,
+            trailing: {
+                Button {
+                    load(opening: status?.destination)
+                } label: {
+                    // The glass style's own 28pt, as every inline card button
+                    // (owner, 2026-10-08); a 44pt label made it the odd one out.
+                    Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)
+                        .lineLimit(1)
+                }
+                .buttonStyle(GlassButtonStyle(.glass))
+                .fixedSize()
+                .disabled(model.credentialBusy || request != nil)
+            })
         .onAppear {
             visible = true
             load(opening: nil)

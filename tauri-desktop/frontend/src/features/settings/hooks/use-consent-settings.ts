@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { coreKeys } from "../../../lib/tauri/query-keys";
+import { useShellStatusLines } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import type { ConsentOption } from "../../onboarding/public";
 import {
@@ -11,6 +12,7 @@ import { profileKeys } from "../../profile/public";
 import { settingsKeys } from "../api/query-keys";
 
 export function useConsentSettings() {
+  const lines = useShellStatusLines();
   const core = useCoreStatus();
   const queryClient = useQueryClient();
   const query = useQuery<ConsentOption[]>({
@@ -49,7 +51,7 @@ export function useConsentSettings() {
           ? "error"
           : "ready") as "busy" | "loading" | "ready" | "error",
     error: query.isError
-      ? "Consent options unavailable. Refresh after Rust core starts."
+      ? lines.readUnavailable
       : mutation.isError
         ? "Consent choices were not changed."
         : null,

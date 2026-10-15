@@ -49,6 +49,15 @@ extension DaemonClient {
         guard reply.signedOut else { throw NativePasskeyFailure.authorizationFailed }
     }
 
+    /// `unenroll`: the daemon drops this Mac's enrollment, locally only.
+    /// Checked against `hello` first, so a daemon without the call refuses
+    /// (`native-identity-unsupported`) and the caller stays as it was.
+    func unenroll() throws {
+        struct Reply: Decodable { let unenrolled: Bool }
+        let reply: Reply = try identityCall("unenroll")
+        guard reply.unenrolled else { throw NativePasskeyFailure.authorizationFailed }
+    }
+
     @MainActor
     func nativePasskeyCoordinator(presentationAnchor: @escaping @MainActor () -> NSWindow?) -> NativePasskeyCoordinator {
         NativePasskeyCoordinator(daemon: NativeIdentityTransport(client: self),

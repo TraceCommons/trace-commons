@@ -193,8 +193,8 @@ public sealed class SessionRootsViewModel : INotifyPropertyChanged
             // one the daemon accepts, which is this shell's bug rather than
             // the contributor's, so it does not get the "answer both" hint.
             Error = exception.IsRootsNotDeclared
-                ? "Trace Commons could not record that answer. Please report this."
-                : "Could not start. Another Trace Commons instance may already be running.";
+                ? "Near.ai could not record that answer. Please report this."
+                : "Could not start. Another Near.ai instance may already be running.";
         }
         finally
         {

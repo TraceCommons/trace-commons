@@ -228,9 +228,10 @@ reservation. The only subtraction is `trace_transition_admission(... ,
 processing began. Nothing else decrements, no window rolls, and retention
 explicitly retains the counters. These are stop-valves with a finite lifetime
 supply, not rate limits. Rate limiting is done elsewhere and is already tight:
-30 submissions per principal per minute with concurrency 2
-(`SUBMIT_PER_PRINCIPAL_LIMIT` / `SUBMIT_PER_PRINCIPAL_CONCURRENCY`), and 10
-challenge mints per minute.
+30 submissions per principal per minute with concurrency 2 by default
+(`TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN` /
+`TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY`, see
+[`env-reference.md`](env-reference.md)), and 10 challenge mints per minute.
 
 **Three of the six are frozen at first use.** `trace_reserve_admission`
 compares the passed `p_global_limit` against the stored singleton row, and

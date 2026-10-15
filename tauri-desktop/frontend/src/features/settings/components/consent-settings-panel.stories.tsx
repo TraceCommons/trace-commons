@@ -11,21 +11,27 @@ type Story = StoryObj<typeof meta>;
 const options = [
   {
     name: "debugging_evaluation",
+    title: "Finding bugs and measuring agents",
     description: "Required baseline use.",
     always_on: true,
     grants_data_use: true,
+    tag: "required",
   },
   {
     name: "research",
+    title: "Research use",
     description: "Allow research use.",
     always_on: false,
     grants_data_use: true,
+    tag: "data use",
   },
   {
     name: "public_attribution",
+    title: "List my handle publicly as a contributor",
     description: "Allow public credit.",
     always_on: false,
     grants_data_use: false,
+    tag: "attribution only",
   },
 ];
 export const Ready: Story = {

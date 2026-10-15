@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
+import { useShellStatusLines } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import { getAudit } from "../api/audit-api";
 import { settingsKeys } from "../api/query-keys";
 
 export function useAudit() {
+  const lines = useShellStatusLines();
   const core = useCoreStatus();
   const query = useQuery({
     queryKey: settingsKeys.audit(core.scope),
@@ -18,7 +20,7 @@ export function useAudit() {
       | "error"
       | "ready",
     error: query.isError
-      ? "Audit log unavailable. Refresh after Rust core starts."
+      ? lines.readUnavailable
       : null,
     refresh: async () => {
       await query.refetch();

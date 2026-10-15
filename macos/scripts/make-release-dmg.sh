@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build, sign, notarize and staple TraceCommons.app, then package it as a DMG.
+# Build, sign, notarize and staple Near.ai.app, then package it as a DMG.
 #
 # This is the release path. `make-app-bundle.sh` remains the development path
 # and stays ad-hoc-signed; nothing here changes it.
@@ -77,8 +77,8 @@ python3 "$PACKAGE_DIR/../scripts/ci/native-passkey-entitlements.py" \
   --entitlements "$SIGNING_ENTITLEMENTS" --profile-cms "$SIGNING_PROFILE" \
   --bundle-id ai.tracecommons.shell --require-passkeys
 CONFIG=release
-APP="$PACKAGE_DIR/.build/TraceCommons.app"
-DMG="$PACKAGE_DIR/.build/TraceCommons.dmg"
+APP="$PACKAGE_DIR/.build/Near.ai.app"
+DMG="$PACKAGE_DIR/.build/Near.ai.dmg"
 
 require_env() {
   local name="$1"
@@ -214,6 +214,10 @@ find "$APP/Contents/Frameworks" -name '*.dylib' -print0 |
 # -- measured, not assumed. The failure is an application that does not start,
 # which is why CI launches the signed app rather than trusting that it signed.
 cp "$SIGNING_PROFILE" "$APP/Contents/embedded.provisionprofile"
+# The bundled `near-ai` CLI is signed without entitlements, before the app
+# that contains it: a command-line binary cannot carry a keychain access group.
+codesign --force --timestamp --options runtime \
+  --sign "$MACOS_SIGNING_IDENTITY" "$APP/Contents/MacOS/near-ai"
 codesign --force --timestamp --options runtime \
   --entitlements "$SIGNING_ENTITLEMENTS" \
   --sign "$MACOS_SIGNING_IDENTITY" "$APP"
@@ -225,7 +229,7 @@ TC_REQUIRE_NATIVE_PASSKEYS=1 TC_VERIFY_STATIC_ONLY=1 \
 
 echo "--- packaging the DMG"
 rm -f "$DMG"
-hdiutil create -volname TraceCommons -srcfolder "$APP" -ov -format UDZO "$DMG"
+hdiutil create -volname Near.ai -srcfolder "$APP" -ov -format UDZO "$DMG"
 codesign --force --timestamp --sign "$MACOS_SIGNING_IDENTITY" "$DMG"
 
 echo "--- notarizing (this waits for Apple's verdict)"

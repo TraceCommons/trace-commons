@@ -35,6 +35,7 @@ final class LiveDaemonClientTests: XCTestCase {
              { _ = try await client.setDigestSchedule(.evening(hour: 18)) }),
             ("set_settings", #"{"digest_schedule":{"mode":"interval"}}"#,
              { _ = try await client.setDigestSchedule(.interval) }),
+            ("set_settings", #"{"insights_ledger_feed":true}"#, { _ = try await client.setInsightsLedgerFeed(true) }),
             ("list_history", #"{"limit":50}"#, { _ = try await client.listHistory(limit: 50) }),
             ("history_rollup", "{}", { _ = try await client.historyRollup() }),
             ("commons_credit_summary", "{}", { _ = try await client.commonsCreditSummary() }),
@@ -57,8 +58,81 @@ final class LiveDaemonClientTests: XCTestCase {
         }
     }
 
+    /// `insights_glance` carries the caller's UTC offset as `tz`, the only
+    /// parameter the daemon reads (`insights_glance::parse_tz`). The offset
+    /// is an argument so this does not depend on the machine's time zone.
+    /// Its own test: the sample transport has no recorded glance to answer.
+    func testInsightsGlanceSendsItsOffset() async throws {
+        let transport = ScriptedTransport { method, _ in
+            method == "insights_glance" ? #"{"id":0,"result":{"enabled":false,"feed":"ledger"}}"# : nil
+        }
+        let glance = try await LiveDaemonClient(transport: transport).insightsGlance(tzSeconds: 3600)
+        XCTAssertFalse(glance.enabled)
+        XCTAssertEqual(transport.calls.map(\.method), ["insights_glance"])
+        XCTAssertEqual(transport.calls.map(\.params), [#"{"tz":3600}"#])
+    }
+
+    /// The nudge requests: the Traces filter and order, the card actions,
+    /// and the Settings switches and offer markers. Queue order sends no
+    /// `order` at all, so the request is byte for byte the one before it.
+    func testNudgeRequestsSendTheirIPCNameAndParams() async throws {
+        let transport = ScriptedTransport { method, _ in
+            switch method {
+            case "list_pending": return #"{"id":0,"result":{"pending":[]}}"#
+            case "nudge_opened": return #"{"id":0,"result":{"opened":true}}"#
+            case "nudge_decline": return #"{"id":0,"result":{"declined":true}}"#
+            case "set_suggestions_enabled": return #"{"id":0,"result":{"suggestions_enabled":false}}"#
+            case "set_menu_bar_mark_enabled": return #"{"id":0,"result":{"menu_bar_mark_enabled":true}}"#
+            case "set_notifications_enabled": return #"{"id":0,"result":{"notifications_enabled":true}}"#
+            case "set_notify_kind": return #"{"id":0,"result":{"kind":"verdicts_landed","on":true}}"#
+            case "set_settings": return #"{"id":0,"result":{"idle_offer_pending":false}}"#
+            default: return nil
+            }
+        }
+        let client = LiveDaemonClient(transport: transport)
+        _ = try await client.listPending(projectId: nil, filter: .idleSessions, order: .suggested)
+        _ = try await client.listPending(projectId: nil, filter: nil, order: .queue)
+        _ = try await client.listPending(projectId: nil, filter: nil, order: .suggested)
+        try await client.nudgeOpened(.idleSessions)
+        try await client.nudgeDecline(.reviewBacklog)
+        try await client.setSuggestionsEnabled(false)
+        try await client.setMenuBarMarkEnabled(true)
+        try await client.setNotificationsEnabled(true)
+        try await client.setNotifyKind("verdicts_landed", on: true)
+        try await client.dismissNotifyOffer(kind: "idle_sessions")
+        XCTAssertEqual(transport.calls.map(\.method), [
+            "list_pending", "list_pending", "list_pending", "nudge_opened", "nudge_decline",
+            "set_suggestions_enabled", "set_menu_bar_mark_enabled", "set_notifications_enabled",
+            "set_notify_kind", "set_settings",
+        ])
+        XCTAssertEqual(transport.calls.map(\.params), [
+            #"{"filter":"idle_sessions","order":"suggested"}"#,
+            "{}",
+            #"{"order":"suggested"}"#,
+            #"{"kind":"idle_sessions"}"#,
+            #"{"kind":"review_backlog"}"#,
+            #"{"on":false}"#,
+            #"{"on":true}"#,
+            #"{"on":true}"#,
+            #"{"kind":"verdicts_landed","on":true}"#,
+            #"{"idle_offer_pending":false}"#,
+        ])
+    }
+
+    /// Only the two kinds with a one-time offer have a marker to clear; any
+    /// other kind sends nothing.
+    func testOnlyAnOfferedKindsMarkerCanBeCleared() async {
+        let transport = ScriptedTransport { _, _ in #"{"id":0,"result":{}}"# }
+        let client = LiveDaemonClient(transport: transport)
+        do {
+            try await client.dismissNotifyOffer(kind: "weekly_recap")
+            XCTFail("cleared a marker that does not exist")
+        } catch {}
+        XCTAssertTrue(transport.calls.isEmpty)
+    }
+
     /// The pill's override writes (#1208): `confirm` goes only with Auto
-    /// contribute, only as `true`; Ask me and Never carry the mode alone;
+    /// contribute, only as `true`; Ask and Never carry the mode alone;
     /// clear carries nothing. Each reply decodes as the daemon sends it.
     func testTheContributionOverrideSendsConfirmOnlyForAutoContribute() async throws {
         let transport = ScriptedTransport { method, _ in
@@ -127,19 +201,64 @@ final class LiveDaemonClientTests: XCTestCase {
         XCTAssertEqual(transport.calls.map(\.params), [#"{"entry_id":"e9"}"#])
     }
 
+    /// The Private AI switch (Z1.5) over `tc_call`: the read is
+    /// `get_settings`, the write is `set_settings` carrying the switch AND
+    /// the offer marker, so a contributor who found the switch is never put
+    /// the first-run question again. Nothing is confirmed here; the caller
+    /// confirms with the core's rule.
+    func testThePrivateAISwitchReadsAndWritesTheSettings() async throws {
+        let transport = ScriptedTransport { method, _ in
+            switch method {
+            case "get_settings":
+                return #"{"id":0,"result":{"private_inference":false,"private_inference_offer_seen":false,"private_inference_state":{"state":"off","port":null}}}"#
+            case "set_settings":
+                return #"{"id":0,"result":{"private_inference":true,"private_inference_offer_seen":true,"private_inference_state":{"state":"running","port":4100}}}"#
+            default: return nil
+            }
+        }
+        let client = LiveDaemonClient(transport: transport)
+        let read = try await client.privateAI()
+        XCTAssertEqual(read, DaemonData.PrivateAISwitch(
+            on: false, offerSeen: false, state: DaemonData.PrivateInferenceState(state: "off", port: nil)))
+        let written = try await client.setPrivateAI(on: true)
+        XCTAssertEqual(written.on, true)
+        XCTAssertEqual(written.offerSeen, true)
+        XCTAssertEqual(written.state?.state, "running")
+        XCTAssertEqual(transport.calls.map(\.method), ["get_settings", "set_settings"])
+        XCTAssertEqual(transport.calls.map(\.params), [
+            "{}",
+            #"{"private_inference":true,"private_inference_offer_seen":true}"#,
+        ])
+    }
+
+    /// A stopped daemon is unreachable for the switch too; a refusal keeps its label.
+    func testAPrivateAIRefusalKeepsItsLabel() async {
+        let refusing = ScriptedTransport { _, _ in #"{"id":0,"error":{"code":"bad_params","message":"settings-invalid-value"}}"# }
+        do {
+            _ = try await LiveDaemonClient(transport: refusing).setPrivateAI(on: true)
+            XCTFail("a refusal answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "settings-invalid-value"))
+        }
+        let stopped = ScriptedTransport { _, _ in #"{"error":{"code":"unavailable","message":"daemon-stopped"}}"# }
+        do {
+            _ = try await LiveDaemonClient(transport: stopped).privateAI()
+            XCTFail("a stopped daemon answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .unreachable)
+        }
+    }
+
+    /// Only the two PROVISIONAL shapes the screens still read throw
+    /// `notAvailableYet`; the daemon's real replies for those methods are
+    /// `networkInferenceSummary()` and `networkMissionCatalogue()`, and every
+    /// other network method is routed (`DaemonNetworkContractTests`).
     func testProvisionalMethodsSendNothing() async {
         let transport = ScriptedTransport.sample(.normalDay)
         let client = LiveDaemonClient(transport: transport)
         let provisional: [(String, () async throws -> Void)] = [
             ("inference_summary", { _ = try await client.inferenceSummary() }),
-            ("inference_call_proof", { _ = try await client.inferenceCallProof(callId: 1) }),
-            ("model_spend", { _ = try await client.modelSpend() }),
-            ("private_ai", { _ = try await client.privateAI() }),
-            ("set_private_ai", { _ = try await client.setPrivateAI(on: true) }),
             ("mission_catalogue", { _ = try await client.missionCatalogue() }),
-            ("invite_lookup", { _ = try await client.lookupInvite(code: "c") }),
-            ("passkey_state", { _ = try await client.passkeyState() }),
-            ("account_session_status", { _ = try await client.accountState() }),
         ]
         for (method, call) in provisional {
             do {
@@ -276,6 +395,30 @@ final class LiveDaemonClientTests: XCTestCase {
         XCTAssertEqual(transport.calls.first?.onQueue, true)
     }
 
+    /// The network methods (C3) wait on a server round trip, so each runs on
+    /// the client's work queue like every local call, never holding a Swift
+    /// concurrency thread for the trip.
+    func testNetworkCallsDoNotRunOnTheCallersThread() async throws {
+        let transport = ScriptedTransport.sample(.normalDay)
+        let client = LiveDaemonClient(transport: transport)
+        _ = try await client.networkInferenceSummary()
+        _ = try await client.inferenceCallProof(callId: 414)
+        _ = try await client.modelSpend()
+        let shown = try await client.networkPrivateAI()
+        _ = try await client.setNetworkPrivateAI(on: false, consent: DaemonData.PrivateAIConsent(acknowledging: shown))
+        _ = try await client.networkMissionCatalogue(limit: 1, before: nil)
+        _ = try await client.lookupInvite(code: "c")
+        _ = try await client.passkeyState()
+        _ = try await client.accountState()
+        _ = try await client.activityMissionsCatalogue()
+        XCTAssertEqual(transport.calls.map(\.method), [
+            "inference_summary", "inference_call_proof", "model_spend", "private_ai", "set_private_ai",
+            "mission_catalogue", "invite_lookup", "passkey_state", "account_session_status",
+            "activity_missions_catalogue",
+        ])
+        XCTAssertEqual(transport.calls.filter { !$0.onQueue }.map(\.method), [])
+    }
+
     // MARK: - Events
 
     func testAStreamOpensWithASnapshotBuiltFromStatusAndTheQueue() async throws {
@@ -408,12 +551,13 @@ private final class ScriptedTransport: DaemonTransport, @unchecked Sendable {
     }
 
     /// Answers from a sample set's daemon-shaped replies, wrapped in a
-    /// `tc_call` result frame. `dismiss` answers `ok: true`, as the daemon does.
+    /// `tc_call` result frame. `dismiss` answers `ok: true`, as the daemon does;
+    /// a write answers with what its read returns.
     static func sample(_ set: SampleDaemonClient.SampleSet) -> ScriptedTransport {
         ScriptedTransport { method, _ in
             if method == "dismiss" { return #"{"id":0,"result":{"ok":true}}"# }
-            let reply = method == "set_settings" ? SampleDaemonData.reply("get_settings", in: set)
-                : SampleDaemonData.reply(method, in: set)
+            let read = ["set_settings": "get_settings", "set_private_ai": "private_ai"][method] ?? method
+            let reply = SampleDaemonData.reply(read, in: set)
             return reply.map { #"{"id":0,"result":\#($0)}"# }
         }
     }

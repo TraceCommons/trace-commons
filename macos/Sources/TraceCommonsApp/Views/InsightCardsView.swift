@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 import TCBridge
 
 struct InsightCardsView: View {
@@ -6,41 +7,41 @@ struct InsightCardsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(model.text("card_title")).font(.title2)
+            Text(model.text("card_title")).insightsTitle()
             Text(model.text("card_selection_notice"))
-                .font(.callout).foregroundStyle(.secondary)
+                .insightsNote()
             selection
             HStack {
                 Button(model.text("card_update")) { model.generateCards() }
-                if model.cardBusy { ProgressView().controlSize(.small) }
+                if model.cardBusy { GlassSpinner() }
             }
-            if let error = model.cardError { Text(error).foregroundStyle(.red) }
+            if let error = model.cardError { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
             if let result = model.cardResult {
                 Text("\(model.text("provider")): \(result.provider.id) · \(result.provider.rubric_version)")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .insightsCaption()
                 ForEach(result.cards) { card in cardView(card) }
             }
         }
     }
 
     private var selection: some View {
-        DisclosureGroup(model.text("card_choose_evidence")) {
+        InsightsDisclosure(model.text("card_choose_evidence")) {
             VStack(alignment: .leading, spacing: 6) {
-                Text(model.text("saved")).font(.headline)
+                Text(model.text("saved")).insightsHeading()
                 ForEach(model.snapshots) { snapshot in
                     Toggle(isOn: Binding(
                         get: { model.cardSnapshotSelection.contains(snapshot.id) },
                         set: { model.setCardSnapshot(snapshot.id, selected: $0) }
-                    )) { Text(snapshot.id).font(.caption.monospaced()).lineLimit(1) }
-                    .toggleStyle(.checkbox)
+                    )) { Text(snapshot.id).insightsMono().lineLimit(1) }
+                    .toggleStyle(GlassCheckboxStyle())
                 }
-                Text(model.text("episode_saved")).font(.headline).padding(.top, 4)
+                Text(model.text("episode_saved")).insightsHeading().padding(.top, 4)
                 ForEach(model.episodes) { episode in
                     Toggle(isOn: Binding(
                         get: { model.cardEpisodeSelection.contains(episode.id) },
                         set: { model.setCardEpisode(episode.id, selected: $0) }
-                    )) { Text(episode.id).font(.caption.monospaced()).lineLimit(1) }
-                    .toggleStyle(.checkbox)
+                    )) { Text(episode.id).insightsMono().lineLimit(1) }
+                    .toggleStyle(GlassCheckboxStyle())
                 }
             }.padding(.top, 6)
         }
@@ -49,10 +50,10 @@ struct InsightCardsView: View {
     private func cardView(_ card: InsightQuestionCard) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(model.text(card.question.copyKey)).font(.headline)
+                Text(model.text(card.question.copyKey)).insightsHeading()
                 Spacer()
                 Text(model.text("card_state_\(card.state.rawValue)"))
-                    .font(.caption).foregroundStyle(.secondary)
+                    .insightsCaption()
             }
             ForEach(card.rows) { row in
                 HStack(alignment: .firstTextBaseline) {
@@ -62,38 +63,38 @@ struct InsightCardsView: View {
                 }
             }
             if !card.coverage.isEmpty {
-                Text(model.text("card_coverage")).font(.caption).foregroundStyle(.secondary)
+                Text(model.text("card_coverage")).insightsCaption()
                 ForEach(card.coverage) { coverage in
                     Text("\(model.text("card_coverage_\(coverage.unit)")): \(coverage.observed) / \(coverage.eligible)")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .insightsCaption()
                 }
             }
             ForEach(card.limitations, id: \.self) { limitation in
                 Text(model.text("card_limitation_\(limitation)"))
-                    .font(.caption).foregroundStyle(.secondary)
+                    .insightsCaption()
             }
             if card.rows_omitted {
-                Text(model.text("card_more_models")).font(.caption).foregroundStyle(.secondary)
+                Text(model.text("card_more_models")).insightsCaption()
             }
             evidence(card)
         }
-        .padding(12).background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+        .insightsCard()
     }
 
     @ViewBuilder private func evidence(_ card: InsightQuestionCard) -> some View {
         if !card.evidence_ids.isEmpty {
-            Text(model.text("card_evidence")).font(.caption.bold())
+            Text(model.text("card_evidence")).glassType(GlassTokens.TypeScale.caption.weight(.semibold))
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(card.evidence_ids, id: \.self) { id in
-                    Button(id) { model.explain(id) }.font(.caption.monospaced()).lineLimit(1)
+                    Button(id) { model.explain(id) }.buttonStyle(GlassButtonStyle(.link)).insightsMono().lineLimit(1)
                 }
             }
         }
         if !card.episode_ids.isEmpty {
-            Text(model.text("card_episodes")).font(.caption.bold())
+            Text(model.text("card_episodes")).glassType(GlassTokens.TypeScale.caption.weight(.semibold))
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(card.episode_ids, id: \.self) { id in
-                    Button(id) { model.openEpisode(id) }.font(.caption.monospaced()).lineLimit(1)
+                    Button(id) { model.openEpisode(id) }.buttonStyle(GlassButtonStyle(.link)).insightsMono().lineLimit(1)
                 }
             }
         }

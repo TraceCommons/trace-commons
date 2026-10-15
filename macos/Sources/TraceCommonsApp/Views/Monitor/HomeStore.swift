@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 import Observation
 import TCShellCore
@@ -23,32 +22,122 @@ final class HomeStore {
     /// The commons' own credit figures. Its `unknown` halves are nil, never zero.
     private(set) var credit: DaemonData.CommonsCreditSummary?
     /// The mission catalogue (R10): one list for the whole commons, the same
-    /// request for every contributor (#1174 M1). PROVISIONAL (Zaki's C3): the
-    /// live client throws `notAvailableYet`, which is not a failure to show.
+    /// request for every contributor (#1174 M1). PROVISIONAL: the live client
+    /// throws `notAvailableYet` for this shape, which is not a failure to
+    /// show; the daemon's real reply is `networkMissionCatalogue()`, and
+    /// moving this store to it is a follow-up. Once it reads that method,
+    /// an older daemon's `unknown_method` is drawn the same way
+    /// (`isNotServed`); today the live client sends nothing for it.
     private(set) var missions: DaemonData.MissionCatalogue?
+    /// Today's routed calls per tool (`insights_glance`), for Home's
+    /// Insights promotion; nil until read, or when the read failed or the
+    /// glance is off.
+    private(set) var glance: DaemonData.InsightsGlance?
+    /// Total credit by day as this Mac saw it, for the Credit tile's
+    /// day-over-day change (`CreditDailyTotals`).
+    private(set) var creditTotals = CreditDailyTotals.load()
     /// The last read that failed, by method; cleared when it next succeeds.
     private(set) var failures: [String: DaemonDataError] = [:]
+
+    /// Total credit: the commons' lifetime points while it knows them, else
+    /// the rollup's settled credit; nil when neither is known (never zero).
+    static func totalCredit(credit: DaemonData.CommonsCreditSummary?, rollup: DaemonData.HistoryRollup?) -> Double? {
+        if let credit, credit.pointsKnown, let lifetime = credit.commonsPointsLifetimeEarned { return Double(lifetime) }
+        return rollup?.creditFinal
+    }
+
+    /// The fresh total, after a read: recorded as today's on this Mac.
+    private func recordCreditTotal() {
+        let fresh = SummaryFacts.fresh(credit, unless: failures["commons_credit_summary"])
+        let rolled = SummaryFacts.fresh(rollup, unless: failures["history_rollup"])
+        guard let total = Self.totalCredit(credit: fresh, rollup: rolled) else { return }
+        creditTotals.record(total, on: .now)
+        creditTotals.save()
+    }
 
     /// History rows read at once: the page, not the whole record.
     static let historyLimit = 100
 
-    let client: any DaemonDataClient
+    /// The verdict news card, in the daemon's words; nil when there is no
+    /// news to show on History.
+    var verdictsCard: NudgeSurface.Card? { NudgeSurface.card(status?.nudge, on: .history) }
+    /// A nudge request in flight.
+    private(set) var nudgeBusy = false
+    /// The last nudge request the core refused, until the next one.
+    private(set) var nudgeError: DaemonDataError?
 
-    init(client: any DaemonDataClient) {
+    /// A card button. See history acknowledges the news (`nudge_opened`);
+    /// History is already open, so nothing else moves. The card then reads
+    /// as the daemon says.
+    func perform(_ intent: NudgeSurface.Intent) async {
+        guard !nudgeBusy else { return }
+        let mine = generation
+        nudgeBusy = true
+        defer { if mine == generation { nudgeBusy = false } }
+        nudgeError = nil
+        guard let client else {
+            nudgeError = .unreachable
+            return
+        }
+        do {
+            try await NudgeSurface.send(NudgeSurface.effect(intent), through: client)
+        } catch {
+            guard mine == generation else { return }
+            nudgeError = error as? DaemonDataError ?? .undecodable(method: "nudge_opened")
+            return
+        }
+        guard mine == generation else { return }
+        await loadStatus()
+    }
+
+    /// The app's live client (`AppModel.daemonData`), attached by the
+    /// window when the daemon starts; nil while it is not running.
+    private(set) var client: (any DaemonDataClient)?
+    /// Bumped by each attach; a read that started against an older client
+    /// is dropped when it answers, so it never writes over the new one.
+    private var generation = 0
+    /// True while no client is attached because the daemon is still
+    /// starting (set by `attach`). `run` then reads nothing and the screen
+    /// stays loading: start-up is not the core being down. Any other nil
+    /// client fails as an unreachable core.
+    private(set) var awaiting = false
+
+    init(client: (any DaemonDataClient)?) {
         self.client = client
+    }
+
+    /// Follows a new client (or none): nothing read from the old one is
+    /// drawn as current, so Home is loading until the new one is read.
+    func attach(_ client: (any DaemonDataClient)?, awaiting: Bool = false) {
+        self.client = client
+        self.awaiting = awaiting && client == nil
+        generation += 1
+        status = nil
+        destinations = nil
+        history = nil
+        rollup = nil
+        credit = nil
+        missions = nil
+        failures = [:]
+        nudgeBusy = false
+        nudgeError = nil
     }
 
     /// Loads, then follows the event stream for as long as the calling task
     /// runs (a view's `.task`). History changes when the queue or the
-    /// status does, so either rereads it all.
+    /// status does, so either rereads it all. With no client the core is
+    /// down: every read says so.
     func run() async {
+        // The daemon is still starting: nothing to read yet, and not down.
+        guard !awaiting else { return }
         await load()
+        guard let client else { return }
         for await event in client.events() {
             if Task.isCancelled { break }
             switch event {
             case .snapshot, .queueChanged, .statusChanged, .resyncRequired:
                 await load()
-            case .digestDue, .previewReady, .inferenceCallAdded, .unknown:
+            case .digestDue, .reengageDue, .previewReady, .inferenceCallAdded, .usageChanged, .unknown:
                 break
             }
         }
@@ -61,33 +150,45 @@ final class HomeStore {
         async let credit: Void = loadCredit()
         async let missions: Void = loadMissions()
         async let destinations: Void = loadDestinations()
-        _ = await (status, history, rollup, credit, missions, destinations)
+        async let glance: Void = loadGlance()
+        _ = await (status, history, rollup, credit, missions, destinations, glance)
+        recordCreditTotal()
+    }
+
+    private func loadGlance() async {
+        await read("insights_glance", { try await $0.insightsGlance(tzSeconds: TimeZone.current.secondsFromGMT()) }) {
+            self.glance = $0
+        }
     }
 
     private func loadStatus() async {
-        status = await read("status", { try await $0.status() })
+        await read("status", { try await $0.status() }) { self.status = $0 }
     }
 
     private func loadDestinations() async {
-        destinations = await read("tool_destinations", { try await $0.toolDestinations() })
+        await read("tool_destinations", { try await $0.toolDestinations() }) { self.destinations = $0 }
     }
 
     private func loadHistory() async {
-        if let value = await read("list_history", { try await $0.listHistory(limit: Self.historyLimit) }) {
-            history = Self.newestFirst(value)
+        await read("list_history", { try await $0.listHistory(limit: Self.historyLimit) }) {
+            if let value = $0 { self.history = Self.newestFirst(value) }
         }
     }
 
     private func loadRollup() async {
-        if let value = await read("history_rollup", { try await $0.historyRollup() }) { rollup = value }
+        await read("history_rollup", { try await $0.historyRollup() }) { if let value = $0 { self.rollup = value } }
     }
 
     private func loadCredit() async {
-        if let value = await read("commons_credit_summary", { try await $0.commonsCreditSummary() }) { credit = value }
+        await read("commons_credit_summary", { try await $0.commonsCreditSummary() }) {
+            if let value = $0 { self.credit = value }
+        }
     }
 
     private func loadMissions() async {
-        if let value = await read("mission_catalogue", { try await $0.missionCatalogue() }) { missions = value }
+        await read("mission_catalogue", { try await $0.missionCatalogue() }) {
+            if let value = $0 { self.missions = value }
+        }
     }
 
     /// Newest first; a row with no date sorts last rather than first.
@@ -95,24 +196,35 @@ final class HomeStore {
         rows.sorted { ($0.submittedAt ?? .distantPast) > ($1.submittedAt ?? .distantPast) }
     }
 
+    /// One read, recording its failure by method, then `apply` with its
+    /// value (nil when it failed or is not there). A read answered after
+    /// another client was attached changes nothing.
     private func read<T: Sendable>(
-        _ method: String, _ call: @Sendable (any DaemonDataClient) async throws -> T
-    ) async -> T? {
+        _ method: String, _ call: @Sendable (any DaemonDataClient) async throws -> T, apply: (T?) -> Void
+    ) async {
+        guard let client else {
+            failures[method] = .unreachable
+            apply(nil)
+            return
+        }
+        let mine = generation
+        let result: Result<T, DaemonDataError>
         do {
-            let value = try await call(client)
-            failures[method] = nil
-            return value
-        } catch let error as DaemonDataError {
-            if case .notAvailableYet = error {
-                failures[method] = nil
-            } else {
-                failures[method] = error
-            }
-            return nil
+            result = .success(try await call(client))
         } catch {
-            failures[method] = .undecodable(method: method)
-            return nil
+            result = .failure(error as? DaemonDataError ?? .undecodable(method: method))
+        }
+        guard mine == generation else { return }
+        switch result {
+        case .success(let value):
+            failures[method] = nil
+            apply(value)
+        case .failure(let error) where error.isNotServed:
+            failures[method] = nil
+            apply(nil)
+        case .failure(let error):
+            failures[method] = error
+            apply(nil)
         }
     }
 }
-#endif

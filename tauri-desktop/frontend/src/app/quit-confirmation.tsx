@@ -2,7 +2,11 @@ import { useState } from "react";
 import { ResponsiveOverlay } from "../components/responsive-overlay";
 import { Button } from "../components/ui/button";
 import { quitApp } from "../lib/tauri/platform-api";
-import { useQuitConfirmationCopy } from "../lib/tauri/use-contributor-copy";
+import { QUIT_FALLBACK, WORDING_UNREADABLE } from "../lib/copy-unreadable";
+import {
+  useQuitConfirmationCopy,
+  useShellStatusLines,
+} from "../lib/tauri/use-contributor-copy";
 
 export function QuitConfirmation({
   open,
@@ -11,23 +15,24 @@ export function QuitConfirmation({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const [error, setError] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const lines = useShellStatusLines();
   // Hosting, attached, or no watcher: each has its own true sentence, and
   // the Rust core decides which one this process is.
   const copy = useQuitConfirmationCopy(open);
   const confirm = async () => {
-    setError(null);
+    setFailed(false);
     try {
       await quitApp();
     } catch {
-      setError("Trace Commons could not quit. Try again.");
+      setFailed(true);
     }
   };
   return (
     <ResponsiveOverlay
       open={open}
       onOpenChange={onOpenChange}
-      title={copy.data?.title ?? "Quit Trace Commons?"}
+      title={copy.data?.title ?? QUIT_FALLBACK.title}
       description={copy.data?.body}
       footer={
         <>
@@ -36,7 +41,7 @@ export function QuitConfirmation({
             variant="outline"
             onClick={() => onOpenChange(false)}
           >
-            {copy.data?.cancel ?? "Cancel"}
+            {copy.data?.cancel ?? QUIT_FALLBACK.cancel}
           </Button>
           <Button
             type="button"
@@ -46,18 +51,20 @@ export function QuitConfirmation({
             disabled={!copy.data && !copy.isError}
             onClick={() => void confirm()}
           >
-            {copy.data?.confirm ?? "Quit"}
+            {copy.data?.confirm ?? QUIT_FALLBACK.confirm}
           </Button>
         </>
       }
     >
+      {/* The core's sentence for this process is what failed to arrive, so
+          the shell says only that, and claims nothing about what keeps
+          running. */}
       {copy.isError && (
-        <p className="text-sm text-destructive">
-          Trace Commons could not tell whether quitting stops it watching for
-          finished sessions. Anything already waiting stays waiting.
-        </p>
+        <p className="text-sm text-destructive">{WORDING_UNREADABLE}</p>
       )}
-      {error && <p className="text-sm text-destructive">{error}</p>}
+      {failed && (
+        <p className="text-sm text-destructive">{lines.requestFailed}</p>
+      )}
     </ResponsiveOverlay>
   );
 }

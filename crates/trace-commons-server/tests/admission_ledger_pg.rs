@@ -228,6 +228,7 @@ async fn account_admission_atomicity_replay_and_revocation() {
         lease_id: Uuid::new_v4(),
         policy: policy.clone(),
         lease_seconds: 60,
+        attested: false,
     };
     let first = request(&principal);
     let second = request(&other);
@@ -792,6 +793,197 @@ async fn account_admission_atomicity_replay_and_revocation() {
         account_rows, 0,
         "legacy retry cannot create a second authority"
     );
+
+    // #1237: the account ledger's release from `processing` for a refusal
+    // that wrote nothing. Its own fixed window (a period no other policy
+    // here uses) holds exactly one cost bound, so a retry is reserved only
+    // if the release gave the bound back.
+    let release_policy = parse_bounded_policy(
+        r#"{"version":"admission-test-1237","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"fixed","seconds":999999937},"growth_rule":"none"}"#,
+        &["admission-test-1237"],
+    )
+    .unwrap();
+    let mut refused = request(&principal);
+    refused.policy = release_policy.clone();
+    let reserved = restarted.reserve_account_admission(&refused).await.unwrap();
+    assert_eq!(reserved.decision, D::Reserved);
+    assert_eq!(reserved.authority, Some("bounded"));
+    let release_spend = || {
+        let admin = &admin;
+        let tenant = &tenant;
+        async move {
+            admin
+                .query_one(
+                    "SELECT COALESCE(sum(cost_used),0)::bigint FROM trace_account_admission_budget
+                      WHERE tenant_id=$1 AND policy_version='admission-test-1237'",
+                    &[tenant],
+                )
+                .await
+                .unwrap()
+                .get::<_, i64>(0)
+        }
+    };
+    let release_status = |submission: Uuid| {
+        let admin = &admin;
+        let tenant = &tenant;
+        async move {
+            admin
+                .query_one(
+                    "SELECT status,last_charged FROM trace_account_admission_submissions
+                      WHERE tenant_id=$1 AND submission_id=$2",
+                    &[tenant, &submission],
+                )
+                .await
+                .map(|row| (row.get::<_, String>(0), row.get::<_, bool>(1)))
+                .unwrap()
+        }
+    };
+    assert_eq!(release_spend().await, 10);
+    assert!(
+        !restarted
+            .transition_account_admission(
+                &tenant,
+                &principal,
+                account,
+                refused.submission_id,
+                refused.lease_id,
+                "released_without_effect"
+            )
+            .await
+            .unwrap(),
+        "a reserved attempt is released by `released`, not this"
+    );
+    assert!(
+        restarted
+            .transition_account_admission(
+                &tenant,
+                &principal,
+                account,
+                refused.submission_id,
+                refused.lease_id,
+                "processing"
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !restarted
+            .transition_account_admission(
+                &tenant,
+                &principal,
+                account,
+                refused.submission_id,
+                refused.lease_id,
+                "released"
+            )
+            .await
+            .unwrap(),
+        "plain release still never refunds processing work"
+    );
+    assert!(
+        !restarted
+            .transition_account_admission(
+                &tenant,
+                &principal,
+                account,
+                refused.submission_id,
+                Uuid::new_v4(),
+                "released_without_effect"
+            )
+            .await
+            .unwrap(),
+        "another lease cannot release the attempt"
+    );
+    assert!(
+        restarted
+            .transition_account_admission(
+                &tenant,
+                &principal,
+                account,
+                refused.submission_id,
+                refused.lease_id,
+                "released_without_effect"
+            )
+            .await
+            .unwrap(),
+        "a processing attempt whose refusal wrote nothing is released"
+    );
+    assert_eq!(
+        release_status(refused.submission_id).await,
+        ("released".to_string(), false)
+    );
+    assert_eq!(release_spend().await, 0, "the charge is given back");
+    assert!(
+        !restarted
+            .transition_account_admission(
+                &tenant,
+                &principal,
+                account,
+                refused.submission_id,
+                refused.lease_id,
+                "released_without_effect"
+            )
+            .await
+            .unwrap(),
+        "a second release refunds nothing"
+    );
+    assert_eq!(release_spend().await, 0);
+    refused.lease_id = Uuid::new_v4();
+    assert_eq!(
+        restarted
+            .reserve_account_admission(&refused)
+            .await
+            .unwrap()
+            .decision,
+        D::Reserved,
+        "a retry inside the lease is reserved again, inside the one-bound window"
+    );
+    assert_eq!(release_spend().await, 10, "and charged once");
+    assert!(
+        restarted
+            .transition_account_admission(
+                &tenant,
+                &principal,
+                account,
+                refused.submission_id,
+                refused.lease_id,
+                "processing"
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        restarted
+            .transition_account_admission(
+                &tenant,
+                &principal,
+                account,
+                refused.submission_id,
+                refused.lease_id,
+                "completed"
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !restarted
+            .transition_account_admission(
+                &tenant,
+                &principal,
+                account,
+                refused.submission_id,
+                refused.lease_id,
+                "released_without_effect"
+            )
+            .await
+            .unwrap(),
+        "a completed attempt is never released"
+    );
+    assert_eq!(
+        release_status(refused.submission_id).await,
+        ("completed".to_string(), true)
+    );
+    assert_eq!(release_spend().await, 10);
 }
 
 #[tokio::test]
@@ -819,6 +1011,14 @@ async fn atomic_admission_replay_budget_recovery_and_rls() {
     admin
         .batch_execute(include_str!(
             "../../../migrations/V59__trace_admission_ledger.sql"
+        ))
+        .await
+        .unwrap();
+    // V127 replaces V59's transition with one that also releases a
+    // `processing` attempt whose refusal wrote nothing (#1237).
+    admin
+        .batch_execute(include_str!(
+            "../../../migrations/V127__admission_release_without_effect.sql"
         ))
         .await
         .unwrap();
@@ -1151,4 +1351,201 @@ async fn atomic_admission_replay_budget_recovery_and_rls() {
         .await
         .unwrap();
     assert_eq!(row.get::<_, i64>(0), 90);
+
+    // #1237: an upload refused after its attempt is `processing`, by a
+    // refusal that wrote nothing, releases the attempt and its cost bound.
+    // Plain `released` still refuses a `processing` attempt (an outcome
+    // whose effects are unknown keeps its charge); only the caller that
+    // knows the refusal wrote nothing asks for `released_without_effect`.
+    let account_used = |tenant: &'static str, anchor: String| {
+        let admin = &admin;
+        async move {
+            let row = admin
+                .query_one(
+                    "SELECT cost_bound_used,attempts_used FROM trace_admission_accounts
+                      WHERE tenant_id=$1 AND anchor_hash=$2",
+                    &[&tenant, &anchor],
+                )
+                .await
+                .unwrap();
+            (row.get::<_, i64>(0), row.get::<_, i64>(1))
+        }
+    };
+    let status_of = |submission: Uuid| {
+        let admin = &admin;
+        async move {
+            admin
+                .query_one(
+                    "SELECT status FROM trace_admission_submissions WHERE submission_id=$1",
+                    &[&submission],
+                )
+                .await
+                .unwrap()
+                .get::<_, String>(0)
+        }
+    };
+    let global = || {
+        let admin = &admin;
+        async move {
+            admin
+                .query_one(
+                    "SELECT cost_bound_used FROM trace_admission_global_budget",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get::<_, i64>(0)
+        }
+    };
+    let mut refused = make("tenant-g", "8");
+    let anchor = refused.anchor_hash.clone();
+    assert_eq!(
+        backend
+            .reserve_submission_admission(&refused)
+            .await
+            .unwrap(),
+        D::Reserved
+    );
+    assert_eq!(global().await, 100);
+    assert!(
+        !backend
+            .transition_submission_admission(
+                "tenant-g",
+                refused.submission_id,
+                refused.lease_id,
+                "released_without_effect"
+            )
+            .await
+            .unwrap(),
+        "a reserved attempt is released by `released`, not this"
+    );
+    assert!(
+        backend
+            .transition_submission_admission(
+                "tenant-g",
+                refused.submission_id,
+                refused.lease_id,
+                "processing"
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !backend
+            .transition_submission_admission(
+                "tenant-g",
+                refused.submission_id,
+                refused.lease_id,
+                "released"
+            )
+            .await
+            .unwrap(),
+        "plain release still never refunds processing work"
+    );
+    assert!(
+        !backend
+            .transition_submission_admission(
+                "tenant-g",
+                refused.submission_id,
+                Uuid::new_v4(),
+                "released_without_effect"
+            )
+            .await
+            .unwrap(),
+        "another lease cannot release the attempt"
+    );
+    assert!(
+        !backend
+            .transition_submission_admission(
+                "tenant-other",
+                refused.submission_id,
+                refused.lease_id,
+                "released_without_effect"
+            )
+            .await
+            .unwrap(),
+        "another tenant cannot release the attempt"
+    );
+    assert!(
+        backend
+            .transition_submission_admission(
+                "tenant-g",
+                refused.submission_id,
+                refused.lease_id,
+                "released_without_effect"
+            )
+            .await
+            .unwrap(),
+        "a processing attempt whose refusal wrote nothing is released"
+    );
+    assert_eq!(status_of(refused.submission_id).await, "released");
+    assert_eq!(global().await, 90, "the global cost bound is given back");
+    assert_eq!(
+        account_used("tenant-g", anchor.clone()).await,
+        (0, 1),
+        "the account's cost bound is given back; the window slot it used is kept"
+    );
+    assert!(
+        !backend
+            .transition_submission_admission(
+                "tenant-g",
+                refused.submission_id,
+                refused.lease_id,
+                "released_without_effect"
+            )
+            .await
+            .unwrap(),
+        "a second release refunds nothing"
+    );
+    assert_eq!(global().await, 90);
+    // A retry inside the old lease is reserved again, not refused as busy,
+    // and is charged one cost bound, not a second window slot (the account
+    // has one, so a second charge would be `Exhausted`).
+    refused.lease_id = Uuid::new_v4();
+    assert_eq!(
+        backend
+            .reserve_submission_admission(&refused)
+            .await
+            .unwrap(),
+        D::Reserved,
+        "a retry inside the lease is not refused as in progress"
+    );
+    assert_eq!(global().await, 100);
+    assert_eq!(account_used("tenant-g", anchor.clone()).await, (10, 1));
+    assert!(
+        backend
+            .transition_submission_admission(
+                "tenant-g",
+                refused.submission_id,
+                refused.lease_id,
+                "processing"
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        backend
+            .transition_submission_admission(
+                "tenant-g",
+                refused.submission_id,
+                refused.lease_id,
+                "completed"
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !backend
+            .transition_submission_admission(
+                "tenant-g",
+                refused.submission_id,
+                refused.lease_id,
+                "released_without_effect"
+            )
+            .await
+            .unwrap(),
+        "a completed attempt is never released"
+    );
+    assert_eq!(status_of(refused.submission_id).await, "completed");
+    assert_eq!(global().await, 100, "the completed upload keeps its charge");
 }

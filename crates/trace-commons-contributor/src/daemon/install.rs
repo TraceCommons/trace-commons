@@ -70,8 +70,9 @@ pub fn install(store: &ConfigStore) -> Result<()> {
     if !cfg!(target_os = "linux") {
         bail!(
             "autostart-not-supported-on-this-platform: on this platform the \
-             Trace Commons application registers the daemon as a login item. \
-             Run `daemon run` directly in the meantime."
+             {} application registers the daemon as a login item. \
+             Run `daemon run` directly in the meantime.",
+            crate::brand::APP_NAME
         );
     }
 
@@ -113,7 +114,7 @@ mod tests {
     fn cfg_with_filter(filter: Option<&str>) -> crate::config::ContributorConfig {
         crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),

@@ -29,7 +29,7 @@ should not have made it alone.
 
 | Statement | Verified against |
 | --- | --- |
-| Single-use invites; device private key never leaves the machine | Enrolment path; `/v1/onboard` is not idempotent (see the Homebrew cask's deliberate zap exclusion in `docs/release-runbook.md`) |
+| Single-use invites; device private key never leaves the machine | Enrollment path; `/v1/onboard` is not idempotent (see the Homebrew cask's deliberate zap exclusion in `docs/release-runbook.md`) |
 | Local redaction before upload; server re-applies it | Contributor client redaction pipeline + server-side re-application |
 | Privacy filter is mandatory and fails closed | `TRACE_COMMONS_REQUIRE_PRIVACY_FILTER=1` on the pilot |
 | Privacy filter and scorer both run at NEAR AI | `TRACE_PRIVACY_FILTER_BACKEND=near-ai`; `TRACE_COMMONS_NEAR_AI_BASE_URL=https://qwen3-6-27b.completions.near.ai/v1` |

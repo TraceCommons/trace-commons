@@ -66,6 +66,8 @@ type AfterWrite = Box<dyn FnOnce(&Rc<App>)>;
 /// switch under a contributor's finger would drop the press.
 pub struct PrivateInferenceView {
     pub root: gtk::Box,
+    pub(super) managed: gtk::Box,
+    pub(super) managed_revision: std::cell::Cell<u64>,
     /// What today's calls cost, and what that figure leaves out. Emptied
     /// and refilled on every render for the same reason the list is: an
     /// amount a later read could not measure must go, not linger.
@@ -128,6 +130,11 @@ impl PrivateInferenceView {
         content.append(&balance.root);
         let funding = crate::ui::funding::FundingSection::default();
         content.append(&funding.root);
+
+        // Saved model accounts and managed sessions, after account setup
+        // and before the tool list.
+        let managed = gtk::Box::new(gtk::Orientation::Vertical, space::M);
+        content.append(&managed);
 
         let tools = style::card(gtk::Orientation::Vertical, space::M);
         // Tools follow account setup; the kill switch stays below both.
@@ -213,6 +220,8 @@ impl PrivateInferenceView {
 
         Self {
             root,
+            managed,
+            managed_revision: std::cell::Cell::new(0),
             spend,
             harnesses,
             credential,
@@ -731,6 +740,15 @@ fn commit_plan(app: &Rc<App>, plan_id: &str) {
 }
 
 pub fn wire(app: &Rc<App>) {
+    let weak = Rc::downgrade(app);
+    glib::timeout_add_seconds_local(10, move || {
+        if let Some(app) = weak.upgrade() {
+            super::managed_sessions::refresh(&app);
+            glib::ControlFlow::Continue
+        } else {
+            glib::ControlFlow::Break
+        }
+    });
     // The switch writes on its own: flipping it IS the contributor acting,
     // and there is nothing else on the screen to fill in first.
     let a = Rc::clone(app);
@@ -750,6 +768,7 @@ pub fn wire(app: &Rc<App>) {
 /// can stop without this process doing anything, and a latched answer would
 /// keep saying it was running.
 pub fn refresh(app: &Rc<App>) {
+    super::managed_sessions::refresh(app);
     app.call("get_settings", serde_json::json!({}), |app, result| {
         let Ok(Ok(settings)) = result.map(serde_json::from_value::<crate::model::Settings>) else {
             return;
@@ -1145,7 +1164,7 @@ mod tests {
     fn a_refusal_on_this_screen_says_what_to_do() {
         for failure in ["port_in_use", "start_failed", "crashed"] {
             let line = copy::private_inference_state_line(failure);
-            assert!(line.contains("off and on again"), "{failure}: {line}");
+            assert!(line.contains("off and on"), "{failure}: {line}");
         }
     }
 

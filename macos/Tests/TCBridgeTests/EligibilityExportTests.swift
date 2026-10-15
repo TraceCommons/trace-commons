@@ -215,8 +215,8 @@ final class EligibilityExportTests: XCTestCase {
         }
         let one = try XCTUnwrap(TCContributionEligibility.withheldLine(withheld: 1))
         let four = try XCTUnwrap(TCContributionEligibility.withheldLine(withheld: 4))
-        XCTAssertTrue(one.contains("1 session"), one)
-        XCTAssertTrue(four.contains("4 sessions"), four)
+        XCTAssertTrue(one.contains("1 trace"), one)
+        XCTAssertTrue(four.contains("4 traces"), four)
         // Never a reason. These are the reason sentences; none of them may
         // leak into the summary.
         for reason in [

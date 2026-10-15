@@ -23,8 +23,16 @@ package to `PipelineCheckEmitter`, and the four candidate tests pass the
 candidate (`qualification_candidate_package` in `pipeline_http_pg_tests.rs`,
 repeated in `versioned_pipeline_runtime_pg.rs`). `evaluate_promotion`
 enforces the split on the evidence itself, from the Rust list
-`PROMOTION_PACKAGE_CHECKS` (a self-test requires that list to equal the
-checks with `digests_required` here).
+`PROMOTION_PACKAGE_CHECKS`.
+
+Since the Q7 amendment (spec 2026-10-08, A-D12) that Rust list has seven
+ids: the four above and the three promotion-only checks
+(`PROMOTION_ONLY_CHECK_IDS`), which no `qualify` run produces. They run
+against the production assembly and name its package, and
+`evaluate_promotion` requires the seven package-bearing results to share one
+run and the mechanics results another. `PROMOTION_PACKAGE_CHECK_IDS` holds
+the seven (a self-test requires it to equal the Rust list, and its
+non-promotion-only part to equal the checks with `digests_required` here).
 """
 
 from __future__ import annotations
@@ -273,6 +281,24 @@ RESTORE_CHECK_ID = "pipeline_restore_drill"
 # the candidate: its result names no package (P5-D15). The corpus report
 # keeps its own digests.
 CORPUS_CHECKS_WITHOUT_PACKAGE = frozenset({"pipeline_http_corpus_minimal"})
+
+# The checks no local or CI run passes: they need the production assembly
+# (Rust `PROMOTION_ONLY_CHECKS`).
+PROMOTION_ONLY_CHECK_IDS = frozenset(
+    {"pipeline_production_adapters", "pipeline_remote_restore", "pipeline_hf_network_canary"}
+)
+# Every check that names the candidate package (Rust `PROMOTION_PACKAGE_CHECKS`).
+PROMOTION_PACKAGE_CHECK_IDS = (
+    frozenset(
+        {
+            "pipeline_bundle_qualification",
+            "pipeline_http_corpus_compatibility",
+            "pipeline_http_corpus_hf_local",
+            RESTORE_CHECK_ID,
+        }
+    )
+    | PROMOTION_ONLY_CHECK_IDS
+)
 
 REQUIRED_CHECK_IDS = frozenset(
     {check.check_id for check in REQUIRED_DATABASE_CHECKS} | set(REQUIRED_CORPUS_CHECK_IDS) | {RESTORE_CHECK_ID}

@@ -316,7 +316,7 @@ mod tests {
         use crate::daemon::preview::input_fingerprint_with_env_filter;
         let cfg = ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(false),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),

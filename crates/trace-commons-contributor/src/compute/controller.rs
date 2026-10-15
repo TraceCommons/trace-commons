@@ -86,8 +86,9 @@ impl Default for ComputeCopy {
             resume: "Resume compute",
             pause: "Pause compute",
             disable: "Disable compute",
-            loading: "Loading compute settings…",
-            unavailable: "Compute settings could not be loaded. Check the state folder and try again.",
+            // #1146 (`settings-modal.tsx`, `use-compute-status.ts`).
+            loading: "Reading compute settings…",
+            unavailable: "Compute settings unavailable.",
             quit_detail: "Enabled compute must stop before the app quits. Worker termination and coordinator drain acknowledgement are separate; a forced exit does not confirm a completed handoff.",
             quit_refused: "Quit was cancelled because worker termination was not confirmed in time. Keep the app open until stopping finishes, then try quitting again.",
         }

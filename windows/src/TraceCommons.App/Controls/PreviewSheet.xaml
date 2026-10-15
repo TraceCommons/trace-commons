@@ -85,7 +85,7 @@
                                Style="{StaticResource TcMonoFigureTextStyle}" />
                 </StackPanel>
                 <StackPanel Spacing="2">
-                    <TextBlock Text="Session on disk" Style="{StaticResource TcEyebrowTextStyle}" />
+                    <TextBlock Text="Trace on disk" Style="{StaticResource TcEyebrowTextStyle}" />
                     <TextBlock Text="{x:Bind ViewModel.RawSessionText, Mode=OneWay}"
                                Style="{StaticResource TcMonoFigureTextStyle}" />
                 </StackPanel>
@@ -776,7 +776,7 @@
                 first.
 
                 CanPrepareAdmission is false unless the daemon says this
-                contributor's enrolment admits evidence-bearing contribution,
+                contributor's enrollment admits evidence-bearing contribution,
                 so an invited contributor, whom it could only refuse, is not
                 offered it at all. Visibility, not IsEnabled: absent, not
                 present and refusing.
@@ -796,7 +796,7 @@
                         Style="{StaticResource TcSecondaryButtonStyle}"
                         Content="Not this one"
                         IsEnabled="{x:Bind ViewModel.CanDecide, Mode=OneWay}"
-                        ToolTipService.ToolTip="Skips this session for good, even if you keep working in it. This project will keep being offered."
+                        ToolTipService.ToolTip="Skips this trace for good, even if you keep working in it. This project will keep being offered."
                         Click="OnNotThisOne" />
                 <Button Grid.Column="2"
                         Style="{StaticResource TcSecondaryButtonStyle}"

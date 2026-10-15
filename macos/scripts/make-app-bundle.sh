@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Assemble TraceCommons.app around the SwiftPM executable.
+# Assemble Near.ai.app around the SwiftPM executable.
 #
-# SwiftPM produces a bare Mach-O; a menu-bar app needs a bundle so that
-# LSUIElement (no Dock icon) and a bundle identifier (UNUserNotificationCenter)
-# exist at all. Signing, notarization and a DMG are out of scope -- this is an
-# ad-hoc-signed development bundle.
+# SwiftPM produces a bare Mach-O; the app needs a bundle so that an Info.plist
+# and a bundle identifier (UNUserNotificationCenter) exist at all. The app is a
+# regular Dock app (LSUIElement is not set). Signing, notarization and a DMG
+# are out of scope -- this is an ad-hoc-signed development bundle.
 #
 # The app ships as a universal (arm64 + x86_64) binary so it runs on both
 # Apple silicon and Intel Macs. That means both the FFI dylib and the Swift
@@ -22,7 +22,7 @@ CONFIG="${1:-debug}"
 # passes the tag's version explicitly; see release-apps.yml.
 SHORT_VERSION="${2:-0.0.0-dev}"
 BUILD_VERSION="${3:-1}"
-APP="$PACKAGE_DIR/.build/TraceCommons.app"
+APP="$PACKAGE_DIR/.build/Near.ai.app"
 DYLIB_NAME="libtrace_commons_contributor_ffi.dylib"
 
 RUST_TARGETS=(aarch64-apple-darwin x86_64-apple-darwin)
@@ -61,14 +61,20 @@ verify_universal() {
 
 echo "--- building the FFI dylib for ${RUST_TARGETS[*]}"
 DYLIB_PATHS=()
+NEAR_AI_PATHS=()
 for target in "${RUST_TARGETS[@]}"; do
   (cd "$REPO_ROOT" && cargo build ${CARGO_BUILD_ARGS[@]+"${CARGO_BUILD_ARGS[@]}"} \
     --target "$target" -p trace-commons-contributor-ffi)
   DYLIB_PATHS+=("$REPO_ROOT/target/$target/$CARGO_PROFILE_DIR/$DYLIB_NAME")
+  (cd "$REPO_ROOT" && cargo build ${CARGO_BUILD_ARGS[@]+"${CARGO_BUILD_ARGS[@]}"} \
+    --target "$target" -p trace-commons-contributor --bin near-ai)
+  NEAR_AI_PATHS+=("$REPO_ROOT/target/$target/$CARGO_PROFILE_DIR/near-ai")
 done
 
 lipo -create "${DYLIB_PATHS[@]}" -output "$STAGING_DIR/$DYLIB_NAME"
 verify_universal "FFI dylib" "$STAGING_DIR/$DYLIB_NAME"
+lipo -create "${NEAR_AI_PATHS[@]}" -output "$STAGING_DIR/near-ai"
+verify_universal "NEAR AI CLI" "$STAGING_DIR/near-ai"
 
 # Package.swift reads this; without it a release build links target/debug.
 export TC_FFI_LIB_DIR="$STAGING_DIR"
@@ -95,6 +101,24 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resourc
 
 cp "$BIN_DIR/TraceCommonsApp" "$APP/Contents/MacOS/TraceCommonsApp"
 cp "$STAGING_DIR/$DYLIB_NAME" "$APP/Contents/Frameworks/$DYLIB_NAME"
+cp "$STAGING_DIR/near-ai" "$APP/Contents/MacOS/near-ai"
+
+# SwiftPM resource bundles (TCShellCore's sample data, for one). SwiftPM
+# builds them beside the executable but, as with Sparkle, does not embed
+# them; the generated `Bundle.module` looks in Bundle.main.resourceURL,
+# which is Contents/Resources, and calls fatalError when the bundle is not
+# there. Without this copy a bundled app run with TRACE_COMMONS_SAMPLE
+# crashed at the first `Bundle.module` read. ditto keeps the bundle intact.
+SHELL_CORE_BUNDLE="TraceCommons_TCShellCore.bundle"
+if [ ! -d "$BIN_DIR/$SHELL_CORE_BUNDLE" ]; then
+  echo "FATAL: no $SHELL_CORE_BUNDLE in $BIN_DIR" >&2
+  echo "The app reads Bundle.module from it and stops without it." >&2
+  exit 1
+fi
+for resource_bundle in "$BIN_DIR"/*.bundle; do
+  [ -d "$resource_bundle" ] || continue
+  ditto "$resource_bundle" "$APP/Contents/Resources/$(basename "$resource_bundle")"
+done
 
 # The app icon. Contents/Resources was created empty by every build before
 # the icon slice -- an LSUIElement app never shows an icon, so nobody noticed
@@ -190,6 +214,7 @@ if [ "${TC_SKIP_ADHOC_SIGN:-0}" != "1" ]; then
   # app therefore runs unentitled and cannot reach Cloud credentials; work on the
   # sign-in ceremony needs a Developer ID-signed build. See the data-protection
   # keychain spec.
+  codesign --force --sign - --timestamp=none "$APP/Contents/MacOS/near-ai"
   codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || true
 fi
 

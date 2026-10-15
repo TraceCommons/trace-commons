@@ -77,7 +77,7 @@ public static class ArmingOfferCopy
         $"Contribute from {projectLabel} automatically?";
 
     /// <summary>Carries the action rather than agreeing in the abstract.</summary>
-    public const string Confirm = "Turn on automatic contributing";
+    public const string Confirm = "Enable";
 
     /// <summary>
     /// "Not now" rather than "No": the daemon silences the offer for thirty

@@ -221,7 +221,7 @@ reachable from a unit test. In an interactive session on Windows Server 2022:
   user's bracket top left, the agent's answer bottom right, and the attention
   dot in the top-right quadrant both brackets leave empty.
 - `TrackPopupMenuEx` drew the original short menu (disabled header,
-  `Open Trace Commons`, the run-at-login toggle, `Quit Trace Commons…`) and
+  `Open Trace Commons`, the run-at-login toggle, `Quit…`) and
   returned cleanly when dismissed with Escape. The expanded menu still needs
   the same interactive VM pass.
 - The digest arrived with the shared spec's wording, under the mark as its app

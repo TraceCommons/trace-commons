@@ -57,7 +57,7 @@ public class OriginalSearchOutcomeTests
     [Fact]
     public void EachOutcomeHasItsOwnSentence()
     {
-        Assert.Contains("Not in this session", OriginalSearchOutcome.Absent.Sentence);
+        Assert.Contains("Not in this trace", OriginalSearchOutcome.Absent.Sentence);
         Assert.Contains("could not check", OriginalSearchOutcome.Unknown.Sentence);
         Assert.Contains("removed", new OriginalSearchOutcome.AllRemoved(3).Sentence);
         Assert.Contains(
@@ -65,7 +65,7 @@ public class OriginalSearchOutcomeTests
             new OriginalSearchOutcome.SomeRemain(2, 5).Sentence);
 
         // The unknown case must not claim absence in any of its words.
-        Assert.DoesNotContain("Not in this session", OriginalSearchOutcome.Unknown.Sentence);
+        Assert.DoesNotContain("Not in this trace", OriginalSearchOutcome.Unknown.Sentence);
     }
 
     [Fact]

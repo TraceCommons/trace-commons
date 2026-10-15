@@ -176,7 +176,9 @@ receives them times out of the queue instead of merging.
   directory (trusted nowhere, never uploaded). Not a required status check
   (owner decision P4-D17): it runs on every PR and in the merge queue, but
   blocks nothing until the owner promotes it. See
-  `docs/operator/pipeline-qualification.md`.
+  `docs/operator/pipeline-qualification.md`. The job also runs
+  `pipeline.py compare --self-test` after `qualify`; see
+  `docs/operator/pipeline-comparison.md`.
 - `builds at the declared MSRV floor` — the only job that does NOT use
   `dtolnay/rust-toolchain@stable`. It reads `rust-version` out of `cargo
   metadata` (never a literal in the workflow) for both the root workspace and
@@ -269,6 +271,13 @@ too, so the manual runs above are a pre-flight, not the only enforcement.
 
 If the boundary test fails, remove the dependency. Do not edit the expected sets
 in `license_boundary.rs` to match your diff -- those sets are the specification.
+
+## Product text
+
+When adding or changing user-facing UI text, follow
+[docs/ui-copy-guide.md](docs/ui-copy-guide.md). It covers short action labels,
+preserved context, separate titles and accessibility names, and shared-copy
+review checks.
 
 ## Conventions specific to this repo
 

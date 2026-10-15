@@ -517,6 +517,9 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
         "useWitnessReviewCopy",
         "copy.data?.disclosure",
         "copy.data?.confirm",
+        // The core's line that the reviewed content is fixed; macOS and GTK
+        // draw it under the disclosure.
+        "copy.data.immutable",
     ] {
         assert!(
             witness.contains(rendered_copy),
@@ -525,6 +528,28 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
     }
     assert!(witness.contains("!confirmed"));
     assert!(witness.contains("mutation.mutate(true)"));
+
+    // A consent scope's label is the core's `title` (`consent_options`),
+    // never its wire name with the underscores turned into spaces.
+    for surface in [
+        "tauri-desktop/frontend/src/features/settings/components/consent-settings-panel.tsx",
+        "tauri-desktop/frontend/src/features/onboarding/components/onboarding-consent-step.tsx",
+    ] {
+        let source = read(&root, surface);
+        assert!(
+            source.contains("{option.title}"),
+            "{surface} must draw the core's scope title"
+        );
+        assert!(
+            !source.contains("option.name.replaceAll"),
+            "{surface} must not draw a scope's wire name"
+        );
+    }
+    let consent_parse = read(
+        &root,
+        "tauri-desktop/frontend/src/features/onboarding/consent-options.ts",
+    );
+    assert!(consent_parse.contains("title: title(scope)"));
 
     let admission = read(
         &root,
@@ -1383,5 +1408,247 @@ fn the_flow1_decisions_are_the_cores_and_the_abi_takes_none_itself() {
             flow1_ts.contains(&format!("\"{label}\"")),
             "flow1.ts no longer names the core's Flow 1 label `{label}`"
         );
+    }
+}
+
+/// Ron's #1146 follow-ups on #1265: the status lines a Tauri screen shows
+/// when a read or a request fails, the startup notice, the quit prompt's
+/// fallback, the consent tags and the onboarding mode names are the core's
+/// words, reached through `shell_status_copy`, `consent_options` and the
+/// disclosure bundle's `folder_mode_labels`. Each literal they replaced is
+/// held out here so it cannot come back.
+#[test]
+fn tauri_status_lines_consent_tags_and_mode_names_are_the_cores() {
+    use trace_commons_contributor::{consent_copy, health_copy, project_copy};
+    let root = repo_root();
+
+    // The core assembles the bundle from its own lines; Tauri only
+    // serialises it.
+    let health = read(&root, "crates/trace-commons-contributor/src/health_copy.rs");
+    let bundle = rust_function(&health, "fn shell_status_copy");
+    assert!(bundle.contains("core_down_copy()"));
+    assert!(bundle.contains("preview_copy::MONITOR_REQUEST_FAILED"));
+    assert!(bundle.contains("READ_UNAVAILABLE"));
+    let status = health_copy::shell_status_copy();
+    assert_eq!(status.core_down, health_copy::core_down_copy());
+    assert_eq!(
+        status.request_failed,
+        trace_commons_contributor::preview_copy::MONITOR_REQUEST_FAILED
+    );
+    assert_eq!(status.read_unavailable, health_copy::READ_UNAVAILABLE);
+
+    let platform = read(&root, "tauri-desktop/src-tauri/src/commands/platform.rs");
+    let command = rust_function(&platform, "fn shell_status_copy");
+    assert!(command.contains("health_copy::shell_status_copy()"));
+    for assembled in [
+        "json!",
+        "core_down_copy",
+        "MONITOR_REQUEST_FAILED",
+        "READ_UNAVAILABLE",
+    ] {
+        assert!(
+            !command.contains(assembled),
+            "Tauri must not assemble the status bundle itself (`{assembled}`)"
+        );
+    }
+    let build = read(&root, "tauri-desktop/src-tauri/build.rs");
+    assert!(build.contains("\"shell_status_copy\""));
+    let handler = read(&root, "tauri-desktop/src-tauri/src/commands/mod.rs");
+    assert!(handler.contains("platform::shell_status_copy"));
+    let permissions = read(&root, "tauri-desktop/src-tauri/permissions/default.toml");
+    assert!(permissions.contains("\"allow-shell-status-copy\""));
+    let api = read(
+        &root,
+        "tauri-desktop/frontend/src/lib/tauri/contributor-copy-api.ts",
+    );
+    assert!(api.contains("invokeTauri(\"shell_status_copy\""));
+    let package = read(&root, "tauri-desktop/frontend/package.json");
+    assert!(package.contains("src/lib/tauri/shell-status-copy.test.mjs"));
+
+    // No Tauri source says the retired status lines, or names the
+    // mechanism ("Rust core") to a contributor.
+    let mut sources = Vec::new();
+    visit_sources(&root.join("tauri-desktop/frontend/src"), &mut sources);
+    for path in &sources {
+        let source = std::fs::read_to_string(path).unwrap_or_default();
+        for retired in [
+            "Refresh after Rust core starts",
+            "Rust core could not start",
+            "Retry core startup",
+            "Core is still unavailable",
+            "Source roots remain saved",
+            "Private AI status unavailable",
+        ] {
+            assert!(
+                !source.contains(retired),
+                "{} still says {retired:?}",
+                path.display()
+            );
+        }
+    }
+
+    // Item 1: a failure is the core's line, never the raw error, which can
+    // carry a URL or a path.
+    let capabilities = read(
+        &root,
+        "tauri-desktop/frontend/src/features/settings/hooks/use-platform-capabilities.ts",
+    );
+    let capabilities_code = code_only(&capabilities);
+    assert!(
+        !capabilities_code.contains(".message"),
+        "use-platform-capabilities.ts shows a raw error message"
+    );
+    assert!(capabilities_code.contains("useShellStatusLines"));
+    assert!(capabilities_code.contains("requestFailed"));
+    assert!(capabilities_code.contains("readUnavailable"));
+
+    // Item 3: each panel that could not read its data says the core's line.
+    for path in [
+        "tauri-desktop/frontend/src/features/settings/settings-page.tsx",
+        "tauri-desktop/frontend/src/features/settings/hooks/use-projects.ts",
+        "tauri-desktop/frontend/src/features/settings/hooks/use-automatic-grant.ts",
+        "tauri-desktop/frontend/src/features/settings/hooks/use-audit.ts",
+        "tauri-desktop/frontend/src/features/settings/hooks/use-witness.ts",
+        "tauri-desktop/frontend/src/features/settings/hooks/use-privacy-controls.ts",
+        "tauri-desktop/frontend/src/features/settings/hooks/use-consent-settings.ts",
+        "tauri-desktop/frontend/src/features/settings/hooks/use-routing.ts",
+        "tauri-desktop/frontend/src/features/private-ai/components/harness-list.tsx",
+        "tauri-desktop/frontend/src/features/history/history-page.tsx",
+        "tauri-desktop/frontend/src/features/onboarding/components/onboarding-roots-step.tsx",
+        "tauri-desktop/frontend/src/features/private-ai/private-ai-page.tsx",
+    ] {
+        let source = read(&root, path);
+        assert!(
+            source.contains("readUnavailable"),
+            "{path} must show the core's read-unavailable line"
+        );
+    }
+
+    // Item 2: the startup notice is the core's core-down banner.
+    let notice = read(
+        &root,
+        "tauri-desktop/frontend/src/app/daemon-startup-notice.tsx",
+    );
+    for field in [
+        "lines.coreDown.title",
+        "lines.coreDown.detail",
+        "lines.retryStartup",
+        "lines.retrying",
+        "lines.requestFailed",
+    ] {
+        assert!(
+            notice.contains(field),
+            "the startup notice must show `{field}`"
+        );
+    }
+
+    // Item 4: when the quit prompt's words cannot be read, the shell says
+    // only that, in its one shared sentence, and makes no claim about what
+    // keeps running.
+    let quit = read(
+        &root,
+        "tauri-desktop/frontend/src/app/quit-confirmation.tsx",
+    );
+    assert!(quit.contains("WORDING_UNREADABLE"));
+    assert!(quit.contains("QUIT_FALLBACK"));
+    for claim in [
+        "Anything already waiting stays waiting",
+        "could not tell whether quitting",
+        "could not quit",
+    ] {
+        assert!(
+            !quit.contains(claim),
+            "the quit prompt still says {claim:?}"
+        );
+    }
+    for word in [
+        trace_commons_contributor::quit_copy::QUIT_TITLE,
+        trace_commons_contributor::quit_copy::QUIT_CONFIRM,
+        trace_commons_contributor::quit_copy::QUIT_CANCEL,
+    ] {
+        assert!(
+            !quit.contains(&format!("\"{word}\"")),
+            "quit-confirmation.tsx types the core's word {word:?}"
+        );
+    }
+
+    // Item 5: a scope's tag is the core's (`consent_options`), with one
+    // spelling of "required" shared with the first-run Uses screen.
+    let enroll = read(
+        &root,
+        "crates/trace-commons-contributor/src/daemon/enroll.rs",
+    );
+    assert!(rust_function(&enroll, "fn consent_options").contains("consent_copy::scope_tag("));
+    assert_eq!(
+        trace_commons_contributor::first_run_copy::first_run_copy()
+            .uses
+            .required,
+        consent_copy::SCOPE_TAG_REQUIRED
+    );
+    let options = trace_commons_contributor::daemon::enroll::consent_options();
+    for scope in options["scopes"].as_array().expect("scopes") {
+        let expected = consent_copy::scope_tag(
+            scope["always_on"].as_bool().expect("always_on"),
+            scope["grants_data_use"].as_bool().expect("grants_data_use"),
+        );
+        assert_eq!(scope["tag"], expected, "{scope:?}");
+    }
+    let consent_parse = read(
+        &root,
+        "tauri-desktop/frontend/src/features/onboarding/consent-options.ts",
+    );
+    assert!(consent_parse.contains("tag: tag(scope)"));
+    for path in [
+        "tauri-desktop/frontend/src/features/settings/components/consent-settings-panel.tsx",
+        "tauri-desktop/frontend/src/features/onboarding/components/onboarding-consent-step.tsx",
+    ] {
+        let source = read(&root, path);
+        assert!(
+            source.contains("option.tag"),
+            "{path} must draw the core's tag"
+        );
+        for word in [
+            consent_copy::SCOPE_TAG_REQUIRED,
+            consent_copy::SCOPE_TAG_DATA_USE,
+            consent_copy::SCOPE_TAG_ATTRIBUTION_ONLY,
+        ] {
+            assert!(
+                !source.contains(&format!("· {word}\"")),
+                "{path} types the core's tag {word:?}"
+            );
+        }
+    }
+
+    // Item 5: the onboarding path and grant name a mode by its one name.
+    for path in [
+        "tauri-desktop/frontend/src/features/onboarding/components/onboarding-path-step.tsx",
+        "tauri-desktop/frontend/src/features/onboarding/components/onboarding-grant-step.tsx",
+    ] {
+        let source = read(&root, path);
+        assert!(
+            code_only(&source).contains("folder_mode_labels"),
+            "{path} must read the core's folder_mode_labels"
+        );
+        for word in project_copy::FOLDER_MODE_LABELS
+            .iter()
+            .map(|(_, label)| *label)
+        {
+            for quoted in [
+                format!("\"{word}\""),
+                format!("'{word}'"),
+                format!(">{word}<"),
+            ] {
+                assert!(
+                    !source.contains(&quoted),
+                    "{path} types the core's mode name {word:?}"
+                );
+            }
+        }
+        for retired in ["Contribute automatically", "Ask me each time"] {
+            assert!(
+                !source.contains(retired),
+                "{path} still says the retired mode name {retired:?}"
+            );
+        }
     }
 }

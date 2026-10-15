@@ -118,9 +118,9 @@ pub const DAILY_BUDGET_TITLE: &str = "Today's upload limit is used up.";
 /// restarts a stopped service, so this does not clear on its own.
 pub fn core_down_copy() -> HealthLineCopy {
     HealthLineCopy::actionable(
-        "Can't reach Trace Commons' background service.",
-        "Nothing is being watched or sent while it's down. Your queue and the sessions \
-         already sent are safe, and sessions from while it was down will be picked up when \
+        concat!("Can't reach ", crate::app_name!(), "'s background service."),
+        "Nothing is being watched or sent while it's down. Your queue and the traces \
+         already sent are safe, and traces from while it was down will be picked up when \
          it's running again.",
         None,
     )
@@ -153,7 +153,7 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
     match label {
         health::LABEL_NOT_LOGGED_IN => HealthLineCopy::actionable(
             "Not connected.",
-            "Sessions are being queued, but nothing can be sent until you reconnect. Nothing \
+            "Traces are being queued, but nothing can be sent until you reconnect. Nothing \
              has been lost.",
             Some(("Reconnect", HealthActionKind::Reconnect)),
         ),
@@ -178,10 +178,17 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
             "The extra privacy scan isn't reachable.",
             "Your traces are waiting rather than going out unscanned. Retrying automatically.",
         ),
+        // The upload servers, not the app's own background service, are out
+        // of reach; "Trace Commons" read as the app (owner ruling, 2026-10-08).
         health::LABEL_CLAIM_MINT_FAILED | health::LABEL_INGEST_UNREACHABLE => {
+            // The upload that set either label ended `Failed`, and nothing
+            // re-sends a failed entry, so this must not promise a retry.
+            // A rate-limited upload, which is kept and re-sent, never sets
+            // either label (`uploader::health_label_for`).
             HealthLineCopy::waiting(
-                "Can't reach Trace Commons right now.",
-                "Your queue is safe; it'll retry on its own.",
+                "Can't upload right now.",
+                "A trace that didn't upload won't be retried on its own. New traces will \
+                 still be tried.",
             )
         }
         health::LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED => {
@@ -204,7 +211,7 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
                 None => "-- the queue is full. Review or clear some to start again.".to_string(),
             };
             HealthLineCopy::actionable(
-                "Trace Commons has stopped queuing new sessions",
+                concat!(crate::app_name!(), " has stopped queuing new traces"),
                 &detail,
                 Some(("Review", HealthActionKind::ReviewQueue)),
             )
@@ -215,6 +222,49 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
              resets.",
         ),
         _ => on_hold_copy(),
+    }
+}
+
+/// What a screen says when it asked for something to show and the answer
+/// did not arrive or could not be read. It may be shown while the
+/// background service is running (one screen's read failed, not the
+/// service), so it claims neither that the service is down nor that what is
+/// on screen is a last-known answer. A failed read changes nothing, which is
+/// the data consequence it states. Approved 2026-10-06.
+pub const READ_UNAVAILABLE: &str =
+    "This couldn't be read just now. Nothing has changed. Try again in a moment.";
+
+/// The button beside [`core_down_copy`] in a shell that can ask its
+/// background service to start again, and the same button while it is
+/// asking. Not part of [`core_down_copy`] itself: nothing in the core
+/// restarts a stopped service, so only a shell that hosts one offers this.
+/// Approved 2026-10-06.
+pub const RETRY_STARTUP: &str = "Try again";
+/// See [`RETRY_STARTUP`]. Approved 2026-10-06.
+pub const RETRYING_STARTUP: &str = "Trying again…";
+
+/// Every status line a shell shows around a failed read or request, in one
+/// bundle so a shell asks once: the core-down banner, the read-unavailable
+/// line, the request-failed line (the monitor's, so the two cannot drift),
+/// and the start-again button's two states.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ShellStatusCopy {
+    pub core_down: HealthLineCopy,
+    pub read_unavailable: &'static str,
+    pub request_failed: &'static str,
+    pub retry_startup: &'static str,
+    pub retrying_startup: &'static str,
+}
+
+/// The status lines, built from the lines above and the monitor's.
+#[must_use]
+pub fn shell_status_copy() -> ShellStatusCopy {
+    ShellStatusCopy {
+        core_down: core_down_copy(),
+        read_unavailable: READ_UNAVAILABLE,
+        request_failed: crate::preview_copy::MONITOR_REQUEST_FAILED,
+        retry_startup: RETRY_STARTUP,
+        retrying_startup: RETRYING_STARTUP,
     }
 }
 
@@ -242,7 +292,10 @@ mod tests {
     #[test]
     fn core_down_says_the_queue_is_safe_and_new_sessions_are_picked_up() {
         let copy = core_down_copy();
-        assert_eq!(copy.title, "Can't reach Trace Commons' background service.");
+        assert_eq!(
+            copy.title,
+            concat!("Can't reach ", crate::app_name!(), "'s background service.")
+        );
         assert!(copy.detail.contains("Your queue"), "{}", copy.detail);
         assert!(
             copy.detail.contains("already sent are safe"),
@@ -321,7 +374,30 @@ mod tests {
         }
     }
 
-    /// Swift's `HealthCopy.forLabel` severities, label for label.
+    /// The upload that set these labels ended terminal `Failed`; nothing
+    /// re-sends it. The banner must not promise that it will.
+    #[test]
+    fn an_upload_failure_banner_does_not_promise_an_automatic_retry() {
+        for label in [
+            health::LABEL_INGEST_UNREACHABLE,
+            health::LABEL_CLAIM_MINT_FAILED,
+        ] {
+            let copy = health_copy_for_label(label, None);
+            assert!(
+                !copy.detail.contains("it'll retry on its own"),
+                "{label}: {}",
+                copy.detail
+            );
+            assert!(
+                copy.detail.contains("won't be retried on its own"),
+                "{label} says what happens to the trace: {}",
+                copy.detail
+            );
+        }
+    }
+
+    /// Each label's severity, label for label, as the Swift table this
+    /// replaced (the deleted `HealthCopy.forLabel`) weighted it.
     #[test]
     fn severity_matches_the_swift_table() {
         use HealthSeverity::{Actionable, Waiting};

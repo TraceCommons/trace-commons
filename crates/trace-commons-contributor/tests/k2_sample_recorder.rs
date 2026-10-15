@@ -36,12 +36,18 @@
 //!   `set` for them), so each is recorded once, from `normal_day`, into
 //!   `RecordedSamples/shared/`.
 //!
-//! Zaki's provisional network methods (`inference_summary`, `model_spend`,
-//! `private_ai`, `mission_catalogue`, `invite_lookup`, `passkey_state`,
-//! `account_session_status`) have no source on `main` yet and stay
-//! hand-written in `SampleDaemonData.swift`, marked `"_sample":"no source
-//! yet"`. `coreDown` stays hand-written too: it answers `nil` for every
-//! method by construction, nothing to record.
+//! The network methods (C3, #1187: `inference_summary`,
+//! `inference_call_proof`, `model_spend`, `private_ai`, `mission_catalogue`,
+//! `invite_lookup`, `passkey_state`, `account_session_status`,
+//! `activity_missions_catalogue`) are not recorded here: they answer from
+//! the network, and this recorder's temp store has none behind it. They stay
+//! hand-written in `SampleDaemonData.swift` in the shapes the daemon
+//! serves, marked `"_sample":"hand-written"`; emitting them as fixtures from
+//! #1187's own mock-server tests is a follow-up. The PROVISIONAL shapes the
+//! Inference and Missions screens still read are hand-written there too,
+//! marked `"_sample":"no source yet"`. `coreDown` stays hand-written as
+//! well: it answers `nil` for every method by construction, nothing to
+//! record.
 //!
 //! Some recordings cannot be the raw real capture either, because the
 //! screen each feeds needs a state a temp store cannot exhibit (a live
@@ -468,6 +474,12 @@ fn seed_sessions_seen(store: &ConfigStore, projects: &[(&Project, u32)]) {
             );
         }
     }
+    // A daemon that has been through a working day has also read its
+    // history back recently, so `status.nudge` can speak to verdict news
+    // (nudge S4) rather than reading `unknown` for a poll that never ran.
+    // Stamped at recording time, because freshness is judged against the
+    // clock `status` reads.
+    state.last_history_poll_at = Some(Utc::now());
     state.save(store).unwrap();
 }
 
@@ -478,7 +490,7 @@ fn enroll(store: &ConfigStore) {
     let device = DeviceIdentity::load_or_generate(store).unwrap();
     let cfg = ContributorConfig {
         inference_receipt_endpoint: None,
-        consent_scopes_chosen: true,
+        consent_scopes_chosen: Some(true),
         witness_origin: None,
         inference_receipt_check_attestation: false,
         schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
@@ -593,7 +605,8 @@ fn default_settings() -> DaemonSettings {
 
 /// Keys whose value is a timestamp computed from the real wall clock at call
 /// time (`Utc::now()` inside the handler) rather than from anything this
-/// file authored, and so differs on every run. Everything else either comes
+/// file authored, and so differs on every run. Apart from the opaque account
+/// scope (normalized separately), everything else either comes
 /// from a literal this file chose or is derived from one by a pure function
 /// (`entry_id_for`, `project_id_for`), and is therefore already stable --
 /// except the history rows, which are authored against the real clock and
@@ -626,6 +639,17 @@ fn normalize(value: &mut Value, key: Option<&str>) {
             for v in items.iter_mut() {
                 normalize(v, key);
             }
+        }
+        // The account scope includes the freshly generated credential epoch and
+        // device identity. Preserve its wire type and validate its hash shape,
+        // but do not pin one throwaway store's opaque identity in every sample.
+        Value::String(s) if key == Some("account_scope") => {
+            let digest = s.strip_prefix("sha256:").expect("account scope is SHA-256");
+            assert!(
+                digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+                "account scope carries a complete SHA-256 digest"
+            );
+            *s = format!("sha256:{}", "0".repeat(64));
         }
         Value::String(s) if key.is_some_and(|k| VOLATILE_KEYS.contains(&k)) && !s.is_empty() => {
             *s = VOLATILE_TIMESTAMP_PLACEHOLDER.to_string();
@@ -1103,7 +1127,13 @@ const HAND_WRITTEN_OVERRIDES: &[&str] = &[
 /// compares the rest, so the untouched fields are still held to the daemon.
 fn override_touched_keys(key: &str) -> Option<&'static [&'static str]> {
     match key {
-        "unknownCounts/status" => Some(&["decisions_owed", "_sample"]),
+        "unknownCounts/status" => Some(&[
+            "decisions_owed",
+            "unpurposed_traces",
+            "nudge",
+            "idle_sessions",
+            "_sample",
+        ]),
         "normalDay/status" | "busyQueue/status" => Some(&[
             "private_inference_state",
             "routing",
@@ -1132,9 +1162,16 @@ fn apply_hand_written_overrides(all: &mut BTreeMap<String, Value>) {
     // to send it or unreachable -- never a fact a temp store's real daemon
     // can exhibit, since `status_value` (`daemon::ipc`) always computes a
     // concrete count. Take the real recording for every other field and
-    // remove this one by hand.
+    // remove this one by hand. `unpurposed_traces` goes with it: a daemon
+    // too old to send the badge count is too old to send the suggestion count,
+    // and an absent one must mean "no card", never 0. `nudge` goes for the
+    // same reason: absent is "no suggestion", never a lead of its own, and
+    // so does `idle_sessions`: absent is "no idle card", never 0.
     if let Some(Value::Object(status)) = all.get_mut("unknownCounts/status") {
         status.remove("decisions_owed");
+        status.remove("unpurposed_traces");
+        status.remove("nudge");
+        status.remove("idle_sessions");
         status.insert(
             "_sample".into(),
             Value::String("absent on purpose: older daemon".into()),
@@ -1145,9 +1182,12 @@ fn apply_hand_written_overrides(all: &mut BTreeMap<String, Value>) {
     // `shared.routing_ledger()`, refreshed by the daemon's main loop
     // (`refresh_routing`, `pub(crate)`) polling a real proxy over HTTP --
     // nothing an IPC-only temp store can be. Shaped exactly like the real
-    // reply `calls_page` builds (`daemon/inference_map.rs` and its own
+    // reply `calls_page_with` builds (`daemon/inference_map.rs` and its own
     // tests): `id`, `at`, `tool`, `family`, `model`, `route`,
-    // `cost.{known,priced_micros}`, `proof`.
+    // `cost.{known,priced_micros}`, `proof`, and -- because the Insights
+    // ledger feed is on by default (owner decision D3, settled 2026-10-09)
+    // and these sets' `get_settings` says so -- `tokens.{input,cache_read,
+    // cache_write,output}`, each a count or `null` when not known.
     for key in ["normalDay/inference_calls", "busyQueue/inference_calls"] {
         all.insert(key.to_string(), hand_written_inference_calls());
     }
@@ -1237,19 +1277,24 @@ fn hand_written_inference_calls() -> Value {
         "calls": [
             {"id": 414, "at": "2026-09-30T09:04:11+00:00", "tool": "claude-code", "family": "anthropic",
              "model": "zai-org/GLM-4.6", "route": "routed", "cost": {"known": true, "priced_micros": 8400},
-             "proof": "verified"},
+             "proof": "verified",
+             "tokens": {"input": 1200, "cache_read": 18000, "cache_write": 0, "output": 350}},
             {"id": 413, "at": "2026-09-30T08:58:40+00:00", "tool": "codex", "family": "openai",
              "model": "Qwen/Qwen3.6-27B-FP8", "route": "routed", "cost": {"known": true, "priced_micros": 12300},
-             "proof": "gateway_only"},
+             "proof": "gateway_only",
+             "tokens": {"input": 900, "cache_read": 0, "cache_write": 2048, "output": 410}},
             {"id": 412, "at": "2026-09-30T08:51:02+00:00", "tool": "unknown", "family": "unknown",
              "model": "unknown", "route": "outside", "cost": {"known": false, "priced_micros": null},
-             "proof": "outside"},
+             "proof": "outside",
+             "tokens": {"input": null, "cache_read": null, "cache_write": null, "output": null}},
             {"id": 411, "at": "2026-09-30T08:40:19+00:00", "tool": "claude-code", "family": "anthropic",
              "model": "zai-org/GLM-4.6", "route": "routed", "cost": {"known": true, "priced_micros": 5100},
-             "proof": "pending"},
+             "proof": "pending",
+             "tokens": {"input": 640, "cache_read": 12000, "cache_write": null, "output": 95}},
             {"id": 410, "at": "2026-09-30T08:31:55+00:00", "tool": "claude-code", "family": "anthropic",
              "model": "zai-org/GLM-4.6", "route": "routed", "cost": {"known": true, "priced_micros": 4900},
-             "proof": "failed"}
+             "proof": "failed",
+             "tokens": {"input": 300, "cache_read": null, "cache_write": null, "output": null}}
         ],
         "next_cursor": null
     })
@@ -1401,4 +1446,28 @@ fn first_diff_reports_a_field_added_or_removed_even_when_null() {
         first_diff(&json!({"a": null}), &json!({"a": null}), ""),
         None
     );
+}
+
+#[test]
+fn account_scope_normalization_preserves_presence_and_type() {
+    let mut scope = serde_json::json!({"account_scope": format!("sha256:{}", "a".repeat(64))});
+    normalize(&mut scope, None);
+    assert_eq!(scope["account_scope"], format!("sha256:{}", "0".repeat(64)));
+    for original in [
+        serde_json::json!({}),
+        serde_json::json!({"account_scope": null}),
+        serde_json::json!({"account_scope": 7}),
+    ] {
+        let mut value = original.clone();
+        normalize(&mut value, None);
+        assert_eq!(value, original);
+        assert_ne!(value, scope);
+    }
+}
+
+#[test]
+#[should_panic(expected = "account scope carries a complete SHA-256 digest")]
+fn account_scope_normalization_refuses_a_malformed_digest() {
+    let mut scope = serde_json::json!({"account_scope": "sha256:truncated"});
+    normalize(&mut scope, None);
 }

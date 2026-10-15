@@ -4,55 +4,90 @@ import XCTest
 
 @testable import TraceCommonsApp
 
-/// How `PreviewSheet`'s consent surface is wired to the rule underneath it.
+/// How the consent surface is wired to the rule underneath it.
 ///
-/// `ReadGateTests` proves the rule and `ConsentCopyTests` proves the decode.
+/// `ReadGate.canContribute` is the rule and `ConsentCopy` is the decode.
 /// Neither can see the layer between them and a contributor: which fact the
-/// sheet actually feeds the rule. A sheet that armed `Contribute` on "a
+/// surface actually feeds the rule. A surface that armed `Contribute` on "a
 /// preview arrived" rather than "a preview arrived and carries an
 /// enrollment" would pass both suites and ship exactly the divergence this
 /// slice removed -- macOS approving against an envelope that pinned nothing,
 /// under a shared sentence that says it did not.
 ///
-/// The other half is the copy. `canContribute` requires the sentences as
-/// well as the pin, because the gate statement is the whole of what a
-/// contributor is told before an irreversible send, and a build that cannot
-/// read it must not take an approval against it. Dropping either half is a
-/// one-token edit that no behavioural test on this shell can see.
+/// The other half is the copy. Arming requires the sentences as well as the
+/// pin, because the gate statement is the whole of what a contributor is
+/// told before an irreversible send, and a build that cannot read it must
+/// not take an approval against it.
+///
+/// Where it lives (#1241): Look inside is read-only, so the one Contribute
+/// is the inspector's session card. The card arms it through
+/// `TracesStore.contributeArmed`, and its tooltip is chosen on the card. The
+/// card's own file moves (Task 6 of the #1146 port gives it one), so the
+/// tooltip is looked for across `Views/Monitor/` rather than in one file.
+/// The gate statement Look inside still prints stays pinned on the sheet.
+/// `TracesTreeTests.test_contributeArmsOnlyOnAnEnrolledPreviewWithConsent`
+/// holds the same rule behaviourally.
 ///
 /// A SwiftUI `body` holding `@State` cannot be built, rendered or reflected
-/// outside a running window, so these assert against the view's own source
+/// outside a running window, so these assert against the views' own source
 /// -- the same limitation, and the same justification, as
 /// `RoutingBindingTests` and `WitnessBindingTests`. Every locator reports
 /// what it was looking in when it fails, so a refactor that moves this
 /// surface produces a failure to fix rather than a test that quietly stops
 /// asserting.
 private enum ConsentSurfaceSource {
-    /// `.../macos/Sources/TraceCommonsApp/Views/PreviewSheet.swift`
-    static let viewPath = URL(fileURLWithPath: #filePath)
+    static let sources = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()  // TraceCommonsAppTests
         .deletingLastPathComponent()  // Tests
         .deletingLastPathComponent()  // macos
-        .appendingPathComponent("Sources/TraceCommonsApp/Views/PreviewSheet.swift")
+        .appendingPathComponent("Sources/TraceCommonsApp")
 
-    static func canContributeBody(file: StaticString = #filePath, line: UInt = #line) -> String? {
-        declaration("private var canContribute: Bool {", file: file, line: line)
-    }
+    /// `.../Views/PreviewSheet.swift`: Look inside, which still prints the
+    /// gate statement.
+    static let sheetPath = sources.appendingPathComponent("Views/PreviewSheet.swift")
+    /// `.../Views/Monitor/TracesStore.swift`: the card's arming rule.
+    static let storePath = sources.appendingPathComponent("Views/Monitor/TracesStore.swift")
+    static let monitorDirectory = sources.appendingPathComponent("Views/Monitor")
 
-    static func gateHelpBody(file: StaticString = #filePath, line: UInt = #line) -> String? {
-        declaration("private var gateHelp: String {", file: file, line: line)
+    /// The arming rule the session card asks, at draw time and again at the
+    /// press.
+    static func contributeArmedBody(file: StaticString = #filePath, line: UInt = #line) -> String? {
+        declaration(
+            """
+                static func contributeArmed(
+                    enrolled: Bool?, consent: ConsentCopy?, eligibility: ContributionEligibility?, calls: EligibilityCalls
+                ) -> Bool {
+            """, in: storePath, file: file, line: line)
     }
 
     static func gateStatementBody(file: StaticString = #filePath, line: UInt = #line) -> String? {
-        declaration("private var gateStatement: some View {", file: file, line: line)
+        declaration("private var gateStatement: some View {", in: sheetPath, file: file, line: line)
     }
+
+    /// The Monitor sources, concatenated, comment lines stripped.
+    static func monitorCode(file: StaticString = #filePath, line: UInt = #line) -> String? {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: monitorDirectory.path) else {
+            XCTFail("could not list \(monitorDirectory.path)", file: file, line: line)
+            return nil
+        }
+        return names.filter { $0.hasSuffix(".swift") }.sorted().compactMap { name in
+            try? String(contentsOf: monitorDirectory.appendingPathComponent(name), encoding: .utf8)
+        }
+        .joined(separator: "\n")
+        .split(separator: "\n", omittingEmptySubsequences: false)
+        .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+        .joined(separator: "\n")
+    }
+
+    /// The session card's tooltip on Contribute: the one line that chooses it.
+    static let tooltip = #"? (consent == nil ? "" : TCConsentCopy.gateHelp(pinned: armed(entry)) ?? "")"#
 
     /// The source between `signature` and the brace that closes it, with
     /// `//` comments stripped: a comment is not something a contributor
     /// reads, and the comment above `canContribute` names both of the very
     /// expressions these assertions look for.
     static func declaration(
-        _ signature: String, file: StaticString = #filePath, line: UInt = #line
+        _ signature: String, in viewPath: URL, file: StaticString = #filePath, line: UInt = #line
     ) -> String? {
         guard let text = try? String(contentsOf: viewPath, encoding: .utf8) else {
             XCTFail("could not read \(viewPath.path)", file: file, line: line)
@@ -117,27 +152,33 @@ final class ConsentBindingTests: XCTestCase {
     /// pinned, so there is no envelope for an approval to bind to, and the
     /// shared tooltip says as much.
     func testContributeIsArmedByTheEnrollmentAndNotByTheSummaryArriving() throws {
-        let body = try XCTUnwrap(ConsentSurfaceSource.canContributeBody())
+        let body = try XCTUnwrap(ConsentSurfaceSource.contributeArmedBody())
         XCTAssertTrue(
-            body.contains("summary?.enrolled"),
-            "the sheet no longer arms Contribute on the preview's enrollment: \(body)")
+            body.contains("ReadGate.canContribute(hasPinnedPreview: enrolled == true)"),
+            "the card no longer arms Contribute on the preview's enrollment: \(body)")
         XCTAssertFalse(
             body.contains("summary != nil"),
-            "the sheet arms Contribute on a summary that pinned nothing: \(body)")
+            "the card arms Contribute on a summary that pinned nothing: \(body)")
+        // And the card feeds it the enrollment of the preview it asked for.
+        let monitor = try XCTUnwrap(ConsentSurfaceSource.monitorCode())
+        XCTAssertTrue(monitor.contains("TracesStore.contributeArmed("), "the card no longer asks the rule")
+        XCTAssertTrue(
+            monitor.contains("?.enrolled, consent: consent,"),
+            "the card feeds the rule something other than the preview's enrollment")
     }
 
     /// No claim, no approval.
     ///
     /// The gate statement is the whole of what a contributor is told before
     /// pressing `Contribute`. When the payload will not decode there is
-    /// nothing to print, and a sheet that armed the button anyway would be
+    /// nothing to print, and a card that armed the button anyway would be
     /// taking an approval against a claim nobody made. The Windows shell
     /// spells the same rule as `ReadGate.CanArm`.
     func testContributeIsDisarmedWhenTheSentencesCouldNotBeRead() throws {
-        let body = try XCTUnwrap(ConsentSurfaceSource.canContributeBody())
+        let body = try XCTUnwrap(ConsentSurfaceSource.contributeArmedBody())
         XCTAssertTrue(
             body.contains("consent != nil"),
-            "the sheet arms Contribute without the sentences that explain it: \(body)")
+            "the card arms Contribute without the sentences that explain it: \(body)")
     }
 
     /// The tooltip is silent under the same condition, rather than wrong.
@@ -148,10 +189,10 @@ final class ConsentBindingTests: XCTestCase {
     /// contributor's device, made because this shell could not read its own
     /// copy.
     func testTheTooltipIsEmptyRatherThanWrongWhenTheSentencesAreMissing() throws {
-        let body = try XCTUnwrap(ConsentSurfaceSource.gateHelpBody())
+        let monitor = try XCTUnwrap(ConsentSurfaceSource.monitorCode())
         XCTAssertTrue(
-            body.contains("consent != nil"),
-            "the tooltip is chosen without checking the sentences decoded: \(body)")
+            monitor.contains(ConsentSurfaceSource.tooltip),
+            "the card's tooltip is chosen without checking the sentences decoded")
     }
 
     // MARK: - Where the words come from
@@ -169,13 +210,13 @@ final class ConsentBindingTests: XCTestCase {
 
     /// Neither the arming nor the tooltip may hold a sentence of its own.
     ///
-    /// An empty literal is the refusal, not a sentence: it is what the sheet
-    /// renders when there is nothing honest to say. Anything longer written
-    /// here would be a fourth place the consent wording lives.
+    /// An empty literal is the refusal, not a sentence: it is what the
+    /// surface renders when there is nothing honest to say. Anything longer
+    /// written here would be a fourth place the consent wording lives.
     func testNoSentenceIsAuthoredOnThisSurface() throws {
         for (name, body) in [
-            ("canContribute", try XCTUnwrap(ConsentSurfaceSource.canContributeBody())),
-            ("gateHelp", try XCTUnwrap(ConsentSurfaceSource.gateHelpBody())),
+            ("contributeArmed", try XCTUnwrap(ConsentSurfaceSource.contributeArmedBody())),
+            ("the card's tooltip", ConsentSurfaceSource.tooltip),
             ("gateStatement", try XCTUnwrap(ConsentSurfaceSource.gateStatementBody())),
         ] {
             let pieces = body.split(separator: "\"", omittingEmptySubsequences: false)

@@ -134,6 +134,9 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <None Include="$(TcFfiLibDir)/near-ai.exe"
+          Condition="Exists('$(TcFfiLibDir)/near-ai.exe')"
+          CopyToOutputDirectory="PreserveNewest" />
     <None Include="$(TcFfiLibDir)/trace_commons_contributor_ffi.dll"
           Condition="Exists('$(TcFfiLibDir)/trace_commons_contributor_ffi.dll')"
           CopyToOutputDirectory="PreserveNewest" />

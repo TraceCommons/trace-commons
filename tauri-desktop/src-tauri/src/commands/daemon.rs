@@ -64,7 +64,7 @@ pub(crate) fn project_ignore_copy(project_label: String, pending: usize) -> serd
 /// The arming offer and confirmation, assembled in the contributor core
 /// (`project_copy::arming_offer_copy`): the evidence and question, both
 /// confirmation bodies (K5's `body_with_backlog` for `include_backlog`) and
-/// Customize's table. DRAFT, NEEDS APPROVAL where that module says so.
+/// Customize's table. Approved 2026-10-06.
 #[tauri::command]
 pub(crate) fn arming_offer_copy(project_label: String, count: u32) -> serde_json::Value {
     serde_json::json!(trace_commons_contributor::project_copy::arming_offer_copy(
@@ -349,6 +349,21 @@ pub(crate) async fn search_original(
 }
 
 #[cfg(test)]
+mod account_limit_tests {
+    #[test]
+    fn account_limit_refusal_uses_core_copy() {
+        let line = super::queue_outcome_line("account_limit_reached".into());
+        assert_eq!(
+            line,
+            trace_commons_contributor::private_inference_copy::queue_outcome_line(
+                "account_limit_reached"
+            )
+        );
+        assert!(!line.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::eligibility_group_copy;
 
@@ -363,7 +378,7 @@ mod tests {
         assert_eq!(value["eligible_count"], 3);
         assert_eq!(
             value["withheld_line"],
-            "4 sessions here cannot be sent, so they are not included."
+            "4 traces here cannot be sent, so they are not included."
         );
 
         // An absent `contributable_count`: every pending session is

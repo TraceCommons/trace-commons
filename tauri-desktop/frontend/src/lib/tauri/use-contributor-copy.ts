@@ -17,10 +17,13 @@ import {
   getResidualSecretLine,
   getRouteDisclosure,
   getRouteDisclosureUnreadableCopy,
+  getShellStatusCopy,
   getWithdrawalConfirmationPrompt,
   getWitnessCapacityNotice,
   getWitnessReviewCopy,
 } from "./contributor-copy-api";
+import { WORDING_UNREADABLE } from "../copy-unreadable";
+import { type ShellStatusLines, shellStatusLines } from "./shell-status-copy";
 
 /**
  * K11's disclosure facts change whenever the witness does, so they live
@@ -46,6 +49,7 @@ const copyKeys = {
   witnessReview: ["contributor-copy", "witness-review"] as const,
   withdrawalPrompt: ["contributor-copy", "withdrawal-prompt"] as const,
   quitConfirmation: ["contributor-copy", "quit-confirmation"] as const,
+  shellStatus: ["contributor-copy", "shell-status"] as const,
   grantVoid: (id: number) => ["contributor-copy", "grant-void", id] as const,
   armingRewording: (id: number) =>
     ["contributor-copy", "arming-rewording", id] as const,
@@ -235,6 +239,20 @@ export function useQuitConfirmationCopy(open: boolean) {
     staleTime: 0,
     gcTime: 0,
   });
+}
+
+/**
+ * The status lines a screen shows when its read or request failed, and the
+ * core-down banner, resolved: the core's words, the shell's one sentence if
+ * those cannot be read, or nothing while they load. They need no daemon.
+ */
+export function useShellStatusLines(): ShellStatusLines {
+  const query = useQuery({
+    queryKey: copyKeys.shellStatus,
+    queryFn: getShellStatusCopy,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  return shellStatusLines(query.data, query.isError, WORDING_UNREADABLE);
 }
 
 export function useWithdrawalConfirmationPrompt(enabled = true) {

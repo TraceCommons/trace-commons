@@ -12,6 +12,8 @@ mod css_contract;
 pub mod funding;
 pub mod history;
 pub mod insights;
+pub mod legacy_move;
+mod managed_sessions;
 pub mod mark;
 pub mod mission_drafts;
 pub mod onboarding;
@@ -165,6 +167,11 @@ pub struct App {
     /// health banner rather than in it: the health slot carries one label,
     /// and a void must neither hide an outage nor be hidden by one.
     void_notices: gtk::Box,
+    /// The move to a NEAR AI account for a device that joined with an
+    /// invite: its state, and the dismissible offer card that sits first in
+    /// the notices column (Settings holds the other set of controls).
+    pub legacy_move: legacy_move::MoveState,
+    pub legacy_card: legacy_move::Controls,
     /// The count on the switcher's Queue item. Hidden at zero rather than
     /// drawn as a "0": an empty badge is a decoration, and the queue's own
     /// empty state already says the true thing.
@@ -375,6 +382,10 @@ impl App {
             .orientation(gtk::Orientation::Vertical)
             .spacing(style::space::M)
             .build();
+        // The offer card is built once and kept first in the column, so a
+        // refresh never replaces a half-pasted invite.
+        let legacy_card = legacy_move::Controls::new(true);
+        void_notices.append(&legacy_card.root);
         let void_column = adw::Clamp::builder()
             .maximum_size(COLUMN_MAX)
             .tightening_threshold(COLUMN_TIGHTEN)
@@ -414,6 +425,8 @@ impl App {
             health_label,
             health_button,
             void_notices,
+            legacy_move: legacy_move::MoveState::default(),
+            legacy_card,
             queue_badge,
             callbacks: RefCell::new(HashMap::new()),
             entries: RefCell::new(Vec::new()),
@@ -450,6 +463,7 @@ impl App {
         private_inference::wire(&app);
         funding::wire(&app);
         settings::wire(&app);
+        legacy_move::wire(&app);
         update::wire(&app);
         app.refresh();
 
@@ -1015,9 +1029,15 @@ impl App {
     /// acknowledged would say something stopped that this window has no
     /// record of anymore.
     fn render_grant_voids(self: &Rc<Self>, status: &Status) {
-        while let Some(child) = self.void_notices.first_child() {
-            self.void_notices.remove(&child);
+        // Every card but the offer, which is built once.
+        let mut child = self.void_notices.first_child();
+        while let Some(card) = child {
+            child = card.next_sibling();
+            if card != self.legacy_card.root {
+                self.void_notices.remove(&card);
+            }
         }
+        let offer_shown = legacy_move::repaint_for(self, status);
         let notices = status.grant_void_notices();
         // The switch-on notices share the column: a folder whose arming was
         // reworded (K5), and armed folders the gate is holding. So does the
@@ -1032,7 +1052,8 @@ impl App {
                 !notices.is_empty()
                     || !rewordings.is_empty()
                     || held.is_some()
-                    || migration.is_some(),
+                    || migration.is_some()
+                    || offer_shown,
             );
         }
         for card in notices {
@@ -1088,7 +1109,7 @@ impl App {
         label
     }
 
-    /// "Ask me": Settings' call, unchanged -- `set_project_mode` with
+    /// "Ask": Settings' call, unchanged -- `set_project_mode` with
     /// this project's id and `notify_only`. It also answers a rewording
     /// notice. A refusal changes nothing; the core's refusal line says so.
     fn ask_first_button(
@@ -1442,10 +1463,12 @@ impl App {
         }
         self.queue_badge.set_label(&label);
         self.queue_badge.set_visible(!label.is_empty());
+        // The core's words for an unknown count, as the other shells say it.
         self.queue_badge.set_tooltip_text(
             decisions_owed
                 .is_none()
-                .then_some("Decision count unavailable."),
+                .then(|| trace_commons_contributor::preview_copy::decisions_owed_text(None))
+                .as_deref(),
         );
         // A colour is never the only carrier: the glyph above is what
         // survives greyscale, and this is what makes it findable.

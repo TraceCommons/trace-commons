@@ -33,7 +33,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// sentence claims this window can see the send land, because it cannot.
     /// </summary>
     public const string UndoBody =
-        "Approved sessions will send automatically. You can undo until uploading starts.";
+        "Approved traces will send automatically. You can undo until uploading starts.";
 
     /// <summary>
     /// What is said when the daemon granted no hold. There is nothing to
@@ -136,6 +136,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _host.Lagged += OnLagged;
         _host.PreviewReady += OnPreviewReady;
 
+        // The offer to move a legacy invite identity. Passkey first: the
+        // move runs the NEAR AI browser sign-in itself when the daemon has no
+        // session, through the same daemon calls Private AI uses. Status is
+        // re-read after it settles, so the daemon decides whether the offer
+        // is still made and whether the notice takes over.
+        var passkey = new NearAiPasskeyStep(
+            (method, payload) => _host.CallAsync(method, payload),
+            async uri => await Windows.System.Launcher.LaunchUriAsync(uri));
+        var move = new LegacyMigrationMove((method, payload) => _host.CallAsync(method, payload), passkey);
+        move.Settled += () => _ = RefreshAsync();
+        LegacyOffer = new LegacyMigrationOfferViewModel(move);
+
         // One tick per second, only while an undo is live. It moves the
         // remaining count and retires the bar when the daemon's hold runs
         // out; it does not rebuild the bar, so a pointer already resting on
@@ -163,6 +175,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// every status read, so a notice another shell acknowledged goes.
     /// </summary>
     public LegacyMigrationNotice? LegacyMigration { get; private set; }
+
+    /// <summary>
+    /// The offer to move a legacy invite identity to a NEAR AI account, shared
+    /// by the notices card and the Settings section.
+    /// </summary>
+    public LegacyMigrationOfferViewModel LegacyOffer { get; }
 
     public bool HasLegacyMigrationNotice => LegacyMigration is not null;
 
@@ -1393,7 +1411,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         catch (TcException exception) when (exception.IsRootsNotDeclared)
         {
             NeedsSessionRoots = true;
-            StatusText = "Trace Commons is not watching anything yet.";
+            StatusText = "Near.ai is not watching anything yet.";
             return;
         }
         catch (TcException)
@@ -1401,7 +1419,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // Deliberately not interpolating the exception message. It is a
             // fixed ABI label, but the UI string is more useful for saying
             // what to do about it.
-            StatusText = "Could not start. Another Trace Commons instance may already be running.";
+            StatusText = "Could not start. Another Near.ai instance may already be running.";
             return;
         }
 
@@ -1537,6 +1555,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 SetHealth(parsedStatus.Health?.LastErrorLabel);
                 SetGrantVoids(GrantVoidNotices.Cards(parsedStatus.GrantVoids));
                 SetLegacyMigration(LegacyMigrationNotices.Notice(parsedStatus.LegacyInviteMigration));
+                LegacyOffer.SetStatus(parsedStatus.LegacyInviteMigration, parsedStatus.TenantId);
                 SetArmingRewordings(SwitchOnNotices.RewordingCards(parsedStatus.ArmingRewordings));
             }
 
@@ -1645,8 +1664,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public void ReportAlreadyRunning(bool withInvite)
     {
         StatusText = withInvite
-            ? "Trace Commons is already running. Open that window and paste your invite there."
-            : "Trace Commons is already running. Use the window that is already open.";
+            ? "Near.ai is already running. Open that window and paste your invite there."
+            : "Near.ai is already running. Use the window that is already open.";
     }
 
     /// <summary>
@@ -1823,7 +1842,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// "Ask me" on a rewording or held-folder notice: the Settings
+    /// "Ask" on a rewording or held-folder notice: the Settings
     /// call, unchanged, which also answers a rewording notice. A refusal
     /// changes nothing, and <paramref name="failed"/>, the core's refusal
     /// line, is shown.
@@ -1892,9 +1911,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private static string DescribeQueue(int count) => count switch
     {
-        0 => "No sessions waiting for review.",
-        1 => "1 session waiting for review.",
-        _ => $"{count} sessions waiting for review.",
+        0 => "No traces waiting for review.",
+        1 => "1 trace waiting for review.",
+        _ => $"{count} traces waiting for review.",
     };
 
     /// <summary>

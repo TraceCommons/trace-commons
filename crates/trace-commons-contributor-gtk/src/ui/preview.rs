@@ -1200,7 +1200,7 @@ impl Sheet {
             (
                 "Would send",
                 format!(
-                    "{} (the session file on disk is {})",
+                    "{} (the trace file on disk is {})",
                     human_bytes(summary.would_send_bytes),
                     human_bytes(summary.raw_session_bytes)
                 ),
@@ -1293,14 +1293,17 @@ impl Sheet {
                     .and_then(|v| serde_json::from_value(v.get("scopes").cloned()?).ok())
                     .unwrap_or_default();
                 for name in &scopes {
-                    let description = described
+                    // The core's title and description. A granted scope the
+                    // core does not describe still shows, under its wire
+                    // name: it is held, so it is never hidden.
+                    let (title, description) = described
                         .iter()
                         .find(|s| &s.name == name)
-                        .map(|s| s.description.clone())
-                        .unwrap_or_default();
+                        .map(|s| (s.title.clone(), s.description.clone()))
+                        .unwrap_or_else(|| (name.clone(), String::new()));
                     sheet
                         .permissions
-                        .append(&super::titled_paragraph(name, &description));
+                        .append(&super::titled_paragraph(&title, &description));
                 }
                 style::append_caveat(&sheet.permissions, copy::PERMISSIONS_REQUESTED_NOTE);
             },
@@ -1342,7 +1345,7 @@ impl Sheet {
                     )
                 }
                 "unknown-entry-id" | "session-file-vanished" => {
-                    "This session is no longer waiting. Nothing was sent."
+                    "This trace is no longer waiting. Nothing was sent."
                 }
                 _ => "Something went wrong working out what would be sent. Nothing has been sent.",
             }
@@ -1408,7 +1411,7 @@ impl Sheet {
         // Zero matches in the redacted body cannot tell "never here" from
         // "removed", and it certainly cannot tell either from "the daemon
         // has not answered yet" -- and this module's own doc says the one
-        // direction it must not fail in is reporting "not in this session"
+        // direction it must not fail in is reporting "not in this trace"
         // about a value that is in it. Printing the good-standing tick here
         // did exactly that, synchronously, before anything was checked.
         // `apply_original_count` is the only thing allowed to print a
@@ -2329,7 +2332,7 @@ fn context_around(body: &str, byte_start: usize, byte_end: usize) -> Excerpt {
     }
 }
 
-/// Whether this contributor's enrolment admits evidence-bearing
+/// Whether this contributor's enrollment admits evidence-bearing
 /// contribution, read out of a `get_settings` reply.
 ///
 /// `admission_evidence_required` is the daemon's own answer, and it is not a
@@ -2347,11 +2350,11 @@ fn admission_required_by_settings(settings: &serde_json::Value) -> bool {
 /// Whether the preparation control belongs on the sheet at all.
 ///
 /// Withheld rather than shown refused, which is what macOS does: it omits
-/// `AdmissionPreparationView` outright for a contributor whose enrolment
+/// `AdmissionPreparationView` outright for a contributor whose enrollment
 /// cannot use it. A disabled button with nothing beside it to say why is
 /// worse than no button.
 fn admission_control_visible(required: bool, supported: bool, pinned: bool) -> bool {
-    // `required` is the enrolment, `supported` the daemon advertising the
+    // `required` is the enrollment, `supported` the daemon advertising the
     // method, `pinned` this sheet having already committed the bytes -- after
     // which there is nothing left to prepare.
     required && supported && !pinned

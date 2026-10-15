@@ -3,7 +3,7 @@ import XCTest
 
 @testable import TCBridge
 
-/// The login-enrolment sentences, taken from the live ABI rather than a
+/// The login-enrollment sentences, taken from the live ABI rather than a
 /// fixture, so they cannot go stale when the ABI moves.
 final class TCNearAiEnrollTests: XCTestCase {
     private static let labels = [

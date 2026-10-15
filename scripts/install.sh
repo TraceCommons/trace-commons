@@ -154,9 +154,14 @@ dest="$INSTALL_DIR/trace-commons-contributor"
 rm -f "$dest"
 cp "$tmp/$asset" "$dest"
 chmod 755 "$dest"
+# Both names dispatch through the same implementation.
+near_ai_dest="$INSTALL_DIR/near-ai"
+cp "$dest" "$near_ai_dest.tmp"
+chmod 755 "$near_ai_dest.tmp"
+mv -f "$near_ai_dest.tmp" "$near_ai_dest"
 
 say ""
-say "installed: $dest"
+say "installed: $near_ai_dest (compatibility command: $dest)"
 "$dest" --version 2>/dev/null || true
 
 case ":$PATH:" in
@@ -169,5 +174,5 @@ case ":$PATH:" in
 esac
 
 say ""
-say "next: trace-commons-contributor login --invite <url>"
+say "next: near-ai login --invite <url>"
 say "docs: https://docs.tracecommons.ai/cli/quickstart/"

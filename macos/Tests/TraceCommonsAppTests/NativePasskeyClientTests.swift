@@ -48,6 +48,18 @@ final class NativePasskeyClientTests: XCTestCase {
         XCTAssertEqual(daemon.calls.map { $0.0 }, ["hello", "account_session_status", "hello"])
     }
 
+    func testUnenrollIsSentOnlyToADaemonThatAdvertisesIt() throws {
+        let daemon = NativeIdentityWireFixture()
+        daemon.methods.append("unenroll")
+        let client = DaemonClient(daemon: daemon)
+        try client.unenroll()
+        XCTAssertEqual(daemon.calls.map { $0.0 }, ["hello", "unenroll"])
+
+        let old = NativeIdentityWireFixture()
+        XCTAssertThrowsError(try DaemonClient(daemon: old).unenroll())
+        XCTAssertEqual(old.calls.map { $0.0 }, ["hello"])
+    }
+
     func testCoreDownRefusesWithoutManufacturingAccountState() {
         let daemon = NativeIdentityWireFixture()
         daemon.coreDown = true
@@ -70,6 +82,7 @@ private final class NativeIdentityWireFixture: DaemonCalling {
         switch method {
         case "hello": result = ["methods": methods]
         case "account_session_status": result = ["state": "unknown", "signed_in": NSNull(), "expires_at": NSNull()]
+        case "unenroll": result = ["unenrolled": true, "removed": true, "approvals_returned": 0]
         default: result = ["binding_state": "unbound"]
         }
         return String(decoding: try! JSONSerialization.data(withJSONObject: ["result": result]), as: UTF8.self)

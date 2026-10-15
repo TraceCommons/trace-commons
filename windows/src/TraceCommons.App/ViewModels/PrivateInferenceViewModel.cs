@@ -430,7 +430,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     public NearAiCredentialSurface.ProviderChoice[] CredentialProviders =>
         _copy is null ? [] : NearAiCredentialSurface.Providers(_copy);
 
-    private string _credentialProvider = NearAiCredentialSurface.ProviderGithub;
+    private string _credentialProvider = NearAiCredentialSurface.ProviderNear;
     public string CredentialProvider
     {
         get => _credentialProvider;
@@ -613,7 +613,8 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// which is a second browser tab in front of somebody already looking at
     /// one.
     /// </remarks>
-    public async Task<NearAiCredentialAttempt?> StartCredentialAsync()
+    /// <param name="provider">The sign-in provider; the page's choice when null.</param>
+    public async Task<NearAiCredentialAttempt?> StartCredentialAsync(string? provider = null)
     {
         if (_copy is null || _credentialBusy)
         {
@@ -627,7 +628,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         {
             DaemonResponse response = await _host
                 .CallAsync(DaemonProtocol.Methods.NearAiCredentialStart,
-                    NearAiCredentialSurface.SerializeStart(CredentialProvider))
+                    NearAiCredentialSurface.SerializeStart(provider ?? CredentialProvider))
                 .ConfigureAwait(true);
             if (response.IsError || response.Result is null)
             {

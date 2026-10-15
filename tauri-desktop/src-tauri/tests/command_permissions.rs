@@ -76,3 +76,37 @@ fn every_granted_command_is_registered() {
         "granted in permissions/default.toml but not registered in build.rs: {stale:?}"
     );
 }
+
+/// The command names inside `tauri::generate_handler![ ... ]`, without their
+/// module paths.
+fn handled_commands() -> BTreeSet<String> {
+    let source = read("src/commands/mod.rs");
+    let start = source
+        .find("generate_handler![")
+        .expect("commands/mod.rs builds the invoke handler");
+    let body = &source[start + "generate_handler![".len()..];
+    let end = body.find(']').expect("generate_handler! is closed");
+    let commands: BTreeSet<String> = body[..end]
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty() && !entry.starts_with("//"))
+        .map(|entry| entry.rsplit("::").next().unwrap_or(entry).to_owned())
+        .collect();
+    assert!(!commands.is_empty(), "generate_handler! parsed as empty");
+    commands
+}
+
+/// A handler the app serves but never lists in `TAURI_COMMANDS` has no
+/// `allow-*` permission at all, so the ACL refuses it and the two checks
+/// above never see it. Three account commands shipped that way.
+#[test]
+fn every_handled_command_is_registered() {
+    let missing: Vec<_> = handled_commands()
+        .difference(&registered_commands())
+        .cloned()
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "served by generate_handler! but not listed in build.rs TAURI_COMMANDS: {missing:?}"
+    );
+}

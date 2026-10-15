@@ -114,7 +114,7 @@ export function ProjectModeField({
           if (!open) cancel();
         }}
         title={`Ignore ${project.project_label}?`}
-        description="Review the sessions this setting will remove from the queue."
+        description="Review the traces this setting will remove from the queue."
         footer={
           <div className="flex justify-end gap-2">
             <Button type="button" variant="outline" onClick={cancel} disabled={disabled}>
@@ -133,10 +133,10 @@ export function ProjectModeField({
       >
         <p className="text-[12px] leading-[1.55] text-muted-foreground">
           {project.pending_count === undefined
-            ? "Pending sessions"
-            : `${project.pending_count} pending session${project.pending_count === 1 ? "" : "s"}`}{" "}
-          will leave the review queue. Future sessions from this project will
-          not be offered. Session files stay on this device. You can switch this
+            ? "Pending traces"
+            : `${project.pending_count} pending trace${project.pending_count === 1 ? "" : "s"}`}{" "}
+          will leave the review queue. Future traces from this project will
+          not be offered. Trace files stay on this device. You can switch this
           project back to {label("notify_only")} in Project settings.
         </p>
       </ResponsiveOverlay>

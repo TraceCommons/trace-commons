@@ -168,6 +168,15 @@ fn quit_prompt_value(role: QuitRole) -> Result<serde_json::Value, String> {
         .map_err(|_| "quit-copy-unavailable".to_owned())
 }
 
+/// The status lines a screen shows around a failed read or request, and
+/// the core-down banner, as the core words them. Needs no daemon: these are
+/// what a screen shows when the daemon did not answer.
+#[tauri::command]
+pub(crate) fn shell_status_copy() -> Result<serde_json::Value, String> {
+    serde_json::to_value(trace_commons_contributor::health_copy::shell_status_copy())
+        .map_err(|_| "shell-status-copy-unavailable".to_owned())
+}
+
 #[tauri::command]
 pub(crate) fn quit_app<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     app.exit(0);
@@ -300,7 +309,7 @@ fn picker_result(output: std::process::Output) -> Result<String, String> {
 pub(crate) async fn pick_directory(purpose: String) -> Result<String, String> {
     let prompt = match purpose.as_str() {
         "repository" => "Choose a Git repository",
-        "source_root" => "Choose a session folder",
+        "source_root" => "Choose a trace folder",
         _ => return Err("directory-picker-purpose-invalid".to_owned()),
     };
 
@@ -385,6 +394,22 @@ mod tests {
             assert_eq!(value["confirm"], quit_copy::QUIT_CONFIRM);
             assert_eq!(value["cancel"], quit_copy::QUIT_CANCEL);
         }
+    }
+
+    #[test]
+    fn shell_status_lines_reach_the_frontend_as_the_core_words_them() {
+        use trace_commons_contributor::{health_copy, preview_copy};
+        let value = super::shell_status_copy().unwrap();
+        let core_down = health_copy::core_down_copy();
+        assert_eq!(value["core_down"]["title"], core_down.title);
+        assert_eq!(value["core_down"]["detail"], core_down.detail);
+        assert_eq!(value["read_unavailable"], health_copy::READ_UNAVAILABLE);
+        assert_eq!(
+            value["request_failed"],
+            preview_copy::MONITOR_REQUEST_FAILED
+        );
+        assert_eq!(value["retry_startup"], health_copy::RETRY_STARTUP);
+        assert_eq!(value["retrying_startup"], health_copy::RETRYING_STARTUP);
     }
 
     // The allowlist itself moved to the contributor core (K7, #1173:
@@ -479,6 +504,14 @@ mod tests {
         )));
         assert!(!installed_by_homebrew(Path::new(
             "/Applications/Trace Commons.app/Contents/MacOS/app"
+        )));
+        // The bundle was renamed to Near.ai.app; ownership follows the
+        // Caskroom path, so both names resolve the same way.
+        assert!(installed_by_homebrew(Path::new(
+            "/opt/homebrew/Caskroom/trace-commons/0.13.0/Near.ai.app/Contents/MacOS/app"
+        )));
+        assert!(!installed_by_homebrew(Path::new(
+            "/Applications/Near.ai.app/Contents/MacOS/app"
         )));
         assert!(!installed_by_homebrew(Path::new(
             "/opt/homebrew/Caskroom/other-app/current/app"

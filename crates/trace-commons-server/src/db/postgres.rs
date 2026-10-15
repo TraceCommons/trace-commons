@@ -161,6 +161,13 @@ pub struct PgBackend {
     invite_registry_pool: Option<Pool>,
 }
 
+/// Global internal lock state; these tables have guard-only forced RLS and
+/// deliberately carry no tenant-readable rows or ordinary login grants.
+pub const TRACE_COMMONS_INTERNAL_RLS_TABLES: &[&str] = &[
+    "trace_account_trust_dependency_locks",
+    "trace_account_trust_external_growth",
+];
+
 /// Tables whose tenant isolation `trace_corpus_rls_diagnostics` attests to.
 ///
 /// Public so RLS tests assert against this list rather than a hand-maintained
@@ -232,6 +239,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_admission_submissions",
     "trace_account_trust_facts",
     "trace_account_trust_evaluations",
+    "trace_account_trust_frontiers",
     "trace_source_sessions",
     "trace_submission_sessions",
     "trace_account_inference_connections",
@@ -1685,6 +1693,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "versioned_pipeline_attempt_artifacts",
         include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
     ),
+    // V109: the versioned pipeline's follow-ups after #1143 -- the legacy
+    // V94 payouts, and the schema checks and indexes V105 and V106 left out.
+    (
+        109,
+        "versioned_pipeline_followups",
+        include_str!("../../../../migrations/V109__versioned_pipeline_followups.sql"),
+    ),
     // V110 (PR 5) adds each tenant's committed routing record, the immutable
     // activation event history, and the permanent per-submission receipt
     // owner, which the upload route reads before it chooses the legacy or the
@@ -1725,6 +1740,92 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         113,
         "versioned_pipeline_rebuild_fence",
         include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
+    ),
+    (
+        114,
+        "external_account_trust_evaluations",
+        include_str!("../../../../migrations/V114__external_account_trust_evaluations.sql"),
+    ),
+    // V114's frontier backfill read trace_accounts with no tenant context, so a
+    // migrator without BYPASSRLS seeded no row for any existing account. Re-run
+    // it as the evaluation guard under a policy that lives only for the
+    // statement; rows the trigger made since V114 keep their generations.
+    (
+        115,
+        "account_trust_frontier_backfill",
+        include_str!("../../../../migrations/V115__account_trust_frontier_backfill.sql"),
+    ),
+    // V116 (spec 2026-10-08, Slice C) marks the trace_gate_decisions rows
+    // the pipeline's Settle writes: `source` and `pipeline_run_id`, both
+    // defaulted so main's writers are unchanged, one pipeline row per
+    // submission, and the gate driver's read of `source`.
+    (
+        116,
+        "pipeline_gate_decision_rows",
+        include_str!("../../../../migrations/V116__pipeline_gate_decision_rows.sql"),
+    ),
+    // V117 (spec 2026-10-09, async privacy rescrub) records the Review-start
+    // privacy pass on pipeline_runs: the pass object, the hashes of its input
+    // and output, its residual-risk labels and outcome, and the link from a
+    // human approval of an escalated run; and admits the `privacy-pass`
+    // attempt artifact.
+    (
+        117,
+        "pipeline_privacy_pass",
+        include_str!("../../../../migrations/V117__pipeline_privacy_pass.sql"),
+    ),
+    // V118 adds the marker of a review audit event that the worker must still
+    // append: `pipeline_runs.review_audit_pending_at`, with its work index
+    // and the runtime role's column grant.
+    (
+        118,
+        "pipeline_review_audit_marker",
+        include_str!("../../../../migrations/V118__pipeline_review_audit_marker.sql"),
+    ),
+    // V123 (#1346) records on a failed run that its failure moved the
+    // run's `received` submission to `rejected`:
+    // `pipeline_runs.submission_rejected_at`, the CHECK that only a failed
+    // run carries it, and the runtime role's column grant.
+    (
+        123,
+        "pipeline_failed_run_submission_rejection",
+        include_str!("../../../../migrations/V123__pipeline_failed_run_submission_rejection.sql"),
+    ),
+    // V124 (spec 2026-10-10, pipeline default routing): the two cross-tenant
+    // reads default routing makes, tenant ids only, through SECURITY DEFINER
+    // functions owned by a NOLOGIN, NOBYPASSRLS guard (the V85 pattern), with
+    // EXECUTE granted to trace_ingest_runtime. V123 is #1346's.
+    (
+        124,
+        "pipeline_default_routing",
+        include_str!("../../../../migrations/V124__pipeline_default_routing.sql"),
+    ),
+    // V125 (owner decision 2026-10-11): an account reservation admitted on
+    // verified NEAR AI evidence is recorded as authority_kind 'attested' and
+    // debits no allowance. Widens the V77 CHECK only; no grant changes.
+    (
+        125,
+        "account_admission_attested_kind",
+        include_str!("../../../../migrations/V125__account_admission_attested_kind.sql"),
+    ),
+    // V126 (decided 2026-10-11): earned trust goes live with attested
+    // inference. The attested_submission fact kind verified from V76's
+    // witness evidence, first-in-cluster for it, an attested_units count on
+    // evaluations, and the writer the in-process evaluator uses for shadow
+    // and applied rows, bound to V114's input generation.
+    (
+        126,
+        "account_trust_live_attested",
+        include_str!("../../../../migrations/V126__account_trust_live_attested.sql"),
+    ),
+    // V127 (#1237): `trace_transition_admission` also releases a
+    // `processing` attempt, cost bound included, for a caller that knows the
+    // upload's refusal wrote nothing (`released_without_effect`). Replaces
+    // the function in place; its owner and grants are unchanged.
+    (
+        127,
+        "admission_release_without_effect",
+        include_str!("../../../../migrations/V127__admission_release_without_effect.sql"),
     ),
 ];
 
@@ -1829,6 +1930,14 @@ impl Database for PgBackend {
         evaluation: &crate::account_trust_rule::Evaluation,
     ) -> Result<bool, DatabaseError> {
         PgBackend::record_account_trust_evaluation(self, account, mode, evaluation).await
+    }
+
+    async fn evaluate_and_record_applied_account_trust(
+        &self,
+        account: &crate::account_trust::TrustAccount,
+        policy: &crate::account_trust_rule::GrowthPolicy,
+    ) -> Result<Option<(crate::account_trust_rule::Evaluation, bool)>, DatabaseError> {
+        PgBackend::evaluate_and_record_applied_account_trust(self, account, policy).await
     }
 
     async fn latest_account_trust_evaluation(
@@ -1987,6 +2096,26 @@ impl Database for PgBackend {
     > {
         self.participant_reward_history(tenant, account, query)
             .await
+    }
+
+    async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        PgBackend::external_account_trust_runtime_ready(self).await
+    }
+
+    async fn tiered_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        PgBackend::tiered_account_trust_runtime_ready(self).await
+    }
+
+    async fn enable_external_account_trust_growth(&self) -> Result<(), DatabaseError> {
+        PgBackend::enable_external_account_trust_growth(self).await
+    }
+
+    async fn prune_account_trust_dependency_locks(
+        &self,
+        limit: i32,
+        dry_run: bool,
+    ) -> Result<u64, DatabaseError> {
+        PgBackend::prune_account_trust_dependency_locks(self, limit, dry_run).await
     }
 
     async fn account_admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
@@ -3753,6 +3882,26 @@ impl Database for PgBackend {
         .await
     }
 
+    async fn enrol_near_ai_login(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        login: &crate::near_ai_login::VerifiedNearAiLogin,
+        device_public_key: &[u8; 32],
+        session: crate::db::NewSession<'_>,
+        identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
+        self.near_ai_login_enrol(
+            tenant_id,
+            account_id,
+            login,
+            device_public_key,
+            session,
+            identity,
+        )
+        .await
+    }
+
     async fn get_near_provisioned_anchor(
         &self,
         tenant: &str,
@@ -4194,6 +4343,33 @@ impl Database for PgBackend {
             account_id: row.get("account_id"),
             passkey: row.get("passkey"),
         }))
+    }
+
+    async fn credential_label_for_account(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        credential_id: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        // Read-only and only after a verified assertion, so, like the login
+        // loader, no ensure_trace_tenant. Tenant, account AND credential must
+        // all match: the label of a credential another account holds is never
+        // readable here, even within one tenant.
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT label FROM trace_webauthn_credentials
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND credential_id = $2
+                    AND revoked_at IS NULL",
+                &[&account_id, &credential_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.and_then(|row| row.get::<_, Option<String>>("label")))
     }
 
     async fn update_webauthn_credential_after_login(
@@ -5419,6 +5595,16 @@ impl Database for PgBackend {
                  FROM trace_submissions s
                  JOIN trace_gate_decisions d
                    ON d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                 -- A submission the pipeline's Settle wrote a row for is left
+                 -- out, even if it also holds a legacy row: the re-score would
+                 -- rewrite the verdict its Score awarded credit on (spec
+                 -- 2026-10-08, Slice C, O-C3). V116 grants trace_gate_driver
+                 -- this column.
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM trace_gate_decisions p
+                      WHERE p.tenant_id = s.tenant_id
+                        AND p.submission_id = s.submission_id
+                        AND p.source = 'pipeline_settle')
                  ORDER BY s.received_at ASC
                  LIMIT $1",
                 &[&limit],
@@ -5459,6 +5645,12 @@ impl Database for PgBackend {
                  -- leaves credit quality NULL; scoring it here would hand
                  -- every skipped duplicate the graded-floor product.
                  WHERE COALESCE(perplexity_micros, 0) > 0
+                   -- A row the pipeline's Settle wrote already holds the
+                   -- credit quality its Score computed under the bundle's
+                   -- pinned calibration; rescoring it here would overwrite
+                   -- that (spec 2026-10-08, Slice C, O-C3). V116 grants
+                   -- trace_gate_driver this column.
+                   AND source <> 'pipeline_settle'
                  ORDER BY decided_at ASC
                  LIMIT $1",
                 &[&limit],
@@ -5512,6 +5704,39 @@ impl Database for PgBackend {
                 dedup_cluster_id: row.get("dedup_cluster_id"),
                 dedup_simhash: row.get("dedup_simhash"),
                 dedup_signal_version: row.get("dedup_signal_version"),
+            })
+            .collect())
+    }
+
+    async fn list_recent_gate_decision_keys(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateDecisionKeyRow>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant GUC: the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize this read. The four columns are in the
+        // role's V45 column grants, so the query needs no migration.
+        let rows = client
+            .query(
+                "SELECT tenant_id, submission_id, decision_id, decided_at
+                 FROM trace_gate_decisions
+                 ORDER BY decided_at DESC, decision_id DESC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::GateDecisionKeyRow {
+                tenant_id: row.get("tenant_id"),
+                submission_id: row.get("submission_id"),
+                decision_id: row.get("decision_id"),
+                decided_at: row.get("decided_at"),
             })
             .collect())
     }
@@ -5992,13 +6217,9 @@ fn onboarding_device_tenant_access_grant_id(tenant_id: &str, device_key_id: &str
     )
 }
 
+/// One derivation for provisioning, the issuer and ingest's account lookup.
 fn onboarding_device_principal_ref(tenant_id: &str, device_key_id: &str) -> String {
-    let digest = Sha256::digest(format!(
-        "device:{}:{}",
-        tenant_id.trim(),
-        device_key_id.trim()
-    ));
-    format!("principal_sha256:{}", hex::encode(digest))
+    crate::account_trust::device_principal_ref(tenant_id, device_key_id)
 }
 
 fn sha256_prefixed(input: &str) -> String {
@@ -7859,6 +8080,7 @@ mod tests {
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
+            include_str!("../../../../migrations/V114__external_account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
             include_str!("../../../../migrations/V97__account_bindings.sql"),
         ];
@@ -7904,6 +8126,7 @@ mod tests {
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
+            include_str!("../../../../migrations/V114__external_account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
             include_str!("../../../../migrations/V97__account_bindings.sql"),
         ];

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { coreKeys } from "../../../lib/tauri/query-keys";
+import { useShellStatusLines } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import {
   type AutomaticGrant,
@@ -13,6 +14,7 @@ import {
 // and the way to withdraw it after onboarding. A withdraw is confirmed by
 // re-reading that status, never by the withdraw call's own answer.
 export function useAutomaticGrant() {
+  const lines = useShellStatusLines();
   const core = useCoreStatus();
   const queryClient = useQueryClient();
   const queryKey = onboardingKeys.automaticGrant(core.scope);
@@ -45,7 +47,7 @@ export function useAutomaticGrant() {
           ? "error"
           : "ready") as "busy" | "loading" | "ready" | "error",
     error: query.isError
-      ? "Automatic contributing status unavailable. Refresh after Rust core starts."
+      ? lines.readUnavailable
       : mutation.isError
         ? "Automatic contributing was not turned off. Nothing changed."
         : mutation.data === "still_granted"

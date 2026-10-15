@@ -62,7 +62,7 @@ final class SourceCandidateTests: XCTestCase {
             mostRecent: nil,
             relocatedByEnv: false
         )
-        // "0 sessions" and "that folder is not here" are materially
+        // "0 traces" and "that folder is not here" are materially
         // different answers to "may I watch this", and a contributor
         // deciding between them deserves the difference.
         XCTAssertEqual(missing.evidence(now: Date()), "Not found on this machine")
@@ -77,7 +77,7 @@ final class SourceCandidateTests: XCTestCase {
             mostRecent: nil,
             relocatedByEnv: false
         )
-        XCTAssertEqual(empty.evidence(now: Date()), "Found, but holding no sessions yet")
+        XCTAssertEqual(empty.evidence(now: Date()), "Found, but holding no traces yet")
     }
 
     func testEvidenceCountsSessionsAndSaysHowRecent() {
@@ -90,7 +90,7 @@ final class SourceCandidateTests: XCTestCase {
             mostRecent: now.addingTimeInterval(-2 * 60 * 60),
             relocatedByEnv: false
         )
-        XCTAssertEqual(candidate.evidence(now: now), "953 sessions, most recent 2 hours ago")
+        XCTAssertEqual(candidate.evidence(now: now), "953 traces, most recent 2 hours ago")
     }
 
     func testASingleSessionIsNotPluralised() {
@@ -103,7 +103,7 @@ final class SourceCandidateTests: XCTestCase {
             mostRecent: now.addingTimeInterval(-90),
             relocatedByEnv: false
         )
-        XCTAssertEqual(candidate.evidence(now: now), "1 session, most recent just now")
+        XCTAssertEqual(candidate.evidence(now: now), "1 trace, most recent just now")
     }
 
     func testRelocationIsSurfacedSoAnUnusualPathHasAnExplanation() {
@@ -157,5 +157,61 @@ final class SourceCandidateTests: XCTestCase {
               "session_count":1,"most_recent":null,"relocated_by_env":false}]
             """
         XCTAssertEqual(try SourceCandidate.decodeList(from: json).count, 0)
+    }
+
+    /// What `tc_describe_folder` returns for a flat folder of `.json`
+    /// exports: an OpenCode row and a trajectory row, both naming the picked
+    /// folder. Both survive, so the shell has two matches to ask between
+    /// rather than one it would take as certain.
+    func testADescribedFlatJsonFolderKeepsBothRows() throws {
+        let json = """
+            [{"source":"opencode","path":"/Users/someone/exports","exists":true,
+              "session_count":2,"most_recent":"2026-10-04T09:00:00.123456789Z",
+              "relocated_by_env":false,"answers_at":null},
+             {"source":"trajectory","path":"/Users/someone/exports","exists":true,
+              "session_count":2,"most_recent":"2026-10-04T09:00:00.123456789Z",
+              "relocated_by_env":false,"answers_at":null}]
+            """
+        let matches = try FolderMatch.decodeList(from: json)
+        XCTAssertEqual(matches.map(\.kind), [.source(.opencode), .trajectory])
+        XCTAssertEqual(matches.map(\.path), ["/Users/someone/exports", "/Users/someone/exports"])
+        XCTAssertEqual(matches.map(\.sessionCount), [2, 2])
+        XCTAssertTrue(matches.allSatisfy { $0.mostRecent != nil })
+        XCTAssertEqual(matches[0].candidate?.source, .opencode)
+        XCTAssertNil(matches[1].candidate)
+    }
+
+    /// A trajectory-only export is one trajectory match, not no match: a
+    /// declared Letta trajectory folder is a recognised kind.
+    func testADescribedJsonlFolderIsOneTrajectoryRow() throws {
+        let json = """
+            [{"source":"trajectory","path":"/Users/someone/runs","exists":true,
+              "session_count":3,"most_recent":null,
+              "relocated_by_env":false,"answers_at":null}]
+            """
+        let matches = try FolderMatch.decodeList(from: json)
+        XCTAssertEqual(matches.map(\.kind), [.trajectory])
+        XCTAssertEqual(matches.first?.sessionCount, 3)
+    }
+
+    /// A slug this build has never heard of is kept as a match it cannot
+    /// name, not dropped: dropping it would turn two matches into one and
+    /// the shell would stop asking.
+    func testADescribedFolderKeepsAnUnknownKind() throws {
+        let json = """
+            [{"source":"codex","path":"/p","exists":true,"session_count":1,
+              "most_recent":null,"relocated_by_env":false,"answers_at":"OpenAI"},
+             {"source":"some-future-tool","path":"/p","exists":true,"session_count":1,
+              "most_recent":null,"relocated_by_env":false,"answers_at":null}]
+            """
+        let matches = try FolderMatch.decodeList(from: json)
+        XCTAssertEqual(matches.map(\.kind), [.source(.codex), .unrecognised("some-future-tool")])
+        XCTAssertEqual(matches[0].answersAt, "OpenAI")
+    }
+
+    /// A folder that matches no layout is an empty array, and decodes to no
+    /// matches rather than failing.
+    func testAnUnrecognisedFolderDecodesToNoMatches() throws {
+        XCTAssertEqual(try FolderMatch.decodeList(from: "[]"), [])
     }
 }

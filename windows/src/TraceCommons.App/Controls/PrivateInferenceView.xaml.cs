@@ -23,6 +23,10 @@ public sealed partial class PrivateInferenceView : UserControl
         InitializeComponent();
 
         ViewModel = new PrivateInferenceViewModel(host);
+        // The managed card's sign-in is this page's ceremony, on NEAR AI.
+        ManagedContent.Content = new ManagedSessionsView(host, async () =>
+            await ViewModel.ContinueCredentialAsync(
+                await ViewModel.StartCredentialAsync(NearAiCredentialSurface.ProviderNear)));
         Loaded += OnFirstLoaded;
         Loaded += OnFundingLoaded;
         Unloaded += (_, _) => ViewModel.Funding.Deactivate();

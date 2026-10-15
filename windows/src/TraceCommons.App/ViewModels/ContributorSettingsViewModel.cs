@@ -669,6 +669,15 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     private string _inferenceEvidenceNotice = string.Empty;
     public bool InferenceEvidenceEnabled => _inferenceEvidenceEnabled;
     public string InferenceEvidenceHeading => _witnessCopy?.InferenceHeading ?? string.Empty;
+
+    /// <summary>
+    /// The title over both privacy confirmations, and the line under it: the
+    /// core's <c>WITNESS_PRIVACY_CONFIRM_TITLE</c> and
+    /// <c>WITNESS_PRIVACY_CONFIRM_DESCRIPTION</c>, as macOS and GTK title them.
+    /// </summary>
+    public string PrivacyConfirmTitle => _witnessCopy?.PrivacyConfirmTitle ?? string.Empty;
+
+    public string PrivacyConfirmDescription => _witnessCopy?.PrivacyConfirmDescription ?? string.Empty;
     public string InferenceEvidenceDisclosure => _witnessCopy?.InferenceDisclosure ?? string.Empty;
     public string InferenceEvidenceCaptureNote => _witnessCopy?.InferenceCaptureNote ?? string.Empty;
     public string InferenceEvidenceScopeNote => _witnessCopy?.InferenceScopeNote ?? string.Empty;
@@ -924,7 +933,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     public string ConnectionDetail => Connected
         ? string.Empty
-        : "Sessions are being queued, but nothing can be sent.";
+        : "Traces are being queued, but nothing can be sent.";
 
     public bool HasConnectionDetail => !Connected;
 
@@ -977,7 +986,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     }
 
     public string QueueExpiryText =>
-        $"Undecided sessions are dropped after {_queueTtlDays} days. Dropped means never sent.";
+        $"Undecided traces are dropped after {_queueTtlDays} days. Dropped means never sent.";
 
     public string NotificationOwnerText => _localNotifications
         ? "Notifications are rendered by the background daemon."
@@ -1310,6 +1319,19 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         var grantedSet = new HashSet<string>(granted, StringComparer.Ordinal);
         foreach (ConsentOption option in options?.Scopes ?? new List<ConsentOption>())
         {
+            // Fail closed: a scope the core gave no title is not offered. One
+            // already granted is kept as it is, never revoked by a later
+            // write.
+            if (string.IsNullOrEmpty(option.Title))
+            {
+                if (!option.AlwaysOn && grantedSet.Contains(option.Name))
+                {
+                    _preservedNonDataScopes.Add(option.Name);
+                }
+
+                continue;
+            }
+
             var row = new ConsentScopeViewModel(option);
             if (!option.AlwaysOn)
             {

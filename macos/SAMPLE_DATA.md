@@ -6,11 +6,17 @@
 `undo_keep`, `set_project_mode`) from `RecordedSamples/`, real replies the
 real daemon sent against a throwaway store, bundled into `TCShellCore` as a
 resource (`Package.swift`) and read through `Bundle.module`. `coreDown` and
-Zaki's provisional network methods (`inference_summary`, `model_spend`,
-`private_ai`, `mission_catalogue`, `invite_lookup`, `passkey_state`,
-`account_session_status`, marked `"_sample":"no source yet"` in the JSON) stay
-hand-written, the first because it answers `nil` for every method by
-construction and the second because none has a source on `main` yet. To
+the network methods (C3, #1187: `inference_summary`, `inference_call_proof`,
+`model_spend`, `private_ai`, `mission_catalogue`, `invite_lookup`,
+`passkey_state`, `account_session_status`, `activity_missions_catalogue`,
+marked `"_sample":"hand-written"` in the JSON) stay hand-written, the first
+because it answers `nil` for every method by construction and the second
+because they answer from the network and the recorder's temp store has none
+behind it. The network samples follow the shapes the daemon serves, are
+synthetic rather than pilot observations, and are a candidate for
+Rust-emitted fixtures in a follow-up. The PROVISIONAL shapes the Inference
+and Missions screens still read (`SampleDaemonData.provisional`, marked
+`"_sample":"no source yet"`) are hand-written too. To
 re-record after a daemon change: from the repo root, run
 `cargo test -p trace-commons-contributor --test k2_sample_recorder -- --ignored record_samples_to_disk`
 (see that file's module doc for exactly how each sample set is built), then

@@ -11,6 +11,7 @@ export function HarnessListPanel({
   onPlan,
   onCommit,
   onCancel,
+  readUnavailable,
 }: {
   data: HarnessList | null;
   state: "loading" | "ready" | "error";
@@ -21,6 +22,8 @@ export function HarnessListPanel({
   onPlan: (id: string, action: "connect" | "disconnect") => Promise<void>;
   onCommit: () => Promise<void>;
   onCancel: () => void;
+  /** The core's read-unavailable line (`shell_status_copy`). */
+  readUnavailable: string;
 }) {
   const rows = data?.harnesses ?? [];
   const view = data?.view;
@@ -68,7 +71,7 @@ export function HarnessListPanel({
       )}
       {state === "error" && (
         <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
-          Configured tools unavailable. Refresh after Rust core starts.
+          {readUnavailable}
         </p>
       )}
       {state === "ready" && rows.length === 0 && (

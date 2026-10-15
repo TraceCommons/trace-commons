@@ -57,6 +57,8 @@ struct Record {
     kind: Kind,
     reference: CredentialReference,
     authority: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_lifecycle: Option<String>,
 }
 
 // Separate from Cloud's SecretBundle: a Commons key cannot become an inference key.
@@ -126,12 +128,23 @@ fn current_authority(store: &ConfigStore) -> Result<Option<String>> {
 }
 fn binding(store: &ConfigStore, record: &Record) -> Result<String> {
     let dir = std::fs::canonicalize(store.dir()).map_err(|_| unavailable())?;
-    let bytes = serde_json::to_vec(&(
-        record.kind.domain(),
-        dir,
-        &record.authority,
-        record.reference,
-    ))
+    let bytes = if let Some(lifecycle) = &record.account_lifecycle {
+        serde_json::to_vec(&(
+            record.kind.domain(),
+            dir,
+            &record.authority,
+            record.reference,
+            lifecycle,
+        ))
+    } else {
+        // Existing opaque records retain their original OS-bundle binding.
+        serde_json::to_vec(&(
+            record.kind.domain(),
+            dir,
+            &record.authority,
+            record.reference,
+        ))
+    }
     .map_err(|_| unavailable())?;
     Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
 }
@@ -199,6 +212,40 @@ pub(crate) fn account_snapshot(store: &ConfigStore, cfg: &ContributorConfig) -> 
         return Err(changed());
     }
     Ok(expected)
+}
+
+fn lifecycle_marker(bytes: Option<&[u8]>) -> Result<Option<String>> {
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    if let Some(record) = record(bytes)? {
+        return Ok(Some(record.account_lifecycle.unwrap_or_else(|| {
+            format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(
+                    serde_json::to_vec(&record.reference).expect("reference serializes")
+                ))
+            )
+        })));
+    }
+    Ok(Some(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(bytes))
+    )))
+}
+/// Opaque UI/operation scope: account login/logout and configuration changes invalidate it;
+/// token rotation preserves it. No OS credential-store read or secret is exposed.
+pub(crate) fn account_scope(store: &ConfigStore) -> Result<String> {
+    scope_for_snapshot(&snapshot(store, Kind::Account)?)
+}
+pub(crate) fn scope_for_snapshot(snapshot: &Snapshot) -> Result<String> {
+    let bytes = serde_json::to_vec(&(
+        "trace-commons/account-lifecycle/v1",
+        &snapshot.generation,
+        &snapshot.config,
+        lifecycle_marker(snapshot.previous.as_deref())?,
+    ))?;
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
 }
 
 fn snapshot_locked(store: &ConfigStore, kind: Kind) -> Result<Snapshot> {
@@ -274,10 +321,19 @@ pub(crate) fn replace(
     payload: &[u8],
     enrollment: Option<&ContributorConfig>,
 ) -> Result<()> {
+    replace_with_lifecycle(store, expected, payload, enrollment, None)
+}
+fn replace_with_lifecycle(
+    store: &ConfigStore,
+    expected: &Snapshot,
+    payload: &[u8],
+    enrollment: Option<&ContributorConfig>,
+    lifecycle: Option<String>,
+) -> Result<()> {
     if needs_native_thread() {
         return std::thread::scope(|scope| {
             scope
-                .spawn(|| replace(store, expected, payload, enrollment))
+                .spawn(|| replace_with_lifecycle(store, expected, payload, enrollment, lifecycle))
                 .join()
                 .map_err(|_| unavailable())?
         });
@@ -287,6 +343,8 @@ pub(crate) fn replace(
     let credentials = native(store)?;
     cleanup_locked(store, &credentials)?;
     let record = Record {
+        account_lifecycle: (expected.kind == Kind::Account)
+            .then(|| lifecycle.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())),
         commons_credential_version: 1,
         kind: expected.kind,
         reference: CredentialReference::allocate(),
@@ -356,13 +414,21 @@ pub(crate) fn replace_account_rotation(
     expected: &Snapshot,
     payload: &[u8],
 ) -> Result<()> {
-    match replace(store, expected, payload, None) {
+    match replace_with_lifecycle(
+        store,
+        expected,
+        payload,
+        None,
+        lifecycle_marker(expected.previous.as_deref())?,
+    ) {
         Ok(()) => Ok(()),
         Err(_) => {
             let current = snapshot(store, Kind::Account)?;
             if current.generation == expected.generation
                 && current.config == expected.config
                 && current.previous != expected.previous
+                && lifecycle_marker(current.previous.as_deref())?
+                    == lifecycle_marker(expected.previous.as_deref())?
             {
                 Ok(())
             } else {
@@ -680,6 +746,80 @@ mod tests {
             "audience":"trace-commons-upload", "tenant_id":"tenant-one", "instance_id":"instance-one",
             "user_subject":"subject-one", "device_key_id":"sha256:00", "consent_scopes":[]
         })).unwrap()
+    }
+    #[test]
+    fn legacy_opaque_account_scope_survives_rotation_but_not_replacement() {
+        let (_dir, store, _) = fixture();
+        let cfg = config();
+        store.save_config(&cfg).unwrap();
+        let record = Record {
+            commons_credential_version: 1,
+            kind: Kind::Account,
+            reference: CredentialReference::allocate(),
+            authority: Some(authority(&cfg)),
+            account_lifecycle: None,
+        };
+        let bundle = Bundle {
+            version: 1,
+            binding: binding(&store, &record).unwrap(),
+            payload: STANDARD.encode(session()),
+        };
+        native(&store)
+            .unwrap()
+            .prepare_bytes_at(&record.reference, &serde_json::to_vec(&bundle).unwrap())
+            .unwrap();
+        write(
+            &store,
+            &Kind::Account.file(&store),
+            &serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        let scope = account_scope(&store).unwrap();
+        let loaded = crate::account_auth::try_load_session_with_snapshot(&store)
+            .unwrap()
+            .unwrap();
+        crate::account_auth::store_rotated_token(&store, &loaded, "synthetic-rotation".into())
+            .unwrap();
+        assert_eq!(scope, account_scope(&store).unwrap());
+        let old = crate::account_auth::try_load_session_with_snapshot(&store)
+            .unwrap()
+            .unwrap();
+        replace(
+            &store,
+            &snapshot(&store, Kind::Account).unwrap(),
+            &session(),
+            None,
+        )
+        .unwrap();
+        assert_ne!(scope, account_scope(&store).unwrap());
+        assert!(
+            crate::account_auth::store_rotated_token(&store, &old, "stale-rotation".into())
+                .is_err(),
+            "login replacement cannot be mistaken for concurrent rotation"
+        );
+    }
+    #[test]
+    fn lifecycle_marker_is_bound_to_the_os_credential_entry() {
+        let (_dir, store, _) = fixture();
+        store.save_config(&config()).unwrap();
+        replace(
+            &store,
+            &snapshot(&store, Kind::Account).unwrap(),
+            &session(),
+            None,
+        )
+        .unwrap();
+        let mut record = record(&read(&Kind::Account.file(&store)).unwrap().unwrap())
+            .unwrap()
+            .unwrap();
+        record.account_lifecycle = Some("forged-lifecycle".into());
+        write(
+            &store,
+            &Kind::Account.file(&store),
+            &serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        assert!(crate::account_auth::try_load_session_with_snapshot(&store).is_err());
     }
     #[test]
     fn account_switch_rejects_old_sessions_and_stale_signin_parameters() {

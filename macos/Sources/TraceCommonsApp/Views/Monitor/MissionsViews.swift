@@ -1,4 +1,3 @@
-#if DEBUG
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -29,9 +28,6 @@ struct MissionsPage: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            GlassBreadcrumb(
-                [GlassCrumb(MonitorWindowView.Tab.home.title, action: back), GlassCrumb(MonitorWords.missions)],
-                backLabel: MonitorWindowView.Tab.home.title, onBack: back)
             ScrollView {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                     if let failure = store.failures["mission_catalogue"] {
@@ -72,6 +68,8 @@ struct MissionsPage: View {
             }
             .scrollIndicators(.never)
         }
+        // Escape goes back to Home, as the shell's breadcrumb does.
+        .onExitCommand(perform: back)
     }
 }
 
@@ -129,10 +127,18 @@ enum MissionFormat {
     /// range, or when the commons has not said what the credit waits on: a
     /// bare range would read as owed (M3).
     static func credit(_ mission: DaemonData.Mission, in catalogue: DaemonData.MissionCatalogue) -> String {
-        guard condition(catalogue) != nil, let range = mission.creditRange else { return "—" }
-        let span = range.min == range.max ? "\(range.min)" : "\(range.min)–\(range.max)"
-        return "\(span) \(range.unit)"
+        guard condition(catalogue) != nil, let range = mission.creditRange,
+            range.unit == missionCreditUnit, let words = MonitorWords.table
+        else { return "—" }
+        if range.min == range.max {
+            return words.missionCreditPointsOne.replacingOccurrences(of: "{min}", with: "\(range.min)")
+        }
+        return words.missionCreditPoints.replacingOccurrences(of: "{min}", with: "\(range.min)")
+            .replacingOccurrences(of: "{max}", with: "\(range.max)")
     }
+
+    /// The one unit the data contract names for a mission's range.
+    static let missionCreditUnit = "points"
 
     /// Home's count: the catalogue's size, or a dash when it was not read.
     static func count(_ catalogue: DaemonData.MissionCatalogue?) -> String {
@@ -146,4 +152,3 @@ extension MonitorWords {
     static var projected: String { table?.projected ?? "" }
     static var projectedNote: String { table?.projectedNote ?? "" }
 }
-#endif

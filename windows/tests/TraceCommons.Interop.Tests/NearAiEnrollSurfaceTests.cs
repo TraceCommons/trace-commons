@@ -9,7 +9,7 @@ using Xunit;
 namespace TraceCommons.Interop.Tests;
 
 /// <summary>
-/// The login-enrolment sentences, from the live ABI rather than a fixture.
+/// The login-enrollment sentences, from the live ABI rather than a fixture.
 /// </summary>
 public sealed class NearAiEnrollSurfaceTests
 {

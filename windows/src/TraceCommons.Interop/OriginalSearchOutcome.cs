@@ -91,9 +91,9 @@ public abstract record OriginalSearchOutcome
     /// <summary>The line the search tab prints.</summary>
     public string Sentence => this switch
     {
-        AbsentOutcome => "Not in this session, before or after scrubbing.",
+        AbsentOutcome => "Not in this trace, before or after scrubbing.",
         UnknownOutcome =>
-            "0 matches in what would be sent. This build could not check the session as it was "
+            "0 matches in what would be sent. This build could not check the trace as it was "
             + "recorded, so that is not the same as saying it was never there.",
         AllRemoved removed => removed.Removed == 1
             ? "1 match, and it was removed."

@@ -58,11 +58,23 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
     public var overrideCalls: [String] { lock.withLock { recordedOverrideCalls } }
     private var recordedOverrideCalls: [String] = []
 
+    /// Replies a test put in place of the recorded ones, by method.
+    private var replacedReplies: [String: String] = [:]
+
+    /// Answers `method` with `json` from now on, in place of the recorded
+    /// reply, so a test can show the daemon changing what it sends (a
+    /// ledger feed turned off). A test seam: no screen calls it.
+    public func replaceReply(_ method: String, with json: String) {
+        lock.withLock { replacedReplies[method] = json }
+    }
+
     /// The raw JSON this set answers `method` with: the IPC `result`
     /// object, or `nil` for a set where the core is down. `status` carries
     /// the override in force, as the daemon's `status_value` does.
     public func json(for method: String) -> String? {
-        guard set != .coreDown, let reply = SampleDaemonData.reply(method, in: set) else { return nil }
+        guard set != .coreDown else { return nil }
+        let replaced = lock.withLock { replacedReplies[method] }
+        guard let reply = replaced ?? SampleDaemonData.reply(method, in: set) else { return nil }
         guard method == "status" else { return reply }
         lock.lock()
         let active = contributionOverride
@@ -132,8 +144,25 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("status", as: DaemonData.Status.self)
     }
 
-    public func listPending(projectId: String?) async throws -> [DaemonData.QueueEntry] {
-        let all = try serve("list_pending", as: DaemonData.PendingList.self).pending
+    public func listPending(
+        projectId: String?, filter: DaemonData.PendingFilter?, order: DaemonData.PendingOrder?
+    ) async throws -> [DaemonData.QueueEntry] {
+        var all = try serve("list_pending", as: DaemonData.PendingList.self).pending
+        if filter == .idleSessions {
+            // The recorded replies do not say which entries are idle; the
+            // set's own `idle_sessions.count` waiting entries stand in, so a
+            // preview of the filtered list shows as many rows as the card
+            // named. A fixture, not the daemon's rule.
+            let idle = try serve("status", as: DaemonData.Status.self).idleSessions?.count ?? 0
+            all = Array(all.filter { $0.state == "pending" && !$0.heldForReview }.prefix(idle))
+        }
+        if order == .suggested {
+            // Mission fit first, as the daemon sorts; ties keep queue order.
+            all = all.enumerated().sorted { a, b in
+                let (x, y) = (a.element.missionFit ?? 0, b.element.missionFit ?? 0)
+                return x != y ? x > y : a.offset < b.offset
+            }.map(\.element)
+        }
         guard let projectId else { return all }
         // The daemon knows a project from its policy (the `list_projects`
         // rows) and from the queue; anything else it refuses, as here.
@@ -143,6 +172,50 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
             throw DaemonDataError.daemon(code: "bad_params", message: "project-id-unrecognized")
         }
         return all.filter { $0.projectId == projectId }
+    }
+
+    // MARK: Nudges
+
+    /// Every nudge write this client answered, as `method params`, in
+    /// order. The sets are fixtures: none of them changes a reply.
+    public var nudgeCalls: [String] { lock.withLock { recordedNudgeCalls } }
+    private var recordedNudgeCalls: [String] = []
+
+    private func recordNudge(_ call: String) throws {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        lock.withLock { recordedNudgeCalls.append(call) }
+    }
+
+    public func nudgeOpened(_ kind: NudgeSurface.Kind) async throws {
+        try recordNudge("nudge_opened \(kind.rawValue)")
+    }
+
+    public func nudgeDecline(_ kind: NudgeSurface.Kind) async throws {
+        guard kind != .verdictsLanded else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "nudge-kind-not-declinable")
+        }
+        try recordNudge("nudge_decline \(kind.rawValue)")
+    }
+
+    public func setSuggestionsEnabled(_ on: Bool) async throws {
+        try recordNudge("set_suggestions_enabled \(on)")
+    }
+
+    public func setMenuBarMarkEnabled(_ on: Bool) async throws {
+        try recordNudge("set_menu_bar_mark_enabled \(on)")
+    }
+
+    public func setNotificationsEnabled(_ on: Bool) async throws {
+        try recordNudge("set_notifications_enabled \(on)")
+    }
+
+    public func setNotifyKind(_ kind: String, on: Bool) async throws {
+        try recordNudge("set_notify_kind \(kind) \(on)")
+    }
+
+    public func dismissNotifyOffer(kind: String) async throws {
+        guard let key = NudgeSettings.offerMarker(kind: kind) else { throw NudgeSettings.noOfferForKind }
+        try recordNudge("set_settings \(key) false")
     }
 
     public func listKept() async throws -> [DaemonData.QueueEntry] {
@@ -222,8 +295,11 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
     /// Approves every pending entry of that folder in this set, except
     /// those held for a person (`heldForReview`), as the daemon's group
     /// selector does. A Manual Scrub check hold is approved with the rest.
-    public func approveFolder(projectId: String) async throws -> ApproveResponse {
-        let pending = try await listPending(projectId: projectId)
+    /// A `filter` narrows the folder as `listPending` does.
+    public func approveFolder(
+        projectId: String, verdict: ContributorVerdict?, filter: DaemonData.PendingFilter?
+    ) async throws -> ApproveResponse {
+        let pending = try await listPending(projectId: projectId, filter: filter, order: nil)
         let held = pending.filter(\.heldForReview).count
         let json = SampleDaemonData.approvedGroup(approved: pending.count - held, excludedHeld: held)
         return try decode(json, method: "approve", as: ApproveResponse.self)
@@ -317,6 +393,32 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("get_settings", as: DaemonData.Settings.self)
     }
 
+    /// The Private AI value last written, as the daemon keeps it; `nil` is
+    /// the recorded `get_settings` value.
+    private var privateAIOn: Bool?
+
+    /// Every Private AI write this client answered, in order. Tests read it
+    /// to prove what was (and was not) sent.
+    public var privateAICalls: [Bool] { lock.withLock { recordedPrivateAICalls } }
+    private var recordedPrivateAICalls: [Bool] = []
+
+    public func privateAI() async throws -> DaemonData.PrivateAISwitch {
+        let recorded = DaemonData.PrivateAISwitch(settings: try serve("get_settings", as: DaemonData.Settings.self))
+        guard let written = lock.withLock({ privateAIOn }) else { return recorded }
+        return DaemonData.PrivateAISwitch(on: written, offerSeen: true, state: recorded.state)
+    }
+
+    public func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        lock.withLock {
+            recordedPrivateAICalls.append(on)
+            privateAIOn = on
+        }
+        let answer = try await privateAI()
+        emit(.statusChanged)
+        return answer
+    }
+
     public func setScrubCheck(_ mode: DaemonData.ScrubCheckMode) async throws -> DaemonData.Settings {
         try serve("get_settings", as: DaemonData.Settings.self)
     }
@@ -326,6 +428,14 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
     }
 
     public func setDigestSchedule(_ schedule: DaemonData.DigestSchedule) async throws -> DaemonData.Settings {
+        try serve("get_settings", as: DaemonData.Settings.self)
+    }
+
+    public func setInsightsRecapCard(_ on: Bool) async throws -> DaemonData.Settings {
+        try serve("get_settings", as: DaemonData.Settings.self)
+    }
+
+    public func setInsightsLedgerFeed(_ on: Bool) async throws -> DaemonData.Settings {
         try serve("get_settings", as: DaemonData.Settings.self)
     }
 
@@ -353,10 +463,26 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("inference_calls", as: DaemonData.InferenceCallPage.self)
     }
 
-    // MARK: PROVISIONAL network methods (Zaki's C3)
+    // MARK: Insights
 
-    public func inferenceSummary() async throws -> DaemonData.InferenceSummary {
-        try serve("inference_summary", as: DaemonData.InferenceSummary.self)
+    public func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        // SAMPLE: no counter pass is recorded, so the window shows the
+        // saved-imports feed, as it would against a daemon that predates it.
+        throw DaemonDataError.notAvailableYet(method: "insights_week")
+    }
+
+    public func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        // SAMPLE: no glance is recorded (it needs a live IronWire ledger), so
+        // the popover draws none, as against a daemon that predates it.
+        throw DaemonDataError.notAvailableYet(method: "insights_glance")
+    }
+
+    // MARK: Network methods (C3, #1187): hand-written samples
+
+    public func networkInferenceSummary() async throws -> DaemonData.NetworkInferenceSummary {
+        try serve("inference_summary", as: DaemonData.NetworkInferenceSummary.self)
     }
 
     public func inferenceCallProof(callId: Int64) async throws -> DaemonData.InferenceProofDetail {
@@ -367,16 +493,36 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("model_spend", as: DaemonData.ModelSpend.self)
     }
 
-    public func privateAI() async throws -> DaemonData.PrivateAISwitch {
-        try serve("private_ai", as: DaemonData.PrivateAISwitch.self)
+    public func networkPrivateAI() async throws -> DaemonData.NetworkPrivateAISwitch {
+        try serve("private_ai", as: DaemonData.NetworkPrivateAISwitch.self)
     }
 
-    public func setPrivateAI(on: Bool) async throws -> DaemonData.PrivateAISwitch {
-        try serve("private_ai", as: DaemonData.PrivateAISwitch.self)
+    /// Answers the switch as asked -- off with no port, or running on the
+    /// sample port -- keeping the set's disclosure. Not remembered: a later
+    /// `networkPrivateAI()` still reads the set's own state.
+    public func setNetworkPrivateAI(on: Bool, consent: DaemonData.PrivateAIConsent?) async throws
+        -> DaemonData.NetworkPrivateAISwitch
+    {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        guard !on || consent != nil else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "confirmation-required")
+        }
+        let shown = try serve("private_ai", as: DaemonData.NetworkPrivateAISwitch.self)
+        let answer: [String: Any] = [
+            "on": on, "state": on ? "running" : "off", "port": on ? 3128 : NSNull(), "disclosure": shown.disclosure,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: answer) else {
+            throw DaemonDataError.undecodable(method: "set_private_ai")
+        }
+        return try decode(String(decoding: data, as: UTF8.self), method: "set_private_ai",
+                          as: DaemonData.NetworkPrivateAISwitch.self)
     }
 
-    public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {
-        try serve("mission_catalogue", as: DaemonData.MissionCatalogue.self)
+    /// One fixed page: the sample has no second page to ask for.
+    public func networkMissionCatalogue(limit: Int?, before: String?) async throws
+        -> DaemonData.NetworkMissionCatalogue
+    {
+        try serve("mission_catalogue", as: DaemonData.NetworkMissionCatalogue.self)
     }
 
     public func lookupInvite(code: String) async throws -> DaemonData.InviteLookup {
@@ -389,6 +535,41 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     public func accountState() async throws -> DaemonData.AccountState {
         try serve("account_session_status", as: DaemonData.AccountState.self)
+    }
+
+    public func activityMissionsCatalogue() async throws -> DaemonData.ActivityMissionsCatalogue {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        guard set != .unknownCounts else {
+            throw DaemonDataError.daemon(code: "unavailable", message: "activity-missions-unavailable")
+        }
+        return try serve("activity_missions_catalogue", as: DaemonData.ActivityMissionsCatalogue.self)
+    }
+
+    public func activityMissionsStatus() async throws -> DaemonData.ActivityMissionsStatus {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        // SAMPLE: no official configured policy or authoritative progress recording yet.
+        throw DaemonDataError.daemon(code: "unavailable", message: "activity-missions-unavailable")
+    }
+
+    // MARK: PROVISIONAL shapes the screens still read
+
+    /// The Inference screen's earlier shape, from `SampleDaemonData.provisional`;
+    /// the wire's `inference_summary` is `networkInferenceSummary()`.
+    public func inferenceSummary() async throws -> DaemonData.InferenceSummary {
+        try serveProvisional("inference_summary", as: DaemonData.InferenceSummary.self)
+    }
+
+    /// The Missions screen's earlier shape, from `SampleDaemonData.provisional`;
+    /// the wire's `mission_catalogue` is `networkMissionCatalogue(limit:before:)`.
+    public func missionCatalogue() async throws -> DaemonData.MissionCatalogue {
+        try serveProvisional("mission_catalogue", as: DaemonData.MissionCatalogue.self)
+    }
+
+    private func serveProvisional<T: Decodable>(_ method: String, as type: T.Type) throws -> T {
+        guard set != .coreDown, let json = SampleDaemonData.provisional(method, in: set) else {
+            throw DaemonDataError.unreachable
+        }
+        return try decode(json, method: method, as: T.self)
     }
 
     // MARK: Live updates

@@ -19,7 +19,7 @@ export function WaitingEntryRow({
   const detail =
     entry.subagent_count > 0
       ? `${entry.subagent_count} delegated transcript${entry.subagent_count === 1 ? "" : "s"}`
-      : "Single session";
+      : "Single trace";
   const proof = entry.holds_certificate ? "Witness certificate held" : null;
   const attestationTone =
     entry.attestation_copy?.tone === "clear"

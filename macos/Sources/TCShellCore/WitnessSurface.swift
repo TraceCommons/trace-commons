@@ -183,6 +183,17 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
     public let inferenceEnabled: String
     public let inferenceDisabled: String
     public let inferenceSaveFailed: String
+    /// Ron's #1146 field prompts, operator-label lead-in, privacy
+    /// confirmation title and line, and the local capture and storage
+    /// names. Optional so an older core still draws the card.
+    public let urlPlaceholder: String?
+    public let signingAddressPlaceholder: String?
+    public let measurementsPlaceholder: String?
+    public let operatorLabel: String?
+    public let privacyConfirmTitle: String?
+    public let privacyConfirmDescription: String?
+    public let localCapture: String?
+    public let localStorage: String?
     public let review: WitnessReviewCopy?
     public let onboarding: FirstContributionCopy?
     public let wallet: WalletCopy?
@@ -224,6 +235,14 @@ public struct WitnessCopy: Decodable, Equatable, Sendable {
         case inferenceEnabled = "inference_enabled"
         case inferenceDisabled = "inference_disabled"
         case inferenceSaveFailed = "inference_save_failed"
+        case urlPlaceholder = "url_placeholder"
+        case signingAddressPlaceholder = "signing_address_placeholder"
+        case measurementsPlaceholder = "measurements_placeholder"
+        case operatorLabel = "operator_label"
+        case privacyConfirmTitle = "privacy_confirm_title"
+        case privacyConfirmDescription = "privacy_confirm_description"
+        case localCapture = "local_capture"
+        case localStorage = "local_storage"
 
     }
 
@@ -578,6 +597,8 @@ public struct AdmissionCopy: Decodable, Equatable, Sendable {
     public let prerequisite: String
     public let backend: String
     public let confirm: String
+    /// #1146's confirmation tick: Prepare waits on it.
+    public let confirmLine: String
     public let cancel: String
     public let permission: String
     public let working: String
@@ -602,6 +623,7 @@ public struct AdmissionCopy: Decodable, Equatable, Sendable {
         case prerequisite = "prerequisite"
         case backend = "backend"
         case confirm = "confirm"
+        case confirmLine = "confirm_line"
         case cancel = "cancel"
         case permission = "permission"
         case working = "working"

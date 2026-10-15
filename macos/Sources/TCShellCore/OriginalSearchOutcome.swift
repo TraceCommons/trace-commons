@@ -38,7 +38,7 @@ public enum OriginalSearchOutcome: Equatable {
     public var sentence: String {
         switch self {
         case .absent:
-            return "0 matches -- not in this session"
+            return "0 matches -- not in this trace"
         case .allRemoved(let count):
             return "\(count) matches -- all \(count) were removed"
         case .someRemain(let remaining, let total):

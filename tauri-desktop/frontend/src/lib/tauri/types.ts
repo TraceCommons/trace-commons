@@ -7,6 +7,7 @@ export const coreStatusSchema = z.object({
     schema_version: z.string(),
     logged_in: z.boolean(),
     tenant_id: z.string().nullable(),
+    account_scope: z.string().nullable().optional().catch(null),
     consent_scopes: z.array(z.string()),
     paused: z.boolean(),
     queue_depth: z.number(),

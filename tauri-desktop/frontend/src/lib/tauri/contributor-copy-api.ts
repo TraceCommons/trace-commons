@@ -43,6 +43,12 @@ export type {
 } from "./route-disclosure";
 
 export type { QuitConfirmationCopy } from "./quit-confirmation-copy";
+import {
+  parseShellStatusCopy,
+  type ShellStatusCopy,
+} from "./shell-status-copy";
+
+export type { ShellStatusCopy } from "./shell-status-copy";
 
 type RecordValue = Record<string, unknown>;
 
@@ -181,7 +187,7 @@ export type ContributorDisclosureCopy = {
   project_automatic_unavailable: string;
   /**
    * Each folder mode's one name, by wire mode
-   * (`project_copy::FOLDER_MODE_LABELS`): "Ask me", "Automatic", "Never".
+   * (`project_copy::FOLDER_MODE_LABELS`): "Ask", "Automatic", "Never".
    */
   folder_mode_labels: Record<string, string>;
   near_ai_enroll: {
@@ -717,6 +723,11 @@ export async function getCertificateDetail(
 
 export async function getQuitConfirmationCopy(): Promise<QuitConfirmationCopy> {
   return parseQuitConfirmationCopy(await invokeTauri("quit_confirmation_copy"));
+}
+
+/** The core's status lines around a failed read or request. */
+export async function getShellStatusCopy(): Promise<ShellStatusCopy> {
+  return parseShellStatusCopy(await invokeTauri("shell_status_copy"));
 }
 
 export async function getWithdrawalConfirmationPrompt(): Promise<string> {

@@ -29,7 +29,7 @@ export function PrivateAiConnectionPanel({
     privateAi.busy || settings.data?.near_ai_inference_configured !== true;
   const form = useForm<PrivateAiProviderValues>({
     resolver: zodResolver(privateAiProviderSchema),
-    defaultValues: { provider: "github" },
+    defaultValues: { provider: "near" },
   });
   const providerError = form.formState.errors.provider?.message;
   const provider = form.watch("provider");
@@ -105,9 +105,9 @@ export function PrivateAiConnectionPanel({
               providerError ? "private-ai-provider-error" : undefined
             }
           >
+            <option value="near">NEAR wallet</option>
             <option value="github">GitHub</option>
             <option value="google">Google</option>
-            <option value="near">NEAR wallet</option>
           </NativeSelect>
           <FormFieldError
             id="private-ai-provider-error"

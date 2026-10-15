@@ -8,31 +8,20 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
     /// The menu bar is the surface most likely to be read at a glance and
     /// least likely to be read carefully, so the fail-open matters most
     /// here: none of these states may be drawn the way a working one is.
-    func testMenuBarGlyphFollowsToneNotSwitch() {
-        let working = MenuBarContent.privateInferenceSymbol(
-            PrivateInferenceState(label: "running", port: 8080), calls: .testing)
+    func testTheMenuBarPillFollowsToneNotSwitch() {
         for label in ["port_in_use", "start_failed", "crashed", "stopping", "unknown_state", ""] {
-            let state = PrivateInferenceState(label: label, port: nil)
-            XCTAssertFalse(
-                PrivateInferenceSurface.tone(state, calls: .testing).readsAsWorking,
-                "\(label) must not read as working in the menu bar")
+            let tone = PrivateInferenceSurface.tone(PrivateInferenceState(label: label, port: nil), calls: .testing)
+            XCTAssertFalse(tone.readsAsWorking, "\(label) must not read as working in the menu bar")
             XCTAssertNotEqual(
-                MenuBarContent.privateInferenceSymbol(state, calls: .testing), working,
-                "\(label) is drawn with the working glyph in the menu bar")
+                MenuPanelStatus.privateAI(on: true, tone: tone), .on,
+                "\(label) is drawn On in the menu bar because the switch is on")
         }
     }
 
-    /// The symbol is a function of the reported state alone. The menu bar is
-    /// handed no switch to read, so it cannot accidentally read one.
-    func testTheMenuBarSymbolIsAFunctionOfTheReportedStateAlone() {
-        let refused = PrivateInferenceState(label: "port_in_use", port: nil)
-        XCTAssertEqual(
-            MenuBarContent.privateInferenceSymbol(refused, calls: .testing),
-            PrivateInferenceIndicator.palette(.refused).symbol)
-        XCTAssertEqual(
-            MenuBarContent.privateInferenceSymbol(
-                PrivateInferenceState(label: "running", port: 8080), calls: .testing),
-            PrivateInferenceIndicator.palette(.clear).symbol)
+    /// The indicator the pill reads tells a refused listener from a clear
+    /// one: a refused listener is never drawn the way a working one is.
+    func testTheIndicatorNeverDrawsARefusedListenerAsClear() {
+        XCTAssertNotEqual(PrivateInferenceIndicator.status(.refused), PrivateInferenceIndicator.status(.clear))
     }
 
     /// The menu may turn it OFF and may not turn it ON.
@@ -54,19 +43,19 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
     /// `offer_exposure` -- as the Windows and GTK off switches do, living
     /// only on that screen.
     func testTheMenuTurnsItOffAndOpensTheScreenToTurnItOn() {
-        XCTAssertEqual(MenuBarContent.privateInferenceTrayAction(on: false), .openDestination)
-        XCTAssertEqual(MenuBarContent.privateInferenceTrayAction(on: true), .stopAnswering)
+        XCTAssertEqual(PrivateInferenceTray.action(on: false), .openDestination)
+        XCTAssertEqual(PrivateInferenceTray.action(on: true), .stopAnswering)
 
         var wrote = false
         var opened = false
-        MenuBarContent.performPrivateInferenceTray(
+        PrivateInferenceTray.perform(
             on: false, turnOff: { wrote = true }, open: { opened = true })
         XCTAssertFalse(wrote, "the menu wrote a setting to turn model calls on")
         XCTAssertTrue(opened, "the menu did not open the screen that explains what it exposes")
 
         wrote = false
         opened = false
-        MenuBarContent.performPrivateInferenceTray(
+        PrivateInferenceTray.perform(
             on: true, turnOff: { wrote = true }, open: { opened = true })
         XCTAssertTrue(wrote, "the menu could not stop this computer answering model calls")
         XCTAssertTrue(
@@ -79,9 +68,9 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
     @MainActor
     func testTheMenuRowTakesItsWordsFromTheCopyPayload() throws {
         let copy = try XCTUnwrap(AppModel().privateInferenceCopy)
-        XCTAssertEqual(MenuBarContent.privateInferenceTrayLabel(on: true, copy: copy), copy.trayTurnOff)
+        XCTAssertEqual(PrivateInferenceTray.label(on: true, copy: copy), copy.trayTurnOff)
         XCTAssertEqual(
-            MenuBarContent.privateInferenceTrayLabel(on: false, copy: copy), copy.trayOpenToTurnOn)
+            PrivateInferenceTray.label(on: false, copy: copy), copy.trayOpenToTurnOn)
         XCTAssertNotEqual(copy.trayTurnOff, copy.trayOpenToTurnOn)
     }
 
@@ -92,20 +81,35 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
         for label in ["port_in_use", "start_failed", "crashed"] {
             let state = PrivateInferenceState(label: label, port: nil)
             XCTAssertFalse(PrivateInferenceSurface.tone(state, calls: .testing).readsAsWorking)
-            XCTAssertEqual(MenuBarContent.privateInferenceTrayAction(on: true), .stopAnswering)
+            XCTAssertEqual(PrivateInferenceTray.action(on: true), .stopAnswering)
         }
     }
 
     /// The toggle's shortcut is in-app only and collides with none of the
-    /// five destination shortcuts.
+    /// three tab shortcuts, which are Cmd-1..3 in the tab strip's order.
     @MainActor
     func testTheToggleShortcutDoesNotCollideWithADestination() {
-        let destinations = MainWindowView.Section.allCases.compactMap(\.shortcut)
-        XCTAssertEqual(MainWindowCommands.toggleModifiers, [.command, .shift])
-        XCTAssertEqual(MainWindowCommands.destinationModifiers, [.command])
+        let tabs = MonitorWindowView.Tab.allCases.map(MonitorCommands.shortcut)
+        XCTAssertEqual(tabs, ["1", "2", "3"])
+        XCTAssertEqual(MonitorCommands.toggleModifiers, [.command, .shift])
+        XCTAssertEqual(MonitorCommands.tabModifiers, [.command])
         XCTAssertFalse(
-            destinations.contains(MainWindowCommands.toggleKey),
+            tabs.contains(MonitorCommands.toggleKey),
             "the toggle shares a key with a destination")
+    }
+
+    /// Each tab's item opens through `OpenMonitor` at its own tab, so while
+    /// onboarding is required Home and Traces open first run instead and
+    /// Inference opens the Monitor (R-38; `InferenceDuringOnboardingTests`).
+    @MainActor
+    func testEachTabCommandOpensItsTab() throws {
+        XCTAssertEqual(MonitorCommands.destination(.home), .home(.overview))
+        XCTAssertEqual(MonitorCommands.destination(.inference), .inference)
+        XCTAssertEqual(MonitorCommands.destination(.traces), .traces(entryId: nil))
+        let main = try MonitorNavigationTests.text("TraceCommonsAppMain.swift")
+        XCTAssertTrue(main.contains("Button(tab.title) { OpenMonitor.request(Self.destination(tab)) }"))
+        XCTAssertTrue(main.contains(".commands {\n            MonitorCommands(model: model, navigation: navigation)\n        }"))
+        XCTAssertFalse(main.contains("MainWindowCommands"))
     }
 }
 
@@ -121,7 +125,7 @@ final class PrivateInferenceCommandTests: XCTestCase {
     func testTheShortcutCannotEnableAnswering() {
         var wrote = false
         var opened = false
-        MenuBarContent.performPrivateInferenceTray(
+        PrivateInferenceTray.perform(
             on: false, turnOff: { wrote = true }, open: { opened = true })
         XCTAssertFalse(wrote, "the shortcut must never enable answering")
         XCTAssertTrue(opened, "the off direction opens the destination instead")
@@ -136,7 +140,7 @@ final class PrivateInferenceCommandTests: XCTestCase {
     func testTheShortcutStopsAnsweringWhileItIsOn() {
         var wrote = false
         var opened = false
-        MenuBarContent.performPrivateInferenceTray(
+        PrivateInferenceTray.perform(
             on: true, turnOff: { wrote = true }, open: { opened = true })
         XCTAssertTrue(wrote, "the on direction stops answering")
         XCTAssertTrue(opened, "the press that records the asking must show the words")
@@ -146,7 +150,7 @@ final class PrivateInferenceCommandTests: XCTestCase {
     /// on while the action opens a screen, or the reverse.
     func testTheShortcutLabelMatchesItsAction() {
         for on in [true, false] {
-            let action = MenuBarContent.privateInferenceTrayAction(on: on)
+            let action = PrivateInferenceTray.action(on: on)
             XCTAssertEqual(
                 action == .stopAnswering, on,
                 "the action and the switch position must agree")

@@ -79,7 +79,7 @@ fn main() -> anyhow::Result<()> {
     // launches us with the URL as an argument, so an invite clicked in mail
     // lands on the Connect screen instead of being retyped.
     //
-    // Two things this deliberately does not do. It does not enrol: the
+    // Two things this deliberately does not do. It does not enroll: the
     // invite is filled in and the button is left for a person to press,
     // because which commons to join is the decision that screen exists to
     // ask. And it does not log the URL -- an invite is a credential, and

@@ -45,6 +45,7 @@ async fn provisioned_near_window_review_builds_over_http_and_uploads_exact_appro
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let mut cfg = crate::commands::unenrolled_preview_config();
+    cfg.consent_scopes_chosen = Some(true);
     cfg.device_key_id = device.device_key_id.clone();
     cfg.user_subject = device.device_key_id.clone();
     cfg.instance_id.clear();

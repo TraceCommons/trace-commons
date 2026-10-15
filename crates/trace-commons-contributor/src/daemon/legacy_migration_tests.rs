@@ -334,7 +334,7 @@ fn legacy_config(ingest_url: &str, device_key_id: &str) -> ContributorConfig {
     cfg.instance_id = String::new();
     cfg.user_subject = "invitee".to_string();
     cfg.device_key_id = device_key_id.to_string();
-    cfg.consent_scopes_chosen = true;
+    cfg.consent_scopes_chosen = Some(true);
     cfg
 }
 
@@ -585,17 +585,123 @@ async fn a_record_not_signed_by_this_device_changes_nothing() {
 }
 
 /// A shared event invite is refused by the server; the reason is named and
-/// the device keeps contributing under it exactly as before.
+/// the device keeps contributing under it exactly as before. The refusal is
+/// remembered, so the move is not offered again to this identity: a pooled
+/// tenant never links (owner, 2026-10-11).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pooled_invite_is_refused_by_name_and_keeps_working() {
     let f = fixture(LinkMode::Pooled, true).await;
+    let mut events = f.shared.events.subscribe();
     let error = f.migrate(&provisioner(&f.ingest)).await.unwrap_err();
     assert_eq!(label(&error), "legacy_migration_tenant_pooled");
     f.assert_legacy_intact();
     assert_eq!(
-        status_value(&f.shared.store, Some(&f.cfg))["offered"],
-        true,
-        "still offered: nothing was recorded"
+        f.shared.status_value()["legacy_invite_migration"],
+        serde_json::json!({"offered": false, "notice": null}),
+        "no longer offered, and nothing identifying in status"
+    );
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .any(|e| e.event == crate::daemon::ipc::EVENT_STATUS_CHANGED),
+        "the shells are told to re-read status"
+    );
+    let on_disk = String::from_utf8(
+        f.shared
+            .store
+            .read_daemon_file(crate::config::LEGACY_INVITE_REFUSAL_FILE)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!on_disk.contains(&f.cfg.tenant_id), "{on_disk}");
+    assert!(!on_disk.contains(&f.legacy.device_key_id), "{on_disk}");
+}
+
+/// The remembered refusal survives a restart of the daemon.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remembered_pooled_refusal_survives_a_restart() {
+    let f = fixture(LinkMode::Pooled, true).await;
+    f.migrate(&provisioner(&f.ingest)).await.unwrap_err();
+    let restarted = DaemonShared::load(f.shared.store.clone()).unwrap();
+    assert_eq!(
+        restarted.status_value()["legacy_invite_migration"]["offered"],
+        false
+    );
+}
+
+/// The refusal belongs to the identity that was refused: another identity
+/// enrolled on the same store is offered the move as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remembered_pooled_refusal_does_not_reach_another_identity() {
+    let f = fixture(LinkMode::Pooled, true).await;
+    f.migrate(&provisioner(&f.ingest)).await.unwrap_err();
+    let mut other_tenant = f.cfg.clone();
+    other_tenant.tenant_id = "tenant-someone-else".into();
+    assert_eq!(
+        status_value(&f.shared.store, Some(&other_tenant))["offered"],
+        true
+    );
+    let mut other_key = f.cfg.clone();
+    other_key.device_key_id = "another-device-key".into();
+    assert_eq!(
+        status_value(&f.shared.store, Some(&other_key))["offered"],
+        true
+    );
+}
+
+/// Unenrolling forgets the refusal with the rest of the enrollment.
+#[tokio::test(flavor = "multi_thread")]
+async fn unenrolling_forgets_a_pooled_refusal() {
+    let f = fixture(LinkMode::Pooled, true).await;
+    f.migrate(&provisioner(&f.ingest)).await.unwrap_err();
+    assert!(
+        f.shared
+            .store
+            .daemon_path(crate::config::LEGACY_INVITE_REFUSAL_FILE)
+            .exists()
+    );
+    crate::daemon::unenroll::unenroll(&f.shared).unwrap();
+    assert!(
+        !f.shared
+            .store
+            .daemon_path(crate::config::LEGACY_INVITE_REFUSAL_FILE)
+            .exists()
+    );
+    // Enrolled again under the same identity, the move is offered again.
+    f.shared.store.save_config(&f.cfg).unwrap();
+    assert_eq!(status_value(&f.shared.store, Some(&f.cfg))["offered"], true);
+}
+
+/// Refusals that may yet succeed for this identity -- another account, a
+/// pasted invite, a server switched on later -- are not remembered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_that_may_yet_succeed_is_not_remembered() {
+    let f = fixture(LinkMode::Honest, false).await;
+    let error = f.migrate(&provisioner(&f.ingest)).await.unwrap_err();
+    assert_eq!(label(&error), "legacy_migration_admission_not_ready");
+    assert_eq!(
+        f.shared.status_value()["legacy_invite_migration"]["offered"],
+        true
+    );
+    for transient in [
+        "legacy_migration_link_not_enabled",
+        "legacy_migration_tenant_claimed",
+        "legacy_migration_invite_not_linked",
+        "legacy_migration_invite_revoked",
+        "legacy_migration_device_not_eligible",
+        "legacy_migration_no_near_ai_session",
+        "legacy_migration_admission_not_ready",
+        "legacy_migration_link_refused",
+        "legacy_migration_unavailable",
+    ] {
+        assert!(!is_terminal_refusal(transient), "{transient}");
+    }
+    assert!(is_terminal_refusal("legacy_migration_tenant_pooled"));
+    assert!(
+        !f.shared
+            .store
+            .daemon_path(crate::config::LEGACY_INVITE_REFUSAL_FILE)
+            .exists()
     );
 }
 

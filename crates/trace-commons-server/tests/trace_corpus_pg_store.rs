@@ -4703,6 +4703,76 @@ async fn pg_store_list_dedup_rederive_rows_enumerates_cross_tenant_in_decided_or
     cleanup_tenant(&backend, &tenant_b).await;
 }
 
+/// The credit estimate eval enumerates decisions newest first through the
+/// NARROW trace_gate_driver pool (Kristi's #1285 review, finding 3). The
+/// four columns must already be granted to the role (V45), which is why this
+/// runs as the role: a column it cannot select is a runtime permission
+/// error an in-memory store cannot see. Rows come back across tenants in
+/// `decided_at DESC` order, and a `limit` keeps the newest end.
+#[tokio::test]
+async fn pg_store_list_recent_gate_decision_keys_enumerates_newest_first() {
+    let Some(backend) = gate_driver_backend().await else {
+        return;
+    };
+
+    let tenant_a = format!("pg-recent-a-{}", Uuid::new_v4());
+    let tenant_b = format!("pg-recent-b-{}", Uuid::new_v4());
+    // In the future, so no other test's decision sorts ahead of these.
+    let base = Utc::now() + chrono::Duration::days(3650);
+
+    // Inserted OUT of decided order so the ORDER BY is what sorts them.
+    let mut seeded = Vec::new();
+    for (tenant, offset_secs) in [(&tenant_b, 20), (&tenant_a, 10), (&tenant_a, 30)] {
+        let submission_id = Uuid::new_v4();
+        backend
+            .upsert_trace_submission(sample_submission(tenant, submission_id))
+            .await
+            .expect("insert scoped submission");
+        let mut decision = sample_gate_decision(submission_id);
+        decision.decided_at = base + chrono::Duration::seconds(offset_secs);
+        backend
+            .insert_trace_gate_decision(tenant, decision.clone())
+            .await
+            .expect("insert gate decision");
+        seeded.push((tenant.clone(), submission_id, decision.decision_id));
+    }
+
+    let rows = backend
+        .list_recent_gate_decision_keys(i64::MAX)
+        .await
+        .expect("list_recent_gate_decision_keys runs on the gate-driver pool");
+    let ours: Vec<_> = rows
+        .iter()
+        .filter(|r| r.tenant_id == tenant_a || r.tenant_id == tenant_b)
+        .collect();
+    assert_eq!(ours.len(), 3);
+    // Newest first: tenant_a +30, tenant_b +20, tenant_a +10.
+    assert_eq!(ours[0].decision_id, seeded[2].2);
+    assert_eq!(ours[1].decision_id, seeded[0].2);
+    assert_eq!(ours[2].decision_id, seeded[1].2);
+    assert!(ours.windows(2).all(|w| w[0].decided_at >= w[1].decided_at));
+    for (tenant, submission_id, decision_id) in &seeded {
+        let row = ours
+            .iter()
+            .find(|r| r.decision_id == *decision_id)
+            .expect("seeded decision enumerated");
+        assert_eq!(&row.tenant_id, tenant);
+        assert_eq!(row.submission_id, *submission_id);
+    }
+
+    // A `limit` keeps the newest end: these are dated ahead of every other
+    // test's decisions.
+    let limited = backend
+        .list_recent_gate_decision_keys(1)
+        .await
+        .expect("limited enumeration");
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].decision_id, seeded[2].2);
+
+    cleanup_tenant(&backend, &tenant_a).await;
+    cleanup_tenant(&backend, &tenant_b).await;
+}
+
 /// The credit-quality batch pass picks its calibration from each row's
 /// `decided_at`, read through the NARROW trace_gate_driver pool. A column the
 /// narrow role cannot select is a runtime permission error, not a compile

@@ -83,7 +83,7 @@ impl ClineSource {
 }
 
 /// The messages file a session directory must hold: `<dir name>.messages.json`.
-fn messages_file_for(session_dir: &Path) -> Option<PathBuf> {
+pub(crate) fn messages_file_for(session_dir: &Path) -> Option<PathBuf> {
     let id = session_dir.file_name()?.to_str()?;
     Some(session_dir.join(format!("{id}{MESSAGES_SUFFIX}")))
 }
@@ -457,6 +457,7 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
         });
 
     Ok(SessionTranscript {
+        source_session: super::native_session_identity(SOURCE_CLINE, conversation_id.as_deref()),
         source: Cow::Borrowed(SOURCE_CLINE),
         // The manifest carries no extension version.
         agent_version: None,
@@ -617,6 +618,11 @@ mod tests {
         let t = load("k3x9q");
         assert_eq!(t.source, SOURCE_CLINE);
         assert_eq!(t.conversation_id.as_deref(), Some("1756900000000_k3x9q"));
+        assert_eq!(t.source_session.as_ref().unwrap().adapter, "cline");
+        assert_eq!(
+            t.source_session.as_ref().unwrap().native_id,
+            "1756900000000_k3x9q"
+        );
         assert_eq!(t.model.as_deref(), Some("claude-sonnet-5"));
         assert_eq!(t.cwd.as_deref(), Some("/home/contributor/code/alpha"));
         assert_eq!(t.project.as_deref(), Some("alpha"));

@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 import XCTest
 import TCShellCore
 @testable import TraceCommonsApp
@@ -9,66 +10,15 @@ import TCShellCore
 /// Rust copy payload, and a test that retyped it would be the second place
 /// the words live -- which is the thing the copy module exists to prevent.
 final class PrivateInferenceDestinationTests: XCTestCase {
+    /// The destination's name is the Rust's word, read through the copy
+    /// payload -- never retyped in Swift. (The legacy sidebar's row, glyph
+    /// and Cmd-N shortcut left with the legacy window, R15; the Monitor's
+    /// tabs and `MonitorCommands` are pinned in `PrivateInferenceMenuBarTests`.)
     @MainActor
-    func testTheDestinationHasAGlyphNothingElseUses() {
-        XCTAssertEqual(MainWindowView.Section.allCases.count, 7)
-        XCTAssertTrue(MainWindowView.Section.allCases.contains(.privateInference))
-        let glyph = MainWindowView.Section.privateInference.glyph
-        XCTAssertNotEqual(glyph, MainWindowView.Section.queue.glyph)
-        XCTAssertNotEqual(glyph, MainWindowView.Section.compute.glyph)
-        XCTAssertNotEqual(glyph, MainWindowView.Section.history.glyph)
-        XCTAssertNotEqual(glyph, MainWindowView.Section.settings.glyph)
-    }
-
-    /// Every destination has one of Cmd-1..7 and no two share one. In-app
-    /// only: a global system-wide hotkey is out of scope.
-    @MainActor
-    func testEveryDestinationHasItsOwnNumberShortcut() {
-        let shortcuts = MainWindowView.Section.allCases.compactMap(\.shortcut)
-        XCTAssertEqual(shortcuts.count, 7)
-        XCTAssertEqual(Set(shortcuts), Set("1234567"))
-        for (index, section) in MainWindowView.Section.allCases.enumerated() {
-            XCTAssertEqual(
-                section.shortcut, Character("\(index + 1)"),
-                "the shortcut and the sidebar must agree about which row is which")
-        }
-    }
-
-    /// Settings is the last row, here and on every other shell.
-    ///
-    /// This is a cross-shell rule, not a macOS preference: GTK's `SCREENS`
-    /// ends with `settings` and the Windows panes are declared in the same
-    /// order. This shell used to place it third, which left two destinations
-    /// below the settings row and made the three sidebars disagree. Pinning
-    /// it here is what keeps a later addition from quietly reopening that
-    /// gap -- a new destination appended after `settings` would restore
-    /// exactly the layout this test exists to rule out.
-    @MainActor
-    func testSettingsIsTheLastDestination() {
-        XCTAssertEqual(
-            MainWindowView.Section.allCases.last, .settings,
-            "settings is the last row on every shell; a new destination goes before it")
-    }
-
-    /// The label and the subtitle are the Rust's words, read through the
-    /// copy payload -- never retyped in Swift, and never the raw value.
-    @MainActor
-    func testTheLabelAndSubtitleComeFromTheCopyPayload() throws {
+    func testTheNameComesFromTheCopyPayload() throws {
         let copy = try XCTUnwrap(AppModel().privateInferenceCopy)
         XCTAssertFalse(copy.destination.isEmpty)
         XCTAssertFalse(copy.subtitle.isEmpty)
-        XCTAssertEqual(
-            MainWindowView.title(.privateInference, compute: nil, privateInference: copy),
-            copy.destination)
-        XCTAssertEqual(
-            MainWindowView.subtitle(.privateInference, compute: nil, privateInference: copy),
-            copy.subtitle)
-        // Words that never arrived are no words, never the enum's raw value.
-        XCTAssertEqual(
-            MainWindowView.title(.privateInference, compute: nil, privateInference: nil), "")
-        XCTAssertEqual(
-            MainWindowView.subtitle(.privateInference, compute: nil, privateInference: nil), "")
-        XCTAssertEqual(MainWindowView.Section.privateInference.subtitle, "")
     }
 
     /// The switch reports what was asked for; the indicator reports what is
@@ -81,20 +31,19 @@ final class PrivateInferenceDestinationTests: XCTestCase {
     }
 
     /// Held, attention, refused and anything unknown are drawn differently
-    /// from clear -- in the glyph as well as the colour, so the difference
-    /// survives greyscale.
+    /// from clear. On glass the status is a dot, which is colour alone; the
+    /// difference that survives greyscale is the core's state sentence every
+    /// `GlassStatusLabel` draws beside it, so this pins only that no other
+    /// tone shares clear's status.
     func testEveryNonClearToneIsVisiblyDistinctFromClear() {
-        let clear = PrivateInferenceIndicator.palette(.clear)
+        let clear = PrivateInferenceIndicator.status(.clear)
         for tone: PrivateInferenceTone in [.neutral, .held, .attention, .refused] {
-            XCTAssertNotEqual(
-                PrivateInferenceIndicator.palette(tone).symbol, clear.symbol,
-                "\(tone) shares clear's glyph")
-            XCTAssertFalse(PrivateInferenceIndicator.palette(tone).symbol.isEmpty)
+            XCTAssertNotEqual(PrivateInferenceIndicator.status(tone), clear, "\(tone) shares clear's status")
         }
         for raw: Int32 in [-1, 0, 99, Int32.max, Int32.min] {
             let tone = PrivateInferenceTone.fromABI(raw)
             XCTAssertFalse(tone.readsAsWorking)
-            XCTAssertNotEqual(PrivateInferenceIndicator.palette(tone).symbol, clear.symbol)
+            XCTAssertNotEqual(PrivateInferenceIndicator.status(tone), clear)
         }
     }
 }

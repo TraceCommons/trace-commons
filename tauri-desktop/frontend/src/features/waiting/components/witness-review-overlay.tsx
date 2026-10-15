@@ -80,15 +80,16 @@ export function WitnessReviewOverlay({
             Disclosure unavailable. Witness review is disabled.
           </p>
         )}
+        {copy.data && <p className="m-0">{copy.data.immutable}</p>}
         {copy.data && (
           <label className="flex items-start gap-2.5 rounded-[9px] border border-border p-3.5 text-foreground">
             <Checkbox
               checked={confirmed}
               onCheckedChange={(value) => setConfirmed(value === true)}
               disabled={mutation.isPending || (mutation.isSuccess && !busy)}
-              aria-label="Confirm sending unredacted session to witness"
+              aria-label="Confirm sending unredacted trace to witness"
             />
-            <span>I understand and want to send this session for review.</span>
+            <span>I understand and want to send this trace for review.</span>
           </label>
         )}
         {mutation.isPending && copy.data && (

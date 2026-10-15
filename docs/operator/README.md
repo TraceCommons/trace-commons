@@ -28,9 +28,14 @@ the link.
 | Setting gate floors or calibrating thresholds | [`./calibration.md`](./calibration.md) |
 | Validating a deployment before promoting | [`./smoke-test.md`](./smoke-test.md) |
 | Cutting the pilot over from `5f239be4`/V74 to `main`/V91 (go/no-go, pre-checks, rollback, withdrawal tombstone repair) | [`./pilot-cutover-2026-09.md`](./pilot-cutover-2026-09.md) |
+| Switching on account admission (weekly allowance) and legacy invite linking on the pilot, with marking the Devfolio tenants, post-checks and rollback | [`./pilot-account-admission-cutover-2026-10.md`](./pilot-account-admission-cutover-2026-10.md) |
 | Running a versioned pipeline corpus locally | [`./pipeline-lab.md`](./pipeline-lab.md) |
 | Qualifying a versioned pipeline candidate locally | [`./pipeline-qualification.md`](./pipeline-qualification.md) |
+| Comparing the old gate path with the versioned pipeline | [`./pipeline-comparison.md`](./pipeline-comparison.md) |
+| Reading a failure label of `pipeline.py compare` | [`./pipeline-comparison-labels.md`](./pipeline-comparison-labels.md) |
 | Activating, rolling back, or containing the versioned pipeline for a tenant, suspending a policy, or reading the legacy drain report | [`./pipeline-activation.md`](./pipeline-activation.md) |
+| Arming, re-arming, or disarming default routing of every tenant to the versioned pipeline | [`./pipeline-activation.md`](./pipeline-activation.md) ("Default routing") and [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) (stage 4a) |
+| Smoke-testing a move to the versioned pipeline, stage by stage | [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) |
 | Qualifying the signed native passkey entitlement and profile | [`./native-passkey-release-qualification.md`](./native-passkey-release-qualification.md) |
 | Preparing offline anonymized pilot response projections | [`./network-recording-projections.md`](./network-recording-projections.md) |
 | Verifying the contributor apps before tagging a release | [`./client-end-to-end-verification.md`](./client-end-to-end-verification.md) |
@@ -189,6 +194,11 @@ Every runbook in this directory, with a one-line description.
   tenant-level link to a NEAR account (V81), the operator-set pooled-tenant
   marker, conflict resolution, readiness rules, and the cutover for shared
   event invites.
+- [`./pilot-account-admission-cutover-2026-10.md`](./pilot-account-admission-cutover-2026-10.md) — ordered switch-on
+  for the pilot: deploy the #1373 build and V125, mark the pooled Devfolio
+  tenants, enable invite linking, then account admission with a weekly
+  allowance; each step has commands, a stop condition and a rollback. Growth
+  is a placeholder.
 - [`./mission-insight-rewards.md`](./mission-insight-rewards.md): provision reward roles, pin program terms, reserve capacity, review claims, and inspect award history.
 - [`./mission-packages.md`](./mission-packages.md) — publish immutable
   executable mission packages, operate anonymous discovery, and interpret
@@ -205,8 +215,16 @@ Every runbook in this directory, with a one-line description.
 - [`./pipeline-activation.md`](./pipeline-activation.md) — the pipeline's
   scope lists and routing row, the nine `/v1/admin/pipeline/` routes
   (qualification, activation, rollback, containment, deactivation, policy
-  suspension, routing, and the legacy drain report), and the rules for the
-  receipt, settlement, payout, withdrawal, and rebuild paths.
+  suspension, routing, and the legacy drain report), default routing of
+  every tenant once an operator arms it for the running revision, and the
+  rules for the receipt, settlement, payout, withdrawal, and rebuild paths.
+- [`./pipeline-comparison.md`](./pipeline-comparison.md) — running
+  `pipeline.py compare`: the same traces through the old gate path and the
+  versioned pipeline, the pins, what is compared, the alignment, the
+  floors, the report, the limits, how a failure shows, and the full run on
+  the network pin.
+- [`./pipeline-comparison-labels.md`](./pipeline-comparison-labels.md) —
+  each failure label of `pipeline.py compare` with its cause.
 - [`./pipeline-lab.md`](./pipeline-lab.md) — running a versioned pipeline
   corpus locally with `pipeline.py run` and `pipeline.py package`: the HF
   pin, report fields, isolation and privacy, and failure labels.
@@ -215,6 +233,11 @@ Every runbook in this directory, with a one-line description.
   the result contract, signing results (`--signing-key`, `keygen`,
   `revision`), `.local/` outputs, the catalog, the qualification route, and
   what local evidence is not.
+- [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) — the four
+  stages of moving a deployment to the versioned pipeline (deploy with it off,
+  offline replay, one throwaway tenant, first real tenant, then default
+  routing for every tenant) and what must hold at each before the next
+  starts.
 - [`./pii-classify-policy.md`](./pii-classify-policy.md) — `TRACE_COMMONS_PII_CLASSIFY_POLICY`
   (`all-events` / `prose-only`): the measured ~10x round-trip reduction from
   restricting the NEAR AI privacy filter to prose events, the accepted

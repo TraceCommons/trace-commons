@@ -6,6 +6,8 @@ public struct GlassListRow: View {
     public enum Depth: Int, Sendable { case tool = 0, folder = 1, session = 2 }
     public enum Flag: Sendable, Equatable { case ask, on }
 
+    /// The tree's top level (`glassTreeRoot`): rows at it sit flush left.
+    @Environment(\.glassTreeRoot) private var treeRoot
     private let depth: Depth
     private let tile: GlassToolTile.Kind
     private let title: String
@@ -28,6 +30,7 @@ public struct GlassListRow: View {
     private let onSelect: (() -> Void)?
     private let onSubmit: (() -> Void)?
     private let onMenu: (() -> Void)?
+    @State private var hovering = false
 
     /// `accessory` is a control drawn before the row menu (a folder's mode
     /// picker). `watchDisabled` shows the switch's state without letting it
@@ -92,16 +95,45 @@ public struct GlassListRow: View {
     /// `GlassTokens.Color.selection`. Solid, so the sub-line keeps text
     /// contrast too (`SelectionContrastTests`).
     static let selectedInk = GlassTokens.Color.textOnAccent
-    /// The sub-line's ink when selected: the same solid ink, not a faded one.
+    /// The sub-line's ink when selected: the same solid white. #1146's
+    /// `.tc-list-row[aria-selected] .tc-list-row__sub` is white at 80%,
+    /// which is 3.5:1 on the selection; the sub-line is text, so it keeps
+    /// 4.5:1 (owner ruling, 2026-10-07: hold the WCAG floors).
     static let selectedSubInk = selectedInk
+
+    /// The watch switch's column, kept on every row (#1146 `38px`).
+    static let watchColumn: CGFloat = GlassTokens.Size.watchSwitchWidth
+
+    /// The row's fill: the selection, or the faint hover fill under the
+    /// pointer (#1146 `.tc-list-row:hover`), never over a selected row.
+    static func fill(selected: Bool, hovering: Bool) -> GlassRGBA? {
+        if selected { return GlassTokens.Color.selection }
+        return hovering ? GlassTokens.Color.rowHover : nil
+    }
+
+    /// An unflagged sub-line's ink: tertiary, on and off. An off row is no
+    /// longer faded as a whole (#1146's `rowOff` 0.6 put a light off row's
+    /// title at 4.32:1 and its sub-line at 3.02:1); its title steps down to
+    /// the secondary ink instead, and only its tool tile keeps the fade, so
+    /// every word on it clears 4.5:1 in both appearances (owner ruling,
+    /// 2026-10-07: the floors win everywhere; TextContrastTests).
+    static func plainSubInk(off: Bool) -> GlassRGBA {
+        GlassTokens.Color.textTertiary
+    }
+
+    /// The title's ink: the selection's, else secondary on an off row.
+    static func titleInk(selected: Bool, off: Bool) -> GlassRGBA {
+        if selected { return selectedInk }
+        return off ? GlassTokens.Color.textSecondary : GlassTokens.Color.textPrimary
+    }
 
     public var body: some View {
         HStack(spacing: GlassTokens.Space.s4) {
             Group {
                 if let expanded, let onToggleExpand {
                     Button(action: onToggleExpand) {
-                        Text("›")
-                            .glassGlyph(14)
+                        Image(systemName: "chevron.right")
+                            .glassGlyph(10, weight: .semibold)
                             .foregroundStyle(selected ? Self.selectedInk.color : GlassTokens.Color.statusOff.color)
                             .rotationEffect(.degrees(expanded ? 90 : 0))
                             .glassPressedFill()
@@ -122,11 +154,14 @@ public struct GlassListRow: View {
             }
             .frame(width: 16)
 
+            // Decorative; the one part of an off row that still fades.
             GlassToolTile(tile)
+                .opacity(off ? GlassTokens.Opacity.rowOff : 1)
 
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
                     .glassType(GlassTokens.TypeScale.body.weight(depth == .session ? .medium : .semibold))
+                    .foregroundStyle(Self.titleInk(selected: selected, off: off).color)
                     .lineLimit(1)
                 if let sub {
                     Text(sub)
@@ -137,23 +172,37 @@ public struct GlassListRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            // Every column is laid out on every row, empty or not (#1146's
+            // grid `16 24 1fr auto 38 22`, with placeholders): a session's
+            // Review pill lines up with its folder's Submit pill.
             if let submitTitle {
                 Button(submitTitle) { onSubmit?() }
                     .buttonStyle(GlassButtonStyle(.submit(done: submitDone)))
+                    // One line at its full width ("Submit all (12)" at the
+                    // 360pt left pane): the title gives way, never the count.
+                    .lineLimit(1)
+                    .fixedSize()
                     .disabled(onSubmit == nil)
                     .focusable(submitFocusable)
+            } else {
+                Color.clear.frame(width: 0, height: 0)
             }
 
             if let accessory {
                 accessory
             }
 
+            // A row's switch, when it has one, in #1146's `38px` column. No
+            // placeholder for a row without one: the Traces tree has no
+            // switches (owner, 2026-10-08), so its rows' Review and Submit
+            // sit right beside the row menu, lined up with each other.
             if let watched {
                 Toggle(watchLabel, isOn: watched)
                     .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
                     // A switch the person cannot change here is disabled, so
                     // assistive tech does not offer a control that does nothing.
                     .disabled(watchDisabled)
+                    .frame(width: Self.watchColumn)
             }
 
             Group {
@@ -168,15 +217,15 @@ public struct GlassListRow: View {
             .frame(width: 22)
         }
         .foregroundStyle(selected ? Self.selectedInk.color : GlassColor.textPrimary)
-        .padding(.leading, 8 + CGFloat(depth.rawValue) * 18)
+        .padding(.leading, Self.leadingInset(depth, root: treeRoot))
         .padding(.trailing, 6)
         .frame(minHeight: GlassTokens.Size.listRow)
         .background(
             RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
-                .fill(selected ? GlassTokens.Color.selection.color : Color.clear)
+                .fill(Self.fill(selected: selected, hovering: hovering)?.color ?? Color.clear)
         )
-        .opacity(off ? GlassTokens.Opacity.rowOff : 1)
         .contentShape(Rectangle())
+        .onHover { hovering = $0 }
         // A click selects the row. The keyboard does not stop on each row:
         // the list holding the rows is one tab stop and the arrow keys move
         // its selection (spec, "Components": one list, not a tab stop per
@@ -195,6 +244,14 @@ public struct GlassListRow: View {
         .accessibilityHeading(Self.heading(depth))
     }
 
+    /// A row's leading inset: 8, and 18 for each level below the tree's
+    /// top level. A tree without a tool level (the Traces tree, whose
+    /// top level is folders) starts its folders flush left (owner,
+    /// 2026-10-11), not one level in.
+    static func leadingInset(_ depth: Depth, root: Depth) -> CGFloat {
+        8 + CGFloat(max(0, depth.rawValue - root.rawValue)) * 18
+    }
+
     static func heading(_ depth: Depth) -> AccessibilityHeadingLevel {
         switch depth {
         case .tool: .h1
@@ -208,7 +265,13 @@ public struct GlassListRow: View {
         return switch flag {
         case .ask: GlassTokens.Color.statusAsk.color
         case .on: GlassTokens.Color.statusOn.color
-        case nil: GlassColor.textTertiary
+        case nil: Self.plainSubInk(off: off).color
         }
     }
+}
+
+public extension EnvironmentValues {
+    /// The depth a tree's top-level rows have: `.tool` by default, `.folder`
+    /// for a tree with no tool level.
+    @Entry var glassTreeRoot: GlassListRow.Depth = .tool
 }

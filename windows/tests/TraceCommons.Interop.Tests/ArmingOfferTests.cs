@@ -79,7 +79,7 @@ public class ArmingOfferTests
     [Fact]
     public void TheButtonsCarryTheirActions()
     {
-        Assert.Equal("Turn on automatic contributing", ArmingOfferCopy.Confirm);
+        Assert.Equal("Enable", ArmingOfferCopy.Confirm);
         Assert.Equal("Not now", ArmingOfferCopy.Decline);
     }
 

@@ -150,31 +150,34 @@ final class SheetEligibilityInvalidationTests: XCTestCase {
         XCTAssertFalse(refused)
     }
 
-    /// The sheet's body, hosted for real, draws differently before and after
-    /// the queue downgrades the row.
+    /// The session card, hosted for real, draws differently before and
+    /// after the queue downgrades the row.
     ///
     /// The end-to-end version of the two tests above: not "the getter would
-    /// answer correctly" but "the pixels changed". `NSHostingView` runs the
-    /// same observation machinery the app does, so a sheet that had no
-    /// dependency on the queue would render identically twice and fail here.
+    /// answer correctly" but "the pixels changed". Look inside used to carry
+    /// Contribute and was hosted here; it is read-only now (#1241), so the
+    /// property belongs to the one approve control, the inspector's session
+    /// card. The host reads the selected session only through
+    /// `TracesStore.selectedSession`, live from the tree, so a reload that
+    /// downgrades the row must reach the card. `NSHostingView` runs the same
+    /// observation machinery the app does, so a card with no dependency on
+    /// the queue would render identically twice and fail here.
+    #if DEBUG
     @MainActor
-    func testTheHostedSheetRedrawsAfterTheQueueDowngradesTheRow() throws {
+    func testTheHostedCardRedrawsAfterTheQueueDowngradesTheRow() async throws {
         _ = NSApplication.shared
+        let transport = DowngradingTransport()
+        let client = LiveDaemonClient(transport: transport)
+        let traces = TracesStore(client: client)
+        await traces.load()
+        let id = try XCTUnwrap(transport.firstEntryID, "the sample day has no waiting session")
+        let selection = MonitorSelection.session(entryID: id)
+        XCTAssertEqual(traces.selectedSession(selection)?.eligibility, "eligible")
+
         let model = AppModel()
-        let held = entry("e1", eligibility: "eligible")
-        model.applyPendingUpdate([held])
-
-        let summary = PreviewSummary(
-            wouldSendBytes: 80, rawSessionBytes: 100, eventCount: 2,
-            openingPrompt: "Review a synthetic session", redactions: [:], redactionsDistinct: [:],
-            piiLabelsPresent: [], consentScopes: [], residualRisk: "low")
-        let view = PreviewSheet(
-            entry: held,
-            preloaded: .init(
-                summary: summary, transcript: "Synthetic transcript", needle: "", offsets: [])
-        ).environmentObject(model)
-
-        let size = CGSize(width: 900, height: 700)
+        let view = TracesInspectorHost(traces: traces, home: HomeStore(client: client), selection: selection)
+            .environmentObject(model)
+        let size = CGSize(width: 420, height: 900)
         let hosting = NSHostingView(rootView: view.frame(width: size.width, height: size.height))
         let bounds = NSRect(origin: .zero, size: size)
         hosting.frame = bounds
@@ -187,15 +190,63 @@ final class SheetEligibilityInvalidationTests: XCTestCase {
         }
 
         let eligible = try render()
-        model.applyPendingUpdate([
-            entry("e1", eligibility: "ineligible_permanent", reason: "no_inference_call")
-        ])
+        // The control: with nothing changed, the card draws the same bytes,
+        // so the difference below is the downgrade and nothing else.
+        await traces.load()
+        XCTAssertEqual(try render(), eligible, "the card must render identically while nothing changed")
+        transport.downgrade()
+        await traces.load()
+        XCTAssertEqual(
+            traces.selectedSession(selection)?.eligibility, "ineligible_permanent",
+            "the host's live read still holds the row as it was")
         let downgraded = try render()
 
         XCTAssertNotEqual(
             eligible, downgraded,
-            "the sheet drew the same thing after the queue downgraded the row -- it is not "
+            "the card drew the same thing after the queue downgraded the row -- it is not "
                 + "re-reading the eligibility gate, and Contribute stays armed on a session "
                 + "that cannot be sent")
     }
+    #endif
 }
+
+#if DEBUG
+/// The sample day over the live client, with the first waiting session's
+/// eligibility under the test's control: eligible until `downgrade()`, then
+/// refused permanently, as a submit-time failure written back into the row
+/// reads.
+private final class DowngradingTransport: DaemonTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var downgraded = false
+    private(set) var firstEntryID: String?
+
+    func downgrade() {
+        lock.lock()
+        downgraded = true
+        lock.unlock()
+    }
+
+    func call(_ method: String, params paramsJSON: String) -> String {
+        guard var reply = SampleDaemonData.reply(method, in: .normalDay) else {
+            return #"{"id":0,"error":{"code":"bad_params","message":"unknown-method"}}"#
+        }
+        if method == "list_pending", let rewritten = rewrite(reply) { reply = rewritten }
+        return #"{"id":0,"result":\#(reply)}"#
+    }
+
+    private func rewrite(_ json: String) -> String? {
+        guard var object = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any],
+              var pending = object["pending"] as? [[String: Any]], !pending.isEmpty
+        else { return nil }
+        lock.lock()
+        let down = downgraded
+        firstEntryID = pending[0]["entry_id"] as? String
+        lock.unlock()
+        pending[0]["eligibility"] = down ? "ineligible_permanent" : "eligible"
+        pending[0]["eligibility_reason"] = down ? "no_inference_call" : NSNull()
+        object["pending"] = pending
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+}
+#endif

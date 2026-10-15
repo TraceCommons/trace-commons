@@ -25,7 +25,7 @@ public sealed class GrantVoidNoticeTests
         ["reasons"] = new[] { "R" },
         ["rearm"] = "A",
         ["acknowledge"] = "K",
-        ["rearm_action"] = "Turn back on",
+        ["rearm_action"] = "Turn on",
         ["rearm_failed"] = "F",
     };
 
@@ -65,7 +65,7 @@ public sealed class GrantVoidNoticeTests
     }
 
     /// <summary>
-    /// "Turn back on" is offered only when the core offered it, and it arms
+    /// "Turn on" is offered only when the core offered it, and it arms
     /// the element's own project through the Settings call, unchanged.
     /// </summary>
     [Fact]
@@ -75,7 +75,7 @@ public sealed class GrantVoidNoticeTests
             Elements(ProjectVoid), _ => JsonSerializer.Serialize(Complete)));
         Assert.True(offered.CanRearm);
         Assert.Equal("p", offered.RearmProjectId);
-        Assert.Equal("Turn back on", offered.Notice.RearmAction);
+        Assert.Equal("Turn on", offered.Notice.RearmAction);
         using JsonDocument request = JsonDocument.Parse(
             GrantVoidNotices.RearmParams(offered) ?? throw new InvalidOperationException());
         Assert.Equal("p", request.RootElement.GetProperty("project_id").GetString());
@@ -165,7 +165,7 @@ public sealed class GrantVoidNoticeTests
         Assert.Equal(2, cards.Count);
         Assert.Contains("api", cards[0].Notice.Title, StringComparison.Ordinal);
         Assert.NotEqual(cards[0].Notice.Title, cards[1].Notice.Title);
-        // Only the project's notice offers "Turn back on".
+        // Only the project's notice offers "Turn on".
         Assert.True(cards[0].CanRearm);
         Assert.False(cards[1].CanRearm);
 
