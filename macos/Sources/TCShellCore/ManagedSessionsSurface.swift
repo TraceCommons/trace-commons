@@ -90,8 +90,9 @@ public enum ManagedSurface {
         }
     }
 
-    public static let installableTools = ["claude", "codex", "opencode"]
-    public static let supportedTools = ["claude", "codex"]
+    /// The managed tools, in the order the Add and Launch sheets offer them.
+    /// OpenCode is one since #1417.
+    public static let supportedTools = ["claude", "codex", "opencode"]
     public static func setupTools(_ tools: [ManagedToolAvailability]?) -> [String] {
         guard let tools else { return supportedTools }
         return supportedTools.filter { tool in tools.first(where: { $0.tool == tool })?.installed == true }
@@ -138,6 +139,12 @@ public enum ManagedSurface {
         template.replacingOccurrences(of: "{destination}", with: destination ?? fallback)
     }
 
+    /// `tool_unavailable` ("{tool} wasn't found on this computer.") with the
+    /// tool's display name filled in.
+    public static func toolUnavailable(_ tool: String, copy: (String) -> String) -> String {
+        copy("tool_unavailable").replacingOccurrences(of: "{tool}", with: copy(toolKey(tool) ?? tool))
+    }
+
     /// The tool's name key, or nil for a tool this shell does not know.
     public static func toolKey(_ tool: String) -> String? {
         ["claude", "codex", "opencode"].contains(tool) ? tool : nil
@@ -145,9 +152,9 @@ public enum ManagedSurface {
 
     /// A failed action is said in the shared copy, never as the daemon's
     /// code: a launch whose outcome is unknown asks for a refresh, anything
-    /// else is the general failure.
+    /// else is the general failure. A missing tool is said on its account
+    /// row after the refresh that follows, where the tool can be named.
     public static func errorKey(code: String?, message: String?) -> String {
-        if code == "managed-tool-unavailable" || message == "managed-tool-unavailable" { return "tool_unavailable" }
         let launchUnknown = ["launch-unknown", "managed-launch-unknown"]
         if launchUnknown.contains(code ?? "") || launchUnknown.contains(message ?? "") { return "launch_unknown" }
         // No NEAR AI sign-in: the line that asks for one.
@@ -161,7 +168,7 @@ public extension ManagedSnapshot {
     var setupTools: [String] { ManagedSurface.setupTools(tools) }
     var needsToolInstallation: Bool {
         guard let tools else { return false }
-        return !tools.contains { ManagedSurface.installableTools.contains($0.tool) && $0.installed }
+        return !tools.contains { ManagedSurface.supportedTools.contains($0.tool) && $0.installed }
     }
     func canLaunch(tool: String) -> Bool {
         guard ManagedSurface.supportedTools.contains(tool) else { return false }

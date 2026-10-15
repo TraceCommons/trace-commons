@@ -43,8 +43,15 @@ public sealed record ManagedSnapshot(
     public bool CanLaunch(string tool) => ManagedSignIn.Tools.Contains(tool) &&
         (Tools is null || Tools.Any(t => t.Tool == tool && t.Installed));
     public string[] SetupTools => ManagedSignIn.Tools.Where(CanLaunch).ToArray();
-    public ManagedTool[] RecoveryTools => (Tools ?? []).Where(t => !t.Installed &&
-        (!Tools!.Any(x => x.Installed) || Accounts.Any(a => a.Tool == t.Tool))).ToArray();
+    /// <summary>The tools the install block offers: every tool this shell
+    /// launches, and only while none is installed (Ron, 2026-10-15).</summary>
+    public ManagedTool[] InstallTools => Tools is null || SetupTools.Length > 0 ? []
+        : Tools.Where(t => ManagedSignIn.Tools.Contains(t.Tool)).ToArray();
+    /// <summary>Reconnect is hidden, not disabled, while the tool is missing.</summary>
+    public bool OffersReconnect(ManagedAccount account) =>
+        account.Connection == "subscription" && CanLaunch(account.Tool);
+    /// <summary><c>tool_unavailable</c> with <c>{tool}</c> filled with the tool's name.</summary>
+    public string ToolUnavailable(string tool) => Text("tool_unavailable").Replace("{tool}", Text(tool));
     public string Text(string key) => Copy.GetValueOrDefault(key, string.Empty);
 
     /// <summary>Whether the daemon holds a NEAR AI sign-in.</summary>

@@ -1,3 +1,4 @@
+using System.Linq;
 using TraceCommons.Interop;
 using Xunit;
 
@@ -39,8 +40,14 @@ public sealed class ManagedSessionsTests
         Assert.NotNull(snapshot.SignInEntry("codex"));
         Assert.False(snapshot.CanLaunch("opencode"));
         Assert.Single(snapshot.Accounts);
-        Assert.Equal("claude", Assert.Single(snapshot.RecoveryTools).Tool);
-        Assert.Empty((snapshot with { Accounts = [] }).RecoveryTools);
+        // A tool is installed: no install block (Ron, 2026-10-15).
+        Assert.Empty(snapshot.InstallTools);
+        // The missing tool's account: Reconnect hidden, the tool named.
+        Assert.False(snapshot.OffersReconnect(snapshot.Accounts[0]));
+        Assert.True(snapshot.OffersReconnect(snapshot.Accounts[0] with { Tool = "codex" }));
+        Assert.False(snapshot.OffersReconnect(snapshot.Accounts[0] with { Tool = "codex", Connection = "api_key" }));
+        var worded = snapshot with { Copy = new() { ["tool_unavailable"] = "{tool} wasn't found on this computer.", ["claude"] = "Claude Code" } };
+        Assert.Equal("Claude Code wasn't found on this computer.", worded.ToolUnavailable("claude"));
     }
 
     [Fact]
@@ -53,8 +60,10 @@ public sealed class ManagedSessionsTests
         Assert.Equal(["codex"], decoded.SetupTools);
         Assert.Equal("https://example.test", Assert.Single(decoded.Tools!).InstallUrl);
         var empty = snapshot with { Tools = [new("claude", false, "a"), new("codex", false, "b"), new("opencode", false, "c")] };
-        Assert.Equal(3, empty.RecoveryTools.Length);
+        // Windows stays on Claude Code and Codex until it launches OpenCode.
+        Assert.Equal(["claude", "codex"], empty.InstallTools.Select(t => t.Tool));
         Assert.Empty(empty.SetupTools);
+        Assert.Empty(snapshot.InstallTools);
         Assert.Empty((snapshot with { Tools = [new("opencode", true, "c")] }).SetupTools);
     }
 

@@ -20,7 +20,7 @@ final class ManagedToolAvailabilityTests: XCTestCase {
     func testOlderPayloadPreservesUnknownAvailability() throws {
         let value = try snapshot()
         XCTAssertNil(value.tools)
-        XCTAssertEqual(value.setupTools, ["claude", "codex"])
+        XCTAssertEqual(value.setupTools, ["claude", "codex", "opencode"])
         XCTAssertTrue(value.canLaunch(tool: "claude"))
         XCTAssertFalse(value.needsToolInstallation)
     }
@@ -32,16 +32,18 @@ final class ManagedToolAvailabilityTests: XCTestCase {
         XCTAssertFalse(value.canLaunch(tool: "claude"))
     }
     func testOneAndMultipleInstalledFilterSetup() throws {
-        XCTAssertEqual(try snapshot(tools(["opencode"])).setupTools, [])
-        XCTAssertEqual(try snapshot(tools(["codex", "opencode"])).setupTools, ["codex"])
+        // #1417 made OpenCode a managed tool: it belongs in setup and launch.
+        XCTAssertEqual(try snapshot(tools(["opencode"])).setupTools, ["opencode"])
+        XCTAssertEqual(try snapshot(tools(["codex", "opencode"])).setupTools, ["codex", "opencode"])
+        XCTAssertEqual(ManagedSurface.supportedTools, ["claude", "codex", "opencode"])
     }
     func testEveryInstallationCombinationFiltersOnlyManagedTools() throws {
         for mask in 0..<8 {
-            let installed = ManagedSurface.installableTools.enumerated().compactMap { mask & (1 << $0.offset) != 0 ? $0.element : nil }
+            let installed = ManagedSurface.supportedTools.enumerated().compactMap { mask & (1 << $0.offset) != 0 ? $0.element : nil }
             let value = try snapshot(tools(installed))
-            XCTAssertEqual(value.setupTools, ["claude", "codex"].filter(installed.contains))
+            XCTAssertEqual(value.setupTools, ["claude", "codex", "opencode"].filter(installed.contains))
             XCTAssertEqual(value.needsToolInstallation, installed.isEmpty)
-            XCTAssertFalse(value.canLaunch(tool: "opencode"))
+            XCTAssertEqual(value.canLaunch(tool: "opencode"), installed.contains("opencode"))
             XCTAssertEqual(value.tools?.count, 3)
         }
     }
@@ -55,7 +57,12 @@ final class ManagedToolAvailabilityTests: XCTestCase {
         let value = try snapshot(tools(["opencode"]))
         XCTAssertEqual(value.accounts.first?.id, "old")
         XCTAssertFalse(value.canLaunch(tool: "claude"))
-        XCTAssertFalse(value.canLaunch(tool: "opencode"))
+        XCTAssertTrue(value.canLaunch(tool: "opencode"))
         XCTAssertFalse(value.needsToolInstallation)
+    }
+    func testToolUnavailableNamesTheTool() {
+        let copy = ["tool_unavailable": "{tool} wasn't found on this computer.", "claude": "Claude Code", "opencode": "OpenCode"]
+        XCTAssertEqual(ManagedSurface.toolUnavailable("claude", copy: { copy[$0] ?? "" }), "Claude Code wasn't found on this computer.")
+        XCTAssertEqual(ManagedSurface.toolUnavailable("opencode", copy: { copy[$0] ?? "" }), "OpenCode wasn't found on this computer.")
     }
 }

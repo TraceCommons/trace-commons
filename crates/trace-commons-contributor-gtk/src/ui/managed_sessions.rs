@@ -24,6 +24,55 @@ fn setup_tools(snapshot: &Value) -> Vec<&'static str> {
         .filter(|tool| can_launch(snapshot, tool))
         .collect()
 }
+/// The tools to offer Install for: every tool this shell launches, and only
+/// while none of them is installed (Ron's review of #1419, 2026-10-15).
+fn install_block(snapshot: &Value) -> Vec<Value> {
+    let Some(tools) = snapshot["tools"].as_array() else {
+        return Vec::new();
+    };
+    if !setup_tools(snapshot).is_empty() {
+        return Vec::new();
+    }
+    tools
+        .iter()
+        .filter(|t| ["claude", "codex"].contains(&t["tool"].as_str().unwrap_or_default()))
+        .cloned()
+        .collect()
+}
+/// Reconnect is hidden, not disabled, while the account's tool is missing.
+fn offers_reconnect(snapshot: &Value, account: &Value) -> bool {
+    account["connection"] == "subscription"
+        && can_launch(snapshot, account["tool"].as_str().unwrap_or_default())
+}
+/// `tool_unavailable` with `{tool}` filled with the tool's display name.
+fn tool_unavailable(tool: &str) -> String {
+    text("tool_unavailable").replace("{tool}", &text(tool))
+}
+/// One Install button for a tool's setup guide, named with the tool.
+fn install_button(tool: &Value) -> Option<gtk::Button> {
+    let id = tool["tool"].as_str().unwrap_or_default().to_owned();
+    let url = tool["install_url"].as_str()?.to_owned();
+    let install = button("install", move || {
+        let _ =
+            gtk::gio::AppInfo::launch_default_for_uri(&url, None::<&gtk::gio::AppLaunchContext>);
+    });
+    install.update_property(&[gtk::accessible::Property::Label(&format!(
+        "{} {}",
+        text("install"),
+        text(&id)
+    ))]);
+    Some(install)
+}
+/// A bare refresh glyph, its tooltip and accessible name "Refresh".
+fn refresh_glyph(app: &Rc<App>) -> gtk::Button {
+    let glyph = gtk::Button::from_icon_name("view-refresh-symbolic");
+    glyph.add_css_class("flat");
+    glyph.set_tooltip_text(Some(&text("refresh")));
+    glyph.update_property(&[gtk::accessible::Property::Label(&text("refresh"))]);
+    let app = Rc::clone(app);
+    glyph.connect_clicked(move |_| refresh(&app));
+    glyph
+}
 fn launch_accounts(snapshot: &Value) -> Vec<Value> {
     snapshot["accounts"]
         .as_array()
@@ -83,35 +132,21 @@ pub fn refresh(app: &Rc<App>) {
         let add_app = Rc::clone(app);
         let terminal = snapshot["capabilities"]["terminal_launch"] == true;
         let tools = setup_tools(&snapshot);
-        let has_tools = !tools.is_empty();
-        let add = button("add", move || add_dialog(&add_app, terminal, tools.clone()));
-        add.set_sensitive(has_tools);
-        controls.append(&add);
-        let refresh_app = Rc::clone(app);
-        controls.append(&button("check_again", move || refresh(&refresh_app)));
+        // Hidden, not disabled, with no tool to add an account for.
+        if !tools.is_empty() {
+            controls.append(&button("add", move || add_dialog(&add_app, terminal, tools.clone())));
+        }
         root.append(&controls);
-        if let Some(tools) = snapshot["tools"].as_array() {
-            root.append(&style::section(&text("tools_title")));
-            let any_installed = tools.iter().any(|t| t["installed"] == true);
-            if !any_installed { style::append_body(root, text("tools_empty")); }
-            for tool in tools {
-                let id = tool["tool"].as_str().unwrap_or_default();
-                if tool["installed"] == true {
-                    style::append_body(root, text(id));
-                    if id == "opencode" { style::append_meta(root, text("opencode_export_scope")); }
-                    continue;
-                }
-                let saved = snapshot["accounts"].as_array().into_iter().flatten().any(|a| a["tool"] == id);
-                if any_installed && !saved { continue; }
-                style::append_body(root, text(id));
-                if let Some(url) = tool["install_url"].as_str() {
-                    let url = url.to_owned();
-                    let install = button("install", move || {
-                        let _ = gtk::gio::AppInfo::launch_default_for_uri(&url, None::<&gtk::gio::AppLaunchContext>);
-                    });
-                    install.update_property(&[gtk::accessible::Property::Label(&format!("{} {}", text("install"), text(id)))]);
-                    root.append(&install);
-                }
+        let missing = install_block(&snapshot);
+        if !missing.is_empty() {
+            let heading = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            heading.append(&style::section(&text("tools_title")));
+            heading.append(&refresh_glyph(app));
+            root.append(&heading);
+            style::append_body(root, text("tools_empty"));
+            for tool in &missing {
+                style::append_body(root, text(tool["tool"].as_str().unwrap_or_default()));
+                if let Some(install) = install_button(tool) { root.append(&install); }
             }
         }
         let destination = snapshot["capabilities"]["terminal_destination"].as_str();
@@ -119,8 +154,12 @@ pub fn refresh(app: &Rc<App>) {
         for account in snapshot["accounts"].as_array().into_iter().flatten() {
             let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
             style::append_body(&row, format!("{} · {} · {} · {}", account["label"].as_str().unwrap_or_default(), text(account["tool"].as_str().unwrap_or_default()), text(account["connection"].as_str().unwrap_or_default()), account["auth_state"].as_str().unwrap_or_default()));
-            let available = can_launch(&snapshot, account["tool"].as_str().unwrap_or_default());
-            if !available { style::append_meta(&row, text("tool_unavailable")); }
+            let tool = account["tool"].as_str().unwrap_or_default();
+            if !can_launch(&snapshot, tool) {
+                style::append_meta(&row, tool_unavailable(tool));
+                let availability = snapshot["tools"].as_array().into_iter().flatten().find(|t| t["tool"] == tool);
+                if let Some(install) = availability.and_then(install_button) { row.append(&install); }
+            }
             let held = snapshot["sessions"].as_array().into_iter().flatten().any(|s| s["account_id"] == account["id"] && s["state"] != "exited" && s["state"] != "failed");
             let controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             let a = Rc::clone(app); let account_copy = account.clone();
@@ -128,10 +167,10 @@ pub fn refresh(app: &Rc<App>) {
             controls.append(&button("use_default", move || action(&a, "managed_select", json!({"selection":{"tool":account_copy["tool"],"connection":account_copy["connection"],"account_id":account_copy["id"],"generation":generation},"expected_generation":generation}), false)));
             let a = Rc::clone(app); let account_copy = account.clone();
             controls.append(&button("rename_short", move || rename_dialog(&a, &account_copy)));
-            if account["connection"] == "subscription" {
+            if offers_reconnect(&snapshot, account) {
                 let a = Rc::clone(app); let id = account["id"].clone();
                 let reconnect = button("reconnect", move || action(&a, "managed_account_reconnect", json!({"account_id":id}), true));
-                reconnect.set_sensitive(!held && terminal && available); controls.append(&reconnect);
+                reconnect.set_sensitive(!held && terminal); controls.append(&reconnect);
             }
             let a = Rc::clone(app); let id = account["id"].clone();
             let remove = button("remove", move || {
@@ -316,6 +355,7 @@ mod tests {
         assert_eq!(setup_tools(&snapshot), vec!["codex"]);
         assert_eq!(launch_accounts(&snapshot), vec![json!({"tool":"codex"})]);
         assert_eq!(snapshot["accounts"].as_array().unwrap().len(), 2);
+        // GTK stays on Claude Code and Codex until it launches OpenCode.
         assert!(!can_launch(&snapshot, "opencode"));
     }
 
@@ -324,5 +364,35 @@ mod tests {
         assert_eq!(setup_tools(&json!({})), vec!["claude", "codex"]);
         assert!(setup_tools(&json!({"tools":[]})).is_empty());
         assert!(setup_tools(&json!({"tools":[{"tool":"opencode","installed":true}]})).is_empty());
+    }
+
+    /// Ron's review of #1419 (2026-10-15): the install block, and Add's
+    /// absence, only while no tool this shell launches is installed.
+    #[test]
+    fn the_install_block_shows_only_when_no_tool_is_installed() {
+        let none = json!({"tools":[{"tool":"claude","installed":false},{"tool":"codex","installed":false}]});
+        let one = json!({"tools":[{"tool":"claude","installed":false},{"tool":"codex","installed":true}]});
+        assert_eq!(install_block(&none).len(), 2);
+        assert!(install_block(&one).is_empty());
+        assert!(install_block(&json!({})).is_empty());
+    }
+
+    /// A missing tool's account keeps its row and caption, with the tool
+    /// named; Reconnect is hidden, not disabled.
+    #[test]
+    fn a_missing_tool_hides_reconnect_and_names_the_tool() {
+        let snapshot = json!({"tools":[{"tool":"claude","installed":false},{"tool":"codex","installed":true}]});
+        let claude = json!({"tool":"claude","connection":"subscription"});
+        let codex = json!({"tool":"codex","connection":"subscription"});
+        assert!(!offers_reconnect(&snapshot, &claude));
+        assert!(offers_reconnect(&snapshot, &codex));
+        assert!(!offers_reconnect(
+            &snapshot,
+            &json!({"tool":"codex","connection":"api_key"})
+        ));
+        assert_eq!(
+            tool_unavailable("claude"),
+            "Claude Code wasn't found on this computer."
+        );
     }
 }

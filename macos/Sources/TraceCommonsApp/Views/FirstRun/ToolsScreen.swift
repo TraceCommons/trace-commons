@@ -22,23 +22,17 @@ enum AddToolOutcome: Equatable {
 /// Every write goes through `FirstRunState.add(_:)`, `answerAdded`, or, on
 /// a tool row, `ToolAnswerRowLayout.select`.
 enum ToolsScreenLayout {
-    static func sourceKind(_ tool: String) -> SourceKind? {
-        switch tool { case "claude": .claudeCode; case "codex": .codex; case "opencode": .opencode; default: nil }
-    }
-    static func shownRows(_ discovered: [SourceCandidate], state: FirstRunState, tools: [ManagedToolAvailability]?) -> [SourceCandidate] {
-        ToolsScreenLayout.rows(discovered, state: state).filter { candidate in
-            // Existing exports and explicit choices remain visible even after uninstall.
-            if candidate.exists || ToolAnswerRowLayout.asks(candidate, in: state) { return true }
-            guard tools != nil else { return true }
-            return false
+    /// The core's executable discovery for a row's tool (`tc_managed_tools_json`),
+    /// or nil where it has none: Gemini CLI and Cline, or an unread table.
+    static func installed(_ kind: SourceKind, tools: [ManagedToolAvailability]?) -> Bool? {
+        let id: String
+        switch kind {
+        case .claudeCode: id = "claude"
+        case .codex: id = "codex"
+        case .opencode: id = "opencode"
+        case .geminiCli, .cline: return nil
         }
-    }
-    static func setupRows(_ discovered: [SourceCandidate], state: FirstRunState, tools: [ManagedToolAvailability]?) -> [ManagedToolAvailability] {
-        (tools ?? []).filter { tool in
-            tool.installed && !ToolsScreenLayout.rows(discovered, state: state).contains {
-                $0.source == sourceKind(tool.tool) && ($0.exists || ToolAnswerRowLayout.asks($0, in: state))
-            }
-        }
+        return tools?.first(where: { $0.tool == id })?.installed
     }
 
     /// The `tc_describe_folder` JSON for `path` as an outcome. Decoded with
@@ -326,11 +320,8 @@ struct ToolList: View {
     let retry: () -> Void
 
     @State private var tools: [ManagedToolAvailability]?
-    @State private var managedCopy: [String: String] = [:]
-    private func managedText(_ key: String) -> String { managedCopy[key] ?? "" }
     private func refreshTools() {
         tools = TCDiscovery.managedToolsJSON().flatMap { try? JSONDecoder().decode([ManagedToolAvailability].self, from: Data($0.utf8)) }
-        if let json = TCDiscovery.managedCopyJSON(), let copy = try? JSONDecoder().decode([String: String].self, from: Data(json.utf8)) { managedCopy = copy }
     }
 
     var body: some View {
@@ -338,32 +329,10 @@ struct ToolList: View {
             switch discovery {
             case .found(let discovered):
                 VStack(spacing: GlassTokens.Space.s4) {
-                    if let tools, !tools.contains(where: \.installed) {
-                        ManagedToolInstallation(tools: tools, copy: managedText) { refreshTools(); retry() }
-                    }
-                    ForEach(ToolsScreenLayout.setupRows(discovered, state: runner.state, tools: tools)) { tool in
-                        GlassCard {
-                            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                                HStack {
-                                    GlassToolTile(.tool(ManagedWords.glassTool(tool.tool)))
-                                    Text(managedText(tool.tool)).glassType(GlassTokens.TypeScale.bodyStrong)
-                                    Spacer()
-                                    if let kind = ToolsScreenLayout.sourceKind(tool.tool) {
-                                        GlassFolderButton(FirstRunCopy.fill(copy.folders.chooseFolder, ["tool": kind.displayName])) {
-                                            if let path = FolderPanel.choose() { adding.describe(path, runner: runner) }
-                                        }
-                                    }
-                                }
-                                if tool.tool == "opencode" {
-                                    Text(managedText("opencode_export_scope"))
-                                        .glassType(GlassTokens.TypeScale.caption)
-                                        .foregroundStyle(GlassColor.textSecondary)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                            }
-                        }
-                    }
-                    ForEach(ToolsScreenLayout.shownRows(discovered, state: runner.state, tools: tools), id: \.source) { candidate in
+                    // Every tool keeps its row (Ron's review of #1419,
+                    // 2026-10-15): Install when missing, Choose folder when
+                    // installed with no folder found.
+                    ForEach(ToolsScreenLayout.rows(discovered, state: runner.state), id: \.source) { candidate in
                         ToolAnswerRow(
                             copy: copy.folders,
                             choose: copy.frame.choose,
@@ -371,7 +340,8 @@ struct ToolList: View {
                             meta: ToolsScreenLayout.meta(
                                 for: candidate, in: runner.state, discovered: discovered, copy: copy),
                             state: $runner.state,
-                            installURL: installURL(candidate.source)
+                            installURL: installURL(candidate.source),
+                            installed: ToolsScreenLayout.installed(candidate.source, tools: tools)
                         )
                     }
                     ForEach(ToolsScreenLayout.addedRows(runner.state), id: \.path) { folder in

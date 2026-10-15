@@ -410,14 +410,17 @@ tc_handle*  tc_daemon_attach(const char* config_dir, char** err);
  */
 char*       tc_discover_sources(void);
 
-/* Installed coding tools [{tool, installed, install_url}] and shared copy.
- * Read-only metadata discovery, no daemon or subprocess. Includes OpenCode
- * availability for export-only use, not managed launch support. No trace access
- * or contribution consent is implied. Both return owned JSON; tc_string_free.
- * Returns NULL on failure; tc_last_error describes the error.
+/* Installed coding tools [{tool, installed, install_url}] for Claude Code,
+ * Codex and OpenCode, and the shared managed-session copy. Read-only metadata
+ * discovery, no daemon or subprocess. No trace access or contribution consent
+ * is implied. tc_install_guides_json is {source slug: https url}, each coding
+ * tool's setup guide: the one table first run and managed sessions read.
+ * All return owned JSON; tc_string_free. Returns NULL on failure;
+ * tc_last_error describes the error.
  */
 char*       tc_managed_tools_json(void);
 char*       tc_managed_copy_json(void);
+char*       tc_install_guides_json(void);
 
 /* Describe a folder the contributor has already named as their OpenCode
  * export directory, so a Customize screen can say "N sessions found" for

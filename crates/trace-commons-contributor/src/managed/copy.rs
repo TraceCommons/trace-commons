@@ -16,17 +16,22 @@
 //!   sign-in.
 //! - `sign_in_near_ai_accessibility` "Sign in to NEAR AI" -- its accessible
 //!   name.
+//!
+//! Installing a coding tool. Approved 2026-10-15 (#1419 review):
+//! - `tools_title` "Coding tools", above the install block shown when no
+//!   coding tool is installed.
+//! - `tools_empty` "Install a coding tool to get started."
+//! - `install` "Install"; its accessible name appends the tool's name.
+//! - `tool_unavailable` "{tool} wasn't found on this computer." Shells fill
+//!   `{tool}` with the tool's display name (`claude`, `codex`, `opencode`).
+//! - `refresh` "Refresh": a bare glyph's tooltip and accessible name.
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "Managed sessions",
             "tools_title": "Coding tools",
-            "tools_empty": "Install a coding tool to get started. Claude Code and Codex support managed sessions; OpenCode supports export imports.",
+            "tools_empty": "Install a coding tool to get started.",
             "install": "Install",
-            "check_again": "Refresh",
-            "not_installed": "Not installed",
-            "tool_unavailable": "This tool is not installed or is unavailable. Install it, then choose Refresh.",
-            "opencode": "OpenCode",
-            "opencode_export_scope": "Import an OpenCode export to collect traces. Managed sessions are not available for OpenCode.",
+            "tool_unavailable": "{tool} wasn't found on this computer.",
             "description": "Start a session with a saved account. Your other sessions keep running.",
             "launch": "Launch",
             "launch_title": "Launch managed session",
@@ -168,6 +173,24 @@ mod tests {
         ] {
             let key = key("auth", state);
             assert!(copy[&key].is_string(), "missing {key}");
+        }
+    }
+
+    /// Ron's 2026-10-15 review of #1419: the install words, with `{tool}`
+    /// filled with the tool's display name by every shell.
+    #[test]
+    fn the_install_words_are_the_approved_ones() {
+        let copy = copy();
+        assert_eq!(copy["tools_title"], "Coding tools");
+        assert_eq!(copy["tools_empty"], "Install a coding tool to get started.");
+        assert_eq!(
+            copy["tool_unavailable"],
+            "{tool} wasn't found on this computer."
+        );
+        assert_eq!(copy["install"], "Install");
+        assert_eq!(copy["refresh"], "Refresh");
+        for removed in ["opencode_export_scope", "not_installed", "check_again"] {
+            assert!(copy.get(removed).is_none(), "{removed} should be gone");
         }
     }
 }

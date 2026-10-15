@@ -36,7 +36,7 @@ final class ManagedSessionsRenderTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         for installed in [[], ["opencode"], ["codex"]] {
-            fixture["tools"] = ManagedSurface.installableTools.map { ["tool": $0, "installed": installed.contains($0), "install_url": "https://example.com/" + $0] as [String: Any] }
+            fixture["tools"] = ManagedSurface.supportedTools.map { ["tool": $0, "installed": installed.contains($0), "install_url": "https://example.com/" + $0] as [String: Any] }
             let model = AppModel()
             let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: fixture))
             model.managedSnapshot = snapshot

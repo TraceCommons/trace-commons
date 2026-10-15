@@ -6762,14 +6762,26 @@ mod in_process_subscribe_tests {
 }
 
 /// Discovers installed coding tools without a daemon or subprocess.
-/// Returns the same tools array as managed_snapshot, including export-only
-/// OpenCode. Availability does not imply managed launch support or trace access.
+/// Returns the same tools array as managed_snapshot (Claude Code, Codex and
+/// OpenCode). Availability implies no trace access or contribution consent.
 /// Free the returned owned JSON string with tc_string_free.
 #[unsafe(no_mangle)]
 pub extern "C" fn tc_managed_tools_json() -> *mut c_char {
     guarded_string_no_err(|| {
         Ok(to_owned_cstring(&serde_json::to_string(
             &trace_commons_contributor::managed::profiles::tools(),
+        )?))
+    })
+}
+
+/// Each coding tool's setup guide, `{source slug: https url}`, from
+/// `install_guides`: the one table first run and managed sessions read.
+/// Returns an owned JSON object; free it with tc_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_install_guides_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(&serde_json::to_string(
+            &trace_commons_contributor::install_guides::json(),
         )?))
     })
 }
@@ -6817,12 +6829,14 @@ mod managed_availability_tests {
             "tools_title",
             "tools_empty",
             "install",
-            "check_again",
+            "refresh",
             "tool_unavailable",
-            "opencode_export_scope",
         ] {
             assert!(copy[key].is_string(), "missing {key}");
         }
         assert_eq!(copy, trace_commons_contributor::managed::copy::copy());
+        let guides = owned_json(tc_install_guides_json());
+        assert_eq!(guides, trace_commons_contributor::install_guides::json());
+        assert_eq!(guides["claude-code"], tools[0]["install_url"]);
     }
 }

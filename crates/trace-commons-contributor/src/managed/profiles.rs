@@ -514,11 +514,13 @@ fn executable_file(path: &Path) -> bool {
 
 /// Installed binaries, independently of trace sources or managed launch support.
 /// Discovery reads filesystem metadata only; it never runs a tool or scans traces.
+/// `install_url` is the tool's setup guide from `crate::install_guides`.
 pub fn tools() -> serde_json::Value {
+    use crate::install_guides::install_guide;
     serde_json::json!([
-        {"tool": "claude", "installed": installed("claude"), "install_url": "https://code.claude.com/docs/en/setup"},
-        {"tool": "codex", "installed": installed("codex"), "install_url": "https://developers.openai.com/codex/cli/"},
-        {"tool": "opencode", "installed": installed("opencode"), "install_url": "https://opencode.ai/docs/"}
+        {"tool": "claude", "installed": installed("claude"), "install_url": install_guide("claude-code")},
+        {"tool": "codex", "installed": installed("codex"), "install_url": install_guide("codex")},
+        {"tool": "opencode", "installed": installed("opencode"), "install_url": install_guide("opencode")}
     ])
 }
 

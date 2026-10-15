@@ -197,9 +197,6 @@ struct ManagedSessionsSection: View {
                 if snapshot.needsToolInstallation {
                     ManagedToolInstallation(tools: snapshot.tools ?? [], copy: model.managedText, retry: model.refreshManagedSessions)
                 }
-                if snapshot.tools?.contains(where: { $0.tool == "opencode" && $0.installed }) == true && snapshot.setupTools.isEmpty {
-                    Text(model.managedText("opencode_export_scope")).glassType(GlassTokens.TypeScale.caption)
-                }
                 if snapshot.capabilities.terminalDestination == nil {
                     GlassNotice(tone: .ask, title: model.managedText("terminal_unavailable")) { EmptyView() }
                 }
@@ -274,7 +271,10 @@ struct ManagedSessionsSection: View {
                     }
                 }
                 if !snapshot.canLaunch(tool: account.tool) {
-                    Text(model.managedText("tool_unavailable")).glassType(GlassTokens.TypeScale.caption)
+                    Text(ManagedSurface.toolUnavailable(account.tool, copy: model.managedText))
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     if let availability = snapshot.tools?.first(where: { $0.tool == account.tool }) {
                         ManagedInstallLink(tool: availability, copy: model.managedText)
                     }
@@ -306,12 +306,14 @@ struct ManagedSessionsSection: View {
                         menuFor = nil
                         DispatchQueue.main.async { renaming = account }
                     }
-                    if account.connection == "subscription" {
+                    // Hidden, not disabled, while the tool is missing (Ron,
+                    // 2026-10-15): the row says so and offers Install.
+                    if account.connection == "subscription" && snapshot.canLaunch(tool: account.tool) {
                         GlassMenuItem(model.managedText("reconnect")) {
                             menuFor = nil
                             model.managedAction("managed_account_reconnect", params: ["account_id": account.id], openTerminal: true)
                         }
-                        .disabled(held || !snapshot.capabilities.terminalLaunch || !snapshot.canLaunch(tool: account.tool))
+                        .disabled(held || !snapshot.capabilities.terminalLaunch)
                     }
                     GlassMenuItem(model.managedText("verify")) {
                         menuFor = nil
@@ -579,11 +581,13 @@ struct ManagedLaunchSheet: View {
                         placeholder: model.managedText("choose_account"))
                 }
                 if let account = selectedAccount, !toolAvailable {
-                    ManagedNote(text: model.managedText("tool_unavailable"))
-                    if let availability = model.managedSnapshot?.tools?.first(where: { $0.tool == account.tool }) {
-                        ManagedInstallLink(tool: availability, copy: model.managedText)
+                    ManagedNote(text: ManagedSurface.toolUnavailable(account.tool, copy: model.managedText))
+                    HStack(spacing: GlassTokens.Space.s3) {
+                        if let availability = model.managedSnapshot?.tools?.first(where: { $0.tool == account.tool }) {
+                            ManagedInstallLink(tool: availability, copy: model.managedText)
+                        }
+                        GlassRefreshButton(model.managedText("refresh")) { model.refreshManagedSessions() }
                     }
-                    Button(model.managedText("check_again")) { model.refreshManagedSessions() }
                 }
                 if isOpenCode {
                     GlassTextField(model.managedText("model"), text: $selectedModel)
@@ -691,23 +695,34 @@ struct ManagedInstallLink: View {
     }
 }
 
+/// Shown only while no coding tool is installed: each managed tool with
+/// Install, and one bare refresh glyph beside the heading (Ron, 2026-10-15).
 struct ManagedToolInstallation: View {
     let tools: [ManagedToolAvailability]
     let copy: (String) -> String
     let retry: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            Text(copy("tools_title")).glassType(GlassTokens.TypeScale.bodyStrong)
-            Text(copy("tools_empty")).glassType(GlassTokens.TypeScale.caption)
-            ForEach(tools.filter { ManagedSurface.installableTools.contains($0.tool) }) { tool in
+            HStack(spacing: GlassTokens.Space.s2) {
+                Text(copy("tools_title"))
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+                GlassRefreshButton(copy("refresh"), action: retry)
+            }
+            Text(copy("tools_empty"))
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(tools.filter { ManagedSurface.supportedTools.contains($0.tool) }) { tool in
                 HStack {
                     GlassToolTile(.tool(ManagedWords.glassTool(tool.tool)))
                     Text(copy(tool.tool))
+                        .glassType(GlassTokens.TypeScale.label)
+                        .foregroundStyle(GlassColor.textPrimary)
                     Spacer()
                     ManagedInstallLink(tool: tool, copy: copy)
                 }
             }
-            Button(copy("check_again"), action: retry).buttonStyle(GlassButtonStyle(.glass, small: true))
         }
     }
 }

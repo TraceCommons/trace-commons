@@ -8027,10 +8027,11 @@ Acceptance can earn pending credit; this is not credit redemption.
 `managed_snapshot.tools` is an additive array of `{tool, installed, install_url}`
 rows for `claude`, `codex`, and `opencode`. Each row reports executable discovery
 independently of trace-source discovery, saved accounts, or sign-in. It does not
-verify tool versions, read traces, grant consent, or imply managed launch support.
-Managed account and launch support for OpenCode is described under
-"Managed OpenCode launch additions" below. Missing native launch binaries
-return `managed-tool-unavailable`.
+verify tool versions, read traces, or grant consent. All three are managed
+tools; see "Managed OpenCode launch additions" below for OpenCode's launch
+fields. `install_url` is the tool's setup guide from the shared install-guide
+table (`tc_install_guides_json`). Missing native launch binaries return
+`managed-tool-unavailable`.
 
 Discovery checks absolute PATH entries and conventional install locations,
 including `~/.opencode/bin`, without launching subprocesses. Unix candidates must
@@ -8040,8 +8041,10 @@ files are skipped. Windows installation detection includes `.exe`, `.cmd`, and
 wrapper-only installations can be reported installed without being launchable
 through managed sessions. Discovery never invokes a command interpreter. Each
 snapshot refresh checks again. Before daemon startup,
-`tc_managed_tools_json` returns the same array and `tc_managed_copy_json` returns
-the shared copy object; both strings are freed with `tc_string_free`.
+`tc_managed_tools_json` returns the same array, `tc_managed_copy_json` returns
+the shared copy object, and `tc_install_guides_json` returns the install-guide
+table as `{source slug: url}` for every tool first run asks about; all three
+strings are freed with `tc_string_free`.
 
 ### Managed OpenCode launch additions
 

@@ -580,7 +580,7 @@ mod tests {
         let tools = without["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 3);
         assert_eq!(tools[2]["tool"], "opencode");
-        assert_eq!(without["generations"].as_object().unwrap().len(), 2);
+        assert_eq!(without["generations"].as_object().unwrap().len(), 3);
         assert_eq!(without["capabilities"]["near_ai_signin"], false);
         assert_eq!(without["sign_in_accounts"], json!([]));
         assert_eq!(without["defaults"], json!([]));
