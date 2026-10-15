@@ -175,9 +175,9 @@ private struct NearSignerSetting: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            Toggle(NearSignerCopy.settingTitle, isOn: $on)
+            Toggle((ShellWords.table?.settings.nearSignerSettingTitle ?? ""), isOn: $on)
                 .toggleStyle(GlassToggleStyle(.settings))
-            Text(NearSignerCopy.settingCaption)
+            Text((ShellWords.table?.settings.nearSignerSettingCaption ?? ""))
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)

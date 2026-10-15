@@ -44,8 +44,8 @@ struct NearAccountConnectView: View {
                                 .buttonStyle(GlassButtonStyle(.primary))
                                 .disabled(pending)
                             if signerRefused {
-                                GlassAlert(NearSignerCopy.failed)
-                                Button(NearSignerCopy.useBrowserInstead) {
+                                GlassAlert((ShellWords.table?.settings.nearSignerFailed ?? ""))
+                                Button((ShellWords.table?.settings.nearSignerUseBrowser ?? "")) {
                                     // Shows the browser route's account field and Start;
                                     // nothing opens until the person taps Start there.
                                     signerRefused = false

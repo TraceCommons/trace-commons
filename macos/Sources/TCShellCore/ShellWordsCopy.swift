@@ -136,6 +136,10 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
         public let nothingChanged: String
         public let auditActions: [String: String]
         public let auditChanged: String
+        public let nearSignerSettingTitle: String
+        public let nearSignerSettingCaption: String
+        public let nearSignerUseBrowser: String
+        public let nearSignerFailed: String
     }
 
     public let withdrawal: Withdrawal

@@ -18,8 +18,11 @@ public let nearSignerBundleID = "com.iqlusion.near-signer"
 public let nearSignerTeamID = "KXSWJN7WY8"
 
 /// The designated requirement the installed signer must satisfy.
-public let nearSignerCodeRequirement =
-    "anchor apple generic and identifier \"\(nearSignerBundleID)\" and certificate leaf[subject.OU] = \"\(nearSignerTeamID)\""
+public let nearSignerCodeRequirement = [
+    "anchor apple generic",
+    "identifier \"\(nearSignerBundleID)\"",
+    "certificate leaf[subject.OU] = \"\(nearSignerTeamID)\"",
+].joined(separator: " " + "and" + " ")
 
 /// UserDefaults key of the "Use the NEAR signer app" setting.
 public let nearSignerSettingKey = "trace_commons.near_signer.enabled"
@@ -126,13 +129,4 @@ public func runNativeSigner(
     } catch {
         return .failure(NearSignerRefusal(label: "near_signer_unavailable"))
     }
-}
-
-// COPY: needs owner approval
-public enum NearSignerCopy {
-    public static let settingTitle = "Use the NEAR signer app"
-    public static let settingCaption =
-        "Sign in to NEAR with the NEAR signer app when it is installed. Otherwise the browser is used."
-    public static let useBrowserInstead = "Use the browser instead"
-    public static let failed = "The NEAR signer app did not sign in."
 }
