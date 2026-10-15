@@ -1,7 +1,64 @@
 //! External terminal handoff. Only short-lived launch authority crosses argv.
 use super::ManagedError;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+/// What the daemon keeps, from its own launch, to find a session's terminal
+/// window again. A launch that cannot name its window keeps none, and that
+/// session cannot be shown. One variant per terminal the daemon can script;
+/// another terminal adds its own here, with its own `focus` arm.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TerminalHandle {
+    /// A Terminal window, by the id AppleScript returned for the window
+    /// holding the tab the launch opened.
+    AppleTerminal { window_id: u32 },
+}
+
+/// The window id the launch script printed, or none. Only a bare positive
+/// decimal is taken, so nothing the script prints can become part of a
+/// later script.
+pub fn apple_terminal_window(output: &[u8]) -> Option<TerminalHandle> {
+    let text = std::str::from_utf8(output).ok()?;
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    if text.is_empty() || text.len() > 10 || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    match text.parse::<u32>() {
+        Ok(window_id) if window_id > 0 => Some(TerminalHandle::AppleTerminal { window_id }),
+        _ => None,
+    }
+}
+
+/// Bring a session's window to the front. Refused when the window is gone
+/// or this build cannot script the terminal that holds it.
+pub fn focus(handle: &TerminalHandle) -> Result<(), ManagedError> {
+    match handle {
+        #[cfg(target_os = "macos")]
+        TerminalHandle::AppleTerminal { window_id } => {
+            // `window_id` is a u32, so the script holds only digits from it.
+            let script = format!(
+                "tell application \"Terminal\"\n\
+                 set w to window id {window_id}\n\
+                 if miniaturized of w then set miniaturized of w to false\n\
+                 set index of w to 1\n\
+                 activate\n\
+                 end tell"
+            );
+            let mut command = std::process::Command::new("/usr/bin/osascript");
+            command.args(["-e", &script]);
+            let output = super::profiles::bounded_output(command)?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(ManagedError::NotFound)
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        TerminalHandle::AppleTerminal { .. } => Err(ManagedError::UnsupportedVersion),
+    }
+}
 
 pub fn shell_command(
     helper: &Path,
@@ -70,7 +127,14 @@ pub fn destination() -> Option<&'static str> {
     }
 }
 
-pub fn launch(config: &Path, session: Uuid, ticket: &str) -> Result<(), ManagedError> {
+/// Open the session's launcher in the terminal. The handle names the window
+/// it opened in, when the terminal can say; a launch that cannot is still a
+/// launch, with no handle.
+pub fn launch(
+    config: &Path,
+    session: Uuid,
+    ticket: &str,
+) -> Result<Option<TerminalHandle>, ManagedError> {
     let command = shell_command(&helper_path()?, config, session, ticket)?;
     #[cfg(target_os = "macos")]
     {
@@ -81,20 +145,30 @@ pub fn launch(config: &Path, session: Uuid, ticket: &str) -> Result<(), ManagedE
             .replace('"', "\\\"")
             .replace('\n', "\\n")
             .replace('\r', "\\r");
+        // The window is found by the new tab's tty, a string compare, and
+        // printed as its id. Any failure there prints nothing: the launch
+        // stands and the session simply cannot be shown.
         let mut script = std::process::Command::new("/usr/bin/osascript");
-        script
-            .args([
-                "-e",
-                &format!("tell application \"Terminal\" to do script \"{literal}\""),
-                "-e",
-                "tell application \"Terminal\" to activate",
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+        script.args([
+            "-e",
+            &format!(
+                "tell application \"Terminal\"\n\
+                 set t to do script \"{literal}\"\n\
+                 activate\n\
+                 set found to \"\"\n\
+                 try\n\
+                 set wanted to tty of t\n\
+                 repeat with w in windows\n\
+                 if wanted is in (tty of tabs of w) then set found to (id of w) as text\n\
+                 end repeat\n\
+                 end try\n\
+                 return found\n\
+                 end tell"
+            ),
+        ]);
         let output = super::profiles::bounded_output(script)?;
         if output.status.success() {
-            Ok(())
+            Ok(apple_terminal_window(&output.stdout))
         } else {
             Err(ManagedError::LaunchUnknown)
         }
@@ -134,7 +208,7 @@ pub fn launch(config: &Path, session: Uuid, ticket: &str) -> Result<(), ManagedE
         std::thread::spawn(move || {
             let _ = process.wait();
         });
-        Ok(())
+        Ok(None)
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {

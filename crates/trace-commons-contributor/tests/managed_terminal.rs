@@ -34,3 +34,41 @@ fn terminal_handoff_quotes_paths_and_never_accepts_shell_syntax_as_arguments() {
         .is_err()
     );
 }
+
+#[test]
+fn only_a_bare_window_id_names_a_terminal_window() {
+    use trace_commons_contributor::managed::terminal::{TerminalHandle, apple_terminal_window};
+    assert_eq!(
+        apple_terminal_window(b"4242\n"),
+        Some(TerminalHandle::AppleTerminal { window_id: 4242 })
+    );
+    for output in [
+        &b""[..],
+        b"\n",
+        b"0",
+        b"-1",
+        b"42 43",
+        b"42\n43",
+        b"window id 42",
+        b"99999999999",
+        b"4242; do shell script",
+    ] {
+        assert_eq!(apple_terminal_window(output), None, "{output:?}");
+    }
+    let handle = TerminalHandle::AppleTerminal { window_id: 7 };
+    let json = serde_json::to_value(&handle).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"kind":"apple_terminal","window_id":7})
+    );
+    assert_eq!(
+        serde_json::from_value::<TerminalHandle>(json).unwrap(),
+        handle
+    );
+    assert!(
+        serde_json::from_value::<TerminalHandle>(
+            serde_json::json!({"kind":"apple_terminal","window_id":7,"script":"x"})
+        )
+        .is_err()
+    );
+}

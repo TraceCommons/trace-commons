@@ -30,6 +30,10 @@ near-ai sessions list
 
 CLI launches use the current terminal or multiplexer pane. All managed launches,
 including those initiated from the CLI, appear in the app's managed-session list.
+A session the app opened in Terminal can be shown (its window brought to the
+front) and stopped from its row; a CLI launch cannot, because the app neither
+opened its window nor started its launcher. An ended session can be started
+again in the same folder with the same account while both still exist.
 Standard sessions and multiple managed accounts can run in parallel.
 
 For an API key, supply it through stdin using a secret-manager pipe, rather than

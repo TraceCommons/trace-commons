@@ -135,6 +135,11 @@
     "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
     "sign_in_needed": "Sign in to NEAR AI to start a session.",
     "sign_in_near_ai": "Sign in",
-    "sign_in_near_ai_accessibility": "Sign in to NEAR AI"
+    "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
+    "show": "Show",
+    "stop": "Stop",
+    "stop_question": "Stop this session?",
+    "stop_description": "{tool} stops what it's doing in {folder}.",
+    "start_again": "Start again"
   }
 }
