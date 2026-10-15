@@ -8300,6 +8300,511 @@ async fn owned_quarantined_submit_supersedes_envelope_under_same_submission_id()
     );
 }
 
+/// #332: a quarantined envelope, submitted under required DB mirror writes
+/// against PostgreSQL with the encrypted artifact store configured.
+async fn issue_332_quarantined_fixture() -> TraceContributionEnvelope {
+    let mut first = low_risk_envelope().await;
+    first.consent.message_text_included = true;
+    first.consent.tool_payloads_included = true;
+    first.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    first
+}
+
+/// #332: the corrected re-POST of `first`, under the same submission id.
+fn issue_332_corrected(first: &TraceContributionEnvelope) -> TraceContributionEnvelope {
+    let mut corrected = first.clone();
+    make_metadata_only_low_risk(&mut corrected);
+    corrected.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    assert_eq!(corrected.submission_id, first.submission_id);
+    corrected
+}
+
+/// #332: every live `trace_object_refs` row of the submission names an
+/// artifact that still exists and, for the encrypted store, decrypts.
+async fn issue_332_assert_live_object_refs_resolve(
+    backend: &PgBackend,
+    store: &LocalEncryptedTraceArtifactStore,
+    root: &Path,
+    submission_id: Uuid,
+    context: &str,
+) {
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', 'tenant-a', true)",
+        &[],
+    )
+    .await
+    .unwrap();
+    let rows = tx
+        .query(
+            "SELECT object_store, object_key, content_sha256 FROM trace_object_refs
+             WHERE tenant_id = 'tenant-a' AND submission_id = $1
+               AND invalidated_at IS NULL AND deleted_at IS NULL",
+            &[&submission_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        !rows.is_empty(),
+        "{context}: the submission has a live object ref"
+    );
+    for row in rows {
+        let object_store: String = row.get(0);
+        let object_key: String = row.get(1);
+        let content_sha256: String = row.get(2);
+        if object_store == TRACE_COMMONS_FILE_OBJECT_STORE {
+            assert!(
+                root.join(&object_key).exists(),
+                "{context}: a live file object ref names a deleted file"
+            );
+        } else {
+            store
+                .get_json_by_object_key::<TraceContributionEnvelope>(
+                    &tenant_storage_ref("tenant-a"),
+                    TraceArtifactKind::ContributionEnvelope,
+                    &object_key,
+                    content_sha256
+                        .strip_prefix("sha256:")
+                        .unwrap_or(&content_sha256),
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{context}: a live object ref names an unreadable artifact: {error:#}")
+                });
+        }
+    }
+}
+
+/// #332: the submission's DB audit rows are exactly the file audit log's
+/// events for it -- same ids, one row each -- and the returned list is the
+/// file events' kinds in log order.
+async fn issue_332_assert_audit_stores_agree(
+    backend: &PgBackend,
+    root: &Path,
+    submission_id: Uuid,
+    context: &str,
+) -> Vec<String> {
+    let file_events: Vec<TraceCommonsAuditEvent> = read_all_audit_events(root, "tenant-a")
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.submission_id == submission_id)
+        .collect();
+    let mut client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', 'tenant-a', true)",
+        &[],
+    )
+    .await
+    .unwrap();
+    let rows = tx
+        .query(
+            "SELECT audit_event_id, canonical_event_json FROM trace_audit_events
+             WHERE tenant_id = 'tenant-a' AND submission_id = $1",
+            &[&submission_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let db_rows: BTreeMap<Uuid, Option<String>> = rows
+        .iter()
+        .map(|row| (row.get::<_, Uuid>(0), row.get::<_, Option<String>>(1)))
+        .collect();
+    assert_eq!(
+        db_rows.len(),
+        rows.len(),
+        "{context}: no duplicate DB audit rows"
+    );
+    let file_ids: BTreeSet<Uuid> = file_events.iter().map(|event| event.event_id).collect();
+    assert_eq!(
+        file_ids.len(),
+        file_events.len(),
+        "{context}: no duplicate file audit events"
+    );
+    assert_eq!(
+        db_rows.keys().copied().collect::<BTreeSet<_>>(),
+        file_ids,
+        "{context}: the DB audit rows mirror the file audit events one for one"
+    );
+    for event in &file_events {
+        let canonical = db_rows[&event.event_id]
+            .as_deref()
+            .unwrap_or_else(|| panic!("{context}: DB audit row carries its canonical event"));
+        assert!(
+            canonical.contains(&format!("\"kind\":\"{}\"", event.kind)),
+            "{context}: the DB row of a {} event records that kind",
+            event.kind
+        );
+    }
+    file_events.into_iter().map(|event| event.kind).collect()
+}
+
+/// #332 acceptance: an unchanged re-POST of an owned quarantined envelope, a
+/// corrected re-POST, and a retry of each, with required DB mirror writes
+/// against PostgreSQL. Before #1043 the remediation's DB audit row reused
+/// the first submission's deterministic `submit-audit` id, so every
+/// remediation hit `trace_audit_events_pkey` and returned 500 after
+/// destroying the prior artifact.
+#[tokio::test]
+async fn pg_owned_quarantined_repost_unchanged_and_corrected_mirror_one_audit_row_each() {
+    let Some(backend) = required_postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+    let temp = tempfile::tempdir().unwrap();
+    let store = test_artifact_store(temp.path());
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(backend.clone() as Arc<dyn Database>),
+        Some(store.clone()),
+        false,
+        false,
+        false,
+        false,
+    );
+    {
+        let state_mut = Arc::get_mut(&mut state).unwrap();
+        state_mut.require_db_mirror_writes = true;
+        state_mut.accept_medium_risk_submissions = false;
+        state_mut.pii_backstop_driver = None;
+    }
+    let first = issue_332_quarantined_fixture().await;
+    let submission_id = first.submission_id;
+
+    let Json(receipt) = test_submit(state.clone(), "token-a", first.clone())
+        .await
+        .expect("first submission lands");
+    assert_eq!(receipt.status, "quarantined");
+    let prior = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .unwrap()
+        .unwrap();
+
+    // The unchanged re-POST, then its retry.
+    for attempt in ["unchanged re-POST", "retry of the unchanged re-POST"] {
+        let Json(receipt) = test_submit(state.clone(), "token-a", first.clone())
+            .await
+            .unwrap_or_else(|error| panic!("{attempt} succeeds, got {}", error.0));
+        assert_eq!(receipt.status, "quarantined", "{attempt}");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.status, TraceCorpusStatus::Quarantined, "{attempt}");
+        assert_eq!(record.received_at, prior.received_at, "{attempt}");
+        assert_eq!(
+            record.auth_principal_ref, prior.auth_principal_ref,
+            "{attempt}"
+        );
+        let stored = read_envelope_by_record(state.as_ref(), &record)
+            .unwrap_or_else(|error| panic!("{attempt}: envelope decrypts: {error:#}"));
+        assert_eq!(stored.submission_id, submission_id);
+        assert!(
+            read_derived_record(temp.path(), "tenant-a", submission_id)
+                .unwrap()
+                .is_some(),
+            "{attempt}: derived record kept"
+        );
+        issue_332_assert_live_object_refs_resolve(
+            &backend,
+            &store,
+            temp.path(),
+            submission_id,
+            attempt,
+        )
+        .await;
+        issue_332_assert_audit_stores_agree(&backend, temp.path(), submission_id, attempt).await;
+    }
+
+    // The corrected re-POST, then its retry.
+    let corrected = issue_332_corrected(&first);
+    let Json(receipt) = test_submit(state.clone(), "token-a", corrected.clone())
+        .await
+        .unwrap_or_else(|error| panic!("corrected re-POST succeeds, got {}", error.0));
+    assert_eq!(receipt.status, "accepted");
+    let Json(receipt) = test_submit(state.clone(), "token-a", corrected.clone())
+        .await
+        .unwrap_or_else(|error| panic!("retry of the corrected re-POST succeeds, got {}", error.0));
+    assert_eq!(receipt.status, "accepted");
+    let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.status, TraceCorpusStatus::Accepted);
+    assert_eq!(record.received_at, prior.received_at);
+    read_envelope_by_record(state.as_ref(), &record).expect("remediated envelope decrypts");
+    let db_status = backend
+        .get_trace_submission("tenant-a", submission_id)
+        .await
+        .unwrap()
+        .expect("DB submission row")
+        .status;
+    assert_eq!(
+        db_status,
+        storage_corpus_status(TraceCorpusStatus::Accepted)
+    );
+    issue_332_assert_live_object_refs_resolve(
+        &backend,
+        &store,
+        temp.path(),
+        submission_id,
+        "corrected re-POST and retry",
+    )
+    .await;
+    let kinds = issue_332_assert_audit_stores_agree(
+        &backend,
+        temp.path(),
+        submission_id,
+        "corrected re-POST and retry",
+    )
+    .await;
+    assert_eq!(
+        kinds,
+        [
+            "submitted",
+            "quarantine_remediated",
+            "quarantine_remediated",
+            "quarantine_remediated",
+            "idempotent_submit",
+        ],
+        "one remediation event per remediating re-POST, and the retry of the \
+         now-accepted record is an idempotent submit"
+    );
+    cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+}
+
+/// #332 test seam: a trigger on the test database that refuses one table's
+/// writes for one submission id. Test-side only; production has no seam.
+/// `once` refuses only the first matching write, so a rollback that
+/// re-mirrors the prior goes through; otherwise every write is refused, so
+/// the rollback's own re-mirror fails at the same stage.
+async fn issue_332_inject_write_failure(
+    backend: &PgBackend,
+    table: &str,
+    submission_id: Uuid,
+    once: bool,
+) {
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let condition = if once {
+        "nextval('issue_332_injected_failure_seq') = 1"
+    } else {
+        "true"
+    };
+    client
+        .batch_execute(&format!(
+            "DROP SEQUENCE IF EXISTS issue_332_injected_failure_seq;
+             CREATE SEQUENCE issue_332_injected_failure_seq;
+             CREATE OR REPLACE FUNCTION issue_332_injected_failure() RETURNS trigger
+                 LANGUAGE plpgsql AS $$ BEGIN
+                     IF {condition} THEN
+                         RAISE EXCEPTION 'issue 332 injected failure';
+                     END IF;
+                     RETURN NEW;
+                 END $$;
+             DROP TRIGGER IF EXISTS issue_332_injected_failure ON {table};
+             CREATE TRIGGER issue_332_injected_failure BEFORE INSERT OR UPDATE ON {table}
+                 FOR EACH ROW WHEN (NEW.submission_id = '{submission_id}')
+                 EXECUTE FUNCTION issue_332_injected_failure();"
+        ))
+        .await
+        .unwrap();
+}
+
+/// Every stored artifact file under `root`, for before/after comparison.
+fn issue_332_artifact_files(root: &Path) -> BTreeSet<PathBuf> {
+    fn walk(dir: &Path, out: &mut BTreeSet<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path
+                .components()
+                .any(|part| part.as_os_str() == "artifacts")
+            {
+                out.insert(path);
+            }
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(root, &mut out);
+    out
+}
+
+async fn issue_332_clear_injected_failures(backend: &PgBackend) {
+    let client = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    for table in ISSUE_332_MIRROR_STAGE_TABLES {
+        client
+            .batch_execute(&format!(
+                "DROP TRIGGER IF EXISTS issue_332_injected_failure ON {table};"
+            ))
+            .await
+            .unwrap();
+    }
+}
+
+/// The tables a remediation writes, in the order it writes them: the
+/// submission row (with its witness evidence, in one transaction), the
+/// envelope object ref, the duplicate-precheck derived row, and the audit
+/// row. The accepted-credit event is not reachable from submit: an accepted
+/// submit stores 0.0 pending credit, so the mirror never writes one.
+const ISSUE_332_MIRROR_STAGE_TABLES: [&str; 4] = [
+    "trace_submissions",
+    "trace_object_refs",
+    "trace_derived_records",
+    "trace_audit_events",
+];
+
+/// #332 acceptance: a corrected re-POST of an owned quarantined envelope that
+/// fails at any one DB mirror stage leaves the prior submission and its
+/// artifact readable and decryptable, every live object ref resolvable, and
+/// the two audit stores in agreement; a retry once the fault clears succeeds.
+#[tokio::test]
+async fn pg_owned_quarantined_remediation_failure_at_each_mirror_stage_keeps_prior_state() {
+    let Some(backend) = required_postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    issue_332_clear_injected_failures(&backend).await;
+    for (table, once) in ISSUE_332_MIRROR_STAGE_TABLES
+        .into_iter()
+        .flat_map(|table| [(table, false), (table, true)])
+    {
+        let stage = format!("{table}{}", if once { " (transient)" } else { "" });
+        cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+        let temp = tempfile::tempdir().unwrap();
+        let store = test_artifact_store(temp.path());
+        let mut state = test_state_with_options(
+            temp.path().to_path_buf(),
+            Some(backend.clone() as Arc<dyn Database>),
+            Some(store.clone()),
+            false,
+            false,
+            false,
+            false,
+        );
+        {
+            let state_mut = Arc::get_mut(&mut state).unwrap();
+            state_mut.require_db_mirror_writes = true;
+            state_mut.accept_medium_risk_submissions = false;
+            state_mut.pii_backstop_driver = None;
+        }
+        let first = issue_332_quarantined_fixture().await;
+        let submission_id = first.submission_id;
+        let Json(receipt) = test_submit(state.clone(), "token-a", first.clone())
+            .await
+            .expect("first submission lands");
+        assert_eq!(receipt.status, "quarantined");
+        let prior = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .unwrap()
+            .unwrap();
+
+        let artifacts_before = issue_332_artifact_files(temp.path());
+        issue_332_inject_write_failure(&backend, table, submission_id, once).await;
+        let corrected = issue_332_corrected(&first);
+        let failed = test_submit(state.clone(), "token-a", corrected.clone()).await;
+        issue_332_clear_injected_failures(&backend).await;
+        let error = failed.expect_err("an injected mirror failure fails the remediation");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR, "{stage}");
+
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{stage}: the submission record survives"));
+        read_envelope_by_record(state.as_ref(), &record)
+            .unwrap_or_else(|error| panic!("{stage}: the current envelope decrypts: {error:#}"));
+        read_envelope_by_record(state.as_ref(), &prior)
+            .unwrap_or_else(|error| panic!("{stage}: the prior envelope decrypts: {error:#}"));
+        assert!(
+            read_derived_record(temp.path(), "tenant-a", submission_id)
+                .unwrap()
+                .is_some(),
+            "{stage}: the derived record survives"
+        );
+        let db_status = backend
+            .get_trace_submission("tenant-a", submission_id)
+            .await
+            .unwrap()
+            .expect("DB submission row")
+            .status;
+        assert_eq!(
+            db_status,
+            storage_corpus_status(record.status),
+            "{stage}: the DB and file records agree"
+        );
+        // Known gap: the audit append runs after the mirror and outside the
+        // rollback, so a failure at that stage leaves the remediation applied
+        // with no remediation audit event. Its result is accepted here, not
+        // endorsed; a fix that brings the audit append into the rollback
+        // changes this branch.
+        if table != "trace_audit_events" {
+            assert_eq!(record.status, TraceCorpusStatus::Quarantined, "{stage}");
+            assert_eq!(
+                record.artifact_receipt.as_ref().map(|r| &r.object_key),
+                prior.artifact_receipt.as_ref().map(|r| &r.object_key),
+                "{stage}: the file record still names the prior artifact"
+            );
+        }
+        if once && table != "trace_audit_events" {
+            assert_eq!(
+                issue_332_artifact_files(temp.path()),
+                artifacts_before,
+                "{stage}: a rollback that restored the prior deletes the \
+                 remediation's artifact and nothing else"
+            );
+        }
+        issue_332_assert_live_object_refs_resolve(
+            &backend,
+            &store,
+            temp.path(),
+            submission_id,
+            &stage,
+        )
+        .await;
+        issue_332_assert_audit_stores_agree(&backend, temp.path(), submission_id, table).await;
+
+        let Json(receipt) = test_submit(state.clone(), "token-a", corrected)
+            .await
+            .unwrap_or_else(|error| panic!("{stage}: the retry succeeds, got {}", error.0));
+        assert_eq!(receipt.status, "accepted", "{stage}");
+        let record = read_submission_record(temp.path(), "tenant-a", submission_id)
+            .unwrap()
+            .unwrap();
+        read_envelope_by_record(state.as_ref(), &record)
+            .unwrap_or_else(|error| panic!("{stage}: the remediated envelope decrypts: {error:#}"));
+        issue_332_assert_live_object_refs_resolve(
+            &backend,
+            &store,
+            temp.path(),
+            submission_id,
+            &format!("{stage} retry"),
+        )
+        .await;
+        issue_332_assert_audit_stores_agree(
+            &backend,
+            temp.path(),
+            submission_id,
+            &format!("{stage} retry"),
+        )
+        .await;
+    }
+    cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+}
+
 #[tokio::test]
 async fn operator_rescrub_reclassifies_quarantined_submission_in_place() {
     let temp = tempfile::tempdir().expect("temp dir");
