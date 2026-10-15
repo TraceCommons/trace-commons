@@ -224,7 +224,7 @@ public sealed class PublicProfileCopyTests
 
         Assert.Equal(
             "Your traces or anything in them. Per-trace data of any kind. Anything about "
-            + "sessions you didn't send.",
+            + "traces you didn't send.",
             PublicProfileCopy.NeverBody);
 
         Assert.Equal("On the roster since March 4, 2026", PublicProfileCopy.OnRosterSince("March 4, 2026"));

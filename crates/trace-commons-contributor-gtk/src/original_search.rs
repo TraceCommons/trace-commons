@@ -13,7 +13,7 @@
 //!
 //! `Unknown` exists so a failed call never renders as a clean result. There
 //! is exactly one direction this module must not fail in, and it is
-//! reporting "not in this session" about a value that is in it.
+//! reporting "not in this trace" about a value that is in it.
 
 /// What a search found, once both counts are in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,7 +160,7 @@ mod tests {
         ));
     }
 
-    /// Reporting "not in this session" because a call failed would be the
+    /// Reporting "not in this trace" because a call failed would be the
     /// single most dangerous wrong answer this tab can give.
     #[test]
     fn a_failed_original_search_is_unknown_not_absent() {
@@ -189,7 +189,7 @@ mod tests {
     fn the_sentences_say_which_case_it_is() {
         assert_eq!(
             sentence(&Outcome::Absent),
-            "0 matches \u{2014} not in this session"
+            "0 matches \u{2014} not in this trace"
         );
         assert_eq!(
             sentence(&Outcome::AllRemoved(3)),
@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn the_unknown_sentence_does_not_claim_the_value_is_absent() {
         let said = sentence(&Outcome::Unknown);
-        assert!(!said.contains("not in this session"), "{said}");
+        assert!(!said.contains("not in this trace"), "{said}");
         assert!(said.to_lowercase().contains("couldn't"), "{said}");
     }
 }

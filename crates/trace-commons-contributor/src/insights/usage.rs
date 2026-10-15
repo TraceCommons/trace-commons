@@ -25,10 +25,16 @@ pub enum NativeTokenCounts {
         reasoning_output: u64,
         total: u64,
     },
+    /// Claude's cache categories are independent input categories. The
+    /// 5-minute and 1-hour writes are stated by the record; their sum is
+    /// `cache_creation_input`, which `validate_accounting` checks. The split
+    /// arrived with usage evidence schema 2.
     ClaudeCode {
         input: u64,
         cache_read_input: u64,
         cache_creation_input: u64,
+        cache_creation_5m: u64,
+        cache_creation_1h: u64,
         output: u64,
     },
 }
@@ -39,6 +45,16 @@ pub struct InvalidTokenAccounting;
 
 impl NativeTokenCounts {
     pub fn validate_accounting(&self) -> std::result::Result<(), InvalidTokenAccounting> {
+        if let Self::ClaudeCode {
+            cache_creation_input,
+            cache_creation_5m,
+            cache_creation_1h,
+            ..
+        } = *self
+            && cache_creation_5m.checked_add(cache_creation_1h) != Some(cache_creation_input)
+        {
+            return Err(InvalidTokenAccounting);
+        }
         if let Self::Codex {
             input,
             cached_input,
@@ -99,6 +115,7 @@ impl NativeTokenCounts {
                 cache_read_input,
                 cache_creation_input,
                 output,
+                ..
             } => {
                 // Each category can be valid on its own even if their sum does
                 // not fit u64. Monetary aggregation must use checked wide math.
@@ -159,42 +176,47 @@ fn model_label(value: Option<&Value>) -> Option<String> {
     .then(|| text.to_owned())
 }
 
+/// Counter positions: Codex `[input, cached, output, reasoning, total]`;
+/// Claude `[input, cache_read, output, cache_5m, cache_1h]`, read through the
+/// one Claude rule in `source::claude_code`.
 fn counts(source: UsageSource, value: &Value) -> Option<[u64; 5]> {
-    let keys = match source {
-        UsageSource::Codex => [
-            "input_tokens",
-            "cached_input_tokens",
-            "output_tokens",
-            "reasoning_output_tokens",
-            "total_tokens",
-        ],
-        UsageSource::ClaudeCode => [
-            "input_tokens",
-            "cache_read_input_tokens",
-            "output_tokens",
-            "cache_creation_input_tokens",
-            "input_tokens",
-        ],
-    };
-    let mut result = [0; 5];
-    for (i, key) in keys.iter().enumerate() {
-        result[i] = value.get(key)?.as_u64()?;
-    }
-    if source == UsageSource::Codex {
-        NativeTokenCounts::Codex {
-            input: result[0],
-            cached_input: result[1],
-            output: result[2],
-            reasoning_output: result[3],
-            total: result[4],
+    match source {
+        UsageSource::Codex => {
+            let mut result = [0; 5];
+            for (i, key) in [
+                "input_tokens",
+                "cached_input_tokens",
+                "output_tokens",
+                "reasoning_output_tokens",
+                "total_tokens",
+            ]
+            .iter()
+            .enumerate()
+            {
+                result[i] = value.get(key)?.as_u64()?;
+            }
+            NativeTokenCounts::Codex {
+                input: result[0],
+                cached_input: result[1],
+                output: result[2],
+                reasoning_output: result[3],
+                total: result[4],
+            }
+            .validate_accounting()
+            .ok()?;
+            Some(result)
         }
-        .validate_accounting()
-        .ok()?;
+        UsageSource::ClaudeCode => {
+            let stated = crate::source::claude_code::claude_stated_usage(value)?;
+            Some([
+                u64::from(stated.input),
+                u64::from(stated.cache_read),
+                u64::from(stated.output),
+                u64::from(stated.cache_write_5m),
+                u64::from(stated.cache_write_1h),
+            ])
+        }
     }
-    if source == UsageSource::ClaudeCode {
-        result[4] = 0;
-    }
-    Some(result)
 }
 
 /// Extract only explicitly supplied JSONL, bounded to the local importer limit.
@@ -330,21 +352,26 @@ pub fn extract_usage(source: UsageSource, bytes: &[u8]) -> Result<UsageSummary> 
     summary.unavailable_reason =
         problem.or_else(|| latest.is_none().then_some(UsageUnavailableReason::NoUsage));
     if summary.unavailable_reason.is_none() {
-        summary.counts = latest.map(|v| match source {
-            UsageSource::Codex => NativeTokenCounts::Codex {
+        summary.counts = latest.and_then(|v| match source {
+            UsageSource::Codex => Some(NativeTokenCounts::Codex {
                 input: v[0],
                 cached_input: v[1],
                 output: v[2],
                 reasoning_output: v[3],
                 total: v[4],
-            },
-            UsageSource::ClaudeCode => NativeTokenCounts::ClaudeCode {
+            }),
+            UsageSource::ClaudeCode => Some(NativeTokenCounts::ClaudeCode {
                 input: v[0],
                 cache_read_input: v[1],
                 output: v[2],
-                cache_creation_input: v[3],
-            },
+                cache_creation_input: v[3].checked_add(v[4])?,
+                cache_creation_5m: v[3],
+                cache_creation_1h: v[4],
+            }),
         });
+        if latest.is_some() && summary.counts.is_none() {
+            summary.unavailable_reason = Some(UsageUnavailableReason::Overflow);
+        }
     }
     Ok(summary)
 }
@@ -376,6 +403,8 @@ mod tests {
                     input: 0,
                     cache_read_input: 0,
                     cache_creation_input: 0,
+                    cache_creation_5m: 0,
+                    cache_creation_1h: 0,
                     output: 0,
                 },
                 PricingAccounting::ClaudeCode,
@@ -447,6 +476,8 @@ mod tests {
             input: 3,
             cache_read_input: 100,
             cache_creation_input: 50,
+            cache_creation_5m: 20,
+            cache_creation_1h: 30,
             output: 7,
         };
         assert_eq!(
@@ -462,6 +493,8 @@ mod tests {
             input: u64::MAX,
             cache_read_input: u64::MAX,
             cache_creation_input: u64::MAX,
+            cache_creation_5m: u64::MAX,
+            cache_creation_1h: 0,
             output: u64::MAX,
         };
         assert_eq!(large.accounting_components().unwrap().len(), 4);
@@ -481,7 +514,79 @@ mod tests {
         json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":input,"cached_input_tokens":input/2,"output_tokens":output,"reasoning_output_tokens":output/2,"total_tokens":input+output},"last_token_usage":{"input_tokens":999}}}})
     }
     fn claude(id: &str, input: u64) -> Value {
-        json!({"type":"assistant","message":{"id":id,"model":"claude-sonnet-4","content":[{"type":"tool_use","id":"synthetic"}],"usage":{"input_tokens":input,"output_tokens":4,"cache_read_input_tokens":10,"cache_creation_input_tokens":20}}})
+        json!({"type":"assistant","message":{"id":id,"model":"claude-sonnet-4","content":[{"type":"tool_use","id":"synthetic"}],"usage":{"input_tokens":input,"output_tokens":4,"cache_read_input_tokens":10,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":15,"ephemeral_1h_input_tokens":5}}}})
+    }
+    #[test]
+    fn claude_counts_carry_the_5m_and_1h_split() {
+        assert_eq!(
+            run(
+                UsageSource::ClaudeCode,
+                vec![claude("a", 3), claude("b", 7)]
+            )
+            .counts,
+            Some(NativeTokenCounts::ClaudeCode {
+                input: 10,
+                cache_read_input: 20,
+                cache_creation_input: 40,
+                cache_creation_5m: 30,
+                cache_creation_1h: 10,
+                output: 8
+            })
+        );
+    }
+    /// `source::claude_code::claude_stated_usage` is the one rule: an old
+    /// record with writes but no split, a split that does not sum, and a
+    /// non-standard tier, speed or geo are all unknown, never guessed.
+    #[test]
+    fn claude_counts_follow_the_authoritative_stated_usage_rule() {
+        let mut no_split = claude("a", 1);
+        no_split["message"]["usage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_creation");
+        let mut bad_sum = claude("a", 1);
+        bad_sum["message"]["usage"]["cache_creation"]["ephemeral_1h_input_tokens"] = json!(6);
+        let mut priority = claude("a", 1);
+        priority["message"]["usage"]["service_tier"] = json!("priority");
+        let mut fast = claude("a", 1);
+        fast["message"]["usage"]["speed"] = json!("fast");
+        let mut pinned = claude("a", 1);
+        pinned["message"]["usage"]["inference_geo"] = json!("us");
+        for row in [no_split, bad_sum, priority, fast, pinned] {
+            let summary = run(UsageSource::ClaudeCode, vec![row]);
+            assert_eq!(summary.complete_records, 0);
+            assert!(summary.counts.is_none());
+            assert_eq!(
+                summary.unavailable_reason,
+                Some(UsageUnavailableReason::IncompleteOrInvalidUsage)
+            );
+        }
+        let mut zero_writes = claude("a", 1);
+        zero_writes["message"]["usage"]["cache_creation_input_tokens"] = json!(0);
+        zero_writes["message"]["usage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_creation");
+        zero_writes["message"]["usage"]["service_tier"] = json!("standard");
+        zero_writes["message"]["usage"]["inference_geo"] = json!("not_available");
+        assert!(
+            run(UsageSource::ClaudeCode, vec![zero_writes])
+                .counts
+                .is_some()
+        );
+    }
+    #[test]
+    fn claude_split_must_sum_to_the_creation_total() {
+        let counts = NativeTokenCounts::ClaudeCode {
+            input: 1,
+            cache_read_input: 1,
+            cache_creation_input: 5,
+            cache_creation_5m: 3,
+            cache_creation_1h: 1,
+            output: 1,
+        };
+        assert_eq!(counts.validate_accounting(), Err(InvalidTokenAccounting));
+        assert!(counts.accounting_components().is_err());
     }
     #[test]
     fn codex_cumulative_is_not_summed_or_cache_counted_twice() {
@@ -545,6 +650,8 @@ mod tests {
                 input: 10,
                 cache_read_input: 20,
                 cache_creation_input: 40,
+                cache_creation_5m: 30,
+                cache_creation_1h: 10,
                 output: 8
             })
         );
@@ -567,15 +674,18 @@ mod tests {
                 .is_none()
         );
     }
+    /// A per-record count is stated as `u32` under the authoritative rule,
+    /// so one past that range is unknown rather than saturated or summed.
     #[test]
-    fn overflow_is_unknown_not_saturated() {
+    fn out_of_range_count_is_unknown_not_saturated() {
+        let summary = run(
+            UsageSource::ClaudeCode,
+            vec![claude("a", u64::MAX), claude("b", 1)],
+        );
+        assert!(summary.counts.is_none());
         assert_eq!(
-            run(
-                UsageSource::ClaudeCode,
-                vec![claude("a", u64::MAX), claude("b", 1)]
-            )
-            .unavailable_reason,
-            Some(UsageUnavailableReason::Overflow)
+            summary.unavailable_reason,
+            Some(UsageUnavailableReason::IncompleteOrInvalidUsage)
         );
     }
     #[test]

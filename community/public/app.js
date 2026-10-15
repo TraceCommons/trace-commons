@@ -701,7 +701,7 @@ sh install.sh</code></pre>
         <h2>macOS</h2>
         <p class="install-label">Desktop app</p>
         <pre class="install-code"><code>brew uninstall --cask trace-commons</code></pre>
-        <p class="install-note">Installed from the DMG instead, quit it and move <code>TraceCommons.app</code> to the Trash. Turn off run-at-login first, or clear the leftover row in System Settings, General, Login Items.</p>
+        <p class="install-note">Installed from the DMG instead, quit it and move <code>Near.ai.app</code> (<code>TraceCommons.app</code> if you installed before the rename) to the Trash. Turn off run-at-login first, or clear the leftover row in System Settings, General, Login Items.</p>
         <p class="install-label">Command-line contributor</p>
         <pre class="install-code"><code>brew uninstall trace-commons-contributor</code></pre>
         <p class="install-note">From the shell installer instead, delete <code>~/.local/bin/trace-commons-contributor</code>. State lives in <code>~/Library/Application Support/trace-commons</code>.</p>

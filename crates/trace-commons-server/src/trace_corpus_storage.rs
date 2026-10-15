@@ -1034,7 +1034,16 @@ const ALLOWLISTED_STATUS_REASONS: &[&str] = &[
     // the contributor's receipt reports. It is NOT a claim that the trace is
     // clean, and nothing may read it as one.
     WITNESS_ADMITTED_STATUS_REASON,
+    // #1346: the submission's pipeline run ended `failed` before Review
+    // decided it, so the trace was never scored.
+    PIPELINE_PROCESSING_FAILED_STATUS_REASON,
 ];
+
+/// Status reason recorded when a pipeline run ended `failed` while its
+/// submission was still `received` (#1346): the same transaction moves the
+/// submission to `rejected` under this label. It says the trace was not
+/// processed, not that anything was found in it.
+pub const PIPELINE_PROCESSING_FAILED_STATUS_REASON: &str = "pipeline_processing_failed";
 
 /// Status reason recorded when an attested redaction witness admitted a
 /// submission in place of the server's queued PII-backstop re-check.
@@ -1171,6 +1180,7 @@ pub enum TraceTenantAccessGrantRole {
     RevocationWorker,
     CompetitionReadWorker,
     RegisterStatsWorker,
+    AccountTrustWorker,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2241,6 +2251,17 @@ impl DedupSignalRow {
     pub fn effective_signal_version(&self) -> &str {
         effective_dedup_signal_version(self.dedup_signal_version.as_deref())
     }
+}
+
+/// One decision row's identifiers and time, newest first, as the credit
+/// estimate eval enumerates them (through the narrow `trace_gate_driver`
+/// pool, no tenant GUC, every column granted by V45).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateDecisionKeyRow {
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+    pub decision_id: Uuid,
+    pub decided_at: DateTime<Utc>,
 }
 
 /// One decision row as the dedup re-derivation pass enumerates it (through
@@ -3832,6 +3853,35 @@ pub trait TraceCorpusStore: Send + Sync {
         _limit: i64,
     ) -> Result<Vec<Uuid>, DatabaseError> {
         Ok(Vec::new())
+    }
+
+    /// Record the post-backstop privacy summary on one RELEASED submission:
+    /// its `privacy_risk`, `redaction_counts` and `canonical_summary_hash`,
+    /// and nothing else.
+    ///
+    /// This is the remediation write for submissions the PII backstop released
+    /// before it recorded these itself (GHSA-q7pr-c684-grrq). It is a narrow
+    /// UPDATE rather than `upsert_trace_submission` on purpose: the upsert
+    /// rewrites `status` from the caller, so a pass racing a revocation could
+    /// put a revoked row back to accepted. Implementations MUST touch only a
+    /// row that is still `accepted` or `quarantined` and neither revoked nor
+    /// purged, and return the number of rows updated (0 when the row has moved
+    /// on, which the caller treats as "skip this submission").
+    ///
+    /// The default returns a "not implemented" error -- only the production
+    /// Postgres backend has a real implementation today.
+    async fn record_released_submission_privacy_summary(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _privacy_risk: &str,
+        _redaction_counts: &BTreeMap<String, u32>,
+        _canonical_summary_hash: &str,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Query(
+            "record_released_submission_privacy_summary not implemented for this backend"
+                .to_string(),
+        ))
     }
 
     /// Clear the PII-backstop attempt budget for one submission, so a

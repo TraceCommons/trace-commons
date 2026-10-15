@@ -45,8 +45,10 @@ enum SettingsLegacyWords {
     static func sessionFinishedAfter(_ secs: Int) -> String {
         fill(words?.sessionFinishedAfter, ["seconds": String(secs)])
     }
+    /// The core's singular at one hour, so it never reads "every 1 hours".
     static func atMostOneNotification(_ hours: Int) -> String {
-        fill(words?.atMostOneNotification, ["hours": String(hours)])
+        fill(hours == 1 ? words?.atMostOneNotificationOne : words?.atMostOneNotification,
+             ["hours": String(hours)])
     }
     static func undecidedDropped(_ days: Int) -> String {
         fill(words?.undecidedDropped, ["days": String(days)])
@@ -118,6 +120,9 @@ enum ActionNoticeWords {
     /// can be put away; nil when the core's copy does not decode, and the
     /// caller falls back to `dismissWord`.
     static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismissAction
+    /// The dismiss-all word over the notices above the tabs; nil when the core's
+    /// table cannot be read.
+    static let coreDismissAllWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismissAll
 
     /// The dismiss control's name when the whole table does not decode: the
     /// same core word, read from its one key, so a glass notice still names

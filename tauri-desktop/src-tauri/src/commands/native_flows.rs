@@ -240,6 +240,11 @@ mod tests {
         assert!(value["model_scrubbed"].is_null());
         assert_eq!(value["patterns_only"]["scope"], AUTO_PATTERNS_ONLY_SCOPE);
         assert_eq!(value["no_review"], AUTO_NO_REVIEW);
+        // The one sentence crosses with the long form (owner, 2026-10-12).
+        assert_eq!(
+            value["summary"],
+            trace_commons_contributor::consent_copy::AUTO_SUMMARY_PATTERNS_ONLY
+        );
         let wire = value.to_string();
         for sentence in [AUTO_SCRUB_SCOPE, AUTO_SCRUB_LIMIT] {
             let escaped = serde_json::to_string(sentence).unwrap();

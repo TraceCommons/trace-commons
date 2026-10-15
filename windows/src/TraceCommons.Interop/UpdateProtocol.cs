@@ -186,7 +186,7 @@ public static class UpdateProtocol
             TcUpdateAvailability.Required =>
                 "A required update is ready to install.",
             TcUpdateAvailability.NoUpdates =>
-                "Trace Commons is up to date.",
+                "Near.ai is up to date.",
             TcUpdateAvailability.Unknown =>
                 "Updates are not managed for this installation.",
             _ =>

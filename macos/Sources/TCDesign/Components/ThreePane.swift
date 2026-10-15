@@ -313,8 +313,10 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
             host.window = window
             onFirstLayout?(window.screen?.visibleFrame.width ?? window.frame.width)
         }.frame(width: 0, height: 0))
+        // On the next turn: `.onChange` runs inside SwiftUI's update, and a
+        // window frame set there re-enters the window's layout pass.
         .onChange(of: wanted) { _, new in
-            move(to: new)
+            GlassWindowFrame.onNextTurn { move(to: new) }
         }
     }
 

@@ -77,6 +77,9 @@ pub enum SessionCommand {
 #[derive(Deserialize)]
 pub struct Snapshot {
     pub accounts: Vec<AccountView>,
+    /// Derived from the NEAR AI sign-in, never saved; empty without one.
+    #[serde(default)]
+    pub sign_in_accounts: Vec<AccountView>,
     pub defaults: Vec<Selection>,
     pub generations: std::collections::BTreeMap<ToolId, Generation>,
 }
@@ -105,6 +108,7 @@ pub fn resolve(
     let candidates: Vec<_> = snapshot
         .accounts
         .iter()
+        .chain(&snapshot.sign_in_accounts)
         .filter(|a| a.tool == tool && connection.is_none_or(|c| a.connection == c))
         .collect();
     if let Some(name) = name {
@@ -126,6 +130,7 @@ pub fn resolve(
         return snapshot
             .accounts
             .iter()
+            .chain(&snapshot.sign_in_accounts)
             .find(|a| a.id == selection.account_id)
             .cloned()
             .ok_or(ManagedError::NotFound);
@@ -213,7 +218,10 @@ pub async fn accounts(
         }
         return login(store, &account, json_output).await;
     }
-    let snapshot: Snapshot = call(store, "managed_snapshot", json!({}))?;
+    let mut snapshot: Snapshot = call(store, "managed_snapshot", json!({}))?;
+    // Saved accounts only: a sign-in entry cannot be renamed, removed,
+    // reconnected or saved as a default.
+    snapshot.sign_in_accounts.clear();
     let (name, tool) = match &command {
         AccountCommand::Rename { account, tool, .. }
         | AccountCommand::Reconnect { account, tool }

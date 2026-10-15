@@ -394,7 +394,7 @@ fn build_choice(
 ///
 /// Every known source is matched explicitly. The arm this replaced sent
 /// anything unrecognised to the Claude Code title, so when a third source
-/// appeared the screen offered two rows both called "Claude Code sessions",
+/// appeared the screen offered two rows both called "Claude Code traces",
 /// one of them pointing at `~/.gemini/tmp`. Agreeing to a store under another
 /// store's name is not agreeing, and a fallback that reads as a safe default
 /// is how that shipped.
@@ -463,7 +463,7 @@ mod tests {
 
     #[test]
     fn an_absent_store_says_so_rather_than_reporting_zero_sessions() {
-        // "0 sessions" and "the folder isn't there" are different facts and
+        // "0 traces" and "the folder isn't there" are different facts and
         // lead to different answers.
         let line = evidence_line(&candidate("claude-code", 0, false));
         assert_eq!(line, copy::ROOTS_ABSENT);
@@ -479,7 +479,7 @@ mod tests {
     #[test]
     fn a_populated_store_reports_its_count() {
         let line = evidence_line(&candidate("claude-code", 946, true));
-        assert!(line.contains("946 sessions"), "got: {line}");
+        assert!(line.contains("946 traces"), "got: {line}");
     }
 
     #[test]
@@ -501,7 +501,7 @@ mod tests {
     /// Titles must be distinct, because this label is the only thing naming
     /// the store a contributor is agreeing to. A catch-all arm previously sent
     /// Gemini to the Claude Code title, so the screen offered two rows both
-    /// called "Claude Code sessions", one of them pointing at ~/.gemini/tmp.
+    /// called "Claude Code traces", one of them pointing at ~/.gemini/tmp.
     /// Agreeing to a store under another store's name is not agreeing.
     #[test]
     fn no_two_sources_share_a_title() {

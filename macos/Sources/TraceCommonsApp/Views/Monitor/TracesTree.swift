@@ -9,7 +9,7 @@ import TCShellCore
 /// hierarchy). A folder can hold sessions from several tools, so each
 /// session row shows its own tool. Folders are ordered by their most recent
 /// waiting session, then by name. Ignored folders are drawn, with a switch
-/// back to Ask me, while the View menu's "Show ignored folders" asks
+/// back to Ask, while the View menu's "Show ignored folders" asks
 /// for them (Ron's shell, #1146 `showIgnored`, shown by default).
 ///
 /// `tools` and `unplaced` are the per-tool aggregate the flow map draws (and
@@ -34,6 +34,37 @@ import TCShellCore
 ///   drawn under its shared name, never its `unknown-project` slug, and is
 ///   never offered automatic.
 struct TracesTree: Equatable {
+    /// The tree narrowed to `query` (the Traces search): a folder whose
+    /// label or path holds it keeps every session; otherwise a folder keeps
+    /// the sessions whose title, folder label or tool holds it, and a folder
+    /// left with none is dropped. Case and diacritics are ignored; a blank
+    /// query is the whole tree.
+    func matching(_ query: String) -> TracesTree {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return self }
+        func has(_ text: String?) -> Bool {
+            guard let text else { return false }
+            return text.range(of: needle, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
+        func narrowed(_ folder: FolderNode) -> FolderNode? {
+            if has(folder.label) || has(folder.path) { return folder }
+            var kept = folder
+            kept.sessions = folder.sessions.filter {
+                has($0.title) || has($0.projectLabel) || has(SourceKind(rawValue: $0.source)?.displayName)
+            }
+            return kept.sessions.isEmpty ? nil : kept
+        }
+        var result = self
+        result.folders = folders.compactMap(narrowed)
+        result.unplaced = unplaced.compactMap(narrowed)
+        result.tools = tools.compactMap { tool in
+            var kept = tool
+            kept.folders = tool.folders.compactMap(narrowed)
+            return kept.folders.isEmpty ? nil : kept
+        }
+        return result
+    }
+
     var tools: [ToolNode]
     /// Folders no session places under a tool yet (K11).
     var unplaced: [FolderNode]
@@ -116,12 +147,21 @@ struct TracesTree: Equatable {
 
     /// `scansWhenUnset` is the tools the core reads from their usual folder
     /// while unset, from its source copy (`unset_scans_conventional`).
+    ///
+    /// `keepsOrder` draws the entries in the order the core listed them (an
+    /// order chosen with the Traces order control, `list_pending {order}`):
+    /// folders by their first listed session, sessions as listed, folders
+    /// with nothing waiting after them. Otherwise, newest first as always.
+    /// `onlyWithSessions` leaves out folders with nothing listed, for a list
+    /// the core narrowed (the idle filter).
     static func build(
         entries: [DaemonData.QueueEntry],
         projects: [ProjectRow],
         settings: DaemonData.Settings?,
         scansWhenUnset: Set<SourceKind>,
-        showsIgnored: Bool = false
+        showsIgnored: Bool = false,
+        keepsOrder: Bool = false,
+        onlyWithSessions: Bool = false
     ) -> TracesTree {
         var folders: [String: FolderNode] = [:]
         var order: [String] = []
@@ -151,7 +191,10 @@ struct TracesTree: Equatable {
         var drawn: [FolderNode] = []
         for id in order {
             guard var node = folders[id], showsIgnored || node.mode != .ignore else { continue }
-            node.sessions.sort { ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast) }
+            if onlyWithSessions && node.sessions.isEmpty { continue }
+            if !keepsOrder {
+                node.sessions.sort { ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast) }
+            }
             drawn.append(node)
             if let kind = majorityTool(node.sessions) {
                 byTool[kind, default: []].append(node)
@@ -168,7 +211,20 @@ struct TracesTree: Equatable {
         }
         .sorted { $0.waiting > $1.waiting }
 
-        return TracesTree(tools: tools, unplaced: unplaced, folders: ordered(drawn))
+        return TracesTree(
+            tools: tools, unplaced: unplaced,
+            folders: keepsOrder ? listedOrder(drawn, entries: entries) : ordered(drawn))
+    }
+
+    /// Folders in the order their first session was listed; folders with
+    /// nothing listed after them, by name, as `ordered` places them.
+    static func listedOrder(_ folders: [FolderNode], entries: [DaemonData.QueueEntry]) -> [FolderNode] {
+        var rank: [String: Int] = [:]
+        for (index, entry) in entries.enumerated() where rank[entry.projectId] == nil {
+            rank[entry.projectId] = index
+        }
+        let listed = folders.filter { rank[$0.id] != nil }.sorted { (rank[$0.id] ?? .max) < (rank[$1.id] ?? .max) }
+        return listed + ordered(folders.filter { rank[$0.id] == nil })
     }
 
     /// Newest waiting session first; folders with nothing waiting after

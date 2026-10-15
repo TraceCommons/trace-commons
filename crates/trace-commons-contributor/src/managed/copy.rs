@@ -2,6 +2,20 @@
 //!
 //! The buttons `launch`, `use_default`, `reconnect` and `save_login`:
 //! Approved 2026-10-08 (button rule). `launch_title` keeps the launch dialog's full title.
+//!
+//! Sessions on the NEAR AI sign-in. Approved 2026-10-12:
+//! - `start_claude` "Start Claude Code"
+//! - `start_codex` "Start Codex"
+//! - `sign_in_scope` "Uses your NEAR AI sign-in. Runs in {destination}, in the
+//!   folder you choose." Shells fill `{destination}` from
+//!   `capabilities.terminal_destination`, as for `launch_scope`, so Windows
+//!   never reads "Terminal".
+//! - `sign_in_needed` "Sign in to NEAR AI to start a session." Also the line
+//!   a shell shows for the refusal `managed-near-ai-sign-in-required`.
+//! - `sign_in_near_ai` "Sign in" -- the button that starts the NEAR AI
+//!   sign-in.
+//! - `sign_in_near_ai_accessibility` "Sign in to NEAR AI" -- its accessible
+//!   name.
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "Managed sessions",
@@ -65,6 +79,7 @@ pub fn copy() -> serde_json::Value {
             "launch_unknown": "Refresh, then try again.",
             "action_failed": "That didn't work. Try again.",
             "accounts_title": "Saved accounts",
+            "accounts_refresh_accessibility": "Refresh saved accounts",
             "state_starting": "Starting",
             "state_running": "Running",
             "state_exited": "Exited",
@@ -73,7 +88,13 @@ pub fn copy() -> serde_json::Value {
             "auth_sign_in_required": "Needs sign-in",
             "auth_checking": "Checking",
             "auth_ready": "Ready",
-            "auth_unavailable": "Unavailable"
+            "auth_unavailable": "Unavailable",
+            "start_claude": "Start Claude Code",
+            "start_codex": "Start Codex",
+            "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
+            "sign_in_needed": "Sign in to NEAR AI to start a session.",
+            "sign_in_near_ai": "Sign in",
+            "sign_in_near_ai_accessibility": "Sign in to NEAR AI"
     }"#).expect("static managed copy is valid JSON")
 }
 
@@ -85,6 +106,35 @@ mod tests {
     fn key(prefix: &str, value: impl serde::Serialize) -> String {
         let value = serde_json::to_value(value).expect("enum serializes");
         format!("{prefix}_{}", value.as_str().expect("unit variant"))
+    }
+
+    /// The saved accounts' refresh icon says what it re-reads to assistive
+    /// tech, as the core's words rather than a shell's join.
+    #[test]
+    fn the_accounts_refresh_has_its_own_accessible_name() {
+        let copy = copy();
+        assert_eq!(
+            copy["accounts_refresh_accessibility"],
+            "Refresh saved accounts"
+        );
+    }
+
+    /// The NEAR AI sign-in launch reads these words, exactly as proposed.
+    #[test]
+    fn the_sign_in_launch_has_its_words() {
+        let copy = copy();
+        assert_eq!(copy["start_claude"], "Start Claude Code");
+        assert_eq!(copy["start_codex"], "Start Codex");
+        assert_eq!(
+            copy["sign_in_scope"],
+            "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose."
+        );
+        assert_eq!(
+            copy["sign_in_needed"],
+            "Sign in to NEAR AI to start a session."
+        );
+        assert_eq!(copy["sign_in_near_ai"], "Sign in");
+        assert_eq!(copy["sign_in_near_ai_accessibility"], "Sign in to NEAR AI");
     }
 
     /// Every lifecycle and sign-in state a shell can be sent has a label,

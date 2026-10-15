@@ -198,7 +198,7 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let moreAbout: String
         public let start: String
         /// Start's failures, one per call that can stop it, and the refused
-        /// grant, which finishes on Ask me.
+        /// grant, which finishes on Ask.
         public let sharingRefused: String
         public let scopesFailed: String
         public let rulesFailed: String

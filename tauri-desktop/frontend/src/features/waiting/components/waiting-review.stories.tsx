@@ -41,18 +41,18 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 const outcomeCopy = {
-  verdict_question: "Did this session do what you asked?",
+  verdict_question: "Did this trace do what you asked?",
   worked: "Worked",
   partly: "Partly",
   failed: "Failed",
-  verdict_caption: "Optional. This is recorded as the trace outcome; the preview above does not show it.",
+  verdict_caption: "Optional. Recorded with the trace; not shown in the preview.",
   correction_question: "What did it get wrong?",
   correction_placeholder: "Optional",
   correction_caption: "Stored exactly as you write it. This correction is not scrubbed.",
   correction_credential_headline: "Nothing was sent. Your correction looks like it contains a credential.",
   correction_credential_body: "Remove credential, rotate it, and submit again.",
   submit_all_as: "Submit all as...",
-  submit_all_as_tooltip: "Record the same outcome for every session in this group.",
+  submit_all_as_tooltip: "Record the same outcome for every trace in this group.",
   max_correction_chars: 2000,
 };
 

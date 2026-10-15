@@ -31,7 +31,7 @@ Developer ID launch, Apple platform passkey origin behavior or successful login.
 Run the release checks against the actual Developer ID signed native bundle:
 
 ```bash
-scripts/ci/verify-macos-entitlements.sh /path/to/TraceCommons.app
+scripts/ci/verify-macos-entitlements.sh /path/to/Near.ai.app
 scripts/check-aasa.sh https://tracecommons.ai KXSWJN7WY8.ai.tracecommons.shell
 ```
 

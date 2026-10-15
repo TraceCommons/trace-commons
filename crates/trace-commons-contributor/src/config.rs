@@ -65,6 +65,10 @@ pub const LEGACY_INVITE_LINK_FILE: &str = "legacy-invite-link.json";
 /// without asking the issuer or the contributor. A hash, never the code.
 /// Swept by `wipe()`.
 pub const INVITE_SUBJECT_FILE: &str = "invite-subject.json";
+/// A legacy invite move the server refused for good (a pooled tenant), so
+/// the daemon stops offering it (`daemon::legacy_migration`). Hashes only;
+/// belongs to this enrollment and swept by `wipe()`.
+pub const LEGACY_INVITE_REFUSAL_FILE: &str = "legacy-invite-refusal.json";
 /// The passkeys used on this Mac, remembered for the first run's "Welcome
 /// back" (`daemon::remembered_passkeys`). Names and account hashes only.
 /// Survives sign-out; swept by `wipe()`.
@@ -84,12 +88,13 @@ pub const DAEMON_APPROVED_ENVELOPE_PREFIX: &str = "daemon-approved-envelope-";
 /// itself), settings, folder rules and the queue (the person's choices about
 /// this Mac, not about an account), the NEAR AI notice marker, and the
 /// remembered passkeys (a passkey is not an enrollment).
-pub(crate) const ENROLLMENT_FILES: [&str; 5] = [
+pub(crate) const ENROLLMENT_FILES: [&str; 6] = [
     CONFIG_FILE,
     DAEMON_INFERENCE_CONNECTION_FILE,
     IDENTITY_SWITCH_JOURNAL_FILE,
     LEGACY_INVITE_LINK_FILE,
     INVITE_SUBJECT_FILE,
+    LEGACY_INVITE_REFUSAL_FILE,
 ];
 /// Runtime files, not persistent state: removed on shutdown, not by `wipe()`.
 pub const DAEMON_SOCK_FILE: &str = "daemon.sock";
@@ -1281,6 +1286,7 @@ impl ConfigStore {
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
             INVITE_SUBJECT_FILE,
+            LEGACY_INVITE_REFUSAL_FILE,
             REMEMBERED_PASSKEYS_FILE,
         ] {
             let path = self.dir.join(name);
@@ -1306,6 +1312,7 @@ impl ConfigStore {
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
             INVITE_SUBJECT_FILE,
+            LEGACY_INVITE_REFUSAL_FILE,
             REMEMBERED_PASSKEYS_FILE,
         ]
         .into_iter()

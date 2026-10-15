@@ -933,7 +933,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     public string ConnectionDetail => Connected
         ? string.Empty
-        : "Sessions are being queued, but nothing can be sent.";
+        : "Traces are being queued, but nothing can be sent.";
 
     public bool HasConnectionDetail => !Connected;
 
@@ -986,7 +986,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     }
 
     public string QueueExpiryText =>
-        $"Undecided sessions are dropped after {_queueTtlDays} days. Dropped means never sent.";
+        $"Undecided traces are dropped after {_queueTtlDays} days. Dropped means never sent.";
 
     public string NotificationOwnerText => _localNotifications
         ? "Notifications are rendered by the background daemon."

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Trace Commons",
+  "productName": "Near.ai",
   "identifier": "ai.tracecommons.desktop",
   "version": "0.1.0",
   "bundle": {

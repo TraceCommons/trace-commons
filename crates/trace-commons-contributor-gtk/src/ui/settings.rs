@@ -170,6 +170,8 @@ pub struct SettingsView {
     /// the daemon and nothing on it can be painted as working: the indicator
     /// belongs beside the control, on the screen that has both.
     private_inference_link: gtk::Button,
+    /// The move to a NEAR AI account, drawn only while the daemon offers it.
+    pub legacy_move: super::legacy_move::Controls,
     /// The port a running IronWire published, or `None` for a machine that
     /// published nothing.
     ///
@@ -279,6 +281,8 @@ impl SettingsView {
         pause_button.set_halign(gtk::Align::Start);
         state_card.append(&pause_button);
         content.append(&state_card);
+        let legacy_move = super::legacy_move::Controls::new(false);
+        content.append(&legacy_move.root);
 
         content.append(&style::section(CONTRIBUTION_HEADING));
         let contribution_card = style::card(gtk::Orientation::Vertical, space::M);
@@ -735,6 +739,7 @@ impl SettingsView {
             routing_evidence_pending: std::cell::Cell::new(false),
             filling_routing: std::cell::Cell::new(false),
             private_inference_link,
+            legacy_move,
             routing_discovered_port: std::cell::Cell::new(None),
             witness_status,
             disclosure,
@@ -1039,9 +1044,9 @@ pub fn render_status(app: &Rc<App>, status: &Status) {
         "A background watcher is running separately. It keeps going when this window closes."
     };
     let connected = if status.logged_in {
-        concat!("Connected to ", copy::app_name!(), ".")
+        concat!("Connected to ", copy::commons_name!(), ".")
     } else {
-        "Not connected. Sessions are still being queued; nothing can be sent yet, and nothing \
+        "Not connected. Traces are still being queued; nothing can be sent yet, and nothing \
          has been lost."
     };
     app.settings
@@ -1993,7 +1998,7 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
     });
     let armed_line = gtk::Label::builder()
         .label(if armed.is_empty() {
-            "Every session is offered to you first.".to_string()
+            "Every trace is offered to you first.".to_string()
         } else {
             armed
                 .iter()
@@ -4252,7 +4257,7 @@ mod tests {
     /// The three modes are three different rows, and the `off` row does not
     /// say what the `unset` row says.
     ///
-    /// `off` and `unset` shared a sentence -- "sessions read from the usual
+    /// `off` and `unset` shared a sentence -- "traces read from the usual
     /// place" -- because the row branched on `*_root_configured`, which is
     /// `mode == "watch"`. Nothing is read from an `off` source, so that was
     /// a false statement on the one screen a contributor checks to confirm
@@ -4264,15 +4269,15 @@ mod tests {
         let unset = source_check_rows(&settings_with_modes("unset", "unset"));
         let off = source_check_rows(&settings_with_modes("off", "off"));
 
-        assert_eq!(watch[0].0, "Claude Code sessions folder set");
-        assert_eq!(unset[0].0, "Claude Code sessions read from the usual place");
+        assert_eq!(watch[0].0, "Claude Code traces folder set");
+        assert_eq!(unset[0].0, "Claude Code traces read from the usual place");
         assert_eq!(
             off[0].0,
-            "Claude Code marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed"
         );
         assert_eq!(
             off[1].0,
-            "Codex marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "Codex marked not used, so nothing is opened for it. Previously queued traces are not removed"
         );
 
         for (a, b) in [(&watch, &unset), (&watch, &off), (&unset, &off)] {
@@ -4300,9 +4305,9 @@ mod tests {
         let rows = source_check_rows(&settings_with_modes("off", "unset"));
         assert_eq!(
             rows[0].0,
-            "Claude Code marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed"
         );
-        assert_eq!(rows[1].0, "Codex sessions read from the usual place");
+        assert_eq!(rows[1].0, "Codex traces read from the usual place");
         assert_eq!((rows[0].1, rows[1].1), (false, false));
     }
 

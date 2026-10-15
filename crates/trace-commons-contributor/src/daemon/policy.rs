@@ -341,6 +341,18 @@ pub struct ProjectPolicy {
     /// `#[serde(default)]` so an older policy file loads with none.
     #[serde(default)]
     pub contribution_override: Option<ContributionOverride>,
+    /// Whether this file was first written by a build that has the per-kind
+    /// notification switches (`DaemonSettings::notify`). Set by
+    /// [`ProjectPolicy::new`] and never changed, so a file an older build
+    /// wrote keeps reading `false` -- that build has no such key -- however
+    /// often this build saves it.
+    ///
+    /// `DaemonSettings::load` reads it when there is no settings file: a
+    /// policy an older build wrote is an existing install, and gets the
+    /// upgrade values and the one-time offers (constraint 12), even when
+    /// that build already marked `scrub_check_upgrade_recorded`.
+    #[serde(default)]
+    pub notify_kinds_known: bool,
 }
 
 /// The key the contribution override's arming record is listed under in
@@ -365,7 +377,7 @@ pub const OVERRIDE_ARMING_KEY: &str = "contribution-override";
 ///   contributor already approved are held, not sent, and `approve` is
 ///   refused ([`ProjectPolicy::holds_every_send`]); clearing the override
 ///   releases them as they were.
-/// - `NotifyOnly` ("Ask me"): every folder resolves to `NotifyOnly`, except
+/// - `NotifyOnly` ("Ask"): every folder resolves to `NotifyOnly`, except
 ///   a folder set to `Ignore`, which stays `Ignore`. Nothing goes unattended.
 /// - `AutoUpload` ("Automatic"): every folder resolves to
 ///   `AutoUpload`, **except a folder set to `Ignore`, which stays `Ignore`**
@@ -507,6 +519,7 @@ impl ProjectPolicy {
             sessions_on_disk_at_arming: BTreeMap::new(),
             next_arming_record: 0,
             contribution_override: None,
+            notify_kinds_known: true,
         }
     }
 
@@ -1073,7 +1086,7 @@ impl ProjectPolicy {
                     && key.as_str() != UNKNOWN_PROJECT_KEY
                     // The folder's own mode, not an override's: the offer
                     // is to set that, and an override must neither hide an
-                    // Ask me folder nor offer to arm an armed one.
+                    // Ask folder nor offer to arm an armed one.
                     && self.folder_mode(key) == ProjectMode::NotifyOnly
                     && match self.arming_declined_at.get(*key) {
                         // A clock that went backwards lands here as "still
@@ -3209,7 +3222,7 @@ mod tests {
         assert!(!p.clear_contribution_override(), "nothing left to clear");
     }
 
-    /// "Ask me" and "Never" leave nothing to go unattended, in any folder,
+    /// "Ask" and "Never" leave nothing to go unattended, in any folder,
     /// including one armed by its own mode.
     #[test]
     fn ask_and_never_overrides_stop_every_unattended_send() {

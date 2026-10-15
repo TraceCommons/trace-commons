@@ -25,6 +25,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:vm="using:TraceCommons.App.ViewModels"
     xmlns:interop="using:TraceCommons.Interop"
+    xmlns:controls="using:TraceCommons.App.Controls"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
@@ -76,10 +77,21 @@
                     </StackPanel>
                 </Border>
 
+                <!--
+                    Move a legacy invite identity to the contributor's NEAR AI
+                    account. Shown only while the daemon offers it. The same
+                    control the main window's notices card uses, here without
+                    the dismiss: the move stays available as long as it is
+                    offered. Every string is bound, from the Rust.
+                -->
+                <controls:LegacyMigrationOfferView x:Name="LegacyOfferView"
+                                                   ShowsDismiss="False"
+                                                   Visibility="{x:Bind LegacyOffer.IsAvailable, Mode=OneWay}" />
+
                 <TextBlock Text="STARTUP"
                            Style="{StaticResource TcEyebrowTextStyle}"
                            Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}" />
-                <ToggleSwitch Header="Start Trace Commons when you sign in"
+                <ToggleSwitch Header="Start Near.ai when you sign in"
                               IsOn="{x:Bind Settings.StartAtLogin, Mode=OneWay}"
                               IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
                               Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}"
@@ -142,7 +154,7 @@
                         Padding="14,12">
                     <StackPanel Spacing="10">
                         <NumberBox x:Name="QuiescenceMinutes"
-                                   Header="Quiet time before a session counts as finished (minutes)"
+                                   Header="Quiet time before a trace counts as finished (minutes)"
                                    Value="{x:Bind Settings.QuiescenceMinutes, Mode=OneWay}"
                                    Minimum="1"
                                    Maximum="240"

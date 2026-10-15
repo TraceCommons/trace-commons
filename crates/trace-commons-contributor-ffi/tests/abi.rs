@@ -3153,7 +3153,7 @@ fn the_witness_copy_call_carries_the_whole_card() {
         object["certificate_means"]
             .as_str()
             .unwrap()
-            .contains("not a statement that a session is clean")
+            .contains("not a statement that a trace is clean")
     );
 }
 
@@ -5248,7 +5248,7 @@ fn the_residual_secret_line_crosses_the_abi_with_its_sites() {
     );
     assert_eq!(
         take_owned(unsafe { tc_residual_secret_line_text(1, std::ptr::null()) }),
-        "A secret found here is still in what would be sent"
+        "1 secret is still in this trace"
     );
     let not_a_list = cstr_str(r#"{"a":1}"#);
     assert_eq!(
@@ -5505,7 +5505,7 @@ fn the_monitor_traces_copy_crosses_the_abi() {
     // Ron's #1146 inspector words (#1241) cross as nested tables.
     for (pointer, word) in [
         ("/tree/submit_count", "Submit \u{00b7} {count}"),
-        ("/tree/dismiss_session_title", "Dismiss this session?"),
+        ("/tree/dismiss_session_title", "Dismiss this trace?"),
         ("/inspector/contribution_rule", "Contribution rule"),
         ("/summary_panel/statistics", "Statistics"),
         ("/session_review/heading", "What would leave this computer"),

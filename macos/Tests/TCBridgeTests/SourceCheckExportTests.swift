@@ -31,16 +31,16 @@ final class SourceCheckExportTests: XCTestCase {
     /// way, and worse.
     func testEachSourceModeGetsItsOwnSentence() {
         XCTAssertEqual(
-            line(TCSourceChecks.claude, "watch"), "Claude Code sessions folder set")
+            line(TCSourceChecks.claude, "watch"), "Claude Code traces folder set")
         XCTAssertEqual(
             line(TCSourceChecks.claude, "unset"),
-            "Claude Code sessions read from the usual place")
+            "Claude Code traces read from the usual place")
         XCTAssertEqual(
             line(TCSourceChecks.claude, "off"),
-            "Claude Code marked not used, so nothing is opened for it. Previously queued sessions are not removed")
+            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed")
         XCTAssertEqual(
             line(TCSourceChecks.codex, "off"),
-            "Codex marked not used, so nothing is opened for it. Previously queued sessions are not removed")
+            "Codex marked not used, so nothing is opened for it. Previously queued traces are not removed")
     }
 
     /// No mode's sentence contains another's. "Private" is a substring of
@@ -99,9 +99,9 @@ extension SourceCheckExportTests {
             let unset = try XCTUnwrap(TCSourceChecks.checkLine(tool: tool.key, sourceMode: "unset"))
             XCTAssertEqual(unset.contains("read from the usual place"), tool.unsetScansConventional)
             let off = try XCTUnwrap(TCSourceChecks.checkLine(tool: tool.key, sourceMode: "off"))
-            XCTAssertTrue(off.contains("Previously queued sessions are not removed"))
+            XCTAssertTrue(off.contains("Previously queued traces are not removed"))
         }
-        XCTAssertTrue(copy.explanation.contains("does not remove sessions already queued"))
+        XCTAssertTrue(copy.explanation.contains("does not remove traces already queued"))
         XCTAssertTrue(copy.consentSaveFailed.contains("Couldn't confirm"))
     }
 }

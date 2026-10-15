@@ -184,23 +184,32 @@ impl MissionCatalogClient {
 }
 
 fn validate_origin(origin: &Url) -> Result<(), MissionCatalogClientError> {
+    if origin_is_valid(origin) {
+        Ok(())
+    } else {
+        Err(MissionCatalogClientError::EndpointInvalid)
+    }
+}
+
+/// Whether `origin` is an ingest origin a public, unauthenticated read may
+/// go to: HTTPS (or HTTP to a literal loopback IP), no credentials, query,
+/// fragment or base path. Shared with
+/// [`crate::credit_estimate_table::EstimateTableClient`], so the two public
+/// reads cannot drift apart on it.
+pub(crate) fn origin_is_valid(origin: &Url) -> bool {
     let is_loopback_http = match origin.host() {
         Some(url::Host::Ipv4(address)) => address.is_loopback(),
         Some(url::Host::Ipv6(address)) => address.is_loopback(),
         _ => false,
     };
-    if origin.host_str().is_none()
+    !(origin.host_str().is_none()
         || (!origin.username().is_empty())
         || origin.password().is_some()
         || origin.query().is_some()
         || origin.fragment().is_some()
         || origin.path() != "/"
         || !matches!(origin.scheme(), "https" | "http")
-        || (origin.scheme() == "http" && !is_loopback_http)
-    {
-        return Err(MissionCatalogClientError::EndpointInvalid);
-    }
-    Ok(())
+        || (origin.scheme() == "http" && !is_loopback_http))
 }
 
 #[cfg(test)]

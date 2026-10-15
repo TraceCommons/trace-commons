@@ -21,6 +21,8 @@ use std::sync::Arc;
 
 use base64::Engine;
 use sha2::{Digest, Sha256};
+use trace_commons_protocol::local_credit_estimate::LocalEstimateFeatures;
+use trace_commons_protocol::trace_contribution::TraceContributionEnvelope;
 use uuid::Uuid;
 
 use trace_commons_gate_enclave::{
@@ -353,6 +355,27 @@ pub trait TraceGateService: Send + Sync {
         _algorithm: DedupAlgorithm,
     ) -> anyhow::Result<DedupSignalDerivation> {
         anyhow::bail!("DedupRederiveUnsupported")
+    }
+
+    /// Derive ONLY the local credit estimate features (`lef1`) of a wrapped
+    /// trace: the same decrypt as [`Self::evaluate_trace`], then
+    /// [`LocalEstimateFeatures::from_envelope`] over the stored envelope. No
+    /// scoring, no embedding, no vector-index read or write. The plaintext
+    /// never leaves the method; only counts and ratios cross back. Used by
+    /// the estimate eval route (`POST /v1/admin/credit-estimate-eval`).
+    ///
+    /// The default implementation refuses, for the reason
+    /// [`Self::derive_dedup_signal`]'s does: the deterministic services never
+    /// see plaintext, so they have no features to report, and the eval counts
+    /// each such row as failed rather than inventing numbers.
+    fn derive_estimate_features(
+        &self,
+        _tenant_ctx: &TenantCtx,
+        _envelope_ciphertext: &[u8],
+        _wrapped_dek: &WrappedDek,
+        _object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<LocalEstimateFeatures> {
+        anyhow::bail!("EstimateFeaturesUnsupported")
     }
 
     /// Mark a previously-indexed vector entry as invalidated inside the gate
@@ -942,6 +965,28 @@ where
             simhash: algorithm.simhash(&dedup_canonical_text(&plaintext)) as i64,
             signal_version: dedup_signal_version_for(algorithm),
         })
+    }
+
+    fn derive_estimate_features(
+        &self,
+        tenant_ctx: &TenantCtx,
+        envelope_ciphertext: &[u8],
+        wrapped_dek: &WrappedDek,
+        object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<LocalEstimateFeatures> {
+        // The decrypt `derive_dedup_signal` does; the orchestrator is not
+        // consulted at all.
+        let ciphertext = decode_envelope_ciphertext(envelope_ciphertext);
+        let ctx = KekContext {
+            tenant_storage_ref: tenant_ctx.tenant_storage_ref().to_string(),
+            artifact_kind: object_kind.clone(),
+        };
+        let dek = self.decryptor.unwrap_dek(wrapped_dek, &ctx)?;
+        let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
+        // A parser error can quote the input, so it is replaced by a label.
+        let envelope: TraceContributionEnvelope = serde_json::from_slice(&plaintext)
+            .map_err(|_| anyhow::anyhow!("EstimateFeaturesEnvelopeUnreadable"))?;
+        Ok(LocalEstimateFeatures::from_envelope(&envelope))
     }
 
     fn invalidate_vector_entry(
@@ -1715,6 +1760,206 @@ mod enclave_gate_service_tests {
                 &tampered,
                 TraceArtifactKind::ContributionEnvelope,
                 DedupAlgorithm::V2,
+            )
+            .expect_err("tampered context must fail");
+        assert!(format!("{err}").contains("KekContextMismatch"));
+    }
+
+    /// A full contribution envelope, as stored, with `events` of
+    /// `(type, content, tool)`.
+    fn estimate_fixture_envelope(
+        events: &[(
+            trace_commons_protocol::trace_contribution::TraceContributionEventType,
+            &str,
+            Option<&str>,
+        )],
+    ) -> Vec<u8> {
+        use std::collections::BTreeMap;
+        use trace_commons_protocol::trace_contribution::*;
+        let now = chrono::Utc::now();
+        let envelope = TraceContributionEnvelope {
+            schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION.to_string(),
+            trace_id: Uuid::new_v4(),
+            submission_id: Uuid::new_v4(),
+            created_at: now,
+            ironclaw: IronclawTraceMetadata {
+                version: "1".to_string(),
+                engine_version: None,
+                feature_flags: BTreeMap::new(),
+                channel: TraceChannel::Cli,
+                model_name: None,
+            },
+            consent: ConsentMetadata {
+                policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
+                scopes: vec![ConsentScope::DebuggingEvaluation],
+                message_text_included: true,
+                tool_payloads_included: true,
+                correction_included: false,
+                routing_metadata_included: false,
+                revocable: true,
+            },
+            contributor: ContributorMetadata {
+                pseudonymous_contributor_id: None,
+                tenant_scope_ref: None,
+                credit_account_ref: None,
+                revocation_handle: Uuid::new_v4(),
+            },
+            privacy: PrivacyMetadata {
+                redaction_pipeline_version: DETERMINISTIC_REDACTION_PIPELINE_VERSION.to_string(),
+                redaction_counts: BTreeMap::new(),
+                redaction_distinct_counts: BTreeMap::new(),
+                privacy_filter_summary: None,
+                pii_labels_present: Vec::new(),
+                residual_pii_risk: ResidualPiiRisk::Low,
+                redaction_hash: "sha256:placeholder".to_string(),
+                warnings: Vec::new(),
+            },
+            events: events
+                .iter()
+                .map(|(event_type, content, tool)| TraceContributionEvent {
+                    event_id: Uuid::new_v4(),
+                    parent_event_id: None,
+                    event_type: *event_type,
+                    timestamp: now,
+                    redacted_content: Some((*content).to_string()),
+                    structured_payload: serde_json::Value::Null,
+                    tool_name: tool.map(str::to_string),
+                    tool_category: None,
+                    tool_call_id: None,
+                    latency_ms: None,
+                    token_counts: None,
+                    cost_usd: None,
+                    success: None,
+                    failure_modes: Vec::new(),
+                    side_effect: SideEffectLevel::None,
+                })
+                .collect(),
+            outcome: OutcomeMetadata::default(),
+            replay: ReplayMetadata {
+                replayable: false,
+                required_tools: Vec::new(),
+                tool_manifest_hashes: BTreeMap::new(),
+                expected_assertions: Vec::new(),
+                replay_notes: Vec::new(),
+            },
+            embedding_analysis: None,
+            value: ValueMetadata::default(),
+            conversation_id: None,
+            source_session: None,
+            trace_card: TraceCard::default(),
+            value_card: TraceValueCard::default(),
+            hindsight: None,
+            training_dynamics: None,
+            process_evaluation: None,
+        };
+        serde_json::to_vec(&envelope).expect("fixture envelope serializes")
+    }
+
+    /// The deterministic services never see plaintext, so they refuse to
+    /// derive estimate features rather than inventing them from a digest.
+    #[test]
+    fn deterministic_services_refuse_to_derive_estimate_features() {
+        use trace_commons_protocol::trace_contribution::TraceContributionEventType as T;
+        let decryptor = fixture_decryptor();
+        let tenant = TenantCtx::new("tenant-a");
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let ciphertext = aead_encrypt_with_dek(
+            &dek,
+            &estimate_fixture_envelope(&[(T::UserMessage, "hi", None)]),
+        )
+        .unwrap();
+        for svc in [
+            Box::new(InMemoryGateService::new("t", "sha256:t")) as Box<dyn TraceGateService>,
+            Box::new(LegacyDeterministicGateService::new()),
+        ] {
+            let err = svc
+                .derive_estimate_features(
+                    &tenant,
+                    &ciphertext,
+                    &wrapped,
+                    TraceArtifactKind::ContributionEnvelope,
+                )
+                .expect_err("deterministic services must refuse");
+            assert!(
+                format!("{err}").contains("EstimateFeaturesUnsupported"),
+                "got: {err}"
+            );
+        }
+    }
+
+    /// The enclave path decrypts inside the service and returns exactly the
+    /// protocol's features of the stored envelope -- numbers only -- and
+    /// touches no index. A plaintext that is not an envelope fails with a
+    /// label, never with a parser message that could quote content.
+    #[test]
+    fn enclave_derive_estimate_features_matches_the_protocol_definition() {
+        use trace_commons_protocol::local_credit_estimate::LocalEstimateFeatures;
+        use trace_commons_protocol::trace_contribution::{
+            TraceContributionEnvelope, TraceContributionEventType as T,
+        };
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
+        let tenant = TenantCtx::new("tenant-a");
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let plaintext = estimate_fixture_envelope(&[
+            (T::UserMessage, "make the estimate test pass", None),
+            (T::AssistantMessage, "Reading the module first.", None),
+            (T::ToolCall, "cat src/lib.rs", Some("bash")),
+            (T::ToolResult, "pub mod credit_estimate_fit;", Some("bash")),
+            (T::RoutingDecision, "routed to the hosted model", None),
+        ]);
+        let ciphertext = aead_encrypt_with_dek(&dek, &plaintext).expect("encrypt fixture");
+        let features = svc
+            .derive_estimate_features(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect("features");
+        let envelope: TraceContributionEnvelope = serde_json::from_slice(&plaintext).unwrap();
+        assert_eq!(features, LocalEstimateFeatures::from_envelope(&envelope));
+        assert_eq!(features.user_messages, 1);
+        assert_eq!(features.distinct_tools, 1);
+
+        let decision = svc
+            .evaluate_trace(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect("evaluate_trace");
+        assert!(
+            decision.novelty_score_micros >= 900_000,
+            "derive_estimate_features must not insert into the vector index"
+        );
+
+        let secret = "not an envelope: SECRET-CONTENT-123";
+        let garbage = aead_encrypt_with_dek(&dek, secret.as_bytes()).unwrap();
+        let err = svc
+            .derive_estimate_features(
+                &tenant,
+                &garbage,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+            .expect_err("not an envelope");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("EstimateFeaturesEnvelopeUnreadable"),
+            "{message}"
+        );
+        assert!(!message.contains("SECRET"), "{message}");
+
+        let mut tampered = wrapped.clone();
+        tampered.context_hash = "sha256:tampered".into();
+        let err = svc
+            .derive_estimate_features(
+                &tenant,
+                &ciphertext,
+                &tampered,
+                TraceArtifactKind::ContributionEnvelope,
             )
             .expect_err("tampered context must fail");
         assert!(format!("{err}").contains("KekContextMismatch"));

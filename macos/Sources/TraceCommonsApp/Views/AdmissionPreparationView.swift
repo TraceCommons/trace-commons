@@ -41,9 +41,9 @@ struct AdmissionPreparationView: View {
             }
             if working { GlassSpinner(standalone: true) }
             if refused {
-                // The core's glyph beside its sentence, in the outside tone.
-                GlassStatusLabel([copy.refusedGlyph, message].filter { !$0.isEmpty }.joined(separator: " "), status: .outside)
-                    .fixedSize(horizontal: false, vertical: true)
+                // The core's glyph beside its sentence, as the failed
+                // request's red line (Ron, 2026-10-09).
+                GlassAlert([copy.refusedGlyph, message].filter { !$0.isEmpty }.joined(separator: " "))
             } else if !message.isEmpty {
                 Text(message)
                     .glassType(GlassTokens.TypeScale.label.weight(.regular))

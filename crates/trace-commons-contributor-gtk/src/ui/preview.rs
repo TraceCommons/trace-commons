@@ -1200,7 +1200,7 @@ impl Sheet {
             (
                 "Would send",
                 format!(
-                    "{} (the session file on disk is {})",
+                    "{} (the trace file on disk is {})",
                     human_bytes(summary.would_send_bytes),
                     human_bytes(summary.raw_session_bytes)
                 ),
@@ -1345,7 +1345,7 @@ impl Sheet {
                     )
                 }
                 "unknown-entry-id" | "session-file-vanished" => {
-                    "This session is no longer waiting. Nothing was sent."
+                    "This trace is no longer waiting. Nothing was sent."
                 }
                 _ => "Something went wrong working out what would be sent. Nothing has been sent.",
             }
@@ -1411,7 +1411,7 @@ impl Sheet {
         // Zero matches in the redacted body cannot tell "never here" from
         // "removed", and it certainly cannot tell either from "the daemon
         // has not answered yet" -- and this module's own doc says the one
-        // direction it must not fail in is reporting "not in this session"
+        // direction it must not fail in is reporting "not in this trace"
         // about a value that is in it. Printing the good-standing tick here
         // did exactly that, synchronously, before anything was checked.
         // `apply_original_count` is the only thing allowed to print a

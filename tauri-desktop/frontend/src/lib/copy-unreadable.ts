@@ -18,7 +18,7 @@ export const WORDING_UNREADABLE =
  * `WORDING_UNREADABLE`, never a sentence about what keeps running.
  */
 export const QUIT_FALLBACK = {
-  title: "Quit Trace Commons?",
+  title: "Quit Near.ai?",
   confirm: "Quit",
   cancel: "Cancel",
 } as const;

@@ -90,7 +90,9 @@ async fn run_native(
         let model = row.model.as_deref().ok_or(ManagedError::InvalidRequest)?;
         session.prepare()?;
         match row.connection {
-            ConnectionKind::Subscription => return Err(ManagedError::InvalidRequest.into()),
+            ConnectionKind::Subscription | ConnectionKind::NearAiSignIn => {
+                return Err(ManagedError::InvalidRequest.into());
+            }
             ConnectionKind::ApiKey => {
                 command = session.command(
                     model,
@@ -151,36 +153,17 @@ async fn run_native(
                     SecretStore::new(store).get(account.id)?,
                 )
                 .await?;
-                let base = format!("http://127.0.0.1:{}", proxy.port());
-                match row.tool {
-                    super::ToolId::Opencode => return Err(ManagedError::InvalidRequest.into()),
-                    super::ToolId::Claude => {
-                        command
-                            .env("ANTHROPIC_BASE_URL", format!("{base}/anthropic"))
-                            .env("ANTHROPIC_AUTH_TOKEN", "managed-local-session");
-                    }
-                    super::ToolId::Codex => {
-                        command
-                        .env("NEAR_AI_SESSION_API_KEY", "managed-local-session")
-                        .args([
-                            "-c",
-                            "model_provider=\"near_ai_managed\"",
-                            "-c",
-                            "model_providers.near_ai_managed.name=\"NEAR AI\"",
-                            "-c",
-                        ])
-                        .arg(format!(
-                            "model_providers.near_ai_managed.base_url=\"{base}/openai/v1\""
-                        ))
-                        .args([
-                            "-c",
-                            "model_providers.near_ai_managed.env_key=\"NEAR_AI_SESSION_API_KEY\"",
-                            "-c",
-                            "model_providers.near_ai_managed.wire_api=\"responses\"",
-                        ]);
-                    }
-                }
+                near_ai_route(&mut command, row.tool, proxy.port())?;
                 route = Some(proxy);
+            }
+            // The daemon holds the sign-in and hosts this session's proxy. This
+            // process learns its port and never the credential; no port, no run.
+            ConnectionKind::NearAiSignIn => {
+                near_ai_route(
+                    &mut command,
+                    row.tool,
+                    context.route_port.ok_or(ManagedError::LaunchUnknown)?,
+                )?;
             }
         }
     }
@@ -293,7 +276,8 @@ async fn run_native(
     }
     if final_report.is_err() && persisted.is_err() {
         eprintln!(
-            "Native session exited; Trace Commons status is unknown until the daemon reconnects."
+            "Native session exited; {} status is unknown until the daemon reconnects.",
+            crate::brand::APP_NAME
         );
     }
     if let Some(route) = route {
@@ -307,6 +291,45 @@ async fn run_native(
         );
     }
     Ok(code)
+}
+
+/// Point the tool at a session's local NEAR AI proxy. The tool gets the
+/// loopback URL and a placeholder token, never a credential.
+fn near_ai_route(
+    command: &mut std::process::Command,
+    tool: super::ToolId,
+    port: u16,
+) -> Result<(), ManagedError> {
+    let base = format!("http://127.0.0.1:{port}");
+    match tool {
+        super::ToolId::Opencode => return Err(ManagedError::InvalidRequest),
+        super::ToolId::Claude => {
+            command
+                .env("ANTHROPIC_BASE_URL", format!("{base}/anthropic"))
+                .env("ANTHROPIC_AUTH_TOKEN", "managed-local-session");
+        }
+        super::ToolId::Codex => {
+            command
+                .env("NEAR_AI_SESSION_API_KEY", "managed-local-session")
+                .args([
+                    "-c",
+                    "model_provider=\"near_ai_managed\"",
+                    "-c",
+                    "model_providers.near_ai_managed.name=\"NEAR AI\"",
+                    "-c",
+                ])
+                .arg(format!(
+                    "model_providers.near_ai_managed.base_url=\"{base}/openai/v1\""
+                ))
+                .args([
+                    "-c",
+                    "model_providers.near_ai_managed.env_key=\"NEAR_AI_SESSION_API_KEY\"",
+                    "-c",
+                    "model_providers.near_ai_managed.wire_api=\"responses\"",
+                ]);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

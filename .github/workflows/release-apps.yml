@@ -254,7 +254,7 @@ jobs:
       # the kernel at exec, and nothing else in this pipeline would notice: the
       # DMG builds, signs, notarizes and staples exactly as it should.
       - name: Verify entitlements and reach the credential store
-        run: ./scripts/ci/verify-macos-entitlements.sh macos/.build/TraceCommons.app
+        run: ./scripts/ci/verify-macos-entitlements.sh macos/.build/Near.ai.app
 
       # make-app-bundle.sh lipos the FFI dylib and passes
       # `swift build --arch arm64 --arch x86_64`, so the DMG is universal and
@@ -265,8 +265,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          OUT="TraceCommons-${SHORT_VERSION}.dmg"
-          cp macos/.build/TraceCommons.dmg "dist/$OUT"
+          OUT="Near.ai-${SHORT_VERSION}.dmg"
+          cp macos/.build/Near.ai.dmg "dist/$OUT"
           # The DMG is signed, notarized and stapled by this point, so this
           # checksum already covers the final bytes -- unlike the Windows and
           # CLI paths, where signing happens after packaging and the checksum
@@ -524,8 +524,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $paths = @(Get-Content -Path $env:APP_SIGN_LIST | Where-Object { $_.Trim() -ne "" })
-          if ($paths.Count -ne 4) {
-            throw "expected exactly 4 app binaries staged for signing, found $($paths.Count): $($paths -join ', ')"
+          # Five: the staging step's allowlist, which includes near-ai.exe.
+          if ($paths.Count -ne 5) {
+            throw "expected exactly 5 app binaries staged for signing, found $($paths.Count): $($paths -join ', ')"
           }
           foreach ($p in $paths) {
             if (-not (Test-Path $p -PathType Leaf)) { throw "staged path is not a file: $p" }
@@ -553,7 +554,7 @@ jobs:
       # unsigned build output. The Authenticode signature travels inside the .exe,
       # so provenance on the exe covers what a contributor executes; the zip is
       # only transport. The same reasoning extends to the app: provenance names
-      # the four binaries we built and signed, not the Microsoft runtime files
+      # the five binaries we built and signed, not the Microsoft runtime files
       # the publish tree carries alongside them.
       - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         with:
@@ -563,6 +564,7 @@ jobs:
             app-publish/TraceCommons.dll
             app-publish/TraceCommons.Interop.dll
             app-publish/trace_commons_contributor_ffi.dll
+            app-publish/near-ai.exe
 
       - name: Package
         shell: pwsh
@@ -1324,7 +1326,7 @@ jobs:
           # checksum THIS run's macOS job produced, out of the artifact
           # downloaded into dist/. It is the only source of a hash anywhere
           # in this step.
-          SHA="$(awk '{print $1}' dist/macos-dmg/TraceCommons-"$V".dmg.sha256)"
+          SHA="$(awk '{print $1}' dist/macos-dmg/Near.ai-"$V".dmg.sha256)"
           # Clone with the token IN the remote URL. `gh repo clone` leaves a
           # plain HTTPS remote, and GH_TOKEN authenticates the gh CLI but NOT
           # raw `git push` -- which failed on the first real release with
@@ -1357,6 +1359,17 @@ jobs:
             exit 1
           fi
           sed -i "s/^  sha256 \".*\"/  sha256 \"$SHA\"/" Casks/trace-commons.rb
+          # The DMG and the bundle inside it were renamed from TraceCommons to
+          # Near.ai. A tap still naming the old files would bump to a url that
+          # 404s, so rewrite both stanzas here (a no-op once the tap carries
+          # the new names) and refuse to push unless both landed.
+          sed -i 's|/TraceCommons-#{version}\.dmg"|/Near.ai-#{version}.dmg"|' Casks/trace-commons.rb
+          sed -i 's|^  app "TraceCommons\.app"$|  app "Near.ai.app"|' Casks/trace-commons.rb
+          if ! grep -qF '/Near.ai-#{version}.dmg"' Casks/trace-commons.rb \
+            || ! grep -qxF '  app "Near.ai.app"' Casks/trace-commons.rb; then
+            echo "cask does not name Near.ai-#{version}.dmg and Near.ai.app; refusing to push a cask that points at a missing asset" >&2
+            exit 1
+          fi
           # Prove the hash now in the file is the one computed from this
           # run's DMG. Everything up to here is a hard failure by design: it
           # runs before anything has been pushed, so refusing costs a
@@ -1499,10 +1512,10 @@ jobs:
           ARGS=()
 
           if [ "$MACOS_RESULT" = success ]; then
-            F="dist/macos-dmg/TraceCommons-$V.dmg"
+            F="dist/macos-dmg/Near.ai-$V.dmg"
             SHA="$(shasum -a 256 "$F" | awk '{print $1}')"
             SIZE="$(wc -c < "$F" | tr -d ' ')"
-            ARGS+=(--platform "macos-universal=$BASE/TraceCommons-$V.dmg=$SHA=$SIZE")
+            ARGS+=(--platform "macos-universal=$BASE/Near.ai-$V.dmg=$SHA=$SIZE")
           fi
 
           if [ "$WINDOWS_RESULT" = success ]; then
@@ -1593,8 +1606,8 @@ jobs:
           ./scripts/updates/generate-appcast.sh \
             --short-version "$V" \
             --build-version "$BUILD_VERSION" \
-            --dmg-url "https://github.com/$REPO/releases/download/app-v$V/TraceCommons-$V.dmg" \
-            --dmg-path "dist/macos-dmg/TraceCommons-$V.dmg" \
+            --dmg-url "https://github.com/$REPO/releases/download/app-v$V/Near.ai-$V.dmg" \
+            --dmg-path "dist/macos-dmg/Near.ai-$V.dmg" \
             --sign-update "$SIGN_UPDATE" \
             --ed-key-file "$RUNNER_TEMP/sparkle-ed-key" \
             --out dist/updates/appcast.xml

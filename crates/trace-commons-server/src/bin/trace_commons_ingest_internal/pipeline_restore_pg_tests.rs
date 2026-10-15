@@ -247,14 +247,19 @@ const PIPELINE_TABLES: [&str; 20] = [
 /// The four authoritative tables, as the port's `fingerprint` reads them
 /// (lines 134-173), then the tenant's Trace Credit ledger rows (ruling
 /// T10-4), in one statement. Run in a tenant transaction as the runtime
-/// login, so RLS admits only that tenant's rows.
+/// login, so RLS admits only that tenant's rows. The `pipeline_runs` row
+/// also names the privacy pass record (V117), which the port predates.
 const AUTHORITATIVE_FINGERPRINT_SQL: &str = r"
     SELECT COALESCE((
           SELECT string_agg(
             concat_ws('|', run_id, submission_id, trace_id, bundle_id,
                       request_idempotency_key, request_content_hash,
                       source_object_ref_id, next_phase, state,
-                      COALESCE(index_command_hash, '')),
+                      COALESCE(index_command_hash, ''),
+                      COALESCE(privacy_pass_object_ref_id::text, ''),
+                      COALESCE(privacy_pass_content_hash, ''),
+                      COALESCE(privacy_pass_outcome, ''),
+                      privacy_pass_required::text),
             E'\n' ORDER BY run_id
           )
           FROM pipeline_runs

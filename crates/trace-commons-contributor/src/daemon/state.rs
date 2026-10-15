@@ -14,7 +14,7 @@
 //!
 //! Paths appear in this file and never leave it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -25,6 +25,27 @@ use sha2::{Digest, Sha256};
 use crate::config::{ConfigStore, DAEMON_STATE_FILE};
 
 pub const DAEMON_STATE_SCHEMA: &str = "trace_commons.daemon_state.v1";
+
+/// How long the attention log keeps an entry. Derived, not an owner
+/// decision: the longest window a cap counts over is one local ISO week
+/// (owner decision 4's `STANDALONE_PER_WEEK` and the per-kind weekly caps),
+/// and a week plus one day covers it from any local offset.
+pub const ATTENTION_LOG_RETENTION: chrono::Duration = chrono::Duration::days(8);
+
+/// Read the attention log entry by entry, dropping any this build cannot
+/// parse. See `DaemonState::attention_log`.
+fn readable_attention_entries<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<super::attention::AttentionEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?.unwrap_or_default();
+    Ok(raw
+        .into_iter()
+        .filter_map(|entry| serde_json::from_value(entry).ok())
+        .collect())
+}
 
 /// What the daemon last shipped for a given session file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,6 +196,71 @@ pub struct DaemonState {
     /// bound.
     #[serde(default)]
     pub community: Option<super::community::CommunityStanding>,
+    /// Nudge: the in-app suggestion ledger, keyed by kind label or
+    /// `kind:opaque id` (`nudge::ledger_key`), never by a path or a folder
+    /// label. Times only. Cleared by `unenroll` (`clear_nudges`), so a next
+    /// account never inherits this one's "Not now"s; removed with the rest
+    /// of this file by `ConfigStore::wipe`.
+    ///
+    /// `#[serde(default)]` so a file written before it existed loads, and
+    /// not written while empty, so an install that never saw a suggestion
+    /// keeps writing the bytes it always did.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub nudges: BTreeMap<String, super::nudge::NudgeLedger>,
+    /// Nudge U2: the high-water mark verdict news is diffed against, keyed
+    /// by submission id (opaque) and pruned to ids still in the history
+    /// cache. Only the daemon writes it, unlike the shared cache. Flags only.
+    /// See `nudge::verdict_delta`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub verdict_marks: BTreeMap<String, super::nudge::VerdictMark>,
+    /// Whether `verdict_marks` has been seeded. False on the first poll after
+    /// an upgrade or after `unenroll`, which seeds the marks silently so
+    /// history that already existed never reads as news; an empty mark map
+    /// alone cannot tell "never seeded" from "seeded against an empty cache".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub verdict_marks_seeded: bool,
+    /// Nudge U2: verdicts landed and not yet acknowledged, counts and times
+    /// only. Cleared by `nudge_opened {kind: "verdicts_landed"}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdicts_pending: Option<super::nudge::VerdictDelta>,
+    /// Nudge U4: the idle candidates an announcement (folded into a digest
+    /// or standalone) has already named, by queue entry id (opaque), so the
+    /// next batch names only new ones and never one session at a time.
+    /// Pruned to entries still `Pending` (`nudge::prune_idle_announced`) and
+    /// cleared by `unenroll` (`clear_nudges`). Never a path.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub idle_announced: BTreeSet<uuid::Uuid>,
+    /// Nudge A2: every notification the arbiter announced, folded or
+    /// standalone, as kind label, route and time only -- the budget the
+    /// global and per-kind caps are counted against. Pruned to
+    /// [`ATTENTION_LOG_RETENTION`] by `record_attention` and
+    /// `prune_attention_log`. Cleared by `unenroll` (`clear_nudges`).
+    ///
+    /// An entry this build cannot read (a kind a newer build added, then a
+    /// downgrade) is dropped on load rather than refusing the whole file,
+    /// which would stop the daemon starting. That can only loosen the
+    /// budget for the week the entry would have counted in.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "readable_attention_entries"
+    )]
+    pub attention_log: Vec<super::attention::AttentionEntry>,
+    /// Nudge A2: when anything last notified -- the digest included -- for
+    /// `attention::MIN_GAP_ANY`. Cleared by `unenroll` (`clear_nudges`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_notified_at: Option<DateTime<Utc>>,
+    /// Whether this file was first written by a build that has the per-kind
+    /// notification switches, as `ProjectPolicy::notify_kinds_known` is for
+    /// the policy. Set by [`DaemonState::new`] and never changed, so a file
+    /// an older build wrote keeps reading `false` however often this build
+    /// saves it.
+    ///
+    /// `DaemonSettings::load` reads it when there is no settings file: an
+    /// install whose daemon only ever watched has no policy file, and this
+    /// is the evidence that it predates the kinds (constraint 12).
+    #[serde(default)]
+    pub notify_kinds_known: bool,
     /// Write-elision memo; see [`LastWritten`]. Never persisted, so a fresh
     /// process always writes once before it can skip anything.
     #[serde(skip)]
@@ -204,6 +290,14 @@ impl DaemonState {
             history_refresh_due_at: None,
             last_community_poll_at: None,
             community: None,
+            nudges: BTreeMap::new(),
+            verdict_marks: BTreeMap::new(),
+            verdict_marks_seeded: false,
+            verdicts_pending: None,
+            idle_announced: BTreeSet::new(),
+            attention_log: Vec::new(),
+            last_notified_at: None,
+            notify_kinds_known: true,
             last_written: LastWritten::default(),
         }
     }
@@ -240,6 +334,57 @@ impl DaemonState {
         store.write_daemon_file(DAEMON_STATE_FILE, &body)?;
         self.last_written = LastWritten(Some((store.dir().to_path_buf(), digest)));
         Ok(())
+    }
+
+    /// Forget every in-app suggestion stamp, the verdict news with its
+    /// high-water mark, the idle-session batching set, and the attention log
+    /// with the last-notified stamp: what `unenroll` calls so a next account
+    /// inherits none of this one's stamps, news or notification budget. The marks go back to unseeded, so the next account's
+    /// first poll seeds silently and the history cache this Mac keeps never
+    /// replays as its news. Returns whether anything was there to forget, so
+    /// the caller saves only when it must. Later nudge slices clear their
+    /// own fields here too, so one call stays "every nudge field".
+    pub fn clear_nudges(&mut self) -> bool {
+        let had = !self.nudges.is_empty()
+            || !self.verdict_marks.is_empty()
+            || self.verdict_marks_seeded
+            || self.verdicts_pending.is_some()
+            || !self.idle_announced.is_empty()
+            || !self.attention_log.is_empty()
+            || self.last_notified_at.is_some();
+        self.nudges.clear();
+        self.verdict_marks.clear();
+        self.verdict_marks_seeded = false;
+        self.verdicts_pending = None;
+        self.idle_announced.clear();
+        self.attention_log.clear();
+        self.last_notified_at = None;
+        had
+    }
+
+    /// Record one announcement (folded into a digest or standalone), stamp
+    /// `last_notified_at`, and prune the log. The caller saves.
+    pub fn record_attention(
+        &mut self,
+        kind: super::attention::Kind,
+        route: super::attention::Route,
+        now: DateTime<Utc>,
+    ) {
+        self.attention_log.push(super::attention::AttentionEntry {
+            kind,
+            at: now,
+            route,
+        });
+        self.last_notified_at = Some(self.last_notified_at.map_or(now, |was| was.max(now)));
+        self.prune_attention_log(now);
+    }
+
+    /// Drop log entries older than [`ATTENTION_LOG_RETENTION`] behind `now`.
+    /// An entry stamped after `now` is kept: a clock that went backwards may
+    /// only suppress (see `attention`'s module doc), so it must still count.
+    pub fn prune_attention_log(&mut self, now: DateTime<Utc>) {
+        let floor = now - ATTENTION_LOG_RETENTION;
+        self.attention_log.retain(|entry| entry.at >= floor);
     }
 
     /// Reset the daily volume counters when the UTC day has rolled over.
@@ -547,6 +692,227 @@ mod tests {
             entry.project_key.as_deref(),
             Some("/Users/testuser/code/proj"),
             "the field that did exist must still decode"
+        );
+    }
+
+    /// A state file from a build that kept `verdicts_acked_through` still
+    /// loads, and the next save drops the key: nothing ever read it.
+    #[test]
+    fn a_state_file_with_verdicts_acked_through_loads_and_drops_it() {
+        let (_d, store) = temp_store();
+        let mut body = serde_json::to_value(DaemonState::new()).unwrap();
+        body["verdicts_acked_through"] = serde_json::json!("2026-10-01T00:00:00Z");
+        std::fs::write(
+            store.daemon_path(DAEMON_STATE_FILE),
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        let mut loaded = DaemonState::load(&store).unwrap();
+        loaded.save(&store).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.daemon_path(DAEMON_STATE_FILE)).unwrap())
+                .unwrap();
+        assert!(written.get("verdicts_acked_through").is_none(), "{written}");
+    }
+
+    /// Nudge S3: a state file written before the nudge ledger existed loads
+    /// with an empty one, and an empty ledger adds nothing to the file, so
+    /// an install that never saw a suggestion writes the bytes it always did.
+    #[test]
+    fn the_nudge_ledger_defaults_empty_and_writes_nothing_while_empty() {
+        let (_d, store) = temp_store();
+        let body = serde_json::json!({
+            "schema_version": DAEMON_STATE_SCHEMA,
+            "cwd_cache": {},
+            "prior_uploads": {},
+            "last_observation": {},
+            "last_digest_at": null,
+            "day_bucket": null,
+            "uploads_today": 0,
+            "bytes_today": 0
+        });
+        std::fs::write(
+            store.daemon_path(DAEMON_STATE_FILE),
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        let loaded = DaemonState::load(&store).unwrap();
+        assert!(loaded.nudges.is_empty());
+        // Nudge S4: the verdict fields load empty and unseeded too.
+        assert!(loaded.verdict_marks.is_empty());
+        assert!(!loaded.verdict_marks_seeded);
+        assert_eq!(loaded.verdicts_pending, None);
+        // Nudge U4: the idle batching set loads empty too.
+        assert!(loaded.idle_announced.is_empty());
+        let written = serde_json::to_value(DaemonState::new()).unwrap();
+        for key in [
+            "nudges",
+            "verdict_marks",
+            "verdict_marks_seeded",
+            "verdicts_pending",
+            "idle_announced",
+            "attention_log",
+            "last_notified_at",
+        ] {
+            assert!(written.get(key).is_none(), "{key}: {written}");
+        }
+    }
+
+    /// A stamped ledger survives a restart, and `clear_nudges` (what
+    /// `unenroll` calls) empties it.
+    #[test]
+    fn the_nudge_ledger_round_trips_and_clears() {
+        let (_d, store) = temp_store();
+        let mut state = DaemonState::new();
+        let at = DateTime::parse_from_rfc3339("2026-10-07T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        state.nudges.insert(
+            "review_backlog".to_string(),
+            super::super::nudge::NudgeLedger {
+                declined_at: Some(at),
+                ..Default::default()
+            },
+        );
+        state.save(&store).unwrap();
+        let mut loaded = DaemonState::load(&store).unwrap();
+        assert_eq!(loaded, state);
+        assert!(loaded.clear_nudges(), "a non-empty ledger reports a change");
+        assert!(loaded.nudges.is_empty());
+        assert!(!loaded.clear_nudges(), "an empty one reports none");
+    }
+
+    /// Nudge U4: the idle batching set holds opaque entry ids only,
+    /// survives a restart, and `clear_nudges` (what `unenroll` calls)
+    /// empties it, so a next account never inherits this one's batches.
+    #[test]
+    fn idle_announced_round_trips_and_clears_on_unenroll() {
+        let (_d, store) = temp_store();
+        let mut state = DaemonState::new();
+        let id = uuid::Uuid::from_u128(7);
+        state.idle_announced.insert(id);
+        state.save(&store).unwrap();
+        let body = std::fs::read_to_string(store.daemon_path(DAEMON_STATE_FILE)).unwrap();
+        assert!(body.contains(&id.to_string()), "{body}");
+        let mut loaded = DaemonState::load(&store).unwrap();
+        assert_eq!(loaded.idle_announced, state.idle_announced);
+        assert!(loaded.clear_nudges(), "a non-empty set reports a change");
+        assert!(loaded.idle_announced.is_empty());
+        assert!(!loaded.clear_nudges());
+    }
+
+    fn utc(rfc3339: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// Nudge A2: the attention log (kind labels, routes and times only) and
+    /// the last-notified stamp survive a restart, spelled as the arbiter
+    /// spells its kinds, and `clear_nudges` (what `unenroll` calls) empties
+    /// both, so a next account never inherits this one's budget.
+    #[test]
+    fn the_attention_log_round_trips_by_label_and_clears_on_unenroll() {
+        use super::super::attention::{AttentionEntry, Kind, Route};
+        let (_d, store) = temp_store();
+        let mut state = DaemonState::new();
+        let now = utc("2026-10-07T12:00:00Z");
+        for (kind, route) in [
+            (Kind::IdleSessions, Route::Folded),
+            (Kind::VerdictsLanded, Route::Standalone),
+        ] {
+            state.record_attention(kind, route, now);
+        }
+        assert_eq!(state.last_notified_at, Some(now));
+        state.save(&store).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.daemon_path(DAEMON_STATE_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(body["attention_log"][0]["kind"], "idle_sessions");
+        assert_eq!(body["attention_log"][0]["route"], "folded");
+        assert_eq!(body["attention_log"][1]["kind"], "verdicts_landed");
+        assert_eq!(body["attention_log"][1]["route"], "standalone");
+        let mut loaded = DaemonState::load(&store).unwrap();
+        assert_eq!(loaded, state);
+        assert_eq!(
+            loaded.attention_log[1],
+            AttentionEntry {
+                kind: Kind::VerdictsLanded,
+                at: now,
+                route: Route::Standalone
+            }
+        );
+        assert!(loaded.clear_nudges(), "a non-empty log reports a change");
+        assert!(loaded.attention_log.is_empty());
+        assert_eq!(loaded.last_notified_at, None);
+        assert!(!loaded.clear_nudges());
+
+        // The stamp alone is enough to report a change.
+        loaded.last_notified_at = Some(now);
+        assert!(loaded.clear_nudges());
+    }
+
+    /// Every arbiter kind serializes as its own label, so the file, the
+    /// wire and the logs spell a kind one way.
+    #[test]
+    fn every_kind_serializes_as_its_label() {
+        for kind in super::super::attention::Kind::ALL {
+            assert_eq!(serde_json::to_value(kind).unwrap(), kind.label());
+        }
+    }
+
+    /// Pruned to `ATTENTION_LOG_RETENTION` behind `now`, and never ahead of
+    /// it: an entry stamped after `now` (a clock that went backwards) is
+    /// kept, because it may only suppress.
+    #[test]
+    fn the_attention_log_is_pruned_to_its_retention_and_keeps_future_entries() {
+        use super::super::attention::{AttentionEntry, Kind, Route};
+        let now = utc("2026-10-20T12:00:00Z");
+        let mut state = DaemonState::new();
+        let too_old = now - ATTENTION_LOG_RETENTION - chrono::Duration::seconds(1);
+        let boundary = now - ATTENTION_LOG_RETENTION;
+        let future = now + chrono::Duration::days(30);
+        for when in [too_old, boundary, future] {
+            state.attention_log.push(AttentionEntry {
+                kind: Kind::WeeklyRecap,
+                at: when,
+                route: Route::Standalone,
+            });
+        }
+        state.prune_attention_log(now);
+        let kept: Vec<_> = state.attention_log.iter().map(|e| e.at).collect();
+        assert_eq!(kept, vec![boundary, future]);
+        assert_eq!(ATTENTION_LOG_RETENTION, chrono::Duration::days(8));
+
+        // `record_attention` prunes as it pushes.
+        state.record_attention(
+            Kind::IdleSessions,
+            Route::Folded,
+            now + chrono::Duration::days(1),
+        );
+        assert!(!state.attention_log.iter().any(|e| e.at == boundary));
+    }
+
+    /// A kind this build does not know (a newer build wrote it, then the
+    /// install was downgraded) is dropped from the log rather than refusing
+    /// the whole state file, which would stop the daemon starting.
+    #[test]
+    fn an_unknown_kind_in_the_attention_log_is_dropped_not_fatal() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonState::new()).unwrap();
+        v["attention_log"] = serde_json::json!([
+            {"kind": "future_kind", "at": "2026-10-07T12:00:00Z", "route": "standalone"},
+            {"kind": "idle_sessions", "at": "2026-10-07T12:00:00Z", "route": "folded"},
+            {"kind": "idle_sessions", "at": "2026-10-07T12:00:00Z", "route": "beamed"}
+        ]);
+        store
+            .write_daemon_file(DAEMON_STATE_FILE, v.to_string().as_bytes())
+            .unwrap();
+        let loaded = DaemonState::load(&store).expect("state still loads");
+        assert_eq!(loaded.attention_log.len(), 1);
+        assert_eq!(
+            loaded.attention_log[0].kind,
+            super::super::attention::Kind::IdleSessions
         );
     }
 }

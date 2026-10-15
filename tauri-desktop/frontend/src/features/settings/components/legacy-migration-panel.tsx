@@ -8,6 +8,7 @@ import {
 } from "../../../lib/tauri/core-api";
 import {
   type LegacyMigrationResult,
+  legacyMigrationPanelState,
   parseLegacyMigrationStatus,
 } from "../../../lib/tauri/legacy-migration";
 import { coreKeys } from "../../../lib/tauri/query-keys";
@@ -45,7 +46,8 @@ export function LegacyMigrationPanel({ status }: { status: unknown }) {
       }
     },
   });
-  if (!offered || !copy.data) return null;
+  const panel = legacyMigrationPanelState(offered, answer);
+  if (!panel.drawn || !copy.data) return null;
   const needsInvite = answer?.kind === "invite_needed";
   return (
     <section className="mb-4 rounded-2xl border border-border bg-card/80 p-[26px]">
@@ -70,16 +72,20 @@ export function LegacyMigrationPanel({ status }: { status: unknown }) {
           />
         </div>
       )}
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        <Button
-          type="button"
-          size="sm"
-          disabled={migrate.isPending || (needsInvite && invite.trim() === "")}
-          onClick={() => migrate.mutate(needsInvite ? invite.trim() : null)}
-        >
-          {migrate.isPending ? copy.data.working : copy.data.action}
-        </Button>
-      </div>
+      {panel.move && (
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <Button
+            type="button"
+            size="sm"
+            disabled={
+              migrate.isPending || (needsInvite && invite.trim() === "")
+            }
+            onClick={() => migrate.mutate(needsInvite ? invite.trim() : null)}
+          >
+            {migrate.isPending ? copy.data.working : copy.data.action}
+          </Button>
+        </div>
+      )}
       {answer && answer.kind !== "migrated" && (
         <p className="mt-3 text-[13px] text-muted-foreground" role="status">
           {answer.line}

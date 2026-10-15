@@ -105,15 +105,21 @@ final class ToolFolderInspectorTests: XCTestCase {
                        "GlassLegendCell(table.shared, value: Self.shared(folder, history: history), status: .shared)",
                        "GlassLegendCell(table.kept, value: String(folder.sessions.count), status: .kept)",
                        "InspectorSection(words.inspector.project)", "InspectorSection(words.inspector.contributionRule)",
-                       "InspectorSection(words.inspector.decisions)", "GlassCard(quiet: true)"] {
+                       "InspectorSection(words.inspector.decisions)"] {
             XCTAssertTrue(source.contains(needle), "ToolFolderInspectors.swift lacks \(needle)")
         }
+        // Each section is a quiet card (owner, 2026-10-11), so the Decisions
+        // content draws none of its own: never a card inside a card.
+        XCTAssertFalse(source.contains("GlassCard(quiet: true)"), "a card inside the Decisions section's card")
+        let host = try TracesParityTests.text("Views/Monitor/TracesInspectorHost.swift")
+        let section = try XCTUnwrap(host.range(of: "struct InspectorSection").map { String(host[$0.lowerBound...].prefix(1500)) })
+        XCTAssertTrue(section.contains("GlassCard(quiet: true)"), "an inspector section has no card")
         XCTAssertFalse(source.contains("GlassEyebrowCard("), "the folder inspector still draws eyebrow cards")
         XCTAssertFalse(source.contains("TracesTreeView.submitTitle("), "the inspector's Submit is the tree pill's")
     }
 
     /// Automatic always goes through the arming confirmation, in the core's
-    /// words; Never asks first when sessions are waiting; Ask me is a
+    /// words; Never asks first when sessions are waiting; Ask is a
     /// direct write. The inspector's picker takes the same route as the
     /// tree's switch and menu, and writes only through it.
     func test_automaticGoesThroughTheArmingConfirmation() throws {
@@ -135,7 +141,7 @@ final class ToolFolderInspectorTests: XCTestCase {
         let empty = TracesTree.FolderNode(id: "p2", label: "docs", mode: .ask, offerableModes: [.ask, .ignore], sessions: [])
         guard case .apply = TracesTreeView.modeChange(empty, .ignore) else { return XCTFail("nothing to clear: direct") }
         let armed = TracesTree.FolderNode(id: "p3", label: "web", mode: .autoUpload, sessions: [])
-        guard case .apply = TracesTreeView.modeChange(armed, .ask) else { return XCTFail("Ask me is direct") }
+        guard case .apply = TracesTreeView.modeChange(armed, .ask) else { return XCTFail("Ask is direct") }
         guard case .noop = TracesTreeView.modeChange(folder, .ask) else { return XCTFail("the same mode is no change") }
 
         let source = try TracesParityTests.text("Views/Monitor/ToolFolderInspectors.swift")

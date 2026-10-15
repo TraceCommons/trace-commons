@@ -201,7 +201,10 @@ extension DaemonData {
 }
 
 /// Activity reply wrappers enforce the strict Rust field sets. Reject unsafe economic,
-/// profile and predicate extensions instead of displaying an unvalidated claim.
+/// profile and unversioned extensions instead of displaying an unvalidated claim.
+/// A mission's `predicate` is the one versioned extension point, read as the
+/// protocol reads it: a version-1 block against its own key set, a later
+/// version carried unread. The shell never matches on it.
 ///
 /// Deliberate, and it applies to version skew too: these key sets mirror
 /// `#[serde(deny_unknown_fields)]` on every activity type in
@@ -250,7 +253,10 @@ private enum ActivityWireValidation {
     static func policy(_ raw: ActivityWireNode) throws {
         let value = try object(raw, keys: ["schema_version", "policy_id", "starts_on", "ends_before", "qualification", "missions", "daily", "levels", "badges"])
         guard let missions = value["missions"] else { throw failure() }
-        try array(missions) { _ = try object($0, keys: ["id", "title", "required_contributions"]) }
+        try array(missions) { raw in
+            let mission = try object(raw, keys: ["id", "title", "required_contributions", "predicate"])
+            try optional(mission["predicate"], check: predicate)
+        }
         try optional(value["daily"]) { raw in
             guard case .object(let fields) = raw, case .string(let kind)? = fields["kind"] else { throw failure() }
             switch kind {
@@ -261,6 +267,21 @@ private enum ActivityWireValidation {
         }
         try optional(value["levels"]) { try array($0) { _ = try object($0, keys: ["id", "required"]) } }
         try optional(value["badges"]) { try array($0) { _ = try object($0, keys: ["id", "metric", "required"]) } }
+    }
+
+    /// Mirrors `MissionPredicate` in the protocol: a positive integer
+    /// `version`; version 1 has a closed key set of string lists and a
+    /// required `min_sessions`; a later version is any object. Its bounds are
+    /// the daemon's to enforce, before the reply reaches the shell.
+    static func predicate(_ raw: ActivityWireNode) throws {
+        guard case .object(let fields) = raw, case .number(let version)? = fields["version"],
+              version >= 1, version == version.rounded(.towardZero) else { throw failure() }
+        guard version == 1 else { return }
+        let value = try object(raw, keys: ["version", "tools", "tool_families", "languages", "min_sessions"])
+        guard case .number? = value["min_sessions"] else { throw failure() }
+        for key in ["tools", "tool_families", "languages"] {
+            try optional(value[key]) { try array($0) { guard case .string = $0 else { throw failure() } } }
+        }
     }
 
     static func status(_ raw: ActivityWireNode) throws {
@@ -316,7 +337,7 @@ private enum ActivityWireValidation {
 /// Structural inspection keeps the original Decoder for exact UInt64 decoding;
 /// numeric values are never projected through floating-point conversion.
 private indirect enum ActivityWireNode: Decodable {
-    case object([String: ActivityWireNode]), array([ActivityWireNode]), string(String), bool(Bool), number, null
+    case object([String: ActivityWireNode]), array([ActivityWireNode]), string(String), bool(Bool), number(Double), null
 
     init(from decoder: Decoder) throws {
         let value = try decoder.singleValueContainer()
@@ -325,7 +346,7 @@ private indirect enum ActivityWireNode: Decodable {
         else if let raw = try? value.decode(String.self) { self = .string(raw) }
         else if let raw = try? value.decode([String: ActivityWireNode].self) { self = .object(raw) }
         else if let raw = try? value.decode([ActivityWireNode].self) { self = .array(raw) }
-        else if (try? value.decode(Double.self)) != nil { self = .number }
+        else if let raw = try? value.decode(Double.self) { self = .number(raw) }
         else { throw ActivityWireValidation.failure() }
     }
 }

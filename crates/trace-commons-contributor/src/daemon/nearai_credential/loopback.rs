@@ -104,7 +104,7 @@ fn bounce_page(state: &str) -> Result<String> {
     Ok(format!(
         "<!doctype html>\n\
          <meta charset=\"utf-8\">\n\
-         <title>Trace Commons</title>\n\
+         <title>{app}</title>\n\
          <p id=\"m\">Finishing sign in.</p>\n\
          <script>\n\
          var m = document.getElementById(\"m\");\n\
@@ -114,11 +114,12 @@ fn bounce_page(state: &str) -> Result<String> {
          fetch(\"{DEPOSIT_PATH}\", {{ method: \"POST\", body: \"state={state}&ua=\" + u + \"&\" + h }})\n\
          .then(function (r) {{\n\
          m.textContent = r.ok\n\
-         ? \"Signed in. Return to Trace Commons.\"\n\
-         : \"Trace Commons could not finish sign-in. Return to the app and try again.\";\n\
+         ? \"Signed in. Return to {app}.\"\n\
+         : \"{app} could not finish sign-in. Return to the app and try again.\";\n\
          }})\n\
-         .catch(function () {{ m.textContent = \"Trace Commons could not finish sign-in. Return to the app and try again.\"; }});\n\
-         </script>\n"
+         .catch(function () {{ m.textContent = \"{app} could not finish sign-in. Return to the app and try again.\"; }});\n\
+         </script>\n",
+        app = crate::brand::APP_NAME
     ))
 }
 

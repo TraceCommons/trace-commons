@@ -77,7 +77,7 @@ export function WaitingReview({
             title="This one can't be shown."
             body={
               error ??
-              "The session file changed while it was being read. Nothing has been sent, and nothing will be until it can be shown to you."
+              "The trace file changed while it was being read. Nothing has been sent, and nothing will be until it can be shown to you."
             }
           />
         ) : (

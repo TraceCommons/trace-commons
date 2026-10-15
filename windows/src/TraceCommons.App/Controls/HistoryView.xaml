@@ -504,7 +504,7 @@
                     <TextBlock Text="Nothing has been sent yet"
                                Style="{StaticResource TcTitleCardTextStyle}"
                                HorizontalAlignment="Center" />
-                    <TextBlock Text="Once you approve a session it appears here, with what became of it and what it earned."
+                    <TextBlock Text="Once you approve a trace it appears here, with what became of it and what it earned."
                                Style="{StaticResource TcCaptionTextStyle}"
                                TextWrapping="Wrap"
                                MaxWidth="360"

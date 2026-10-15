@@ -128,6 +128,12 @@ pub enum UploadDecision {
     /// tried again no sooner than `retry_after_secs`, the witness's own
     /// bounded `Retry-After`.
     WitnessSaturated { retry_after_secs: u32 },
+    /// Ingest's per-principal rate limit turned the upload away (`429`, see
+    /// `submit::REASON_RATE_LIMITED`). Nothing was judged and nothing is
+    /// lost: the session keeps its approval and is tried again no sooner
+    /// than `retry_after_secs`, the server's own bounded hint. The pass
+    /// stops here, so the rest are not sent into the same limit.
+    RateLimited { retry_after_secs: u32 },
     /// A daily volume cap is in force.
     CapReached,
 }
@@ -321,8 +327,17 @@ fn decision_for(
     outcome: SubmitOutcome,
     receipt: crate::submit::ReceiptShipped,
     witness_retry_after: Option<u32>,
+    rate_limit_retry_after: Option<u32>,
 ) -> UploadDecision {
     match outcome {
+        SubmitOutcome::Failed { reason_label }
+            if reason_label == crate::submit::REASON_RATE_LIMITED =>
+        {
+            UploadDecision::RateLimited {
+                retry_after_secs: rate_limit_retry_after
+                    .unwrap_or(crate::submit::RATE_LIMIT_DEFAULT_RETRY_SECS),
+            }
+        }
         SubmitOutcome::Failed { reason_label }
             if reason_label == crate::submit::REASON_WITNESS_SATURATED =>
         {
@@ -378,6 +393,10 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
     match decision {
         UploadDecision::CapReached => Some(LABEL_DAILY_CAP_REACHED),
         UploadDecision::WitnessSaturated { .. } => Some(super::health::LABEL_WITNESS_SATURATED),
+        // A pause the next pass clears on its own, with the session kept.
+        // Like a lease another attempt holds, nothing to tell anyone about;
+        // above all not `ingest-unreachable`, which reads as an outage.
+        UploadDecision::RateLimited { .. } => None,
         UploadDecision::Refused { reason_label } => match reason_label.as_str() {
             "pii-filter-unavailable" => Some(LABEL_PII_FILTER_UNAVAILABLE),
             LABEL_NEAR_AI_NOTICE_PENDING => Some(LABEL_NEAR_AI_NOTICE_PENDING),
@@ -775,6 +794,7 @@ impl Uploader<'_, '_> {
                 outcome,
                 self.ctx.last_receipt_shipped(),
                 self.ctx.last_witness_retry_after(),
+                self.ctx.last_rate_limit_retry_after(),
             ),
         };
         // K6: checked on this session's own certificate, the one it was

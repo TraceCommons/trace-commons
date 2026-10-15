@@ -309,7 +309,8 @@ async fn await_loopback_code(listener: tokio::net::TcpListener) -> Result<String
         None => ("400 Bad Request", "Sign-in did not complete."),
     };
     let body = format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>Trace Commons</title><p>{message}</p>"
+        "<!doctype html><meta charset=\"utf-8\"><title>{app}</title><p>{message}</p>",
+        app = crate::brand::APP_NAME
     );
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
@@ -330,7 +331,7 @@ async fn await_loopback_code(listener: tokio::net::TcpListener) -> Result<String
 
 /// Best-effort: hand the URL to the platform's browser opener. A failure here
 /// is not fatal — the caller prints the URL, which is the headless path.
-fn try_open_browser(url: &str) -> bool {
+pub(crate) fn try_open_browser(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     let attempt = std::process::Command::new("open").arg(url).status();
     #[cfg(target_os = "linux")]

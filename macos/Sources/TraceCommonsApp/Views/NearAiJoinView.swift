@@ -84,12 +84,18 @@ struct NearAiJoinView: View {
                             .glassType(GlassTokens.TypeScale.body)
                             .foregroundStyle(GlassColor.textSecondary)
                     }
+                    // A refused join is the failed request's red line,
+                    // unboxed, under Join (Ron, 2026-10-09); any other
+                    // outcome keeps its notice.
                     if let refusal, let line = TCNearAiEnroll.line(label: refusal) {
-                        NativeFlowNotice(
-                            message: line,
-                            glyph: model.witnessCopy?.wallet?.refusedGlyph ?? "",
-                            tone: TCNearAiEnroll.tone(label: refusal)
-                                == TC_PRIVATE_INFERENCE_TONE_REFUSED ? "refused" : "neutral")
+                        if TCNearAiEnroll.tone(label: refusal) == TC_PRIVATE_INFERENCE_TONE_REFUSED {
+                            GlassAlert(line)
+                        } else {
+                            NativeFlowNotice(
+                                message: line,
+                                glyph: model.witnessCopy?.wallet?.refusedGlyph ?? "",
+                                tone: "neutral")
+                        }
                     }
                 }
             }

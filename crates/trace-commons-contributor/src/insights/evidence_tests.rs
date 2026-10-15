@@ -222,6 +222,11 @@ fn a_post_legacy_model_schema_requires_the_store_version_floor() {
     assert_eq!(current["version"], super::STORE_VERSION);
 
     let mut below = current.clone();
+    // A store below 13 never carried a session identity.
+    below["reports"][&saved.id]
+        .as_object_mut()
+        .unwrap()
+        .remove("session_identity");
     below["version"] = (models::MODEL_OBSERVATIONS_STORE_VERSION_FLOOR - 1).into();
     fs::write(&index_path, serde_json::to_vec(&below).unwrap()).unwrap();
     super::assert_quarantined(

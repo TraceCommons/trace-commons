@@ -2640,3 +2640,357 @@ async fn pg_enrolment_works_as_the_runtime_role() {
         .await
         .expect("drop role");
 }
+
+// --- Upload claim to account admission, over the real token path -------------
+
+/// The real upload-claim issuer, reading device keys from the test database,
+/// and an ingest state that verifies what it signs. Nothing between the two
+/// is hand-built: the claim is whatever the issuer mints for a
+/// device-signed request, and the `TenantCtx` is whatever ingest's
+/// `authenticate_ctx` makes of it.
+struct ClaimPath {
+    issuer: axum::Router,
+    ingest: Arc<AppState>,
+}
+
+const CLAIM_ISSUER: &str = "trace-commons-test-upload-issuer";
+const CLAIM_AUDIENCE: &str = "trace-commons-test-upload";
+
+impl ClaimPath {
+    fn new(h: &Harness) -> Self {
+        use trace_commons_server::trace_upload_claim_issuer as issuer;
+        let keys = issuer::generate_upload_claim_keypair().expect("issuer keypair");
+        let config = issuer::TraceUploadClaimIssuerConfig {
+            bind: "127.0.0.1:0".parse().expect("bind"),
+            signing_private_key_pem: keys.private_key_pem,
+            signing_public_key_pem: keys.public_key_pem.clone(),
+            signing_kid: keys.suggested_kid.clone(),
+            issuer: CLAIM_ISSUER.to_string(),
+            audience: CLAIM_AUDIENCE.to_string(),
+            max_ttl_seconds: 300,
+            // No workload token is minted here; any valid key will do.
+            workload_public_key_pem: keys.public_key_pem.clone(),
+            workload_issuer: None,
+            workload_audience: None,
+            tenant_access_grant_db: None,
+            require_tenant_access_grants: false,
+            shutdown_grace_seconds: 1,
+            request_timeout_seconds: 30,
+            max_request_bytes: 64 * 1024,
+            allowlist_source: None,
+            allowlist_refresh_interval_seconds: 60,
+            allowlist_max_stale_seconds: 600,
+            onboarding_device_key_db: Some(h.backend.clone() as Arc<dyn Database>),
+            // Required alongside the device registry; nothing here reads them.
+            onboarding_ingest_url: Some("https://ingest.example".to_string()),
+            onboarding_community_url: Some("https://community.example".to_string()),
+            onboarding_profile_url: Some("https://community.example/profile".to_string()),
+            onboarding_leaderboard_url: Some("https://community.example/leaderboard".to_string()),
+            admin_bind: None,
+            invite_admin_backend: None,
+            invite_admin_registry: None,
+            invite_registry_authoritative: false,
+        };
+        let issuer = issuer::trace_upload_claim_issuer_router(config).expect("issuer router");
+        let mut ingest = h.state.clone();
+        let settings = Arc::make_mut(&mut ingest);
+        settings.signed_token_verifier = Some(shared_signed_token_verifier(
+            TraceCommonsSignedTokenVerifier {
+                default_secret: None,
+                keyed_secrets: BTreeMap::new(),
+                // The issuer stamps its kid on every claim.
+                default_eddsa_public_key: None,
+                keyed_eddsa_public_keys: BTreeMap::from([(
+                    keys.suggested_kid,
+                    TraceCommonsSignedEddsaPublicKey {
+                        pem: keys.public_key_pem,
+                        not_before: None,
+                        not_after: None,
+                    },
+                )]),
+                managed_eddsa_key_ids: BTreeSet::new(),
+                managed_eddsa_keyset_last_refreshed_at: None,
+                managed_eddsa_keyset_last_refresh_failed_at: None,
+                issuer: Some(CLAIM_ISSUER.to_string()),
+                audience: Some(CLAIM_AUDIENCE.to_string()),
+                revoked_jtis: BTreeSet::new(),
+                max_ttl_seconds: Some(900),
+                require_jti: true,
+            },
+        ));
+        settings.require_eddsa_signed_tokens = true;
+        Self { issuer, ingest }
+    }
+
+    /// `POST /v1/trace-upload-claim` exactly as the contributor sends it
+    /// (`identity::build_signed_claim_request_with_scopes`): the body carries
+    /// the tenant and a hashed per-user subject, and the device signs it.
+    async fn mint(&self, device: &Device, tenant: &str) -> Result<String, StatusCode> {
+        let device_key_id = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+            &device.public_bytes(),
+        );
+        let body = serde_json::json!({
+            "schema_version": "ironclaw.trace_upload_claim_request.v1",
+            "tenant_id": tenant,
+            "audience": CLAIM_AUDIENCE,
+            "consent_scopes": [],
+            "allowed_uses": [],
+            "subject": trace_commons_protocol::onboarding::user_subject_hash("near-ai-user"),
+            "requested_at": Utc::now().to_rfc3339(),
+        })
+        .to_string();
+        let response = self
+            .issuer
+            .clone()
+            .oneshot(
+                axum::http::Request::post("/v1/trace-upload-claim")
+                    .header("content-type", "application/json")
+                    .header("x-trace-device-key-id", &device_key_id)
+                    .header("x-trace-device-signature", device.sign(body.as_bytes()))
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("issuer responds");
+        let status = response.status();
+        if status != StatusCode::OK {
+            return Err(status);
+        }
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("claim body");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("claim json");
+        Ok(json["access_token"]
+            .as_str()
+            .expect("access_token")
+            .to_string())
+    }
+
+    /// The `TenantCtx` ingest's upload route builds from that bearer.
+    fn ctx(&self, token: &str) -> TenantCtx {
+        authenticate_ctx(&self.ingest, &auth_headers(token)).expect("ingest accepts the claim")
+    }
+
+    async fn resolve(
+        &self,
+        ctx: &TenantCtx,
+    ) -> Result<
+        trace_commons_server::account_trust::TrustAccount,
+        trace_commons_server::account_trust::TrustRefusal,
+    > {
+        let db = self.ingest.db_mirror.as_ref().expect("mirror");
+        trace_commons_server::account_trust::resolve_contribution_account(
+            db.as_ref(),
+            ctx.tenant_id(),
+            &ctx.account_principal_ref(),
+        )
+        .await
+    }
+}
+
+async fn provisioned_account(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    device: &str,
+) -> Uuid {
+    admin
+        .query_one(
+            "SELECT account_id FROM trace_near_provisioned_devices
+              WHERE tenant_id = $1 AND device_key_id = $2",
+            &[&tenant, &device],
+        )
+        .await
+        .expect("provisioned device")
+        .get(0)
+}
+
+/// The pilot failure of 2026-10-12: a NEAR AI device's upload claim, minted
+/// by the issuer and verified by ingest, must reach the account its device
+/// was provisioned into. Until this was fixed, ingest looked the account up
+/// by the claim's signed-claim principal, which no provisioning path writes,
+/// and every `nearai-` upload was refused with `account_trust_refused`.
+#[tokio::test]
+async fn pg_a_near_ai_device_upload_claim_resolves_its_provisioned_account() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_test();
+    let admin = h.admin().await;
+    let device = Device::new();
+    let provisioned = provision(&h, &device).await;
+    let tenant = provisioned["tenant_id"]
+        .as_str()
+        .expect("tenant")
+        .to_string();
+    let key = provisioned["device_key_id"]
+        .as_str()
+        .expect("device")
+        .to_string();
+    assert!(tenant.starts_with("nearai-"), "{tenant}");
+
+    let path = ClaimPath::new(&h);
+    let token = path.mint(&device, &tenant).await.expect("issuer mints");
+    let ctx = path.ctx(&token);
+    assert_eq!(ctx.tenant_id(), tenant);
+    assert_eq!(
+        ctx.account_principal_ref(),
+        trace_commons_server::account_trust::device_principal_ref(&tenant, &key),
+        "admission looks the device up by the principal it was provisioned under"
+    );
+
+    let account = path
+        .resolve(&ctx)
+        .await
+        .expect("the claim resolves its account");
+    assert_eq!(
+        account.account_id(),
+        provisioned_account(&admin, &tenant, &key).await
+    );
+    let anchor = admission::anchor(&path.ingest, &ctx)
+        .await
+        .expect("anchor lookup")
+        .expect("an anchored tenant has an anchor");
+    assert!(
+        trace_commons_protocol::admission::is_hash(&anchor),
+        "{anchor}"
+    );
+
+    // The ledger rechecks the live device under the principal the
+    // reservation carries (`trace_account_admission_live_device`), so the
+    // derived principal has to satisfy that join too, not only the lookup.
+    let policy = trace_commons_server::account_trust::parse_bounded_policy(
+        r#"{"version":"claim-path-fixture","processing_cost_bound":10,"bounded_allowance":10,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
+        &["claim-path-fixture"],
+    )
+    .expect("fixture policy");
+    let reserved = h
+        .backend
+        .reserve_account_admission(
+            &trace_commons_server::admission_ledger::AccountAdmissionReservation {
+                account,
+                principal_ref: ctx.account_principal_ref(),
+                expected_trust_version: None,
+                submission_id: Uuid::new_v4(),
+                body_hash: "0".repeat(64),
+                lease_id: Uuid::new_v4(),
+                policy,
+                lease_seconds: 60,
+                attested: false,
+            },
+        )
+        .await
+        .expect("reserve");
+    assert!(
+        matches!(
+            reserved.decision,
+            trace_commons_server::admission_ledger::AdmissionDecision::Reserved
+        ),
+        "the device's claim reserves against its account: {:?}",
+        reserved.decision
+    );
+
+    // The reservation's rows hold `trace_accounts`, which `drop_tenants` removes.
+    for table in [
+        "trace_account_admission_submissions",
+        "trace_account_admission_budget",
+        "trace_account_trust",
+    ] {
+        admin
+            .execute(
+                &format!("DELETE FROM {table} WHERE tenant_id = $1"),
+                &[&tenant],
+            )
+            .await
+            .unwrap_or_else(|error| panic!("cleanup {table}: {error}"));
+    }
+    reset_account_rate_limiter_for_test();
+    drop_tenants(&admin, &[&tenant]).await;
+}
+
+/// One device's claim never reaches another device's account. Each token
+/// yields only the principal of the key it was minted for: a device in
+/// another tenant (another account) is unreachable, the issuer will not
+/// mint a claim for a key under a tenant it is not registered in, and in
+/// one tenant a revoked second device stops resolving while the first
+/// carries on, so resolution is per device and not per tenant.
+#[tokio::test]
+async fn pg_one_devices_upload_claim_cannot_resolve_another_devices_account() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    let Some(other) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_test();
+    let admin = h.admin().await;
+    let device_a = Device::new();
+    let a = provision(&h, &device_a).await;
+    let tenant_a = a["tenant_id"].as_str().expect("tenant").to_string();
+    let key_a = a["device_key_id"].as_str().expect("device").to_string();
+    let device_b = Device::new();
+    let b = provision(&other, &device_b).await;
+    let tenant_b = b["tenant_id"].as_str().expect("tenant").to_string();
+    let key_b = b["device_key_id"].as_str().expect("device").to_string();
+    assert_ne!(tenant_a, tenant_b);
+
+    let path = ClaimPath::new(&h);
+    let ctx_a = path.ctx(&path.mint(&device_a, &tenant_a).await.expect("mint a"));
+    let ctx_b = path.ctx(&path.mint(&device_b, &tenant_b).await.expect("mint b"));
+    let account_a = path.resolve(&ctx_a).await.expect("a resolves");
+    let account_b = path.resolve(&ctx_b).await.expect("b resolves");
+    assert_eq!(
+        account_a.account_id(),
+        provisioned_account(&admin, &tenant_a, &key_a).await
+    );
+    assert_eq!(
+        account_b.account_id(),
+        provisioned_account(&admin, &tenant_b, &key_b).await
+    );
+    assert_ne!(account_a.account_id(), account_b.account_id());
+
+    // Device A asking for a claim in B's tenant: its key is not registered
+    // there, so the issuer refuses before any claim exists.
+    assert_eq!(
+        path.mint(&device_a, &tenant_b).await,
+        Err(StatusCode::FORBIDDEN)
+    );
+
+    // A second device provisioned by the same NEAR AI login lands in A's
+    // tenant. Each claim names its own key's principal, and revoking the
+    // second key refuses only the second.
+    let device_a2 = Device::new();
+    let a2 = provision(&h, &device_a2).await;
+    let key_a2 = a2["device_key_id"].as_str().expect("device").to_string();
+    assert_eq!(a2["tenant_id"].as_str(), Some(tenant_a.as_str()));
+    let ctx_a2 = path.ctx(&path.mint(&device_a2, &tenant_a).await.expect("mint a2"));
+    assert_eq!(
+        ctx_a2.account_principal_ref(),
+        trace_commons_server::account_trust::device_principal_ref(&tenant_a, &key_a2)
+    );
+    assert_ne!(
+        ctx_a2.account_principal_ref(),
+        ctx_a.account_principal_ref()
+    );
+    admin
+        .execute(
+            "UPDATE device_keys SET revoked_at = NOW() WHERE tenant_id = $1 AND device_key_id = $2",
+            &[&tenant_a, &key_a2],
+        )
+        .await
+        .expect("revoke a2");
+    assert_eq!(
+        path.resolve(&ctx_a2).await,
+        Err(trace_commons_server::account_trust::TrustRefusal::Refused),
+        "a revoked device's still-valid claim resolves nothing"
+    );
+    assert_eq!(
+        path.resolve(&ctx_a)
+            .await
+            .map(|account| account.account_id()),
+        Ok(account_a.account_id()),
+        "revoking one device leaves the other resolving"
+    );
+
+    reset_account_rate_limiter_for_test();
+    drop_tenants(&admin, &[&tenant_a, &tenant_b]).await;
+}

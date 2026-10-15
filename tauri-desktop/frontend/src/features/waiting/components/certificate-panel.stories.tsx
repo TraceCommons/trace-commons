@@ -11,11 +11,11 @@ type Story = StoryObj<typeof meta>;
 export const Held: Story = {
   args: {
     copy: {
-      list_title: "Sessions carrying a witness certificate",
+      list_title: "Traces carrying a witness certificate",
       row_line:
-        "A witness certificate is held for this session, so what you send carries signed proof of the reviewed bytes.",
+        "A witness certificate is held for this trace, so what you send carries signed proof of the reviewed bytes.",
       list_empty:
-        "Nothing here yet. A session joins this list once your witness has reviewed it.",
+        "Nothing here yet. A trace joins this list once your witness has reviewed it.",
     },
     entries: [
       {
@@ -33,7 +33,7 @@ export const Held: Story = {
         attestation: "attested",
         attestation_copy: {
           state_line:
-            "This session carries a checkable copy of its last model call.",
+            "This trace carries a checkable copy of its last model call.",
           reason_line: null,
           tone: "clear",
         },
@@ -45,11 +45,11 @@ export const Held: Story = {
 export const Empty: Story = {
   args: {
     copy: {
-      list_title: "Sessions carrying a witness certificate",
+      list_title: "Traces carrying a witness certificate",
       row_line:
-        "A witness certificate is held for this session, so what you send carries signed proof of the reviewed bytes.",
+        "A witness certificate is held for this trace, so what you send carries signed proof of the reviewed bytes.",
       list_empty:
-        "Nothing here yet. A session joins this list once your witness has reviewed it.",
+        "Nothing here yet. A trace joins this list once your witness has reviewed it.",
     },
     entries: [
       {
@@ -67,7 +67,7 @@ export const Empty: Story = {
         attestation: "unattested_configuration",
         attestation_copy: {
           state_line:
-            "This session carries no copy of its last model call. A setting decides whether the ones you record from now on will.",
+            "This trace carries no copy of its last model call. A setting decides whether the ones you record from now on will.",
           reason_line: null,
           tone: "attention",
         },

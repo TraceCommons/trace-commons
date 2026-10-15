@@ -44,7 +44,7 @@ export function PreviewInspector({
         if (!nextOpen) onClose();
       }}
       title="Exactly what would be sent"
-      description="This is the redacted envelope. It stays local while you read it. Original-session search returns only a count; it never returns raw text."
+      description="This is the redacted envelope. It stays local while you read it. Original-trace search returns only a count; it never returns raw text."
       footer={
         <Button type="button" variant="outline" onClick={onClose}>
           Close
@@ -57,7 +57,7 @@ export function PreviewInspector({
         </span>
         <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
           This is the redacted envelope. It stays local while you read it.
-          Original-session search returns only a count; it never returns raw
+          Original-trace search returns only a count; it never returns raw
           text.
         </p>
         <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
@@ -222,13 +222,13 @@ function SearchTab({
       )}
     >
       <p className="mb-3 text-[11px] leading-[1.5] text-muted-foreground">
-        Search checks the original session locally and returns a count only. It
+        Search checks the original trace locally and returns a count only. It
         never renders original text.
       </p>
       <div className="my-[18px] flex flex-wrap items-end gap-2.5">
         <div className="grid gap-1.5">
           <label htmlFor="original-search-needle">
-            Search original session
+            Search original trace
           </label>
           <Input
             id="original-search-needle"

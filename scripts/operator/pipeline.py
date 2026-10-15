@@ -5,6 +5,10 @@ Python 3 standard library only. Every subcommand builds one `Run`, runs its
 handler, and on failure prints a single label-only line to standard error --
 never a child command line, its environment, or its output (repo
 convention: hash-only, label-only operational surfaces).
+
+`compare` sends the traces of one pin through the old gate path of `main`
+and through the versioned pipeline, and reports each difference
+(`pipeline_tooling.comparison`).
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ import secrets
 import shutil
 import stat
 import sys
+import time
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -38,6 +43,18 @@ from pipeline_tooling.checks import (
     corpus_check_spec,
     required_specs,
 )
+from pipeline_tooling.comparison import (
+    ALIGNMENT_LABEL,
+    BRANCH_LABEL,
+    PIN_DIGEST_FIELDS,
+    REFUSED_LABEL,
+    SIDES,
+    UNEXPLAINED_LABEL,
+    export_compare_corpus,
+    file_digest,
+    validate_comparison_report,
+)
+from pipeline_tooling.comparison import markdown as comparison_markdown
 from pipeline_tooling.corpus import (
     DEFAULT_CORPUS,
     PIN_SCHEMA,
@@ -166,6 +183,12 @@ QUALIFY_CORPUS_RUNS = (
     ("compatibility", HF_LOCAL_PIN),
 )
 
+# `compare`: the ignored test that sends each trace of a pin through the old
+# gate path and through the pipeline, and the two pins of `--self-test`.
+COMPARE_HARNESS = "tests::pipeline_compare_pg_tests::pipeline_compare_run"
+COMPARE_LOCAL_PIN = ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl/pin-local.json"
+COMPARE_RISK_PIN = ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl/pin-local-risk.json"
+
 _HASH = re.compile(r"sha256:[a-f0-9]{64}\Z")
 _KEY_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 # A public key: 32 bytes, 43 characters of unpadded base64url.
@@ -265,6 +288,29 @@ def build_parser():
         help="Use this existing PostgreSQL server instead of starting a container.",
     )
     restore_parser.set_defaults(handler=restore_drill)
+
+    compare_parser = subparsers.add_parser(
+        "compare", help="Send one pin through the old gate path and the pipeline and report each difference"
+    )
+    compare_parser.add_argument(
+        "--corpus", default=None, help="A comparison pin (an HF pin descriptor with with_events: true)."
+    )
+    compare_parser.add_argument(
+        "--self-test",
+        dest="self_test",
+        action="store_true",
+        help="Run the four scenarios that show that the comparison permits the ruled differences and fails on any other. Not evidence.",
+    )
+    compare_parser.add_argument(
+        "--limit", type=int, default=None, help="Compare only the first N traces (a partial run; not evidence)."
+    )
+    compare_parser.add_argument(
+        "--postgres-admin-url",
+        dest="postgres_admin_url",
+        default=None,
+        help="Use this existing PostgreSQL server instead of starting a container.",
+    )
+    compare_parser.set_defaults(handler=run_compare)
 
     qualify_parser = subparsers.add_parser(
         "qualify", help="Run every required pipeline check and write one qualification report (local evidence)"
@@ -591,6 +637,419 @@ def run_corpus(args, run):
     if args.archive:
         update_catalog(LOCAL_DIR / CATALOG_NAME, local_report)
     print(f"PipelineRunOK: bundle={report['bundle_id']} fixtures={report['fixture_count']}")
+
+
+def _compare_pin(pin_path):
+    """`(pin, local directory or None)` of a comparison pin. A file that
+    cannot be read, or that is not a JSON object, is
+    `comparison_pin_unreadable`. A pin without `with_events: true` is
+    `comparison_pin_without_events`: its export has no session events. A
+    local fixture pin names its JSONL directory; a pin without one exports
+    from the HF dataset that it names.
+
+    Each of the three fields that only a comparison pin has is absent or
+    has its type, or the pin is `comparison_pin_unreadable`:
+    `local_jsonl_dir` is a string, `session_names` is a list of strings,
+    and `declared_privacy_risk` is a map of strings."""
+    require(isinstance(_read_json(pin_path, "comparison_pin_unreadable"), dict), "comparison_pin_unreadable")
+    pin = load_pin(pin_path)
+    require(pin.get("with_events") is True, "comparison_pin_without_events")
+    local = pin.get("local_jsonl_dir")
+    names = pin.get("session_names")
+    risks = pin.get("declared_privacy_risk")
+    require(local is None or isinstance(local, str), "comparison_pin_unreadable")
+    require(
+        names is None or (isinstance(names, list) and all(isinstance(name, str) for name in names)),
+        "comparison_pin_unreadable",
+    )
+    require(
+        risks is None or (isinstance(risks, dict) and all(isinstance(risk, str) for risk in risks.values())),
+        "comparison_pin_unreadable",
+    )
+    return pin, (ROOT / local if local else None)
+
+
+class CompareInput(NamedTuple):
+    """One export, ready for the harness: its three files, and what its
+    manifest says of the sample (the five digests, and the number of
+    traces in the two corpus files)."""
+
+    bootstrap: Path
+    holdout: Path
+    manifest: Path
+    pin: dict
+    trace_count: int
+
+
+def _compare_input(exported):
+    """The `CompareInput` of one `export_compare_corpus` result. A manifest
+    that cannot be read, or that lacks one of the five digests or a whole
+    `sample_count`, is `comparison_manifest_malformed`."""
+    bootstrap, holdout, manifest_path = exported
+    manifest = _read_json(manifest_path, "comparison_manifest_malformed")
+    require(isinstance(manifest, dict), "comparison_manifest_malformed")
+    pin = {field: manifest.get(field) for field in PIN_DIGEST_FIELDS}
+    trace_count = manifest.get("sample_count")
+    require(
+        all(isinstance(digest, str) and _HASH.fullmatch(digest) is not None for digest in pin.values())
+        and type(trace_count) is int
+        and trace_count >= 0,
+        "comparison_manifest_malformed",
+    )
+    return CompareInput(Path(bootstrap), Path(holdout), Path(manifest_path), pin, trace_count)
+
+
+def _compare_records_path(run, step):
+    return run.run_dir / f"{step}-records.jsonl"
+
+
+def _compare_once(run, environment, exported, check_id, step, *, limit=None, skew=None, release=False, emit=True):
+    """One harness run in its own scenario of `environment`. Returns
+    `(report or None, StepFailed or None, report bytes or None)`.
+
+    Each file of the run is in the run directory, with the step in its
+    name: the harness removes a report that exists at its report path.
+    `release` selects Cargo's optimized build (PC-D21). Without `emit`, the
+    harness gets none of the three check result variables, so it emits no
+    result (`--self-test`: one check id, four runs).
+
+    A harness that fails keeps its failure: the transaction guard does not
+    apply, and a report that is missing or not valid is left out. A harness
+    that passes must show at least 5 committed transactions, and its
+    report, when there is one, must be valid.
+
+    A valid report must be the report of this run, for a harness that
+    passes and for one that fails: it names `check_id`
+    (`comparison_report_check_mismatch`), the five digests of the export
+    manifest (`comparison_report_pin_mismatch`), the manifest's trace count
+    (`comparison_report_trace_count_mismatch`), and the skew that this call
+    set, or none (`comparison_report_skew_mismatch`). A report with a skew
+    never has a check result (`comparison_skew_with_check_result`)."""
+    report_path = run.run_dir / f"{step}-report.json"
+    scenario = environment.scenario(step)
+    extra = {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": scenario.runtime_url,
+        "TRACE_COMMONS_PIPELINE_COMPARE_BOOTSTRAP_PATH": str(exported.bootstrap),
+        "TRACE_COMMONS_PIPELINE_COMPARE_HOLDOUT_PATH": str(exported.holdout),
+        "TRACE_COMMONS_PIPELINE_COMPARE_MANIFEST_PATH": str(exported.manifest),
+        "TRACE_COMMONS_PIPELINE_COMPARE_CHECK_ID": check_id,
+        "TRACE_COMMONS_PIPELINE_COMPARE_REPORT_PATH": str(report_path),
+        "TRACE_COMMONS_PIPELINE_COMPARE_RECORDS_PATH": str(_compare_records_path(run, step)),
+        # The milliseconds of each trace. Not part of the report or of a digest.
+        "TRACE_COMMONS_PIPELINE_COMPARE_TIMING_PATH": str(run.run_dir / f"{step}-timing.jsonl"),
+        "TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT": str(scenario.artifact_root),
+        # One random key per harness run (P4-D18); only the child sees it.
+        "TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX": secrets.token_hex(32),
+    }
+    if emit:
+        extra["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"] = str(run.results_dir)
+        extra["TRACE_COMMONS_PIPELINE_CHECK_RUN_ID"] = run.run_id
+        extra["TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH"] = run.code_revision_hash
+    if limit is not None:
+        extra["TRACE_COMMONS_PIPELINE_COMPARE_LIMIT"] = str(limit)
+    if skew is not None:
+        extra["TRACE_COMMONS_PIPELINE_COMPARE_SKEW"] = skew
+    # `cargo_test` puts the arguments in its list command and in its run
+    # command, so the two use one profile.
+    cargo_args = (*INGEST_TEST_ARGS, "--release") if release else INGEST_TEST_ARGS
+    failure = None
+    try:
+        cargo_test(run, step, cargo_args, COMPARE_HARNESS, child_environment(extra), exact=True, ignored=True)
+    except StepFailed as error:
+        failure = error
+    if failure is None:
+        committed = scenario.committed_transactions(scenario.pilot_database)
+        require(committed >= 5, f"database_check_executed_nothing:{step}")
+
+    if not report_path.is_file():
+        return None, failure, None
+    report_bytes = report_path.read_bytes()
+    try:
+        try:
+            report = json.loads(report_bytes)
+        except ValueError as error:
+            raise ToolingError("comparison_report_malformed") from error
+        validate_comparison_report(report)
+    except ToolingError:
+        if failure is None:
+            raise
+        return None, failure, None
+    require(report["check_id"] == check_id, "comparison_report_check_mismatch")
+    require(report["pin"] == exported.pin, "comparison_report_pin_mismatch")
+    require(report["trace_count"] == exported.trace_count, "comparison_report_trace_count_mismatch")
+    # The more exact label first: a skew together with a result of the check.
+    require(
+        report["skew"] is None or not (run.results_dir / f"{check_id}.result.json").exists(),
+        "comparison_skew_with_check_result",
+    )
+    require(report["skew"] == skew, "comparison_report_skew_mismatch")
+    return report, failure, report_bytes
+
+
+def _compare_failure_label(report):
+    """The first failure that a valid report names, or `None`: a pair that
+    loses the alignment and a refused pair are also unexplained, and the
+    more exact label must win. The harness gives a failure that it kept (a
+    driver error, for example) before each of these. The command sees only
+    the report, so for a run that such a failure cut short after a
+    difference it gives the label of the difference; `partial` then says
+    that the run did not complete."""
+    if report["alignment_lost_position"] is not None:
+        return ALIGNMENT_LABEL
+    if any(report["distribution"][side]["refused"] for side in SIDES):
+        return REFUSED_LABEL
+    if report["unexplained_total"] > 0:
+        return UNEXPLAINED_LABEL
+    if report["branch_gaps"]:
+        return BRANCH_LABEL
+    return None
+
+
+def _require_passing_report(report):
+    """After a harness run that passed: it wrote a report
+    (`comparison_report_missing`), and the report names no failure."""
+    require(report is not None, "comparison_report_missing")
+    label = _compare_failure_label(report)
+    require(label is None, label)
+
+
+def _write_compare_report(check_id, report, report_bytes, *, failed=False):
+    """The latest report of this check under `.local/`, beside its Markdown
+    view. One name for each check id and for a partial run, so a `--limit`
+    run or a local-pin run does not replace the report of the full run. The
+    JSON bytes are the harness's own, so they keep the hash that the check
+    evidence names.
+
+    `failed`: the harness failed. No check result exists for its report, so
+    the name of a full report has `-failed`, and the plain name is the name
+    of a pass only. A partial report keeps `-partial`."""
+    if report["partial"]:
+        suffix = "-partial"
+    elif failed:
+        suffix = "-failed"
+    else:
+        suffix = ""
+    json_path = LOCAL_DIR / f"pipeline-comparison-{check_id}{suffix}.json"
+    atomic_write(json_path, report_bytes)
+    atomic_write(json_path.with_suffix(".md"), comparison_markdown(report).encode())
+    return json_path
+
+
+def _require_compare_result(run, results, check_id, report, report_bytes):
+    """A full run that passed: a current pass result for `check_id` from
+    this run, with the package that the report names and with evidence
+    equal to the report's counts and to the hashes of the records file
+    (`comparison_records_missing` without one) and of the report file."""
+    require_current_pass_results(run, results, {check_id: CheckSpec(check_id, digests_required=True)})
+    result = results[check_id]
+    require(
+        (result.package_hash, result.configuration_digest, result.dependency_digest)
+        == (report["package_hash"], report["configuration_digest"], report["dependency_digest"]),
+        "comparison_report_package_mismatch",
+    )
+    evidence = _read_json(run.results_dir / f"{check_id}.evidence.json", "comparison_evidence_malformed")
+    validate_evidence(evidence)
+    try:
+        records_hash = file_digest(_compare_records_path(run, "compare_run"))
+    except OSError as error:
+        raise ToolingError("comparison_records_missing") from error
+    require(
+        evidence
+        == {
+            "traces": report["compared_count"],
+            "equal": report["equal_count"],
+            "permitted": report["permitted_total"],
+            "unexplained": 0,
+            "records_hash": records_hash,
+            "report_hash": sha256_digest(report_bytes),
+        },
+        "comparison_evidence_mismatch",
+    )
+
+
+def _compare_self_test(args, run):
+    """`compare --self-test`: four harness runs of the two local pins in one
+    environment, with the debug build. Each run must give its one expected
+    result:
+
+    1. The local pin passes, and compares each of its traces
+       (`compare_self_test_pass_incomplete`).
+    2. The risk pin passes, and compares each of its traces. Its declared
+       medium risk is one pair that the rule `medium_risk_privacy_review`
+       permits. Its declared high risk is one pair that both sides
+       quarantine and that compares equal (PC-D27). The `quarantine` count
+       is 1 on the baseline and 2 on the candidate, and no side rejects a
+       trace. Nothing else is allowed: no unexplained difference, no other
+       rule, no refused receipt, no alignment loss. A wrong count gives
+       `compare_self_test_risk_fields`. The other failures give the label
+       of a run that must pass: `comparison_has_unexplained_differences`,
+       `comparison_receipt_refused`, `comparison_alignment_lost`,
+       `comparison_gate_branch_not_exercised`, or
+       `compare_self_test_pass_incomplete`.
+    3. The local pin with the baseline's quality floor skewed fails
+       (`compare_self_test_skew_passed`), and its report names the pair at
+       which the run stopped and `quality_passed`
+       (`compare_self_test_skew_fields`).
+    4. The local pin again gives the report of run 1
+       (`compare_self_test_not_deterministic`).
+
+    No scenario emits a check result, and no report goes under `.local/`:
+    the result is not evidence."""
+    check_id = "pipeline_comparison_local"
+    exports = {}
+    for name, pin_path in (("local", COMPARE_LOCAL_PIN), ("risk", COMPARE_RISK_PIN)):
+        _, local_dir = _compare_pin(pin_path)
+        exports[name] = _compare_input(
+            export_compare_corpus(run, pin_path, child_environment({}), name=name, local_dir=local_dir, release=False)
+        )
+
+    with Environment(run, postgres_admin_url=args.postgres_admin_url) as environment:
+
+        def scenario(step, name, *, skew=None, passed_label=None):
+            """The report of one scenario. Without `passed_label` the
+            harness must pass and compare each trace of a pin that has
+            one. With it, the harness must fail and leave a valid report."""
+            report, failure, _ = _compare_once(
+                run, environment, exports[name], check_id, step, skew=skew, emit=False
+            )
+            if passed_label is None:
+                if failure is not None:
+                    raise failure
+                _require_passing_report(report)
+                require(
+                    not report["partial"] and report["compared_count"] == report["trace_count"] > 0,
+                    "compare_self_test_pass_incomplete",
+                )
+                return report
+            require(failure is not None, passed_label)
+            if report is None:
+                raise failure
+            return report
+
+        first = scenario("compare_self_pass", "local")
+        risk = scenario("compare_self_risk", "risk")
+        # The alignment keeps the two indexes equal after an admission
+        # difference: no chain of later differences, and no early stop.
+        require(
+            risk["unexplained_counts"] == {}
+            and risk["unexplained_total"] == 0
+            and risk["permitted_counts"] == {"medium_risk_privacy_review": 1}
+            and risk["permitted_total"] == 1
+            and not risk["partial"]
+            and risk["alignment_lost_position"] is None
+            and not any(risk["distribution"][side]["refused"] for side in SIDES)
+            # The declared high trace is held on the two sides (PC-D27); the
+            # declared medium trace is held on the candidate side only.
+            and not any(risk["distribution"][side]["reject"] for side in SIDES)
+            and risk["distribution"]["baseline"]["quarantine"] == 1
+            and risk["distribution"]["candidate"]["quarantine"] == 2,
+            "compare_self_test_risk_fields",
+        )
+        skewed = scenario(
+            "compare_self_skew", "local", skew="baseline_quality_floor", passed_label="compare_self_test_skew_passed"
+        )
+        # PC-D20: the run stops at the pair after which the indexes can differ.
+        require(
+            skewed["alignment_lost_position"] is not None and "quality_passed" in skewed["unexplained_counts"],
+            "compare_self_test_skew_fields",
+        )
+        repeat = scenario("compare_self_repeat", "local")
+        require(repeat["report_digest"] == first["report_digest"], "compare_self_test_not_deterministic")
+    print("PipelineCompareSelfTestOK: scenarios=4")
+
+
+def run_compare(args, run):
+    """`compare --corpus PIN`: exports the pin with its session events,
+    checks the export against the pin before any database starts, and runs
+    the comparison harness one time, with Cargo's optimized build for the
+    two (PC-D21). The check id comes from the pin and from nothing else: a
+    pin with a local directory gives `pipeline_comparison_local`, a pin
+    without one `pipeline_comparison_hf`.
+
+    A harness that fails and leaves a valid report: the report goes under
+    `.local/` with `-partial` or `-failed` in its name, one line names the
+    run and the report, and the failure is the first label that the report
+    names (the alignment, a refused receipt, an unexplained difference, a
+    gate branch with no evidence), or else the step failure. A report write
+    that fails does not replace that failure.
+
+    A harness that passes must leave a report that names none of the four
+    and that compared the expected number of traces: the limit, or each
+    trace of the pin (`comparison_compared_count_mismatch`). A full run must
+    also have a pin with all five digests, a current pass result whose
+    evidence agrees with the report, and no other result. A partial run
+    (`--limit` below the trace count) has no check result
+    (`comparison_check_results_unexpected`) and is not evidence: its line
+    says `partial=true`. The tree is examined again before the report goes
+    under `.local/`. Nothing goes to the lab catalog.
+
+    `compare --self-test`: see `_compare_self_test`."""
+    require(args.corpus is not None or args.self_test, "compare_corpus_or_self_test_required")
+    require(args.corpus is None or not args.self_test, "compare_corpus_and_self_test_conflict")
+    require(args.limit is None or not args.self_test, "compare_self_test_takes_no_option")
+    require(args.limit is None or args.limit >= 1, "compare_limit_invalid")
+    if args.self_test:
+        _compare_self_test(args, run)
+        return
+
+    pin_path = Path(args.corpus).resolve()
+    pin, local_dir = _compare_pin(pin_path)
+    # The declared risks change only the corpus files, so a run that can
+    # emit a result needs each digest of the pin.
+    pinned = all(pin.get(field) is not None for field in PIN_DIGEST_FIELDS)
+    require(pinned or args.limit is not None, "comparison_pin_digest_missing")
+    check_id = "pipeline_comparison_local" if local_dir is not None else "pipeline_comparison_hf"
+    exported = _compare_input(
+        export_compare_corpus(run, pin_path, child_environment({}), name="corpus", local_dir=local_dir, release=True)
+    )
+    # The number of traces that a pass compares. A limit at or above the
+    # trace count does not make a partial run, so the rule for the pin's
+    # digests applies before a database starts.
+    expected = exported.trace_count if args.limit is None else min(args.limit, exported.trace_count)
+    require(pinned or expected < exported.trace_count, "comparison_pin_digest_missing")
+    with Environment(run, postgres_admin_url=args.postgres_admin_url) as environment:
+        started = time.monotonic()
+        report, failure, report_bytes = _compare_once(
+            run, environment, exported, check_id, "compare_run", limit=args.limit, release=True
+        )
+        seconds = int(time.monotonic() - started)
+
+    if failure is not None:
+        if report is None:
+            raise failure
+        label = _compare_failure_label(report)
+        try:
+            shown = _shown(_write_compare_report(check_id, report, report_bytes, failed=True))
+        except OSError:
+            # The failure of the run must win: the report stays in the run
+            # directory, and no line names a file under `.local/`.
+            shown = None
+        if shown is not None:
+            lost = report["alignment_lost_position"]
+            print(
+                f"PipelineCompareReport: unexplained={report['unexplained_total']} "
+                f"alignment_lost={'none' if lost is None else lost} "
+                f"partial={'true' if report['partial'] else 'false'} run={run.run_id} report={shown}"
+            )
+        raise ToolingError(label) if label is not None else failure
+    _require_passing_report(report)
+    require(pinned or report["partial"], "comparison_pin_digest_missing")
+    require(report["compared_count"] == expected, "comparison_compared_count_mismatch")
+    results = load_results(run)
+    if report["partial"]:
+        require(not results, "comparison_check_results_unexpected")
+    else:
+        _require_compare_result(run, results, check_id, report, report_bytes)
+        require(set(results) == {check_id}, "comparison_check_results_unexpected")
+    # Before the report goes under `.local/`: a run that is refused leaves
+    # no report there that reads as a pass.
+    run.require_code_revision_unchanged()
+    shown = _shown(_write_compare_report(check_id, report, report_bytes))
+    print(
+        f"PipelineCompareOK: traces={report['compared_count']} equal={report['equal_count']} "
+        f"permitted={report['permitted_total']} unexplained=0 "
+        f"partial={'true' if report['partial'] else 'false'} seconds={seconds} run={run.run_id} report={shown}"
+    )
 
 
 def run_package(args, run):

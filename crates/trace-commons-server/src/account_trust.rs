@@ -32,6 +32,9 @@ pub enum TrustFactSource {
     SubmissionQuarantined(Uuid),
     /// An `abuse_penalty` credit-ledger event ID.
     AbusePenalty(Uuid),
+    /// A submission ID whose v2 witness certificate attests a provider-TEE
+    /// final call over the current accepted artifact (V76, V126).
+    AttestedSubmission(Uuid),
 }
 
 impl TrustFactSource {
@@ -42,7 +45,8 @@ impl TrustFactSource {
             | Self::SubmissionWithdrawn(id)
             | Self::SubmissionRevoked(id)
             | Self::SubmissionQuarantined(id)
-            | Self::AbusePenalty(id) => id,
+            | Self::AbusePenalty(id)
+            | Self::AttestedSubmission(id) => id,
         }
     }
 
@@ -54,6 +58,7 @@ impl TrustFactSource {
             Self::SubmissionRevoked(_) => "submission_revoked",
             Self::SubmissionQuarantined(_) => "submission_quarantined",
             Self::AbusePenalty(_) => "abuse_penalty",
+            Self::AttestedSubmission(_) => "attested_submission",
         }
     }
 
@@ -66,6 +71,7 @@ impl TrustFactSource {
             "submission_revoked" => Self::SubmissionRevoked(source_id),
             "submission_quarantined" => Self::SubmissionQuarantined(source_id),
             "abuse_penalty" => Self::AbusePenalty(source_id),
+            "attested_submission" => Self::AttestedSubmission(source_id),
             _ => return None,
         })
     }
@@ -87,6 +93,8 @@ pub enum TrustFactOutcome {
     Revoked,
     Quarantined,
     Penalized,
+    /// A provider-TEE attested final call over the accepted artifact.
+    AttestedProviderTee,
 }
 
 impl TrustFactOutcome {
@@ -102,6 +110,7 @@ impl TrustFactOutcome {
             "revoked" => Some(Self::Revoked),
             "quarantined" => Some(Self::Quarantined),
             "penalized" => Some(Self::Penalized),
+            "attested_provider_tee" => Some(Self::AttestedProviderTee),
             _ => None,
         }
     }
@@ -118,6 +127,7 @@ impl TrustFactOutcome {
             Self::Revoked => "revoked",
             Self::Quarantined => "quarantined",
             Self::Penalized => "penalized",
+            Self::AttestedProviderTee => "attested_provider_tee",
         }
     }
 }
@@ -179,6 +189,91 @@ pub async fn resolve_contribution_account(
     })
 }
 
+/// The principal a device key is provisioned under:
+/// `principal_sha256:` + hex(sha256(`device:<tenant>:<device_key_id>`)).
+///
+/// Every NEAR and NEAR AI provisioning path keys `trace_near_provisioned_devices`,
+/// `trace_account_principals` and the onboarding tenant-access grant by this
+/// value, and the upload-claim issuer looks grants up by it. It is NOT the
+/// principal ingest derives for a signed upload claim (that one hashes the
+/// claim's actor under the `signed_claim` method), so account resolution has
+/// to recover it from the claim: see [`device_claim_key_id`].
+pub fn device_principal_ref(tenant_id: &str, device_key_id: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(format!(
+        "device:{}:{}",
+        tenant_id.trim(),
+        device_key_id.trim()
+    ));
+    format!("principal_sha256:{}", hex::encode(digest))
+}
+
+/// A device key id as the onboarding registry stores it: `sha256:` and 64
+/// lowercase hex digits.
+pub fn is_device_key_id(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// Longest per-user subject the issuer accepts on a device claim.
+pub const DEVICE_CLAIM_SUBJECT_MAX_LEN: usize = 128;
+
+/// Whether `subject` is a per-user subject the issuer would accept: non-empty,
+/// at most [`DEVICE_CLAIM_SUBJECT_MAX_LEN`] bytes, ASCII alphanumerics and
+/// `:`, `_`, `-` only.
+pub fn is_device_claim_subject(subject: &str) -> bool {
+    !subject.is_empty()
+        && subject.len() <= DEVICE_CLAIM_SUBJECT_MAX_LEN
+        && subject
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'-'))
+}
+
+/// The upload-claim actor (`sub` and `principal_ref`) the issuer mints for a
+/// device-key-authenticated request: the bare device key id, or, when the
+/// device asserts a per-user subject, `instance:<tenant>:<device_key_id>:user:<subject>`.
+///
+/// The issuer builds the actor with this function and ingest parses it back
+/// with [`device_claim_key_id`]; keep the two together.
+pub fn device_claim_actor(tenant_id: &str, device_key_id: &str, subject: Option<&str>) -> String {
+    match subject {
+        Some(subject) => format!("instance:{tenant_id}:{device_key_id}:user:{subject}"),
+        None => device_key_id.to_string(),
+    }
+}
+
+/// The device key id inside a device-shaped upload-claim actor for `tenant_id`,
+/// the inverse of [`device_claim_actor`]. `None` for anything else, including
+/// an `instance:` actor naming a different tenant.
+///
+/// Parsed by length, not by splitting on `:`: the key id and the subject both
+/// contain colons.
+pub fn device_claim_key_id<'a>(tenant_id: &str, actor: &'a str) -> Option<&'a str> {
+    if is_device_key_id(actor) {
+        return Some(actor);
+    }
+    const KEY_LEN: usize = "sha256:".len() + 64;
+    let rest = actor
+        .strip_prefix("instance:")?
+        .strip_prefix(tenant_id)?
+        .strip_prefix(':')?;
+    let key = rest.get(..KEY_LEN)?;
+    let subject = rest.get(KEY_LEN..)?.strip_prefix(":user:")?;
+    (!tenant_id.is_empty() && is_device_key_id(key) && is_device_claim_subject(subject))
+        .then_some(key)
+}
+
+/// Whether an actor has the shape of a device claim actor for any tenant. The
+/// issuer refuses such an actor on every path that did not verify the device
+/// key, so that the shape alone is evidence a device signature was checked.
+pub fn is_device_shaped_actor(actor: &str) -> bool {
+    is_device_key_id(actor) || actor.starts_with("instance:")
+}
+
 /// A policy definition is parsed only when an operator explicitly supplies it.
 /// This module does not activate a policy or choose production quota values.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,12 +307,26 @@ impl BoundedPolicy {
     }
 }
 
-/// Explicit bounds for consuming externally recorded evaluations.
+/// Explicit bounds for consuming recorded `applied` evaluations. Admission
+/// reads them the same way whoever wrote them (V114).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalGrowth {
     pub policy_version: String,
     pub allowance_ceiling: i64,
     pub evaluation_max_age_seconds: i64,
+    pub source: GrowthSource,
+}
+
+/// Who computes the `applied` evaluations admission reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrowthSource {
+    /// `"growth_rule":"external"`: a separate evaluator login holding
+    /// `trace_account_trust_evaluator` (V114).
+    External,
+    /// `"growth_rule":"tiered-v1"`: this server's own evaluator runs the
+    /// policy's `growth` object (`account_trust_rule`) and writes through
+    /// V126. The growth policy version is the admission policy's version.
+    TieredV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,6 +350,8 @@ struct RawPolicy {
     growth_policy_version: Option<String>,
     allowance_ceiling: Option<i64>,
     evaluation_max_age_seconds: Option<i64>,
+    /// `tiered-v1` only; validated by `account_trust_rule::parse_growth_policy`.
+    growth: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -278,11 +389,32 @@ pub fn parse_bounded_policy(
         "none"
             if raw.growth_policy_version.is_none()
                 && raw.allowance_ceiling.is_none()
-                && raw.evaluation_max_age_seconds.is_none() =>
+                && raw.evaluation_max_age_seconds.is_none()
+                && raw.growth.is_none() =>
         {
             None
         }
-        "external" => {
+        crate::account_trust_rule::GROWTH_RULE_TIERED_V1
+            if raw.growth_policy_version.is_none()
+                && raw.allowance_ceiling.is_none()
+                && raw.evaluation_max_age_seconds.is_none() =>
+        {
+            let growth = crate::account_trust_rule::parse_growth_policy(json, supported_versions)?;
+            if growth
+                .evaluation_max_age_seconds()
+                .checked_mul(1000)
+                .is_none()
+            {
+                return Err(PolicyError);
+            }
+            Some(ExternalGrowth {
+                policy_version: raw.version.clone(),
+                allowance_ceiling: growth.allowance_ceiling(),
+                evaluation_max_age_seconds: growth.evaluation_max_age_seconds(),
+                source: GrowthSource::TieredV1,
+            })
+        }
+        "external" if raw.growth.is_none() => {
             let policy_version = raw.growth_policy_version.ok_or(PolicyError)?;
             let allowance_ceiling = raw.allowance_ceiling.ok_or(PolicyError)?;
             let evaluation_max_age_seconds = raw.evaluation_max_age_seconds.ok_or(PolicyError)?;
@@ -304,6 +436,7 @@ pub fn parse_bounded_policy(
                 policy_version,
                 allowance_ceiling,
                 evaluation_max_age_seconds,
+                source: GrowthSource::External,
             })
         }
         _ => return Err(PolicyError),
@@ -322,4 +455,76 @@ pub fn parse_bounded_policy(
         period,
         external_growth,
     })
+}
+
+#[cfg(test)]
+mod device_principal_tests {
+    use super::*;
+
+    const KEY_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const KEY_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const SUBJECT: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn device_principal_ref_is_the_pinned_provisioning_value() {
+        // Same pin as `db::postgres::onboarding_device_principal_ref`'s test:
+        // the rows on the pilot are keyed by exactly this derivation.
+        assert_eq!(
+            device_principal_ref("tenant-1", "sha256:device-key"),
+            "principal_sha256:2bf5c8fb2e00d4b044f1e3d24aaf864d21197baaaca9de3da5de631a951caf9d"
+        );
+    }
+
+    #[test]
+    fn device_claim_actor_round_trips_both_forms() {
+        let tenant = "nearai-tenant";
+        let bare = device_claim_actor(tenant, KEY_A, None);
+        assert_eq!(bare, KEY_A);
+        assert_eq!(device_claim_key_id(tenant, &bare), Some(KEY_A));
+        let instance = device_claim_actor(tenant, KEY_A, Some(SUBJECT));
+        assert_eq!(
+            instance,
+            format!("instance:{tenant}:{KEY_A}:user:{SUBJECT}")
+        );
+        assert_eq!(device_claim_key_id(tenant, &instance), Some(KEY_A));
+        let other = device_claim_actor(tenant, KEY_B, Some(SUBJECT));
+        assert_eq!(device_claim_key_id(tenant, &other), Some(KEY_B));
+    }
+
+    #[test]
+    fn device_claim_key_id_refuses_other_shapes() {
+        let tenant = "nearai-tenant";
+        // A different tenant's instance actor names no device here.
+        let foreign = device_claim_actor("nearai-other", KEY_A, Some(SUBJECT));
+        assert_eq!(device_claim_key_id(tenant, &foreign), None);
+        // A tenant that is only a prefix of the embedded one.
+        let longer = device_claim_actor("nearai-tenant2", KEY_A, Some(SUBJECT));
+        assert_eq!(device_claim_key_id(tenant, &longer), None);
+        let rejected = [
+            "principal:agent-1".to_string(),
+            String::new(),
+            "sha256:AAAA".to_string(),
+            KEY_A.to_uppercase(),
+            format!("instance:{tenant}:{KEY_A}"),
+            format!("instance:{tenant}:{KEY_A}:user:"),
+            format!("instance:{tenant}:{KEY_A}:user:bad/slash"),
+            format!("instance:{tenant}:{KEY_A}:usr:{SUBJECT}"),
+            format!("instance:{tenant}:sha256:short:user:{SUBJECT}"),
+            format!("instance:{tenant}:{KEY_A}:user:{}", "a".repeat(129)),
+        ];
+        for actor in &rejected {
+            assert_eq!(device_claim_key_id(tenant, actor), None, "{actor}");
+        }
+        assert_eq!(
+            device_claim_key_id("", &format!("instance::{KEY_A}:user:{SUBJECT}")),
+            None
+        );
+    }
+
+    #[test]
+    fn device_shaped_actor_covers_both_forms() {
+        assert!(is_device_shaped_actor(KEY_A));
+        assert!(is_device_shaped_actor("instance:anything"));
+        assert!(!is_device_shaped_actor("principal:agent-1"));
+    }
 }

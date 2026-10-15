@@ -97,7 +97,7 @@ export function usePreviewInspector(entryId: string | null) {
     : turnsQuery.isError
       ? "Turn index unavailable; raw redacted body remains available."
       : searchMutation.isError
-        ? "Original-session search unavailable. Redacted body remains local."
+        ? "Original-trace search unavailable. Redacted body remains local."
         : null;
   const matches =
     searchMutation.variables?.entryId === entryId

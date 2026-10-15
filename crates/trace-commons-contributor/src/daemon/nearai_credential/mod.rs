@@ -186,9 +186,13 @@ pub fn credential_state(shared: &DaemonShared) -> &'static str {
 /// Async, and on the async dispatch path, because it binds the listener
 /// before it answers -- see [`ceremony::begin`] for why that ordering is not
 /// negotiable.
+///
+/// With no `provider` the ceremony is the NEAR wallet sign-in (passkey
+/// wallets included). `github` and `google` are still accepted when named,
+/// but nothing defaults to them.
 pub async fn handle_start(shared: &DaemonShared, req: &Request) -> Response {
     let provider = match req.params.get("provider") {
-        None => "github",
+        None => "near",
         Some(serde_json::Value::String(provider)) => provider,
         Some(_) => {
             return Response::err(
@@ -568,6 +572,26 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn start_without_a_provider_begins_the_near_wallet_ceremony() {
+        let (_directory, store) = crate::config::tests_support::temp_store();
+        let shared = DaemonShared::load(store).unwrap();
+        let request = Request {
+            id: 21,
+            method: "near_ai_credential_start".into(),
+            params: serde_json::json!({}),
+        };
+        let response = handle_start(&shared, &request).await;
+        let body = response.result.expect("a ceremony starts");
+        let url = reqwest::Url::parse(body["browser_url"].as_str().unwrap()).unwrap();
+        // The NEAR wallet page is served from the daemon's own loopback
+        // listener; an OAuth ceremony would point at the service instead.
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+        assert_eq!(url.path(), near_wallet::CALLBACK_PATH);
+        let id = body["attempt_id"].as_str().unwrap();
+        ceremony::cancel(shared.store.dir(), Some(id)).unwrap();
     }
 
     #[test]

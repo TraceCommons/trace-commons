@@ -1086,7 +1086,8 @@ impl PipelineProductStore {
 
     /// The rows a tenant's pipeline runs wrote into `main`'s tables, each
     /// found through its run, never by its shape (Ruling F-M10): the runs'
-    /// submissions; the credit events whose `pipeline_run_id` is one of the
+    /// submissions, and among them those whose run has a recorded privacy
+    /// pass; the credit events whose `pipeline_run_id` is one of the
     /// runs; the settlement batches the runs' settlement legs carry; and the
     /// NEAR outbox lines of those batches. The pipeline writes these rows to
     /// the database only, so `main`'s DB/file reconciliation leaves them out
@@ -1105,6 +1106,13 @@ impl PipelineProductStore {
         let submission_ids = ids(tx
             .query(
                 "SELECT DISTINCT submission_id FROM pipeline_runs WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await?);
+        let privacy_pass_submission_ids = ids(tx
+            .query(
+                "SELECT DISTINCT submission_id FROM pipeline_runs
+                  WHERE tenant_id = $1 AND privacy_pass_recorded_at IS NOT NULL",
                 &[&tenant_id],
             )
             .await?);
@@ -1140,6 +1148,7 @@ impl PipelineProductStore {
         tx.commit().await?;
         Ok(PipelineReconciliationRows {
             submission_ids,
+            privacy_pass_submission_ids,
             credit_event_ids,
             settlement_batch_ids,
             near_outbox_ids,
@@ -1210,6 +1219,7 @@ impl PipelineProductStore {
                 "SELECT status, COUNT(*) AS item_count
                    FROM trace_near_credit_outbox
                   WHERE tenant_id = $1
+                    AND instrument_id IS NOT NULL
                   GROUP BY status
                   ORDER BY status",
                 &[&tenant_id],
@@ -1371,6 +1381,10 @@ impl PipelineProductStore {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PipelineReconciliationRows {
     pub submission_ids: BTreeSet<Uuid>,
+    /// The submissions whose run has a recorded Review-start privacy pass
+    /// (`privacy_pass_recorded_at IS NOT NULL`): the only ones whose stored
+    /// risk the pipeline rewrote (V117). A subset of `submission_ids`.
+    pub privacy_pass_submission_ids: BTreeSet<Uuid>,
     pub credit_event_ids: BTreeSet<Uuid>,
     pub settlement_batch_ids: BTreeSet<Uuid>,
     pub near_outbox_ids: BTreeSet<Uuid>,

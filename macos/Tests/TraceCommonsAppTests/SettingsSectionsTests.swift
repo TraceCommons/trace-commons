@@ -94,7 +94,7 @@ final class SettingsSectionsTests: XCTestCase {
         XCTAssertEqual(Self.view(drawnFor: .startup, in: content), "StartupSection()")
         XCTAssertEqual(Self.view(drawnFor: .notifications, in: content), "NotificationsSection()")
         XCTAssertEqual(Self.view(drawnFor: .updates, in: content), "UpdatesSection()")
-        XCTAssertEqual(Self.view(drawnFor: .privateAI, in: content), "PrivateAISection(onPointer: onPrivateAI)")
+        XCTAssertEqual(Self.view(drawnFor: .privateAI, in: content), "PrivateAISection()")
 
         let startup = try SettingsParityTests.text("Views/Settings/StartupSection.swift")
         let startupBody = try XCTUnwrap(startup.components(separatedBy: "struct NotificationsSection").first)
@@ -124,7 +124,9 @@ final class SettingsSectionsTests: XCTestCase {
             .publicProfile: ("PublicProfileSection", "GlassEyebrowCard(PublicProfileCopy.heading)"),
             .watchedFolders: ("WatchedFoldersSection", "GlassEyebrowCard(copy.heading)"),
             .tools: ("ToolsSection", "GlassEyebrowCard(copy.toolsHeading)"),
-            .privateAI: ("PrivateAISection", "GlassEyebrowCard(copy.settingsTitle)"),
+            // The section's own panels, headed by the standard-settings rule
+            // (owner, 2026-10-10); the modal's rule names it by the list's word.
+            .privateAI: ("PrivateAISection", "PrivateAISettingsPanels(store: store)"),
             .witness: ("WitnessSection", "GlassEyebrowCard(copy.heading)"),
             .projects: ("ProjectsSection", "GlassEyebrowCard(SettingsWords.projects)"),
             .changes: ("ChangesSection", "GlassEyebrowCard(SettingsLegacyWords.auditHeading)"),
@@ -173,6 +175,19 @@ final class SettingsSectionsTests: XCTestCase {
             let text = try SettingsParityTests.text("Views/Settings/\(file).swift")
             XCTAssertTrue(text.contains("Button(SettingsLegacyWords.refresh"), "\(file) has no Refresh")
         }
+    }
+
+    /// The digest interval line at one hour, the shortest interval the
+    /// daemon allows, is the core's singular, never "every 1 hours"
+    /// (poldsam's #1298 review, finding 2). Other intervals keep the plural.
+    func test_theDigestIntervalLineAtOneHourIsTheCoresSingular() throws {
+        let words = try XCTUnwrap(ShellWords.table?.settings)
+        XCTAssertFalse(words.atMostOneNotificationOne.isEmpty)
+        XCTAssertEqual(SettingsLegacyWords.atMostOneNotification(1), words.atMostOneNotificationOne)
+        XCTAssertFalse(SettingsLegacyWords.atMostOneNotification(1).contains("1 hours"))
+        XCTAssertEqual(SettingsLegacyWords.atMostOneNotification(4),
+                       ShellWords.fill(words.atMostOneNotification, ["hours": "4"]))
+        XCTAssertTrue(SettingsLegacyWords.atMostOneNotification(4).contains("4 hours"))
     }
 
     /// The view a section's `case` arm draws in `GlassSettingsContent`.

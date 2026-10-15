@@ -7,9 +7,6 @@ import TCDesign
 struct GlassSettingsContent: View {
     var navigation: MainWindowNavigation?
     let section: SettingsSection
-    /// The Private AI pointer's way out of the Monitor's Settings modal;
-    /// nil elsewhere (`PrivateAISection.onPointer`).
-    var onPrivateAI: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -23,8 +20,13 @@ struct GlassSettingsContent: View {
             case .publicProfile: PublicProfileSection()
             case .watching: WatchingSection()
             case .watchedFolders: WatchedFoldersSection()
-            case .tools: ToolsSection()
-            case .privateAI: PrivateAISection(onPointer: onPrivateAI)
+            case .tools:
+                ToolsSection()
+                // The Insights switches: in Tools because it waits for first
+                // run (R-43); the ledger feed's is in Private AI (Ron's #1287
+                // review).
+                InsightsSettingsCard()
+            case .privateAI: PrivateAISection()
             case .witness: WitnessSection()
             case .projects: ProjectsSection()
             case .changes: ChangesSection()
