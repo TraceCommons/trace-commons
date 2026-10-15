@@ -5,44 +5,77 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// What the daemon keeps, from its own launch, to find a session's terminal
-/// window again. A launch that cannot name its window keeps none, and that
+/// tab again. A launch that cannot name its tab keeps none, and that
 /// session cannot be shown. One variant per terminal the daemon can script;
 /// another terminal adds its own here, with its own `focus` arm.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TerminalHandle {
-    /// A Terminal window, by the id AppleScript returned for the window
-    /// holding the tab the launch opened.
-    AppleTerminal { window_id: u32 },
+    /// A Terminal tab, by the tty device the launch's tab reported. The tool
+    /// holds that tty for as long as it runs, so no other tab can have it
+    /// while the session can be shown, and a tab dragged into another window
+    /// is still found.
+    AppleTerminal {
+        #[serde(deserialize_with = "tty_path")]
+        tty: String,
+    },
 }
 
-/// The window id the launch script printed, or none. Only a bare positive
-/// decimal is taken, so nothing the script prints can become part of a
-/// later script.
-pub fn apple_terminal_window(output: &[u8]) -> Option<TerminalHandle> {
+/// A bare tty device path, `/dev/tty` and up to 16 letters or digits. Nothing
+/// else is ever put in a script, whether it came from the launch script's
+/// output or from a file on disk.
+fn valid_tty(text: &str) -> bool {
+    text.strip_prefix("/dev/tty").is_some_and(|rest| {
+        (1..=16).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_alphanumeric())
+    })
+}
+
+fn tty_path<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let text = String::deserialize(d)?;
+    if valid_tty(&text) {
+        Ok(text)
+    } else {
+        Err(serde::de::Error::custom("not a tty path"))
+    }
+}
+
+/// The tty the launch script printed, or none.
+pub fn apple_terminal_tab(output: &[u8]) -> Option<TerminalHandle> {
     let text = std::str::from_utf8(output).ok()?;
     let text = text.strip_suffix('\n').unwrap_or(text);
-    if text.is_empty() || text.len() > 10 || !text.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    match text.parse::<u32>() {
-        Ok(window_id) if window_id > 0 => Some(TerminalHandle::AppleTerminal { window_id }),
-        _ => None,
-    }
+    valid_tty(text).then(|| TerminalHandle::AppleTerminal {
+        tty: text.to_string(),
+    })
 }
 
-/// Bring a session's window to the front. Refused when the window is gone
-/// or this build cannot script the terminal that holds it.
+/// Bring a session's tab to the front, in whichever window holds it now.
+/// Refused when the tab is gone or this build cannot script the terminal
+/// that holds it.
 pub fn focus(handle: &TerminalHandle) -> Result<(), ManagedError> {
     match handle {
         #[cfg(target_os = "macos")]
-        TerminalHandle::AppleTerminal { window_id } => {
-            // `window_id` is a u32, so the script holds only digits from it.
+        TerminalHandle::AppleTerminal { tty } => {
+            if !valid_tty(tty) {
+                return Err(ManagedError::InvalidRequest);
+            }
+            // `tty` passed `valid_tty`, so the script holds only letters,
+            // digits and slashes from it.
             let script = format!(
                 "tell application \"Terminal\"\n\
-                 set w to window id {window_id}\n\
+                 set done to false\n\
+                 repeat with w in windows\n\
+                 repeat with t in tabs of w\n\
+                 if tty of t is \"{tty}\" then\n\
+                 set selected of t to true\n\
                  if miniaturized of w then set miniaturized of w to false\n\
                  set index of w to 1\n\
+                 set done to true\n\
+                 exit repeat\n\
+                 end if\n\
+                 end repeat\n\
+                 if done then exit repeat\n\
+                 end repeat\n\
+                 if not done then error \"no tab\"\n\
                  activate\n\
                  end tell"
             );
@@ -145,10 +178,9 @@ pub fn launch(
             .replace('"', "\\\"")
             .replace('\n', "\\n")
             .replace('\r', "\\r");
-        // The window is found by the new tab's tty, a string compare, and
-        // printed as its id. An empty tty matches nothing, and any failure
-        // there prints nothing: the launch stands and the session simply
-        // cannot be shown.
+        // The new tab's tty is printed, and read back only as a bare device
+        // path. Any failure there prints nothing: the launch stands and the
+        // session simply cannot be shown.
         let mut script = std::process::Command::new("/usr/bin/osascript");
         script.args([
             "-e",
@@ -158,12 +190,7 @@ pub fn launch(
                  activate\n\
                  set found to \"\"\n\
                  try\n\
-                 set wanted to tty of t\n\
-                 if wanted is not \"\" then\n\
-                 repeat with w in windows\n\
-                 if wanted is in (tty of tabs of w) then set found to (id of w) as text\n\
-                 end repeat\n\
-                 end if\n\
+                 set found to tty of t\n\
                  end try\n\
                  return found\n\
                  end tell"
@@ -171,7 +198,7 @@ pub fn launch(
         ]);
         let output = super::profiles::bounded_output(script)?;
         if output.status.success() {
-            Ok(apple_terminal_window(&output.stdout))
+            Ok(apple_terminal_tab(&output.stdout))
         } else {
             Err(ManagedError::LaunchUnknown)
         }

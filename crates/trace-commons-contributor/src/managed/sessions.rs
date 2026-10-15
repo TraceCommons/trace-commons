@@ -157,6 +157,17 @@ pub struct LifecycleReport {
     pub exit_code: Option<i32>,
 }
 
+/// A handle this build cannot read (a terminal it does not script, or a field
+/// a newer build added) reads as none: that session cannot be shown, and the
+/// registry still opens.
+fn known_terminal<'de, D>(d: D) -> Result<Option<TerminalHandle>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Entry {
     #[serde(default)]
@@ -166,7 +177,11 @@ struct Entry {
     #[serde(default)]
     launched: bool,
     /// The window that launch opened, when the terminal could name it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "known_terminal"
+    )]
     terminal: Option<TerminalHandle>,
     /// A stop was asked for; the launcher is told on its next report.
     #[serde(default)]
@@ -556,10 +571,31 @@ impl SessionRegistry {
         if entry.ticket_hash.as_deref() != Some(&digest(ticket))
             || Utc::now() >= entry.ticket_expires
             || entry.view.state != SessionState::Starting
+            || entry.launched
         {
             return Err(ManagedError::Conflict);
         }
         Ok(())
+    }
+
+    /// The session an earlier start-again with this request id made, when
+    /// `request` is that same request apart from the selection generation it
+    /// was stamped with. A retry then finds its session, whatever the
+    /// selection has done since.
+    pub fn replayed(&self, request: &LaunchRequest) -> Option<PreparedLaunch> {
+        let entry = self
+            .data
+            .entries
+            .iter()
+            .find(|e| e.request.request_id == request.request_id)?;
+        let same = LaunchRequest {
+            expected_generation: entry.request.expected_generation,
+            ..request.clone()
+        } == entry.request;
+        same.then(|| PreparedLaunch {
+            session_id: entry.view.id,
+            ticket: None,
+        })
     }
 
     pub fn redeem(
@@ -752,6 +788,41 @@ pub fn clear_exit(store: &ConfigStore, id: Uuid) {
 mod tests {
     use super::*;
     use crate::managed::accounts::AccountStore;
+
+    #[test]
+    fn a_registry_holding_a_terminal_handle_this_build_does_not_know_still_opens() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut accounts = AccountStore::open(&store).unwrap();
+        let account = accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let request = LaunchRequest {
+            model: None,
+            collect_traces: false,
+            purpose: LaunchPurpose::Coding,
+            request_id: Uuid::new_v4(),
+            tool: ToolId::Claude,
+            connection: ConnectionKind::Subscription,
+            account_id: account.id,
+            cwd: home.path().to_path_buf(),
+            expected_generation: Generation(0),
+            save_default: false,
+        };
+        let launch = registry.prepare(request, &account).unwrap();
+        let mut value = serde_json::to_value(&registry.data).unwrap();
+        for unknown in [
+            serde_json::json!({"kind":"ghostty","tty":"/dev/ttys007"}),
+            serde_json::json!({"kind":"apple_terminal","tty":"/dev/ttys007","extra":"x"}),
+            serde_json::json!("garbage"),
+        ] {
+            value["entries"][0]["terminal"] = unknown;
+            let parsed: Data = serde_json::from_value(value.clone()).unwrap();
+            assert!(parsed.entries[0].terminal.is_none());
+            assert_eq!(parsed.entries[0].view.id, launch.session_id);
+        }
+    }
 
     #[test]
     fn expired_ticket_cannot_start_a_tool_and_restart_invalidates_unredeemed_ticket() {

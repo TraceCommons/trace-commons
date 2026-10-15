@@ -278,6 +278,9 @@ impl ManagedService {
                 let mut again = self
                     .sessions
                     .start_again_request(p.session_id, p.request_id)?;
+                if let Some(existing) = self.sessions.replayed(&again) {
+                    return Ok(json!(existing));
+                }
                 let account = self.launch_account(&again, sign_in)?;
                 if !again.cwd.is_absolute() || !again.cwd.is_dir() {
                     return Err(ManagedError::InvalidRequest);
@@ -965,7 +968,9 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let handle = TerminalHandle::AppleTerminal { window_id: 4242 };
+        let handle = TerminalHandle::AppleTerminal {
+            tty: "/dev/ttys042".into(),
+        };
         service
             .sessions
             .opened_in_terminal(prepared.session_id, Some(handle.clone()))
@@ -1135,6 +1140,85 @@ mod tests {
         .unwrap();
         assert_eq!(repeated.session_id, prepared.session_id);
         assert!(repeated.ticket.is_none());
+    }
+
+    #[test]
+    fn start_again_retried_after_a_selection_change_is_still_one_session() {
+        let (home, _store, mut service) = service();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let (id, proof) = running(&mut service, &folder);
+        report(&mut service, id, &proof, "exited", Some(0)).unwrap();
+        let again = json!({"session_id":id,"request_id":Uuid::new_v4()});
+        let first: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                again.clone(),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        // The selection moves between the request and its retry.
+        let account = service.accounts.list().into_iter().next().unwrap();
+        let generation = service.accounts.generation(ToolId::Claude);
+        service
+            .accounts
+            .select(
+                Selection {
+                    tool: ToolId::Claude,
+                    connection: ConnectionKind::Subscription,
+                    account_id: account.id,
+                    generation,
+                },
+                generation,
+            )
+            .unwrap();
+        let retried: PreparedLaunch = serde_json::from_value(
+            call(&mut service, "managed_session_start_again", again, false).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(retried.session_id, first.session_id);
+        assert!(retried.ticket.is_none());
+    }
+
+    #[test]
+    fn a_second_terminal_launch_for_one_session_is_refused() {
+        let (home, _store, mut service) = service();
+        let account = service
+            .accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Work")
+            .unwrap();
+        let mut request: LaunchRequest =
+            serde_json::from_value(launch(ToolId::Claude, home.path())).unwrap();
+        request.connection = ConnectionKind::Subscription;
+        request.account_id = account.id;
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_launch_prepare",
+                json!(request),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let ticket = prepared.ticket.unwrap();
+        service
+            .sessions
+            .validate_ticket(prepared.session_id, &ticket)
+            .unwrap();
+        service
+            .sessions
+            .opened_in_terminal(prepared.session_id, None)
+            .unwrap();
+        assert_eq!(
+            service
+                .sessions
+                .validate_ticket(prepared.session_id, &ticket),
+            Err(ManagedError::Conflict)
+        );
     }
 
     #[test]

@@ -36,30 +36,36 @@ fn terminal_handoff_quotes_paths_and_never_accepts_shell_syntax_as_arguments() {
 }
 
 #[test]
-fn only_a_bare_window_id_names_a_terminal_window() {
-    use trace_commons_contributor::managed::terminal::{TerminalHandle, apple_terminal_window};
+fn only_a_bare_tty_path_names_a_terminal_tab() {
+    use trace_commons_contributor::managed::terminal::{TerminalHandle, apple_terminal_tab};
     assert_eq!(
-        apple_terminal_window(b"4242\n"),
-        Some(TerminalHandle::AppleTerminal { window_id: 4242 })
+        apple_terminal_tab(b"/dev/ttys003\n"),
+        Some(TerminalHandle::AppleTerminal {
+            tty: "/dev/ttys003".into()
+        })
     );
     for output in [
         &b""[..],
         b"\n",
-        b"0",
-        b"-1",
-        b"42 43",
-        b"42\n43",
-        b"window id 42",
-        b"99999999999",
-        b"4242; do shell script",
+        b"/dev/tty",
+        b"ttys003",
+        b"/dev/ttys003 /dev/ttys004",
+        b"/dev/ttys003\n/dev/ttys004",
+        b"/dev/ttys003\"; do shell script",
+        b"/dev/../etc/passwd",
+        b"/dev/ttys0/../x",
+        b"/dev/ttys00000000000000000000",
+        b"4242",
     ] {
-        assert_eq!(apple_terminal_window(output), None, "{output:?}");
+        assert_eq!(apple_terminal_tab(output), None, "{output:?}");
     }
-    let handle = TerminalHandle::AppleTerminal { window_id: 7 };
+    let handle = TerminalHandle::AppleTerminal {
+        tty: "/dev/ttys007".into(),
+    };
     let json = serde_json::to_value(&handle).unwrap();
     assert_eq!(
         json,
-        serde_json::json!({"kind":"apple_terminal","window_id":7})
+        serde_json::json!({"kind":"apple_terminal","tty":"/dev/ttys007"})
     );
     assert_eq!(
         serde_json::from_value::<TerminalHandle>(json).unwrap(),
@@ -67,7 +73,14 @@ fn only_a_bare_window_id_names_a_terminal_window() {
     );
     assert!(
         serde_json::from_value::<TerminalHandle>(
-            serde_json::json!({"kind":"apple_terminal","window_id":7,"script":"x"})
+            serde_json::json!({"kind":"apple_terminal","tty":"/dev/ttys007","script":"x"})
+        )
+        .is_err()
+    );
+    // A handle read from disk is held to the same shape as one from a launch.
+    assert!(
+        serde_json::from_value::<TerminalHandle>(
+            serde_json::json!({"kind":"apple_terminal","tty":"x\" & (do shell script \"y\") & \""})
         )
         .is_err()
     );
