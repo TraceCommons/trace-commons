@@ -357,6 +357,9 @@ pub(super) struct Attempt {
     _guard: AdmissionProcessingGuard,
     processing: bool,
     completed: bool,
+    /// Released by [`Attempt::finish_without_effect`]: the trailing
+    /// `finish` has nothing left to do.
+    released: bool,
     account: Option<(TrustAccount, String)>,
     pub(super) source_claim: Option<(Uuid, [u8; 32])>,
 }
@@ -369,14 +372,51 @@ impl Attempt {
         if self.processing || self.completed {
             return Ok(());
         }
-        let transitioned = if let Some((account, principal)) = &self.account {
+        let transitioned = self.transition(db, "processing").await;
+        if !transitioned.map_err(|_| denied_at("db_error:attempt_processing_transition"))? {
+            return Err(denied_at("attempt_processing_transition_refused"));
+        }
+        self.processing = true;
+        Ok(())
+    }
+
+    /// Releases the attempt, and gives back the cost bound or charge its
+    /// reservation took, for an upload refused by a refusal that the caller
+    /// KNOWS wrote nothing (#1237). Unlike `finish(false)`, this releases an
+    /// attempt that is already `processing`; a `reserved` one is released as
+    /// `finish(false)` releases it. A failure whose effects are not known
+    /// must call `finish(false)` instead, which keeps a `processing`
+    /// attempt's charge.
+    ///
+    /// A completed or already released attempt is left alone. A ledger that
+    /// refuses the release is a refusal here, labelled; the attempt then
+    /// stays as it was, as with `finish(false)`.
+    pub async fn finish_without_effect(&mut self, db: &dyn Database) -> ApiResult<()> {
+        if self.completed || self.released {
+            return Ok(());
+        }
+        let next = if self.processing {
+            "released_without_effect"
+        } else {
+            "released"
+        };
+        let transitioned = self.transition(db, next).await;
+        if !transitioned.map_err(|_| denied_at("db_error:attempt_release_without_effect"))? {
+            return Err(denied_at("attempt_release_without_effect_refused"));
+        }
+        self.released = true;
+        Ok(())
+    }
+
+    async fn transition(&self, db: &dyn Database, next: &str) -> Result<bool, DatabaseError> {
+        if let Some((account, principal)) = &self.account {
             db.transition_account_admission(
                 &self.tenant_id,
                 principal,
                 account.account_id(),
                 self.submission_id,
                 self.lease_id,
-                "processing",
+                next,
             )
             .await
         } else {
@@ -384,18 +424,14 @@ impl Attempt {
                 &self.tenant_id,
                 self.submission_id,
                 self.lease_id,
-                "processing",
+                next,
             )
             .await
-        };
-        if !transitioned.map_err(|_| denied_at("db_error:attempt_processing_transition"))? {
-            return Err(denied_at("attempt_processing_transition_refused"));
         }
-        self.processing = true;
-        Ok(())
     }
+
     pub async fn finish(&mut self, db: &dyn Database, success: bool) -> ApiResult<()> {
-        if self.completed {
+        if self.completed || self.released {
             return Ok(());
         }
         if success {
@@ -408,25 +444,7 @@ impl Attempt {
         } else {
             return Ok(());
         };
-        let transitioned = if let Some((account, principal)) = &self.account {
-            db.transition_account_admission(
-                &self.tenant_id,
-                principal,
-                account.account_id(),
-                self.submission_id,
-                self.lease_id,
-                next,
-            )
-            .await
-        } else {
-            db.transition_submission_admission(
-                &self.tenant_id,
-                self.submission_id,
-                self.lease_id,
-                next,
-            )
-            .await
-        };
+        let transitioned = self.transition(db, next).await;
         if !transitioned.map_err(|_| denied_at("db_error:attempt_finish_transition"))? {
             return Err(denied_at("attempt_finish_transition_refused"));
         }
@@ -540,6 +558,7 @@ async fn reserve_on_evidence_ledger(
             submission_id: submission,
             lease_id: Uuid::new_v4(),
             _guard: guard,
+            released: false,
             processing: false,
             completed: true,
             account: None,
@@ -617,6 +636,7 @@ async fn reserve_on_evidence_ledger(
         submission_id: reservation.submission_id,
         lease_id: reservation.lease_id,
         _guard: guard,
+        released: false,
         processing: false,
         completed,
         account: None,
@@ -706,6 +726,7 @@ async fn reserve_account(
                 submission_id: submission,
                 lease_id: Uuid::new_v4(),
                 _guard: guard,
+                released: false,
                 processing: false,
                 completed: true,
                 account: None,
@@ -775,6 +796,7 @@ async fn reserve_account(
             submission_id: submission,
             lease_id: lease,
             _guard: guard,
+            released: false,
             processing: false,
             completed,
             account: None,
@@ -955,6 +977,7 @@ async fn reserve_account(
         submission_id: submission,
         lease_id: reservation.lease_id,
         _guard: guard,
+        released: false,
         processing: false,
         completed,
         account: Some((account.clone(), principal)),
@@ -1387,6 +1410,8 @@ mod refusal_label_tests {
         "attempt_processing_transition_refused",
         "db_error:attempt_finish_transition",
         "attempt_finish_transition_refused",
+        "db_error:attempt_release_without_effect",
+        "attempt_release_without_effect_refused",
         "legacy_admission_unconfigured",
         "legacy_db_mirror_writes_off",
         "legacy_db_unconfigured",

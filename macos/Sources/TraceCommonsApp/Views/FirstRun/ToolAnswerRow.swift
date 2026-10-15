@@ -151,8 +151,10 @@ struct ToolAnswerRow: View {
                     if ToolAnswerRowLayout.offersFolderChoice(candidate, in: state) {
                         GlassFolderButton(ToolAnswerRowLayout.fill(copy.chooseFolder, tool: candidate.source)) {
                             if let path = FolderPanel.choose() {
-                                chosenFolder = path
-                                ToolAnswerRowLayout.choose(folder: path, for: candidate, in: &state)
+                                let selectedPath = SourceFolderSelection.path(
+                                    for: candidate.source, chosenFolder: path)
+                                chosenFolder = selectedPath
+                                ToolAnswerRowLayout.choose(folder: selectedPath, for: candidate, in: &state)
                             }
                         }
                         .fixedSize()

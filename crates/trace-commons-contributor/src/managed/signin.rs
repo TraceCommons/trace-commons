@@ -14,22 +14,23 @@ const CODEX: Uuid = Uuid::from_u128(0x6e65_6172_2d61_4900_8000_0000_0000_0002);
 pub const TOOLS: [ToolId; 2] = [ToolId::Claude, ToolId::Codex];
 
 /// The stable id of a tool's sign-in entry. Stable so the tool's isolated
-/// profile directory survives between launches.
-pub fn account_id(tool: ToolId) -> AccountId {
-    AccountId(match tool {
+/// profile directory survives between launches. OpenCode has no sign-in entry.
+pub fn account_id(tool: ToolId) -> Option<AccountId> {
+    Some(AccountId(match tool {
         ToolId::Claude => CLAUDE,
         ToolId::Codex => CODEX,
-    })
+        ToolId::Opencode => return None,
+    }))
 }
 
 /// The tool whose sign-in entry this id is, if it is one.
 pub fn tool_for(id: AccountId) -> Option<ToolId> {
-    TOOLS.into_iter().find(|tool| account_id(*tool) == id)
+    TOOLS.into_iter().find(|tool| account_id(*tool) == Some(id))
 }
 
-pub fn entry(tool: ToolId) -> AccountView {
-    AccountView {
-        id: account_id(tool),
+pub fn entry(tool: ToolId) -> Option<AccountView> {
+    Some(AccountView {
+        id: account_id(tool)?,
         tool,
         connection: ConnectionKind::NearAiSignIn,
         label: super::copy::copy()["near_ai"]
@@ -38,13 +39,13 @@ pub fn entry(tool: ToolId) -> AccountView {
             .to_owned(),
         auth_state: AuthState::Ready,
         verified_at: None,
-    }
+    })
 }
 
 /// Both tools' entries while signed in; none otherwise.
 pub fn entries(signed_in: bool) -> Vec<AccountView> {
     if signed_in {
-        TOOLS.into_iter().map(entry).collect()
+        TOOLS.into_iter().filter_map(entry).collect()
     } else {
         vec![]
     }
@@ -60,11 +61,14 @@ pub fn defaults(
     let mut out = saved;
     if signed_in {
         for tool in TOOLS {
+            let Some(account_id) = account_id(tool) else {
+                continue;
+            };
             if !out.iter().any(|s| s.tool == tool) {
                 out.push(Selection {
                     tool,
                     connection: ConnectionKind::NearAiSignIn,
-                    account_id: account_id(tool),
+                    account_id,
                     generation: generation(tool),
                 });
             }
@@ -80,6 +84,8 @@ mod tests {
     #[test]
     fn entries_follow_the_sign_in() {
         assert!(entries(false).is_empty());
+        assert_eq!(account_id(ToolId::Opencode), None);
+        assert_eq!(entry(ToolId::Opencode), None);
         let present = entries(true);
         assert_eq!(present.len(), 2);
         for (account, tool) in present.iter().zip(TOOLS) {
@@ -104,7 +110,7 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0], saved);
         assert_eq!(out[1].tool, ToolId::Codex);
-        assert_eq!(out[1].account_id, account_id(ToolId::Codex));
+        assert_eq!(Some(out[1].account_id), account_id(ToolId::Codex));
         assert_eq!(out[1].generation, Generation(7));
         assert_eq!(
             defaults(vec![saved.clone()], false, |_| Generation(7)),

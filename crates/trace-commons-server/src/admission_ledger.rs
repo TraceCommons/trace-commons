@@ -795,7 +795,14 @@ impl PgBackend {
                 tx.execute("UPDATE trace_account_admission_submissions SET status='completed' WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&submission]).await.map_err(|_|database_refused())?;
                 true
             }
-            "released" if status == "reserved" => {
+            // `released` gives a `reserved` attempt's charge back. A
+            // `processing` attempt keeps its charge, unless the caller knows
+            // the upload's refusal wrote nothing (`released_without_effect`,
+            // #1237): then it is released and refunded the same way.
+            "released" | "released_without_effect"
+                if (next == "released" && status == "reserved")
+                    || (next == "released_without_effect" && status == "processing") =>
+            {
                 let charged: bool = prior.get(5);
                 if charged {
                     let period_id: String = prior.get(6);

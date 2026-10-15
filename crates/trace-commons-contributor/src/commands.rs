@@ -1004,6 +1004,33 @@ fn resolve_undecided_project_refs(
         .collect()
 }
 
+/// Runs `discover` on each source `source_filter` admits. A source named by
+/// `source_filter` that fails is an error, since the caller asked for it.
+/// Without a filter, a failing source is returned in the second list and
+/// skipped, as the daemon's watcher does: one unreadable store (an OpenCode
+/// database that is busy or of an unknown version) must not stop `submit`
+/// for every other source.
+fn discover_across_sources(
+    sources: impl IntoIterator<Item = Box<dyn TraceSource>>,
+    source_filter: Option<&str>,
+) -> Result<(Vec<SessionRef>, Vec<(&'static str, anyhow::Error)>)> {
+    let mut refs = Vec::new();
+    let mut skipped = Vec::new();
+    for source in sources {
+        if source_filter.is_some_and(|sf| source.name() != sf) {
+            continue;
+        }
+        match source.discover() {
+            Ok(found) => refs.extend(found),
+            Err(err) if source_filter.is_some() => {
+                return Err(err.context("discovering local sessions"));
+            }
+            Err(err) => skipped.push((source.name(), err)),
+        }
+    }
+    Ok((refs, skipped))
+}
+
 /// Discover every locally discoverable session across all sources, applying
 /// optional `source`/`project`/`since` filters. `project` matches the
 /// session's true decoded working directory when available; otherwise falls
@@ -1041,14 +1068,10 @@ fn discover_filtered(
     };
     let project_filter = resolved_project.as_deref();
 
-    let mut refs = Vec::new();
-    for source in all_sources(&cli_source_roots(trajectory)) {
-        if let Some(sf) = source_filter {
-            if source.name() != sf {
-                continue;
-            }
-        }
-        refs.extend(source.discover().context("discovering local sessions")?);
+    let (mut refs, skipped) =
+        discover_across_sources(all_sources(&cli_source_roots(trajectory)), source_filter)?;
+    for (name, err) in &skipped {
+        eprintln!("Skipped {name} sessions: {err:#}");
     }
 
     let now = Utc::now();
@@ -3054,11 +3077,12 @@ mod login_route_tests {
 #[cfg(test)]
 mod project_filter_tests {
     use super::{
-        cwd_matches_project, project_filter_undecided, resolve_undecided_project_refs, session_row,
-        submit_picker_row,
+        cwd_matches_project, discover_across_sources, project_filter_undecided,
+        resolve_undecided_project_refs, session_row, submit_picker_row,
     };
-    use crate::source::SessionRef;
-    use std::path::Path;
+    use crate::source::{SessionRef, TraceSource};
+    use anyhow::Result;
+    use std::path::{Path, PathBuf};
 
     #[tokio::test]
     async fn manifest_with_dry_run_is_refused_before_any_upload() {
@@ -3168,6 +3192,65 @@ mod project_filter_tests {
             Path::new("/Users/dev/.claude/projects/-Users-dev-code-my-hack/s.jsonl"),
             Path::new("/Users/dev/code/my-hack"),
         ));
+    }
+
+    /// A source whose `discover` either lists one ref or fails.
+    struct StubSource {
+        name: &'static str,
+        fails: bool,
+    }
+
+    impl TraceSource for StubSource {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn discover(&self) -> Result<Vec<SessionRef>> {
+            if self.fails {
+                anyhow::bail!("{} store unreadable", self.name);
+            }
+            Ok(vec![undecided_ref(PathBuf::from(self.name))])
+        }
+        fn load(&self, _r: &SessionRef) -> Result<crate::source::SessionTranscript> {
+            unreachable!("discovery only")
+        }
+    }
+
+    fn stub_sources() -> Vec<Box<dyn TraceSource>> {
+        vec![
+            Box::new(StubSource {
+                name: "opencode",
+                fails: true,
+            }),
+            Box::new(StubSource {
+                name: "claude_code",
+                fails: false,
+            }),
+        ]
+    }
+
+    /// One unreadable store (a busy or newer OpenCode database) must not
+    /// stop `submit` for every other source: it is skipped and named.
+    #[test]
+    fn a_failing_source_is_skipped_when_none_was_named() {
+        let (refs, skipped) = discover_across_sources(stub_sources(), None).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].path, PathBuf::from("claude_code"));
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].0, "opencode");
+    }
+
+    /// `--source opencode` asked for that store, so its failure is the
+    /// command's failure, not an empty result.
+    #[test]
+    fn a_failing_source_named_by_the_filter_is_an_error() {
+        let err = discover_across_sources(stub_sources(), Some("opencode")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("opencode store unreadable"),
+            "{err:#}"
+        );
+        let (refs, skipped) = discover_across_sources(stub_sources(), Some("claude_code")).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert!(skipped.is_empty());
     }
 
     /// A ref that can never be decided against `--project` from the cheap
@@ -4360,7 +4443,12 @@ pub fn daemon_set_project(
     // disambiguation happens at render time (here, and in `daemon projects`
     // / the queue) against the current known-key set, so a stored label
     // never goes stale when a colliding project shows up later.
-    let label = crate::daemon::policy::project_label_for(&key);
+    // The daemon stores the key normalized (#992): case-folded on macOS and
+    // Windows and walked up to the repository root. The label it derives is
+    // that root's, in the case on disk, so derive it the same way here.
+    let label = crate::daemon::policy::project_label_for(
+        &crate::daemon::policy::display_path_for_key(&key).unwrap_or_else(|| key.clone()),
+    );
     let resp = daemon_call(
         store,
         "set_project_mode",
@@ -4755,10 +4843,12 @@ mod daemon_command_tests {
         store.save_config(&cfg).unwrap();
         let project = tempfile::tempdir().unwrap();
         daemon_set_project(&store, project.path(), "auto", false, false).unwrap();
-        let key = std::fs::canonicalize(project.path())
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        // The key a session in that directory resolves to (#992).
+        let key = crate::daemon::policy::project_key_for(Some(
+            &std::fs::canonicalize(project.path())
+                .unwrap()
+                .to_string_lossy(),
+        ));
         let policy = crate::daemon::policy::ProjectPolicy::load(&store).unwrap();
         assert_eq!(policy.resolve(&key), ProjectMode::AutoUpload);
     }

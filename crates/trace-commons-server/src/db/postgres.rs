@@ -1818,6 +1818,15 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "account_trust_live_attested",
         include_str!("../../../../migrations/V126__account_trust_live_attested.sql"),
     ),
+    // V127 (#1237): `trace_transition_admission` also releases a
+    // `processing` attempt, cost bound included, for a caller that knows the
+    // upload's refusal wrote nothing (`released_without_effect`). Replaces
+    // the function in place; its owner and grants are unchanged.
+    (
+        127,
+        "admission_release_without_effect",
+        include_str!("../../../../migrations/V127__admission_release_without_effect.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus

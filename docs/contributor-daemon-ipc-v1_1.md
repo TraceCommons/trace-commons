@@ -8028,9 +8028,9 @@ Acceptance can earn pending credit; this is not credit redemption.
 rows for `claude`, `codex`, and `opencode`. Each row reports executable discovery
 independently of trace-source discovery, saved accounts, or sign-in. It does not
 verify tool versions, read traces, grant consent, or imply managed launch support.
-OpenCode remains export-only; managed account and launch requests still accept
-only Claude Code and Codex. Missing native launch binaries return
-`managed-tool-unavailable`.
+Managed account and launch support for OpenCode is described under
+"Managed OpenCode launch additions" below. Missing native launch binaries
+return `managed-tool-unavailable`.
 
 Discovery checks absolute PATH entries and conventional install locations,
 including `~/.opencode/bin`, without launching subprocesses. Unix candidates must
@@ -8042,3 +8042,21 @@ through managed sessions. Discovery never invokes a command interpreter. Each
 snapshot refresh checks again. Before daemon startup,
 `tc_managed_tools_json` returns the same array and `tc_managed_copy_json` returns
 the shared copy object; both strings are freed with `tc_string_free`.
+
+### Managed OpenCode launch additions
+
+`managed_account_add.tool` additionally accepts `opencode`, with connections
+`api_key` (OpenAI) and `near_ai`. `subscription` is refused for this tool.
+`managed_launch_prepare` accepts additive `model: string | null` and
+`collect_traces: boolean` fields. OpenCode coding launches require a nonempty
+model ID (at most 256 ASCII letters, digits, `/._:-`) and explicit collection
+opt-in; omission defaults to false. Other tools reject these OpenCode-only
+options. Old requests therefore keep their previous behavior.
+
+Session views persist `model`, `collect_traces` and `collection` (`off`,
+`pending`, `collected`, `failed`). Lifecycle reports optionally carry the final
+collection result; the helper proof remains required. Collection is independent
+of native process exit. Unredeemed launches that expire or fail during restart
+settle pending collection as failed. The snapshot includes OpenCode generation
+and default selection, plus additive shared copy keys. Older shell decoders may
+ignore these fields; macOS renders them.

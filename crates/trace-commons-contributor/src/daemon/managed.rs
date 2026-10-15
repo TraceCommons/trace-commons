@@ -110,6 +110,7 @@ impl ManagedService {
                 let saved = [
                     self.accounts.selection(ToolId::Claude),
                     self.accounts.selection(ToolId::Codex),
+                    self.accounts.selection(ToolId::Opencode),
                 ]
                 .into_iter()
                 .flatten()
@@ -117,7 +118,7 @@ impl ManagedService {
                 let defaults =
                     signin::defaults(saved, sign_in, |tool| self.accounts.generation(tool));
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"revision":self.sessions.revision(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":crate::managed::terminal::destination().is_some(),"terminal_destination":crate::managed::terminal::destination()}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"revision":self.sessions.revision(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":crate::managed::terminal::destination().is_some(),"terminal_destination":crate::managed::terminal::destination()}}),
                 )
             }
             "managed_account_add" => {
@@ -156,7 +157,7 @@ impl ManagedService {
                     {
                         return Err(ManagedError::InvalidRequest);
                     }
-                    signin::entry(p.tool)
+                    signin::entry(p.tool).ok_or(ManagedError::InvalidRequest)?
                 } else {
                     self.accounts
                         .list()
@@ -271,6 +272,8 @@ impl ManagedService {
                     return Err(ManagedError::Conflict);
                 }
                 let request = LaunchRequest {
+                    model: None,
+                    collect_traces: false,
                     request_id: Uuid::new_v4(),
                     purpose: LaunchPurpose::Login,
                     tool: account.tool,
@@ -450,6 +453,7 @@ async fn redeem_async(shared: &DaemonShared, request: &Request) -> Response {
         Err(error) => {
             // Nothing will run: say so now, not after a heartbeat gap.
             let _ = service.sessions.report(LifecycleReport {
+                collection: None,
                 session_id: p.session_id,
                 proof: context.proof.clone(),
                 state: SessionState::Failed,
@@ -549,10 +553,12 @@ mod tests {
             request_id: Uuid::new_v4(),
             tool,
             connection: ConnectionKind::NearAiSignIn,
-            account_id: signin::account_id(tool),
+            account_id: signin::account_id(tool).unwrap(),
             cwd: cwd.to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            model: None,
+            collect_traces: false,
         })
     }
 
@@ -623,6 +629,35 @@ mod tests {
         // Signed out, the saved default stands alone.
         let snapshot = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
         assert_eq!(snapshot["defaults"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn opencode_saved_default_survives_sign_in_snapshot() {
+        let (_home, _store, mut service) = service();
+        let account = service
+            .accounts
+            .add(ToolId::Opencode, ConnectionKind::ApiKey, "OpenAI")
+            .unwrap();
+        service
+            .accounts
+            .select(
+                Selection {
+                    tool: ToolId::Opencode,
+                    connection: ConnectionKind::ApiKey,
+                    account_id: account.id,
+                    generation: Generation(0),
+                },
+                Generation(0),
+            )
+            .unwrap();
+        let snapshot = call(&mut service, "managed_snapshot", json!({}), true).unwrap();
+        assert_eq!(snapshot["sign_in_accounts"].as_array().unwrap().len(), 2);
+        let defaults = snapshot["defaults"].as_array().unwrap();
+        assert_eq!(defaults.len(), 3);
+        let opencode = defaults.iter().find(|d| d["tool"] == "opencode").unwrap();
+        assert_eq!(opencode["account_id"], json!(account.id));
+        assert_eq!(opencode["connection"], "api_key");
+        assert_eq!(snapshot["generations"]["opencode"], 1);
     }
 
     #[test]
