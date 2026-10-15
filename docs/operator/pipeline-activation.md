@@ -1986,8 +1986,12 @@ assessment also records the policy's label as `hold_label`.
   row, because nothing was scored and the row's measurements would be
   invented. The submission stays accepted.
 
-The audit event the assessment route appends records the recommendation as it
-does for a Review hold. A withdrawal or operator containment still releases
+The audit event the assessment route appends (and the worker's review audit
+pass appends when the route's append missed) records a Score hold's
+resolution without claiming a status change: its status is `accepted`, the
+status the submission keeps, and its reason is the label `score_hold_approved`
+or `score_hold_rejected`. A run can hold an assessment for each phase, and the
+pass appends the event of each. A withdrawal or operator containment still releases
 a Score hold as before: the worker releases it, and the Score then ends the
 run as `submission_inoperable`.
 

@@ -1622,6 +1622,9 @@ pub struct PipelineReviewAuditAssessment {
     pub approved: bool,
     pub reason_code: String,
     pub reviewer_principal_ref: String,
+    /// The assessment resolved a Score policy's hold (V130 `phase =
+    /// 'score'`) rather than a Review hold. It changes no corpus status.
+    pub at_score: bool,
 }
 
 /// A run with a review audit marker (`review_audit_pending_at`,
@@ -1635,7 +1638,8 @@ pub struct PipelineReviewAuditItem {
     pub submission_id: Uuid,
     pub pending_at: DateTime<Utc>,
     pub outcome: Option<PipelineReviewAuditOutcome>,
-    pub assessment: Option<PipelineReviewAuditAssessment>,
+    /// Every assessment of the run, oldest first: one per phase (V130).
+    pub assessments: Vec<PipelineReviewAuditAssessment>,
     /// The privacy pass escalated the run (`privacy_pass_outcome = 'escalated'`):
     /// the run is, or was, held for a human under `privacy_pass_review_required`.
     pub privacy_pass_escalated: bool,
@@ -3567,6 +3571,26 @@ impl PgPipelineStore {
         reason: ReasonCode,
         resolved_quarantine_reasons: Vec<ReasonCode>,
     ) -> Result<HumanReviewAssessment, DatabaseError> {
+        self.record_review_assessment_for_hold(
+            claim,
+            recommendation,
+            reason,
+            resolved_quarantine_reasons,
+        )
+        .await
+        .map(|(assessment, _)| assessment)
+    }
+
+    /// `record_review_assessment`, also answering whether the assessment
+    /// resolved a Score hold (`true`) or a Review hold (`false`), as read
+    /// under the run's lock.
+    pub async fn record_review_assessment_for_hold(
+        &self,
+        claim: &PipelineReviewClaim,
+        recommendation: ReviewRecommendation,
+        reason: ReasonCode,
+        resolved_quarantine_reasons: Vec<ReasonCode>,
+    ) -> Result<(HumanReviewAssessment, bool), DatabaseError> {
         let mut resolved = resolved_quarantine_reasons;
         resolved.sort();
         resolved.dedup();
@@ -3747,13 +3771,16 @@ impl PgPipelineStore {
         // now resolves) or rejected (Review now ends the run) it.
         release_awaiting_review(&tx, &claim.tenant_id, claim.run_id).await?;
         tx.commit().await?;
-        Ok(HumanReviewAssessment {
-            assessment_id,
-            recommendation,
-            reason,
-            resolved_quarantine_reasons: resolved,
-            evidence_hash,
-        })
+        Ok((
+            HumanReviewAssessment {
+                assessment_id,
+                recommendation,
+                reason,
+                resolved_quarantine_reasons: resolved,
+                evidence_hash,
+            },
+            at_score,
+        ))
     }
 
     /// The stored assessment for `run_id`, if a reviewer has recorded one
@@ -4431,8 +4458,6 @@ impl PgPipelineStore {
             .query(
                 "SELECT p.run_id, p.submission_id, p.review_audit_pending_at,
                         o.outcome_id, o.decision ->> 'kind' AS decision_kind,
-                        a.assessment_id, a.recommendation, a.reason_code,
-                        a.reviewer_principal_ref,
                         p.privacy_pass_outcome IS NOT DISTINCT FROM 'escalated'
                             AS privacy_pass_escalated,
                         (p.state = 'failed' AND p.last_error_label IS NOT DISTINCT FROM $3)
@@ -4442,16 +4467,6 @@ impl PgPipelineStore {
                    LEFT JOIN phase_outcomes o
                      ON o.tenant_id = p.tenant_id AND o.run_id = p.run_id
                     AND o.phase = 'review'
-                   -- A run holds at most one assessment per phase (V130); the
-                   -- marker is for the latest one recorded.
-                   LEFT JOIN LATERAL (
-                       SELECT la.assessment_id, la.recommendation, la.reason_code,
-                              la.reviewer_principal_ref
-                         FROM pipeline_review_assessments la
-                        WHERE la.tenant_id = p.tenant_id AND la.run_id = p.run_id
-                        ORDER BY la.recorded_at DESC, la.assessment_id
-                        LIMIT 1
-                   ) a ON TRUE
                   WHERE p.tenant_id = $1 AND p.review_audit_pending_at IS NOT NULL
                   ORDER BY p.review_audit_pending_at, p.run_id
                   LIMIT $2",
@@ -4462,7 +4477,52 @@ impl PgPipelineStore {
                 ],
             )
             .await?;
+        // A run holds at most one assessment per phase (V130), and the one
+        // marker covers both: every assessment of a marked run is read.
+        let run_ids: Vec<Uuid> = rows.iter().map(|row| row.get("run_id")).collect();
+        let assessment_rows = tx
+            .query(
+                "SELECT run_id, assessment_id, recommendation, reason_code,
+                        reviewer_principal_ref, phase
+                   FROM pipeline_review_assessments
+                  WHERE tenant_id = $1 AND run_id = ANY($2)
+                  ORDER BY recorded_at, assessment_id",
+                &[&tenant_id, &run_ids],
+            )
+            .await?;
         tx.commit().await?;
+        let mut assessments: std::collections::HashMap<Uuid, Vec<PipelineReviewAuditAssessment>> =
+            std::collections::HashMap::new();
+        for row in &assessment_rows {
+            let approved = match row.get::<_, String>("recommendation").as_str() {
+                "approve" => true,
+                "reject" => false,
+                _ => {
+                    return Err(DatabaseError::Serialization(
+                        "unknown review recommendation".to_string(),
+                    ));
+                }
+            };
+            let at_score = match row.get::<_, String>("phase").as_str() {
+                "score" => true,
+                "review" => false,
+                _ => {
+                    return Err(DatabaseError::Serialization(
+                        "unknown review assessment phase".to_string(),
+                    ));
+                }
+            };
+            assessments
+                .entry(row.get("run_id"))
+                .or_default()
+                .push(PipelineReviewAuditAssessment {
+                    assessment_id: row.get("assessment_id"),
+                    approved,
+                    reason_code: row.get("reason_code"),
+                    reviewer_principal_ref: row.get("reviewer_principal_ref"),
+                    at_score,
+                });
+        }
         rows.iter()
             .map(|row| {
                 let outcome = match row.get::<_, Option<Uuid>>("outcome_id") {
@@ -4484,33 +4544,15 @@ impl PgPipelineStore {
                     }
                     None => None,
                 };
-                let assessment = match row.get::<_, Option<Uuid>>("assessment_id") {
-                    Some(assessment_id) => {
-                        let approved =
-                            match row.get::<_, Option<String>>("recommendation").as_deref() {
-                                Some("approve") => true,
-                                Some("reject") => false,
-                                _ => {
-                                    return Err(DatabaseError::Serialization(
-                                        "unknown review recommendation".to_string(),
-                                    ));
-                                }
-                            };
-                        Some(PipelineReviewAuditAssessment {
-                            assessment_id,
-                            approved,
-                            reason_code: row.get("reason_code"),
-                            reviewer_principal_ref: row.get("reviewer_principal_ref"),
-                        })
-                    }
-                    None => None,
-                };
                 Ok(PipelineReviewAuditItem {
                     run_id: row.get("run_id"),
                     submission_id: row.get("submission_id"),
                     pending_at: row.get("review_audit_pending_at"),
                     outcome,
-                    assessment,
+                    assessments: assessments
+                        .get(&row.get::<_, Uuid>("run_id"))
+                        .cloned()
+                        .unwrap_or_default(),
                     privacy_pass_escalated: row.get("privacy_pass_escalated"),
                     privacy_classification_failed: row.get("privacy_classification_failed"),
                     submission_rejected: row.get("submission_rejected"),

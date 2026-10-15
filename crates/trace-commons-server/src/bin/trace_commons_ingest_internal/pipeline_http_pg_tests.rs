@@ -16996,6 +16996,19 @@ async fn pipeline_review_queue_names_the_phase_of_each_hold() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{recorded}");
+    // The route's audit event does not claim a status change: the
+    // submission stays accepted.
+    let assessment_id: Uuid = recorded["assessment_id"].as_str().unwrap().parse().unwrap();
+    let score_event =
+        audit_file_events_of_kind(&fixture, score_held.submission_id, "review_decision")
+            .into_iter()
+            .find(|event| event.event_id == assessment_id)
+            .expect("the route appended the Score assessment's event");
+    assert_eq!(score_event.status, Some(TraceCorpusStatus::Accepted));
+    assert_eq!(
+        score_event.reason.as_deref(),
+        Some(trace_free_text_audit_reason("score_hold_rejected").as_str())
+    );
     for _ in 0..2 {
         fixture
             .service
@@ -17034,4 +17047,149 @@ async fn pipeline_review_queue_names_the_phase_of_each_hold() {
     let queue = queue.as_array().expect("a review queue").clone();
     assert_eq!(queue.len(), 1, "{queue:?}");
     assert_eq!(queue[0]["phase"], "review");
+}
+
+/// A run holds an assessment per phase. When neither assessment's event
+/// was appended by a route, the review audit pass appends both, not only
+/// the latest, and a Score hold's event does not claim a corpus status
+/// change: the submission stays accepted whichever way the hold resolves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_repairs_both_assessment_events_of_a_run_held_at_score() {
+    let Some(mut fixture) = withdrawal_fixture_with(score_holding_http_service, false).await else {
+        return;
+    };
+    let reviewer = format!("token-review-two-phase-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    let state = Arc::make_mut(&mut fixture.state);
+    state.tokens = Arc::new(tokens);
+    state.require_db_mirror_writes = true;
+    fixture
+        .service
+        .register_default_bundle(&fixture.tenant)
+        .await
+        .expect("register the bundle");
+    let tenant = fixture.tenant.clone();
+
+    let mut envelope = model_training_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = fixture
+        .service
+        .submit(PipelineReceiptRequest {
+            accept_medium_risk: false,
+            source_session: None,
+            tenant_id: &tenant,
+            actor_principal_ref: "principal_sha256:two-phase-audit",
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    else {
+        panic!("the receipt creates a run")
+    };
+    let run_id = created.run_id;
+    fixture
+        .service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the privacy pass holds the run");
+    let reviewer_ref = format!(
+        "reviewer_sha256:{}",
+        hex::encode(Sha256::digest(
+            static_token_principal_ref(&reviewer).as_bytes()
+        ))
+    );
+    let assess = |recommendation: ReviewRecommendation, reason: &'static str, resolved: &str| {
+        let fixture = &fixture;
+        let reviewer = &reviewer;
+        let reviewer_ref = reviewer_ref.clone();
+        let tenant = tenant.clone();
+        let resolved = resolved.to_string();
+        async move {
+            let lease_token = claim_review_through_the_route(fixture, reviewer, run_id).await;
+            fixture
+                .service
+                .store()
+                .record_review_assessment(
+                    &PipelineReviewClaim {
+                        tenant_id: tenant,
+                        run_id,
+                        reviewer_principal_ref: reviewer_ref,
+                        lease_token: serde_json::from_value(lease_token).unwrap(),
+                        lease_expires_at: Utc::now(),
+                    },
+                    recommendation,
+                    ReasonCode::new(reason.to_string()).unwrap(),
+                    vec![ReasonCode::new(resolved).unwrap()],
+                )
+                .await
+                .expect("the assessment records")
+        }
+    };
+    let review_assessment = assess(
+        ReviewRecommendation::Approve,
+        "privacy_review_cleared",
+        "privacy_pass_review_required",
+    )
+    .await;
+    fixture
+        .service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Review runs on the assessment");
+    let parked = fixture
+        .service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the Score is claimed");
+    assert_eq!(parked.next_phase, Some(Phase::Score), "{parked:?}");
+    let score_assessment = assess(
+        ReviewRecommendation::Reject,
+        "operator_rejected",
+        HTTP_SCORE_HOLD_LABEL,
+    )
+    .await;
+    assert!(
+        audit_file_events_of_kind(&fixture, created.submission_id, "review_decision").is_empty(),
+        "no route appended an event"
+    );
+
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let events = audit_file_events_of_kind(&fixture, created.submission_id, "review_decision");
+    let event_of = |assessment_id: Uuid| {
+        events
+            .iter()
+            .find(|event| event.event_id == assessment_id)
+            .unwrap_or_else(|| panic!("{assessment_id} has an event: {events:?}"))
+    };
+    assert_eq!(
+        event_of(review_assessment.assessment_id).status,
+        Some(TraceCorpusStatus::Accepted)
+    );
+    let score_event = event_of(score_assessment.assessment_id);
+    assert_eq!(
+        score_event.status,
+        Some(TraceCorpusStatus::Accepted),
+        "a rejected Score hold leaves the submission accepted"
+    );
+    assert_eq!(
+        score_event.reason.as_deref(),
+        Some(trace_free_text_audit_reason("score_hold_rejected").as_str())
+    );
+    assert!(!review_audit_marker_is_set(&fixture, run_id).await);
 }
