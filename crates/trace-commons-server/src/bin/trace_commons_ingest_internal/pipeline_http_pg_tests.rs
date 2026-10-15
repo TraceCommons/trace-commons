@@ -16795,7 +16795,8 @@ async fn the_review_audit_pass_records_a_run_held_for_an_operator() {
     run_review_audit_pass(&fixture)
         .await
         .expect("the pass runs");
-    let held_id = pipeline_settle_hold_audit_event_id(&tenant, created.run_id, held_at);
+    let held_id =
+        pipeline_runtime::pipeline_settle_hold_audit_event_id(&tenant, created.run_id, held_at);
     let events =
         audit_file_events_of_kind(&fixture, envelope.submission_id, "lifecycle_status_change");
     let held = events
@@ -16823,5 +16824,182 @@ async fn the_review_audit_pass_records_a_run_held_for_an_operator() {
             .count(),
         1,
         "a second pass adds no event"
+    );
+}
+
+/// Holds `run_id` for an operator directly, as the owner: a route-level
+/// shortcut. The hold itself is driven in `versioned_pipeline_runtime_pg`.
+async fn hold_run_for_operator_as_owner(fixture: &ProductFixture, tenant: &str, run_id: Uuid) {
+    let mut owner = fixture
+        .base
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap();
+    let tx = tenant_tx(&mut owner, tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs
+            SET state = 'awaiting_operator',
+                last_error_label = 'pipeline_gate_decision_conflict',
+                operator_held_at = clock_timestamp()
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// #1413 review: `POST /v1/admin/pipeline/runs/{run_id}/held-run-resolution`
+/// is the operator's way to end a hold (`resolve_operator_held_run`). It
+/// needs `main`'s admin credential: a contributor is refused and another
+/// tenant's admin finds no held run. `release` and `fail` answer the run's
+/// new state, a run no longer held is `404`, and each resolution appends a
+/// label-only audit row: the submission's status, `accepted`, with the
+/// operator's decision as its reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_operator_route_resolves_a_held_run() {
+    let Some(fixture) = product_fixture().await else {
+        return;
+    };
+    let state = &fixture.base.state;
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let run = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    hold_run_for_operator_as_owner(&fixture, tenant, run.run_id).await;
+    let uri = format!("/v1/admin/pipeline/runs/{}/held-run-resolution", run.run_id);
+    let release = serde_json::json!({"resolution": "release"});
+    let run_state = |run_id: Uuid| {
+        let service = fixture.base.service.clone();
+        async move {
+            service
+                .store()
+                .get_run(tenant, run_id)
+                .await
+                .unwrap()
+                .expect("the run")
+                .state
+        }
+    };
+
+    let (status, _) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.base.token),
+        Some(release.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a contributor is refused");
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.other_tenant_admin_token),
+        Some(release.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, _) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.admin_token),
+        Some(serde_json::json!({"resolution": "complete"})),
+    )
+    .await;
+    assert!(status.is_client_error(), "an unknown resolution: {status}");
+    assert_eq!(
+        run_state(run.run_id).await,
+        PipelineRunState::AwaitingOperator,
+        "no refused request changed it"
+    );
+
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.admin_token),
+        Some(release.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, serde_json::json!({"state": "retry"}));
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.admin_token),
+        Some(release),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a run no longer held: {body}"
+    );
+
+    hold_run_for_operator_as_owner(&fixture, tenant, run.run_id).await;
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.admin_token),
+        Some(serde_json::json!({"resolution": "fail"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, serde_json::json!({"state": "failed"}));
+    assert_eq!(run_state(run.run_id).await, PipelineRunState::Failed);
+
+    let mut client = fixture
+        .base
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let rows = tx
+        .query(
+            "SELECT metadata_json->>'reason_code' AS reason,
+                    metadata_json->>'resulting_status' AS status
+               FROM trace_audit_events
+              WHERE tenant_id = $1 AND submission_id = $2
+                AND metadata_json->>'reason_code' IN ($3, $4)
+              ORDER BY audit_sequence",
+            &[
+                &tenant,
+                &run.submission_id,
+                &trace_commons_server::versioned_pipeline::PIPELINE_OPERATOR_RELEASED_HELD_RUN_LABEL,
+                &trace_commons_server::versioned_pipeline::PIPELINE_OPERATOR_FAILED_HELD_RUN_LABEL,
+            ],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let recorded = rows
+        .iter()
+        .map(|row| {
+            (
+                row.get::<_, String>("reason"),
+                row.get::<_, String>("status"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recorded,
+        vec![
+            (
+                "operator_released_held_run".to_string(),
+                "accepted".to_string()
+            ),
+            (
+                "operator_failed_held_run".to_string(),
+                "accepted".to_string()
+            ),
+        ],
+        "one row per resolution the route made"
     );
 }

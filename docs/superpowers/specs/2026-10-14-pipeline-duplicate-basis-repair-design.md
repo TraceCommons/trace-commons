@@ -14,7 +14,7 @@ Owner decisions of 2026-10-14:
 2. The gap (a paid run whose Settle commit is refused for good) is held for
    operator review and not failed.
 3. Case (a): record the bases now, and defer the rescore.
-4. The migration is V128. V127 is reserved for #1237.
+4. The migration is V128. V127 is #1237's.
 
 Code read on `origin/main` at `91f37668d`.
 
@@ -24,6 +24,9 @@ Code read on `origin/main` at `91f37668d`.
 
 - `pipeline_runs.state` gains `awaiting_operator`. The check constraint is
   widened.
+- `pipeline_runs.operator_held_at TIMESTAMPTZ` records when the run was
+  last held for an operator. Every hold sets it and nothing clears it. The
+  runtime gets `UPDATE` on this column only.
 - `pipeline_runs.settle_finish_granted_at TIMESTAMPTZ` records when a
   failure path gave a finishable Settle run its one extra attempt. The
   runtime gets `UPDATE` on this column only. `max_attempts` keeps no update
@@ -116,10 +119,13 @@ run.
 transaction). A run is held, not failed, when all of these hold:
 
 - the run is in Settle;
-- its label is one of those two;
+- its label is one of those two, or the run was held before
+  (`operator_held_at` is set: an operator released it and its attempt
+  failed);
 - it is finishable, ignoring the grant;
-- at least one leg paid: `complete` with a `credit_event_id` or an
-  `external_receipt_hash`.
+- at least one leg paid: `complete` with a `credit_event_id`, a
+  `result_ref_hash` or an `external_receipt_hash`. Every leg that completes
+  carries a receipt, so this is every `complete` leg.
 
 A held run moves to **`awaiting_operator`** and keeps its label. Its legs
 are left alone (they are terminal), no invalidation is queued, and the
@@ -128,12 +134,28 @@ submission is not rejected. Its paid revision stays in the index.
 Every other `mark_failed`, and every refusal on a run with nothing paid,
 still fails under N-7.
 
+**A released run is never failed by an automatic path** (review of #1413).
+`mark_failed`, `mark_retry` exhaustion and the `claim_next` sweep of an
+expired lease all hold a run that was held before, if it is still
+finishable and paid, instead of failing it. Without this, a worker crash
+during a released attempt let the sweep fail the run, and N-7 removed the
+paid revision the operator had chosen to keep.
+
 - **Audit.** The hold sets the V118 review audit marker. The worker's review
   audit pass (`append_pipeline_review_audit_events`) appends a system
   `lifecycle_status_change` event:
-  - status `quarantined`;
+  - status `accepted`: the submission's status, which the hold does not
+    change (Review accepted it and a leg paid). The event records the
+    hold as a reason, not a status change. `quarantined` was considered
+    and rejected: it would have stated, permanently, a status the
+    submission never had;
   - reason label `pipeline_settle_held_for_operator`;
-  - event id derived from the run (`pipeline-settle-held-for-operator-audit`).
+  - event id derived from the run and the hold's time
+    (`pipeline-settle-held-for-operator-audit`), so each hold gets one
+    event.
+
+  The pass reads `operator_held_at`, not the run's state, so an operator
+  who ends the hold before the pass runs does not lose the hold's event.
 
   The event is label-only, with no run id and no content. A `tracing::warn!`
   logs the label, the reason label, the tenant storage reference and a hash
@@ -160,12 +182,17 @@ still fails under N-7.
     N-7 in the same transaction.
   - `Release` gives it one more attempt, due now
     (`operator_released_held_run`). Its legs are terminal, so the attempt
-    only commits. A commit that is refused again holds the run again. The
-    release counts as the run's extra attempt (it sets
-    `settle_finish_granted_at`), so a charged failure on it fails the run.
+    only commits. The release counts as the run's extra attempt (it sets
+    `settle_finish_granted_at`), so no automatic grant follows; if the
+    attempt fails in any way, the run is held again.
 
-  Both act only on a run that is still `awaiting_operator`. **No HTTP route
-  is wired yet**, so the operator route and its audit event are a follow-up.
+  Both act only on a run that is still `awaiting_operator`. The route is
+  `POST /v1/admin/pipeline/runs/{run_id}/held-run-resolution` with
+  `{"resolution": "fail" | "release"}`, behind `main`'s admin credential,
+  for the credential's tenant. It answers the run's new state, or `404`
+  for a run that is not held. Each decision appends a
+  `lifecycle_status_change` row with status `accepted` and the decision's
+  label as its reason.
 - **Withdrawal** of a held run's submission queues the revision's
   invalidation through the existing path, because the index write is
   `complete`. The run stays held for the operator.
@@ -239,8 +266,7 @@ the Score lock.
 
 1. Should withdrawal or revocation of a basis run (its command dropped, not
    failed) also count toward (a)? Out of scope here.
-2. The operator route for `resolve_operator_held_run` and its audit event.
-3. Should holds cover other permanent Settle failures of a paid run (for
+2. Should holds cover other permanent Settle failures of a paid run (for
    example a bound bundle that no longer loads)? Today only the two
    gate-decision refusals are held.
 
@@ -257,8 +283,19 @@ In `crates/trace-commons-server/tests/versioned_pipeline_runtime_pg.rs`:
 - `a_paid_run_whose_settle_commit_is_refused_waits_for_an_operator` (the
   gap: hold, audit marker, summary, no claim, `Fail` under N-7);
 - `an_operator_released_held_run_completes_without_paying_again`;
+- `a_released_run_whose_attempt_crashes_is_held_again` (the sweep) and
+  `a_released_run_charged_on_its_attempt_is_held_again` (`mark_retry`);
+- `a_paid_run_refused_for_incomplete_evidence_waits_for_an_operator`;
+- `a_run_paid_by_another_adapter_waits_for_an_operator` (a leg paid with a
+  receipt and no ledger event);
 - `a_near_duplicate_score_records_the_unapplied_run_it_counted` (case (a)
   bases).
+
+In the ingest bin's `pipeline_http_pg_tests`:
+
+- `the_review_audit_pass_records_a_run_held_for_an_operator` (status
+  `accepted`, and the event survives an operator failing the run first);
+- `the_operator_route_resolves_a_held_run`.
 
 The existing N-7 test
 `a_run_that_fails_for_good_after_its_index_write_has_its_revision_removed`

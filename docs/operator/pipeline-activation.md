@@ -2696,28 +2696,32 @@ only commits the run `complete`. So a run whose Trace Credit leg paid keeps
 its revision in the index. The attempt is given once: a run charged again
 on it fails as above, and its revision is removed (N-7).
 
-A run with a paid leg (`complete` with a credit event or an external
-receipt) whose Settle commit is refused for good waits in
+A run with a paid leg (any `complete` leg: each carries a receipt) whose
+Settle commit is refused for good waits in
 **`awaiting_operator`**. The refusal is `pipeline_gate_decision_conflict` or
 `pipeline_gate_decision_evidence_incomplete`, and the run keeps that label.
 It is not failed, so its paid revision stays in the index. No claim selects
 it, and the contributor sees it as pending.
 
 - **Audit.** The review audit pass appends a `lifecycle_status_change`
-  event with status `quarantined` and reason
-  `pipeline_settle_held_for_operator`.
+  event with status `accepted` (the submission's status, which the hold
+  does not change) and reason `pipeline_settle_held_for_operator`, one per
+  hold (`operator_held_at` records when).
 - **Where to see it.** `GET /v1/admin/pipeline/operational-summary` counts
   these runs as `operator_held_run_count`, and lists them in `work` under
   `settle` / `awaiting_operator` / the refusal label.
-- **Deciding.** `PgPipelineStore::resolve_operator_held_run` takes two
-  decisions:
+- **Deciding.** `POST /v1/admin/pipeline/runs/{run_id}/held-run-resolution`
+  with the admin credential and `{"resolution": "fail"}` or
+  `{"resolution": "release"}`. It answers `{"state": ...}`, or `404` for a
+  run that is not held, and appends a `lifecycle_status_change` row with
+  the decision as its reason:
   - `Fail` ends the run `failed` with `operator_failed_held_run`, and queues
     its revision's removal.
   - `Release` gives it one more attempt with `operator_released_held_run`,
     after the cause is fixed. For a conflict, that means removing the other
-    run's pipeline gate decision row. The attempt pays nothing again.
-
-  No admin route calls it yet.
+    run's pipeline gate decision row. The attempt pays nothing again. If
+    it fails -- refused again, retried to exhaustion, or its worker
+    crashes -- the run is held again, never failed.
 
 A withdrawal (or another way a submission stops being operable -- revoked,
 purged, or expired) forfeits every leg that is not `complete` without an

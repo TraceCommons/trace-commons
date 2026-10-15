@@ -8706,6 +8706,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(pipeline_requeue_failed_index_invalidations_handler),
         )
         .route(
+            "/v1/admin/pipeline/runs/{run_id}/held-run-resolution",
+            post(pipeline_resolve_held_run_handler).layer(pipeline_admin_body_limit()),
+        )
+        .route(
             "/.well-known/trace-commons-attestation-keyset.json",
             get(attestation_keyset_handler),
         )
@@ -18654,6 +18658,89 @@ async fn pipeline_requeue_failed_index_invalidations_handler(
         "pipeline failed index invalidations re-enqueued"
     );
     Ok(Json(PipelineInvalidationRequeueResponse { requeued }))
+}
+
+/// The operator's decision on a run held for an operator, as
+/// `POST /v1/admin/pipeline/runs/{run_id}/held-run-resolution` takes it.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PipelineHeldRunResolutionRequest {
+    Fail,
+    Release,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PipelineHeldRunResolutionBody {
+    resolution: PipelineHeldRunResolutionRequest,
+}
+
+/// Response body of
+/// `POST /v1/admin/pipeline/runs/{run_id}/held-run-resolution`: the run's
+/// state after the decision, a label only.
+#[derive(Debug, Serialize)]
+struct PipelineHeldRunResolutionResponse {
+    state: trace_commons_server::versioned_pipeline::PipelineRunState,
+}
+
+/// `POST /v1/admin/pipeline/runs/{run_id}/held-run-resolution`: ends the
+/// hold of a run in `awaiting_operator` (#1313,
+/// `PgPipelineStore::resolve_operator_held_run`). `fail` ends it `failed`
+/// and applies N-7; `release` gives it one more Settle attempt, which pays
+/// nothing again, for an operator who has fixed what refused its commit. It
+/// needs `main`'s admin credential, as the other pipeline admin routes do;
+/// the tenant is the credential's. A run the tenant does not have, or one
+/// that is not held, is `404`; without a pipeline runtime it is `404` too.
+/// Each decision appends a label-only `lifecycle_status_change` row: the
+/// submission keeps its status, `accepted`, and the decision is the reason.
+async fn pipeline_resolve_held_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<Uuid>,
+    Json(body): Json<PipelineHeldRunResolutionBody>,
+) -> ApiResult<Json<PipelineHeldRunResolutionResponse>> {
+    use trace_commons_server::versioned_pipeline::{
+        PIPELINE_OPERATOR_FAILED_HELD_RUN_LABEL, PIPELINE_OPERATOR_RELEASED_HELD_RUN_LABEL,
+        PipelineOperatorHeldRunResolution,
+    };
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let pipeline = require_pipeline_service(state.as_ref())?;
+    let (resolution, reason_label) = match body.resolution {
+        PipelineHeldRunResolutionRequest::Fail => (
+            PipelineOperatorHeldRunResolution::Fail,
+            PIPELINE_OPERATOR_FAILED_HELD_RUN_LABEL,
+        ),
+        PipelineHeldRunResolutionRequest::Release => (
+            PipelineOperatorHeldRunResolution::Release,
+            PIPELINE_OPERATOR_RELEASED_HELD_RUN_LABEL,
+        ),
+    };
+    let resolved = pipeline
+        .store()
+        .resolve_operator_held_run(tenant.tenant_id(), run_id, resolution)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "pipeline_run_not_held"))?;
+    append_lifecycle_status_audit(
+        state.as_ref(),
+        tenant.auth(),
+        LifecycleAuditActor::Tenant,
+        resolved.submission_id,
+        TraceCorpusStatus::Accepted,
+        reason_label,
+    )
+    .await
+    .map_err(internal_error)?;
+    tracing::warn!(
+        tenant_storage_ref = %tenant_storage_ref(tenant.tenant_id()),
+        run_ref_hash = %sha256_prefixed(&run_id.to_string()),
+        reason_label,
+        "an operator resolved a held pipeline run"
+    );
+    Ok(Json(PipelineHeldRunResolutionResponse {
+        state: resolved.state,
+    }))
 }
 
 /// `GET /.well-known/trace-commons-attestation-keyset.json` — publishes the
