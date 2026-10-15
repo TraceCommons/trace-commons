@@ -9,6 +9,10 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 const FILE: &str = "managed-sessions.json";
+/// Present once a coding session has started on this computer, from the
+/// app or the command line (#1408). Its own file, not a field of
+/// [`FILE`], so a downgraded daemon still opens the registry.
+const FIRST_LAUNCH_FILE: &str = "managed-first-launch.json";
 
 /// How long a redeemed session may go unheard before it is no longer taken
 /// to be running. The launcher reports every 5 seconds, so this is nine
@@ -167,6 +171,7 @@ struct Data {
 pub struct SessionRegistry {
     store: ConfigStore,
     data: Data,
+    launched: bool,
 }
 
 fn secret() -> String {
@@ -211,13 +216,28 @@ impl SessionRegistry {
             }
             entry.ticket_hash = None;
         }
+        let launched = store
+            .read_daemon_file(FIRST_LAUNCH_FILE)
+            .map_err(|_| ManagedError::StorageUnavailable)?
+            .is_some();
         let mut registry = Self {
             store: ConfigStore::open(store.dir().to_path_buf())
                 .map_err(|_| ManagedError::StorageUnavailable)?,
             data,
+            launched,
         };
         registry.commit(registry.data.clone())?;
         registry.reconcile_receipts()?;
+        // A session started before the fact was recorded still counts.
+        if !registry.launched
+            && registry
+                .data
+                .entries
+                .iter()
+                .any(|e| e.request.purpose == LaunchPurpose::Coding && e.proof_hash.is_some())
+        {
+            registry.record_launch()?;
+        }
         Ok(registry)
     }
 
@@ -241,6 +261,21 @@ impl SessionRegistry {
                 let _ = std::fs::remove_file(self.store.dir().join(name));
             }
         }
+        Ok(())
+    }
+
+    /// Whether a coding session has ever started on this computer: a
+    /// redeemed launch, from the app or the command line. A sign-in launch
+    /// does not count; it never asked for a folder.
+    pub fn has_launched(&self) -> bool {
+        self.launched
+    }
+
+    fn record_launch(&mut self) -> Result<(), ManagedError> {
+        self.store
+            .write_daemon_file(FIRST_LAUNCH_FILE, br#"{"schema_version":1}"#)
+            .map_err(|_| ManagedError::StorageUnavailable)?;
+        self.launched = true;
         Ok(())
     }
 
@@ -459,7 +494,13 @@ impl SessionRegistry {
         entry.proof_hash = Some(digest(&proof));
         entry.last_seen = Utc::now();
         let session = entry.view.clone();
+        let coding = entry.request.purpose == LaunchPurpose::Coding;
         self.commit(next)?;
+        // The launch has happened; failing to record it only shows the
+        // first-launch explanation again, so it never fails the launch.
+        if coding && !self.launched {
+            let _ = self.record_launch();
+        }
         Ok(LaunchContext {
             session,
             proof,
@@ -662,5 +703,90 @@ mod tests {
         );
         assert_eq!(reopened.views().unwrap()[1].state, SessionState::Failed);
         assert!(!reopened.holds_profile(account.id));
+    }
+
+    fn coding(account: &AccountView, cwd: &std::path::Path) -> LaunchRequest {
+        LaunchRequest {
+            model: None,
+            collect_traces: false,
+            purpose: LaunchPurpose::Coding,
+            request_id: Uuid::new_v4(),
+            tool: account.tool,
+            connection: account.connection,
+            account_id: account.id,
+            cwd: cwd.to_path_buf(),
+            expected_generation: Generation(0),
+            save_default: false,
+        }
+    }
+
+    /// #1408: the first started coding session is recorded once, on this
+    /// computer, whichever caller redeemed it, and a restart keeps it. A
+    /// prepared launch that never started, and a sign-in launch, do not
+    /// count.
+    #[test]
+    fn the_first_started_coding_session_is_recorded_and_survives_a_restart() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut accounts = AccountStore::open(&store).unwrap();
+        let account = accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        assert!(!registry.has_launched());
+
+        let login = registry
+            .prepare(
+                LaunchRequest {
+                    purpose: LaunchPurpose::Login,
+                    ..coding(&account, home.path())
+                },
+                &account,
+            )
+            .unwrap();
+        registry
+            .redeem(login.session_id, login.ticket.as_deref().unwrap())
+            .unwrap();
+        assert!(
+            !registry.has_launched(),
+            "a sign-in is not a coding session"
+        );
+
+        let other = accounts
+            .add(ToolId::Codex, ConnectionKind::Subscription, "Work")
+            .unwrap();
+        let prepared = registry
+            .prepare(coding(&other, home.path()), &other)
+            .unwrap();
+        assert!(!registry.has_launched(), "prepared is not started");
+        assert!(!SessionRegistry::open(&store).unwrap().has_launched());
+
+        registry
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        assert!(registry.has_launched());
+        assert!(SessionRegistry::open(&store).unwrap().has_launched());
+    }
+
+    /// A computer that started a session before the fact was recorded is
+    /// not shown the first-launch explanation again.
+    #[test]
+    fn a_session_started_before_the_record_existed_counts() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut accounts = AccountStore::open(&store).unwrap();
+        let account = accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let prepared = registry
+            .prepare(coding(&account, home.path()), &account)
+            .unwrap();
+        registry
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        std::fs::remove_file(store.dir().join(FIRST_LAUNCH_FILE)).unwrap();
+        assert!(SessionRegistry::open(&store).unwrap().has_launched());
+        assert!(store.dir().join(FIRST_LAUNCH_FILE).is_file());
     }
 }

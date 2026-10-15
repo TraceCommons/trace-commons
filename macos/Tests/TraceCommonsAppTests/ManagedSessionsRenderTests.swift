@@ -60,6 +60,27 @@ final class ManagedSessionsRenderTests: XCTestCase {
         try render(ManagedLaunchSheet(onClose: {}, accountID: "opencode-test").environmentObject(model), size: CGSize(width: 580, height: 580), to: directory.appendingPathComponent("managed-opencode-launch.png"))
     }
 
+    /// #1408: the explanation before the folder picker, for each Start
+    /// button, and its artwork at rest, as Reduce Motion shows it.
+    @MainActor
+    func testTheFolderExplainerRendersForEachStartButton() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let model = AppModel()
+        model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json")))
+        XCTAssertEqual(model.managedSnapshot?.explainsFolderChoice, true)
+        XCTAssertEqual(ManagedFolderExplainerSheet.line(tool: "codex", model: model),
+                       "Choose a folder for Codex to work in. It opens in Terminal.")
+        XCTAssertTrue(ManagedFolderHandoff.startsAtRest(reduceMotion: true))
+        XCTAssertFalse(ManagedFolderHandoff.startsAtRest(reduceMotion: false))
+        let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }
+        for tool in ManagedSurface.signInTools {
+            try render(ManagedFolderExplainerSheet(tool: tool, onCancel: {}, onChoose: {}).environmentObject(model), size: CGSize(width: 520, height: 360), to: directory.appendingPathComponent("managed-folder-explainer-\(tool).png"))
+        }
+        try render(ManagedFolderHandoff(tool: .claudeCode, atRest: true), size: CGSize(width: 320, height: 160), to: directory.appendingPathComponent("managed-folder-handoff-rest.png"))
+    }
+
     @MainActor
     private func render<V: View>(_ view: V, size: CGSize, to url: URL) throws {
         _ = NSApplication.shared

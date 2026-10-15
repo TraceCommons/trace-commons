@@ -59,9 +59,12 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
     public let generations: [String: UInt64]
     public let sessions: [ManagedSession]
     public let capabilities: Capabilities
+    /// Whether a coding session has started on this computer, from the app
+    /// or the command line (#1408). Absent from an older daemon.
+    public let hasLaunched: Bool?
     enum CodingKeys: String, CodingKey {
         case copy, revision, accounts, defaults, generations, sessions, capabilities
-        case signInAccounts = "sign_in_accounts"
+        case signInAccounts = "sign_in_accounts", hasLaunched = "has_launched"
     }
 }
 
@@ -110,6 +113,15 @@ public enum ManagedSurface {
         template.replacingOccurrences(of: "{destination}", with: destination ?? fallback)
     }
 
+    /// The line before the folder picker (#1408), with `{tool}` and
+    /// `{destination}` filled; `fallback` (the core's "your terminal") when
+    /// the daemon reports no terminal, as `signInScope` does.
+    public static func folderChoiceLine(_ template: String, tool: String, destination: String?, fallback: String) -> String {
+        template
+            .replacingOccurrences(of: "{tool}", with: tool)
+            .replacingOccurrences(of: "{destination}", with: destination ?? fallback)
+    }
+
     /// The tool's name key, or nil for a tool this shell does not know.
     public static func toolKey(_ tool: String) -> String? {
         ["claude", "codex", "opencode"].contains(tool) ? tool : nil
@@ -138,6 +150,11 @@ public extension ManagedSnapshot {
     func isDefault(_ account: ManagedAccount) -> Bool {
         defaults.contains { $0.accountID == account.id }
     }
+
+    /// Whether Start explains the folder choice before the picker: until a
+    /// session has started on this computer (#1408). An older daemon that
+    /// does not say reads as never launched.
+    var explainsFolderChoice: Bool { hasLaunched != true }
 
     /// Whether the daemon holds a NEAR AI sign-in.
     var nearAiSignedIn: Bool { capabilities.nearAiSignin == true }

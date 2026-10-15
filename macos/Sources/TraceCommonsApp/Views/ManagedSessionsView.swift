@@ -15,6 +15,8 @@ struct ManagedSessionsSection: View {
     @State private var launching = false
     @State private var renaming: ManagedAccount?
     @State private var removing: ManagedAccount?
+    /// The tool whose Start is explaining the folder choice (#1408).
+    @State private var explaining: ManagedFolderChoice?
     /// The account whose row menu is open.
     @State private var menuFor: String?
     @Environment(\.openURL) private var openURL
@@ -41,6 +43,16 @@ struct ManagedSessionsSection: View {
         }
         .glassModal(item: $removing) { account in
             ManagedRemoveSheet(account: account, onClose: { removing = nil }).environmentObject(model)
+        }
+        .glassModal(item: $explaining) { choice in
+            ManagedFolderExplainerSheet(
+                tool: choice.tool, onCancel: { explaining = nil },
+                onChoose: {
+                    explaining = nil
+                    // The picker opens once the sheet is gone.
+                    DispatchQueue.main.async { chooseAndStart(choice.tool) }
+                }
+            ).environmentObject(model)
         }
         // Kept: `managed_changed` is published only when a request changes
         // the session revision, so an expiry or a reconciled exit is seen
@@ -106,8 +118,19 @@ struct ManagedSessionsSection: View {
         }
     }
 
-    /// The folder chooser the launch sheet uses, then the launch.
+    /// Until a session has started on this computer, a sheet that says why
+    /// a folder is asked for comes first (#1408); then the picker.
     private func start(_ tool: String) {
+        guard !model.managedBusy else { return }
+        if model.managedSnapshot?.explainsFolderChoice == true {
+            explaining = ManagedFolderChoice(tool: tool)
+        } else {
+            chooseAndStart(tool)
+        }
+    }
+
+    /// The folder chooser the launch sheet uses, then the launch.
+    private func chooseAndStart(_ tool: String) {
         guard !model.managedBusy, let path = FolderPanel.choose(),
               let params = model.managedSnapshot?.signInLaunchParams(tool: tool, cwd: path, requestID: UUID().uuidString)
         else { return }
