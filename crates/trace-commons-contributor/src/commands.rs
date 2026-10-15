@@ -4360,7 +4360,12 @@ pub fn daemon_set_project(
     // disambiguation happens at render time (here, and in `daemon projects`
     // / the queue) against the current known-key set, so a stored label
     // never goes stale when a colliding project shows up later.
-    let label = crate::daemon::policy::project_label_for(&key);
+    // The daemon stores the key normalized (#992): case-folded on macOS and
+    // Windows and walked up to the repository root. The label it derives is
+    // that root's, in the case on disk, so derive it the same way here.
+    let label = crate::daemon::policy::project_label_for(
+        &crate::daemon::policy::display_path_for_key(&key).unwrap_or_else(|| key.clone()),
+    );
     let resp = daemon_call(
         store,
         "set_project_mode",
@@ -4755,10 +4760,12 @@ mod daemon_command_tests {
         store.save_config(&cfg).unwrap();
         let project = tempfile::tempdir().unwrap();
         daemon_set_project(&store, project.path(), "auto", false, false).unwrap();
-        let key = std::fs::canonicalize(project.path())
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        // The key a session in that directory resolves to (#992).
+        let key = crate::daemon::policy::project_key_for(Some(
+            &std::fs::canonicalize(project.path())
+                .unwrap()
+                .to_string_lossy(),
+        ));
         let policy = crate::daemon::policy::ProjectPolicy::load(&store).unwrap();
         assert_eq!(policy.resolve(&key), ProjectMode::AutoUpload);
     }

@@ -87,10 +87,10 @@ impl Harness {
     fn project_key(&self) -> String {
         let path = self.shared.store.dir().join("a-project");
         std::fs::create_dir_all(&path).unwrap();
-        std::fs::canonicalize(&path)
-            .unwrap()
-            .to_string_lossy()
-            .to_string()
+        // The watcher's key for it (#992): what a session there resolves to.
+        trace_commons_contributor::daemon::policy::project_key_for(Some(
+            &std::fs::canonicalize(&path).unwrap().to_string_lossy(),
+        ))
     }
 
     /// A pending entry over a session that really exists, with the source
