@@ -41,7 +41,10 @@ struct WatchedFoldersSection: View {
                                     choice: choice(for: kind),
                                     reportedMode: mode(for: kind),
                                     onWatchCandidate: { save(kind, .watch(path: $0.path)) },
-                                    onChoose: { save(kind, .watch(path: $0)) },
+                                    onChoose: { path in
+                                        save(kind, .watch(path: SourceFolderSelection.path(
+                                            for: kind, chosenFolder: path)))
+                                    },
                                     onDecline: { save(kind, .off) })
                             }
                             if let trajectory = copy.trajectory,

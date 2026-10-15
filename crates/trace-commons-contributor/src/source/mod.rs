@@ -17,6 +17,7 @@ pub mod codex;
 pub mod discovery;
 pub mod gemini_cli;
 pub mod opencode;
+pub(crate) mod opencode_db;
 pub mod trajectory;
 
 /// A load declined because of what the session *is*, not because of what
@@ -672,8 +673,11 @@ struct SourceSpec {
 static NATIVE_SOURCES: &[SourceSpec] = &[
     SourceSpec {
         name: SOURCE_OPENCODE,
-        // Export-only: this path is never used without a declaration.
-        conventional_root: None,
+        // Discovery offers this location; old undeclared desktop settings stay off.
+        conventional_root: Some(|| {
+            opencode_db::conventional_root(&home_dir(), |key| std::env::var(key).ok())
+                .join("opencode.db")
+        }),
         build: |path| Box::new(opencode::OpenCodeSource::new(path)),
         undeclared: Undeclared::Nothing,
     },
@@ -1405,6 +1409,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                SOURCE_OPENCODE,
                 SOURCE_CLAUDE_CODE,
                 SOURCE_CODEX,
                 SOURCE_GEMINI_CLI,

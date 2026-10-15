@@ -2,7 +2,7 @@
 
 Goal: launch OpenCode from native macOS or near-ai with a selected saved key and model; optionally collect that exact session automatically on exit.
 
-Design authorized in conversation: extend existing managed accounts, ticket redemption, process supervision and export importer. No global provider changes, native database scan, new dependencies, or attestation claims. Use OpenCode 1.19.0, qualified with an isolated synthetic localhost model and external networking denied. Subscription login is unavailable for OpenCode until independently qualified.
+Design authorized in conversation: extend existing managed accounts, ticket redemption, process supervision and export importer. No global provider changes or attestation claims. The follow-up automatic discovery and direct rusqlite dependency were explicitly authorized in conversation. Use OpenCode 1.19.0, qualified with an isolated synthetic localhost model and external networking denied. Subscription login is unavailable for OpenCode until independently qualified.
 
 ## Tasks
 - [x] Qualify real export and add failing version/account tests; accept 1.19.0 alongside 1.18.29 and preserve actual producer version.
@@ -28,10 +28,29 @@ Design authorized in conversation: extend existing managed accounts, ticket rede
 - Source adapter library selection: 189 passed, excluding unrelated compute resource tests matched by the substring.
 - Managed library tests: 7 passed, including explicitly selecting the second NEAR model with distinct per-session credentials.
 - Logout cleanup: 6 passed; shared source copy: 10 passed; OpenCode settings regression: 1 passed.
-- License boundary: 4 passed. No dependency or license-set changes.
+- License boundary: 4 passed. The original managed-launch change added no dependencies. See the automatic-discovery follow-up below.
 - Contributor all-target Clippy passed with RUSTFLAGS=-D warnings and the repo allow-list; cargo fmt check and git diff check passed.
 - Rebuilt contributor FFI and ran native macOS ManagedSessions, SourceCheckExport, SessionRoots and SettingsParity tests successfully. OpenCode launch dialog rendered and visually inspected.
 - Fresh read-only reviewer identified two issues: explicit Off bypass and indefinitely pending collection after unredeemed launch failure. Both reproduced in tests and fixed; regressions pass.
-- Ruling: collection opt-in defaults off and applies to the seeded session only. Export happens on exit. Subscription auth, ordinary-session auto-export, continuous capture, forced-helper recovery, and attested contribution qualification remain outside this implementation.
+- Ruling: collection opt-in defaults off and applies to the seeded session only. Export happens on exit. Subscription auth,  forced-helper recovery, and attested contribution qualification remain outside this implementation.
 - Ruling: managed staging discovery is bounded at 65,536 entries; the ordinary declared folder retains its 256-entry bound. Explicit Off disables both. Logout removes collected staging without deleting native session profiles.
 - No real provider credentials, paid calls, deployment, or release performed. Windows/Linux desktop launch UI remains frozen; CLI shares the implementation, but no Windows/Linux live-native qualification was performed.
+
+## Automatic discovery follow-up
+
+- Offer the native `opencode.db` at `$XDG_DATA_HOME/opencode` or `~/.local/share/opencode` during source discovery. Selection is explicit; old undeclared desktop settings remain off.
+- Preserve existing export-folder declarations. Native selections name the database file, so adding a database to an old export folder never widens its consent.
+- Read qualified session/message/part tables through read-only SQLite transactions. Retain export validation, version checks, redaction, project policy, preview and upload approval. No credentials or provider configuration are queried.
+- Use stable per-session references, session/message/part update times, and DB/WAL preview cache invalidation. Existing polling observes committed changes.
+- Bound session counts, payload bytes, record counts and SQLite instruction work. Fail closed on malformed/unsupported input. No database migrations or transcript writes; SQLite may coordinate readers through an existing shared-memory sidecar.
+- `rusqlite` 0.37 with bundled SQLite and hooks was approved by the user. It already exists transitively through IronWire; no new package is introduced.
+- Qualification fixture `tests/fixtures/opencode/native-1.19.0.sql` comes from the installed OpenCode 1.19.0 importing synthetic `completed.json` in an isolated temporary profile. It exercises assistant parent links, reasoning, tool call/result, ordering and native identity; imported original version 1.18.29 is preserved.
+
+### Follow-up verification
+
+- Complete contributor suite: 3,820 passed, 14 ignored.
+- FFI ABI and header suites: 197 passed. Rebuilt native FFI.
+- Native macOS source setup, chooser, source-copy, session-roots and settings suites: 66 passed.
+- License boundary: 4 passed; all four required dependency license configurations passed.
+- Contributor and FFI all-target Clippy passed with `RUSTFLAGS=-D warnings` and repository allowances; formatting and diff checks passed.
+- Native SQLite qualification uses OpenCode 1.19.0 on macOS. No Windows/Linux live-native qualification or release was performed.

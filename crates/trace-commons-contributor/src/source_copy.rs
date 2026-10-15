@@ -162,10 +162,10 @@ pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
     let name = tool.name();
     if tool == SourceTool::OpenCode {
         return match source_mode {
-            "watch" => "OpenCode export folder selected; saved exports and sessions you collect through managed launches can be read",
-            "off" => "OpenCode exports turned off. Previously queued sessions are not removed",
-            "unset" => "No OpenCode export folder selected; only sessions you collect through managed launches can be read",
-            _ => "OpenCode export-folder settings could not be confirmed",
+            "watch" => "OpenCode sessions are watched in the selected folder",
+            "off" => "OpenCode collection turned off. Previously queued sessions are not removed",
+            "unset" => "No OpenCode folder selected; only sessions you collect through managed launches can be read",
+            _ => "OpenCode source settings could not be confirmed",
         }
         .into();
     }
@@ -182,8 +182,9 @@ pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
 }
 
 /// Export-only importer refusal, shared by all native health surfaces.
-pub const OPENCODE_VERSION_TITLE: &str = "This OpenCode export version isn't supported.";
-pub const OPENCODE_VERSION_DETAIL: &str = "This importer supports sessions created with OpenCode 1.18.29 or 1.19.0. For other versions, wait for an importer update. Choose the folder containing opencode export SESSION_ID JSON files; the live session store is not read.";
+pub const OPENCODE_VERSION_TITLE: &str = "This OpenCode session version isn't supported.";
+pub const OPENCODE_VERSION_DETAIL: &str =
+    "Supported: OpenCode 1.19.0 databases and sessions from 1.18.29 or 1.19.0.";
 
 /// Shared copy and source-policy metadata for editable native settings rows.
 #[derive(serde::Serialize)]
@@ -259,10 +260,14 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
                 key,
                 // Two words at most (owner ruling, 2026-10-07): the row
                 // already names the tool, so the button need not.
-                decline: if tool == SourceTool::OpenCode { "Don't read".into() } else { "Not used".into() },
-                explanation: (tool == SourceTool::OpenCode).then_some(
-                    "Choose a folder of JSON files saved with opencode export SESSION_ID. Those exports and sessions you collect through managed launches can be read. This does not scan OpenCode's live session store or configure model calls."),
-                choose_folder: (tool == SourceTool::OpenCode).then_some("Choose an exports folder…"),
+                decline: if tool == SourceTool::OpenCode {
+                    "Don't read".into()
+                } else {
+                    "Not used".into()
+                },
+                explanation: (tool == SourceTool::OpenCode)
+                    .then_some("Watch local OpenCode sessions or a folder of exports."),
+                choose_folder: (tool == SourceTool::OpenCode).then_some("Choose a folder…"),
                 unset_scans_conventional: undeclared_scans_conventional(tool.adapter_name()),
             },
         )
@@ -324,8 +329,8 @@ mod tests {
         let payload = serde_json::to_value(source_settings_copy()).unwrap();
         assert_eq!(payload["opencode_version_title"], OPENCODE_VERSION_TITLE);
         assert_eq!(payload["opencode_version_detail"], OPENCODE_VERSION_DETAIL);
-        assert!(OPENCODE_VERSION_DETAIL.contains("sessions created with OpenCode 1.18.29"));
-        assert!(OPENCODE_VERSION_DETAIL.contains("live session store is not read"));
+        assert!(OPENCODE_VERSION_DETAIL.contains("1.18.29"));
+        assert!(OPENCODE_VERSION_DETAIL.contains("1.19.0 databases"));
     }
 
     #[test]
@@ -347,7 +352,7 @@ mod tests {
                 assert!(
                     tool.explanation
                         .unwrap()
-                        .contains("opencode export SESSION_ID")
+                        .contains("local OpenCode sessions")
                 );
             } else {
                 assert_eq!(tool.decline, "Not used");
@@ -377,7 +382,7 @@ mod tests {
         );
         assert!(source_check_line(SourceTool::OpenCode, "off").contains("turned off"));
         assert!(OPENCODE_VERSION_DETAIL.contains("1.18.29"));
-        assert!(OPENCODE_VERSION_DETAIL.contains("live session store is not read"));
+        assert!(OPENCODE_VERSION_DETAIL.contains("1.19.0 databases"));
         assert_eq!(SourceTool::from_key("opencode"), Some(SourceTool::OpenCode));
     }
 
