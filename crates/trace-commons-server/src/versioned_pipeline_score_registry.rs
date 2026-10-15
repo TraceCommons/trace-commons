@@ -68,6 +68,24 @@ pub struct ScorePolicyDependencies<'a> {
 /// Builds a Score policy for a bundle whose manifest names this factory's
 /// implementation id. Implemented by an embedding binary; the open build
 /// registers none.
+///
+/// A registered policy runs under the same Score runtime controls as the
+/// compatibility Score policy
+/// ([`score_runs_under_runtime_controls`](crate::versioned_pipeline_bundle::score_runs_under_runtime_controls)):
+///
+/// - its Score takes the tenant's Score lock, and reads the index commands
+///   of the tenant's runs that Settle has not applied as neighbours;
+/// - `main`'s duplicate short-circuits decide its Settle selection, keep a
+///   duplicate out of the index, and withhold a duplicate's Trace Credit
+///   leg, so a duplicate earns nothing whatever the policy awarded;
+/// - Settle writes its `trace_gate_decisions` row from its Score evidence.
+///   The row needs `perplexity_micros`, `tail_fraction_micros`,
+///   `novelty_score_micros`, `quality_passed`, `novelty_passed`, and
+///   `nearest_neighbor_hash` on the policy's `ScoreEvidence`, as the
+///   compatibility evidence carries them. A policy whose evidence lacks one
+///   fails its run closed at Settle
+///   (`pipeline_gate_decision_evidence_incomplete`) before any leg pays;
+///   the server never fills one in.
 pub trait ScorePolicyFactory: Send + Sync {
     /// A safe label that names the factory in hash-only reports.
     fn dependency_identity(&self) -> &str;

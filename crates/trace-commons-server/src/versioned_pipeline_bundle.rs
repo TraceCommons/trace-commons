@@ -526,6 +526,16 @@ pub struct MinimalPolicyBundle {
 }
 
 impl MinimalPolicyBundle {
+    /// Whether this bundle's Score runs under the pipeline's Score runtime
+    /// controls: the tenant's Score lock, the `trace_gate_decisions` row,
+    /// and `main`'s duplicate short-circuits
+    /// ([`score_runs_under_runtime_controls`]). True for the compatibility
+    /// Score policy and for every Score policy a registry supplies; false
+    /// only for the minimal reference.
+    pub fn score_runs_under_runtime_controls(&self) -> bool {
+        score_runs_under_runtime_controls(&self.package.manifest.score.implementation_id)
+    }
+
     /// Builds an unsigned package naming `config`, `scorer`, and `embedder`
     /// by content hash. The package does not hold runnable policies; pass it
     /// to [`Self::from_package_with_runtime`] with matching dependencies to
@@ -837,6 +847,19 @@ impl MinimalPolicyBundle {
             anyhow::bail!("bundle_policy_not_runnable")
         }
     }
+}
+
+/// Whether a bundle whose Score policy ref names `score_implementation_id`
+/// runs its Score under the pipeline's Score runtime controls: the tenant's
+/// Score lock, the `trace_gate_decisions` row Settle writes, and `main`'s
+/// duplicate short-circuits, which withhold a duplicate's Trace Credit leg
+/// whichever event it settles under. Every Score policy that can bind does,
+/// built in or registered, except the minimal reference, whose evidence
+/// carries none of the fields the gate decision row needs. Keyed on the
+/// implementation id alone so the store, which reads only the bound Score
+/// policy ref, decides it the same way as the runner.
+pub fn score_runs_under_runtime_controls(score_implementation_id: &str) -> bool {
+    score_implementation_id != MINIMAL_SCORE_IMPLEMENTATION
 }
 
 /// The factory `score_policies` holds for `package`'s Score implementation

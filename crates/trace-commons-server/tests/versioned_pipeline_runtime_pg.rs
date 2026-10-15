@@ -50195,3 +50195,295 @@ async fn accept_medium_leaves_a_declared_and_a_consent_flag_medium_as_they_were(
         "accepted"
     );
 }
+
+// A Score policy an embedding binary registers (`ScorePolicyRegistry`) runs
+// under the same runtime controls as the compatibility Score policy: the
+// tenant's Score lock, the `trace_gate_decisions` row, and `main`'s
+// duplicate short-circuits. The registered policy below is a test-only
+// factory that builds the compatibility Score policy over the substituted
+// manifest, so its evidence carries every field the gate decision row
+// needs.
+
+const REGISTERED_SCORE_IMPLEMENTATION: &str = "substituted.score.runtime_test_only.v1";
+
+struct RegisteredTestScoreFactory {
+    trace_credit_event: PipelineTraceCreditEvent,
+}
+
+impl trace_commons_server::versioned_pipeline_score_registry::ScorePolicyFactory
+    for RegisteredTestScoreFactory
+{
+    fn dependency_identity(&self) -> &str {
+        "substituted_score_policy_runtime_test_only"
+    }
+
+    fn trace_credit_event(&self) -> PipelineTraceCreditEvent {
+        self.trace_credit_event
+    }
+
+    fn build(
+        &self,
+        dependencies: trace_commons_server::versioned_pipeline_score_registry::ScorePolicyDependencies<'_>,
+    ) -> Result<Arc<dyn trace_commons_gate_api::pipeline::ScorePolicy>, &'static str> {
+        let config: CompatibilityBundleConfig = serde_json::from_slice(dependencies.configuration)
+            .map_err(|_| "substituted_configuration_invalid")?;
+        let policy =
+            trace_commons_server::versioned_pipeline_compat::CompatibilityScorePolicy::new(
+                dependencies.manifest.clone(),
+                config,
+                dependencies.scorer,
+                dependencies.embedder,
+                dependencies.index_reader,
+            )
+            .map_err(|_| "substituted_configuration_invalid")?;
+        Ok(Arc::new(policy))
+    }
+}
+
+/// The compatibility package over `config`, with its Score policy ref
+/// renamed to `REGISTERED_SCORE_IMPLEMENTATION`.
+fn registered_score_package(config: &CompatibilityBundleConfig) -> BundlePackage {
+    let mut package = MinimalPolicyBundle::compatibility_package(
+        config,
+        &ReferencePerplexityScorer::new(),
+        &ReferenceEmbedder::new(),
+    )
+    .expect("build compatibility bundle package");
+    package.manifest.score.policy_id = "substituted.score".to_string();
+    package.manifest.score.implementation_id = REGISTERED_SCORE_IMPLEMENTATION.to_string();
+    package.bundle_id = package.manifest.bundle_id().unwrap();
+    package
+        .validate()
+        .expect("the substituted package validates");
+    package
+}
+
+/// `compatibility_test_builder`, with `registered_score_package` as its
+/// default package and a registry holding the test factory.
+fn registered_score_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+    checks: PipelineNoveltyUtilityChecks,
+    trace_credit_event: PipelineTraceCreditEvent,
+) -> Arc<PipelineService> {
+    let index = IsolatedPipelineIndex::new();
+    let package = registered_score_package(&config);
+    let registry = SettlementAdapterRegistry::new(vec![RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    ) as Arc<dyn SettlementAdapter>])
+    .expect("build settlement adapter registry");
+    let policies =
+        trace_commons_server::versioned_pipeline_score_registry::ScorePolicyRegistry::new()
+            .with_factory(
+                REGISTERED_SCORE_IMPLEMENTATION,
+                Arc::new(RegisteredTestScoreFactory { trace_credit_event }),
+            )
+            .expect("register the test factory");
+    Arc::new(
+        PipelineServiceBuilder::new(
+            backend,
+            artifact_store,
+            package,
+            index.clone(),
+            index,
+            registry,
+            uncapped_caps(&["trace_credit"]),
+        )
+        .with_scorer(Arc::new(ReferencePerplexityScorer::new()))
+        .with_embedder(Arc::new(ReferenceEmbedder::new()))
+        .with_authority(allow_all_authority())
+        .with_privacy(default_privacy_boundary())
+        .with_unqualified_routing(true)
+        .with_novelty_utility_checks(checks)
+        .with_score_policies(policies)
+        .build()
+        .expect("build pipeline service"),
+    )
+}
+
+/// (i) A registered Score policy takes the tenant's Score lock: one that
+/// finds it held is released uncharged as `score_lock_busy`, as a
+/// compatibility Score is, and scores once the lock is free.
+#[tokio::test]
+async fn a_registered_score_policy_takes_the_tenant_score_lock() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for event in [
+        PipelineTraceCreditEvent::PipelineScore,
+        PipelineTraceCreditEvent::NoveltyUtility,
+    ] {
+        let service = registered_score_service(
+            backend.clone(),
+            artifact_store(&dir),
+            near_duplicate_config(),
+            issuing_checks(),
+            event,
+        );
+        let tenant = format!("registered-lock-{}", uuid::Uuid::new_v4());
+        let reviewed = compatibility_run_past_review(&service, &tenant).await;
+
+        let mut holder = owner_client().await;
+        let lock = holder.transaction().await.unwrap();
+        hold_compatibility_score_lock(&lock, &tenant).await;
+        let released = service
+            .process_run(&tenant, reviewed.run_id)
+            .await
+            .unwrap()
+            .expect("the Score is claimed");
+        assert_eq!(
+            (
+                released.state,
+                released.last_error_label.as_deref(),
+                released.attempt_count,
+                released.next_phase,
+            ),
+            (
+                PipelineRunState::Retry,
+                Some(PIPELINE_SCORE_LOCK_BUSY_LABEL),
+                reviewed.attempt_count,
+                Some(Phase::Score),
+            ),
+            "a registered Score that finds its tenant lock held is released uncharged"
+        );
+        lock.commit().await.unwrap();
+        force_due(&backend, &tenant, reviewed.run_id).await;
+        let scored = service
+            .process_run(&tenant, reviewed.run_id)
+            .await
+            .unwrap()
+            .expect("the Score runs once the lock is free");
+        assert_eq!(scored.next_phase, Some(Phase::Settle), "{scored:?}");
+    }
+}
+
+/// (ii) A run under a registered Score policy writes its
+/// `trace_gate_decisions` row at Settle, from its Score evidence, as a
+/// compatibility run does.
+#[tokio::test]
+async fn a_registered_score_policy_writes_a_gate_decision_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for event in [
+        PipelineTraceCreditEvent::PipelineScore,
+        PipelineTraceCreditEvent::NoveltyUtility,
+    ] {
+        let service = registered_score_service(
+            backend.clone(),
+            artifact_store(&dir),
+            CompatibilityBundleConfig::local_reference(),
+            issuing_checks(),
+            event,
+        );
+        let tenant = format!("registered-gate-row-{}", uuid::Uuid::new_v4());
+        let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+        assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+        let rows = gate_decision_rows(&tenant, run.submission_id).await;
+        assert_eq!(rows.len(), 1, "one row for the submission: {rows:?}");
+        let row = &rows[0];
+        assert_eq!(
+            row.decision_id,
+            expected_pipeline_decision_id(&tenant, run.run_id)
+        );
+        assert_eq!(row.source, "pipeline_settle");
+        assert_eq!(row.pipeline_run_id, Some(run.run_id));
+        let evidence: ScoreEvidence = serde_json::from_value(
+            score_outcome_of(&service, &tenant, run.run_id)
+                .await
+                .evidence,
+        )
+        .unwrap();
+        assert_eq!(
+            Some(row.perplexity_micros),
+            evidence
+                .perplexity_micros
+                .map(|value| i64::try_from(value).unwrap())
+        );
+    }
+}
+
+/// (iii) `main`'s duplicate short-circuits gate a registered Score policy's
+/// award as they gate a compatibility one: a second submission that
+/// duplicates the first earns nothing, whichever Trace Credit event the
+/// factory declares, its gate decision row records the label, and it is
+/// kept out of the index.
+#[tokio::test]
+async fn a_duplicate_earns_nothing_under_a_registered_score_policy() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for event in [
+        PipelineTraceCreditEvent::PipelineScore,
+        PipelineTraceCreditEvent::NoveltyUtility,
+    ] {
+        let mut config = CompatibilityBundleConfig::local_reference();
+        config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+        let service = registered_score_service(
+            backend.clone(),
+            artifact_store(&dir),
+            config,
+            PipelineNoveltyUtilityChecks {
+                duplicate_controls: Some(PipelineDuplicateControls::MAIN_DEFAULT),
+                ..issuing_checks()
+            },
+            event,
+        );
+        let tenant = format!("registered-dup-{}", uuid::Uuid::new_v4());
+        service.register_default_bundle(&tenant).await.unwrap();
+        let first = submit_envelope_and_complete(
+            &service,
+            &tenant,
+            RECEIPT_PRINCIPAL,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await;
+        let second = submit_envelope_and_complete(
+            &service,
+            &tenant,
+            RECEIPT_PRINCIPAL,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await;
+        assert_eq!(first.state, PipelineRunState::Complete, "{first:?}");
+        assert_eq!(second.state, PipelineRunState::Complete, "{second:?}");
+
+        let first_leg = trace_credit_settlement(&service, &tenant, first.run_id).await;
+        assert!(first_leg.credit_event_id.is_some(), "{first_leg:?}");
+        assert!(
+            credit_ledger_event_for_run(&backend, &tenant, first.run_id)
+                .await
+                .is_some()
+        );
+
+        let leg = trace_credit_settlement(&service, &tenant, second.run_id).await;
+        assert_eq!(
+            (
+                leg.operation_state.as_str(),
+                leg.last_error_label.as_deref(),
+                leg.credit_event_id,
+            ),
+            ("complete", Some("skipped_duplicate"), None),
+            "a duplicate's leg is withheld: {leg:?}"
+        );
+        assert_eq!(
+            credit_ledger_event_for_run(&backend, &tenant, second.run_id).await,
+            None,
+            "a duplicate writes no ledger row"
+        );
+        let rows = gate_decision_rows(&tenant, second.submission_id).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].credit_withheld_reason.as_deref(),
+            Some("skipped_duplicate")
+        );
+        assert_eq!(rows[0].credit_quality_micros, None);
+        assert_eq!(second.index_write_state, "none", "{second:?}");
+    }
+}

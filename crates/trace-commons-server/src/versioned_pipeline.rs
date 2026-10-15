@@ -60,9 +60,7 @@ use crate::versioned_pipeline_bundle::{
     PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL, PipelineTraceCreditEvent, dependency_content_hash,
     pipeline_operation_ref, pipeline_result_ref, registered_score_factory,
 };
-use crate::versioned_pipeline_compat::{
-    COMPATIBILITY_SCORE_IMPLEMENTATION, UnappliedIndexCommandsReader,
-};
+use crate::versioned_pipeline_compat::UnappliedIndexCommandsReader;
 use crate::versioned_pipeline_credit::{
     DryRunNearPayoutAdapter, NearPayoutAdapter, NearPayoutConfirmation, PIPELINE_CREDIT_ACTOR_ROLE,
     PIPELINE_CREDIT_REASON, PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE,
@@ -5826,16 +5824,21 @@ impl PgPipelineStore {
     /// transaction (spec 2026-10-08, Slice C), so `main`'s consumers --
     /// duplicate clustering, the contributor cap, per-author scoring,
     /// account trust -- see pipeline traffic with no change to their
-    /// readers. Only a run whose bound bundle's Score policy is the
-    /// compatibility one writes a row: no other Score evidence carries the
-    /// legacy fields (C-D1). Every column comes from the committed Score
+    /// readers. Every run whose bound bundle's Score runs under the Score
+    /// runtime controls writes a row: the compatibility Score policy and
+    /// every Score policy a registry supplies
+    /// (`score_runs_under_runtime_controls`). A registered policy's evidence
+    /// must carry the fields the row needs, as the compatibility evidence
+    /// does; one that does not fails the run closed at Settle, before any
+    /// leg pays. Only a minimal-reference run writes none: its evidence
+    /// carries none of the legacy fields (C-D1). Every column comes from the committed Score
     /// outcome, the bound package's Score configuration hash and the run's
     /// Trace Credit leg (C-D3); the legacy-only columns stay NULL for the
     /// sweeps to fill.
     ///
     /// The decision id is a UUIDv5 over the tenant and the run (C-D2), and
     /// offering this run's row twice is a no-op. Returns whether a row was
-    /// written: `false` for a non-compatibility bundle and for this run's
+    /// written: `false` for a minimal-reference bundle and for this run's
     /// row already existing. A pipeline row for the same submission that
     /// names another run refuses with `PIPELINE_GATE_DECISION_CONFLICT_LABEL`.
     ///
@@ -5878,7 +5881,9 @@ impl PgPipelineStore {
             .ok_or_else(incomplete)?;
         let score_policy = serde_json::from_value::<PolicyRef>(score_policy.get("score_policy"))
             .map_err(|_| incomplete())?;
-        if score_policy.implementation_id != COMPATIBILITY_SCORE_IMPLEMENTATION {
+        if !crate::versioned_pipeline_bundle::score_runs_under_runtime_controls(
+            &score_policy.implementation_id,
+        ) {
             return Ok(false);
         }
         let outcome = tx
@@ -8847,12 +8852,14 @@ pub struct PipelineNoveltyUtilityChecks {
 ///   canonical summary hash already has a gate decision.
 ///
 /// The contributor status reads either label as "duplicates an earlier
-/// submission" and shows no pending credit. A compatibility run applies
-/// both, in that order, to its gate decision row
+/// submission" and shows no pending credit. A compatibility run, and a run
+/// under any Score policy a registry supplies, applies both, in that order,
+/// to its gate decision row
 /// (`PgPipelineStore::duplicate_withheld_reason_on_tx`): the row keeps its
 /// Score values, records the label, and holds no credit quality, and the
-/// run's `NoveltyUtility` leg is withheld under the same label, as `main`
-/// never emits that event for a submission it did not score, and the run is
+/// run's Trace Credit leg is withheld under the same label whichever event
+/// it settles under, as `main` never emits that event for a submission it
+/// did not score, and the run is
 /// kept out of the index, as `main` never indexes a submission it did not
 /// score. Settle decides the verdict once, when it persists its selection
 /// (`PgPipelineStore::duplicate_verdict_for_selection`). The Score evidence
@@ -13239,7 +13246,9 @@ impl PipelineService {
     /// and commits the Score outcome together with one pending settlement
     /// operation per award (decision D5).
     ///
-    /// A compatibility Score is serialized per tenant (Zaki review 1, round
+    /// A compatibility Score, and the Score of every policy a registry
+    /// supplies (`score_runs_under_runtime_controls`), is serialized per
+    /// tenant (Zaki review 1, round
     /// 2, finding 12, and the owner ruling of 2026-09-30). It opens a tenant
     /// transaction, takes the tenant's Score lock on it (a transaction-scoped
     /// advisory lock, `pipeline_compatibility_score_lock`) before it reads
@@ -13265,7 +13274,9 @@ impl PipelineService {
     /// never waited for (multi-lens review L3-2): a Score that finds it held
     /// releases its run uncharged (`release_score_lock_busy`), and a lease
     /// that has passed stops the Score before it scores (uncharged, as a
-    /// stale lease). Another family's Score (the minimal one) takes no lock.
+    /// stale lease). A registered Score policy takes the same lock under the
+    /// same name, since it reads the same tenant index. Only the minimal
+    /// reference's Score takes no lock.
     ///
     /// Rebase 10, option D: a compatibility Score also stages its attempt
     /// rows (PR 4) before it opens that transaction
@@ -13290,7 +13301,7 @@ impl PipelineService {
             .ok_or_else(|| anyhow::anyhow!("approved revision is missing"))?;
         self.score_evaluations.fetch_add(1, Ordering::SeqCst);
         let reviewed_artifact = self.load_approved_bytes(run).await?;
-        if bundle.package.manifest.score.implementation_id != COMPATIBILITY_SCORE_IMPLEMENTATION {
+        if !bundle.score_runs_under_runtime_controls() {
             return self
                 .score_and_commit(run, bundle, revision_id, reviewed_artifact, None, None)
                 .await;
@@ -13749,11 +13760,12 @@ impl PipelineService {
                 && *score_decision.awards() == score_evaluation.awards,
             "score_outcome_invalid"
         );
-        // Spec 2026-10-08, Slice C: a compatibility run's commit writes a
-        // gate decision row from this evidence. Checked here, before the
+        // Spec 2026-10-08, Slice C: the commit of a run under the Score
+        // runtime controls (compatibility or registered) writes a gate
+        // decision row from this evidence. Checked here, before the
         // index write or any leg settles, so evidence the row cannot be
         // built from fails the run with nothing paid.
-        if bundle.package.manifest.score.implementation_id == COMPATIBILITY_SCORE_IMPLEMENTATION {
+        if bundle.score_runs_under_runtime_controls() {
             PipelineGateDecisionScoreValues::from_evidence(&score_evidence)
                 .map_err(|label| anyhow::anyhow!(label))?;
         }
@@ -13817,9 +13829,7 @@ impl PipelineService {
                 // (`commit_settle`) read it from there
                 // (`selection_duplicate_verdict`), never deciding again.
                 // Its own pooled connection, returned before the policy runs.
-                let duplicate_verdict = if bundle.package.manifest.score.implementation_id
-                    == COMPATIBILITY_SCORE_IMPLEMENTATION
-                {
+                let duplicate_verdict = if bundle.score_runs_under_runtime_controls() {
                     self.store
                         .duplicate_verdict_for_selection(
                             &run,
@@ -14158,6 +14168,40 @@ impl PipelineService {
                         continue;
                     }
                 };
+                // `main`'s duplicate short-circuits gate the Trace Credit
+                // leg of every Score policy that runs under the Score
+                // runtime controls (`score_runs_under_runtime_controls`),
+                // whichever event the bundle settles under: a duplicate
+                // earns nothing. The leg completes withheld, with no ledger
+                // row, under the verdict's label, the shape the
+                // `NoveltyUtility` checks below write. A `NoveltyUtility`
+                // leg reaches the same result through
+                // `novelty_utility_withheld_reason`, which answers the
+                // verdict first; checking it here, before the hold check,
+                // keeps a `PipelineScore` leg from paying a duplicate. As
+                // there (poldsam P-1), only a leg not yet dispatched is
+                // withheld as a duplicate.
+                if instrument_id == InstrumentId::trace_credit()
+                    && settlement.dispatched_at.is_none()
+                    && let Some(label) = duplicate_verdict
+                {
+                    self.store
+                        .update_settlement(
+                            &run,
+                            instrument_id.as_str(),
+                            SettlementUpdate {
+                                operation_state: "complete",
+                                result_ref_hash: Some(request.expected_result_ref_hash()),
+                                external_receipt_hash: None,
+                                credit_event_id: None,
+                                settlement_batch_id: None,
+                                payout_state: None,
+                                error_label: Some(label),
+                            },
+                        )
+                        .await?;
+                    continue;
+                }
                 // A held Trace Credit account is checked before any external
                 // effect, so a held account never reaches its adapter. Only a
                 // leg that settles into a batch is held: a `NoveltyUtility`
