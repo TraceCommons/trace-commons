@@ -1,6 +1,15 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+// The ingest service. Despite its place under `src/bin/`, this file is a
+// module of the `trace_commons_server` library (`crate::ingest::app`,
+// declared by `#[path]` in `src/ingest.rs`), so a build that registers its
+// own Score policies can start the same service from its own binary through
+// `trace_commons_server::ingest::run`. The `trace-commons-ingest` binary is
+// `src/bin/trace_commons_ingest_main.rs`, a thin `main` that starts it with
+// the open-build options. It stays at this path so its history, and the
+// paths the operator docs cite, do not move.
+
 #[path = "trace_commons_ingest_internal/account_routes.rs"]
 mod account_routes;
 #[path = "trace_commons_ingest_internal/account_trust_growth.rs"]
@@ -105,6 +114,7 @@ use trace_commons_server::trace_summary_similarity::{
 // legacy gates, and under `near-ai-scorer` the one constructor of the NEAR AI
 // scorer and fastembed embedder (PR #1295 review round 2, Major 1).
 use trace_commons_server::versioned_pipeline_production::gate_env::*;
+use trace_commons_server::versioned_pipeline_score_registry::ScorePolicyRegistry;
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
@@ -1277,8 +1287,10 @@ SUBCOMMANDS:
     -h, --help                        Print this help text
 ";
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// What the `trace-commons-ingest` binary's `main` did before the service
+/// moved into the library: select the pipeline runtime, then start ingest
+/// with `options` (`trace_commons_server::ingest::run`).
+pub(crate) async fn run_ingest_main(options: super::IngestOptions) -> anyhow::Result<()> {
     // A subcommand (help, version, keypair, TLS self-check) reads no
     // configuration, so it never sees the pipeline runtime selection.
     let selection = if std::env::args().nth(1).is_some() {
@@ -1286,7 +1298,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         production_assembly::pipeline_runtime_selection_from_env()?
     };
-    run_ingest(selection.assembler()).await
+    run_ingest(selection.assembler(), options).await
 }
 
 /// Starts ingest with an optional production pipeline assembly.
@@ -1301,8 +1313,13 @@ async fn main() -> anyhow::Result<()> {
 /// (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`), unless the test-only
 /// `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` opt-in is set. See
 /// `assemble_ingest_pipeline_runtime`.
+///
+/// `options` carries the Score policy factories the pipeline service and
+/// the qualification store can bind (empty in the open build) and the binary
+/// name `--version` reports.
 pub async fn run_ingest(
     pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
+    options: super::IngestOptions,
 ) -> anyhow::Result<()> {
     // Choose the rustls crypto provider before anything can open a TLS
     // connection.
@@ -1366,10 +1383,7 @@ pub async fn run_ingest(
         Some("-V") | Some("--version") => {
             println!(
                 "{}",
-                trace_commons_build_info::identity(
-                    env!("CARGO_BIN_NAME"),
-                    env!("CARGO_PKG_VERSION")
-                )
+                trace_commons_build_info::identity(options.bin_name(), env!("CARGO_PKG_VERSION"))
             );
             return Ok(());
         }
@@ -1388,8 +1402,11 @@ pub async fn run_ingest(
         policy = PiiClassifyPolicy::from_env().as_label(),
         "Trace Commons PII classify policy"
     );
-    let (state, pipeline_gate_components) =
-        AppState::from_env_with_pipeline_runtime_assembler(pipeline_runtime_assembler).await?;
+    let (state, pipeline_gate_components) = AppState::from_env_with_pipeline_runtime_assembler(
+        pipeline_runtime_assembler,
+        options.score_policies().clone(),
+    )
+    .await?;
     let state = Arc::new(state);
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let listener = finish_ingest_startup(
@@ -3898,6 +3915,7 @@ impl AppState {
     /// was assembled over (`None` unless that runtime was selected).
     async fn from_env_with_pipeline_runtime_assembler(
         pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
+        score_policies: ScorePolicyRegistry,
     ) -> anyhow::Result<(
         Self,
         Option<Arc<production_assembly::PipelineGateComponents>>,
@@ -4219,6 +4237,7 @@ impl AppState {
             &pipeline_novelty_utility_checks,
             pipeline_main_gate,
             pipeline_gate_components.clone(),
+            score_policies.clone(),
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
         if let Some(service) = pipeline_service.as_ref() {
@@ -4247,13 +4266,14 @@ impl AppState {
             Arc::new(PipelineActivationStore::new(connections.postgres.clone()))
         });
         // The qualification store qualifies the Score policies the pipeline
-        // service can bind: the registry the assembled service holds (empty
-        // in the open build).
+        // service can bind: the registry the assembled service holds, or,
+        // with no pipeline runtime, the one ingest was started with (empty
+        // in the open build either way).
         let pipeline_qualification = db_connections.as_ref().map(|connections| {
             let store = PipelineQualificationStore::new(connections.postgres.clone());
             Arc::new(match pipeline_service.as_ref() {
                 Some(service) => store.with_score_policies(service.score_policies().clone()),
-                None => store,
+                None => store.with_score_policies(score_policies.clone()),
             })
         });
         // Task 10: the two trust stores the qualification and activation

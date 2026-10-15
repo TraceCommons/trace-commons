@@ -280,7 +280,7 @@ jobs:
         env:
           TRACE_COMMONS_UNBOUND_REAPER_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_unbound_reaper
       - name: account invite HTTP session and authority guards
-        run: cargo test -p trace-commons-server --bin trace-commons-ingest account_invite_route_requires_session_and_rejects_cross_site_cookie -- --test-threads=1
+        run: cargo test -p trace-commons-server --lib account_invite_route_requires_session_and_rejects_cross_site_cookie -- --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_route
       # V81: the legacy invite -> NEAR account link function, run as a login
@@ -302,7 +302,7 @@ jobs:
         env:
           TRACE_COMMONS_INFERENCE_CONNECTION_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_inference_connection
       - name: inference connection HTTP session selection
-        run: cargo test -p trace-commons-server --bin trace-commons-ingest inference_connection_requires_explicit_account_session_selection -- --test-threads=1
+        run: cargo test -p trace-commons-server --lib inference_connection_requires_explicit_account_session_selection -- --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_inference_connection_route
       - name: migration_atomicity_pg
@@ -363,7 +363,7 @@ jobs:
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_tokens
       - name: token bundle HTTP lost-response recovery
-        run: cargo test --locked -p trace-commons-server --bin trace-commons-ingest token_bundle_http_journey
+        run: cargo test --locked -p trace-commons-server --lib token_bundle_http_journey
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_tokens
           TRACE_COMMONS_BUNDLE_SERVER_ID: journey-server
@@ -449,14 +449,14 @@ jobs:
       - name: versioned pipeline real HTTP
         run: |
           set -euo pipefail
-          cargo test -p trace-commons-server --bin trace-commons-ingest real_http_receipt_completes_and_resumes_after_restart 2>&1 | tee pipeline-real-http.log
+          cargo test -p trace-commons-server --lib real_http_receipt_completes_and_resumes_after_restart 2>&1 | tee pipeline-real-http.log
           grep -q 'test result: ok. 1 passed; 0 failed' pipeline-real-http.log
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_http
       - name: versioned pipeline compatibility through HTTP
         run: |
           set -euo pipefail
-          cargo test -p trace-commons-server --bin trace-commons-ingest compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export 2>&1 | tee pipeline-compat.log
+          cargo test -p trace-commons-server --lib compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export 2>&1 | tee pipeline-compat.log
           grep -q 'test result: ok. 1 passed; 0 failed' pipeline-compat.log
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_compat
@@ -464,7 +464,7 @@ jobs:
       - name: versioned pipeline parity with legacy
         run: |
           set -euo pipefail
-          cargo test -p trace-commons-server --bin trace-commons-ingest legacy_and_pipeline_tenants_match_under_equivalent_configuration 2>&1 | tee pipeline-parity.log
+          cargo test -p trace-commons-server --lib legacy_and_pipeline_tenants_match_under_equivalent_configuration 2>&1 | tee pipeline-parity.log
           grep -q 'test result: ok. 1 passed; 0 failed' pipeline-parity.log
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_parity
@@ -512,7 +512,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo test -p trace-commons-server --bin trace-commons-ingest reward_participant_http_contract -- --ignored --test-threads=1
+          cargo test -p trace-commons-server --lib reward_participant_http_contract -- --ignored --test-threads=1
           test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_participant_http \
             -c 'SELECT count(*) > 0 FROM trace_reward_participant_reservations;')" = t
         env:
@@ -532,7 +532,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo test -p trace-commons-server --bin trace-commons-ingest public_mission_catalog_http_is_bounded_anonymous_and_side_effect_free -- --ignored --test-threads=1
+          cargo test -p trace-commons-server --lib public_mission_catalog_http_is_bounded_anonymous_and_side_effect_free -- --ignored --test-threads=1
           test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_mission_http \
             -c 'SELECT count(*) = 2 FROM trace_reward_mission_packages;')" = t
           test "$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace reward_test_mission_http \
@@ -552,7 +552,7 @@ jobs:
         env:
           TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_external
       - name: the invite-free path, end to end
-        run: cargo test --bin trace-commons-ingest admission_pg_tests -- --ignored
+        run: cargo test -p trace-commons-server --lib admission_pg_tests -- --ignored
         env:
           TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest
       # Selected by module name, like the step above. #836 shipped as two
@@ -565,12 +565,12 @@ jobs:
         run: |
           dbus-run-session -- sh -eu -c '
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
-            cargo test --bin trace-commons-ingest nearai_ceremony_pg_tests -- --ignored
+            cargo test -p trace-commons-server --lib nearai_ceremony_pg_tests -- --ignored
           '
         env:
           TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest
       - name: wallet v2 signed completion against PostgreSQL
-        run: cargo test --bin trace-commons-ingest wallet_v2_pg_tests -- --ignored
+        run: cargo test -p trace-commons-server --lib wallet_v2_pg_tests -- --ignored
         env:
           TRACE_COMMONS_WALLET_V2_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_walletv2
       # A suite that runs nothing passes, so the steps above cannot prove
@@ -609,7 +609,9 @@ jobs:
     # set until protection is updated to the new name, so change both
     # together.
     #
-    # The `trace-commons-ingest` bin carries well over a thousand unit tests,
+    # The ingest service's unit tests (the library's `ingest::app` module,
+    # which was the `trace-commons-ingest` bin until the service moved into
+    # the library; the job keeps its name) number well over a thousand,
     # and every PostgreSQL-backed one self-skips without
     # TRACE_COMMONS_PG_TEST_DATABASE_URL. `postgres-suites` above sets that
     # variable only for a handful of named slices, so most of them had never
@@ -682,7 +684,7 @@ jobs:
         run: |
           dbus-run-session -- sh -eu -c '
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
-            cargo test --locked -p trace-commons-server --bin trace-commons-ingest -- --test-threads=1
+            cargo test --locked -p trace-commons-server --lib ingest::app:: -- --test-threads=1
           '
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest_bin
@@ -784,7 +786,7 @@ jobs:
         run: |
           dbus-run-session -- sh -eu -c '
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
-            cargo test --locked -p trace-commons-server --features near-ai-scorer --bin trace-commons-ingest -- --test-threads=1
+            cargo test --locked -p trace-commons-server --features near-ai-scorer --lib ingest::app:: -- --test-threads=1
           '
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest_bin_near_ai

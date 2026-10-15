@@ -70,7 +70,7 @@ from .results import (
 # pilot's feature set (spec B-D1), so the signing step and the restore
 # harness run on the build the deployment runs.
 PROMOTE_FEATURES = ("--features", "near-ai-scorer,gcs-client,gcp-kms")
-PROMOTE_CARGO_ARGS = ("-p", "trace-commons-server", "--bin", "trace-commons-ingest", *PROMOTE_FEATURES)
+PROMOTE_CARGO_ARGS = ("-p", "trace-commons-server", "--lib", *PROMOTE_FEATURES)
 
 PROMOTE_RUN_SCHEMA = "trace_commons.pipeline_promote_run.v1"
 PROMOTE_RUN_FILE = "promote-run.json"
@@ -107,9 +107,9 @@ REMOTE_STORE_KINDS = frozenset({"gcs"})
 # The harness's three ignored ingest tests: the local restore drill's seed
 # and resume, run with a remote store in place of the artifact root, and the
 # copy between them.
-RESTORE_SEED = "tests::pipeline_restore_pg_tests::pipeline_restore_seed"
-RESTORE_RESUME = "tests::pipeline_restore_pg_tests::pipeline_restore_resume"
-REMOTE_RESTORE_RUN = "tests::pipeline_restore_pg_tests::pipeline_remote_restore_run"
+RESTORE_SEED = "ingest::app::tests::pipeline_restore_pg_tests::pipeline_restore_seed"
+RESTORE_RESUME = "ingest::app::tests::pipeline_restore_pg_tests::pipeline_restore_resume"
+REMOTE_RESTORE_RUN = "ingest::app::tests::pipeline_restore_pg_tests::pipeline_remote_restore_run"
 RESTORE_FINGERPRINT_SCHEMA = "trace_commons.pipeline_restore_fingerprint.v1"
 REMOTE_RESTORE_COPY_SCHEMA = "trace_commons.pipeline_remote_restore_copy.v1"
 REMOTE_RESTORE_RESUME_SCHEMA = "trace_commons.pipeline_remote_restore_resume.v1"

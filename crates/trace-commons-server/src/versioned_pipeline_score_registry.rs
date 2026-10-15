@@ -14,7 +14,9 @@
 //! dependencies (`data_artifact_hashes`) the bundle runs, so a registered
 //! factory never widens what a package can name.
 //!
-//! The ingest binary passes an empty registry. A package naming an
+//! The ingest service takes its registry from the library entry point
+//! (`crate::ingest::IngestOptions::with_score_policies`); the open
+//! `trace-commons-ingest` binary passes an empty one. A package naming an
 //! implementation id no factory is registered under is refused at bind time
 //! with `bundle_policy_not_runnable`; it never falls back to a built-in
 //! policy. The two built-in ids are reserved and cannot be registered.

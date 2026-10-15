@@ -17,8 +17,8 @@ use super::pipeline_http_pg_tests::{
     credit_mutate_audit_rows, local_artifacts, mains_database, model_training_envelope,
     runtime_backend, tenant_tx, wait_for_run_state,
 };
-use crate::pipeline_default_routing::PipelineWorkerPassStats;
-use crate::pipeline_runtime::{
+use crate::ingest::app::pipeline_default_routing::PipelineWorkerPassStats;
+use crate::ingest::app::pipeline_runtime::{
     PIPELINE_WORKER_CONCURRENCY_INVALID_LABEL, PipelineFollowUpCadence, PipelineWorkerStep,
     PipelineWorkerWake, drain_pipeline_tenant_runs_concurrently, drain_tenant_then_follow_ups,
     parse_pipeline_worker_concurrency, run_concurrent_pipeline_worker, run_pipeline_worker_pass,
@@ -1151,7 +1151,7 @@ async fn forty_runs_across_three_tenants_each_complete_once() {
 /// `idle_tenants_cost_no_more_at_concurrency_two_than_the_sequential_pass`).
 /// Run by hand:
 ///
-/// `cargo test -p trace-commons-server --bin trace-commons-ingest --
+/// `cargo test -p trace-commons-server --lib --
 /// --ignored --nocapture measure_idle_worker_commits_by_concurrency`
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "a measurement for the operator docs, not a check"]

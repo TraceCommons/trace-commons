@@ -13736,6 +13736,7 @@ async fn serve_a_routed_tenant_end_to_end(mode: TenantPolicyMode) {
         },
         main_gate,
         Some(components),
+        ScorePolicyRegistry::new(),
     )
     .expect("a production assembly over doubles starts with the test opt-in")
     .expect("an assembler was given, so a service is returned");
@@ -13978,7 +13979,8 @@ async fn db_policy_tenant_authority_matches_legacy_admission() {
                 )
             };
             let root = tempfile::tempdir().unwrap();
-            let mut state = (*crate::tests::test_state(root.path().to_path_buf())).clone();
+            let mut state =
+                (*crate::ingest::app::tests::test_state(root.path().to_path_buf())).clone();
             state.db_mirror = Some(runtime.clone() as Arc<dyn Database>);
             state.db_tenant_policy_reads = global;
             state.tenant_rollout_gates = gates.clone();
