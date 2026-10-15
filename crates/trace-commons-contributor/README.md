@@ -463,12 +463,16 @@ remove that too if you are uninstalling.
   you may not remember running; and they are listed as `Antigravity` rather
   than by the trajectory format they are stored in.
 
-`trace-commons-contributor daemon` — the CLI's watcher — watches Claude Code,
-Codex and Gemini CLI's conventional stores by default, with no declaration
-step: it asks for `SourceRoots::conventional()` explicitly on startup. This
-is different from the desktop shells (macOS, Windows, Linux), which watch
-nothing for a source until the contributor has declared it on the roots
-screen.
+`trace-commons-contributor daemon` — the CLI's watcher — watches the
+conventional stores of Claude Code, Codex, Gemini CLI, Cline and OpenCode
+(its database, `opencode.db` under `$XDG_DATA_HOME/opencode` or
+`~/.local/share/opencode`) by default, with no declaration step: it asks
+for `SourceRoots::conventional()` explicitly on startup, and so do `list`
+and `submit`. This is different from the desktop shells (macOS, Windows,
+Linux), which watch nothing for a source until the contributor has declared
+it on the roots screen. A store that cannot be read is skipped with a
+message naming it, unless `--source` asked for that store, when it is an
+error.
 
 All readers capture model reasoning (Claude Code `thinking` blocks, Codex
 `reasoning` items, Gemini CLI `thought` records, Letta Trajectory

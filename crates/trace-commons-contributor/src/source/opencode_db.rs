@@ -9,13 +9,19 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    time::Duration,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+    time::{Duration, SystemTime},
 };
 
 const BYTE_BUDGET: u64 = 16 * 1024 * 1024;
 const RECORD_BUDGET: u64 = 100_000;
 const SESSION_BUDGET: usize = 65_536;
 const DB: &str = "opencode.db";
+/// Progress callbacks (one per 1000 VM instructions) allowed per session.
+const WORK_BUDGET: u32 = 10_000;
 
 pub fn conventional_root(home: &Path, env: impl Fn(&str) -> Option<String>) -> PathBuf {
     env("XDG_DATA_HOME")
@@ -50,15 +56,64 @@ fn checked_file(path: &Path) -> Result<Option<std::fs::Metadata>> {
         Err(_) => bail!("opencode-database-unreadable"),
     }
 }
-fn sidecars(root: &Path) -> Result<()> {
+/// Whether either sidecar exists. Errors on a non-file sidecar, and on a
+/// non-empty WAL without its shared-memory file.
+fn sidecars(root: &Path) -> Result<bool> {
     let wal = checked_file(&root.join("opencode.db-wal"))?;
     let shm = checked_file(&root.join("opencode.db-shm"))?;
-    if wal.is_some_and(|m| m.len() > 0) && shm.is_none() {
+    if wal.as_ref().is_some_and(|m| m.len() > 0) && shm.is_none() {
         bail!("opencode-database-wal-unavailable");
     }
-    Ok(())
+    Ok(wal.is_some() || shm.is_some())
 }
-fn open(root: &Path) -> Result<Option<Connection>> {
+/// `path` as an SQLite URI opened `immutable=1`; None where the path has no
+/// plain URI form (a Windows UNC share), which then opens normally.
+fn immutable_uri(path: &Path) -> Option<String> {
+    let text = path.to_str()?;
+    #[cfg(windows)]
+    let text = {
+        let text = text.strip_prefix(r"\\?\").unwrap_or(text);
+        if text.starts_with(r"\\") || text.starts_with("UNC\\") {
+            return None;
+        }
+        format!("/{}", text.replace('\\', "/"))
+    };
+    let mut uri = String::from("file:");
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || b"/:-._~".contains(&byte) {
+            uri.push(byte as char);
+        } else {
+            uri.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    uri.push_str("?immutable=1");
+    Some(uri)
+}
+/// An open, read-only OpenCode database.
+struct Reader {
+    conn: Connection,
+    /// Progress callbacks used by the current session's queries.
+    work: Arc<AtomicU32>,
+    /// For an `immutable` open: the database file's size and modification
+    /// time when opened, which must be unchanged once reading is done.
+    snapshot: Option<(PathBuf, u64, SystemTime)>,
+}
+impl Reader {
+    /// An `immutable` read assumed nobody changed the file underneath it. A
+    /// checkpoint by an OpenCode that started meanwhile would, so the read
+    /// is refused and retried on a later pass.
+    fn finish(self) -> Result<()> {
+        drop(self.conn);
+        if let Some((path, len, modified)) = self.snapshot {
+            let now = checked_file(&path)?.ok_or_else(|| anyhow!("opencode-database-busy"))?;
+            if now.len() != len || now.modified().ok() != Some(modified) {
+                bail!("opencode-database-busy");
+            }
+        }
+        Ok(())
+    }
+}
+fn open(root: &Path) -> Result<Option<Reader>> {
     // Like the JSON reader, no claim is made against replacement of ancestor directories.
     let path = root.join(DB);
     let Some(before) = checked_file(&path)? else {
@@ -71,13 +126,23 @@ fn open(root: &Path) -> Result<Option<Connection>> {
         .canonicalize()
         .map_err(|_| anyhow!("opencode-database-unreadable"))?;
     let resolved_path = resolved_root.join(DB);
-    sidecars(&resolved_root)?;
-    let conn = sql(Connection::open_with_flags(
-        &resolved_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    ))?;
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    // With no sidecars the database is fully checkpointed and nobody has it
+    // open in WAL mode. A plain read-only open of a WAL database would then
+    // create `-wal` and `-shm` in the person's folder and leave them there;
+    // `immutable` creates nothing and takes no locks, and `finish` refuses
+    // the read if the file changed meanwhile.
+    let immutable = if sidecars(&resolved_root)? {
+        None
+    } else {
+        immutable_uri(&resolved_path)
+    };
+    let conn = sql(match &immutable {
+        Some(uri) => Connection::open_with_flags(uri, flags | OpenFlags::SQLITE_OPEN_URI),
+        None => Connection::open_with_flags(&resolved_path, flags),
+    })?;
     let after =
         checked_file(&resolved_path)?.ok_or_else(|| anyhow!("opencode-database-unsafe-path"))?;
     #[cfg(unix)]
@@ -87,22 +152,31 @@ fn open(root: &Path) -> Result<Option<Connection>> {
             bail!("opencode-database-unsafe-path");
         }
     }
+    let snapshot = match (&immutable, after.modified()) {
+        (None, _) => None,
+        (Some(_), Ok(modified)) => Some((resolved_path.clone(), after.len(), modified)),
+        (Some(_), Err(_)) => bail!("opencode-database-unreadable"),
+    };
     #[cfg(not(unix))]
     let _ = (before, after);
     sidecars(&resolved_root)?;
     sql(conn.busy_timeout(Duration::from_millis(100)))?;
-    // Bound cumulative VM work, including aggregate scans, across this connection.
-    // A lock timeout alone does not stop expensive queries on a large database.
-    let mut progress_calls = 0_u32;
+    // Bound VM work, including aggregate scans, per session: discovery
+    // starts a fresh budget for each one, so a large store is listed in
+    // full while no single session's queries can run unbounded. A lock
+    // timeout alone does not stop expensive queries on a large database.
+    let work = Arc::new(AtomicU32::new(0));
+    let counter = Arc::clone(&work);
     conn.progress_handler(
         1000,
-        Some(move || {
-            progress_calls += 1;
-            progress_calls >= 10_000
-        }),
+        Some(move || counter.fetch_add(1, Ordering::Relaxed) + 1 >= WORK_BUDGET),
     );
     sql(conn.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;"))?;
-    Ok(Some(conn))
+    Ok(Some(Reader {
+        conn,
+        work,
+        snapshot,
+    }))
 }
 fn schema(tx: &Transaction<'_>) -> Result<()> {
     let version: i64 = sql(tx.query_row("PRAGMA user_version", [], |r| r.get(0)))?;
@@ -187,34 +261,40 @@ fn reference(tx: &Transaction<'_>, root: &Path, id: &str) -> Result<SessionRef> 
         group_member_count: 0,
     })
 }
+/// Lists the database's sessions. A session that cannot be described (an
+/// invalid id, a bad timestamp, oversized metadata, or queries over the
+/// work budget) is left out rather than hiding every other session; it
+/// cannot be loaded either, so nothing about it is sent.
 pub fn discover(root: &Path) -> Result<Vec<SessionRef>> {
-    let Some(mut conn) = open(root)? else {
+    let Some(mut reader) = open(root)? else {
         return Ok(Vec::new());
     };
-    let tx = sql(conn.transaction())?;
-    schema(&tx)?;
-    let count: u64 = sql(tx.query_row("SELECT count(*) FROM session", [], |r| r.get(0)))?;
-    if count > SESSION_BUDGET as u64 {
-        bail!("opencode-database-session-budget");
-    }
-    let invalid: bool = sql(tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM session WHERE length(CAST(id AS BLOB))>256 OR id IS NULL)",
-        [],
-        |r| r.get(0),
-    ))?;
-    if invalid {
-        bail!("opencode-database-invalid-id");
-    }
-    let mut stmt = sql(tx.prepare("SELECT id FROM session ORDER BY id"))?;
-    let ids = sql(stmt.query_map([], |r| r.get::<_, String>(0)))?;
-    let mut refs = Vec::new();
-    for id in ids {
-        let id = sql(id)?;
-        if !valid_id(&id) {
-            bail!("opencode-database-invalid-id");
+    let work = Arc::clone(&reader.work);
+    let refs = {
+        let tx = sql(reader.conn.transaction())?;
+        schema(&tx)?;
+        let count: u64 = sql(tx.query_row("SELECT count(*) FROM session", [], |r| r.get(0)))?;
+        if count > SESSION_BUDGET as u64 {
+            bail!("opencode-database-session-budget");
         }
-        refs.push(reference(&tx, root, &id)?);
-    }
+        let ids: Vec<String> = {
+            let mut stmt = sql(tx.prepare(
+                "SELECT id FROM session WHERE typeof(id)='text' AND length(CAST(id AS BLOB))<=256 ORDER BY id",
+            ))?;
+            let rows = sql(stmt.query_map([], |r| r.get::<_, String>(0)))?;
+            sql(rows.collect::<rusqlite::Result<_>>())?
+        };
+        let mut refs = Vec::new();
+        for id in ids.iter().filter(|id| valid_id(id)) {
+            // A fresh WORK_BUDGET for each session's queries.
+            work.store(0, Ordering::Relaxed);
+            if let Ok(found) = reference(&tx, root, id) {
+                refs.push(found);
+            }
+        }
+        refs
+    };
+    reader.finish()?;
     Ok(refs)
 }
 fn object(data: String, identity: &[(&str, &str)]) -> Result<Value> {
@@ -240,7 +320,12 @@ pub fn load(root: &Path, reference: &SessionRef) -> Result<SessionTranscript> {
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow!("opencode-database-invalid-id"))?;
-    let mut conn = open(root)?.ok_or_else(|| anyhow!("opencode-database-unavailable"))?;
+    let mut reader = open(root)?.ok_or_else(|| anyhow!("opencode-database-unavailable"))?;
+    let transcript = read_session(&mut reader.conn, root, id)?;
+    reader.finish()?;
+    Ok(transcript)
+}
+fn read_session(conn: &mut Connection, root: &Path, id: &str) -> Result<SessionTranscript> {
     let tx = sql(conn.transaction())?;
     schema(&tx)?;
     let (bytes, count) = bounds(&tx, id)?;
@@ -371,6 +456,7 @@ mod tests {
             open(dir.path())
                 .unwrap()
                 .unwrap()
+                .conn
                 .execute("DELETE FROM session", [])
                 .is_err()
         );
@@ -420,12 +506,77 @@ mod tests {
     #[test]
     fn sqlite_vm_work_budget_stops_expensive_queries() {
         let dir = fixture();
-        let conn = open(dir.path()).unwrap().unwrap();
+        let conn = open(dir.path()).unwrap().unwrap().conn;
         let result = conn.query_row("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<10000000) SELECT sum(x) FROM n", [], |r| r.get::<_, i64>(0));
         assert_eq!(
             sql(result).unwrap_err().to_string(),
             "opencode-database-unreadable"
         );
+    }
+    /// OpenCode leaves a cleanly closed WAL database with no sidecars. A
+    /// read-only open must not create `-wal`/`-shm` in the person's folder.
+    #[test]
+    fn a_cleanly_closed_wal_database_gets_no_sidecars() {
+        let dir = fixture();
+        change(dir.path(), "PRAGMA journal_mode=WAL;");
+        for name in ["opencode.db-wal", "opencode.db-shm"] {
+            let _ = std::fs::remove_file(dir.path().join(name));
+        }
+        let before = std::fs::read(dir.path().join(DB)).unwrap();
+        let reference = discover(dir.path()).unwrap().remove(0);
+        assert_eq!(load(dir.path(), &reference).unwrap().events.len(), 1);
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from(DB)]);
+        assert_eq!(before, std::fs::read(dir.path().join(DB)).unwrap());
+    }
+    /// An `immutable` read whose database changed underneath it (an
+    /// OpenCode that started and checkpointed meanwhile) is refused.
+    #[test]
+    fn an_immutable_read_of_a_changed_file_is_refused() {
+        let dir = fixture();
+        let reader = open(dir.path()).unwrap().unwrap();
+        assert!(reader.snapshot.is_some());
+        std::thread::sleep(Duration::from_millis(20));
+        change(
+            dir.path(),
+            "INSERT INTO session VALUES('ses_later','/synthetic/project','1.19.0',1000,2000)",
+        );
+        assert_eq!(
+            reader.finish().unwrap_err().to_string(),
+            "opencode-database-busy"
+        );
+    }
+    /// The VM-work cap bounds one session's queries, not the whole listing:
+    /// a store whose total exceeds it is still listed in full.
+    #[test]
+    fn the_work_budget_is_per_session_not_per_listing() {
+        let dir = fixture();
+        change(
+            dir.path(),
+            "CREATE INDEX part_session ON part(session_id);
+             CREATE INDEX message_session ON message(session_id);
+             WITH RECURSIVE s(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM s WHERE x<400)
+               INSERT INTO session SELECT 'ses_'||x,'/synthetic/project','1.19.0',1000,2000 FROM s;
+             WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<400000)
+               INSERT INTO part SELECT 'prt_'||x,'msg_fixture','ses_'||(x%400+1),1000,2000,'{}' FROM n;",
+        );
+        assert_eq!(discover(dir.path()).unwrap().len(), 401);
+    }
+    /// One malformed session is left out; the rest are still listed.
+    #[test]
+    fn a_malformed_session_does_not_hide_the_others() {
+        let dir = fixture();
+        change(
+            dir.path(),
+            "INSERT INTO session VALUES('ses_bad','/synthetic/project','1.19.0',-5,2000);
+             INSERT INTO session VALUES('bad id!','/synthetic/project','1.19.0',1000,2000);",
+        );
+        let refs = discover(dir.path()).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert!(refs[0].path.ends_with("ses_fixture"));
     }
     #[test]
     fn imported_older_session_retains_version_and_identity() {

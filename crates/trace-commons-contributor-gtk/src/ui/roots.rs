@@ -405,13 +405,14 @@ fn build_choice(
 /// showing the wrong product name is not.
 fn source_title(source: &str) -> &'static str {
     use trace_commons_contributor::source::{
-        SOURCE_CLAUDE_CODE, SOURCE_CLINE, SOURCE_CODEX, SOURCE_GEMINI_CLI,
+        SOURCE_CLAUDE_CODE, SOURCE_CLINE, SOURCE_CODEX, SOURCE_GEMINI_CLI, SOURCE_OPENCODE,
     };
     match source {
         SOURCE_CLAUDE_CODE => copy::ROOTS_CLAUDE,
         SOURCE_CODEX => copy::ROOTS_CODEX,
         SOURCE_GEMINI_CLI => copy::ROOTS_GEMINI,
         SOURCE_CLINE => copy::ROOTS_CLINE,
+        SOURCE_OPENCODE => copy::ROOTS_OPENCODE,
         _ => copy::ROOTS_UNKNOWN_SOURCE,
     }
 }
@@ -510,7 +511,12 @@ mod tests {
             source_title("codex"),
             source_title("gemini-cli"),
             source_title("cline"),
+            source_title("opencode"),
         ];
+        assert!(
+            !titles.contains(&copy::ROOTS_UNKNOWN_SOURCE),
+            "a registered source fell through to the unknown title: {titles:?}"
+        );
         for (i, a) in titles.iter().enumerate() {
             for b in titles.iter().skip(i + 1) {
                 assert_ne!(a, b, "two sources share the title {a:?}");
