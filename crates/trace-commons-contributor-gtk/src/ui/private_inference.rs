@@ -68,6 +68,9 @@ pub struct PrivateInferenceView {
     pub root: gtk::Box,
     pub(super) managed: gtk::Box,
     pub(super) managed_revision: std::cell::Cell<u64>,
+    /// The terminal the last managed snapshot named, for the line a launch
+    /// refused as not found shows.
+    pub(super) managed_destination: std::cell::RefCell<Option<String>>,
     /// What today's calls cost, and what that figure leaves out. Emptied
     /// and refilled on every render for the same reason the list is: an
     /// amount a later read could not measure must go, not linger.
@@ -222,6 +225,7 @@ impl PrivateInferenceView {
             root,
             managed,
             managed_revision: std::cell::Cell::new(0),
+            managed_destination: std::cell::RefCell::new(None),
             spend,
             harnesses,
             credential,

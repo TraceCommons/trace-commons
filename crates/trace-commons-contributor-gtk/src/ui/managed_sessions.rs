@@ -21,15 +21,31 @@ fn clear(root: &gtk::Box) {
     }
 }
 
+/// The line for a refused terminal launch. A chosen terminal that was not
+/// found has its own, naming it and pointing at Settings; anything else is
+/// the generic launch line.
+fn launch_refusal(label: &str, destination: Option<&str>) -> String {
+    if label == "managed-terminal-not-found" {
+        let terminal = destination
+            .map(str::to_owned)
+            .unwrap_or_else(|| text("terminal"));
+        text("terminal_not_found").replace("{terminal}", &terminal)
+    } else {
+        text("launch_unknown")
+    }
+}
+
 fn action(app: &Rc<App>, method: &str, params: Value, terminal: bool) {
+    // The terminal the launch opens in, for the not-found line.
+    let destination = app.private_inference.managed_destination.borrow().clone();
     app.call(method, params, move |app, result| match result {
         Ok(value) if terminal => {
             app.call(
                 "managed_terminal_launch",
                 json!({"session_id":value["session_id"],"ticket":value["ticket"]}),
-                |app, result| {
-                    if result.is_err() {
-                        app.toast(&text("launch_unknown"));
+                move |app, result| {
+                    if let Err(label) = result {
+                        app.toast(&launch_refusal(&label, destination.as_deref()));
                     }
                     refresh(app);
                 },
@@ -61,6 +77,7 @@ pub fn refresh(app: &Rc<App>) {
         controls.append(&button("add", move || add_dialog(&add_app, terminal)));
         root.append(&controls);
         let destination = snapshot["capabilities"]["terminal_destination"].as_str();
+        *app.private_inference.managed_destination.borrow_mut() = destination.map(str::to_owned);
         style::append_meta(root, destination.map(|d| text("terminal_scope").replace("{destination}", d)).unwrap_or_else(|| text("terminal_unavailable")));
         for account in snapshot["accounts"].as_array().into_iter().flatten() {
             let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -243,4 +260,25 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
         w.close();
     }));
     window.present();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::launch_refusal;
+
+    #[test]
+    fn a_terminal_not_found_names_it_and_points_at_settings() {
+        assert_eq!(
+            launch_refusal("managed-terminal-not-found", Some("Konsole")),
+            "Konsole wasn't found on this computer. Choose another in Settings."
+        );
+        assert_eq!(
+            launch_refusal("managed-terminal-not-found", None),
+            "your terminal wasn't found on this computer. Choose another in Settings."
+        );
+        assert_eq!(
+            launch_refusal("managed-launch-unknown", Some("Konsole")),
+            super::text("launch_unknown")
+        );
+    }
 }
