@@ -37,7 +37,7 @@ Four independent layers. A sign-in signature reaches a caller only if all four a
 ### The signer app (`nearai/near-signer`)
 
 - A macOS `.app` in `/Applications`, with bundle ID `com.iqlusion.near-signer` (to be confirmed). It is signed with iqlusion's Developer ID, notarized, and distributed as its own DMG with Sparkle updates.
-- It has a Swift layer for the UI, XPC, caller identity and the `AuthenticationServices` passkey ceremony. A Rust core handles NEP-413 serialization, policy checks and signature verification, exposed to Swift through a narrow C ABI.
+- It is written entirely in Swift. Apple frameworks cover the UI, XPC, caller identity, the `AuthenticationServices` passkey ceremony, and CryptoKit's SHA-256 and Ed25519 for NEP-413 hashing and signature checks. Apart from Sparkle there is no third-party code and no FFI boundary in what NEAR reviews.
 - No Dock icon and no menu bar item. It shows a window only to ask for consent, plus a small settings window for revoking remembered approvals.
 - It talks to `near.com` and to one NEAR RPC endpoint, for signature verification, and to nothing else.
 - It stores no NEAR key. Its only state is the user's remembered approvals.
@@ -62,7 +62,7 @@ A small, MIT OR Apache-2.0 Swift package (and a C header for Rust callers) that 
    - a nonce whose first 8 bytes are not a timestamp within the last 5 minutes (`nonce_stale`);
    - a message longer than 1,024 characters, or containing control characters (`message_rejected`).
 4. **The signer asks the user.** Its own window, which the caller cannot draw over, shows the verified caller's name and team, the recipient, the account and the message, with Cancel and Sign in. A declined request returns `user_declined`. All strings in this window need owner approval before release.
-5. **The signer gets a challenge.** It serializes the NEP-413 payload in Rust, hashes it, and asks near.com for a sign-in challenge bound to that hash.
+5. **The signer gets a challenge.** It serializes the NEP-413 payload, hashes it, and asks near.com for a sign-in challenge bound to that hash.
 6. **The passkey ceremony runs.** The signer runs the assertion with `rpId near.com`, which requires user verification (Touch ID or the device password) every time.
 7. **near.com signs.** The signer sends the assertion and the payload. near.com checks both, signs the payload with the account's key and returns `{account_id, public_key, signature}`.
 8. **The signer verifies before returning.** It checks the signature over its own serialization of the payload, and checks over NEAR RPC that `public_key` is a current key on `account_id`. It returns only `{account_id, public_key, signature}`. A failure returns `signature_invalid` or `near_refused`.
@@ -106,7 +106,7 @@ Every failure fails closed: the caller gets a label and no signature. The labels
 
 ## What NEAR's security review covers
 
-1. The signer: its Swift UI and XPC code, the Rust NEP-413 core, and the registry. Estimated at about 2,000 to 3,000 lines.
+1. The signer: its Swift code (UI, XPC, NEP-413 handling and verification) and the registry. Estimated at about 2,000 to 3,000 lines.
 2. Its release pipeline: iqlusion's Developer ID and notarization, the Sparkle signing key, and the CI that builds releases.
 3. near.com's NEP-413 sign-in endpoint (companion proposal).
 
@@ -130,7 +130,7 @@ Trace Commons is outside the review. A fully compromised Trace Commons can do no
 ## Rollout
 
 1. These two documents are reviewed by the owner and then sent to NEAR. Nothing goes out without the owner's go-ahead.
-2. The signer is built against the mock endpoint. It is developed in `nearai/near-signer` once NEAR creates the repository, and until then on a branch that is moved there.
+2. The signer is built against the mock endpoint, in `nearai/near-signer` (private for now).
 3. The Trace Commons daemon route ships behind a setting that is off by default.
 4. near.com staging adds the endpoint and an AASA entry for a staging build of the signer, and the end-to-end run is done against it.
 5. NEAR's security review.
