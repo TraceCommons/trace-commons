@@ -405,7 +405,7 @@ pub type IncludeRefusal = (&'static str, &'static str);
 
 /// Approve the chosen past sessions of `project_key` as a person's
 /// approval: pinned to a preview, held for the undo window, and recorded as
-/// the person's own, so a later change of the folder's rule -- to Ask me or
+/// the person's own, so a later change of the folder's rule -- to Ask or
 /// to Never -- does not take it back. Never `include_backlog`: each session
 /// is named.
 ///

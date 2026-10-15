@@ -168,7 +168,7 @@ public protocol DaemonDataClient: Sendable {
     /// arming disclosure. Automatic without it is refused
     /// (`bad_params` / `confirm-required`), and is refused without grant
     /// terms in force (`unavailable` / `arming-terms-unavailable`) before
-    /// anything is recorded. Ask me and Never take no confirmation on the
+    /// anything is recorded. Ask and Never take no confirmation on the
     /// wire. Read `status` afterwards; the pill never shows a local guess.
     func setContributionOverride(mode: ProjectMode, confirm: Bool) async throws
         -> DaemonData.ContributionOverrideResult

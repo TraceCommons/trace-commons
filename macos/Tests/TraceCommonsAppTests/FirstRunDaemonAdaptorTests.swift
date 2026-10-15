@@ -41,9 +41,10 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
     }
 
     /// A watch-only Start has no tenant, so its marker is keyed by the
-    /// config directory the daemon runs from. It finishes the first run
-    /// only while the daemon holds no enrollment: an enrolled person must
-    /// still confirm on Start, whatever an earlier watch-only run wrote.
+    /// config directory the daemon runs from. The marker no longer opens
+    /// the app (owner, 2026-10-12: sign-in required): with no enrollment
+    /// the first run stays required, and an enrolled person must still
+    /// confirm on Start, whatever an earlier watch-only run wrote.
     func test_aWatchOnlyCompleteIsKeyedByTheConfigDirectory() async {
         let directory = "/tmp/first-run-adaptor-\(UUID().uuidString)"
         let watching = model(["status": #"{"result":{"logged_in":false,"consent_scopes":[],"health":{}}}"#])
@@ -61,8 +62,8 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
         observing.cancel()
         XCTAssertGreaterThan(notifications, 0, "the hosts re-read requiresOnboarding only when told")
         XCTAssertTrue(done)
-        XCTAssertFalse(watching.requiresOnboarding)
-        XCTAssertTrue(watching.traceNavigationReady, "a finished watch-only run shows the content header")
+        XCTAssertTrue(watching.requiresOnboarding, "owner, 2026-10-12: sign-in required")
+        XCTAssertFalse(watching.traceNavigationReady, "a finished watch-only run no longer opens the app")
 
         let tenant = "first-run-adaptor-\(UUID().uuidString)"
         watching.setStatusForTesting(DaemonStatus(
@@ -85,7 +86,9 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
         }
         let done = await watching.markWatchOnlyComplete()
         XCTAssertTrue(done)
-        XCTAssertFalse(watching.requiresOnboarding)
+        // Owner, 2026-10-12: sign-in required, so the first run is required
+        // with or without the marker; the link still takes it back.
+        XCTAssertTrue(watching.requiresOnboarding)
 
         var notifications = 0
         let observing = watching.objectWillChange.sink { _ in notifications += 1 }
@@ -149,7 +152,8 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
 
         XCTAssertNil(TCInvite.issuerHost("not-an-invite"))
         XCTAssertTrue(watching.isWatchOnlyComplete)
-        XCTAssertFalse(watching.requiresOnboarding)
+        // Owner, 2026-10-12: sign-in required, marker or not.
+        XCTAssertTrue(watching.requiresOnboarding)
     }
 
     func test_aLinkThatIsNotAnInviteBeforeTheConfigDirectoryLeavesTheMarker() async {
@@ -172,7 +176,8 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
         launching.setConfigDirectoryForTesting(directory)
 
         XCTAssertTrue(launching.isWatchOnlyComplete)
-        XCTAssertFalse(launching.requiresOnboarding)
+        // Owner, 2026-10-12: sign-in required, marker or not.
+        XCTAssertTrue(launching.requiresOnboarding)
     }
 
     /// An enrolled daemon's marker is the tenant's; a link leaves the

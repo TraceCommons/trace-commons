@@ -205,7 +205,7 @@ private struct GlassButtonBody: View {
             // No fill to darken: the text takes the press instead, and the
             // pointer underlines it.
             box
-                .foregroundStyle(GlassColor.accentText)
+                .foregroundStyle(GlassTokens.Color.linkText.color)
                 .underline(hovering && isEnabled)
                 .glassPressedFill()
         }
@@ -305,8 +305,8 @@ public struct GlassPillIconButton: View {
 
     @ViewBuilder
     private var icon: some View {
-        if let systemImage {
-            Image(systemName: systemImage).glassGlyph(11, weight: .semibold)
+        if let name = systemImage ?? glyph.flatMap(Self.symbol(for:)) {
+            Image(systemName: name).glassGlyph(11, weight: .semibold)
         } else {
             Text(glyph ?? "").glassGlyph(14, weight: .medium)
         }
@@ -322,6 +322,23 @@ public struct GlassPillIconButton: View {
         .buttonStyle(GlassPressStyle())
         .accessibilityLabel(label)
         .help(label)
+    }
+}
+
+extension GlassPillIconButton {
+    /// The symbol drawn for a known text glyph. A text glyph sits on its
+    /// font's baseline, so it reads low or off-centre in the pill; a symbol
+    /// is drawn optically centred (owner, 2026-10-12). The glyph stays the
+    /// core's word for the control; this is only how it is drawn.
+    static func symbol(for glyph: String) -> String? {
+        switch glyph {
+        case "\u{2039}", "<": "chevron.left"
+        case "\u{203A}", ">": "chevron.right"
+        case "\u{2212}", "-": "minus"
+        case "+": "plus"
+        case "\u{203A}|", ">|": "chevron.right.to.line"
+        default: nil
+        }
     }
 }
 
@@ -483,7 +500,8 @@ public struct GlassKebab: View {
     }
 }
 
-/// "›" that turns 90° when open, then a label. No container.
+/// A chevron that turns 90° when open, then a label. No container. A
+/// symbol rather than a text "›", so it turns about its own centre.
 public struct GlassExpander: View {
     private let title: String
     @Binding private var isOpen: Bool
@@ -501,8 +519,8 @@ public struct GlassExpander: View {
             withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) { isOpen.toggle() }
         } label: {
             HStack(spacing: GlassTokens.Space.s4) {
-                Text("›")
-                    .glassGlyph(14)
+                Image(systemName: "chevron.right")
+                    .glassGlyph(10, weight: .semibold)
                     .foregroundStyle(GlassColor.textTertiary)
                     .rotationEffect(.degrees(isOpen ? 90 : 0))
                     .glassPressedFill()

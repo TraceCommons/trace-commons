@@ -156,6 +156,9 @@ impl AccountStore {
         connection: ConnectionKind,
         label: &str,
     ) -> Result<AccountView, ManagedError> {
+        if tool == ToolId::Opencode && connection == ConnectionKind::Subscription {
+            return Err(ManagedError::InvalidRequest);
+        }
         let label = label.trim();
         if label.is_empty() || label.len() > 128 || label.chars().any(char::is_control) {
             return Err(ManagedError::InvalidRequest);

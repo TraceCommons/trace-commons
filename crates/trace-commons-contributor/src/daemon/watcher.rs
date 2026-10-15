@@ -760,15 +760,12 @@ fn offer_one(
     project_key: &str,
     quiescence_secs: u64,
 ) -> std::result::Result<uuid::Uuid, &'static str> {
-    let modified = std::fs::metadata(&session_ref.path)
-        .and_then(|m| m.modified())
-        .map_err(|_| super::past_sessions::LABEL_SESSION_FILE_VANISHED)?;
+    let modified_at = session_modified_at(session_ref)
+        .ok_or(super::past_sessions::LABEL_SESSION_FILE_VANISHED)?;
     let obs = Observation {
         path: session_ref.path.clone(),
         size_bytes: session_ref.size_bytes,
-        modified_at: session_ref
-            .group_modified_at
-            .unwrap_or_else(|| DateTime::<Utc>::from(modified)),
+        modified_at,
     };
     // Judged again at the read, not only at the caller's walk: a session
     // written to in between is still not read half-written.
@@ -1326,6 +1323,17 @@ impl PassOutcome {
     }
 }
 
+/// Sources backed by a database have stable virtual paths, so their own
+/// modification time is authoritative. File sources retain the stat fallback.
+fn session_modified_at(session_ref: &SessionRef) -> Option<DateTime<Utc>> {
+    session_ref.group_modified_at.or_else(|| {
+        std::fs::metadata(&session_ref.path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .map(DateTime::<Utc>::from)
+    })
+}
+
 /// Everything one session costs: observe, evaluate, ask the queue, and load
 /// and hash only if all three still warrant it.
 ///
@@ -1340,10 +1348,7 @@ fn visit_session(
     out: &mut PassOutcome,
 ) {
     out.report.observed += 1;
-    let Ok(meta) = std::fs::metadata(&session_ref.path) else {
-        return;
-    };
-    let Ok(modified) = meta.modified() else {
+    let Some(modified_at) = session_modified_at(session_ref) else {
         return;
     };
     // Size and mtime come from the `SessionRef`, not from a re-stat
@@ -1361,9 +1366,7 @@ fn visit_session(
     let obs = Observation {
         path: session_ref.path.clone(),
         size_bytes: session_ref.size_bytes,
-        modified_at: session_ref
-            .group_modified_at
-            .unwrap_or_else(|| DateTime::<Utc>::from(modified)),
+        modified_at,
     };
 
     // A trajectory session is never armed, whatever the project mode says --
@@ -1559,7 +1562,7 @@ fn visit_session(
     // whatever the folder's mode (`from_trajectory`).
     let mode = if mode == ProjectMode::NotifyOnly && !from_trajectory {
         // The grant arms the folder's own mode; what is in force is then
-        // read again, so a contribution override ("Ask me") still governs
+        // read again, so a contribution override ("Ask") still governs
         // a folder the grant has just armed (#1173).
         arm_by_default(shared, ctx, source, &project_key, &obs.path);
         shared
@@ -1684,7 +1687,7 @@ fn visit_session(
         );
     }
     // The Manual Scrub check arms nothing either (K4 of #1118): the session
-    // is queued `Pending` for a person, like any in an Ask me folder.
+    // is queued `Pending` for a person, like any in an Ask folder.
     let would_arm = mode == ProjectMode::AutoUpload
         && ctx.consent_chosen
         && !ctx.scrub_check_manual
@@ -1875,6 +1878,7 @@ fn new_entry(
         attempts: 0,
         retry_after: None,
         transient_redaction_failures: 0,
+        transient_upload_failures: 0,
         submission_id: None,
         approved_scopes: armed.then(|| ctx.consent_scopes.clone()),
         // A fresh entry has no answer to give yet, armed or not: it is
@@ -2246,6 +2250,37 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn session_observation_accepts_virtual_paths_and_preserves_file_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let modified = Utc::now();
+        let mut session = SessionRef {
+            source: crate::source::SOURCE_OPENCODE,
+            declared_source: None,
+            path: dir.path().join("opencode.db/session-one"),
+            project: None,
+            cwd: None,
+            started_at: None,
+            size_bytes: 100,
+            group_modified_at: Some(modified),
+            group_member_count: 0,
+        };
+        assert_eq!(session_modified_at(&session), Some(modified));
+        session.group_modified_at = None;
+        assert_eq!(session_modified_at(&session), None);
+        session.path = dir.path().join("export.json");
+        std::fs::write(&session.path, b"{}").unwrap();
+        let filesystem_modified = DateTime::<Utc>::from(
+            std::fs::metadata(&session.path)
+                .unwrap()
+                .modified()
+                .unwrap(),
+        );
+        assert_eq!(session_modified_at(&session), Some(filesystem_modified));
+        session.group_modified_at = Some(modified);
+        assert_eq!(session_modified_at(&session), Some(modified));
+    }
 
     /// A real source with a counter around its `load`.
     ///
@@ -3936,7 +3971,7 @@ mod tests {
     /// a file somebody added, not a session of an agent store the grant
     /// covers, and the session itself always waits for a person. An export
     /// naming an unrecorded project writes no `armed-by-default` row and
-    /// leaves that folder on Ask me.
+    /// leaves that folder on Ask.
     #[tokio::test]
     async fn a_trajectory_export_does_not_arm_a_folder_under_the_grant() {
         let f = WatcherFixture::new();
@@ -3983,7 +4018,7 @@ mod tests {
     }
 
     /// #1173: the Flow 1 grant arms a newly discovered folder's own mode, but
-    /// an "Ask me" contribution override still governs it -- the mode in
+    /// an "Ask" contribution override still governs it -- the mode in
     /// force is read again after `arm_by_default`, so the new session waits
     /// for a person. Clearing the override leaves the folder armed.
     #[tokio::test]
@@ -5955,7 +5990,7 @@ mod tests {
     }
 
     /// The selection is a person's decision: it outlives the folder's rule
-    /// going back to Ask me, which retracts only unattended approvals.
+    /// going back to Ask, which retracts only unattended approvals.
     #[tokio::test]
     async fn include_survives_switching_the_folder_to_ask_me() {
         let f = WatcherFixture::new();
@@ -6396,7 +6431,7 @@ mod tests {
     }
 
     /// Kristi N5: a Never set after the include does not take the person's
-    /// approval back, any more than Ask me does.
+    /// approval back, any more than Ask does.
     #[tokio::test]
     async fn include_survives_switching_the_folder_to_never() {
         let f = WatcherFixture::new();

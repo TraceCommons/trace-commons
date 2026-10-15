@@ -107,6 +107,8 @@ pub(super) async fn account_public_run_session_detail_handler(
         Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => record,
         _ => return Err(not_found()),
     };
+    // After ownership, so a submission the caller does not own stays a 404.
+    refuse_a_pipeline_submission(state.as_ref(), &ctx.tenant_id, submission_id).await?;
     let contribution_status = public_run_contribution_status(stored.status);
     let permitted_uses = public_run_permitted_uses(&stored.allowed_uses).map_err(internal_error)?;
     let account_key = ctx.account_id.as_uuid().to_string();
@@ -145,30 +147,28 @@ pub(super) async fn account_public_run_session_detail_handler(
     let record = trace_commons_record_from_storage_submission(stored)
         .ok_or_else(not_found)?
         .map_err(internal_error)?;
-    let read_state = Arc::clone(&state);
-    let projected = tokio::task::spawn_blocking(move || {
-        let envelope = read_envelope_by_record(read_state.as_ref(), &record)?;
-        if envelope.submission_id != submission_id {
-            anyhow::bail!("session-detail source submission mismatch");
-        }
-        Ok::<_, anyhow::Error>(
-            trace_commons_protocol::public_run::PublicRunSessionRecord::from_envelope(
-                envelope,
-                owner_state,
-            )
-            .with_contribution_state(contribution_status, permitted_uses),
-        )
-    })
-    .await
-    .map_err(anyhow::Error::from)
-    .and_then(|result| result)
-    .inspect_err(|error| {
-        tracing::warn!(
-            error_hash = %safe_display_error_hash(error),
-            "Trace Commons session-detail source read failed; failing closed"
-        );
-    });
-    let projected = match projected {
+    let projected = read_envelope_body_for_account(&state, &ctx.tenant_id, record)
+        .await
+        .and_then(|body_read| {
+            if body_read.envelope.submission_id != submission_id {
+                anyhow::bail!("session-detail source submission mismatch");
+            }
+            Ok((
+                trace_commons_protocol::public_run::PublicRunSessionRecord::from_envelope(
+                    body_read.envelope,
+                    owner_state,
+                )
+                .with_contribution_state(contribution_status, permitted_uses),
+                body_read.object_ref_id,
+            ))
+        })
+        .inspect_err(|error| {
+            tracing::warn!(
+                error_hash = %safe_display_error_hash(error),
+                "Trace Commons session-detail source read failed; failing closed"
+            );
+        });
+    let (projected, object_ref_id) = match projected {
         Ok(projected) => projected,
         Err(_) => {
             return Err(audit_source_read_failure(
@@ -184,7 +184,7 @@ pub(super) async fn account_public_run_session_detail_handler(
         state.as_ref(),
         &account_audit_tenant(&ctx),
         submission_id,
-        &[],
+        object_ref_id.as_slice(),
         "account_public_run_detail",
         None,
     )
@@ -449,6 +449,8 @@ pub(super) async fn account_public_run_publish_handler(
         Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => record,
         _ => return Err(not_found()),
     };
+    // After ownership, so a submission the caller does not own stays a 404.
+    refuse_a_pipeline_submission(state.as_ref(), &ctx.tenant_id, submission_id).await?;
     if stored.status != StorageTraceCorpusStatus::Accepted {
         return Err(api_error(StatusCode::CONFLICT, "trace is not accepted"));
     }
@@ -485,14 +487,9 @@ pub(super) async fn account_public_run_publish_handler(
             PUBLIC_RUN_GLOBAL_CONCURRENCY,
         )
         .ok_or_else(|| api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"))?;
-    let read_state = Arc::clone(&state);
-    let envelope_result =
-        tokio::task::spawn_blocking(move || read_envelope_by_record(read_state.as_ref(), &record))
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|result| result);
-    let envelope = match envelope_result {
-        Ok(envelope) => envelope,
+    let envelope_result = read_envelope_body_for_account(&state, &ctx.tenant_id, record).await;
+    let (envelope, object_ref_id) = match envelope_result {
+        Ok(body_read) => (body_read.envelope, body_read.object_ref_id),
         Err(error) => {
             tracing::warn!(
                 error_hash = %safe_display_error_hash(&error),
@@ -529,7 +526,7 @@ pub(super) async fn account_public_run_publish_handler(
         state.as_ref(),
         &account_audit_tenant(&ctx),
         submission_id,
-        &[],
+        object_ref_id.as_slice(),
         "account_public_run_publish",
         None,
     )

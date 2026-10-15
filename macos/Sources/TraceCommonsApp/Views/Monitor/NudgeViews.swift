@@ -57,14 +57,28 @@ struct NudgeGlassCard: View {
 }
 
 /// Above the Traces tree: its heading, the idle filter while it is on, with
-/// its way out, and the order control. Each is drawn only with the core's
-/// words for it. Suggested first is selected until another order is chosen.
+/// its way out, then search, History and the order control. Each is drawn
+/// only with the core's words for it. Suggested first is selected until
+/// another order is chosen.
 struct TracesListControls: View {
-    let store: TracesStore
+    @Bindable var store: TracesStore
+    /// Opens History on the Traces tab; nil draws no History button.
+    var openHistory: (() -> Void)?
+
+    /// Whether the search field is open. It opens inline from its icon
+    /// (owner, 2026-10-12) and closes, cleared, from its clear button or
+    /// Escape.
+    @State private var searching = false
+    @FocusState private var searchFocused: Bool
 
     /// The order control's icon (owner, 2026-10-11: an icon, not the
     /// chosen order's words).
     static let orderIcon = "line.3.horizontal.decrease"
+    /// Search and History, left of the order control (owner, 2026-10-12).
+    static let searchIcon = "magnifyingglass"
+    static let historyIcon = "clock.arrow.circlepath"
+    /// The open field's widest: room for a few words beside the heading.
+    static let searchWidth: CGFloat = 220
 
     var body: some View {
         let copy = store.nudgeCopy
@@ -85,6 +99,12 @@ struct TracesListControls: View {
                     .fixedSize()
             }
             Spacer(minLength: 0)
+            if let tree = store.words?.tree {
+                search(tree)
+                if let openHistory {
+                    GlassRoundButton(tree.openHistory, systemImage: Self.historyIcon, action: openHistory)
+                }
+            }
             if let suggested = copy?[.listOrderSuggested], let queue = copy?[.listOrderQueue],
                let label = Self.orderLabel(copy)
             {
@@ -106,6 +126,31 @@ struct TracesListControls: View {
                     ])
             }
         }
+    }
+
+    /// The search icon, or the open field with its clear button.
+    @ViewBuilder
+    private func search(_ tree: MonitorTreeCopy) -> some View {
+        if searching {
+            HStack(spacing: GlassTokens.Space.s3) {
+                GlassTextField(tree.search, text: $store.searchText, prompt: tree.searchPrompt,
+                               showsLabel: false, focus: $searchFocused)
+                    .frame(maxWidth: Self.searchWidth)
+                    .onExitCommand(perform: closeSearch)
+                GlassRoundButton(tree.searchClear, systemImage: "xmark", small: true, action: closeSearch)
+            }
+            .transition(.opacity.combined(with: .move(edge: .trailing)))
+        } else {
+            GlassRoundButton(tree.search, systemImage: Self.searchIcon) {
+                withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) { searching = true }
+                DispatchQueue.main.async { searchFocused = true }
+            }
+        }
+    }
+
+    private func closeSearch() {
+        store.searchText = ""
+        withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) { searching = false }
     }
 
     /// The order control's accessible name, the core's; nil without it,

@@ -61,15 +61,13 @@ final class ActionFirstFailureBelowTests: XCTestCase {
             XCTAssertTrue(declineTail.contains(".buttonStyle(GlassButtonStyle(.link))"),
                           "\(site.file) \(site.opening): the decline is not a link")
         }
-        // The session card: Contribute leads both of its layouts, and its
-        // Dismiss is a link wherever it is drawn.
+        // The session card: Contribute leads both of its layouts, and the
+        // card offers no Dismiss (owner, 2026-10-12).
         let source = try Self.text("Views/Monitor/SessionReviewCard.swift")
         let actions = Self.flat(try Self.declaration("private func actions(", in: source))
-        XCTAssertTrue(actions.contains("{ contribute(entry, words) dismiss(entry, words) lookInside(entry, review) }"))
-        XCTAssertTrue(actions.contains("{ contribute(entry, words) dismiss(entry, words) }"))
-        XCTAssertFalse(actions.contains("dismiss(entry, words) contribute(entry, words)"), "Dismiss leads again")
-        XCTAssertTrue(Self.flat(source).contains(
-            "Button(words.dismissAction) { act(.dismiss, entry) } .buttonStyle(GlassButtonStyle(.link))"))
+        XCTAssertTrue(actions.contains("{ contribute(entry, words) lookInside(entry, review) }"))
+        XCTAssertFalse(actions.contains("lookInside(entry, review) contribute(entry, words)"), "Look inside leads")
+        XCTAssertFalse(source.contains("Button(words.dismissAction)"), "the card offers Dismiss again")
         // The offers' doc comments no longer say the decline-first order
         // awaits a ruling.
         let offers = try Self.text("Views/Monitor/TracesOffers.swift")
@@ -102,9 +100,9 @@ final class ActionFirstFailureBelowTests: XCTestCase {
             ("Views/ShellNotices.swift", "struct ArmingRewordedNoticeCard: View {",
              "Button(notice.acknowledge, action: onAcknowledge)", "GlassAlert(failed)"),
             ("Views/Monitor/SessionReviewCard.swift", "private func actions(",
-             "Button(words.keep)", "TracesRefusal(store: store, entryId: entry.entryId)"),
+             "lookInside(entry, review)", "TracesRefusal(store: store, entryId: entry.entryId)"),
             ("Views/Monitor/SessionReviewCard.swift", "private func actions(",
-             "Button(words.keep)", "GlassAlert(outcome.correctionCredentialHeadline)"),
+             "lookInside(entry, review)", "GlassAlert(outcome.correctionCredentialHeadline)"),
             ("Views/Settings/WitnessSection.swift", "private func inferenceEvidence(",
              "Button(copy.inferenceDisable)", "GlassAlert(copy.inferenceSaveFailed)"),
             ("Views/SessionDetailView.swift", "private func localInstalledSkillSurface(",

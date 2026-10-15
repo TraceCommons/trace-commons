@@ -319,14 +319,15 @@ final class MonitorShellTests: XCTestCase {
 
     func test_homeLinksToTracesAndCountsThree() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        for needle in ["Button(action: openTraces)", "HomeStatTile(label: MonitorWords.waiting,",
+        for needle in ["HomeStatTile(label: MonitorWords.waiting,",
                        "HomeStatTile(label: MonitorWords.contributed,", "HomeStatTile(label: HomeFormat.creditPendingWord,",
-                       // Ron's Missions card: his Drafts tag over the drafts,
-                       // headed as the Private AI cards are (owner, 2026-10-11).
-                       "systemImage: Self.missionsIcon, title: MonitorWords.missions,",
-                       "subtitle: words?.missionsSubtitle, promo: promo, action: openMissionDrafts",
-                       "GlassTag(words.draftsTag, tone: .ask)", "Text(words.noMissionDrafts)",
-                       "Text(words.sources(draft.source_count))"] {
+                       // Ron's Missions card as a hero promotion (owner,
+                       // 2026-10-12): the drafts' line and Review drafts, no
+                       // pill.
+                       "gradient: GlassTokens.Gradient.heroMissions,",
+                       "title: MonitorWords.missions, subtitle: words?.missionsSubtitle,",
+                       "actionTitle: words?.missionsAction, action: openMissionDrafts",
+                       "Text(words.noMissionDrafts)"] {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")
         }
         let window = try Self.text("Views/MonitorWindowView.swift")
@@ -335,10 +336,10 @@ final class MonitorShellTests: XCTestCase {
 
     // MARK: Inference
 
-    func test_theInferenceInspectorSummarises() {
-        // A list nobody could read is a dash in both legend cells, never zero.
-        XCTAssertEqual(PrivateAIInspectorView.counts(nil).connected, "—")
-        XCTAssertEqual(PrivateAIInspectorView.counts(nil).notConnected, "—")
+    func test_theInferenceInspectorSummarises() throws {
+        // The connected / not connected pair is gone (owner, 2026-10-12).
+        let views = try Self.text("Views/Monitor/InferenceViews.swift")
+        XCTAssertFalse(views.contains("static func counts("), "the summary counts the tools again")
     }
 
     private static func text(_ path: String) throws -> String {

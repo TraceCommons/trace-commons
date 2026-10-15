@@ -148,8 +148,8 @@ use super::history::{HistoryCache, rollup};
 use super::notify;
 use super::policy::{
     ERR_PROJECT_ID_UNRECOGNIZED, ERR_PROJECT_KEY_UNRECOGNIZED, ProjectMode, ProjectPolicy,
-    UNKNOWN_PROJECT_KEY, disambiguated_label, known_keys, project_id_for, project_key_for_id,
-    project_key_is_admissible,
+    UNKNOWN_PROJECT_KEY, disambiguated_label, known_keys, normalize_policy_key, project_id_for,
+    project_key_for_id, project_key_is_admissible,
 };
 use super::preview_scheduler::{PreviewKey, PreviewScheduler, RequestState};
 use super::queue::{Queue, QueueEntry, QueueState};
@@ -2591,7 +2591,7 @@ impl DaemonShared {
             "decisions_owed": decisions_owed,
             // Additive (nudge U1). The count `list_projects` carries as
             // `unpurposed_traces`, from the same `queue::unpurposed_traces`:
-            // previewed `Pending` entries in folders set to Ask me. Every one
+            // previewed `Pending` entries in folders set to Ask. Every one
             // is also in `decisions_owed`; never a badge number of its own.
             "unpurposed_traces": unpurposed_traces,
             // Additive (nudge S3). Which in-app suggestion leads, if any:
@@ -4903,11 +4903,34 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
                 }
             },
             None => {
-                let key = key_param.unwrap_or_default();
-                if !project_key_is_admissible(key, &known) {
+                // Stored under the watcher's spelling of the key, never the
+                // caller's (#992). `daemon project <path>` sends the case on
+                // disk; sessions resolve through the same normalization as
+                // this, which folds case on macOS and Windows. A key stored
+                // unnormalized is one no session looks up, and under an
+                // "Automatic" override that miss reads as `AutoUpload`.
+                let raw = key_param.unwrap_or_default();
+                if !project_key_is_admissible(raw, &known) {
                     return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_KEY_UNRECOGNIZED);
                 }
-                key.to_string()
+                if known.iter().any(|k| k == raw) {
+                    // A key the daemon already holds is already the spelling
+                    // something looks it up by, and it may not normalize at
+                    // all: its directory can be gone, or (on Windows) a
+                    // `/tmp/...` key is not even absolute.
+                    raw.to_string()
+                } else {
+                    match normalize_policy_key(raw) {
+                        Some(key) => key,
+                        None => {
+                            return Response::err(
+                                req.id,
+                                ERR_BAD_PARAMS,
+                                ERR_PROJECT_KEY_UNRECOGNIZED,
+                            );
+                        }
+                    }
+                }
             }
         };
         let shown = crate::daemon::policy::display_path_for_key(&key);
@@ -4922,7 +4945,7 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
     }
     // Arming sends on the contributor's behalf, so it needs scopes they
-    // chose. Ask me and Never only ever stop sends, and stay allowed.
+    // chose. Ask and Never only ever stop sends, and stay allowed.
     if mode == ProjectMode::AutoUpload {
         let cfg = shared.store.load_config().ok().flatten();
         if let Some(label) = crate::config::consent_hold(cfg.as_ref()) {
@@ -5172,7 +5195,7 @@ fn contribution_mode_value(policy: &ProjectPolicy, queue: &super::queue::Queue) 
 }
 
 /// Put back to waiting every unattended approval that a stopping override
-/// ("Ask me", "Never") leaves with no standing yes: one in a folder that no
+/// ("Ask", "Never") leaves with no standing yes: one in a folder that no
 /// longer resolves to `AutoUpload`. Never refused, so clearing the override
 /// restores them. Call with the policy lock held and the queue lock taken
 /// after it.
@@ -10120,6 +10143,13 @@ mod tests {
     /// must stay resolvable for as long as the daemon under test might
     /// re-validate it.
     fn tmp_project(basename: &str) -> String {
+        crate::daemon::policy::project_key_for(Some(&tmp_project_dir(basename)))
+    }
+
+    /// [`tmp_project`]'s directory as `daemon project <path>` names it:
+    /// canonical, in the case on disk, which on macOS and Windows is not the
+    /// key the watcher stores (#992).
+    fn tmp_project_dir(basename: &str) -> String {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join(basename);
         std::fs::create_dir_all(&p).unwrap();
@@ -11259,7 +11289,7 @@ mod tests {
         );
     }
 
-    /// An old install without a settings file whose folders are all Ask me
+    /// An old install without a settings file whose folders are all Ask
     /// has no Scrub check provenance to save, but its notification offers
     /// must still reach disk before startup marks the policy migrated, or
     /// the next start reads it as a new install.
@@ -11288,7 +11318,7 @@ mod tests {
         }
     }
 
-    /// Kristi's #1300 review, finding 2: an Ask me install that ran a build
+    /// Kristi's #1300 review, finding 2: an Ask install that ran a build
     /// after #1162 has its policy marked migrated and no settings file.
     /// Startup still treats it as existing and saves the offers, so the new
     /// kinds never come on for it unasked.
@@ -12096,7 +12126,7 @@ mod tests {
     }
 
     /// K7's suggestion: "27 scrubbed sessions are sitting on this Mac under
-    /// folders set to Ask me. None has been decided." Three entries, each
+    /// folders set to Ask. None has been decided." Three entries, each
     /// failing exactly one of the three conditions the count requires, so a
     /// broken filter shows up as a wrong number rather than a coincidence:
     ///
@@ -12397,7 +12427,7 @@ mod tests {
         // id exists for it and none can. This is why the id supplements the
         // key rather than replacing it.
         let s = shared();
-        let key = tmp_project("employer-repo");
+        let path = tmp_project_dir("employer-repo");
         assert!(
             projects_of(&s).is_empty(),
             "the project must be genuinely unknown for this test to mean anything"
@@ -12406,10 +12436,12 @@ mod tests {
             &s,
             &req(
                 "set_project_mode",
-                serde_json::json!({"project_key": key, "mode": "ignore"}),
+                serde_json::json!({"project_key": path, "mode": "ignore"}),
             ),
         );
         assert!(r.error.is_none(), "{:?}", r.error);
+        // Looked up the way a session in that directory is.
+        let key = crate::daemon::policy::project_key_for(Some(&path));
         assert_eq!(s.policy.lock().unwrap().resolve(&key), ProjectMode::Ignore);
     }
 
@@ -12924,6 +12956,205 @@ mod tests {
         );
         assert!(r.error.is_none(), "{:?}", r.error);
         assert_eq!(s.policy.lock().unwrap().resolve(gone), ProjectMode::Ignore);
+    }
+
+    /// A mixed-case directory, named the way `daemon project <path>` names
+    /// it: `std::fs::canonicalize`, which keeps the case on disk. Returned
+    /// beside the key the watcher derives for a session recorded there.
+    fn mixed_case_project() -> (String, String) {
+        let cli_key = tmp_project_dir("MixedCase");
+        let watcher_key = crate::daemon::policy::project_key_for(Some(&cli_key));
+        (cli_key, watcher_key)
+    }
+
+    /// #992: the CLI sends the on-disk spelling, the watcher looks up the
+    /// folded one on macOS and Windows. The mode must land where the
+    /// watcher looks, or `--mode ignore` prints success and silences
+    /// nothing.
+    #[test]
+    fn a_mixed_case_key_set_over_the_socket_applies_to_the_watchers_key() {
+        let s = shared();
+        let (cli_key, watcher_key) = mixed_case_project();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": cli_key, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let policy = s.policy.lock().unwrap();
+        assert_eq!(policy.resolve(&watcher_key), ProjectMode::Ignore);
+        assert_eq!(
+            policy.projects.keys().collect::<Vec<_>>(),
+            vec![&watcher_key],
+            "stored under the watcher's key and nothing else"
+        );
+    }
+
+    /// #992, the consent half: under an "Automatic" override a lookup that
+    /// misses the folder's own mode reads as `AutoUpload`, so a mis-keyed
+    /// Never let the folder upload with nobody asked.
+    #[test]
+    fn a_mixed_case_never_set_over_the_socket_holds_under_an_automatic_override() {
+        let s = shared();
+        let (cli_key, watcher_key) = mixed_case_project();
+        s.policy.lock().unwrap().contribution_override =
+            Some(super::super::policy::ContributionOverride {
+                mode: ProjectMode::AutoUpload,
+                since: Utc::now(),
+                arming: None,
+                granted_under: None,
+                claim: None,
+            });
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": cli_key, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(&watcher_key),
+            ProjectMode::Ignore
+        );
+    }
+
+    /// The folded spelling names the same directory on a case-insensitive
+    /// filesystem, so it is as admissible as the on-disk one.
+    #[test]
+    fn the_watchers_own_spelling_of_a_directory_is_admissible() {
+        let s = shared();
+        let (_cli_key, watcher_key) = mixed_case_project();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": watcher_key, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(&watcher_key),
+            ProjectMode::Ignore
+        );
+    }
+
+    /// A key the daemon already holds stays settable even when it is not a
+    /// key normalization can produce at all. On Windows `/tmp/armedproj` --
+    /// the shape a dozen tests here seed -- is not absolute, so normalizing
+    /// it yields nothing; the known-key rule must still answer for it.
+    /// Reproduced on every platform with a key that is relative everywhere.
+    #[test]
+    fn a_known_key_that_does_not_normalize_stays_settable() {
+        let s = shared();
+        let odd = "legacy-relative/oldproj";
+        seed_queue_entry(
+            &s,
+            super::super::queue::QueueEntry {
+                project_key: odd.to_string(),
+                project_label: "oldproj".to_string(),
+                ..queue_entry_fixture()
+            },
+        );
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": odd, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(s.policy.lock().unwrap().resolve(odd), ProjectMode::Ignore);
+    }
+
+    /// A real directory named through a symlink (`/tmp` is
+    /// `/private/tmp` on macOS) or an 8.3 short name on Windows is not
+    /// spelled the way normalization spells it. It is still a real
+    /// directory, so it is admitted, and stored normalized.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_named_through_a_symlink_is_admitted_and_stored_normalized() {
+        let s = shared();
+        let real = tmp_project_dir("Linked");
+        let link_parent = tempfile::tempdir().unwrap();
+        let link = link_parent.path().join("via-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let spelled = link.to_string_lossy().into_owned();
+        let key = crate::daemon::policy::project_key_for(Some(&real));
+        assert_ne!(
+            spelled, key,
+            "the test needs two spellings to mean anything"
+        );
+        assert!(
+            crate::daemon::policy::project_key_is_admissible(&spelled, &[]),
+            "a real directory is admissible however it is spelled"
+        );
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": spelled, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let policy = s.policy.lock().unwrap();
+        assert_eq!(policy.resolve(&key), ProjectMode::Ignore);
+        assert_eq!(policy.projects.keys().collect::<Vec<_>>(), vec![&key]);
+    }
+
+    /// Fail closed: a path naming no directory is refused however spelled.
+    #[test]
+    fn a_path_naming_no_directory_is_still_refused() {
+        let s = shared();
+        let gone = tmp_project_dir("Gone");
+        std::fs::remove_dir(&gone).unwrap();
+        assert!(!crate::daemon::policy::project_key_is_admissible(
+            &gone,
+            &[]
+        ));
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": gone, "mode": "ignore"}),
+            ),
+        );
+        assert_eq!(r.error.unwrap().message, ERR_PROJECT_KEY_UNRECOGNIZED);
+        assert!(s.policy.lock().unwrap().projects.is_empty());
+
+        // Nor does a missing path inside a repository pass on the strength
+        // of the root it would normalize to.
+        let repo = tmp_project_dir("Repo");
+        std::fs::create_dir(std::path::Path::new(&repo).join(".git")).unwrap();
+        let missing = std::path::Path::new(&repo)
+            .join("not-there")
+            .to_string_lossy()
+            .into_owned();
+        assert!(!crate::daemon::policy::project_key_is_admissible(
+            &missing,
+            &[]
+        ));
+    }
+
+    /// The sentinel is not a path and must not be normalized out of
+    /// existence: silencing the unknown bucket stays possible.
+    #[test]
+    fn the_unknown_bucket_can_still_be_silenced_from_a_terminal() {
+        let s = shared();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_key": UNKNOWN_PROJECT_KEY, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(UNKNOWN_PROJECT_KEY),
+            ProjectMode::Ignore
+        );
     }
 
     #[test]
@@ -17861,7 +18092,7 @@ mod tests {
         assert!(o.claim.is_some());
     }
 
-    /// "Ask me" puts what went unattended back to waiting, and says so on
+    /// "Ask" puts what went unattended back to waiting, and says so on
     /// both events; clearing restores the folder's own mode and the watcher
     /// may approve again.
     #[test]
@@ -18079,7 +18310,7 @@ mod tests {
         );
     }
 
-    /// The backlog an "Automatic" override found waiting in an Ask me
+    /// The backlog an "Automatic" override found waiting in an Ask
     /// folder still needs a person: the badge does not drop.
     #[test]
     fn an_auto_override_leaves_the_backlog_on_the_badge() {
@@ -18159,7 +18390,7 @@ mod tests {
     /// Under an enrollment whose scopes nobody chose, every way of sending is
     /// refused with one fixed label, before anything is approved, armed or
     /// recorded: `approve` in all three forms, arming a folder, and an
-    /// `auto_upload` contribution override. What only stops sends -- Ask me,
+    /// `auto_upload` contribution override. What only stops sends -- Ask,
     /// Never -- is still allowed.
     #[tokio::test]
     async fn every_send_path_is_refused_while_consent_scopes_are_not_chosen() {
@@ -19602,7 +19833,7 @@ mod tests {
         }
 
         /// A leading backlog nudge counts its own subjects: the previewed
-        /// Ask me entries `unpurposed_traces` counts.
+        /// Ask entries `unpurposed_traces` counts.
         #[test]
         fn status_nudge_mission_fit_counts_the_backlog_when_it_leads() {
             let s = live();

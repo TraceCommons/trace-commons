@@ -1648,7 +1648,7 @@ pub const ONBOARD_WATCH_UNKNOWN_LABEL: &str = "Traces with no project";
 /// might try to fix.
 ///
 /// It replaces the state line rather than adding a third: "you'll always be
-/// asked" already says what `Ask me` says.
+/// asked" already says what `Ask` says.
 pub const ONBOARD_WATCH_UNKNOWN_NOTE: &str = concat!(
     app_name!(),
     " can't tell which folder these ran in, so they can never be contributed automatically. \
@@ -1697,6 +1697,7 @@ pub const ROOTS_CLAUDE: &str = "Claude Code traces";
 pub const ROOTS_CODEX: &str = "Codex traces";
 pub const ROOTS_GEMINI: &str = "Gemini CLI traces";
 pub const ROOTS_CLINE: &str = "Cline traces";
+pub const ROOTS_OPENCODE: &str = "OpenCode traces";
 /// Shown when a store arrives that this build has no name for -- a newer
 /// contributor library discovering a source this shell predates. Deliberately
 /// not one of the named titles: a row must never claim to be a product it is
@@ -2392,7 +2393,7 @@ mod tests {
     /// happened, and a survivor's description is where that is decided.
     #[test]
     fn the_residual_description_never_claims_a_removal() {
-        assert!(REDACTION_CATEGORY_RESIDUAL.contains("still in what would be sent"));
+        assert!(REDACTION_CATEGORY_RESIDUAL.contains("Still in this trace"));
         assert!(
             !REDACTION_CATEGORY_RESIDUAL
                 .to_lowercase()
@@ -3336,13 +3337,16 @@ mod residual_copy_tests {
     fn one_survivor_reads_as_one() {
         assert_eq!(
             residual_secret_line(1, &[]),
-            "A secret found here is still in what would be sent"
+            "1 secret is still in this trace"
         );
     }
 
     #[test]
     fn several_survivors_inflect() {
-        assert!(residual_secret_line(3, &[]).starts_with("Secrets found in 3 places are"));
+        assert_eq!(
+            residual_secret_line(3, &[]),
+            "3 secrets are still in this trace"
+        );
     }
 
     /// The line must say STILL IN, never anything that reads as removal --
@@ -3350,13 +3354,19 @@ mod residual_copy_tests {
     #[test]
     fn the_line_never_claims_the_secret_was_removed() {
         let line = residual_secret_line(1, &["events.3.correction".to_string()]);
-        assert!(line.contains("still in what would be sent"), "{line}");
+        assert!(line.contains("still in this trace"), "{line}");
         assert!(!line.to_lowercase().contains("removed"), "{line}");
     }
 
+    /// Plain words (owner, 2026-10-12): schema paths are left to the full
+    /// preview, and a scan that could not run says so rather than counting
+    /// a secret nobody found.
     #[test]
-    fn sites_are_listed_when_known() {
+    fn sites_are_left_to_the_preview_and_an_unchecked_trace_says_so() {
         let line = residual_secret_line(2, &["events.1".to_string(), "events.9".to_string()]);
-        assert!(line.ends_with("(events.1, events.9)"), "{line}");
+        assert!(!line.contains("events."), "{line}");
+        let unchecked = residual_secret_line(1, &["{scan_unavailable}".to_string()]);
+        assert!(unchecked.contains("could not be checked"), "{unchecked}");
+        assert!(!unchecked.to_lowercase().contains("removed"), "{unchecked}");
     }
 }

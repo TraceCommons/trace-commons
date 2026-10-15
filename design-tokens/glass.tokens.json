@@ -14,6 +14,7 @@
     "traceLiveEnd": { "hex": "#ff0a6c", "note": "The Trace mark's live trace: the gradient's hot-pink end, and the glow on the current step." },
     "purpleSoft": { "hex": "#8a3dff", "note": "Fills and the shared data series.", "light": { "hex": "#7a2cf5" } },
     "purpleText": { "hex": "#c9b3ff", "note": "Accent text and tertiary links.", "light": { "hex": "#5b10cc" } },
+    "linkText": { "hex": "#c9b3ff", "note": "Every text link (GlassButtonStyle.link). Classic keeps the accent text; the flat theme matches the primary button's accent so a link reads as an action (owner, 2026-10-12: the light purple was not noticeable enough): the button's blue in Light (5.5:1 on the pane) and its violet raised to read on the dark pane (6:1 on the navy).", "light": { "hex": "#5b10cc" } },
     "blue": { "hex": "#3a7bd5", "note": "Toggles on, the kept data series, selection.", "light": { "hex": "#2f6bc4" } },
     "promoTintEnd": { "hex": "#3a7bd5", "note": "The far stop of a promotion card's tint (Home's Missions card): blue, or the light theme's amber." },
     "textPrimary": { "hex": "#f2f2f4", "light": { "hex": "#1d1d1f" } },
@@ -28,13 +29,17 @@
     "textOnStatus": { "hex": "#0c0c0e" },
     "textOnSelected": { "hex": "#f2f2f4", "note": "Text on a selected fill (controlSelected): textPrimary in classic, white in the flat theme, whose selected fill is the brand purple.", "light": { "hex": "#1d1d1f" } },
     "statusOn": { "hex": "#3ddc84", "note": "Watching, share automatically, automatic, always on. Glyph and label only.", "light": { "hex": "#1a8f4c" } },
-    "statusAsk": { "hex": "#f5c142", "note": "Ask me, worth a second look.", "light": { "hex": "#a8690f" } },
+    "statusAsk": { "hex": "#f5c142", "note": "Ask, worth a second look.", "light": { "hex": "#a8690f" } },
     "statusOff": { "hex": "#a9a9b0", "note": "Never, not used. Never for text.", "light": { "hex": "#8a8a90" } },
     "statusOutside": { "hex": "#ff6b6b", "note": "Leaves for an outside model, no proof.", "light": { "hex": "#d0342c" } },
     "statusOnText": { "hex": "#3ddc84", "note": "statusOn as text (a pill label, the submit-done label): 4.5:1 or more on every light ground and on its own tint. Dark is statusOn.", "light": { "hex": "#11613a" } },
     "statusAskText": { "hex": "#f5c142", "note": "statusAsk as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusAsk.", "light": { "hex": "#7a4a06" } },
     "statusOutsideText": { "hex": "#ff9494", "note": "statusOutside as text: 4.5:1 or more on every light ground and on its own tint. Dark is lighter than statusOutside: on tintOutside over every card stop on paneOpaque it clears 4.73:1, where #ff6b6b was 3.61.", "light": { "hex": "#a3221c" } },
     "destructiveText": { "hex": "#ff8a8a", "note": "The destructive button's label (GlassButtonKind.destructive): the outside red lifted so it clears 4.5:1 on the glass control fill over the pane (5.0; statusOutsideText there is 4.1). The same values as menuNoProof. #1146 has no destructive button.", "light": { "hex": "#c62828" } },
+    "heroInk": { "hex": "#ffffff", "note": "Text and graphics on a hero promotion's ground, in both appearances." },
+    "heroButtonFill": { "hex": "#ffffff", "note": "A hero promotion's call to action: a white pill (owner, 2026-10-12)." },
+    "heroButtonInk": { "hex": "#16161a", "note": "The label on heroButtonFill: 18:1." },
+    "badgeFillSubtle": { "hex": "#ffffff", "alpha": 0.16, "note": "A count badge that is not owed a decision (a tab's count): ink at 16%. The flat Light theme draws it in the well's slate, as the legend pills are.", "light": { "hex": "#000000", "alpha": 0.16 } },
     "badgeFill": { "hex": "#ff6b6b", "note": "The decisions-owed badge behind textOnStatus. Dark is statusOutside; light is lighter so the dark count clears 4.5:1 (4.86), and the fill 3:1 on the pane.", "light": { "hex": "#e04a42" } },
     "dataShared": { "hex": "#8a3dff", "light": { "hex": "#7a2cf5" } },
     "dataKept": { "hex": "#3a7bd5", "light": { "hex": "#2f6bc4" } },
@@ -113,6 +118,30 @@
     "ink": { "hex": "#ffffff", "note": "Overlay strokes and fills over a surface: white on dark, black on light. Used at an alpha.", "light": { "hex": "#000000" } }
   },
   "gradient": {
+    "heroCampaign": {
+      "angle": 120,
+      "note": "Home's hero promotions (owner, 2026-10-12): a saturated ground under white text and a graphic on the right, the same in both appearances. The darker stop sits under the text on the left and holds white at 7:1 or more; the lighter runs under the graphic. Campaign (NEAR AI's own): a deep NEAR blue to the brand blue #0091fd, which alone holds white at only 3.25:1.",
+      "stops": [
+        { "hex": "#0057b0", "at": 0 },
+        { "hex": "#0091fd", "at": 1 }
+      ]
+    },
+    "heroMissions": {
+      "angle": 120,
+      "note": "Missions: indigo to violet, the purple (owner, 2026-10-12).",
+      "stops": [
+        { "hex": "#1e1470", "at": 0 },
+        { "hex": "#5b2bd6", "at": 1 }
+      ]
+    },
+    "heroInsights": {
+      "angle": 120,
+      "note": "Insights: deep sea blue to the accent blue.",
+      "stops": [
+        { "hex": "#073b55", "at": 0 },
+        { "hex": "#1f7aa8", "at": 1 }
+      ]
+    },
     "paneFill": { "angle": 160, "stops": [
       { "hex": "#ffffff", "alpha": 0.1, "at": 0, "light": { "hex": "#ffffff", "alpha": 0.55 } },
       { "hex": "#ffffff", "alpha": 0.05, "at": 0.4, "light": { "hex": "#ffffff", "alpha": 0.35 } },
@@ -339,9 +368,10 @@
     "pulse": 1.6
   },
   "themes": {
-    "$comment": "Exploration (design/visual-theme-exploration): the flat glass theme, from getone.one's glass components. flatDark is its dark appearance: white text on navy-tinted glass. flatLight is its light appearance: dark text on white frosted glass (owner choice, 2026-10-09, over a tinted Light). Settings > General > Appearance picks Light, Dark or System. Each names only what it changes; a colour it leaves alone keeps its classic value for that appearance. Gradients and shadows are named by both or neither. Panes sit on clear Liquid Glass, lightly tinted with the veil, for the system's refraction, with the veil painted over it; Increase Contrast deepens the veil; Reduce Transparency is left to the system (R14). The map is on the same glass under a light field. Controls, cards, tags and frames are flat: a faint rim, a soft frame shadow, no highlight, shade or glow (owner feedback, 2026-10-09). Cards, panes, wells, controls, pills, menus, popovers and node cards drop the rim and are told apart by fill (and, where they float, a soft shadow) alone; a checkbox keeps its rim, which is the unchecked box; dark cards are the pane's navy, darker than the pane, rather than white over it (owner, 2026-10-10). Selected states are the brand purple, with textOnSelected on them. Every text colour clears 4.5:1 on the pane, a card, a quiet card and a field over the worst desktop -- a near-black #333333 for Light, which light Liquid Glass frosts no darker than, and white for Dark (FlatThemeContrastTests). Light is a cool grey (owner, 2026-10-12): a #e3e6ec veil at 66%, the lightest that holds the floors, under white cards (35%), quiet cards (29%) and controls (44%) and cool slate pills (wellFill #8a93a5 at 43%), each standing off the pane by the same contrast as Dark's do, with a blue accent in place of the brand purple, from the owner's reference painting (2026-10-12; purple read muddy on grey and orange was set aside): #1f7aa8 fills and tints, a #2a8fc4 tab ember, #15608a selections, toggles and buttons under white text, #0c3f5c accent text, and a #6cb6d6 far stop on the Missions promotion; dark text; Dark's is 68%, the lightest that holds the floors (owner, 2026-10-12: a little more translucent). Panes are frosted Liquid Glass (regularTint) under the veil; out of focus inactiveDim darkens a window, as the system does; and the menu-bar popover, the edge rail and the main window share the one pane spec. The theme is chosen at launch with TC_GLASS_THEME (flat, the default on this branch, or classic).",
+    "$comment": "Exploration (design/visual-theme-exploration): the flat glass theme, from getone.one's glass components. flatDark is its dark appearance: white text on navy-tinted glass. flatLight is its light appearance: dark text on white frosted glass (owner choice, 2026-10-09, over a tinted Light). Settings > General > Appearance picks Light, Dark or System. Each names only what it changes; a colour it leaves alone keeps its classic value for that appearance. Gradients and shadows are named by both or neither. Panes sit on clear Liquid Glass, lightly tinted with the veil, for the system's refraction, with the veil painted over it; Increase Contrast deepens the veil; Reduce Transparency is left to the system (R14). The map is on the same glass under a light field. Controls, cards, tags and frames are flat: a faint rim, a soft frame shadow, no highlight, shade or glow (owner feedback, 2026-10-09). Cards, panes, wells, controls, pills, menus, popovers and node cards drop the rim and are told apart by fill (and, where they float, a soft shadow) alone; a checkbox keeps its rim, which is the unchecked box; dark cards are the pane's navy, darker than the pane, rather than white over it (owner, 2026-10-10). Selected states are the brand purple, with textOnSelected on them. Every text colour clears 4.5:1 on the pane, a card, a quiet card and a field over the worst desktop -- a near-black #333333 for Light, which light Liquid Glass frosts no darker than, and white for Dark (FlatThemeContrastTests). Light is a cool grey (owner, 2026-10-12): a #e3e6ec veil at 66%, the lightest that holds the floors, under white cards (35%), quiet cards (29%) and controls (44%) and cool slate pills (wellFill #8a93a5 at 28%, lightened from 43% by the owner on 2026-10-12, with the tab count badge and an off map node in the same light slate), each standing off the pane by the same contrast as Dark's do, with a blue accent in place of the brand purple, from the owner's reference painting (2026-10-12; purple read muddy on grey and orange was set aside): #1f7aa8 fills and tints, a #2a8fc4 tab ember, #15608a selections, toggles and buttons under white text, #0c3f5c accent text, and a #6cb6d6 far stop on the Missions promotion; dark text; Dark's is 68%, the lightest that holds the floors (owner, 2026-10-12: a little more translucent). Panes are frosted Liquid Glass (regularTint) under the veil; out of focus inactiveDim darkens a window, as the system does; and the menu-bar popover, the edge rail and the main window share the one pane spec. The theme is chosen at launch with TC_GLASS_THEME (flat, the default on this branch, or classic).",
     "flatLight": {
       "color": {
+        "linkText": { "hex": "#15608a" },
         "glassVeil": { "hex": "#e3e6ec", "alpha": 0.66 },
         "purpleSoft": { "hex": "#1f7aa8" },
         "tabEmber": { "hex": "#2a8fc4" },
@@ -363,7 +393,9 @@
         "selection": { "hex": "#15608a" },
         "menuSelection": { "hex": "#15608a" },
         "menuHover": { "hex": "#15608a", "alpha": 0.9 },
-        "wellFill": { "hex": "#8a93a5", "alpha": 0.43 },
+        "wellFill": { "hex": "#8a93a5", "alpha": 0.28 },
+        "badgeFillSubtle": { "hex": "#8a93a5", "alpha": 0.28 },
+        "mapNodeOff": { "hex": "#c4c9d2" },
         "fieldFill": { "hex": "#f4f6f9", "alpha": 0.6 },
         "consentFill": { "hex": "#f4f6f9", "alpha": 0.45 },
         "cardHover": { "hex": "#f7f8fb", "alpha": 0.8 },
@@ -441,6 +473,7 @@
     },
     "flatDark": {
       "color": {
+        "linkText": { "hex": "#a07cff" },
         "textPrimary": { "hex": "#f2f3f8" },
         "textSecondary": { "hex": "#f2f3f8", "alpha": 0.88 },
         "textTertiary": { "hex": "#f2f3f8", "alpha": 0.84 },

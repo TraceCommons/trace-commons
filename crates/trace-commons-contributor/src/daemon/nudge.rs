@@ -161,7 +161,7 @@ pub enum NudgeKind {
     /// (`queue::idle_candidates`). The primary phase-1 trigger. Its "Not
     /// now" is U1's: the two ask for decisions on the same sessions.
     IdleSessions,
-    /// U1: previewed, undecided sessions in folders set to Ask me
+    /// U1: previewed, undecided sessions in folders set to Ask
     /// (`queue::unpurposed_traces`). It has no notification kind of its own:
     /// the digest already covers that moment.
     ReviewBacklog,
@@ -459,7 +459,7 @@ impl NeverProjects {
 ///
 /// Withdrawn or revoked records, and records from a Never folder, are never
 /// counted, but their marks still advance, so a folder later set back to
-/// Ask me does not replay its old verdicts. `rejected` is not news.
+/// Ask does not replay its old verdicts. `rejected` is not news.
 #[must_use]
 pub fn verdict_delta(
     marks: &BTreeMap<String, VerdictMark>,
@@ -1355,7 +1355,7 @@ mod tests {
         assert_eq!(got, None, "a Never folder's verdicts give 0");
         assert!(marks[&sid(3).to_string()].accepted, "{marks:?}");
 
-        // The folder is set back to Ask me: its old verdict stays old.
+        // The folder is set back to Ask: its old verdict stays old.
         let (replayed, _) = verdict_delta(&marks, &[never_rec], &no_never(), now());
         assert_eq!(replayed, None);
     }

@@ -9,7 +9,7 @@ import TCShellCore
 /// hierarchy). A folder can hold sessions from several tools, so each
 /// session row shows its own tool. Folders are ordered by their most recent
 /// waiting session, then by name. Ignored folders are drawn, with a switch
-/// back to Ask me, while the View menu's "Show ignored folders" asks
+/// back to Ask, while the View menu's "Show ignored folders" asks
 /// for them (Ron's shell, #1146 `showIgnored`, shown by default).
 ///
 /// `tools` and `unplaced` are the per-tool aggregate the flow map draws (and
@@ -34,6 +34,37 @@ import TCShellCore
 ///   drawn under its shared name, never its `unknown-project` slug, and is
 ///   never offered automatic.
 struct TracesTree: Equatable {
+    /// The tree narrowed to `query` (the Traces search): a folder whose
+    /// label or path holds it keeps every session; otherwise a folder keeps
+    /// the sessions whose title, folder label or tool holds it, and a folder
+    /// left with none is dropped. Case and diacritics are ignored; a blank
+    /// query is the whole tree.
+    func matching(_ query: String) -> TracesTree {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return self }
+        func has(_ text: String?) -> Bool {
+            guard let text else { return false }
+            return text.range(of: needle, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
+        func narrowed(_ folder: FolderNode) -> FolderNode? {
+            if has(folder.label) || has(folder.path) { return folder }
+            var kept = folder
+            kept.sessions = folder.sessions.filter {
+                has($0.title) || has($0.projectLabel) || has(SourceKind(rawValue: $0.source)?.displayName)
+            }
+            return kept.sessions.isEmpty ? nil : kept
+        }
+        var result = self
+        result.folders = folders.compactMap(narrowed)
+        result.unplaced = unplaced.compactMap(narrowed)
+        result.tools = tools.compactMap { tool in
+            var kept = tool
+            kept.folders = tool.folders.compactMap(narrowed)
+            return kept.folders.isEmpty ? nil : kept
+        }
+        return result
+    }
+
     var tools: [ToolNode]
     /// Folders no session places under a tool yet (K11).
     var unplaced: [FolderNode]

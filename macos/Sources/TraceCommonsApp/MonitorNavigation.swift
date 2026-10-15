@@ -11,6 +11,14 @@ enum HomePage: String {
     case missionDrafts
 }
 
+/// The Traces tab's pages: the tree, or History, opened from the History
+/// button beside the order control (owner, 2026-10-12: History moved here
+/// from Home), with a breadcrumb back to the tree.
+enum TracesPage: String {
+    case tree
+    case history
+}
+
 /// Where an outside caller wants the Monitor to go. Nothing here sends.
 enum MonitorDestination: Equatable, Sendable {
     case home(HomePage)

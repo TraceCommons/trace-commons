@@ -72,3 +72,54 @@ an explicit new selection before a CLI launch without `--account`.
 No real subscription sign-in or provider-key validation is performed by the
 fixture test suite. Native sign-in and external-terminal behavior must also be
 smoke-tested on each release platform.
+
+## OpenCode sessions
+
+OpenCode **1.19.0** is supported for managed launches using an OpenAI API key
+(`api-key`) or NEAR AI key (`near-ai`). OpenCode subscription sign-in is not
+supported. The native macOS Add account dialog includes OpenCode; select an
+account, project, and explicit **Model ID** when launching. Enable **Collect
+this session** to collect the launched session when OpenCode exits.
+
+```sh
+secret-manager-command | near-ai accounts add --tool opencode --connection api-key --label Work --key-stdin
+near-ai launch opencode --account Work --model gpt-5 --cwd /path/to/project --collect-traces
+```
+
+Use an upstream model ID, without a provider prefix added by Trace Commons.
+For NEAR AI, use an ID advertised by that account's model catalogue. A model
+absent from the catalogue is refused; the route never substitutes the first
+model. Without `--collect-traces`, the native session remains local and no
+export is staged. The CLI is also the launch surface on Windows and Linux;
+this change does not extend the frozen desktop launch controls there.
+
+Each launch owns a separate HOME/XDG profile beneath its saved account and
+uses OpenCode's pure mode. Project OpenCode configuration and external plugins
+are disabled for this flow, and the ordinary OpenCode profile is unchanged.
+The selected model also handles OpenCode's small-model calls. The session's
+provider key is passed through the child environment, never a command argument
+or saved configuration file.
+
+Collection exports the exact seeded session ID, validates the complete export,
+then atomically writes it to `managed-opencode-exports` beneath the contributor
+state directory. These exports and an ordinary chosen export folder share one
+OpenCode source. Explicitly turning that source off pauses discovery of both;
+it does not delete the local files. Existing project policy, review, redaction,
+approval and admission rules still apply. Collection itself grants no upload
+permission and creates no attestation evidence.
+
+The process exit and collection result are separate: a session can exit normally
+while collection fails. The managed-session row reports pending, collected, or
+failed collection; `near-ai sessions list` exposes the same `collection` field.
+On export failure the native profile is preserved, and nothing partial enters
+the review pipeline. A forcibly terminated helper may leave an unknown process
+and pending collection; no automatic recovery or guessed session join occurs.
+Only the launched session is collected, not additional sessions created inside
+the TUI. Collection occurs on exit, not continuously while OpenCode is running.
+
+Ordinary, independently launched OpenCode sessions still require export into a
+chosen folder. The importer accepts session versions **1.18.29** and **1.19.0**;
+other versions fail closed. A local synthetic-model qualification covers
+import, exact-ID run, explicit model routing, export, validation and staging.
+It does not certify real provider credentials, NEAR AI receipts, or unattended
+end-to-end contribution without an invite.

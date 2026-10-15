@@ -2260,12 +2260,10 @@ unsafe fn borrow_str<'a>(ptr: *const c_char) -> anyhow::Result<&'a str> {
 /// stops a daemon from starting.
 ///
 /// Returns an owned JSON array; free it with [`tc_string_free`]. Each
-/// element carries `source` (`claude-code`, `codex`, `gemini-cli` or
-/// `cline`), `path`, `exists`, `session_count`, `most_recent` (RFC 3339 or
-/// null), `relocated_by_env` and `answers_at` (the vendor this tool's own
-/// calls answer at by default, e.g. `"Anthropic"`, or null for a tool with
-/// no single default -- see [`tc_discover_opencode_export`]'s doc for why
-/// OpenCode is one of those and is absent from this list entirely).
+/// element carries `source` (`claude-code`, `codex`, `gemini-cli`, `cline`
+/// or `opencode`), `path`, `exists`, `session_count`, `most_recent`,
+/// `relocated_by_env` and `answers_at`. OpenCode identifies its database file;
+/// selecting it explicitly opts into local session discovery.
 ///
 /// `answers_at` is a fixed label this build ships with, never something
 /// checked against the tool actually installed: it names what the released
@@ -2276,8 +2274,8 @@ unsafe fn borrow_str<'a>(ptr: *const c_char) -> anyhow::Result<&'a str> {
 /// being told about a trace. Here the caller is the contributor's own
 /// machine asking the contributor which of their own folders to watch, and a
 /// consent prompt that will not name what it is asking about is not a
-/// consent prompt. It reads directory entries and metadata only, and never
-/// opens a session file.
+/// consent prompt. It reads directory entries and session metadata only;
+/// OpenCode uses a read-only database query, never transcript bodies.
 ///
 /// Returns NULL only on a caught panic.
 #[unsafe(no_mangle)]
@@ -2293,14 +2291,9 @@ pub extern "C" fn tc_discover_sources() -> *mut c_char {
 /// export directory, so a Customize screen can say "N sessions found" for
 /// the folder they just picked rather than trusting the folder name alone.
 ///
-/// Needs no handle, like [`tc_discover_sources`], and for a stronger reason:
-/// OpenCode has no conventional per-user store to guess at before anyone has
-/// said anything -- its export folder is picked by the contributor, one at a
-/// time -- so it is not one of [`tc_discover_sources`]'s rows at all, blind
-/// or otherwise. This call exists so OpenCode can still be described once a
-/// folder is actually named, whether that is moments after a folder chooser
-/// closes or on a later run, reading back whatever this contributor already
-/// declared (`opencode_source` in the daemon's settings).
+/// Needs no handle, like [`tc_discover_sources`]. A path ending in
+/// `opencode.db` describes a native store; a directory describes exports.
+/// Existing directory declarations retain their export-only scope.
 ///
 /// Returns an owned JSON object with the same shape as one row of
 /// [`tc_discover_sources`] -- `source` (always `"opencode"`), `path`,
@@ -2309,8 +2302,8 @@ pub extern "C" fn tc_discover_sources() -> *mut c_char {
 /// `answers_at` (always `null`: OpenCode ships with no single default
 /// vendor to name). Free it with [`tc_string_free`].
 ///
-/// Reads directory entries and metadata only, and never opens a session
-/// file, per the same rule [`tc_discover_sources`] follows.
+/// Reads session metadata only, including read-only SQLite metadata queries
+/// for an explicitly selected native database.
 ///
 /// Returns NULL for a NULL or non-UTF-8 `path`, recording `null-pointer` or
 /// `invalid-utf8`, and NULL on a caught panic.
@@ -5622,7 +5615,7 @@ pub unsafe extern "C" fn tc_arming_offer_copy_json(
 /// The menu-bar Contribution mode pill (#1173,
 /// `project_copy::contribution_mode_copy`): a JSON object `{title, mixed,
 /// choices, override_active, clear}`, `choices` being `[{mode, label,
-/// line}]` for Ask me, Automatic and Never, in that order. `mode` is
+/// line}]` for Ask, Automatic and Never, in that order. `mode` is
 /// what `set_contribution_override` takes.
 ///
 /// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only

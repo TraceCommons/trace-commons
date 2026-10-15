@@ -13175,6 +13175,117 @@ async fn a_suspended_admission_upload_releases_its_admission_attempt() {
     fixture.shutdown().await;
 }
 
+/// #1237: a `contain` that commits after the route decision and before the
+/// receipt's own transaction. The route decision reads `pipeline`, the
+/// attempt is marked `processing`, and the receipt transaction then answers
+/// `NotRouted(Contained)`, writing nothing. The handler releases the attempt
+/// from `processing` (`Attempt::finish_without_effect`): the ledger row is
+/// `released`, the cost bound is given back, and a retry is not refused as
+/// in progress. Without the release the row stays `processing` with a live
+/// lease, and the retry is `409`.
+///
+/// The race is made deterministic with a trigger on the admission ledger
+/// that contains the tenant in the same transaction that marks its attempt
+/// `processing`, so the containment has committed before the receipt runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_contain_after_processing_releases_the_attempt_without_effect() {
+    let Some(fixture) =
+        AdmissionRoutingFixture::new("near-contain-in-flight-release-token", true).await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    write_routing_as_operator(tenant, "pipeline").await;
+    fixture.served().await;
+    let (_, global_before) = fixture.cost_bound_used().await;
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let function = format!("test_1237_contain_{suffix}");
+    let trigger = format!("test_1237_contain_trigger_{suffix}");
+    let url = pipeline_http_database_url()
+        .await
+        .expect("the suite's database variable is set");
+    let (owner, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect as the database owner");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    owner
+        .batch_execute(&format!(
+            "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql
+                 SECURITY DEFINER SET search_path = public AS $$
+             DECLARE
+                 event UUID := gen_random_uuid();
+                 generation BIGINT;
+             BEGIN
+                 -- A routing change names a new activation event with the
+                 -- row's state and generation (V110's triggers), as
+                 -- `write_routing_as_operator` writes one.
+                 UPDATE pipeline_tenant_routing
+                    SET routing_state = 'contained', activation_record_id = event
+                  WHERE tenant_id = NEW.tenant_id
+                 RETURNING routing_generation INTO generation;
+                 INSERT INTO pipeline_activation_events (
+                     tenant_id, event_id, action, previous_state, resulting_state,
+                     actor_principal_ref, reason_code, evidence_hash, routing_generation
+                 ) VALUES (
+                     NEW.tenant_id, event, 'contain', 'unselected', 'contained',
+                     'principal_sha256:' || repeat('ab', 32), 'test_routing_state',
+                     'sha256:' || repeat('cd', 32), generation
+                 );
+                 RETURN NEW;
+             END $$;
+             CREATE TRIGGER {trigger} AFTER UPDATE OF status ON trace_admission_submissions
+                 FOR EACH ROW WHEN (NEW.status = 'processing' AND NEW.tenant_id = '{tenant}')
+                 EXECUTE FUNCTION {function}();"
+        ))
+        .await
+        .expect("install the in-flight containment trigger");
+
+    let (status, refused) = fixture.post().await;
+    owner
+        .batch_execute(&format!(
+            "DROP TRIGGER {trigger} ON trace_admission_submissions;
+             DROP FUNCTION {function}();"
+        ))
+        .await
+        .expect("drop the in-flight containment trigger");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_receipt_intake_contained");
+    assert_eq!(fixture.runs().await, 0, "the receipt wrote no run");
+    assert_eq!(
+        fixture.ledger_status().await.as_deref(),
+        Some("released"),
+        "the attempt was processing, and the refusal released it"
+    );
+    assert_eq!(
+        fixture.cost_bound_used().await,
+        (0, global_before),
+        "the reservation's cost bound is given back"
+    );
+
+    // The tenant is contained now: a retry is refused for that reason, not
+    // as in progress, and releases its own reservation.
+    let (status, refused) = fixture.post().await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+    assert_eq!(refused["error"], "pipeline_receipt_intake_contained");
+    assert_eq!(fixture.ledger_status().await.as_deref(), Some("released"));
+    assert_eq!(fixture.cost_bound_used().await, (0, global_before));
+
+    // Back to `pipeline`: the retry is accepted, completes, and is charged
+    // once.
+    write_routing_as_operator(tenant, "pipeline").await;
+    let (status, accepted) = fixture.post().await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["status"], "processing");
+    assert_eq!(fixture.runs().await, 1);
+    assert_eq!(fixture.ledger_status().await.as_deref(), Some("completed"));
+    assert_ne!(fixture.cost_bound_used().await, (0, global_before));
+
+    fixture.shutdown().await;
+}
+
 impl AdmissionRoutingFixture {
     /// The upload is refused with `503` `label`, twice (a retry is refused
     /// for the same reason, never as in progress), and each time the attempt

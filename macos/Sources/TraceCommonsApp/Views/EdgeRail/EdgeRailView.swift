@@ -286,7 +286,7 @@ private struct EdgeRailPeekCard: View {
 
     // MARK: Private AI
 
-    /// Private AI, compact: the tab's summary (status, credential, tools),
+    /// Private AI, compact: the tab's summary (its status row),
     /// its window's totals and calls by day, and the balance card.
     @ViewBuilder
     private var privateAI: some View {

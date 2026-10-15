@@ -6,9 +6,9 @@ import TCShellCore
 /// The Inference tab (R8 of #1173): the model calls IronWire recorded,
 /// newest first, with what each was priced at and its proof label.
 ///
-/// An unreadable ledger is not an empty one: it draws a dash and the
-/// reason's fixed label, never an empty table. Priced is not billed: no
-/// figure here is money spent. Only `verified` is drawn as proof.
+/// An unreadable ledger is not an empty one: it never draws an empty
+/// table or a zero. Priced is not billed: no figure here is money spent.
+/// Only `verified` is drawn as proof.
 ///
 /// The ledger needs the daemon, so the tab reads its startup first, as the
 /// retired legacy destination did: the first run's Folders step when
@@ -62,10 +62,14 @@ struct InferenceTabView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 // The owner's order (2026-10-09, 2026-10-10), with the
-                // inspector closed on this tab: the prompts, then the Private
+                // inspector closed on this tab: the managed cards lead
+                // (owner, 2026-10-12), then the prompts, then the Private
                 // AI summary the inspector used to hold, then the calls, then
-                // the managed cards, balance and funding, and last the card
-                // that opens Settings, where the tools and the connection are.
+                // balance and funding, and last the card that opens
+                // Settings, where the tools and the connection are.
+                // Saved model accounts and managed sessions, which #1146
+                // has no panel for (owner ruling O3: in the main pane).
+                ManagedSessionsSection()
                 InspectorPrompts(store: traces)
                 PrivateAIInspectorView(store: store)
                 ledgerSections
@@ -95,9 +99,10 @@ struct InferenceTabView: View {
                         // card is drawn only for calls to list (owner,
                         // 2026-10-10: no card for one figure).
                         if !page.calls.isEmpty { calls(page) }
-                    } else {
-                        unreadable
                     }
+                    // An unreadable ledger draws nothing here: its lone
+                    // Calls dash is gone from under the summary (owner,
+                    // 2026-10-12).
                 } else if store.failures["inference_calls"] == nil {
                     GlassSpinner(standalone: true).frame(maxWidth: .infinity)
                 }
@@ -262,14 +267,6 @@ struct InferenceTabView: View {
         .accessibilityElement(children: .combine)
     }
 
-    /// An unreadable ledger: the calls legend cell with a dash, one line
-    /// rather than a card around one figure (owner, 2026-10-10). Unknown,
-    /// never zero.
-    private var unreadable: some View {
-        GlassLegendCell(MonitorWords.calls, value: "—", status: .shared)
-            .accessibilityValue(MonitorWords.unknown)
-    }
-
     // MARK: Formatting
 
     /// The tool's name when the shell knows the adapter, the raw id when
@@ -324,35 +321,22 @@ struct InferenceTabView: View {
 /// (owner, 2026-10-09; it was the tab's inspector, as #1146's
 /// `inference-inspector.tsx` draws it, and the inspector now stays closed
 /// there). No title of its own: the tab names it (owner, 2026-10-10).
-/// Three rows -- the listener's state in the core's sentence (never the
-/// switch: what was asked for is not what happened), the credential's
-/// state, and which tools are connected -- then the connected / not
-/// connected legend pair under them. The balance card is the main pane's,
-/// further down.
+/// One row: the listener's state in the core's sentence (never the
+/// switch: what was asked for is not what happened). The credential and
+/// Connected tools rows and the connected / not connected pair are gone
+/// (owner, 2026-10-12): sign-in and the tools are in Settings. The balance
+/// card is the main pane's, further down.
 struct PrivateAIInspectorView: View {
     let store: InferenceStore
     @EnvironmentObject private var model: AppModel
 
-    /// The tools, from the one list the Local tools card and the Private AI
-    /// map read too (`AppModel.harnesses`, as #1146 reads one
-    /// `useHarnesses()`), so the pane, the inspector and the map never
-    /// disagree. `.none` is a list not read: nil, never "no tools".
-    static func rows(_ list: HarnessList) -> [HarnessRow]? {
-        list == .none ? nil : list.harnesses
-    }
-
-    /// The one list, while it is current: this window's client has read
+    /// The one tool list (`AppModel.harnesses`), while it is current: this window's client has read
     /// the tools (`read`, which `InferenceStore.attach` forgets on a new
     /// client) and its last read did not fail. Otherwise `.none`, so a new
     /// client or a core that stopped answering is unknown, never the last
     /// list. Only whether `read` is there is asked, never its rows.
     static func liveHarnesses(_ list: HarnessList, read: HarnessList?, failure: DaemonDataError?) -> HarnessList {
         read == nil || failure != nil ? .none : list
-    }
-
-    /// `model.harnesses`, while this inspector's store says it is current.
-    private var harnesses: HarnessList {
-        Self.liveHarnesses(model.harnesses, read: store.harnesses, failure: store.failures["harness_list"])
     }
 
     var body: some View {
@@ -368,48 +352,13 @@ struct PrivateAIInspectorView: View {
     }
 
     private func summary(_ copy: PrivateInferenceCopy) -> some View {
-        let rows = Self.rows(harnesses)
-        let counts = Self.counts(rows)
         let state = PrivateAISwitchCard.stateLabel(
             state: InferenceAccountSection.surfaceState(store.privateAI?.state), copy: copy,
             calls: model.privateInferenceCalls)
-        return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                // #1146: the Status dot is on while working, outside otherwise.
-                InspectorFactRow(label: copy.inspectorStatus, value: state.line,
-                                 status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))
-                InspectorFactRow(
-                    label: copy.inspectorCredential,
-                    value: CredentialSurface.stateLine(model.credentialStatus, copy: copy, calls: model.credentialCalls))
-                InspectorFactRow(label: copy.inspectorConnectedTools, value: Self.names(rows, copy: copy))
-            }
+        // #1146: the Status dot is on while working, outside otherwise.
+        return InspectorFactRow(label: copy.inspectorStatus, value: state.line,
+                                status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))
             .padding(.horizontal, GlassTokens.Space.s2)
-            // Under the Connected tools row they count (owner, 2026-10-10).
-            // A list nobody could read is a dash in both cells, never zero.
-            // Always side by side, two equal columns, as #1146's
-            // `.tc-legend` grid is.
-            HStack(spacing: GlassTokens.Space.s3) {
-                GlassLegendCell(copy.inspectorConnected, value: counts.connected, status: .on)
-                GlassLegendCell(copy.inspectorNotConnected, value: counts.notConnected, status: .off)
-            }
-        }
-    }
-
-    /// Connected and not connected, or a dash for each when the list was
-    /// not read.
-    static func counts(_ rows: [HarnessRow]?) -> (connected: String, notConnected: String) {
-        guard let rows else { return ("—", "—") }
-        let connected = rows.filter(\.connected).count
-        return (String(connected), String(rows.count - connected))
-    }
-
-    /// The connected tools' names as the core reports them; the core's
-    /// "None" for a list read with none connected, and a dash for a list
-    /// nobody could read.
-    static func names(_ rows: [HarnessRow]?, copy: PrivateInferenceCopy) -> String {
-        guard let rows else { return "—" }
-        let connected = rows.filter(\.connected)
-        return connected.isEmpty ? copy.inspectorNone : connected.map(\.name).joined(separator: ", ")
     }
 
     /// The Status row's dot (#1146 `inference-inspector.tsx`): on while the

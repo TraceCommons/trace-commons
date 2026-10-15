@@ -9,10 +9,9 @@
 //! fill from memory. Nothing here selects anything, and nothing here writes
 //! a declaration.
 //!
-//! It reads directory entries and file metadata only. It never opens a
-//! session file: the point is to describe the store well enough to consent
-//! to, and reading the contents before consent would be the thing consent is
-//! for.
+//! It reads directory entries and session metadata only. OpenCode metadata
+//! comes from read-only SQLite queries; message and part bodies are never
+//! read before the contributor chooses the source.
 
 use std::path::{Path, PathBuf};
 
@@ -83,7 +82,7 @@ pub struct SourceCandidate {
     pub source: String,
     /// Where this store would be watched.
     pub path: PathBuf,
-    /// Whether that directory exists right now.
+    /// Whether that store exists right now (a database file for OpenCode).
     pub exists: bool,
     /// How many session files were found, counted recursively.
     ///
@@ -107,7 +106,7 @@ pub struct SourceCandidate {
     pub answers_at: Option<String>,
 }
 
-/// Probe both conventional session stores.
+/// Probe conventional session stores.
 ///
 /// `home` and `env` are injected so this is testable without touching the
 /// machine's real directories -- which matters more than usual here, since
@@ -177,36 +176,40 @@ where
             MESSAGES_JSON_SUFFIX,
             Walk::Recursive,
         ),
+        {
+            let mut row = describe_opencode(
+                &super::opencode_db::conventional_root(home, &env).join("opencode.db"),
+            );
+            row.relocated_by_env =
+                env("XDG_DATA_HOME").is_some_and(|v| Path::new(&v).is_absolute());
+            row
+        },
     ]
 }
 
-/// Probe using this machine's real home and environment.
-///
-/// OpenCode is deliberately absent from this list. Every other row here has
-/// a conventional per-user location this build can guess before anyone has
-/// said anything -- that guess is exactly what `Undeclared::Conventional` in
-/// `source::mod` is for. OpenCode has none: its export folder is picked by
-/// the contributor, one at a time, so there is nothing to probe blind and no
-/// path this call could put in a row without inventing one. See
-/// [`describe_opencode`] for the folder a contributor has actually named.
+/// Probe conventional stores, including OpenCode's local database.
+/// This describes candidates only; it does not declare or enable a source.
 pub fn probe_this_machine() -> Vec<SourceCandidate> {
     let home = super::home_dir();
     probe(&home, |key| std::env::var(key).ok())
 }
 
-/// Describe a folder the contributor has already named as their OpenCode
-/// export directory, the way [`probe`]'s rows describe a conventional store.
-///
-/// Unlike every source `probe` returns, this is never called blind: OpenCode
-/// has no conventional location (see [`probe_this_machine`]), so the only
-/// path worth describing is one the contributor picked, typically moments
-/// earlier through a folder chooser. A shell calls this right after that
-/// pick to say "N sessions found" with a real count rather than trusting the
-/// folder name alone, and again later to refresh the row for a folder
-/// recorded in settings (`opencode_source` in
-/// `daemon::settings::DaemonSettings`).
+/// Describe a native OpenCode store or a folder of explicit JSON exports.
+/// Database discovery reads session metadata, never message or part bodies.
 #[must_use]
 pub fn describe_opencode(path: &Path) -> SourceCandidate {
+    if path.file_name().is_some_and(|n| n == "opencode.db") {
+        let refs = super::opencode_db::discover(path.parent().unwrap_or(path)).unwrap_or_default();
+        return SourceCandidate {
+            source: SOURCE_OPENCODE.into(),
+            path: path.to_path_buf(),
+            exists: std::fs::symlink_metadata(path).is_ok(),
+            session_count: refs.len() as u64,
+            most_recent: refs.iter().filter_map(|r| r.group_modified_at).max(),
+            relocated_by_env: false,
+            answers_at: None,
+        };
+    }
     describe(
         SOURCE_OPENCODE,
         path.to_path_buf(),
@@ -262,8 +265,8 @@ const FOLDER_ENTRY_BUDGET: usize = 65_536;
 /// - A tool's own config files ([`CONFIG_FILE_NAMES`]) are never counted
 ///   as flat exports.
 ///
-/// Like everything in this module it reads directory entries and metadata
-/// only and never opens a file. It follows no symlink below the picked
+/// Reads session metadata only, including read-only SQLite queries for
+/// OpenCode. It follows no symlink below the picked
 /// folder; the picked folder itself is taken as given, symlink or not, as
 /// [`describe_opencode`] takes it.
 #[must_use]
@@ -282,6 +285,10 @@ pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
     };
     // A tool's home: its store is a subfolder, never followed through a
     // symlink, as every walk below the picked folder is.
+    if std::fs::symlink_metadata(path.join("opencode.db")).is_ok() {
+        let candidate = describe_opencode(&path.join("opencode.db"));
+        return vec![candidate];
+    }
     let homes: Vec<SourceCandidate> = [
         (
             SOURCE_CLAUDE_CODE,
@@ -811,13 +818,33 @@ mod tests {
     }
 
     #[test]
-    fn opencode_is_never_in_the_blind_probe() {
-        // OpenCode has no conventional location to guess at, unlike every
-        // other row here -- see `describe_opencode` for the folder a
-        // contributor has actually named.
+    fn opencode_probe_offers_native_store_without_enabling_collection() {
         let home = Scratch::new("opencode-blind");
         let found = probe(home.path(), no_env);
-        assert!(!found.iter().any(|c| c.source == SOURCE_OPENCODE));
+        let row = found
+            .iter()
+            .find(|c| c.source == SOURCE_OPENCODE)
+            .expect("OpenCode candidate");
+        assert_eq!(
+            row.path,
+            home.path().join(".local/share/opencode/opencode.db")
+        );
+        assert!(!row.exists);
+        assert_eq!(row.session_count, 0);
+        assert!(!super::super::undeclared_scans_conventional(
+            SOURCE_OPENCODE
+        ));
+        let data = home.path().join("data");
+        assert!(data.is_absolute());
+        let relocated = probe(home.path(), |key| {
+            (key == "XDG_DATA_HOME").then(|| data.to_string_lossy().into_owned())
+        });
+        let row = relocated
+            .iter()
+            .find(|c| c.source == SOURCE_OPENCODE)
+            .unwrap();
+        assert_eq!(row.path, data.join("opencode/opencode.db"));
+        assert!(row.relocated_by_env);
     }
 
     #[test]

@@ -483,19 +483,10 @@ final class TracesRowWordsTests: XCTestCase {
             fromJSON: TCCoreCopy.automaticGrantCopyJSON(disclosure: "patterns_only")))
         XCTAssertEqual(store.disclosureLines(armed.disclosure), words.lines)
         let view = TracesTreeView(store: store, selection: .constant(nil))
-        // The row draws the one sentence, never the long lines; those sit
-        // behind the info button with the core's "More about" label.
-        XCTAssertEqual(view.folderNotes(armed), [words.summary])
-        for line in words.lines { XCTAssertFalse(view.folderNotes(armed).contains(line)) }
-        let info = try XCTUnwrap(view.folderInfo(armed))
-        XCTAssertEqual(info.line, words.summary)
-        XCTAssertEqual(info.text, words.lines.joined(separator: "\n\n"))
-        XCTAssertEqual(
-            info.label,
-            FolderInspector.moreAboutLabel(try XCTUnwrap(store.words).inspector.contributionRule))
-        for folder in folders where folder.mode != .autoUpload {
-            XCTAssertNil(view.folderInfo(folder), folder.label)
-        }
+        // The row draws none of it (owner, 2026-10-12: too much text over
+        // the list); the inspector's Contribution rule card says it.
+        XCTAssertTrue(view.folderNotes(armed).isEmpty)
+        XCTAssertFalse(try TracesParityTests.text("Views/Monitor/TracesViews.swift").contains("folderInfo"))
         for folder in folders where folder.mode != .autoUpload {
             XCTAssertNil(folder.disclosure, folder.label)
             XCTAssertTrue(view.folderNotes(folder).isEmpty, folder.label)
@@ -886,7 +877,8 @@ final class TracesFolderFirstTreeTests: XCTestCase {
                      "requestSource(", "store.setSource(", "SourceChange"] {
             XCTAssertFalse(body.contains(gone), "the tree still draws \(gone)")
         }
-        XCTAssertTrue(body.contains("ForEach(store.tree.folders)"))
+        // The folders as the search narrows them (owner, 2026-10-12).
+        XCTAssertTrue(body.contains("ForEach(store.shownTree.folders)"))
     }
 
     /// Every session row shows its own tool's tile, and names the tool to
@@ -994,7 +986,7 @@ final class TracesFolderFirstTreeTests: XCTestCase {
 
     /// An ignored folder is drawn while the View menu's "Show ignored
     /// folders" asks for it (Ron's shell; hidden by default), drawn off and
-    /// saying the core's "ignored" line, with a switch back to Ask me and
+    /// saying the core's "ignored" line, with a switch back to Ask and
     /// no Submit. It resolves as a selection, so its inspector can show its
     /// rule.
     func test_ignoredFoldersStayInTheTree() throws {
@@ -1015,9 +1007,9 @@ final class TracesFolderFirstTreeTests: XCTestCase {
 
         let labels = try XCTUnwrap(TracesStore.disclosureCopy).folderModeLabels
         XCTAssertEqual(TracesTreeView.folderSub(folder, words: words, modeLabels: labels), words.tree.ignoredFolder)
-        // Back to Ask me (the Folder inspector's picker) is a direct write.
+        // Back to Ask (the Folder inspector's picker) is a direct write.
         guard case .apply = TracesTreeView.modeChange(folder, .ask) else {
-            return XCTFail("switching an ignored folder back to Ask me is a direct write")
+            return XCTFail("switching an ignored folder back to Ask is a direct write")
         }
         let store = TracesStore(client: SampleDaemonClient(.normalDay))
         XCTAssertFalse(FolderInspector.offersSubmitAll(folder, store: store))

@@ -43,9 +43,16 @@ final class ComponentParityTests: XCTestCase {
         XCTAssertEqual(GlassExpander.padding, EdgeInsets(top: 6, leading: 2, bottom: 2, trailing: 2))
     }
 
-    /// A key-value list sits 6pt in from each side (#1146 `.tc-kv`).
-    func test_theKeyValueListInset() {
-        XCTAssertEqual(GlassKeyValueList.inset, 6)
+    /// A key-value list sits flush with its card, its labels leading-aligned
+    /// in a column as wide as the longest (owner, 2026-10-12: #1146's 6pt
+    /// inset and 70pt trailing column pushed the values too far right).
+    func test_theKeyValueListIsFlushAndLeading() throws {
+        let source = try XCTUnwrap(Dictionary(uniqueKeysWithValues: try DesignSources.components())["Containers.swift"])
+        let list = try XCTUnwrap(source.range(of: "public struct GlassKeyValueList"))
+        let body = String(source[list.lowerBound...].prefix(2500))
+        XCTAssertTrue(body.contains(".gridColumnAlignment(.leading)"))
+        XCTAssertFalse(body.contains("width: 70"))
+        XCTAssertFalse(body.contains(".padding(.horizontal, Self.inset)"))
     }
 
     /// The tree's session tile carries #1146's mark; the folder's is the

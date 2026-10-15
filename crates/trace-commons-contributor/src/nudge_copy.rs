@@ -850,7 +850,7 @@ mod tests {
             .choices
             .into_iter()
             .find(|choice| choice.mode == "notify_only")
-            .expect("the Ask me choice")
+            .expect("the Ask choice")
             .label;
         assert!(NUDGE_BACKLOG_BODY.contains(ask), "{NUDGE_BACKLOG_BODY}");
     }
