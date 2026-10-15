@@ -146,8 +146,9 @@ pub fn launch(
             .replace('\n', "\\n")
             .replace('\r', "\\r");
         // The window is found by the new tab's tty, a string compare, and
-        // printed as its id. Any failure there prints nothing: the launch
-        // stands and the session simply cannot be shown.
+        // printed as its id. An empty tty matches nothing, and any failure
+        // there prints nothing: the launch stands and the session simply
+        // cannot be shown.
         let mut script = std::process::Command::new("/usr/bin/osascript");
         script.args([
             "-e",
@@ -158,9 +159,11 @@ pub fn launch(
                  set found to \"\"\n\
                  try\n\
                  set wanted to tty of t\n\
+                 if wanted is not \"\" then\n\
                  repeat with w in windows\n\
                  if wanted is in (tty of tabs of w) then set found to (id of w) as text\n\
                  end repeat\n\
+                 end if\n\
                  end try\n\
                  return found\n\
                  end tell"
