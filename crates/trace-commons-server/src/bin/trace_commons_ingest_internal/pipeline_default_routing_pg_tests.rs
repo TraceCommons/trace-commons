@@ -22,7 +22,7 @@ use super::pipeline_http_pg_tests::{
     account_owner_backend, route_request, route_trace, runtime_backend, tenant_tx,
     wait_for_run_state, write_routing_as_operator,
 };
-use crate::pipeline_default_routing::{
+use crate::ingest::app::pipeline_default_routing::{
     DEFAULT_ROUTING_ACTOR_REF, DEFAULT_ROUTING_ATTESTATION_SUFFIX, DEFAULT_ROUTING_PACKAGE_FILE,
     DefaultRouteOutcome, DefaultRoutingPassReport, PIPELINE_DEFAULT_ROUTING_REASON_CODE,
     PIPELINE_DEFAULT_ROUTING_RESULTS_MISSING_LABEL, PIPELINE_DEFAULT_ROUTING_RESULTS_STALE_LABEL,
@@ -912,7 +912,7 @@ async fn the_loop_routes_a_tenant_that_has_not_uploaded_yet() {
 /// tenants are routed. Prints the timings and asserts nothing about them
 /// (wall-clock asserts flake); run by hand:
 ///
-/// `cargo test -p trace-commons-server --bin trace-commons-ingest --
+/// `cargo test -p trace-commons-server --lib --
 /// --ignored --nocapture measure_idle_worker_pass_by_routed_tenant_count`
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "a measurement for the operator docs, not a check"]

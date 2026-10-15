@@ -45,13 +45,20 @@ use super::*;
 /// assembly. An assembly that enables payout passes them as
 /// `PipelinePayoutConfig::controls`, and `assemble_ingest_pipeline_runtime`
 /// refuses one that does not (Zaki review 1, round 2, finding 2).
+///
+/// The open build's production assembly never enables payout, so outside
+/// tests nothing in this crate reads the three NEAR payout fields; they are
+/// part of the seam's contract all the same.
 pub struct IngestPipelineRuntimeContext {
     pub backend: Arc<PgBackend>,
     pub artifact_store: Arc<dyn TraceArtifactStore>,
     pub object_store_name: String,
     pub lease_config: PipelineLeaseConfig,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub near_contract_id: Option<String>,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub near_confirmation_interval: StdDuration,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub near_payout_controls: PipelineNearPayoutControls,
     pub novelty_utility_checks: PipelineNoveltyUtilityChecks,
     /// Whether a tenant with no routing row on the receipts list is routed to
@@ -75,6 +82,12 @@ pub struct IngestPipelineRuntimeContext {
     /// runtime is selected. The production assembler refuses `None` with
     /// `pipeline_production_components_missing`.
     pub components: Option<Arc<super::production_assembly::PipelineGateComponents>>,
+    /// The Score policy factories ingest was started with
+    /// (`trace_commons_server::ingest::IngestOptions::with_score_policies`):
+    /// empty in the open build. An assembly passes them to
+    /// `PipelineServiceBuilder::with_score_policies`, so a bundle naming a
+    /// registered implementation id can bind.
+    pub score_policies: ScorePolicyRegistry,
 }
 
 /// Compile-time injection seam for a proprietary production pipeline
@@ -174,6 +187,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         novelty_utility_checks,
         main_gate,
         None,
+        ScorePolicyRegistry::new(),
     )
 }
 
@@ -195,6 +209,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime_with_components(
     novelty_utility_checks: &PipelineNoveltyUtilityChecks,
     main_gate: MainGateConfig,
     components: Option<Arc<super::production_assembly::PipelineGateComponents>>,
+    score_policies: ScorePolicyRegistry,
 ) -> anyhow::Result<Option<Arc<PipelineService>>> {
     anyhow::ensure!(
         !(allow_test_dependencies && production_required),
@@ -233,6 +248,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime_with_components(
         unqualified_routing_allowed,
         main_gate,
         components,
+        score_policies,
     })?;
     // M11: every object ref the pipeline commits names the store it was
     // written to, exactly as a legacy receipt's does.
@@ -1713,13 +1729,45 @@ async fn append_pipeline_review_audit_item(
         )
         .await?;
     }
-    if let Some(assessment) = &item.assessment {
+    if let Some(held_at) = item.settle_held_for_operator_at {
+        // #1313: a paid run whose Settle commit was refused for good is
+        // held for an operator (`awaiting_operator`) rather than failed.
+        // Label-only, like the other hold events. The submission stays
+        // `accepted` (its Review approved it and its leg paid), so the event
+        // records that status, with the hold as its reason; it is not a
+        // status change. One event per hold: its id is derived from the run
+        // and the hold's time.
+        append_pipeline_lifecycle_audit_event(
+            state,
+            db,
+            tenant_id,
+            item.submission_id,
+            pipeline_settle_hold_audit_event_id(tenant_id, item.run_id, held_at),
+            TraceCorpusStatus::Accepted,
+            trace_commons_server::versioned_pipeline::PIPELINE_SETTLE_HELD_FOR_OPERATOR_LABEL,
+            "pipeline settle operator hold audit event",
+        )
+        .await?;
+    }
+    for assessment in &item.assessments {
         if db
             .get_trace_audit_event_by_id(tenant_id, assessment.assessment_id)
             .await?
             .is_none()
         {
-            let (status, _) = review_audit_status(assessment.approved)?;
+            // A Score hold's resolution changes no corpus status: the event
+            // records the accepted status the submission keeps.
+            let (status, reason_label) = if assessment.at_score {
+                (
+                    TraceCorpusStatus::Accepted,
+                    score_hold_audit_reason(assessment.approved),
+                )
+            } else {
+                (
+                    review_audit_status(assessment.approved)?.0,
+                    assessment.reason_code.as_str(),
+                )
+            };
             let reviewer = TenantAuth {
                 principal_ref: assessment.reviewer_principal_ref.clone(),
                 ..system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF)
@@ -1728,7 +1776,7 @@ async fn append_pipeline_review_audit_item(
                 &reviewer,
                 item.submission_id,
                 status,
-                Some(&trace_free_text_audit_reason(&assessment.reason_code)),
+                Some(&trace_free_text_audit_reason(reason_label)),
             );
             event.event_id = assessment.assessment_id;
             event.actor_role = None;
@@ -1736,7 +1784,7 @@ async fn append_pipeline_review_audit_item(
                 state,
                 &reviewer,
                 event,
-                review_decision_audit_row(status, &assessment.reason_code, Some("reviewer"))?,
+                review_decision_audit_row(status, reason_label, Some("reviewer"))?,
                 "pipeline review assessment audit event",
             )
             .await?;
@@ -1766,6 +1814,22 @@ async fn append_pipeline_review_audit_item(
         .clear_review_audit_pending(tenant_id, item)
         .await?;
     Ok(())
+}
+
+/// The id of the audit event for the hold of `run_id` at `held_at` (V128
+/// `operator_held_at`): one per hold, so a run held again after a release
+/// gets a second event, and a repeated pass appends none.
+pub(crate) fn pipeline_settle_hold_audit_event_id(
+    tenant_id: &str,
+    run_id: Uuid,
+    held_at: chrono::DateTime<chrono::Utc>,
+) -> Uuid {
+    deterministic_trace_uuid_for_external_ref(
+        "pipeline-settle-held-for-operator-audit",
+        tenant_id,
+        run_id,
+        &held_at.timestamp_micros().to_string(),
+    )
 }
 
 /// Appends the system `lifecycle_status_change` event `event_id` of

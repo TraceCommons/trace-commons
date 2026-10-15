@@ -6586,28 +6586,6 @@ mod scalar_guard_tests {
     }
 }
 
-/// Discovers installed managed tools without a daemon or subprocess.
-/// Returns the same tools array as managed_snapshot. Free with tc_string_free.
-#[unsafe(no_mangle)]
-pub extern "C" fn tc_managed_tools_json() -> *mut c_char {
-    guarded_string_no_err(|| {
-        Ok(to_owned_cstring(&serde_json::to_string(
-            &trace_commons_contributor::managed::profiles::tools(),
-        )?))
-    })
-}
-
-/// Shared managed-session wording, available before daemon startup.
-/// Returns an owned JSON object; free it with tc_string_free.
-#[unsafe(no_mangle)]
-pub extern "C" fn tc_managed_copy_json() -> *mut c_char {
-    guarded_string_no_err(|| {
-        Ok(to_owned_cstring(&serde_json::to_string(
-            &trace_commons_contributor::managed::copy::copy(),
-        )?))
-    })
-}
-
 /// A4 (nudge design section 5): the in-process `tc_subscribe` path cannot
 /// declare `accepts`, so it is an older shell's subscriber and must never
 /// receive an opt-in event such as `reengage_due`.
@@ -6780,5 +6758,85 @@ mod in_process_subscribe_tests {
             seen.iter().any(|e| e == ipc::EVENT_REENGAGE_DUE),
             "an accepting subscriber missed reengage_due: {seen:?}"
         );
+    }
+}
+
+/// Discovers installed coding tools without a daemon or subprocess.
+/// Returns the same tools array as managed_snapshot (Claude Code, Codex and
+/// OpenCode). Availability implies no trace access or contribution consent.
+/// Free the returned owned JSON string with tc_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_managed_tools_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(&serde_json::to_string(
+            &trace_commons_contributor::managed::profiles::tools(),
+        )?))
+    })
+}
+
+/// Each coding tool's setup guide, `{source slug: https url}`, from
+/// `install_guides`: the one table first run and managed sessions read.
+/// Returns an owned JSON object; free it with tc_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_install_guides_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(&serde_json::to_string(
+            &trace_commons_contributor::install_guides::json(),
+        )?))
+    })
+}
+
+/// Shared managed-session wording, available before daemon startup.
+/// Returns an owned JSON object; free it with tc_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_managed_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(&serde_json::to_string(
+            &trace_commons_contributor::managed::copy::copy(),
+        )?))
+    })
+}
+
+#[cfg(test)]
+mod managed_availability_tests {
+    use super::*;
+
+    fn owned_json(pointer: *mut c_char) -> serde_json::Value {
+        assert!(!pointer.is_null());
+        // SAFETY: these exports return owned NUL-terminated strings. Copy the
+        // JSON before releasing the allocation exactly once through the ABI.
+        let text = unsafe { CStr::from_ptr(pointer) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        unsafe { tc_string_free(pointer) };
+        serde_json::from_str(&text).unwrap()
+    }
+
+    #[test]
+    fn tools_and_copy_are_available_without_a_daemon_handle() {
+        let tools = owned_json(tc_managed_tools_json());
+        let rows = tools.as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        for (row, name) in rows.iter().zip(["claude", "codex", "opencode"]) {
+            assert_eq!(row["tool"], name);
+            assert!(row["installed"].is_boolean());
+            assert!(row["install_url"].as_str().unwrap().starts_with("https://"));
+            assert_eq!(row.as_object().unwrap().len(), 3);
+        }
+        let copy = owned_json(tc_managed_copy_json());
+        for key in [
+            "tools_title",
+            "tools_empty",
+            "install",
+            "refresh",
+            "tool_unavailable",
+        ] {
+            assert!(copy[key].is_string(), "missing {key}");
+        }
+        assert_eq!(copy, trace_commons_contributor::managed::copy::copy());
+        let guides = owned_json(tc_install_guides_json());
+        assert_eq!(guides, trace_commons_contributor::install_guides::json());
+        assert_eq!(guides["claude-code"], tools[0]["install_url"]);
     }
 }

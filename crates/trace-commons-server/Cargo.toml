@@ -135,6 +135,15 @@ near-ai-scorer = ["trace-commons-gate-enclave/near-ai-scorer"]
 # `dcap-qvl` gets right.
 near-attestation-collateral = ["trace-commons-attestation/collateral-client"]
 
+# The ingest binary is a thin `main` over the library's entry point
+# (`trace_commons_server::ingest`). `src/bin/trace-commons-ingest.rs` is the
+# service itself, compiled into the library as `ingest::app`; declaring the
+# binary here under the same name keeps Cargo from also discovering that
+# file as a binary.
+[[bin]]
+name = "trace-commons-ingest"
+path = "src/bin/trace_commons_ingest_main.rs"
+
 [[bin]]
 name = "trace-commons-gate-calibrate"
 path = "src/bin/trace-commons-gate-calibrate.rs"

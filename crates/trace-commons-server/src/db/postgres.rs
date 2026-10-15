@@ -275,6 +275,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_receipt_ownership",
     "pipeline_policy_interventions",
     "pipeline_index_rebuild_fences",
+    "pipeline_score_bases",
     "trace_public_runs",
     "trace_reward_operators",
     "trace_reward_programs",
@@ -1826,6 +1827,24 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         127,
         "admission_release_without_effect",
         include_str!("../../../../migrations/V127__admission_release_without_effect.sql"),
+    ),
+    // V128 (#1313): a finishable Settle run's one extra attempt
+    // (`settle_finish_granted_at`), the `awaiting_operator` run state for a
+    // paid run whose Settle commit is refused for good, and
+    // `pipeline_score_bases`, the unapplied runs a Score that runs under
+    // the runtime controls counted.
+    (
+        128,
+        "pipeline_settle_finish_and_score_bases",
+        include_str!("../../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"),
+    ),
+    // V130: a human assessment per phase (`phase`, and the Score hold's
+    // `hold_label`), one per run and phase, so an operator can resolve a
+    // Score hold. No grant changes. V129 is taken by an open PR.
+    (
+        130,
+        "pipeline_score_hold_assessments",
+        include_str!("../../../../migrations/V130__pipeline_score_hold_assessments.sql"),
     ),
 ];
 
@@ -8057,6 +8076,7 @@ mod tests {
             ),
             include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
             include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
+            include_str!("../../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -8099,6 +8119,7 @@ mod tests {
             ),
             include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
             include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
+            include_str!("../../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),

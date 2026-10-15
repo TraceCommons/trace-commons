@@ -38,12 +38,34 @@ public sealed record ManagedSnapshot(
     ulong Revision, ManagedAccount[] Accounts, ManagedSession[] Sessions,
     Dictionary<string, ulong> Generations, ManagedCapabilities Capabilities,
     Dictionary<string, string> Copy,
-    [property: JsonPropertyName("sign_in_accounts")] ManagedAccount[]? SignInAccounts = null,
-    ManagedTool[]? Tools = null)
+    [property: JsonPropertyName("sign_in_accounts")] ManagedAccount[]? SignInAccounts = null, ManagedTool[]? Tools = null)
 {
+    /// <summary>The tools this shell launches, in the order the Add and
+    /// Launch dialogs offer them. OpenCode is one since #1418.</summary>
+    public static readonly string[] LaunchedTools = ["claude", "codex", "opencode"];
+    // Older snapshots retain every launched tool. New inventories
+    // must positively report an installed managed tool.
+    public bool CanLaunch(string tool) => LaunchedTools.Contains(tool) &&
+        (Tools is null || Tools.Any(t => t.Tool == tool && t.Installed));
+    public string[] SetupTools => LaunchedTools.Where(CanLaunch).ToArray();
+    /// <summary>The tools the install block offers: every tool this shell
+    /// launches, and only while none is installed (Ron, 2026-10-15).</summary>
+    public ManagedTool[] InstallTools => Tools is null || SetupTools.Length > 0 ? []
+        : Tools.Where(t => LaunchedTools.Contains(t.Tool)).ToArray();
+    /// <summary>Whether the caption and Install belong on an account row: the
+    /// inventory reports the tool missing. Keys on installation, not on
+    /// launchability, so an installed OpenCode account is not "missing".</summary>
+    public bool ToolMissing(string tool) =>
+        Tools is not null && !Tools.Any(t => t.Tool == tool && t.Installed);
+    /// <summary>Reconnect is hidden, not disabled, while the tool is missing.
+    /// OpenCode has no subscription, so it never offers one.</summary>
+    public bool OffersReconnect(ManagedAccount account) =>
+        account.Connection == "subscription" && ManagedSignIn.Tools.Contains(account.Tool) && CanLaunch(account.Tool);
+    /// <summary><c>tool_unavailable</c> with <c>{tool}</c> filled with the tool's name.</summary>
+    public string ToolUnavailable(string tool) => Text("tool_unavailable").Replace("{tool}", Text(tool));
+    /// <summary>The tools to offer an update for after an unsupported-version
+    /// refusal: the attempted tool, or every installed one for an old payload.</summary>
     public ManagedTool[] VersionRecoveryTools(string? attempted) => (Tools ?? []).Where(t => t.Installed && (attempted is null || t.Tool == attempted)).ToArray();
-    public bool CanLaunch(string tool) => Tools?.FirstOrDefault(t => t.Tool == tool)?.Installed != false;
-    public string[] SetupTools => Tools is null ? ["claude", "codex", "opencode"] : Tools.Where(t => t.Installed).Select(t => t.Tool).ToArray();
     /// <summary>Connections offered when adding an account. OpenCode has no
     /// subscription and no NEAR AI sign-in entry, so it keeps its NEAR AI key;
     /// Claude Code and Codex follow <see cref="ManagedSignIn.ConnectionOptions"/>.</summary>
@@ -55,7 +77,7 @@ public sealed record ManagedSnapshot(
     [JsonIgnore] public bool NearAiSignedIn => Capabilities.NearAiSignin;
 
     /// <summary>The tool's NEAR AI sign-in entry, only while signed in.</summary>
-    public ManagedAccount? SignInEntry(string tool) => NearAiSignedIn
+    public ManagedAccount? SignInEntry(string tool) => NearAiSignedIn && CanLaunch(tool)
         ? System.Array.Find(SignInAccounts ?? [], a => a.Tool == tool && a.Connection == "near_ai_signin")
         : null;
 

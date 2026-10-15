@@ -80,7 +80,7 @@ let anyone who knew a NEAR account name compute its tenant id offline.
 An earlier version of this section also said the end-to-end matrix that would
 catch this is `#[ignore]`d and therefore does not run. **That was wrong when
 written.** `#[ignore]` is how the `postgres-suites` job *selects* these tests:
-they run on every PR via `cargo test --bin trace-commons-ingest
+they run on every PR via `cargo test -p trace-commons-server --lib
 admission_pg_tests -- --ignored`, and that job's `xact_commit` guard fails if
 they silently do not. Three tests cover this path —
 `actual_postgres_challenge_witness_ingest_and_terminal_retry`,

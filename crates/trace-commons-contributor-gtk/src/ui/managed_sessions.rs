@@ -4,22 +4,6 @@ use adw::prelude::*;
 use serde_json::{Value, json};
 use std::rc::Rc;
 
-fn available(snapshot: &Value, tool: &str) -> bool {
-    snapshot["tools"]
-        .as_array()
-        .and_then(|tools| tools.iter().find(|t| t["tool"] == tool))
-        .is_none_or(|t| t["installed"] != false)
-}
-fn setup_tools(snapshot: &Value) -> Vec<String> {
-    match snapshot["tools"].as_array() {
-        Some(tools) => tools
-            .iter()
-            .filter(|t| t["installed"] == true)
-            .filter_map(|t| t["tool"].as_str().map(str::to_owned))
-            .collect(),
-        None => vec!["claude".into(), "codex".into(), "opencode".into()],
-    }
-}
 fn connections(tool: &str) -> Vec<&'static str> {
     if tool == "opencode" {
         vec!["api_key", "near_ai"]
@@ -43,6 +27,92 @@ fn text(key: &str) -> String {
         .unwrap_or_default()
         .into()
 }
+/// The tools this shell launches: OpenCode too since #1418.
+const LAUNCHED: [&str; 3] = ["claude", "codex", "opencode"];
+fn can_launch(snapshot: &Value, tool: &str) -> bool {
+    LAUNCHED.contains(&tool)
+        && snapshot["tools"].as_array().is_none_or(|tools| {
+            tools
+                .iter()
+                .any(|t| t["tool"] == tool && t["installed"] == true)
+        })
+}
+fn setup_tools(snapshot: &Value) -> Vec<&'static str> {
+    LAUNCHED
+        .into_iter()
+        .filter(|tool| can_launch(snapshot, tool))
+        .collect()
+}
+/// The tools to offer Install for: every tool this shell launches, and only
+/// while none of them is installed (Ron's review of #1419, 2026-10-15).
+fn install_block(snapshot: &Value) -> Vec<Value> {
+    let Some(tools) = snapshot["tools"].as_array() else {
+        return Vec::new();
+    };
+    if !setup_tools(snapshot).is_empty() {
+        return Vec::new();
+    }
+    tools
+        .iter()
+        .filter(|t| LAUNCHED.contains(&t["tool"].as_str().unwrap_or_default()))
+        .cloned()
+        .collect()
+}
+/// Whether the caption and Install belong on an account row: the tool is
+/// missing from the snapshot's inventory. This keys on installation, not on
+/// launchability, so an OpenCode account on a machine with OpenCode is clean.
+fn tool_missing(snapshot: &Value, tool: &str) -> bool {
+    snapshot["tools"].as_array().is_some_and(|tools| {
+        !tools
+            .iter()
+            .any(|t| t["tool"] == tool && t["installed"] == true)
+    })
+}
+/// Reconnect is hidden, not disabled, while the account's tool is missing.
+fn offers_reconnect(snapshot: &Value, account: &Value) -> bool {
+    account["connection"] == "subscription"
+        && connections(account["tool"].as_str().unwrap_or_default()).contains(&"subscription")
+        && can_launch(snapshot, account["tool"].as_str().unwrap_or_default())
+}
+/// `tool_unavailable` with `{tool}` filled with the tool's display name.
+fn tool_unavailable(tool: &str) -> String {
+    text("tool_unavailable").replace("{tool}", &text(tool))
+}
+/// One Install button for a tool's setup guide, named with the tool.
+fn install_button(tool: &Value) -> Option<gtk::Button> {
+    let id = tool["tool"].as_str().unwrap_or_default().to_owned();
+    let url = tool["install_url"].as_str()?.to_owned();
+    let install = button("install", move || {
+        let _ =
+            gtk::gio::AppInfo::launch_default_for_uri(&url, None::<&gtk::gio::AppLaunchContext>);
+    });
+    install.update_property(&[gtk::accessible::Property::Label(&format!(
+        "{} {}",
+        text("install"),
+        text(&id)
+    ))]);
+    Some(install)
+}
+/// A bare refresh glyph, its tooltip and accessible name "Refresh".
+fn refresh_glyph(app: &Rc<App>) -> gtk::Button {
+    let glyph = gtk::Button::from_icon_name("view-refresh-symbolic");
+    glyph.add_css_class("flat");
+    glyph.set_tooltip_text(Some(&text("refresh")));
+    glyph.update_property(&[gtk::accessible::Property::Label(&text("refresh"))]);
+    let app = Rc::clone(app);
+    glyph.connect_clicked(move |_| refresh(&app));
+    glyph
+}
+fn launch_accounts(snapshot: &Value) -> Vec<Value> {
+    snapshot["accounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|a| can_launch(snapshot, a["tool"].as_str().unwrap_or_default()))
+        .cloned()
+        .collect()
+}
+
 fn button(key: &str, f: impl Fn() + 'static) -> gtk::Button {
     let b = gtk::Button::with_label(&text(key));
     b.connect_clicked(move |_| f());
@@ -89,7 +159,7 @@ fn action(app: &Rc<App>, method: &str, params: Value, terminal: bool) {
             });
             let a = Rc::clone(app);
             let w = window.clone();
-            content.append(&button("check_again", move || {
+            content.append(&button("refresh", move || {
                 refresh(&a);
                 w.close();
             }));
@@ -113,29 +183,26 @@ pub fn refresh(app: &Rc<App>) {
         let launch_app = Rc::clone(app);
         let launch_snapshot = snapshot.clone();
         let launch = button("launch", move || launch_dialog(&launch_app, &launch_snapshot));
-        launch.set_sensitive(snapshot["capabilities"]["terminal_launch"] == true && snapshot["accounts"].as_array().is_some_and(|a| a.iter().any(|a| available(&snapshot, a["tool"].as_str().unwrap_or_default()))));
+        launch.set_sensitive(snapshot["capabilities"]["terminal_launch"] == true && !launch_accounts(&snapshot).is_empty());
         controls.append(&launch);
         let add_app = Rc::clone(app);
         let terminal = snapshot["capabilities"]["terminal_launch"] == true;
-        let add_snapshot = snapshot.clone();
-        let add = button("add", move || add_dialog(&add_app, terminal, &add_snapshot));
-        add.set_sensitive(!setup_tools(&snapshot).is_empty());
-        controls.append(&add);
-        let a = Rc::clone(app);
-        controls.append(&button("check_again", move || refresh(&a)));
+        let tools = setup_tools(&snapshot);
+        // Hidden, not disabled, with no tool to add an account for.
+        if !tools.is_empty() {
+            controls.append(&button("add", move || add_dialog(&add_app, terminal, tools.clone())));
+        }
         root.append(&controls);
-        if let Some(tools) = snapshot["tools"].as_array() {
-            let any_installed = tools.iter().any(|t| t["installed"] == true);
-            if !any_installed { style::append_body(root, text("tools_empty")); }
-            for tool in tools {
-                if tool["installed"] == true { continue; }
-                let saved = snapshot["accounts"].as_array().is_some_and(|a| a.iter().any(|a| a["tool"] == tool["tool"]));
-                if any_installed && !saved { continue; }
-                style::append_body(root, format!("{} · {}", text(tool["tool"].as_str().unwrap_or_default()), text("not_installed")));
-                if let Some(url) = tool["install_url"].as_str() {
-                    let link = gtk::LinkButton::with_label(url, &text("install"));
-                    root.append(&link);
-                }
+        let missing = install_block(&snapshot);
+        if !missing.is_empty() {
+            let heading = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            heading.append(&style::section(&text("tools_title")));
+            heading.append(&refresh_glyph(app));
+            root.append(&heading);
+            style::append_body(root, text("tools_empty"));
+            for tool in &missing {
+                style::append_body(root, text(tool["tool"].as_str().unwrap_or_default()));
+                if let Some(install) = install_button(tool) { root.append(&install); }
             }
         }
         let destination = snapshot["capabilities"]["terminal_destination"].as_str();
@@ -143,7 +210,12 @@ pub fn refresh(app: &Rc<App>) {
         for account in snapshot["accounts"].as_array().into_iter().flatten() {
             let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
             style::append_body(&row, format!("{} · {} · {} · {}", account["label"].as_str().unwrap_or_default(), text(account["tool"].as_str().unwrap_or_default()), text(account["connection"].as_str().unwrap_or_default()), account["auth_state"].as_str().unwrap_or_default()));
-            if !available(&snapshot, account["tool"].as_str().unwrap_or_default()) { style::append_body(&row, text("tool_unavailable")); }
+            let tool = account["tool"].as_str().unwrap_or_default();
+            if tool_missing(&snapshot, tool) {
+                style::append_meta(&row, tool_unavailable(tool));
+                let availability = snapshot["tools"].as_array().into_iter().flatten().find(|t| t["tool"] == tool);
+                if let Some(install) = availability.and_then(install_button) { row.append(&install); }
+            }
             let held = snapshot["sessions"].as_array().into_iter().flatten().any(|s| s["account_id"] == account["id"] && s["state"] != "exited" && s["state"] != "failed");
             let controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             let a = Rc::clone(app); let account_copy = account.clone();
@@ -151,10 +223,10 @@ pub fn refresh(app: &Rc<App>) {
             controls.append(&button("use_default", move || action(&a, "managed_select", json!({"selection":{"tool":account_copy["tool"],"connection":account_copy["connection"],"account_id":account_copy["id"],"generation":generation},"expected_generation":generation}), false)));
             let a = Rc::clone(app); let account_copy = account.clone();
             controls.append(&button("rename_short", move || rename_dialog(&a, &account_copy)));
-            if account["connection"] == "subscription" {
+            if offers_reconnect(&snapshot, account) {
                 let a = Rc::clone(app); let id = account["id"].clone();
                 let reconnect = button("reconnect", move || action(&a, "managed_account_reconnect", json!({"account_id":id}), true));
-                reconnect.set_sensitive(!held && terminal && available(&snapshot, account["tool"].as_str().unwrap_or_default())); controls.append(&reconnect);
+                reconnect.set_sensitive(!held && terminal); controls.append(&reconnect);
             }
             let a = Rc::clone(app); let id = account["id"].clone();
             let remove = button("remove", move || {
@@ -224,16 +296,15 @@ fn rename_dialog(app: &Rc<App>, account: &Value) {
     window.present();
 }
 
-fn add_dialog(app: &Rc<App>, terminal: bool, snapshot: &Value) {
-    let (window, content) = dialog(app, "save_title");
-    let tools = setup_tools(snapshot);
+fn add_dialog(app: &Rc<App>, terminal: bool, tools: Vec<&'static str>) {
     if tools.is_empty() {
         return;
     }
-    let tool_labels: Vec<_> = tools.iter().map(|t| text(t)).collect();
+    let (window, content) = dialog(app, "save_title");
+    let tool_labels: Vec<_> = tools.iter().map(|id| text(id)).collect();
     let tool =
         gtk::DropDown::from_strings(&tool_labels.iter().map(String::as_str).collect::<Vec<_>>());
-    let kinds = Rc::new(std::cell::RefCell::new(connections(&tools[0])));
+    let kinds = Rc::new(std::cell::RefCell::new(connections(tools[0])));
     let labels: Vec<_> = kinds.borrow().iter().map(|k| text(k)).collect();
     let connection =
         gtk::DropDown::from_strings(&labels.iter().map(String::as_str).collect::<Vec<_>>());
@@ -275,7 +346,7 @@ fn add_dialog(app: &Rc<App>, terminal: bool, snapshot: &Value) {
     tool.connect_selected_notify(move |t| {
         scope.set_visible(
             ts.get(t.selected() as usize)
-                .is_some_and(|t| t == "opencode"),
+                .is_some_and(|t| *t == "opencode"),
         )
     });
     content.append(&open_code_scope);
@@ -312,14 +383,7 @@ fn add_dialog(app: &Rc<App>, terminal: bool, snapshot: &Value) {
 }
 
 fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
-    let Some(accounts) = snapshot["accounts"].as_array() else {
-        return;
-    };
-    let accounts: Vec<_> = accounts
-        .iter()
-        .filter(|a| available(snapshot, a["tool"].as_str().unwrap_or_default()))
-        .cloned()
-        .collect();
+    let accounts = launch_accounts(snapshot);
     if accounts.is_empty() {
         return;
     }
@@ -430,17 +494,88 @@ mod tests {
     }
 
     #[test]
-    fn discovery_preserves_unknown_and_filters_explicit_absence() {
-        assert!(available(&json!({}), "opencode"));
-        let snapshot = json!({"tools":[{"tool":"claude","installed":false},{"tool":"opencode","installed":true}]});
-        assert!(!available(&snapshot, "claude"));
-        assert_eq!(setup_tools(&snapshot), vec!["opencode"]);
-        assert!(setup_tools(&json!({"tools":[{"tool":"opencode","installed":false}]})).is_empty());
-    }
-
-    #[test]
     fn opencode_has_no_subscription() {
         assert_eq!(connections("opencode"), vec!["api_key", "near_ai"]);
         assert_eq!(connections("codex")[0], "subscription");
+    }
+
+    #[test]
+    fn availability_filters_launch_without_removing_saved_accounts() {
+        let snapshot = json!({"tools":[{"tool":"claude","installed":false},{"tool":"codex","installed":true},{"tool":"opencode","installed":true}],
+            "accounts":[{"tool":"claude"},{"tool":"codex"},{"tool":"opencode"}]});
+        assert_eq!(setup_tools(&snapshot), vec!["codex", "opencode"]);
+        assert_eq!(
+            launch_accounts(&snapshot),
+            vec![json!({"tool":"codex"}), json!({"tool":"opencode"})]
+        );
+        assert_eq!(snapshot["accounts"].as_array().unwrap().len(), 3);
+        // GTK launches OpenCode since #1418.
+        assert!(can_launch(&snapshot, "opencode"));
+    }
+
+    #[test]
+    fn older_snapshot_retains_managed_tools_but_empty_inventory_does_not() {
+        assert_eq!(setup_tools(&json!({})), vec!["claude", "codex", "opencode"]);
+        assert!(setup_tools(&json!({"tools":[]})).is_empty());
+        assert_eq!(
+            setup_tools(&json!({"tools":[{"tool":"opencode","installed":true}]})),
+            vec!["opencode"]
+        );
+        assert!(setup_tools(&json!({"tools":[{"tool":"opencode","installed":false}]})).is_empty());
+    }
+
+    /// Ron's review of #1419 (2026-10-15): the install block, and Add's
+    /// absence, only while no tool this shell launches is installed.
+    #[test]
+    fn the_install_block_shows_only_when_no_tool_is_installed() {
+        let none = json!({"tools":[{"tool":"claude","installed":false},{"tool":"codex","installed":false},{"tool":"opencode","installed":false}]});
+        let one = json!({"tools":[{"tool":"claude","installed":false},{"tool":"codex","installed":true},{"tool":"opencode","installed":false}]});
+        let only_opencode = json!({"tools":[{"tool":"claude","installed":false},{"tool":"codex","installed":false},{"tool":"opencode","installed":true}]});
+        assert_eq!(install_block(&none).len(), 3);
+        assert!(install_block(&one).is_empty());
+        assert!(install_block(&only_opencode).is_empty());
+        assert!(install_block(&json!({})).is_empty());
+    }
+
+    /// The caption and Install key on the inventory. OpenCode has no
+    /// subscription, so it never offers Reconnect (Ron, #1419).
+    #[test]
+    fn an_installed_opencode_account_is_not_reported_missing() {
+        let installed = json!({"tools":[{"tool":"claude","installed":true},{"tool":"opencode","installed":true}]});
+        let absent = json!({"tools":[{"tool":"claude","installed":true},{"tool":"opencode","installed":false}]});
+        let account = json!({"tool":"opencode","connection":"api_key"});
+        assert!(!tool_missing(&installed, "opencode"));
+        assert!(tool_missing(&absent, "opencode"));
+        assert!(!tool_missing(&json!({}), "opencode"));
+        assert!(can_launch(&installed, "opencode"));
+        assert!(!can_launch(&absent, "opencode"));
+        assert!(!offers_reconnect(
+            &installed,
+            &json!({"tool":"opencode","connection":"subscription"})
+        ));
+        assert_eq!(
+            launch_accounts(&json!({"tools":installed["tools"],"accounts":[account.clone()]})),
+            vec![account.clone()]
+        );
+        assert!(launch_accounts(&json!({"tools":absent["tools"],"accounts":[account]})).is_empty());
+    }
+
+    /// A missing tool's account keeps its row and caption, with the tool
+    /// named; Reconnect is hidden, not disabled.
+    #[test]
+    fn a_missing_tool_hides_reconnect_and_names_the_tool() {
+        let snapshot = json!({"tools":[{"tool":"claude","installed":false},{"tool":"codex","installed":true}]});
+        let claude = json!({"tool":"claude","connection":"subscription"});
+        let codex = json!({"tool":"codex","connection":"subscription"});
+        assert!(!offers_reconnect(&snapshot, &claude));
+        assert!(offers_reconnect(&snapshot, &codex));
+        assert!(!offers_reconnect(
+            &snapshot,
+            &json!({"tool":"codex","connection":"api_key"})
+        ));
+        assert_eq!(
+            tool_unavailable("claude"),
+            "Claude Code wasn't found on this computer."
+        );
     }
 }

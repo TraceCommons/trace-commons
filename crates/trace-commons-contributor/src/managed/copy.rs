@@ -16,6 +16,32 @@
 //!   sign-in.
 //! - `sign_in_near_ai_accessibility` "Sign in to NEAR AI" -- its accessible
 //!   name.
+//!
+//! A session row's actions (Ron, #1407, 2026-10-14):
+//! - `show` "Show" and `stop` "Stop" -- the row menu's items and the row's
+//!   accessibility actions. Clicking a running row also shows it.
+//! - `stop_question` "Stop this session?" and `stop_description` "{tool}
+//!   stops what it's doing in {folder}." -- the confirmation, with `cancel`
+//!   and `stop`. Shells fill `{tool}` with the tool's name and `{folder}`
+//!   with the row's folder name.
+//! - `start_again` "Start again" -- an ended row's glass button, before
+//!   `dismiss` as a link.
+//!
+//! Installing a coding tool. Approved 2026-10-15 (#1419 review):
+//! - `tools_title` "Coding tools", above the install block shown when no
+//!   coding tool is installed.
+//! - `tools_empty` "Install a coding tool to get started."
+//! - `install` "Install"; its accessible name appends the tool's name.
+//! - `tool_unavailable` "{tool} wasn't found on this computer." Shells fill
+//!   `{tool}` with the tool's display name (`claude`, `codex`, `opencode`).
+//! - `refresh` "Refresh": a bare glyph's tooltip and accessible name.
+//!
+//! The explanation before the folder picker (#1408). Approved 2026-10-14:
+//! - `folder_choice` "Choose a folder for {tool} to work in. It opens in
+//!   {destination}." Shells fill `{tool}` with the tool's name key and
+//!   `{destination}` from `capabilities.terminal_destination`, as for
+//!   `sign_in_scope`. Its title is the Start button's own label, and its
+//!   buttons are `cancel` and `choose_folder`.
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "Managed sessions",
@@ -26,15 +52,12 @@ pub fn copy() -> serde_json::Value {
             "map_scope": "Session routes; model calls are unverified.",
             "collection_disabled": "Trace collection off",
             "model_required": "Enter a model ID to launch OpenCode.",
-            "opencode_export_scope": "Watch local sessions, import an export, or collect a managed session.",
             "tools_title": "Coding tools",
-            "tools_empty": "Install a coding tool to start a managed session. Saved accounts and session history stay here.",
+            "tools_empty": "Install a coding tool to get started.",
             "install": "Install",
-            "check_again": "Check again",
+            "tool_unavailable": "{tool} wasn't found on this computer.",
             "unsupported_version": "This tool version is not supported. Install a supported version, then try again.",
             "update": "Update",
-            "not_installed": "Not installed",
-            "tool_unavailable": "This tool is not installed or is unavailable. Install it, then choose Check again.",
             "description": "Start a session with a saved account. Your other sessions keep running.",
             "launch": "Launch",
             "launch_title": "Launch managed session",
@@ -87,6 +110,7 @@ pub fn copy() -> serde_json::Value {
             "choose_account": "Choose account",
             "project_placeholder": "No folder chosen",
             "choose_folder": "Choose folder",
+            "folder_choice": "Choose a folder for {tool} to work in. It opens in {destination}.",
             "launch_scope": "Opens in {destination}.",
             "launch_short": "Launch",
             "terminal": "your terminal",
@@ -110,7 +134,12 @@ pub fn copy() -> serde_json::Value {
             "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
             "sign_in_needed": "Sign in to NEAR AI to start a session.",
             "sign_in_near_ai": "Sign in",
-            "sign_in_near_ai_accessibility": "Sign in to NEAR AI"
+            "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
+            "show": "Show",
+            "stop": "Stop",
+            "stop_question": "Stop this session?",
+            "stop_description": "{tool} stops what it's doing in {folder}.",
+            "start_again": "Start again"
     }"#).expect("static managed copy is valid JSON")
 }
 
@@ -135,6 +164,15 @@ mod tests {
         );
     }
 
+    /// #1408: the line before the folder picker, as approved 2026-10-14.
+    #[test]
+    fn the_folder_choice_line_has_its_words() {
+        assert_eq!(
+            copy()["folder_choice"],
+            "Choose a folder for {tool} to work in. It opens in {destination}."
+        );
+    }
+
     /// The NEAR AI sign-in launch reads these words, exactly as proposed.
     #[test]
     fn the_sign_in_launch_has_its_words() {
@@ -151,6 +189,23 @@ mod tests {
         );
         assert_eq!(copy["sign_in_near_ai"], "Sign in");
         assert_eq!(copy["sign_in_near_ai_accessibility"], "Sign in to NEAR AI");
+    }
+
+    /// Show, Stop and Start again on a session row read these words
+    /// (Ron, #1407, 2026-10-14).
+    #[test]
+    fn the_session_row_actions_have_their_words() {
+        let copy = copy();
+        assert_eq!(copy["show"], "Show");
+        assert_eq!(copy["stop"], "Stop");
+        assert_eq!(copy["stop_question"], "Stop this session?");
+        assert_eq!(
+            copy["stop_description"],
+            "{tool} stops what it's doing in {folder}."
+        );
+        assert_eq!(copy["start_again"], "Start again");
+        assert_eq!(copy["cancel"], "Cancel");
+        assert_eq!(copy["dismiss"], "Dismiss");
     }
 
     /// Every lifecycle and sign-in state a shell can be sent has a label,
@@ -176,6 +231,24 @@ mod tests {
         ] {
             let key = key("auth", state);
             assert!(copy[&key].is_string(), "missing {key}");
+        }
+    }
+
+    /// Ron's 2026-10-15 review of #1419: the install words, with `{tool}`
+    /// filled with the tool's display name by every shell.
+    #[test]
+    fn the_install_words_are_the_approved_ones() {
+        let copy = copy();
+        assert_eq!(copy["tools_title"], "Coding tools");
+        assert_eq!(copy["tools_empty"], "Install a coding tool to get started.");
+        assert_eq!(
+            copy["tool_unavailable"],
+            "{tool} wasn't found on this computer."
+        );
+        assert_eq!(copy["install"], "Install");
+        assert_eq!(copy["refresh"], "Refresh");
+        for removed in ["opencode_export_scope", "not_installed", "check_again"] {
+            assert!(copy.get(removed).is_none(), "{removed} should be gone");
         }
     }
 }

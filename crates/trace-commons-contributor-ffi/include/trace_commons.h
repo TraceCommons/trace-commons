@@ -408,11 +408,19 @@ tc_handle*  tc_daemon_attach(const char* config_dir, char** err);
  * Reads session metadata only, using read-only SQLite for native OpenCode.
  * Returns NULL only on a caught panic.
  */
-/* Read-only executable availability and shared managed copy; no daemon required. */
+char*       tc_discover_sources(void);
+
+/* Installed coding tools [{tool, installed, install_url}] for Claude Code,
+ * Codex and OpenCode, and the shared managed-session copy. Read-only metadata
+ * discovery, no daemon or subprocess. No trace access or contribution consent
+ * is implied. tc_install_guides_json is {source slug: https url}, each coding
+ * tool's setup guide: the one table first run and managed sessions read.
+ * All return owned JSON; tc_string_free. Returns NULL on failure;
+ * tc_last_error describes the error.
+ */
 char*       tc_managed_tools_json(void);
 char*       tc_managed_copy_json(void);
-
-char*       tc_discover_sources(void);
+char*       tc_install_guides_json(void);
 
 /* Describe a folder the contributor has already named as their OpenCode
  * export directory, so a Customize screen can say "N sessions found" for

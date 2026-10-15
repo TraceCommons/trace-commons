@@ -29,11 +29,56 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
     public let exitCode: Int?
     public let model: String?
     public let collection: String?
+    /// The daemon can bring this session's window to the front (#1407).
+    /// False from an older daemon.
+    public let canFocus: Bool
+    /// The daemon can ask this session's launcher to stop it. False from an
+    /// older daemon and for a launch from the command line.
+    public let canStop: Bool
+    /// The ended session can be launched again as it was.
+    public let canStartAgain: Bool
+    /// When the session started; nil when absent or unreadable.
+    public let startedAt: Date?
     public var holdsAccount: Bool { state != "exited" && state != "failed" }
     enum CodingKeys: String, CodingKey {
         case id, tool, connection, cwd, state, purpose, model, collection
         case accountID = "account_id", accountLabel = "account_label", projectLabel = "project_label", exitCode = "exit_code"
+        case canFocus = "can_focus", canStop = "can_stop", canStartAgain = "can_start_again", startedAt = "started_at"
     }
+
+    /// Decodes its own timestamp, as `PastSession` does: chrono writes
+    /// nanoseconds, which `ISO8601DateFormatter` refuses.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        tool = try c.decode(String.self, forKey: .tool)
+        connection = try c.decode(String.self, forKey: .connection)
+        accountID = try c.decode(String.self, forKey: .accountID)
+        accountLabel = try c.decode(String.self, forKey: .accountLabel)
+        projectLabel = try c.decode(String.self, forKey: .projectLabel)
+        cwd = try c.decode(String.self, forKey: .cwd)
+        state = try c.decode(String.self, forKey: .state)
+        purpose = try c.decode(String.self, forKey: .purpose)
+        exitCode = try c.decodeIfPresent(Int.self, forKey: .exitCode)
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        collection = try c.decodeIfPresent(String.self, forKey: .collection)
+        canFocus = try c.decodeIfPresent(Bool.self, forKey: .canFocus) ?? false
+        canStop = try c.decodeIfPresent(Bool.self, forKey: .canStop) ?? false
+        canStartAgain = try c.decodeIfPresent(Bool.self, forKey: .canStartAgain) ?? false
+        startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt).flatMap(SourceCandidate.Wire.parseTimestamp)
+    }
+}
+
+/// What a session row offers (#1407), in the order drawn.
+public enum ManagedSessionAction: Equatable, Sendable {
+    /// Bring the session's window to the front.
+    case show
+    /// Stop the session, after a confirmation.
+    case stop
+    /// Launch the ended session again, same tool, account and folder.
+    case startAgain
+    /// Take the ended row off the list.
+    case dismiss
 }
 
 public struct ManagedToolAvailability: Decodable, Equatable, Identifiable, Sendable {
@@ -72,9 +117,12 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
     public let generations: [String: UInt64]
     public let sessions: [ManagedSession]
     public let capabilities: Capabilities
+    /// Whether a coding session has started on this computer, from the app
+    /// or the command line (#1408). Absent from an older daemon.
+    public let hasLaunched: Bool?
     enum CodingKeys: String, CodingKey {
         case tools, copy, revision, accounts, defaults, generations, sessions, capabilities
-        case signInAccounts = "sign_in_accounts"
+        case signInAccounts = "sign_in_accounts", hasLaunched = "has_launched"
     }
 }
 
@@ -90,10 +138,12 @@ public enum ManagedSurface {
         }
     }
 
+    /// The managed tools, in the order the Add and Launch sheets offer them.
+    /// OpenCode is one since #1417.
     public static let supportedTools = ["claude", "codex", "opencode"]
     public static func setupTools(_ tools: [ManagedToolAvailability]?) -> [String] {
         guard let tools else { return supportedTools }
-        return supportedTools.filter { tool in tools.first(where: { $0.tool == tool })?.installed != false }
+        return supportedTools.filter { tool in tools.first(where: { $0.tool == tool })?.installed == true }
     }
 
     /// The lifecycle values the daemon sends today.
@@ -137,6 +187,21 @@ public enum ManagedSurface {
         template.replacingOccurrences(of: "{destination}", with: destination ?? fallback)
     }
 
+    /// The line before the folder picker (#1408), with `{tool}` and
+    /// `{destination}` filled; `fallback` (the core's "your terminal") when
+    /// the daemon reports no terminal, as `signInScope` does.
+    public static func folderChoiceLine(_ template: String, tool: String, destination: String?, fallback: String) -> String {
+        template
+            .replacingOccurrences(of: "{tool}", with: tool)
+            .replacingOccurrences(of: "{destination}", with: destination ?? fallback)
+    }
+
+    /// `tool_unavailable` ("{tool} wasn't found on this computer.") with the
+    /// tool's display name filled in.
+    public static func toolUnavailable(_ tool: String, copy: (String) -> String) -> String {
+        copy("tool_unavailable").replacingOccurrences(of: "{tool}", with: copy(toolKey(tool) ?? tool))
+    }
+
     /// The tool's name key, or nil for a tool this shell does not know.
     public static func toolKey(_ tool: String) -> String? {
         ["claude", "codex", "opencode"].contains(tool) ? tool : nil
@@ -144,16 +209,57 @@ public enum ManagedSurface {
 
     /// A failed action is said in the shared copy, never as the daemon's
     /// code: a launch whose outcome is unknown asks for a refresh, anything
-    /// else is the general failure.
+    /// else is the general failure. A missing tool is said on its account
+    /// row after the refresh that follows, where the tool can be named.
     public static func errorKey(code: String?, message: String?) -> String {
         if code == "managed-unsupported-version" || message == "managed-unsupported-version" { return "unsupported_version" }
-        if code == "tool-unavailable" || message == "tool-unavailable" || code == "managed-tool-unavailable" || message == "managed-tool-unavailable" { return "tool_unavailable" }
         let launchUnknown = ["launch-unknown", "managed-launch-unknown"]
         if launchUnknown.contains(code ?? "") || launchUnknown.contains(message ?? "") { return "launch_unknown" }
         // No NEAR AI sign-in: the line that asks for one.
         let signInNeeded = "managed-near-ai-sign-in-required"
         if code == signInNeeded || message == signInNeeded { return "sign_in_needed" }
         return "action_failed"
+    }
+}
+
+/// Session row actions (Ron, #1407, 2026-10-14). An action the daemon cannot
+/// do is left out, never drawn disabled.
+public extension ManagedSurface {
+    /// The row's actions. A running row: Show and Stop where the daemon can
+    /// do them. An ended row: Start again where it can be, with a terminal
+    /// to start in, then Dismiss. Anything else: none.
+    static func sessionActions(_ session: ManagedSession, terminalLaunch: Bool) -> [ManagedSessionAction] {
+        if session.state == "running" { return menuActions(session) }
+        guard !session.holdsAccount else { return [] }
+        return (session.canStartAgain && terminalLaunch ? [.startAgain] : []) + [.dismiss]
+    }
+
+    /// The row menu's items: Show and Stop, for a running row only.
+    static func menuActions(_ session: ManagedSession) -> [ManagedSessionAction] {
+        guard session.state == "running" else { return [] }
+        return (session.canFocus ? [.show] : []) + (session.canStop ? [.stop] : [])
+    }
+
+    /// Whether clicking the row brings its window to the front.
+    static func clickShows(_ session: ManagedSession) -> Bool {
+        session.state == "running" && session.canFocus
+    }
+
+    /// The stop confirmation's line with `{tool}` and `{folder}` filled.
+    static func stopDescription(_ template: String, tool: String, folder: String) -> String {
+        template.replacingOccurrences(of: "{tool}", with: tool).replacingOccurrences(of: "{folder}", with: folder)
+    }
+
+    /// The `managed_session_start_again` request: the row and a fresh
+    /// request id, nothing the shell could change.
+    static func startAgainParams(sessionID: String, requestID: String) -> [String: Any] {
+        ["session_id": sessionID, "request_id": requestID]
+    }
+
+    /// The row's caption: its parts, then the start time in the app's
+    /// relative format when the daemon sent one.
+    static func caption(_ parts: [String], startedAt: Date?, relative: (Date) -> String = Format.when) -> String {
+        (parts + [startedAt.map(relative)].compactMap { $0 }).filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 
@@ -168,14 +274,15 @@ public extension ManagedSnapshot {
         }
     }
 
-    var setupTools: [String] {
-        ManagedSurface.setupTools(tools)
-    }
+    var setupTools: [String] { ManagedSurface.setupTools(tools) }
     var needsToolInstallation: Bool {
-        tools != nil && setupTools.isEmpty
+        guard let tools else { return false }
+        return !tools.contains { ManagedSurface.supportedTools.contains($0.tool) && $0.installed }
     }
     func canLaunch(tool: String) -> Bool {
-        ManagedSurface.toolKey(tool) != nil && tools?.first(where: { $0.tool == tool })?.installed != false
+        guard ManagedSurface.supportedTools.contains(tool) else { return false }
+        guard let tools else { return true }
+        return tools.first { $0.tool == tool }?.installed == true
     }
 
     /// A running, starting or unknown session holds its account: no sign-in,
@@ -187,6 +294,11 @@ public extension ManagedSnapshot {
     func isDefault(_ account: ManagedAccount) -> Bool {
         defaults.contains { $0.accountID == account.id }
     }
+
+    /// Whether Start explains the folder choice before the picker: until a
+    /// session has started on this computer (#1408). An older daemon that
+    /// does not say reads as never launched.
+    var explainsFolderChoice: Bool { hasLaunched != true }
 
     /// Whether the daemon holds a NEAR AI sign-in.
     var nearAiSignedIn: Bool { capabilities.nearAiSignin == true }
@@ -200,7 +312,7 @@ public extension ManagedSnapshot {
     /// The `managed_launch_prepare` request that starts `tool` on the NEAR
     /// AI sign-in in `cwd`; nil without a sign-in entry for it.
     func signInLaunchParams(tool: String, cwd: String, requestID: String) -> [String: Any]? {
-        guard let entry = signInEntry(tool) else { return nil }
+        guard canLaunch(tool: tool), let entry = signInEntry(tool) else { return nil }
         return [
             "request_id": requestID, "purpose": "coding", "tool": entry.tool,
             "connection": entry.connection, "account_id": entry.id, "cwd": cwd,

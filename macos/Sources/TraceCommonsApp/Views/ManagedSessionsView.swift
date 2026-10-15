@@ -15,6 +15,10 @@ struct ManagedSessionsSection: View {
     @State private var launching = false
     @State private var renaming: ManagedAccount?
     @State private var removing: ManagedAccount?
+    /// The tool whose Start is explaining the folder choice (#1408).
+    @State private var explaining: ManagedFolderChoice?
+    /// The session whose stop is being confirmed.
+    @State private var stopping: ManagedSession?
     /// The account whose row menu is open.
     @State private var menuFor: String?
     @Environment(\.openURL) private var openURL
@@ -41,6 +45,19 @@ struct ManagedSessionsSection: View {
         }
         .glassModal(item: $removing) { account in
             ManagedRemoveSheet(account: account, onClose: { removing = nil }).environmentObject(model)
+        }
+        .glassModal(item: $explaining) { choice in
+            ManagedFolderExplainerSheet(
+                tool: choice.tool, onCancel: { explaining = nil },
+                onChoose: {
+                    explaining = nil
+                    // The picker opens once the sheet is gone.
+                    DispatchQueue.main.async { chooseAndStart(choice.tool) }
+                }
+            ).environmentObject(model)
+        }
+        .glassModal(item: $stopping) { session in
+            ManagedStopSheet(session: session, onClose: { stopping = nil }).environmentObject(model)
         }
         // Kept: `managed_changed` is published only when a request changes
         // the session revision, so an expiry or a reconciled exit is seen
@@ -82,7 +99,7 @@ struct ManagedSessionsSection: View {
     private func signInActions(_ snapshot: ManagedSnapshot) -> some View {
         if snapshot.nearAiSignedIn {
             if snapshot.capabilities.terminalLaunch {
-                let buttons = ForEach(ManagedSurface.signInTools.filter { snapshot.signInEntry($0) != nil }, id: \.self) { tool in
+                let buttons = ForEach(ManagedSurface.signInTools.filter { snapshot.signInEntry($0) != nil && snapshot.canLaunch(tool: $0) }, id: \.self) { tool in
                     Button { start(tool) } label: {
                         Text(ManagedSurface.startKey(tool).map(model.managedText) ?? "").lineLimit(1)
                     }
@@ -106,8 +123,19 @@ struct ManagedSessionsSection: View {
         }
     }
 
-    /// The folder chooser the launch sheet uses, then the launch.
+    /// Until a session has started on this computer, a sheet that says why
+    /// a folder is asked for comes first (#1408); then the picker.
     private func start(_ tool: String) {
+        guard !model.managedBusy else { return }
+        if model.managedSnapshot?.explainsFolderChoice == true {
+            explaining = ManagedFolderChoice(tool: tool)
+        } else {
+            chooseAndStart(tool)
+        }
+    }
+
+    /// The folder chooser the launch sheet uses, then the launch.
+    private func chooseAndStart(_ tool: String) {
         guard !model.managedBusy, let path = FolderPanel.choose(),
               let params = model.managedSnapshot?.signInLaunchParams(tool: tool, cwd: path, requestID: UUID().uuidString)
         else { return }
@@ -166,8 +194,7 @@ struct ManagedSessionsSection: View {
     /// list was read, nothing failed, there is a terminal, and no account.
     static func accountsBodyEmpty(_ snapshot: ManagedSnapshot?, failing: Bool) -> Bool {
         guard let snapshot else { return false }
-        return !failing && snapshot.capabilities.terminalDestination != nil && snapshot.accounts.isEmpty
-            && !snapshot.needsToolInstallation
+        return !(snapshot.tools != nil && snapshot.setupTools.isEmpty) && !failing && snapshot.capabilities.terminalDestination != nil && snapshot.accounts.isEmpty
     }
 
     /// Add and Launch once the list is read; Retry until then.
@@ -243,7 +270,6 @@ struct ManagedSessionsSection: View {
         }
         .buttonStyle(GlassButtonStyle(.glass, small: true))
         .fixedSize()
-        .disabled(snapshot.setupTools.isEmpty)
         let launch = Button { launching = true } label: {
             Text(model.managedText("launch")).lineLimit(1)
         }
@@ -251,8 +277,8 @@ struct ManagedSessionsSection: View {
         .fixedSize()
         let launchable = Self.offersLaunch(snapshot)
         return ViewThatFits(in: .horizontal) {
-            HStack(spacing: GlassTokens.Space.s3) { add; if launchable { launch } }
-            VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) { add; if launchable { launch } }
+            HStack(spacing: GlassTokens.Space.s3) { if !snapshot.setupTools.isEmpty { add }; if launchable { launch } }
+            VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) { if !snapshot.setupTools.isEmpty { add }; if launchable { launch } }
         }
         .disabled(model.managedBusy)
     }
@@ -278,8 +304,10 @@ struct ManagedSessionsSection: View {
                     }
                 }
                 if !snapshot.canLaunch(tool: account.tool) {
-                    Text(model.managedText("tool_unavailable"))
+                    Text(ManagedSurface.toolUnavailable(account.tool, copy: model.managedText))
                         .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     if let availability = snapshot.tools?.first(where: { $0.tool == account.tool }) {
                         ManagedInstallLink(tool: availability, copy: model.managedText)
                     }
@@ -311,12 +339,14 @@ struct ManagedSessionsSection: View {
                         menuFor = nil
                         DispatchQueue.main.async { renaming = account }
                     }
-                    if account.connection == "subscription" {
+                    // Hidden, not disabled, while the tool is missing (Ron,
+                    // 2026-10-15): the row says so and offers Install.
+                    if account.connection == "subscription" && snapshot.canLaunch(tool: account.tool) {
                         GlassMenuItem(model.managedText("reconnect")) {
                             menuFor = nil
                             model.managedAction("managed_account_reconnect", params: ["account_id": account.id], openTerminal: true)
                         }
-                        .disabled(held || !snapshot.capabilities.terminalLaunch || !snapshot.canLaunch(tool: account.tool))
+                        .disabled(held || !snapshot.capabilities.terminalLaunch)
                     }
                     GlassMenuItem(model.managedText("verify")) {
                         menuFor = nil
@@ -368,30 +398,23 @@ struct ManagedSessionsSection: View {
         if let code = session.exitCode {
             meta.append(model.managedText("exit_code").replacingOccurrences(of: "{code}", with: String(code)))
         }
-        return HStack(spacing: GlassTokens.Space.s4) {
+        let row = HStack(spacing: GlassTokens.Space.s4) {
             GlassToolTile(.tool(ManagedWords.glassTool(session.tool)))
             VStack(alignment: .leading, spacing: 1) {
                 Text(session.purpose == "login" ? model.managedText("sign_in") : session.projectLabel)
                     .glassType(GlassTokens.TypeScale.label.weight(.semibold))
                     .foregroundStyle(GlassColor.textPrimary)
                     .lineLimit(1)
-                Text(meta.joined(separator: " · "))
+                Text(ManagedSurface.caption(meta, startedAt: session.startedAt))
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textTertiary)
                     .lineLimit(1)
             }
             Spacer(minLength: GlassTokens.Space.s4)
             GlassStatusLabel(model.managedText(ManagedSurface.stateKey(session.state)), status: ManagedWords.status(session.state))
-            if !session.holdsAccount {
-                Button(model.managedText("dismiss")) {
-                    model.managedAction("managed_session_dismiss", params: ["session_id": session.id])
-                }
-                .buttonStyle(GlassButtonStyle(.link))
-                .fixedSize()
-                .disabled(model.managedBusy)
-            }
+            ManagedSessionActions(session: session, menuFor: $menuFor, onStop: { stopping = session })
         }
-        .accessibilityElement(children: .contain)
+        return ManagedSessionRowActions(session: session, onStop: { stopping = session }) { row }
     }
 }
 
@@ -549,10 +572,10 @@ struct ManagedLaunchSheet: View {
     @State private var accountID = ""
     @State private var selectedModel = ""
     @State private var collectTraces = false
-    private var selectedAccount: ManagedAccount? { model.managedSnapshot?.accounts.first { $0.id == accountID } }
-    private var toolAvailable: Bool { selectedAccount.map { model.managedSnapshot?.canLaunch(tool: $0.tool) == true } ?? false }
     private var isOpenCode: Bool { model.managedSnapshot?.accounts.first(where: { $0.id == accountID })?.tool == "opencode" }
     @State private var project: URL?
+    private var selectedAccount: ManagedAccount? { model.managedSnapshot?.accounts.first { $0.id == accountID } }
+    private var toolAvailable: Bool { selectedAccount.map { model.managedSnapshot?.canLaunch(tool: $0.tool) == true } ?? false }
 
     init(onClose: @escaping () -> Void, accountID: String = "") {
         self.onClose = onClose
@@ -585,12 +608,13 @@ struct ManagedLaunchSheet: View {
                         placeholder: model.managedText("choose_account"))
                 }
                 if let account = selectedAccount, !toolAvailable {
-                    ManagedNote(text: model.managedText("tool_unavailable"))
-                    if let availability = model.managedSnapshot?.tools?.first(where: { $0.tool == account.tool }) {
-                        ManagedInstallLink(tool: availability, copy: model.managedText)
+                    ManagedNote(text: ManagedSurface.toolUnavailable(account.tool, copy: model.managedText))
+                    HStack(spacing: GlassTokens.Space.s3) {
+                        if let availability = model.managedSnapshot?.tools?.first(where: { $0.tool == account.tool }) {
+                            ManagedInstallLink(tool: availability, copy: model.managedText)
+                        }
+                        GlassRefreshButton(model.managedText("refresh")) { model.refreshManagedSessions() }
                     }
-                    Button(model.managedText("check_again")) { model.refreshManagedSessions() }
-                        .buttonStyle(GlassButtonStyle(.glass, small: true))
                 }
                 if let account = selectedAccount, model.managedErrorKey == "unsupported_version",
                    model.managedErrorTool == nil || model.managedErrorTool == account.tool {
@@ -688,10 +712,144 @@ struct ManagedRemoveSheet: View {
     }
 }
 
+// MARK: - Session row actions (#1407)
+
+/// A session row's trailing actions (Ron, #1407): a running row's menu with
+/// Show and Stop; an ended row's Start again, then Dismiss as a link. What
+/// the daemon cannot do is left out, never drawn disabled.
+struct ManagedSessionActions: View {
+    let session: ManagedSession
+    /// The row whose menu is open, shared with the account rows.
+    @Binding var menuFor: String?
+    let onStop: () -> Void
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        let actions = ManagedSurface.sessionActions(session, terminalLaunch: model.managedSnapshot?.capabilities.terminalLaunch == true)
+        if actions.contains(.show) || actions.contains(.stop) {
+            menu(actions)
+        }
+        if actions.contains(.startAgain) {
+            Button { startAgain() } label: {
+                Text(model.managedText("start_again")).lineLimit(1)
+            }
+            .buttonStyle(GlassButtonStyle(.glass, small: true))
+            .fixedSize()
+            .disabled(model.managedBusy)
+        }
+        if actions.contains(.dismiss) {
+            Button(model.managedText("dismiss")) {
+                model.managedAction("managed_session_dismiss", params: ["session_id": session.id])
+            }
+            .buttonStyle(GlassButtonStyle(.link))
+            .fixedSize()
+            .disabled(model.managedBusy)
+        }
+    }
+
+    private func menu(_ actions: [ManagedSessionAction]) -> some View {
+        let open = Binding(get: { menuFor == session.id }, set: { if !$0 { menuFor = nil } })
+        return GlassKebab(model.managedText("manage"), open: menuFor == session.id) { menuFor = session.id }
+            .disabled(model.managedBusy)
+            .popover(isPresented: open, arrowEdge: .bottom) {
+                GlassMenu(onDismiss: { menuFor = nil }) {
+                    if actions.contains(.show) {
+                        GlassMenuItem(model.managedText("show")) {
+                            menuFor = nil
+                            model.showManagedSession(session.id)
+                        }
+                    }
+                    if actions.contains(.stop) {
+                        GlassMenuItem(model.managedText("stop")) {
+                            menuFor = nil
+                            DispatchQueue.main.async { onStop() }
+                        }
+                    }
+                }
+                .disabled(model.managedBusy)
+            }
+    }
+
+    /// Same tool, account and folder, with no folder chooser; the terminal
+    /// opens as for any launch.
+    private func startAgain() {
+        model.managedAction(
+            "managed_session_start_again",
+            params: ManagedSurface.startAgainParams(sessionID: session.id, requestID: UUID().uuidString),
+            openTerminal: true)
+    }
+}
+
+/// The whole row's click and its VoiceOver actions: a click on a running
+/// row the daemon can show brings its window to the front, and Show and
+/// Stop are the row's named accessibility actions. A row with neither
+/// reads as before.
+struct ManagedSessionRowActions<Content: View>: View {
+    let session: ManagedSession
+    let onStop: () -> Void
+    @ViewBuilder let content: Content
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        let menu = ManagedSurface.menuActions(session)
+        if menu.isEmpty {
+            content.accessibilityElement(children: .contain)
+        } else {
+            content
+                .contentShape(Rectangle())
+                .onTapGesture { if ManagedSurface.clickShows(session) { model.showManagedSession(session.id) } }
+                .accessibilityElement(children: .contain)
+                .accessibilityActions {
+                    if menu.contains(.show) {
+                        Button(model.managedText("show")) { model.showManagedSession(session.id) }
+                    }
+                    if menu.contains(.stop) {
+                        Button(model.managedText("stop")) { onStop() }
+                    }
+                }
+        }
+    }
+
+}
+
+extension AppModel {
+    /// Bring a session's window to the front.
+    func showManagedSession(_ id: String) {
+        managedAction("managed_session_focus", params: ["session_id": id])
+    }
+}
+
+/// The stop confirmation (Ron, #1407): Cancel first, Stop on the right,
+/// never one Return away.
+struct ManagedStopSheet: View {
+    let session: ManagedSession
+    let onClose: () -> Void
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        GlassConfirmation(
+            title: model.managedText("stop_question"),
+            message: ManagedSurface.stopDescription(
+                model.managedText("stop_description"),
+                tool: ManagedWords.tool(session.tool, model: model) ?? "",
+                folder: session.projectLabel),
+            actions: [
+                .cancel(model.managedText("cancel"), action: onClose),
+                .destructive(model.managedText("stop")) {
+                    model.managedAction("managed_session_stop", params: ["session_id": session.id])
+                    onClose()
+                },
+            ],
+            onCancel: onClose)
+    }
+}
+
 /// Installation recovery uses the core's official links and words.
 struct ManagedInstallLink: View {
     let tool: ManagedToolAvailability
     let copy: (String) -> String
+    /// The link's copy key: `install`, or `update` after an unsupported-version
+    /// refusal, with the tool's name appended when `includeToolName` is set.
     var labelKey: String = "install"
     var includeToolName = false
     private var actionLabel: String { copy(labelKey).isEmpty ? copy("install") : copy(labelKey) }
@@ -705,23 +863,34 @@ struct ManagedInstallLink: View {
     }
 }
 
+/// Shown only while no coding tool is installed: each managed tool with
+/// Install, and one bare refresh glyph beside the heading (Ron, 2026-10-15).
 struct ManagedToolInstallation: View {
     let tools: [ManagedToolAvailability]
     let copy: (String) -> String
     let retry: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            Text(copy("tools_title")).glassType(GlassTokens.TypeScale.bodyStrong)
-            Text(copy("tools_empty")).glassType(GlassTokens.TypeScale.caption)
-            ForEach(tools.filter { ManagedSurface.toolKey($0.tool) != nil }) { tool in
+            HStack(spacing: GlassTokens.Space.s2) {
+                Text(copy("tools_title"))
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+                GlassRefreshButton(copy("refresh"), action: retry)
+            }
+            Text(copy("tools_empty"))
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(tools.filter { ManagedSurface.supportedTools.contains($0.tool) }) { tool in
                 HStack {
                     GlassToolTile(.tool(ManagedWords.glassTool(tool.tool)))
                     Text(copy(tool.tool))
+                        .glassType(GlassTokens.TypeScale.label)
+                        .foregroundStyle(GlassColor.textPrimary)
                     Spacer()
                     ManagedInstallLink(tool: tool, copy: copy)
                 }
             }
-            Button(copy("check_again"), action: retry).buttonStyle(GlassButtonStyle(.glass, small: true))
         }
     }
 }

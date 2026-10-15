@@ -1,6 +1,7 @@
 import AppKit
 import TCBridge
 import SwiftUI
+import TCBridge
 import TCShellCore
 import XCTest
 @testable import TraceCommonsApp
@@ -24,6 +25,28 @@ final class ManagedSessionsRenderTests: XCTestCase {
         let account = try XCTUnwrap(model.managedSnapshot?.accounts.first)
         try render(ManagedRenameSheet(account: account, onClose: {}).environmentObject(model), size: CGSize(width: 520, height: 240), to: directory.appendingPathComponent("managed-rename.png"))
         try render(ManagedRemoveSheet(account: account, onClose: {}).environmentObject(model), size: CGSize(width: 520, height: 240), to: directory.appendingPathComponent("managed-remove.png"))
+    }
+
+    @MainActor
+    func testMissingAndExportOnlyToolsKeepRecoveryVisible() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        var fixture = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json"))) as? [String: Any])
+        let copy = try XCTUnwrap(TCDiscovery.managedCopyJSON())
+        fixture["copy"] = try JSONSerialization.jsonObject(with: Data(copy.utf8))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for installed in [[], ["opencode"], ["codex"]] {
+            fixture["tools"] = ManagedSurface.supportedTools.map { ["tool": $0, "installed": installed.contains($0), "install_url": "https://example.com/" + $0] as [String: Any] }
+            let model = AppModel()
+            let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: fixture))
+            model.managedSnapshot = snapshot
+            XCTAssertFalse(snapshot.canLaunch(tool: "claude"))
+            XCTAssertEqual(ManagedSessionsSection.offersLaunch(snapshot), installed.contains("codex"))
+            XCTAssertFalse(ManagedSessionsSection.accountsBodyEmpty(snapshot, failing: false))
+            XCTAssertEqual(snapshot.needsToolInstallation, installed.isEmpty)
+            try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 720, height: 900), to: directory.appendingPathComponent("availability-\(installed.first ?? "none").png"))
+        }
     }
 
     /// The NEAR AI sign-in card both ways: Start buttons with a sign-in,
@@ -59,6 +82,60 @@ final class ManagedSessionsRenderTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }
         try render(ManagedLaunchSheet(onClose: {}, accountID: "opencode-test").environmentObject(model), size: CGSize(width: 580, height: 580), to: directory.appendingPathComponent("managed-opencode-launch.png"))
+    }
+
+    /// #1408: the explanation before the folder picker, for each Start
+    /// button, and its artwork at rest, as Reduce Motion shows it.
+    @MainActor
+    func testTheFolderExplainerRendersForEachStartButton() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let model = AppModel()
+        model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json")))
+        XCTAssertEqual(model.managedSnapshot?.explainsFolderChoice, true)
+        XCTAssertEqual(ManagedFolderExplainerSheet.line(tool: "codex", model: model),
+                       "Choose a folder for Codex to work in. It opens in Terminal.")
+        XCTAssertTrue(ManagedFolderHandoff.startsAtRest(reduceMotion: true))
+        XCTAssertFalse(ManagedFolderHandoff.startsAtRest(reduceMotion: false))
+        let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }
+        for tool in ManagedSurface.signInTools {
+            try render(ManagedFolderExplainerSheet(tool: tool, onCancel: {}, onChoose: {}).environmentObject(model), size: CGSize(width: 520, height: 360), to: directory.appendingPathComponent("managed-folder-explainer-\(tool).png"))
+        }
+        try render(ManagedFolderHandoff(tool: .claudeCode, atRest: true), size: CGSize(width: 320, height: 160), to: directory.appendingPathComponent("managed-folder-handoff-rest.png"))
+    }
+
+    /// #1407: a running row the daemon can show and stop, a running row it
+    /// cannot, an ended row that can start again, and the stop
+    /// confirmation, rendered off screen.
+    @MainActor
+    func testSessionRowActionsAndStopConfirmationRender() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let fixture = try Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json"))
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture) as? [String: Any])
+        var sessions = try XCTUnwrap(value["sessions"] as? [[String: Any]])
+        var owned = sessions[0]
+        owned["can_focus"] = true
+        owned["can_stop"] = true
+        owned["started_at"] = "2026-10-14T09:30:00.123456789Z"
+        var cli = sessions[0]
+        cli["id"] = "00000000-0000-0000-0000-000000000004"
+        var ended = sessions[0]
+        ended["id"] = "00000000-0000-0000-0000-000000000005"
+        ended["state"] = "exited"
+        ended["exit_code"] = 0
+        ended["can_start_again"] = true
+        sessions = [owned, cli, ended]
+        value["sessions"] = sessions
+        let model = AppModel()
+        model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
+        let rows = try XCTUnwrap(model.managedSnapshot?.sessions)
+        XCTAssertEqual(rows.map { ManagedSurface.sessionActions($0, terminalLaunch: true) }, [[.show, .stop], [], [.startAgain, .dismiss]])
+        let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }
+        try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 720, height: 640), to: directory.appendingPathComponent("managed-session-actions.png"))
+        try render(ManagedStopSheet(session: rows[0], onClose: {}).environmentObject(model), size: CGSize(width: 520, height: 240), to: directory.appendingPathComponent("managed-stop.png"))
     }
 
     @MainActor

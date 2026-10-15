@@ -30,10 +30,6 @@ final class ManagedToolAvailabilityTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.errorKey(code: "managed-unsupported-version", message: nil), "unsupported_version")
         XCTAssertEqual(ManagedSurface.errorKey(code: nil, message: "managed-unsupported-version"), "unsupported_version")
     }
-    func testMissingToolErrorHasInstallationRecoveryCopy() {
-        XCTAssertEqual(ManagedSurface.errorKey(code: "tool-unavailable", message: nil), "tool_unavailable")
-        XCTAssertEqual(ManagedSurface.errorKey(code: nil, message: "managed-tool-unavailable"), "tool_unavailable")
-    }
     func testOlderPayloadPreservesUnknownAvailability() throws {
         let value = try snapshot()
         XCTAssertNil(value.tools)
@@ -49,13 +45,37 @@ final class ManagedToolAvailabilityTests: XCTestCase {
         XCTAssertFalse(value.canLaunch(tool: "claude"))
     }
     func testOneAndMultipleInstalledFilterSetup() throws {
+        // #1417 made OpenCode a managed tool: it belongs in setup and launch.
         XCTAssertEqual(try snapshot(tools(["opencode"])).setupTools, ["opencode"])
         XCTAssertEqual(try snapshot(tools(["codex", "opencode"])).setupTools, ["codex", "opencode"])
+        XCTAssertEqual(ManagedSurface.supportedTools, ["claude", "codex", "opencode"])
+    }
+    func testEveryInstallationCombinationFiltersSetup() throws {
+        for mask in 0..<8 {
+            let installed = ManagedSurface.supportedTools.enumerated().compactMap { mask & (1 << $0.offset) != 0 ? $0.element : nil }
+            let value = try snapshot(tools(installed))
+            XCTAssertEqual(value.setupTools, ["claude", "codex", "opencode"].filter(installed.contains))
+            XCTAssertEqual(value.needsToolInstallation, installed.isEmpty)
+            XCTAssertEqual(value.canLaunch(tool: "opencode"), installed.contains("opencode"))
+            XCTAssertEqual(value.tools?.count, 3)
+        }
+    }
+    func testSignInEntryIsPreservedButMissingToolCannotStart() throws {
+        let json = #"{"revision":1,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"near_ai_signin":true},"sign_in_accounts":[{"id":"signin","tool":"claude","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready"}],"tools":[{"tool":"claude","installed":false,"install_url":"https://code.claude.com/docs/en/setup"}]}"#
+        let value = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(json.utf8))
+        XCTAssertNotNil(value.signInEntry("claude"))
+        XCTAssertNil(value.signInLaunchParams(tool: "claude", cwd: "/tmp", requestID: "r"))
     }
     func testRemovedToolRetainsAccountButCannotLaunch() throws {
         let value = try snapshot(tools(["opencode"]))
         XCTAssertEqual(value.accounts.first?.id, "old")
         XCTAssertFalse(value.canLaunch(tool: "claude"))
         XCTAssertTrue(value.canLaunch(tool: "opencode"))
+        XCTAssertFalse(value.needsToolInstallation)
+    }
+    func testToolUnavailableNamesTheTool() {
+        let copy = ["tool_unavailable": "{tool} wasn't found on this computer.", "claude": "Claude Code", "opencode": "OpenCode"]
+        XCTAssertEqual(ManagedSurface.toolUnavailable("claude", copy: { copy[$0] ?? "" }), "Claude Code wasn't found on this computer.")
+        XCTAssertEqual(ManagedSurface.toolUnavailable("opencode", copy: { copy[$0] ?? "" }), "OpenCode wasn't found on this computer.")
     }
 }

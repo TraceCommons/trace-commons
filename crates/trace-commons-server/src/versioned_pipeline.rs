@@ -20,8 +20,9 @@ use trace_commons_gate_api::pipeline::{
     Microcredits, PIPELINE_OUTCOME_SCHEMA_ID, PIPELINE_OUTCOME_SCHEMA_VERSION, Phase, PhaseResult,
     PolicyError, PolicyRef, PrivacyRisk, ReasonCode, ReviewDecision, ReviewEvaluation,
     ReviewEvidence, ReviewInput, ReviewOutput, ReviewRecommendation, SchemaRef, ScoreDecision,
-    ScoreEvaluation, ScoreEvidence, ScoreInput, SealedIndexCommand, SettleDecision,
-    SettleEvaluation, SettleEvidence, SettleInput, TenantStorageRef, UnverifiedScoreDecision,
+    ScoreEvaluation, ScoreEvidence, ScoreHoldReview, ScoreInput, ScoreOutput, SealedIndexCommand,
+    SettleDecision, SettleEvaluation, SettleEvidence, SettleInput, TenantStorageRef,
+    UnverifiedScoreDecision,
 };
 use trace_commons_gate_api::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
@@ -58,11 +59,9 @@ use crate::versioned_pipeline_authority::{
 use crate::versioned_pipeline_bundle::{
     MinimalPolicyBundle, PIPELINE_BUNDLE_INVALID_LABEL, PIPELINE_DEPENDENCY_MISSING_LABEL,
     PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL, PipelineTraceCreditEvent, dependency_content_hash,
-    pipeline_operation_ref, pipeline_result_ref,
+    pipeline_operation_ref, pipeline_result_ref, registered_score_factory,
 };
-use crate::versioned_pipeline_compat::{
-    COMPATIBILITY_SCORE_IMPLEMENTATION, UnappliedIndexCommandsReader,
-};
+use crate::versioned_pipeline_compat::UnappliedIndexCommandsReader;
 use crate::versioned_pipeline_credit::{
     DryRunNearPayoutAdapter, NearPayoutAdapter, NearPayoutConfirmation, PIPELINE_CREDIT_ACTOR_ROLE,
     PIPELINE_CREDIT_REASON, PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE,
@@ -72,6 +71,9 @@ use crate::versioned_pipeline_credit::{
     pipeline_settlement_batch_id, source_list_hash,
 };
 use crate::versioned_pipeline_qualification::package_digests;
+use crate::versioned_pipeline_score_registry::{
+    SCORE_POLICY_MISSING_LABEL, ScorePolicyRegistry, is_built_in_score_implementation,
+};
 
 /// The lifecycle half of every pipeline operability check, over the
 /// `trace_submissions` row aliased `s` (Zaki review 1, round 2,
@@ -113,6 +115,25 @@ macro_rules! reviewable_submission_sql {
     };
 }
 
+/// The submission, aliased `s`, of a parked run, aliased `p`, is still one
+/// the hold applies to: a submission Review has not decided yet
+/// (`reviewable_submission_sql!`) for a run parked at Review, and an
+/// accepted one (`accepted_submission_sql!`, what Score needs) for a run its
+/// Score policy held for operator review at Score. A parked run whose
+/// submission fails this is released (`release_inoperable_parked_runs`) and
+/// left out of the review queue.
+macro_rules! parked_run_submission_sql {
+    () => {
+        concat!(
+            "((p.next_phase = 'score' AND ",
+            accepted_submission_sql!(),
+            ") OR (p.next_phase IS DISTINCT FROM 'score' AND ",
+            reviewable_submission_sql!(),
+            "))"
+        )
+    };
+}
+
 /// A run, aliased `p`, that waits for a human review: at Review, quarantined
 /// by Admission or escalated by the Review-start privacy pass, and idle
 /// (`pending`, `retry`, or `awaiting_review`). A run that needs the privacy
@@ -129,6 +150,16 @@ macro_rules! run_waiting_for_review_sql {
          AND (p.admission_decision = 'quarantine' OR p.privacy_pass_outcome = 'escalated')
          AND (NOT p.privacy_pass_required OR p.privacy_pass_object_ref_id IS NOT NULL)
          AND p.state IN ('pending', 'retry', 'awaiting_review')"
+    };
+}
+
+/// A run, aliased `p`, that its Score policy held for operator review
+/// (`hold_score_for_review_on_tx`): parked in `awaiting_review` at Score.
+/// `claim_review` and `record_review_assessment` act on it as on a run
+/// waiting at Review, with its own assessment (`phase` `score`, V130).
+macro_rules! run_held_at_score_sql {
+    () => {
+        "p.next_phase = 'score' AND p.state = 'awaiting_review'"
     };
 }
 
@@ -150,9 +181,76 @@ pub const PIPELINE_POLICY_NOT_RUNNABLE_LABEL: &str = "bundle_policy_not_runnable
 /// its evidence lacks a field the row needs: the commit writes nothing.
 pub const PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL: &str =
     "pipeline_gate_decision_evidence_incomplete";
+/// A Score policy asked for a hold again on an input that carries the
+/// operator's approval of its earlier hold
+/// (`ScoreInput::operator_review`). The run fails closed under this label
+/// rather than going back to the review queue, so a hold cannot loop.
+pub const PIPELINE_SCORE_HOLD_REPEATED_LABEL: &str = "pipeline_score_hold_repeated";
 /// Settle refuses to commit when the submission already has a pipeline gate
 /// decision row written by another run (V116 allows one per submission).
 pub const PIPELINE_GATE_DECISION_CONFLICT_LABEL: &str = "pipeline_gate_decision_conflict";
+
+/// #1313 (b): the label a failure path records when it gives a finishable
+/// Settle run (`finishable_settle_run_sql!`) its one extra attempt instead
+/// of failing it.
+pub const PIPELINE_SETTLE_FINISH_GRANTED_LABEL: &str = "settle_finish_granted";
+
+/// #1313: the reason label of the audit event for a run held for an
+/// operator (`PipelineRunState::AwaitingOperator`).
+pub const PIPELINE_SETTLE_HELD_FOR_OPERATOR_LABEL: &str = "pipeline_settle_held_for_operator";
+
+/// #1313: the label an operator's `Fail` of a held run records.
+pub const PIPELINE_OPERATOR_FAILED_HELD_RUN_LABEL: &str = "operator_failed_held_run";
+
+/// #1313: the label an operator's `Release` of a held run records.
+pub const PIPELINE_OPERATOR_RELEASED_HELD_RUN_LABEL: &str = "operator_released_held_run";
+
+/// #1313 (b): a run, aliased `p`, whose Settle can finish with no further
+/// effect: its selection is persisted, its index write is done (not
+/// `pending`, and not `failed`, whose partly written entries must leave the
+/// index under N-7), and every settlement leg is `complete` or `forfeited`
+/// (a `failed` leg is resolved only by the failure path). A run with no leg
+/// qualifies. Its one extra attempt reuses the selection, skips the index
+/// write and every terminal leg, and only commits.
+macro_rules! settle_run_is_finishable_sql {
+    () => {
+        "p.next_phase = 'settle'
+         AND p.settle_selection IS NOT NULL
+         AND p.index_write_state IN ('none', 'complete', 'cancelled')
+         AND NOT EXISTS (
+             SELECT 1 FROM pipeline_run_settlements fs
+              WHERE fs.tenant_id = p.tenant_id AND fs.run_id = p.run_id
+                AND fs.operation_state NOT IN ('complete', 'forfeited'))"
+    };
+}
+
+/// #1313: a run, aliased `p`, with a settlement leg that paid. A leg
+/// completes only with a receipt (`result_ref_hash`), a Trace Credit ledger
+/// event, or an external receipt; any of them means the instrument was
+/// paid, so N-7 removing the run's revision would leave a payment for a
+/// revision that is no longer indexed.
+macro_rules! settle_run_has_paid_leg_sql {
+    () => {
+        "EXISTS (
+             SELECT 1 FROM pipeline_run_settlements paid
+              WHERE paid.tenant_id = p.tenant_id AND paid.run_id = p.run_id
+                AND paid.operation_state = 'complete'
+                AND (paid.credit_event_id IS NOT NULL
+                     OR paid.result_ref_hash IS NOT NULL
+                     OR paid.external_receipt_hash IS NOT NULL))"
+    };
+}
+
+/// `settle_run_is_finishable_sql!` for a run that has not had its extra
+/// attempt yet (V128 `settle_finish_granted_at`): the attempt is given once.
+macro_rules! finishable_settle_run_sql {
+    () => {
+        concat!(
+            settle_run_is_finishable_sql!(),
+            " AND p.settle_finish_granted_at IS NULL"
+        )
+    };
+}
 
 /// The columns of a pipeline gate decision row that come from the Score
 /// evidence alone (spec C-D3), checked before Settle pays any leg and
@@ -388,6 +486,10 @@ const PIPELINE_SUBMISSION_BOUND_MESSAGE: &str =
 /// (`PipelineBundleQualification::configuration_qualifiable`).
 pub const PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL: &str =
     "bundle_configuration_not_qualifiable";
+/// A bundle whose Score policy a registry supplies, from a factory that is
+/// not production-qualified, or that names a Score policy the service holds
+/// no factory for (`PipelineBundleQualification::score_policy`).
+pub const PIPELINE_SCORE_POLICY_NOT_PRODUCTION_LABEL: &str = "runtime_score_policy_not_production";
 /// Safe label of an object-store call in the run path that failed (an
 /// outage, not a decode or hash mismatch): the uncharged suspension of
 /// ruling FR3 (multi-lens review L2-2).
@@ -1177,6 +1279,18 @@ pub enum PipelineCrashPoint {
     AfterNearConfirm,
 }
 
+/// An operator's decision on a run held in `awaiting_operator` (#1313,
+/// `PgPipelineStore::resolve_operator_held_run`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineOperatorHeldRunResolution {
+    /// Fail the run: N-7 applies, and its revision is queued for removal.
+    Fail,
+    /// Give the run one more Settle attempt, due now, once the cause of the
+    /// refusal is fixed. Its paid legs are terminal, so the attempt pays
+    /// nothing again.
+    Release,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PipelineRunState {
@@ -1185,7 +1299,9 @@ pub enum PipelineRunState {
     Retry,
     /// A run Review quarantined with no human assessment yet
     /// (`PgPipelineStore::mark_awaiting_review`, label
-    /// `review_assessment_required`). No claim query selects this state, so
+    /// `review_assessment_required`), or a run its Score policy held for
+    /// operator review instead of pricing it, parked at Score under the
+    /// policy's label (`PgPipelineStore::hold_score_for_review_on_tx`). No claim query selects this state, so
     /// the run does not retry hourly forever while it waits.
     /// `PgPipelineStore::record_review_assessment` moves it back to
     /// `Pending`, due at once, once an assessment lands (Ruling T3-3); a
@@ -1193,6 +1309,13 @@ pub enum PipelineRunState {
     /// the same way by `claim_review` or `record_review_assessment`
     /// themselves (Ruling T3-6).
     AwaitingReview,
+    /// A Settle run with a paid leg whose commit was refused for good
+    /// (`pipeline_gate_decision_conflict` or
+    /// `pipeline_gate_decision_evidence_incomplete`; #1313, V128). It is not
+    /// failed, so its paid revision stays in the index: N-7 removes only
+    /// the revision of a run that fails. No claim query selects it; an
+    /// operator ends it (`PgPipelineStore::resolve_operator_held_run`).
+    AwaitingOperator,
     Complete,
     Failed,
 }
@@ -1204,6 +1327,7 @@ impl PipelineRunState {
             Self::Leased => "leased",
             Self::Retry => "retry",
             Self::AwaitingReview => "awaiting_review",
+            Self::AwaitingOperator => "awaiting_operator",
             Self::Complete => "complete",
             Self::Failed => "failed",
         }
@@ -1215,6 +1339,7 @@ impl PipelineRunState {
             "leased" => Ok(Self::Leased),
             "retry" => Ok(Self::Retry),
             "awaiting_review" => Ok(Self::AwaitingReview),
+            "awaiting_operator" => Ok(Self::AwaitingOperator),
             "complete" => Ok(Self::Complete),
             "failed" => Ok(Self::Failed),
             _ => Err(DatabaseError::Serialization(
@@ -1580,6 +1705,9 @@ pub struct PipelineReviewAuditAssessment {
     pub approved: bool,
     pub reason_code: String,
     pub reviewer_principal_ref: String,
+    /// The assessment resolved a Score policy's hold (V130 `phase =
+    /// 'score'`) rather than a Review hold. It changes no corpus status.
+    pub at_score: bool,
 }
 
 /// A run with a review audit marker (`review_audit_pending_at`,
@@ -1593,7 +1721,8 @@ pub struct PipelineReviewAuditItem {
     pub submission_id: Uuid,
     pub pending_at: DateTime<Utc>,
     pub outcome: Option<PipelineReviewAuditOutcome>,
-    pub assessment: Option<PipelineReviewAuditAssessment>,
+    /// Every assessment of the run, oldest first: one per phase (V130).
+    pub assessments: Vec<PipelineReviewAuditAssessment>,
     /// The privacy pass escalated the run (`privacy_pass_outcome = 'escalated'`):
     /// the run is, or was, held for a human under `privacy_pass_review_required`.
     pub privacy_pass_escalated: bool,
@@ -1603,6 +1732,13 @@ pub struct PipelineReviewAuditItem {
     /// same transaction moved the submission to `rejected` under
     /// `pipeline_processing_failed` (#1346, V123 `submission_rejected_at`).
     pub submission_rejected: bool,
+    /// The time the run was last held for an operator (V128
+    /// `operator_held_at`, #1313): a leg paid and its Settle commit was
+    /// refused for good, or a released run's attempt failed. Read from the
+    /// column, not the run's state, so the hold's audit event is appended
+    /// even after an operator has ended the hold. `None` for a run never
+    /// held.
+    pub settle_held_for_operator_at: Option<DateTime<Utc>>,
 }
 
 /// The result of `PipelineService::settle_internal_credit`: the Trace Credit
@@ -1854,8 +1990,11 @@ pub struct StoredReviewAssessment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineReviewQueueEntry {
     pub run: PipelineRunRecord,
+    /// The Score policy's label for a run its Score policy held for operator
+    /// review (`run.next_phase` is Score,
+    /// `PgPipelineStore::hold_score_for_review_on_tx`);
     /// `privacy_pass_review_required` when the privacy pass escalated the
-    /// run, else the run's `admission_reason`.
+    /// run; else the run's `admission_reason`.
     pub hold_reason: Option<String>,
     pub assessment_superseded: bool,
 }
@@ -2141,7 +2280,8 @@ impl PgPipelineStore {
                  UNION
                  SELECT bundle_id FROM pipeline_runs
                   WHERE tenant_id = $1
-                    AND state IN ('pending', 'leased', 'retry', 'awaiting_review')
+                    AND state IN ('pending', 'leased', 'retry', 'awaiting_review',
+                                  'awaiting_operator')
                  ORDER BY 1",
                 &[&tenant_id],
             )
@@ -2491,6 +2631,80 @@ impl PgPipelineStore {
     ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        // #1313 (b): an expired, exhausted Settle run that can finish
+        // (`finishable_settle_run_sql!`) is not failed by the sweep below.
+        // It gets its one extra attempt back, due now, so this claim or a
+        // later one commits it: it ends `complete`, and N-7 keeps its
+        // revision. Same lock order and skip rule as the sweep.
+        tx.execute(
+            concat!(
+                "WITH finishable AS MATERIALIZED (
+                    SELECT p.run_id FROM pipeline_runs p
+                     WHERE p.tenant_id = $1
+                       AND p.state = 'leased'
+                       AND p.lease_expires_at <= NOW()
+                       AND p.attempt_count >= p.max_attempts
+                       AND ",
+                finishable_settle_run_sql!(),
+                "
+                     ORDER BY p.run_id
+                     FOR UPDATE OF p SKIP LOCKED
+                 )
+                 UPDATE pipeline_runs r
+                 SET state = 'retry', lease_token = NULL, lease_expires_at = NULL,
+                     attempt_count = GREATEST(r.max_attempts - 1, 0),
+                     next_attempt_at = NOW(),
+                     settle_finish_granted_at = clock_timestamp(),
+                     last_error_label = $2, updated_at = NOW()
+                 FROM finishable
+                 WHERE r.tenant_id = $1 AND r.run_id = finishable.run_id"
+            ),
+            &[&tenant_id, &PIPELINE_SETTLE_FINISH_GRANTED_LABEL],
+        )
+        .await?;
+        // #1413 review: an expired, exhausted run that was held before (an
+        // operator released it, and its attempt crashed) is held again
+        // rather than failed, so N-7 does not remove the paid revision the
+        // operator chose to keep. Same lock order and skip rule as the sweep.
+        let reheld = tx
+            .execute(
+                concat!(
+                    "WITH reheld AS MATERIALIZED (
+                        SELECT p.run_id FROM pipeline_runs p
+                         WHERE p.tenant_id = $1
+                           AND p.state = 'leased'
+                           AND p.lease_expires_at <= NOW()
+                           AND p.attempt_count >= p.max_attempts
+                           AND p.operator_held_at IS NOT NULL
+                           AND ",
+                    settle_run_is_finishable_sql!(),
+                    " AND ",
+                    settle_run_has_paid_leg_sql!(),
+                    "
+                         ORDER BY p.run_id
+                         FOR UPDATE OF p SKIP LOCKED
+                     )
+                     UPDATE pipeline_runs r
+                     SET state = 'awaiting_operator', lease_token = NULL,
+                         lease_expires_at = NULL,
+                         operator_held_at = clock_timestamp(),
+                         review_audit_pending_at = clock_timestamp(),
+                         last_error_label = $2, updated_at = NOW()
+                     FROM reheld
+                     WHERE r.tenant_id = $1 AND r.run_id = reheld.run_id"
+                ),
+                &[&tenant_id, &PIPELINE_ATTEMPTS_EXHAUSTED_LABEL],
+            )
+            .await?;
+        if reheld > 0 {
+            tracing::warn!(
+                label = PIPELINE_SETTLE_HELD_FOR_OPERATOR_LABEL,
+                reason_label = PIPELINE_ATTEMPTS_EXHAUSTED_LABEL,
+                tenant_storage_ref = pipeline_tenant_storage_ref(tenant_id).as_str(),
+                held_runs = reheld,
+                "released pipeline runs are held for an operator again"
+            );
+        }
         // Multi-lens review L4-1 and L4-6(a): the sweep locks in run id order
         // and skips a row another transaction holds (a live dispatch, a
         // withdrawal), so a claim never waits behind one and two sweeps
@@ -3342,7 +3556,7 @@ impl PgPipelineStore {
     /// recorded); without the assessment predicate, a reviewer
     /// could re-claim a run that already has one, and a later
     /// `record_review_assessment` would then hit
-    /// `pipeline_review_assessments`'s `UNIQUE (tenant_id, run_id)` instead
+    /// `pipeline_review_assessments`'s `UNIQUE (tenant_id, run_id, phase)` (V130) instead
     /// of refusing cleanly. `FOR UPDATE` on this row also now does the
     /// concurrency work: a worker's `claim_run` (its own `UPDATE ...
     /// RETURNING *`) and this `SELECT` take the same row lock, so whichever
@@ -3360,6 +3574,13 @@ impl PgPipelineStore {
     /// `HeldByAnotherReviewer` when another reviewer holds a live claim on
     /// an otherwise eligible run (Ruling T3-9(b): ingest answers the first
     /// `404` and only the second `409`).
+    ///
+    /// A run its Score policy held for operator review
+    /// (`run_held_at_score_sql!`) is claimable the same way, under the same
+    /// claim table and lease. Its assessment is its own (`phase` `score`,
+    /// V130), so an assessment the run got at Review does not make it
+    /// ineligible, and its submission must still be the accepted one Score
+    /// needs (`hold_submission_is_operable`).
     pub async fn claim_review(
         &self,
         tenant_id: &str,
@@ -3380,10 +3601,12 @@ impl PgPipelineStore {
         let run_row = tx
             .query_opt(
                 concat!(
-                    "SELECT state, submission_id FROM pipeline_runs p
-                      WHERE p.tenant_id = $1 AND p.run_id = $2 AND ",
+                    "SELECT state, submission_id, next_phase FROM pipeline_runs p
+                      WHERE p.tenant_id = $1 AND p.run_id = $2 AND ((",
                     run_waiting_for_review_sql!(),
-                    " FOR UPDATE"
+                    ") OR (",
+                    run_held_at_score_sql!(),
+                    ")) FOR UPDATE"
                 ),
                 &[&tenant_id, &run_id],
             )
@@ -3397,11 +3620,12 @@ impl PgPipelineStore {
         // an assessment committed while this claim waited for that lock. A
         // check inside the locking statement would read the snapshot taken
         // before the wait.
+        let at_score = run_row.get::<_, Option<String>>("next_phase").as_deref() == Some("score");
         let assessed: bool = tx
             .query_one(
                 "SELECT EXISTS (SELECT 1 FROM pipeline_review_assessments
-                                 WHERE tenant_id = $1 AND run_id = $2)",
-                &[&tenant_id, &run_id],
+                                 WHERE tenant_id = $1 AND run_id = $2 AND phase = $3)",
+                &[&tenant_id, &run_id, &assessment_phase(at_score)],
             )
             .await?
             .get(0);
@@ -3411,7 +3635,7 @@ impl PgPipelineStore {
         }
         let run_state: String = run_row.get("state");
         let submission_id: Uuid = run_row.get("submission_id");
-        if !review_submission_is_operable(&tx, tenant_id, submission_id).await? {
+        if !hold_submission_is_operable(&tx, tenant_id, submission_id, at_score).await? {
             if run_state == "awaiting_review" {
                 release_awaiting_review(&tx, tenant_id, run_id).await?;
             }
@@ -3494,6 +3718,17 @@ impl PgPipelineStore {
     /// it has one, and `privacy_pass_review_required`, if the privacy pass
     /// escalated it. A run held for no logged reason at all needs at least
     /// one resolved reason, as in the port.
+    ///
+    /// A run its Score policy held for operator review is assessed the same
+    /// way, under the same claim, and its assessment is recorded with
+    /// `phase` `score` and the policy's hold label (`hold_label`, V130),
+    /// read from the run before the release clears it. An approval must
+    /// resolve that label. The release sends the run back to Score, which
+    /// reads the assessment (`load_score_hold_assessment`): an approval
+    /// reaches the Score policy on its input (`ScoreInput::operator_review`),
+    /// and a rejection makes the server commit a zero Score outcome itself
+    /// (`ScoreOutput::rejected_after_hold`), so the run settles with no
+    /// credit and no index entry.
     pub async fn record_review_assessment(
         &self,
         claim: &PipelineReviewClaim,
@@ -3501,6 +3736,26 @@ impl PgPipelineStore {
         reason: ReasonCode,
         resolved_quarantine_reasons: Vec<ReasonCode>,
     ) -> Result<HumanReviewAssessment, DatabaseError> {
+        self.record_review_assessment_for_hold(
+            claim,
+            recommendation,
+            reason,
+            resolved_quarantine_reasons,
+        )
+        .await
+        .map(|(assessment, _)| assessment)
+    }
+
+    /// `record_review_assessment`, also answering whether the assessment
+    /// resolved a Score hold (`true`) or a Review hold (`false`), as read
+    /// under the run's lock.
+    pub async fn record_review_assessment_for_hold(
+        &self,
+        claim: &PipelineReviewClaim,
+        recommendation: ReviewRecommendation,
+        reason: ReasonCode,
+        resolved_quarantine_reasons: Vec<ReasonCode>,
+    ) -> Result<(HumanReviewAssessment, bool), DatabaseError> {
         let mut resolved = resolved_quarantine_reasons;
         resolved.sort();
         resolved.dedup();
@@ -3519,11 +3774,13 @@ impl PgPipelineStore {
             .query_opt(
                 concat!(
                     "SELECT p.admission_reason, p.privacy_pass_outcome, p.state,
-                            p.submission_id
+                            p.submission_id, p.next_phase, p.last_error_label
                      FROM pipeline_runs p
-                     WHERE p.tenant_id = $1 AND p.run_id = $2 AND ",
+                     WHERE p.tenant_id = $1 AND p.run_id = $2 AND ((",
                     run_waiting_for_review_sql!(),
-                    " FOR UPDATE"
+                    ") OR (",
+                    run_held_at_score_sql!(),
+                    ")) FOR UPDATE"
                 ),
                 &[&claim.tenant_id, &claim.run_id],
             )
@@ -3560,7 +3817,21 @@ impl PgPipelineStore {
             == Some(PrivacyPassOutcome::Escalated.as_db());
         let run_state: String = row.get("state");
         let submission_id: Uuid = row.get("submission_id");
-        if !review_submission_is_operable(&tx, &claim.tenant_id, submission_id).await? {
+        let at_score = row.get::<_, Option<String>>("next_phase").as_deref() == Some("score");
+        // The label a Score policy held the run under; a Score hold always
+        // parks under one (`hold_score_for_review_on_tx`).
+        let hold_label: Option<String> = if at_score {
+            Some(
+                row.get::<_, Option<String>>("last_error_label")
+                    .filter(|label| ReasonCode::new(label.clone()).is_ok())
+                    .ok_or_else(|| {
+                        DatabaseError::Constraint("review claim is stale or inoperable".to_string())
+                    })?,
+            )
+        } else {
+            None
+        };
+        if !hold_submission_is_operable(&tx, &claim.tenant_id, submission_id, at_score).await? {
             if run_state == "awaiting_review" {
                 release_awaiting_review(&tx, &claim.tenant_id, claim.run_id).await?;
             }
@@ -3570,13 +3841,18 @@ impl PgPipelineStore {
             ));
         }
         if recommendation == ReviewRecommendation::Approve {
-            // Every reason that holds the run must be resolved: Admission's,
-            // if it gave one, and the privacy pass's, if it escalated.
-            let required: Vec<&str> = admission_reason
-                .as_deref()
-                .into_iter()
-                .chain(pass_escalated.then_some(PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL))
-                .collect();
+            // Every reason that holds the run must be resolved: at Score,
+            // the policy's hold label; at Review, Admission's, if it gave
+            // one, and the privacy pass's, if it escalated.
+            let required: Vec<&str> = if at_score {
+                hold_label.as_deref().into_iter().collect()
+            } else {
+                admission_reason
+                    .as_deref()
+                    .into_iter()
+                    .chain(pass_escalated.then_some(PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL))
+                    .collect()
+            };
             let unresolved = if required.is_empty() {
                 resolved.is_empty()
             } else {
@@ -3593,18 +3869,25 @@ impl PgPipelineStore {
         let resolved_json = serde_json::to_value(&resolved).map_err(|_| {
             DatabaseError::Serialization("review assessment encode failed".to_string())
         })?;
+        // A Review assessment hashes exactly what it hashed before V130; a
+        // Score assessment also binds its phase and the hold it resolves.
+        let mut evidence = serde_json::json!({
+            "schema": "trace_commons.pipeline_review_assessment.v1",
+            "run_id": claim.run_id,
+            "recommendation": recommendation_label,
+            "reason": reason.as_str(),
+            "resolved_quarantine_reasons": resolved,
+        });
+        if let Some(hold_label) = &hold_label {
+            evidence["phase"] = serde_json::json!(assessment_phase(true));
+            evidence["hold_label"] = serde_json::json!(hold_label);
+        }
         let evidence_hash = sha256_prefixed(
-            serde_json::to_vec(&serde_json::json!({
-                "schema": "trace_commons.pipeline_review_assessment.v1",
-                "run_id": claim.run_id,
-                "recommendation": recommendation_label,
-                "reason": reason.as_str(),
-                "resolved_quarantine_reasons": resolved,
-            }))
-            .map_err(|_| {
-                DatabaseError::Serialization("review assessment encode failed".to_string())
-            })?
-            .as_slice(),
+            serde_json::to_vec(&evidence)
+                .map_err(|_| {
+                    DatabaseError::Serialization("review assessment encode failed".to_string())
+                })?
+                .as_slice(),
         );
         let assessment_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
@@ -3617,8 +3900,9 @@ impl PgPipelineStore {
         tx.execute(
             "INSERT INTO pipeline_review_assessments (
                 tenant_id, assessment_id, run_id, reviewer_principal_ref,
-                recommendation, reason_code, resolved_quarantine_reasons, evidence_hash
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                recommendation, reason_code, resolved_quarantine_reasons, evidence_hash,
+                phase, hold_label
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             &[
                 &claim.tenant_id,
                 &assessment_id,
@@ -3628,6 +3912,8 @@ impl PgPipelineStore {
                 &reason.as_str(),
                 &resolved_json,
                 &evidence_hash,
+                &assessment_phase(at_score),
+                &hold_label,
             ],
         )
         .await?;
@@ -3650,13 +3936,16 @@ impl PgPipelineStore {
         // now resolves) or rejected (Review now ends the run) it.
         release_awaiting_review(&tx, &claim.tenant_id, claim.run_id).await?;
         tx.commit().await?;
-        Ok(HumanReviewAssessment {
-            assessment_id,
-            recommendation,
-            reason,
-            resolved_quarantine_reasons: resolved,
-            evidence_hash,
-        })
+        Ok((
+            HumanReviewAssessment {
+                assessment_id,
+                recommendation,
+                reason,
+                resolved_quarantine_reasons: resolved,
+                evidence_hash,
+            },
+            at_score,
+        ))
     }
 
     /// The stored assessment for `run_id`, if a reviewer has recorded one
@@ -3676,7 +3965,7 @@ impl PgPipelineStore {
                 "SELECT assessment_id, recommendation, reason_code,
                         resolved_quarantine_reasons, evidence_hash, recorded_at
                  FROM pipeline_review_assessments
-                 WHERE tenant_id = $1 AND run_id = $2",
+                 WHERE tenant_id = $1 AND run_id = $2 AND phase = 'review'",
                 &[&tenant_id, &run_id],
             )
             .await?;
@@ -3707,6 +3996,49 @@ impl PgPipelineStore {
                     evidence_hash: row.get("evidence_hash"),
                 },
                 recorded_at: row.get("recorded_at"),
+            })
+        })
+        .transpose()
+    }
+
+    /// The operator's resolution of `run_id`'s Score hold, if one is
+    /// recorded (`record_review_assessment` on a run held at Score): the
+    /// recommendation and the label the policy held the run under. Read
+    /// before every Score attempt (`commit_score_phase`). Nothing that names
+    /// the reviewer is returned.
+    pub async fn load_score_hold_assessment(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+    ) -> Result<Option<ScoreHoldReview>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT recommendation, hold_label
+                 FROM pipeline_review_assessments
+                 WHERE tenant_id = $1 AND run_id = $2 AND phase = 'score'",
+                &[&tenant_id, &run_id],
+            )
+            .await?;
+        tx.commit().await?;
+        row.map(|row| {
+            let decision = match row.get::<_, String>("recommendation").as_str() {
+                "approve" => Ok(ReviewRecommendation::Approve),
+                "reject" => Ok(ReviewRecommendation::Reject),
+                _ => Err(DatabaseError::Serialization(
+                    "unknown review recommendation".to_string(),
+                )),
+            }?;
+            let hold_label = row
+                .get::<_, Option<String>>("hold_label")
+                .and_then(|label| ReasonCode::new(label).ok())
+                .ok_or_else(|| {
+                    DatabaseError::Serialization("invalid score hold label".to_string())
+                })?;
+            Ok(ScoreHoldReview {
+                decision,
+                hold_label,
             })
         })
         .transpose()
@@ -3743,7 +4075,7 @@ impl PgPipelineStore {
                                 WHERE s.tenant_id = p.tenant_id
                                   AND s.submission_id = p.submission_id
                                   AND ",
-                    reviewable_submission_sql!(),
+                    parked_run_submission_sql!(),
                     "
                            )
                          ORDER BY p.run_id
@@ -3779,6 +4111,15 @@ impl PgPipelineStore {
     /// helper mirror), applied here as a join and an anti-join rather than a
     /// per-row lock (this is a plain read, not a claim, so it must filter in
     /// SQL rather than call the helper row by row).
+    ///
+    /// A run whose Score policy held it for operator review
+    /// (`hold_score_for_review_on_tx`) is listed too, with `run.next_phase`
+    /// Score and the policy's label as its hold reason, whether or not an
+    /// earlier Review assessment exists for it, and never as superseded.
+    /// It is claimed and assessed as a Review hold is (`claim_review`,
+    /// `record_review_assessment`), and leaves the queue once its own
+    /// assessment (`phase` `score`) is recorded. Only a Review assessment
+    /// (`phase` `review`) bears on a run held at Review.
     pub async fn list_review_queue(
         &self,
         tenant_id: &str,
@@ -3791,23 +4132,32 @@ impl PgPipelineStore {
             .query(
                 concat!(
                     "SELECT p.*,
-                            CASE WHEN p.privacy_pass_outcome = 'escalated'
+                            CASE WHEN p.next_phase = 'score' THEN p.last_error_label
+                                 WHEN p.privacy_pass_outcome = 'escalated'
                                  THEN 'privacy_pass_review_required'
                                  ELSE p.admission_reason
                             END AS queue_hold_reason,
-                            (a.run_id IS NOT NULL) AS queue_assessment_superseded
+                            (a.run_id IS NOT NULL AND p.next_phase = 'review')
+                                AS queue_assessment_superseded
                        FROM pipeline_runs p
                       JOIN trace_submissions s
                         ON s.tenant_id = p.tenant_id AND s.submission_id = p.submission_id
                       LEFT JOIN pipeline_review_assessments a
                         ON a.tenant_id = p.tenant_id AND a.run_id = p.run_id
-                      WHERE p.tenant_id = $1 AND ",
+                       AND a.phase = 'review'
+                      WHERE p.tenant_id = $1 AND ((",
                     run_waiting_for_review_sql!(),
                     " AND (a.run_id IS NULL
                            OR (p.privacy_pass_outcome = 'escalated'
-                               AND a.recorded_at < p.privacy_pass_recorded_at))
+                               AND a.recorded_at < p.privacy_pass_recorded_at)))
+                        OR (",
+                    run_held_at_score_sql!(),
+                    " AND NOT EXISTS (
+                               SELECT 1 FROM pipeline_review_assessments sa
+                                WHERE sa.tenant_id = p.tenant_id AND sa.run_id = p.run_id
+                                  AND sa.phase = 'score')))
                       AND ",
-                    reviewable_submission_sql!(),
+                    parked_run_submission_sql!(),
                     " ORDER BY p.created_at, p.run_id
                       LIMIT $2"
                 ),
@@ -3887,6 +4237,7 @@ impl PgPipelineStore {
             payout_rails,
             payout_enabled,
             trace_credit_event,
+            &[],
         )
         .await
     }
@@ -3895,6 +4246,12 @@ impl PgPipelineStore {
     /// compatibility Score commits on the transaction that holds its
     /// tenant's Score lock (`PipelineService::commit_score_phase`), so the
     /// lock is released only with the commit.
+    ///
+    /// `score_bases` are the `(run id, revision id)` of the unapplied index
+    /// commands the Score counted (`unapplied_index_commands_on_tx`), which
+    /// the caller passes only for a Score that passed quality and failed
+    /// novelty; they are recorded in `pipeline_score_bases` (#1313 case (a),
+    /// V128) on this transaction, after the outcome.
     #[allow(clippy::too_many_arguments)]
     pub async fn commit_score_in(
         tx: Transaction<'_>,
@@ -3906,6 +4263,7 @@ impl PgPipelineStore {
         payout_rails: &BTreeMap<String, String>,
         payout_enabled: bool,
         trace_credit_event: PipelineTraceCreditEvent,
+        score_bases: &[(Uuid, Uuid)],
     ) -> Result<PipelineRunRecord, DatabaseError> {
         if outcome.phase != Phase::Score || run.next_phase != Some(Phase::Score) {
             return Err(DatabaseError::Constraint(
@@ -3940,6 +4298,17 @@ impl PgPipelineStore {
             outcome,
         )
         .await?;
+
+        for (basis_run_id, basis_revision_id) in score_bases {
+            tx.execute(
+                "INSERT INTO pipeline_score_bases (
+                     tenant_id, run_id, basis_run_id, basis_revision_id)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT DO NOTHING",
+                &[&run.tenant_id, &run.run_id, basis_run_id, basis_revision_id],
+            )
+            .await?;
+        }
 
         for award in awards.iter() {
             let instrument_id = award.instrument_id().as_str();
@@ -4273,19 +4642,16 @@ impl PgPipelineStore {
             .query(
                 "SELECT p.run_id, p.submission_id, p.review_audit_pending_at,
                         o.outcome_id, o.decision ->> 'kind' AS decision_kind,
-                        a.assessment_id, a.recommendation, a.reason_code,
-                        a.reviewer_principal_ref,
                         p.privacy_pass_outcome IS NOT DISTINCT FROM 'escalated'
                             AS privacy_pass_escalated,
                         (p.state = 'failed' AND p.last_error_label IS NOT DISTINCT FROM $3)
                             AS privacy_classification_failed,
-                        p.submission_rejected_at IS NOT NULL AS submission_rejected
+                        p.submission_rejected_at IS NOT NULL AS submission_rejected,
+                        p.operator_held_at AS settle_held_for_operator_at
                    FROM pipeline_runs p
                    LEFT JOIN phase_outcomes o
                      ON o.tenant_id = p.tenant_id AND o.run_id = p.run_id
                     AND o.phase = 'review'
-                   LEFT JOIN pipeline_review_assessments a
-                     ON a.tenant_id = p.tenant_id AND a.run_id = p.run_id
                   WHERE p.tenant_id = $1 AND p.review_audit_pending_at IS NOT NULL
                   ORDER BY p.review_audit_pending_at, p.run_id
                   LIMIT $2",
@@ -4296,7 +4662,52 @@ impl PgPipelineStore {
                 ],
             )
             .await?;
+        // A run holds at most one assessment per phase (V130), and the one
+        // marker covers both: every assessment of a marked run is read.
+        let run_ids: Vec<Uuid> = rows.iter().map(|row| row.get("run_id")).collect();
+        let assessment_rows = tx
+            .query(
+                "SELECT run_id, assessment_id, recommendation, reason_code,
+                        reviewer_principal_ref, phase
+                   FROM pipeline_review_assessments
+                  WHERE tenant_id = $1 AND run_id = ANY($2)
+                  ORDER BY recorded_at, assessment_id",
+                &[&tenant_id, &run_ids],
+            )
+            .await?;
         tx.commit().await?;
+        let mut assessments: std::collections::HashMap<Uuid, Vec<PipelineReviewAuditAssessment>> =
+            std::collections::HashMap::new();
+        for row in &assessment_rows {
+            let approved = match row.get::<_, String>("recommendation").as_str() {
+                "approve" => true,
+                "reject" => false,
+                _ => {
+                    return Err(DatabaseError::Serialization(
+                        "unknown review recommendation".to_string(),
+                    ));
+                }
+            };
+            let at_score = match row.get::<_, String>("phase").as_str() {
+                "score" => true,
+                "review" => false,
+                _ => {
+                    return Err(DatabaseError::Serialization(
+                        "unknown review assessment phase".to_string(),
+                    ));
+                }
+            };
+            assessments
+                .entry(row.get("run_id"))
+                .or_default()
+                .push(PipelineReviewAuditAssessment {
+                    assessment_id: row.get("assessment_id"),
+                    approved,
+                    reason_code: row.get("reason_code"),
+                    reviewer_principal_ref: row.get("reviewer_principal_ref"),
+                    at_score,
+                });
+        }
         rows.iter()
             .map(|row| {
                 let outcome = match row.get::<_, Option<Uuid>>("outcome_id") {
@@ -4318,36 +4729,19 @@ impl PgPipelineStore {
                     }
                     None => None,
                 };
-                let assessment = match row.get::<_, Option<Uuid>>("assessment_id") {
-                    Some(assessment_id) => {
-                        let approved =
-                            match row.get::<_, Option<String>>("recommendation").as_deref() {
-                                Some("approve") => true,
-                                Some("reject") => false,
-                                _ => {
-                                    return Err(DatabaseError::Serialization(
-                                        "unknown review recommendation".to_string(),
-                                    ));
-                                }
-                            };
-                        Some(PipelineReviewAuditAssessment {
-                            assessment_id,
-                            approved,
-                            reason_code: row.get("reason_code"),
-                            reviewer_principal_ref: row.get("reviewer_principal_ref"),
-                        })
-                    }
-                    None => None,
-                };
                 Ok(PipelineReviewAuditItem {
                     run_id: row.get("run_id"),
                     submission_id: row.get("submission_id"),
                     pending_at: row.get("review_audit_pending_at"),
                     outcome,
-                    assessment,
+                    assessments: assessments
+                        .get(&row.get::<_, Uuid>("run_id"))
+                        .cloned()
+                        .unwrap_or_default(),
                     privacy_pass_escalated: row.get("privacy_pass_escalated"),
                     privacy_classification_failed: row.get("privacy_classification_failed"),
                     submission_rejected: row.get("submission_rejected"),
+                    settle_held_for_operator_at: row.get("settle_held_for_operator_at"),
                 })
             })
             .collect()
@@ -5819,17 +6213,24 @@ impl PgPipelineStore {
     /// transaction (spec 2026-10-08, Slice C), so `main`'s consumers --
     /// duplicate clustering, the contributor cap, per-author scoring,
     /// account trust -- see pipeline traffic with no change to their
-    /// readers. Only a run whose bound bundle's Score policy is the
-    /// compatibility one writes a row: no other Score evidence carries the
-    /// legacy fields (C-D1). Every column comes from the committed Score
+    /// readers. Every run whose bound bundle's Score runs under the Score
+    /// runtime controls writes a row: the compatibility Score policy and
+    /// every Score policy a registry supplies
+    /// (`score_runs_under_runtime_controls`). A registered policy's evidence
+    /// must carry the fields the row needs, as the compatibility evidence
+    /// does; one that does not fails the run closed at Settle, before any
+    /// leg pays. Only a minimal-reference run writes none: its evidence
+    /// carries none of the legacy fields (C-D1). Every column comes from the committed Score
     /// outcome, the bound package's Score configuration hash and the run's
     /// Trace Credit leg (C-D3); the legacy-only columns stay NULL for the
     /// sweeps to fill.
     ///
     /// The decision id is a UUIDv5 over the tenant and the run (C-D2), and
     /// offering this run's row twice is a no-op. Returns whether a row was
-    /// written: `false` for a non-compatibility bundle and for this run's
-    /// row already existing. A pipeline row for the same submission that
+    /// written: `false` for a minimal-reference bundle, for this run's row
+    /// already existing, and for the zero outcome the server committed for
+    /// a rejected Score hold (`ScoreEvidence::operator_rejected_hold`),
+    /// which scored nothing the row could record. A pipeline row for the same submission that
     /// names another run refuses with `PIPELINE_GATE_DECISION_CONFLICT_LABEL`.
     ///
     /// Fails closed, writing nothing, when the run has no Score outcome or
@@ -5871,7 +6272,9 @@ impl PgPipelineStore {
             .ok_or_else(incomplete)?;
         let score_policy = serde_json::from_value::<PolicyRef>(score_policy.get("score_policy"))
             .map_err(|_| incomplete())?;
-        if score_policy.implementation_id != COMPATIBILITY_SCORE_IMPLEMENTATION {
+        if !crate::versioned_pipeline_bundle::score_runs_under_runtime_controls(
+            &score_policy.implementation_id,
+        ) {
             return Ok(false);
         }
         let outcome = tx
@@ -5891,6 +6294,11 @@ impl PgPipelineStore {
         let evaluation: serde_json::Value = outcome.get("evaluation");
         let evidence = serde_json::from_value::<ScoreEvidence>(evidence_value.clone())
             .map_err(|_| incomplete())?;
+        // The server's zero outcome for a rejected Score hold: nothing was
+        // scored, so no row is written.
+        if evidence.operator_rejected_hold.is_some() {
+            return Ok(false);
+        }
         let values =
             PipelineGateDecisionScoreValues::from_evidence(&evidence).map_err(|_| incomplete())?;
         let attestation_chain_hash =
@@ -6177,6 +6585,88 @@ impl PgPipelineStore {
         Ok(None)
     }
 
+    /// The unapplied runs a Score of `run_id` (one that runs under the runtime
+    /// controls) counted as
+    /// neighbours (#1313 case (a), V128 `pipeline_score_bases`), as
+    /// `(basis run id, basis revision id)` by basis run id. Only a Score
+    /// that passed quality and failed novelty records them.
+    pub async fn list_score_bases(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+    ) -> Result<Vec<(Uuid, Uuid)>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT basis_run_id, basis_revision_id FROM pipeline_score_bases
+                  WHERE tenant_id = $1 AND run_id = $2
+                  ORDER BY basis_run_id",
+                &[&tenant_id, &run_id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows.iter().map(|row| (row.get(0), row.get(1))).collect())
+    }
+
+    /// An operator's decision on a run held in `awaiting_operator` (#1313).
+    /// Returns the updated run, or `None` when the run is not held.
+    ///
+    /// `Fail` ends the run `failed` and applies N-7 in the same
+    /// transaction, as every failure path does
+    /// (`invalidate_index_writes_of_failed_runs_on_tx`). `Release` gives it
+    /// one more Settle attempt, due now: its paid legs are terminal, so the
+    /// attempt only commits. The release counts as the run's extra attempt
+    /// (`settle_finish_granted_at`), so no automatic grant follows it; if the
+    /// attempt fails in any way -- a refused commit, a charged retry, or a
+    /// crash the claim sweep finds -- the run is held again (V128
+    /// `operator_held_at`), never failed under N-7.
+    /// Lock order: the run row, then the invalidation rows.
+    pub async fn resolve_operator_held_run(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+        resolution: PipelineOperatorHeldRunResolution,
+    ) -> Result<Option<PipelineRunRecord>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let sql = match resolution {
+            PipelineOperatorHeldRunResolution::Fail => {
+                "UPDATE pipeline_runs
+                    SET state = 'failed', last_error_label = $3, updated_at = NOW()
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'awaiting_operator'
+                  RETURNING *"
+            }
+            PipelineOperatorHeldRunResolution::Release => {
+                "UPDATE pipeline_runs
+                    SET state = 'retry',
+                        attempt_count = GREATEST(max_attempts - 1, 0),
+                        next_attempt_at = NOW(),
+                        settle_finish_granted_at =
+                            COALESCE(settle_finish_granted_at, clock_timestamp()),
+                        last_error_label = $3, updated_at = NOW()
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'awaiting_operator'
+                  RETURNING *"
+            }
+        };
+        let label = match resolution {
+            PipelineOperatorHeldRunResolution::Fail => PIPELINE_OPERATOR_FAILED_HELD_RUN_LABEL,
+            PipelineOperatorHeldRunResolution::Release => PIPELINE_OPERATOR_RELEASED_HELD_RUN_LABEL,
+        };
+        let Some(row) = tx.query_opt(sql, &[&tenant_id, &run_id, &label]).await? else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let updated = pipeline_run_from_row(&row)?;
+        if resolution == PipelineOperatorHeldRunResolution::Fail {
+            resolve_open_settlement_legs_on_tx(&tx, tenant_id, &[run_id]).await?;
+            invalidate_index_writes_of_failed_runs_on_tx(&tx, tenant_id, &[run_id]).await?;
+            reject_received_submissions_of_failed_runs_on_tx(&tx, tenant_id, &[run_id]).await?;
+        }
+        tx.commit().await?;
+        Ok(Some(updated))
+    }
+
     /// Fails the run terminally under its live lease. When the
     /// run is in Settle, every open leg is resolved in this same
     /// transaction (`resolve_open_settlement_legs_on_tx`). A worker calls
@@ -6205,6 +6695,25 @@ impl PgPipelineStore {
             )
             .await?
             .ok_or_else(stale_lease_error)?;
+        // #1313, the gap: a Settle run with a paid leg whose commit was
+        // refused for good is held for an operator, not failed, so N-7 does
+        // not remove the revision that was paid for. The automatic paths
+        // keep N-7 for everything else.
+        if phase_from_db(row.get("next_phase"))? == Some(Phase::Settle)
+            && hold_paid_settle_run_for_operator_on_tx(&tx, run, error_label)
+                .await?
+                .is_some()
+        {
+            tx.commit().await?;
+            tracing::warn!(
+                label = PIPELINE_SETTLE_HELD_FOR_OPERATOR_LABEL,
+                reason_label = error_label,
+                tenant_storage_ref = pipeline_tenant_storage_ref(&run.tenant_id).as_str(),
+                run_ref_hash = %sha256_prefixed(run.run_id.to_string().as_bytes()),
+                "a paid pipeline run is held for an operator"
+            );
+            return Ok(());
+        }
         if phase_from_db(row.get("next_phase"))? == Some(Phase::Settle) {
             resolve_open_settlement_legs_on_tx(&tx, &run.tenant_id, &[run.run_id]).await?;
             invalidate_index_writes_of_failed_runs_on_tx(&tx, &run.tenant_id, &[run.run_id])
@@ -6312,6 +6821,59 @@ impl PgPipelineStore {
             .await?
             .ok_or_else(stale_lease_error)?;
         let updated = pipeline_run_from_row(&row)?;
+        // #1313 (b): a retry that exhausts a Settle run that can finish
+        // gives it its one extra attempt, due now, instead of failing it.
+        if updated.state == PipelineRunState::Failed && updated.next_phase == Some(Phase::Settle) {
+            if let Some(granted) = tx
+                .query_opt(
+                    concat!(
+                        "UPDATE pipeline_runs p
+                            SET state = 'retry',
+                                attempt_count = GREATEST(p.max_attempts - 1, 0),
+                                next_attempt_at = NOW(),
+                                settle_finish_granted_at = clock_timestamp(),
+                                last_error_label = $3, updated_at = NOW()
+                          WHERE p.tenant_id = $1 AND p.run_id = $2 AND p.state = 'failed'
+                            AND ",
+                        finishable_settle_run_sql!(),
+                        " RETURNING p.*"
+                    ),
+                    &[
+                        &run.tenant_id,
+                        &run.run_id,
+                        &PIPELINE_SETTLE_FINISH_GRANTED_LABEL,
+                    ],
+                )
+                .await?
+            {
+                let granted = pipeline_run_from_row(&granted)?;
+                tx.commit().await?;
+                return Ok(granted);
+            }
+            // #1413 review: a released run (held before) whose attempt is
+            // exhausted is held again, not failed: the operator chose to
+            // keep its paid revision.
+            if let Some(held) = hold_paid_settle_run_for_operator_on_tx(
+                &tx,
+                run,
+                updated
+                    .last_error_label
+                    .as_deref()
+                    .unwrap_or(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL),
+            )
+            .await?
+            {
+                tx.commit().await?;
+                tracing::warn!(
+                    label = PIPELINE_SETTLE_HELD_FOR_OPERATOR_LABEL,
+                    reason_label = PIPELINE_ATTEMPTS_EXHAUSTED_LABEL,
+                    tenant_storage_ref = pipeline_tenant_storage_ref(&run.tenant_id).as_str(),
+                    run_ref_hash = %sha256_prefixed(run.run_id.to_string().as_bytes()),
+                    "a released pipeline run is held for an operator again"
+                );
+                return Ok(held);
+            }
+        }
         if updated.state == PipelineRunState::Failed && updated.next_phase == Some(Phase::Settle) {
             resolve_open_settlement_legs_on_tx(&tx, &run.tenant_id, &[run.run_id]).await?;
             invalidate_index_writes_of_failed_runs_on_tx(&tx, &run.tenant_id, &[run.run_id])
@@ -6425,6 +6987,85 @@ impl PgPipelineStore {
             &[&run.tenant_id, &run.run_id, &lease_token],
         )
         .await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// Parks a run whose Score policy asked for its trace to be held for
+    /// operator review instead of priced (`ScoreOutput::hold_for_review`),
+    /// on the caller's transaction: the run moves to the review hold state
+    /// (`awaiting_review`) at Score, under the policy's safe label, with its
+    /// lease cleared and the claim's attempt given back, as
+    /// `mark_awaiting_review` parks a run at Review. Nothing of the Score is
+    /// committed, so no award is seeded and no settlement leg exists; the
+    /// rows a Score staged before its tenant lock (`staged`, no hash, under
+    /// this lease token) are deleted, as `release_score_lock_busy` deletes
+    /// them, since the held Score published nothing. Fenced by the lease
+    /// against the database clock.
+    ///
+    /// The same guards as `commit_score_in`, in the same lock order (run
+    /// row, submission row, policy row), refuse the hold and write nothing:
+    /// an inoperable submission with `PIPELINE_SUBMISSION_INOPERABLE_LABEL`,
+    /// so a held run whose submission was withdrawn and that an
+    /// invalidation pass released ends as any Score of such a run ends,
+    /// rather than parking again; and a Score policy that is no longer
+    /// runnable with `PIPELINE_POLICY_NOT_RUNNABLE_LABEL` (GRD-004).
+    pub async fn hold_score_for_review_on_tx(
+        tx: &Transaction<'_>,
+        run: &PipelineRunRecord,
+        label: &str,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        if run.next_phase != Some(Phase::Score) {
+            return Err(DatabaseError::Constraint(
+                "phase does not match run transition".to_string(),
+            ));
+        }
+        let lease_token = required_lease_token(run)?;
+        ensure_current_lease(tx, run, lease_token).await?;
+        if !Self::submission_guard_on_tx(tx, run).await?.operable {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+            ));
+        }
+        if !lock_runnable_policy(tx, &run.tenant_id, &run.bundle_id, Phase::Score).await? {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_POLICY_NOT_RUNNABLE_LABEL.to_string(),
+            ));
+        }
+        let row = tx
+            .query_opt(
+                "UPDATE pipeline_runs
+                    SET state = 'awaiting_review', lease_token = NULL, lease_expires_at = NULL,
+                        attempt_count = GREATEST(attempt_count - 1, 0),
+                        last_error_label = $3, updated_at = clock_timestamp()
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
+                    AND next_phase = 'score'
+                    AND lease_token = $4 AND lease_expires_at > clock_timestamp()
+                  RETURNING *",
+                &[&run.tenant_id, &run.run_id, &label, &lease_token],
+            )
+            .await?
+            .ok_or_else(stale_lease_error)?;
+        let updated = pipeline_run_from_row(&row)?;
+        tx.execute(
+            "DELETE FROM pipeline_attempt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                AND state = 'staged' AND ciphertext_sha256 IS NULL",
+            &[&run.tenant_id, &run.run_id, &lease_token],
+        )
+        .await?;
+        Ok(updated)
+    }
+
+    /// `hold_score_for_review_on_tx` in a tenant transaction of its own.
+    pub async fn hold_score_for_review(
+        &self,
+        run: &PipelineRunRecord,
+        label: &str,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let updated = Self::hold_score_for_review_on_tx(&tx, run, label).await?;
         tx.commit().await?;
         Ok(updated)
     }
@@ -7336,6 +7977,48 @@ async fn receipt_is_tombstoned(
         .get(0))
 }
 
+/// #1313, the gap: holds `run` for an operator, on the caller's
+/// transaction, which just failed it under `error_label` and holds its row.
+/// A run is held when its Settle can finish (`settle_run_is_finishable_sql!`)
+/// and one of its legs paid (`settle_run_has_paid_leg_sql!`), and either the
+/// failure is a refusal of the Settle commit that a retry cannot change
+/// (`PIPELINE_GATE_DECISION_CONFLICT_LABEL`,
+/// `PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL`) or the run was held
+/// before (V128 `operator_held_at`): an operator released it, and its
+/// attempt failed. The run moves to `awaiting_operator` with its label kept,
+/// records the hold's time and sets the review audit marker, so the
+/// worker's review audit pass appends a label-only `lifecycle_status_change`
+/// event for the hold. Returns the held run, or `None` when it held nothing.
+async fn hold_paid_settle_run_for_operator_on_tx(
+    tx: &Transaction<'_>,
+    run: &PipelineRunRecord,
+    error_label: &str,
+) -> Result<Option<PipelineRunRecord>, DatabaseError> {
+    let refused_for_good = error_label == PIPELINE_GATE_DECISION_CONFLICT_LABEL
+        || error_label == PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL;
+    tx.query_opt(
+        concat!(
+            "UPDATE pipeline_runs p
+                SET state = 'awaiting_operator',
+                    operator_held_at = clock_timestamp(),
+                    review_audit_pending_at = clock_timestamp(),
+                    updated_at = NOW()
+              WHERE p.tenant_id = $1 AND p.run_id = $2 AND p.state = 'failed'
+                AND ($3::boolean OR p.operator_held_at IS NOT NULL)
+                AND ",
+            settle_run_is_finishable_sql!(),
+            " AND ",
+            settle_run_has_paid_leg_sql!(),
+            " RETURNING p.*"
+        ),
+        &[&run.tenant_id, &run.run_id, &refused_for_good],
+    )
+    .await?
+    .as_ref()
+    .map(pipeline_run_from_row)
+    .transpose()
+}
+
 /// #1346: for each run of `run_ids` that this transaction ended `failed`
 /// while its submission is still `received` -- Review never decided it, so
 /// nothing else would ever tell the contributor -- moves the submission to
@@ -7997,6 +8680,45 @@ async fn review_submission_is_operable(
             concat!(
                 "SELECT ",
                 reviewable_submission_sql!(),
+                " FROM trace_submissions s
+                  WHERE s.tenant_id = $1 AND s.submission_id = $2"
+            ),
+            &[&tenant_id, &submission_id],
+        )
+        .await?
+        .is_some_and(|row| row.get::<_, bool>(0)))
+}
+
+/// The `phase` column value of an assessment (V130).
+fn assessment_phase(at_score: bool) -> &'static str {
+    if at_score { "score" } else { "review" }
+}
+
+/// Whether the submission of a held run is still one its hold applies to,
+/// under the submission row's lock: at Review, `review_submission_is_operable`;
+/// at Score, the accepted live submission Score needs
+/// (`accepted_submission_sql!`, as `parked_run_submission_sql!` reads it).
+async fn hold_submission_is_operable(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_id: Uuid,
+    at_score: bool,
+) -> Result<bool, DatabaseError> {
+    if !at_score {
+        return review_submission_is_operable(tx, tenant_id, submission_id).await;
+    }
+    tx.query_opt(
+        "SELECT 1 FROM trace_submissions
+          WHERE tenant_id = $1 AND submission_id = $2
+          FOR UPDATE",
+        &[&tenant_id, &submission_id],
+    )
+    .await?;
+    Ok(tx
+        .query_opt(
+            concat!(
+                "SELECT ",
+                accepted_submission_sql!(),
                 " FROM trace_submissions s
                   WHERE s.tenant_id = $1 AND s.submission_id = $2"
             ),
@@ -8840,12 +9562,14 @@ pub struct PipelineNoveltyUtilityChecks {
 ///   canonical summary hash already has a gate decision.
 ///
 /// The contributor status reads either label as "duplicates an earlier
-/// submission" and shows no pending credit. A compatibility run applies
-/// both, in that order, to its gate decision row
+/// submission" and shows no pending credit. A compatibility run, and a run
+/// under any Score policy a registry supplies, applies both, in that order,
+/// to its gate decision row
 /// (`PgPipelineStore::duplicate_withheld_reason_on_tx`): the row keeps its
 /// Score values, records the label, and holds no credit quality, and the
-/// run's `NoveltyUtility` leg is withheld under the same label, as `main`
-/// never emits that event for a submission it did not score, and the run is
+/// run's Trace Credit leg is withheld under the same label whichever event
+/// it settles under, as `main` never emits that event for a submission it
+/// did not score, and the run is
 /// kept out of the index, as `main` never indexes a submission it did not
 /// score. Settle decides the verdict once, when it persists its selection
 /// (`PgPipelineStore::duplicate_verdict_for_selection`). The Score evidence
@@ -8987,6 +9711,16 @@ pub struct PipelineBundleQualification {
     pub privacy: bool,
     pub payout: Option<bool>,
     pub configuration_qualifiable: bool,
+    /// The Score policy a registry supplies for this bundle
+    /// (`PipelineServiceBuilder::with_score_policies`): its factory's
+    /// identity and `production_qualified()`. `None` for a built-in Score
+    /// policy, whose qualification the scorer, embedder, and configuration
+    /// terms already carry; omitted from the serialized form then, so a
+    /// built-in bundle's qualification serializes as it always has. A Score
+    /// implementation the service holds no factory for reports identity
+    /// `score_policy_missing`, unqualified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_policy: Option<PipelineDependencyCheck>,
     pub dependency_digest: String,
 }
 
@@ -9020,6 +9754,13 @@ impl PipelineBundleQualification {
         }
         if self.payout == Some(false) {
             blockers.push("runtime_payout_not_production");
+        }
+        if self
+            .score_policy
+            .as_ref()
+            .is_some_and(|check| !check.production_qualified)
+        {
+            blockers.push(PIPELINE_SCORE_POLICY_NOT_PRODUCTION_LABEL);
         }
         if !self.configuration_qualifiable {
             blockers.push(PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL);
@@ -9198,6 +9939,9 @@ pub struct PipelineServiceBuilder {
     index_write_fence_margin: std::time::Duration,
     /// A test's override of the lease config's privacy pass ceiling.
     privacy_pass_timeout_ceiling: Option<std::time::Duration>,
+    /// Score policies an embedding binary registered
+    /// (`with_score_policies`); empty by default.
+    score_policies: ScorePolicyRegistry,
 }
 
 impl PipelineServiceBuilder {
@@ -9236,7 +9980,21 @@ impl PipelineServiceBuilder {
                 PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS.unsigned_abs(),
             ),
             privacy_pass_timeout_ceiling: None,
+            score_policies: ScorePolicyRegistry::new(),
         }
+    }
+
+    /// The Score policies an embedding binary supplies for a substituted
+    /// backend, keyed by the Score implementation id a bundle manifest
+    /// names (`versioned_pipeline_score_registry`). Defaults to an empty
+    /// registry, which is what the ingest binary runs: only the two
+    /// built-in families bind, and any other Score id is refused as
+    /// `bundle_policy_not_runnable`. A registered factory is a dependency
+    /// of every bundle that names it, so `bundle_qualification` reports its
+    /// own `production_qualified()` (`runtime_score_policy_not_production`).
+    pub fn with_score_policies(mut self, score_policies: ScorePolicyRegistry) -> Self {
+        self.score_policies = score_policies;
+        self
     }
 
     /// The name of the object store `artifact_store` writes to, recorded as
@@ -9484,6 +10242,7 @@ impl PipelineServiceBuilder {
             index_write_fence_margin: self.index_write_fence_margin,
             privacy_pass_timeout,
             follow_ups: std::sync::Mutex::new(BTreeMap::new()),
+            score_policies: self.score_policies,
         };
         service
             .construct(service.default_package.clone())
@@ -9619,6 +10378,9 @@ pub struct PipelineService {
     /// The follow-up steps this service queued work for, per tenant, since
     /// the worker last took them (`take_follow_ups`).
     follow_ups: std::sync::Mutex<BTreeMap<String, PipelineFollowUps>>,
+    /// Score policies an embedding binary registered
+    /// (`PipelineServiceBuilder::with_score_policies`).
+    score_policies: ScorePolicyRegistry,
 }
 
 impl PipelineService {
@@ -9633,6 +10395,14 @@ impl PipelineService {
     /// (decision P4-D7), not every dependency the service happens to hold.
     pub fn default_package(&self) -> &BundlePackage {
         &self.default_package
+    }
+
+    /// The Score policies an embedding binary registered
+    /// (`PipelineServiceBuilder::with_score_policies`); empty in the open
+    /// build. The qualification store and the production observation read
+    /// it, so they qualify exactly the Score policies this service can bind.
+    pub fn score_policies(&self) -> &ScorePolicyRegistry {
+        &self.score_policies
     }
 
     /// The `trace_object_refs.object_store` label this service records.
@@ -10183,7 +10953,7 @@ impl PipelineService {
         main_gate: &crate::versioned_pipeline_compat::MainGateConfig,
         require_qualifiable: bool,
     ) -> Result<(), &'static str> {
-        self.construct(package.clone()).map_err(|label| {
+        let bundle = self.construct(package.clone()).map_err(|label| {
             if label == PIPELINE_DEPENDENCY_MISSING_LABEL {
                 PIPELINE_TENANT_BUNDLE_DEPENDENCY_MISSING_LABEL
             } else {
@@ -10196,9 +10966,14 @@ impl PipelineService {
             if !config.matches_main_gate(main_gate) {
                 return Err("pipeline_runtime_main_gate_config_mismatch");
             }
-            if self.novelty_utility_checks.issuer_principal_ref.is_none() {
-                return Err("pipeline_credit_issuer_principal_missing");
-            }
+        }
+        // Keyed on the Trace Credit event the bundle settles under, not on
+        // its family: a compatibility bundle settles under `NoveltyUtility`,
+        // and so does a bundle whose registered Score policy declares it.
+        if bundle.trace_credit_event == PipelineTraceCreditEvent::NoveltyUtility
+            && self.novelty_utility_checks.issuer_principal_ref.is_none()
+        {
+            return Err("pipeline_credit_issuer_principal_missing");
         }
         // The default package's gate (`pipeline_runtime_is_production_qualified`
         // in ingest): the bundle qualification of this package, which also
@@ -10303,12 +11078,18 @@ impl PipelineService {
         index_reader: Arc<dyn IdentifiedIndexReader>,
     ) -> Result<MinimalPolicyBundle, &'static str> {
         let (scorer, embedder) = self.resolve_score_dependencies(&package)?;
-        MinimalPolicyBundle::from_package_with_runtime(package, scorer, embedder, index_reader)
-            .map_err(|error| match error.to_string().as_str() {
-                PIPELINE_DEPENDENCY_MISSING_LABEL => PIPELINE_DEPENDENCY_MISSING_LABEL,
-                "bundle_policy_not_runnable" => PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
-                _ => PIPELINE_BUNDLE_INVALID_LABEL,
-            })
+        MinimalPolicyBundle::from_package_with_runtime_and_score_policies(
+            package,
+            scorer,
+            embedder,
+            index_reader,
+            &self.score_policies,
+        )
+        .map_err(|error| match error.to_string().as_str() {
+            PIPELINE_DEPENDENCY_MISSING_LABEL => PIPELINE_DEPENDENCY_MISSING_LABEL,
+            "bundle_policy_not_runnable" => PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+            _ => PIPELINE_BUNDLE_INVALID_LABEL,
+        })
     }
 
     /// Whether every dependency the package `package` actually uses is
@@ -10359,6 +11140,41 @@ impl PipelineService {
                 .as_ref()
                 .is_some_and(|(adapter, _)| adapter.production_qualified())
         });
+        // A Score policy a registry supplies is one of this bundle's
+        // dependencies, qualified only when its factory says so; so is the
+        // configuration it decodes. A built-in Score policy reports no
+        // check, which keeps every built-in bundle's qualification as it
+        // was. A Score id that is neither built in nor registered is not
+        // runnable, and fails closed here as well.
+        let score_implementation = package.manifest.score.implementation_id.as_str();
+        let (score_policy, score_configuration_qualifiable) =
+            if is_built_in_score_implementation(score_implementation) {
+                (None, true)
+            } else {
+                match registered_score_factory(package, &self.score_policies) {
+                    Some(factory) => {
+                        let configuration = package
+                            .artifacts
+                            .get(&package.manifest.score.configuration_hash)
+                            .map(Vec::as_slice)
+                            .unwrap_or_default();
+                        (
+                            Some(PipelineDependencyCheck {
+                                identity: factory.dependency_identity().to_string(),
+                                production_qualified: factory.production_qualified(),
+                            }),
+                            factory.configuration_is_qualifiable(configuration),
+                        )
+                    }
+                    None => (
+                        Some(PipelineDependencyCheck {
+                            identity: SCORE_POLICY_MISSING_LABEL.to_string(),
+                            production_qualified: false,
+                        }),
+                        false,
+                    ),
+                }
+            };
         Ok(PipelineBundleQualification {
             bundle_id: package.bundle_id.clone(),
             scorer: PipelineDependencyCheck {
@@ -10388,7 +11204,9 @@ impl PipelineService {
                 .is_some_and(|privacy| privacy.production_qualified()),
             payout,
             configuration_qualifiable:
-                crate::versioned_pipeline_bundle::package_configuration_is_qualifiable(package),
+                crate::versioned_pipeline_bundle::package_configuration_is_qualifiable(package)
+                    && score_configuration_qualifiable,
+            score_policy,
             dependency_digest: digests.dependency_digest,
         })
     }
@@ -12517,6 +13335,20 @@ impl PipelineService {
                 {
                     return self.mark_failed_or_record_lease_expired(&run, &label).await;
                 }
+                // A Score policy held a trace again after the operator
+                // approved its hold. Deterministic for the same policy and
+                // input, and nothing of the Score was committed: the run
+                // fails terminally rather than going back to the queue.
+                if label == PIPELINE_SCORE_HOLD_REPEATED_LABEL
+                    && run.next_phase == Some(Phase::Score)
+                {
+                    return self
+                        .mark_failed_or_record_lease_expired(
+                            &run,
+                            PIPELINE_SCORE_HOLD_REPEATED_LABEL,
+                        )
+                        .await;
+                }
                 // In Review and Score, an inoperable submission (revoked,
                 // withdrawn, expired, or purged) is permanent -- the
                 // condition that caused it can never reverse -- so the run
@@ -13146,7 +13978,9 @@ impl PipelineService {
     /// and commits the Score outcome together with one pending settlement
     /// operation per award (decision D5).
     ///
-    /// A compatibility Score is serialized per tenant (Zaki review 1, round
+    /// A compatibility Score, and the Score of every policy a registry
+    /// supplies (`score_runs_under_runtime_controls`), is serialized per
+    /// tenant (Zaki review 1, round
     /// 2, finding 12, and the owner ruling of 2026-09-30). It opens a tenant
     /// transaction, takes the tenant's Score lock on it (a transaction-scoped
     /// advisory lock, `pipeline_compatibility_score_lock`) before it reads
@@ -13172,7 +14006,9 @@ impl PipelineService {
     /// never waited for (multi-lens review L3-2): a Score that finds it held
     /// releases its run uncharged (`release_score_lock_busy`), and a lease
     /// that has passed stops the Score before it scores (uncharged, as a
-    /// stale lease). Another family's Score (the minimal one) takes no lock.
+    /// stale lease). A registered Score policy takes the same lock under the
+    /// same name, since it reads the same tenant index. Only the minimal
+    /// reference's Score takes no lock.
     ///
     /// Rebase 10, option D: a compatibility Score also stages its attempt
     /// rows (PR 4) before it opens that transaction
@@ -13197,9 +14033,25 @@ impl PipelineService {
             .ok_or_else(|| anyhow::anyhow!("approved revision is missing"))?;
         self.score_evaluations.fetch_add(1, Ordering::SeqCst);
         let reviewed_artifact = self.load_approved_bytes(run).await?;
-        if bundle.package.manifest.score.implementation_id != COMPATIBILITY_SCORE_IMPLEMENTATION {
+        // An operator's resolution of an earlier Score hold of this run, read
+        // before any lock is taken, so the Score still holds one pooled
+        // connection at a time.
+        let hold_review = self
+            .store
+            .load_score_hold_assessment(&run.tenant_id, run.run_id)
+            .await?;
+        if !bundle.score_runs_under_runtime_controls() {
             return self
-                .score_and_commit(run, bundle, revision_id, reviewed_artifact, None, None)
+                .score_and_commit(
+                    run,
+                    bundle,
+                    revision_id,
+                    reviewed_artifact,
+                    hold_review,
+                    None,
+                    None,
+                    &[],
+                )
                 .await;
         }
         let prestaged = self.stage_score_artifacts_before_lock(run).await?;
@@ -13236,9 +14088,11 @@ impl PipelineService {
             return Err(stale_lease_error().into());
         }
         let mut commands = Vec::new();
+        let mut bases = Vec::new();
         for (unapplied_run_id, stored_ref, command_hash, revision) in
             PgPipelineStore::unapplied_index_commands_on_tx(&lock, run).await?
         {
+            bases.push((unapplied_run_id, revision));
             commands.push(
                 self.read_index_command(&run.tenant_id, &stored_ref, &command_hash, revision)
                     .await
@@ -13270,8 +14124,10 @@ impl PipelineService {
             &bundle,
             revision_id,
             reviewed_artifact,
+            hold_review,
             Some(lock),
             Some(&prestaged),
+            &bases,
         )
         .await
     }
@@ -13335,27 +14191,89 @@ impl PipelineService {
     /// is the rows a compatibility Score staged before that lock (rebase 10,
     /// option D); with none, each object's row is staged here, with its
     /// hash, just before the object is published.
+    ///
+    /// `hold_review` is the operator's resolution of an earlier Score hold
+    /// of this run (`load_score_hold_assessment`). A rejection is never
+    /// shown to the policy: the server commits a zero Score outcome itself
+    /// (`ScoreOutput::rejected_after_hold`: no award, no index command,
+    /// evidence naming the hold label), so the run settles with no credit.
+    /// An approval reaches the policy on its input
+    /// (`ScoreInput::operator_review`); a policy that asks for a hold again
+    /// on it fails the run closed (`PIPELINE_SCORE_HOLD_REPEATED_LABEL`)
+    /// rather than parking it again, so a hold cannot loop.
+    #[allow(clippy::too_many_arguments)]
     async fn score_and_commit(
         &self,
         run: &PipelineRunRecord,
         bundle: &MinimalPolicyBundle,
         revision_id: Uuid,
         reviewed_artifact: Vec<u8>,
+        hold_review: Option<ScoreHoldReview>,
         lock: Option<Transaction<'_>>,
         prestaged: Option<&PrestagedScoreArtifacts>,
+        unapplied_bases: &[(Uuid, Uuid)],
     ) -> anyhow::Result<PipelineRunRecord> {
         let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
-        let output = bundle
-            .score
-            .execute(&ScoreInput {
-                run_id: run.run_id,
-                tenant_storage_ref: tenant.clone(),
-                trace_id: run.trace_id,
-                registry_revision_id: revision_id,
-                source_content_hash: run.approved_content_hash.clone().unwrap_or_default(),
-                reviewed_artifact,
-            })
-            .await?;
+        let output = match hold_review {
+            Some(ScoreHoldReview {
+                decision: ReviewRecommendation::Reject,
+                hold_label,
+            }) => ScoreOutput::rejected_after_hold(&bundle.package.manifest, hold_label)
+                .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?,
+            approved => {
+                let approved_hold = approved.is_some();
+                let output = bundle
+                    .score
+                    .execute(&ScoreInput {
+                        run_id: run.run_id,
+                        tenant_storage_ref: tenant.clone(),
+                        trace_id: run.trace_id,
+                        registry_revision_id: revision_id,
+                        source_content_hash: run.approved_content_hash.clone().unwrap_or_default(),
+                        reviewed_artifact,
+                        operator_review: approved,
+                    })
+                    .await?;
+                if approved_hold && output.hold_for_review().is_some() {
+                    anyhow::bail!(PIPELINE_SCORE_HOLD_REPEATED_LABEL);
+                }
+                output
+            }
+        };
+        // The policy asked for the trace to be held for operator review
+        // instead of priced: the run parks in the review hold state at
+        // Score under the policy's label, and nothing of the Score is
+        // committed, so no award is seeded. On the tenant lock's own
+        // transaction when the Score holds one, so the hold commits under
+        // the lock and the Score still holds one pooled connection.
+        if let Some(label) = output.hold_for_review() {
+            output
+                .result()
+                .decision
+                .require_bound(&bundle.package.manifest)
+                .map_err(|_| anyhow::anyhow!("score_outcome_invalid"))?;
+            let label = label.as_str().to_string();
+            let held = match lock {
+                Some(lock) => {
+                    match PgPipelineStore::hold_score_for_review_on_tx(&lock, run, &label).await {
+                        Ok(updated) => lock.commit().await.map(|()| updated).map_err(Into::into),
+                        Err(error) => Err(error),
+                    }
+                }
+                None => self.store.hold_score_for_review(run, &label).await,
+            };
+            // As for a refused Score commit below: the labels the
+            // classification allowlist expects are re-raised bare.
+            return held.map_err(|error| match error {
+                DatabaseError::Constraint(label)
+                    if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
+                        || label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL =>
+                {
+                    anyhow::anyhow!(label)
+                }
+                error => error.into(),
+            });
+        }
         let (result, command, neighbor) = output.into_parts();
         // Before any artifact is stored, the decision must be bound to the
         // run's bundle: it records the bound manifest's bundle identifier,
@@ -13509,6 +14427,16 @@ impl PipelineService {
         };
         self.inject_crash(PipelineCrashPoint::AfterScoreArtifactStorage)?;
         let outcome = StoredPhaseResult::from_result(Phase::Score, &result)?;
+        // #1313 case (a): a Score that passed quality and failed novelty may
+        // have been judged against the unapplied commands it counted; those
+        // runs are recorded as its bases. Any other Score records none.
+        let score_bases = if result.evidence.quality_passed == Some(true)
+            && result.evidence.novelty_passed == Some(false)
+        {
+            unapplied_bases
+        } else {
+            &[]
+        };
         let payout_rails = self.settlement_adapters.payout_rails();
         let commit_result = match lock {
             Some(lock) => {
@@ -13522,6 +14450,7 @@ impl PipelineService {
                     &payout_rails,
                     self.payout_enabled(),
                     bundle.trace_credit_event,
+                    score_bases,
                 )
                 .await
             }
@@ -13656,11 +14585,17 @@ impl PipelineService {
                 && *score_decision.awards() == score_evaluation.awards,
             "score_outcome_invalid"
         );
-        // Spec 2026-10-08, Slice C: a compatibility run's commit writes a
-        // gate decision row from this evidence. Checked here, before the
+        // Spec 2026-10-08, Slice C: the commit of a run under the Score
+        // runtime controls (compatibility or registered) writes a gate
+        // decision row from this evidence. Checked here, before the
         // index write or any leg settles, so evidence the row cannot be
         // built from fails the run with nothing paid.
-        if bundle.package.manifest.score.implementation_id == COMPATIBILITY_SCORE_IMPLEMENTATION {
+        // A rejected Score hold's outcome (`operator_rejected_hold`) was
+        // never scored, so it writes no gate decision row and needs none of
+        // its fields.
+        if bundle.score_runs_under_runtime_controls()
+            && score_evidence.operator_rejected_hold.is_none()
+        {
             PipelineGateDecisionScoreValues::from_evidence(&score_evidence)
                 .map_err(|label| anyhow::anyhow!(label))?;
         }
@@ -13724,9 +14659,7 @@ impl PipelineService {
                 // (`commit_settle`) read it from there
                 // (`selection_duplicate_verdict`), never deciding again.
                 // Its own pooled connection, returned before the policy runs.
-                let duplicate_verdict = if bundle.package.manifest.score.implementation_id
-                    == COMPATIBILITY_SCORE_IMPLEMENTATION
-                {
+                let duplicate_verdict = if bundle.score_runs_under_runtime_controls() {
                     self.store
                         .duplicate_verdict_for_selection(
                             &run,
@@ -14065,6 +14998,40 @@ impl PipelineService {
                         continue;
                     }
                 };
+                // `main`'s duplicate short-circuits gate the Trace Credit
+                // leg of every Score policy that runs under the Score
+                // runtime controls (`score_runs_under_runtime_controls`),
+                // whichever event the bundle settles under: a duplicate
+                // earns nothing. The leg completes withheld, with no ledger
+                // row, under the verdict's label, the shape the
+                // `NoveltyUtility` checks below write. A `NoveltyUtility`
+                // leg reaches the same result through
+                // `novelty_utility_withheld_reason`, which answers the
+                // verdict first; checking it here, before the hold check,
+                // keeps a `PipelineScore` leg from paying a duplicate. As
+                // there (poldsam P-1), only a leg not yet dispatched is
+                // withheld as a duplicate.
+                if instrument_id == InstrumentId::trace_credit()
+                    && settlement.dispatched_at.is_none()
+                    && let Some(label) = duplicate_verdict
+                {
+                    self.store
+                        .update_settlement(
+                            &run,
+                            instrument_id.as_str(),
+                            SettlementUpdate {
+                                operation_state: "complete",
+                                result_ref_hash: Some(request.expected_result_ref_hash()),
+                                external_receipt_hash: None,
+                                credit_event_id: None,
+                                settlement_batch_id: None,
+                                payout_state: None,
+                                error_label: Some(label),
+                            },
+                        )
+                        .await?;
+                    continue;
+                }
                 // A held Trace Credit account is checked before any external
                 // effect, so a held account never reaches its adapter. Only a
                 // leg that settles into a batch is held: a `NoveltyUtility`

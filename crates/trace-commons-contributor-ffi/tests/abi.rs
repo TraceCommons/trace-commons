@@ -6167,3 +6167,41 @@ fn the_first_run_copy_crosses_the_abi() {
     assert_eq!(value, serde_json::to_value(first_run_copy()).unwrap());
     assert_eq!(value["frame"]["quick_setup"], "Quick setup");
 }
+
+/// #1407: Show, Stop and Start again reach the daemon through the same
+/// `tc_call` as every managed method, and each fails closed on a session
+/// the daemon never opened: a refusal label, never a signal or a window.
+#[test]
+fn managed_session_actions_cross_tc_call_and_refuse_an_unknown_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let hello: serde_json::Value = serde_json::from_str(&call(h, "hello", "{}")).unwrap();
+    let methods = hello["result"]["methods"].as_array().unwrap();
+    let session = "00000000-0000-0000-0000-0000000000aa";
+    for (method, params) in [
+        (
+            "managed_session_focus",
+            format!(r#"{{"session_id":"{session}"}}"#),
+        ),
+        (
+            "managed_session_stop",
+            format!(r#"{{"session_id":"{session}"}}"#),
+        ),
+        (
+            "managed_session_start_again",
+            format!(r#"{{"session_id":"{session}","request_id":"{session}"}}"#),
+        ),
+    ] {
+        assert!(
+            methods.contains(&serde_json::json!(method)),
+            "{method} advertised"
+        );
+        let response: serde_json::Value = serde_json::from_str(&call(h, method, &params)).unwrap();
+        assert!(response["result"].is_null(), "{method}: {response}");
+        assert_eq!(
+            response["error"]["code"], "managed-not-found",
+            "{method}: {response}"
+        );
+    }
+    stop(h);
+}

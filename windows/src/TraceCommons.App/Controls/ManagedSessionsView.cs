@@ -82,6 +82,24 @@ public sealed class ManagedSessionsView : UserControl
         return button;
     }
 
+    /// <summary>Install for one tool, named with the tool for Narrator.</summary>
+    private Button InstallButton(ManagedTool tool)
+    {
+        var install = Button("install", async () => { await Windows.System.Launcher.LaunchUriAsync(new Uri(tool.InstallUrl)); });
+        AutomationProperties.SetName(install, $"{T("install")} {T(tool.Tool)}");
+        return install;
+    }
+
+    /// <summary>A bare refresh glyph: no text, its tooltip and accessible name "Refresh".</summary>
+    private Button RefreshGlyph()
+    {
+        var glyph = new Button { Content = new FontIcon { Glyph = "\uE72C", FontSize = 14 }, Background = null, BorderThickness = new Thickness(0), IsEnabled = !_busy };
+        glyph.Click += async (_, _) => await RefreshAsync();
+        ToolTipService.SetToolTip(glyph, T("refresh"));
+        AutomationProperties.SetName(glyph, T("refresh"));
+        return glyph;
+    }
+
     private async Task RunAsync(Func<Task> action)
     {
         if (_busy) return;
@@ -104,20 +122,37 @@ public sealed class ManagedSessionsView : UserControl
         _root.Children.Add(new TextBlock { Text = T("description"), TextWrapping = TextWrapping.Wrap });
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         actions.Children.Add(Button("launch", LaunchAsync, _snapshot.Capabilities.TerminalLaunch && _snapshot.Accounts.Any(a => _snapshot.CanLaunch(a.Tool))));
-        actions.Children.Add(Button("add", AddAsync, _snapshot.SetupTools.Length > 0));
-        actions.Children.Add(Button("refresh", RefreshAsync));
+        // Hidden, not disabled, with no tool to add an account for (Ron, 2026-10-15).
+        if (_snapshot.SetupTools.Length > 0) actions.Children.Add(Button("add", AddAsync));
         _root.Children.Add(actions);
-        if (_snapshot.Tools is not null && !_snapshot.Tools.Any(t => t.Installed))
-            _root.Children.Add(new TextBlock { Text = T("tools_empty"), TextWrapping = TextWrapping.Wrap });
-        foreach (var tool in _snapshot.Tools ?? [])
+        if (_snapshot.InstallTools.Length > 0)
         {
-            if (tool.Installed && !(_unsupportedVersion && _snapshot.VersionRecoveryTools(_unsupportedTool).Any(t => t.Tool == tool.Tool))) continue;
-            if (!tool.Installed && _snapshot.Tools!.Any(t => t.Installed) && !_snapshot.Accounts.Any(a => a.Tool == tool.Tool)) continue;
-            var recovery = new StackPanel { Spacing = 4 };
-            recovery.Children.Add(new TextBlock { Text = $"{T(tool.Tool)} · {T(tool.Installed ? "unsupported_version" : "not_installed")}" });
-            recovery.Children.Add(Button(tool.Installed ? "update" : "install", async () => { await Windows.System.Launcher.LaunchUriAsync(new Uri(tool.InstallUrl)); }));
-            recovery.Children.Add(Button("check_again", RefreshAsync));
-            _root.Children.Add(recovery);
+            // One bare refresh glyph beside the heading; no per-tool copies.
+            var heading = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+            heading.Children.Add(new TextBlock { Text = T("tools_title"), FontSize = 20, VerticalAlignment = VerticalAlignment.Center });
+            heading.Children.Add(RefreshGlyph());
+            _root.Children.Add(heading);
+            _root.Children.Add(new TextBlock { Text = T("tools_empty"), TextWrapping = TextWrapping.Wrap });
+            foreach (var tool in _snapshot.InstallTools)
+            {
+                var install = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+                install.Children.Add(new TextBlock { Text = T(tool.Tool), VerticalAlignment = VerticalAlignment.Center });
+                install.Children.Add(InstallButton(tool));
+                _root.Children.Add(install);
+            }
+        }
+        // After an unsupported-version refusal: the refused tool, with its
+        // setup guide to update from and the refresh glyph.
+        if (_unsupportedVersion)
+        {
+            foreach (var tool in _snapshot.VersionRecoveryTools(_unsupportedTool))
+            {
+                var recovery = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+                recovery.Children.Add(new TextBlock { Text = $"{T(tool.Tool)} · {T("unsupported_version")}", TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center });
+                recovery.Children.Add(Button("update", async () => { await Windows.System.Launcher.LaunchUriAsync(new Uri(tool.InstallUrl)); }));
+                recovery.Children.Add(RefreshGlyph());
+                _root.Children.Add(recovery);
+            }
         }
         _root.Children.Add(new TextBlock { Text = _snapshot.Capabilities.TerminalDestination is string destination
             ? T("terminal_scope").Replace("{destination}", destination) : T("terminal_unavailable"), TextWrapping = TextWrapping.Wrap });
@@ -128,16 +163,24 @@ public sealed class ManagedSessionsView : UserControl
             bool held = _snapshot.Sessions.Any(s => s.AccountId == account.Id && s.HoldsAccount);
             var row = new StackPanel { Spacing = 4 };
             row.Children.Add(new TextBlock { Text = $"{account.Label} · {T(account.Tool)} · {T(account.Connection)} · {account.AuthState}" });
-            if (!_snapshot.CanLaunch(account.Tool)) row.Children.Add(new TextBlock { Text = T("tool_unavailable"), TextWrapping = TextWrapping.Wrap });
+            if (_snapshot.ToolMissing(account.Tool))
+            {
+                row.Children.Add(new TextBlock { Text = _snapshot.ToolUnavailable(account.Tool), TextWrapping = TextWrapping.Wrap });
+                var recovery = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+                if (_snapshot.Tools?.FirstOrDefault(t => t.Tool == account.Tool) is ManagedTool tool) recovery.Children.Add(InstallButton(tool));
+                recovery.Children.Add(RefreshGlyph());
+                row.Children.Add(recovery);
+            }
             var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
             controls.Children.Add(Button("use_default", async () => {
                 ulong generation = _snapshot.Generations.GetValueOrDefault(account.Tool);
                 await CallAsync("managed_select", new { selection = new { tool = account.Tool, connection = account.Connection, account_id = account.Id, generation }, expected_generation = generation });
             }));
             controls.Children.Add(Button("rename_short", () => RenameAsync(account)));
-            if (account.Connection == "subscription") controls.Children.Add(Button("reconnect", async () => {
+            // Hidden, not disabled, while the tool is missing.
+            if (_snapshot.OffersReconnect(account)) controls.Children.Add(Button("reconnect", async () => {
                 await OpenAsync(await CallAsync("managed_account_reconnect", new { account_id = account.Id }));
-            }, !held && _snapshot.Capabilities.TerminalLaunch && _snapshot.CanLaunch(account.Tool)));
+            }, !held && _snapshot.Capabilities.TerminalLaunch));
             controls.Children.Add(Button("remove", async () => {
                 var dialog = Dialog("remove_question", new TextBlock { Text = T("remove_description"), TextWrapping = TextWrapping.Wrap }, "remove");
                 if (await dialog.ShowAsync() == ContentDialogResult.Primary) await CallAsync("managed_account_remove", new { account_id = account.Id });

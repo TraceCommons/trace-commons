@@ -272,7 +272,7 @@ fn compare_main_gate(floors: DerivedFloors) -> MainGateConfig {
         tail_fraction_floor_micros: Some(floors.tail_fraction_floor_micros),
         novelty_floor_micros: Some(floors.novelty_floor_micros),
         embed_insert_novelty_micros: reference.embed_insert_novelty_micros,
-        top_k: crate::TRACE_COMMONS_GATE_DEFAULT_TOP_K as u32,
+        top_k: crate::ingest::app::TRACE_COMMONS_GATE_DEFAULT_TOP_K as u32,
         chunk_target_tokens: reference.chunk_target_tokens,
         chunk_max_tokens: reference.chunk_max_tokens,
         chunk_cap: reference.chunk_cap,
@@ -2484,7 +2484,10 @@ fn the_baseline_configuration_holds_mains_gate() {
     assert_eq!(config.novelty_floor_micros, 8);
     // PC-D23: the two sides take `main`'s default, not the reference's 8.
     assert_eq!(config.top_k, 5);
-    assert_eq!(config.top_k, crate::TRACE_COMMONS_GATE_DEFAULT_TOP_K);
+    assert_eq!(
+        config.top_k,
+        crate::ingest::app::TRACE_COMMONS_GATE_DEFAULT_TOP_K
+    );
     assert_eq!(config.chunk_target_tokens, 2048);
     assert_eq!(config.chunk_max_tokens, 3072);
     assert_eq!(config.chunk_cap, 16);

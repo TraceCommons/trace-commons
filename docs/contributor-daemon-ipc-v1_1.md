@@ -621,7 +621,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `near_account_cancel` | `attempt_id` | cancellation state | cancels the matching local attempt |
 | `near_ai_credential_start` | `provider` (optional, default `near`) | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. The browser URL is returned **once** and no poll re-serves it |
 | `near_ai_credential_status` | `attempt_id` (optional) | `state`, plus `attempt_id` and `attempt_status` for a caller that named the current attempt | never errors on a missing or stale `attempt_id`: `state` is a fact about the machine. See "The credential state" below |
-| `near_ai_credential_cancel` | `attempt_id` (**required**) | `attempt_id`, `status` | stops this machine waiting on the browser; `near_ai_credential_unknown` if the id is not the current attempt |
+| `near_ai_credential_cancel` | `attempt_id` (optional) | `attempt_id`, `status` when named; `status` alone when not | stops this machine waiting on the browser; unnamed, it stops whatever sign-in is in flight and never echoes the id; `near_ai_credential_unknown` if a named id is not the current attempt, or if an unnamed cancel finds no sign-in in flight (none ever started, or the last one finished); a named cancel of the finished current attempt answers its terminal status and changes nothing |
 | `near_ai_credential_forget` | — | `removed`, `revoked: false` | removes the key from **this machine only**; `revoked` is always false and is not a placeholder. See "The credential state" below |
 | `near_ai_credential_migrate` | — | `migrated`, `state` | asynchronous only; macOS. Copies the sign-in an earlier build kept in the login keychain into the data-protection store under the same reference, and never deletes the legacy entry. The one read of the login keychain, so it may raise a password prompt, which is why only a contributor's action sends it. `migrated: false` means neither store held it, and the dangling reference was dropped (`state` becomes `absent`). A refused legacy read is an error and changes nothing. See "The credential state" below |
 | `witness_preview_request` | `entry_id`, `raw_session_confirmed: true`; optional `outcome`, `correction` | `status: "ready"`, `summary` | awaits explicit remote review; saves and pins certified bytes without approval or upload |
@@ -8021,6 +8021,31 @@ methods require an account session and discard responses when the local account
 or ingest configuration changes. Neither returns an invite code or session token.
 Acceptance can earn pending credit; this is not credit redemption.
 
+
+### Installed coding tools
+
+`managed_snapshot.tools` is an additive array of `{tool, installed, install_url}`
+rows for `claude`, `codex`, and `opencode`. Each row reports executable discovery
+independently of trace-source discovery, saved accounts, or sign-in. It does not
+verify tool versions, read traces, or grant consent. All three are managed
+tools; see "Managed OpenCode launch additions" below for OpenCode's launch
+fields. `install_url` is the tool's setup guide from the shared install-guide
+table (`tc_install_guides_json`). Missing native launch binaries return
+`managed-tool-unavailable`.
+
+Discovery checks absolute PATH entries and conventional install locations,
+including `~/.opencode/bin`, without launching subprocesses. Unix candidates must
+be regular files with an executable permission bit; directories and non-executable
+files are skipped. Windows installation detection includes `.exe`, `.cmd`, and
+`.bat` files. The existing managed launcher still requires a native `.exe`;
+wrapper-only installations can be reported installed without being launchable
+through managed sessions. Discovery never invokes a command interpreter. Each
+snapshot refresh checks again. Before daemon startup,
+`tc_managed_tools_json` returns the same array, `tc_managed_copy_json` returns
+the shared copy object, and `tc_install_guides_json` returns the install-guide
+table as `{source slug: url}` for every tool first run asks about; all three
+strings are freed with `tc_string_free`.
+
 ### Managed OpenCode launch additions
 
 `managed_account_add.tool` additionally accepts `opencode`, with connections
@@ -8038,3 +8063,44 @@ of native process exit. Unredeemed launches that expire or fail during restart
 settle pending collection as failed. The snapshot includes OpenCode generation
 and default selection, plus additive shared copy keys. Older shell decoders may
 ignore these fields; macOS renders them.
+
+### Managed session focus, stop and start again (#1407)
+
+Session views carry three additive booleans, computed on every read:
+
+- `can_focus`: the daemon opened the session itself through
+  `managed_terminal_launch`, in a terminal it can script, named the window it
+  opened (today a Terminal window id, printed by the launch script), and the
+  session is a running coding session.
+- `can_stop`: the daemon opened the session itself, its launcher reports a
+  running coding tool, and no stop has been asked for yet.
+- `can_start_again`: the session ended (`exited` or `failed`), was a coding
+  launch, its folder still exists, and its account is still saved (or, for
+  the NEAR AI sign-in, the daemon is still signed in). Shells also need
+  `capabilities.terminal_launch`, as for any launch.
+
+A launch from the command line is never opened by the daemon, so it is never
+focusable or stoppable.
+
+- `managed_session_focus {session_id}` brings the session's window to the
+  front. Refused with `managed-conflict` unless `can_focus` holds, and with
+  `managed-not-found` when the session or its window is gone.
+- `managed_session_stop {session_id}` records a stop. The daemon signals
+  nothing: the launcher (`near-ai redeem-launch`), which spawned the tool and
+  still holds it as its child, reads `stop: true` in its next
+  `managed_session_report` answer (at most 5 seconds), sends the tool SIGTERM
+  (on Windows, terminates it), and kills it if it has not exited within a
+  further 5 to 10 seconds. The exit is reported as any other. Refused with
+  `managed-conflict` unless the daemon opened the session and it is running.
+  Asking twice is accepted and changes nothing.
+- `managed_session_start_again {session_id, request_id}` prepares the ended
+  session's launch again (same tool, connection, account, folder, model and
+  collection opt-in) and returns `managed_launch_prepare`'s answer; the shell
+  then calls `managed_terminal_launch`. The same `request_id` twice is one
+  session. Refused with `managed-conflict` while the session still holds its
+  account, `managed-invalid-request` for a sign-in (login) row or a missing
+  folder, `managed-not-found` for a removed account, and
+  `managed-near-ai-sign-in-required` for a sign-in session while signed out.
+
+`managed_session_report` answers `{accepted: true, stop: bool}`; an older
+launcher reads only `accepted`.
