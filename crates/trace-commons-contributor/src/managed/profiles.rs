@@ -92,6 +92,16 @@ impl NativeProfiles {
                     }
                 }
             }
+            ToolId::Opencode => {
+                super::opencode::isolate(&mut command, &root)?;
+                match action {
+                    NativeAction::Version => {
+                        command.arg("--version");
+                    }
+                    NativeAction::Run => {}
+                    _ => return Err(ManagedError::InvalidRequest),
+                }
+            }
             ToolId::Codex => {
                 command.env("CODEX_HOME", &root);
                 match action {
@@ -160,6 +170,7 @@ impl NativeProfiles {
         let supported = match account.tool {
             ToolId::Claude => numeric.0 == 2 && numeric >= (2, 1, 289),
             ToolId::Codex => numeric.0 == 0 && numeric >= (0, 160, 0),
+            ToolId::Opencode => numeric == (1, 19, 0),
         };
         if !supported {
             return Err(ManagedError::UnsupportedVersion);
@@ -175,6 +186,7 @@ impl NativeProfiles {
             return Ok(AuthState::SignInRequired);
         }
         let ready = match account.tool {
+            ToolId::Opencode => return Err(ManagedError::InvalidRequest),
             ToolId::Claude => {
                 let value: serde_json::Value = serde_json::from_slice(&output.stdout)
                     .map_err(|_| ManagedError::UnsupportedVersion)?;
@@ -196,7 +208,14 @@ impl NativeProfiles {
 
 /// Status helpers may wait for native OS authentication. Bound the wait and
 /// keep their identity-bearing output off the terminal and out of logs.
-pub(crate) fn bounded_output(mut command: Command) -> Result<std::process::Output, ManagedError> {
+pub(crate) fn bounded_output(command: Command) -> Result<std::process::Output, ManagedError> {
+    bounded_output_limit(command, 65536)
+}
+
+pub(crate) fn bounded_output_limit(
+    mut command: Command,
+    limit: u64,
+) -> Result<std::process::Output, ManagedError> {
     use std::io::{Read, Seek};
     use std::process::Stdio;
     let mut stdout = tempfile::tempfile().map_err(|_| ManagedError::StorageUnavailable)?;
@@ -218,6 +237,13 @@ pub(crate) fn bounded_output(mut command: Command) -> Result<std::process::Outpu
         .map_err(|_| ManagedError::UnsupportedVersion)?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let status = loop {
+        if stdout.metadata().map(|m| m.len() > limit).unwrap_or(true)
+            || stderr.metadata().map(|m| m.len() > 65536).unwrap_or(true)
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ManagedError::UnsupportedVersion);
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if std::time::Instant::now() < deadline => {
@@ -230,22 +256,22 @@ pub(crate) fn bounded_output(mut command: Command) -> Result<std::process::Outpu
             }
         }
     };
-    let read = |file: &mut std::fs::File| -> Result<Vec<u8>, ManagedError> {
+    let read = |file: &mut std::fs::File, limit: u64| -> Result<Vec<u8>, ManagedError> {
         file.rewind()
             .map_err(|_| ManagedError::StorageUnavailable)?;
         let mut bytes = vec![];
-        file.take(65537)
+        file.take(limit + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| ManagedError::StorageUnavailable)?;
-        if bytes.len() > 65536 {
+        if bytes.len() as u64 > limit {
             return Err(ManagedError::UnsupportedVersion);
         }
         Ok(bytes)
     };
     Ok(std::process::Output {
         status,
-        stdout: read(&mut stdout)?,
-        stderr: read(&mut stderr)?,
+        stdout: read(&mut stdout, limit)?,
+        stderr: read(&mut stderr, 65536)?,
     })
 }
 
@@ -294,6 +320,10 @@ fn create_private_directory(path: &Path) -> Result<(), ManagedError> {
 /// Project configuration can outrank the isolated profile. Never claim a
 /// selected subscription while a project requests a different credential.
 fn check_project_config(tool: ToolId, cwd: &Path) -> Result<(), ManagedError> {
+    // OpenCode runs in pure mode with project config disabled.
+    if tool == ToolId::Opencode {
+        return Ok(());
+    }
     let project_root = cwd
         .ancestors()
         .find(|p| p.join(".git").exists())
@@ -302,6 +332,7 @@ fn check_project_config(tool: ToolId, cwd: &Path) -> Result<(), ManagedError> {
         let names: &[&str] = match tool {
             ToolId::Claude => &[".claude/settings.json", ".claude/settings.local.json"],
             ToolId::Codex => &[".codex/config.toml"],
+            ToolId::Opencode => &[],
         };
         for name in names {
             let path = ancestor.join(name);
@@ -314,6 +345,7 @@ fn check_project_config(tool: ToolId, cwd: &Path) -> Result<(), ManagedError> {
                 return Err(ManagedError::Conflict);
             }
             match tool {
+                ToolId::Opencode => return Err(ManagedError::InvalidRequest),
                 ToolId::Claude => {
                     let value: serde_json::Value =
                         serde_json::from_slice(&bytes).map_err(|_| ManagedError::Conflict)?;
@@ -377,12 +409,16 @@ pub fn find_native(tool: ToolId) -> Result<PathBuf, ManagedError> {
     let name = match tool {
         ToolId::Claude => "claude",
         ToolId::Codex => "codex",
+        ToolId::Opencode => "opencode",
     };
     let paths = std::env::var_os("PATH").unwrap_or_default();
     let mut folders: Vec<PathBuf> = std::env::split_paths(&paths).collect();
     if let Some(home) = dirs::home_dir() {
         folders.push(home.join(".local/bin"));
         folders.push(home.join(".cargo/bin"));
+        if tool == ToolId::Opencode {
+            folders.push(home.join(".opencode/bin"));
+        }
     }
     #[cfg(target_os = "macos")]
     folders.extend([

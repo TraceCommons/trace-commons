@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod cli;
+pub mod opencode;
 pub mod profiles;
 pub mod secrets;
 pub mod sessions;
@@ -18,6 +19,7 @@ use uuid::Uuid;
 pub enum ToolId {
     Claude,
     Codex,
+    Opencode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]

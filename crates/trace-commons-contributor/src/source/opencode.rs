@@ -1,7 +1,7 @@
-//! Explicit OpenCode JSON export reader, qualified against 1.18.29.
+//! OpenCode local session and JSON export reader.
 //!
-//! No native database discovery, credential access, network requests or receipt
-//! inference. The export is a local transcript, never verbatim provider evidence.
+//! Native SQLite sessions are read through `opencode_db`; exports support 1.18.29
+//! and 1.19.0. Neither source implies provider evidence or upload consent.
 //! A declared directory contains `.json` exports directly (not recursively).
 
 use super::{
@@ -77,15 +77,52 @@ fn export_header(path: &Path) -> Option<ExportHeader> {
 
 pub struct OpenCodeSource {
     root: PathBuf,
+    additional: Option<PathBuf>,
+    managed: bool,
 }
 impl OpenCodeSource {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            additional: None,
+            managed: false,
+        }
+    }
+    /// Managed staging holds one explicitly collected export per launch.
+    pub(crate) fn managed(root: PathBuf) -> Self {
+        Self {
+            root,
+            additional: None,
+            managed: true,
+        }
+    }
+    pub fn also_managed(mut self, root: PathBuf) -> Self {
+        if root != self.root {
+            self.additional = Some(root);
+        }
+        self
+    }
+    // A database file is an explicit native selection. Existing directory
+    // declarations remain export-only even if a database later appears there.
+    fn native(&self) -> bool {
+        self.root.file_name().is_some_and(|n| n == "opencode.db")
     }
     fn address(&self, path: &Path) -> Option<PathBuf> {
-        let path = real_file_within_root(&self.root, path)?;
-        (path.parent() == Some(self.root.as_path()) && path.extension()?.to_str()? == "json")
-            .then_some(path)
+        std::iter::once(&self.root)
+            .chain(self.additional.iter())
+            .find_map(|root| {
+                // Credential/config JSON beside the database is never a transcript.
+                if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| super::discovery::CONFIG_FILE_NAMES.contains(&n))
+                {
+                    return None;
+                }
+                let path = real_file_within_root(root, path)?;
+                (path.parent() == Some(root.as_path()) && path.extension()?.to_str()? == "json")
+                    .then_some(path)
+            })
     }
     fn reference(&self, path: &Path) -> Option<SessionRef> {
         let path = self.address(path)?;
@@ -119,30 +156,63 @@ impl TraceSource for OpenCodeSource {
         SOURCE_OPENCODE
     }
     fn discover(&self) -> Result<Vec<SessionRef>> {
-        let Some(entries) = super::read_dir_for_discovery(&self.root)? else {
-            return Ok(Vec::new());
+        let mut refs = if self.native() {
+            super::opencode_db::discover(self.root.parent().unwrap_or(&self.root))?
+        } else {
+            Vec::new()
         };
-        let mut refs = Vec::new();
-        for (index, entry) in entries.enumerate() {
-            if index >= DISCOVERY_ENTRY_BUDGET {
-                bail!("opencode-discovery-entry-budget");
+        for root in std::iter::once(&self.root).chain(self.additional.iter()) {
+            if root == &self.root && self.native() {
+                continue;
             }
-            if let Some(reference) = entry.ok().and_then(|e| self.reference(&e.path())) {
-                refs.push(reference);
+            let Some(entries) = super::read_dir_for_discovery(root)? else {
+                continue;
+            };
+            let budget = if self.managed || self.additional.as_ref() == Some(root) {
+                65_536
+            } else {
+                DISCOVERY_ENTRY_BUDGET
+            };
+            for (index, entry) in entries.enumerate() {
+                if index >= budget {
+                    bail!("opencode-discovery-entry-budget");
+                }
+                if let Some(reference) = entry.ok().and_then(|e| self.reference(&e.path())) {
+                    refs.push(reference);
+                }
             }
         }
         refs.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(refs)
     }
     fn session_for_path(&self, path: &Path) -> Option<PathBuf> {
+        if self.native()
+            && super::opencode_db::accepts_path(self.root.parent().unwrap_or(&self.root), path)
+        {
+            return Some(path.to_path_buf());
+        }
         self.address(path)
     }
     fn session_at(&self, path: &Path) -> Result<Option<SessionRef>> {
+        if self.native()
+            && super::opencode_db::accepts_path(self.root.parent().unwrap_or(&self.root), path)
+        {
+            return Ok(
+                super::opencode_db::discover(self.root.parent().unwrap_or(&self.root))?
+                    .into_iter()
+                    .find(|r| r.path == path),
+            );
+        }
         Ok(self.reference(path))
     }
     fn load(&self, r: &SessionRef) -> Result<SessionTranscript> {
         if r.source != SOURCE_OPENCODE {
             bail!("opencode_source_mismatch");
+        }
+        if self.native()
+            && super::opencode_db::accepts_path(self.root.parent().unwrap_or(&self.root), &r.path)
+        {
+            return super::opencode_db::load(self.root.parent().unwrap_or(&self.root), r);
         }
         let path = self
             .address(&r.path)
@@ -257,7 +327,7 @@ fn parse_export_with_record_budget(
         serde_json::from_slice(bytes).map_err(|_| anyhow!("opencode_malformed_json"))?;
     let info = &doc["info"];
     let session_id = id(info, "id")?;
-    if field(info, "version")? != QUALIFIED_VERSION {
+    if ![QUALIFIED_VERSION, "1.19.0"].contains(&field(info, "version")?) {
         return Err(UnsupportedExportVersion.into());
     }
     let cwd = field(info, "directory")?.to_owned();
@@ -436,7 +506,7 @@ fn parse_export_with_record_budget(
     Ok(SessionTranscript {
         source_session: super::native_session_identity(SOURCE_OPENCODE, Some(session_id)),
         source: Cow::Borrowed(SOURCE_OPENCODE),
-        agent_version: Some(QUALIFIED_VERSION.into()),
+        agent_version: Some(field(info, "version")?.into()),
         model: if models.len() == 1 {
             models.into_iter().next()
         } else {
@@ -472,6 +542,43 @@ mod tests {
         change(&mut value);
         parse_export(&serde_json::to_vec(&value).unwrap())
     }
+    #[test]
+    fn native_selection_does_not_widen_export_folder_consent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("opencode.db");
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.execute_batch(include_str!(
+            "../../tests/fixtures/opencode/native-1.19.0.sql"
+        ))
+        .unwrap();
+        std::fs::write(tmp.path().join("auth.json"), b"secret-not-a-transcript").unwrap();
+        let exports = OpenCodeSource::new(tmp.path().to_owned());
+        assert!(exports.discover().unwrap().is_empty());
+        let native = OpenCodeSource::new(db_path.clone());
+        let refs = native.discover().unwrap();
+        assert_eq!(refs.len(), 1);
+        assert!(native.load(&refs[0]).is_ok());
+        assert!(exports.load(&refs[0]).is_err());
+        assert_eq!(
+            native.session_at(&refs[0].path).unwrap().unwrap().path,
+            refs[0].path
+        );
+        let candidate = super::super::discovery::describe_opencode(&db_path);
+        assert!(candidate.exists);
+        assert_eq!(candidate.session_count, 1);
+        assert_eq!(candidate.path, db_path);
+        let picked = super::super::discovery::describe_folder(tmp.path());
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].path, db_path);
+        drop(db);
+        std::fs::remove_file(db_path).unwrap();
+        assert!(
+            native.discover().unwrap().is_empty(),
+            "removed database must not become an export folder"
+        );
+        assert!(!super::super::discovery::describe_opencode(&native.root).exists);
+    }
+
     #[test]
     fn export_preserves_observed_identity_roles_and_tool_outcome_without_evidence() {
         let t = parse_export(FIXTURE).unwrap();
@@ -560,14 +667,17 @@ mod tests {
         );
     }
     #[test]
-    fn undeclared_and_conventional_are_off_explicit_root_loads_export() {
-        for roots in [SourceRoots::new(), SourceRoots::conventional()] {
-            assert!(
-                !all_sources(&roots)
-                    .iter()
-                    .any(|s| s.name() == SOURCE_OPENCODE)
-            );
-        }
+    fn undeclared_is_off_conventional_and_explicit_roots_are_available() {
+        assert!(
+            !all_sources(&SourceRoots::new())
+                .iter()
+                .any(|s| s.name() == SOURCE_OPENCODE)
+        );
+        assert!(
+            all_sources(&SourceRoots::conventional())
+                .iter()
+                .any(|s| s.name() == SOURCE_OPENCODE)
+        );
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("session.json");
         std::fs::write(&path, FIXTURE).unwrap();
