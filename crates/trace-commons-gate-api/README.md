@@ -27,12 +27,28 @@ Two parts of the Score contract are there for such a policy:
   review instead of priced. The output awards nothing and carries a safe
   label (`ScoreOutput::hold_for_review`). An output built with
   `ScoreOutput::new` never holds.
+- `ScoreInput::operator_review` tells the policy that an operator approved
+  its earlier hold of this trace: a `ScoreHoldReview` with the decision and
+  the hold label, and nothing that names the reviewer. It is `None` on every
+  other Score. A policy given an approval must price the trace; one that
+  holds again fails the run closed (`pipeline_score_hold_repeated`), so a
+  hold cannot loop. A rejected hold never reaches the policy: the server
+  commits `ScoreOutput::rejected_after_hold` itself, which awards nothing,
+  indexes nothing, and names the hold label in
+  `ScoreEvidence::operator_rejected_hold` (not serialized when absent, so
+  existing evidence keeps its bytes).
 
 The server runs a registered policy under the same Score lock, duplicate
 checks, and gate decision row as its compatibility policy. The gate decision
 row needs `perplexity_micros`, `tail_fraction_micros`,
 `novelty_score_micros`, `quality_passed`, `novelty_passed`, and
-`nearest_neighbor_hash` on the evidence.
+`nearest_neighbor_hash` on the evidence; a run whose evidence lacks one fails
+at Settle before any leg pays. A rejected hold's outcome writes no row.
+
+A registered policy's bundle is qualified for production only when its
+factory declares `production_qualified()` and accepts the bundle's Score
+configuration (`configuration_is_qualifiable()`); both are `false` by
+default.
 
 ## Reference implementations
 

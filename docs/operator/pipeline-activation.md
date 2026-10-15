@@ -1957,18 +1957,61 @@ A registered policy can also record two more things on its Score output:
   award. The run parks in `awaiting_review` at Score, uncharged, under the
   policy's label. No Score outcome is committed, so no award and no
   settlement leg exist. `GET /v1/review/pipeline/quarantine` lists the run
-  with `phase` `score` and the label as `hold_reason`. A Score hold cannot be
-  claimed or assessed yet: the claim answers 404, "pipeline run is not
-  waiting for review". Its exits are a withdrawal (the worker releases it,
-  and the Score then ends the run as `submission_inoperable`) or operator
-  containment, the same exits as a superseded assessment (below). The
-  built-in policies never hold.
+  with `phase` `score` and the label as `hold_reason`. The built-in policies
+  never hold.
 
-One limit applies for now: `PipelineQualificationStore::qualify_bundle` still
-accepts only the compatibility family (`validate_production_package`). A
-package with a registered Score policy can pass the startup gate, but it
-cannot be recorded as a qualified tenant bundle until that allow-list is
-deliberately widened.
+#### Resolving a Score hold
+
+A reviewer resolves a Score hold through the same claim and assessment
+routes, with the same review credential, as a Review hold (below). The
+claim needs the run's submission to still be accepted and live. The
+assessment is the run's own Score assessment: `pipeline_review_assessments`
+holds at most one assessment per run and phase (V130, `phase` `review` or
+`score`), so an assessment the run got at Review does not block it. A Score
+assessment also records the policy's label as `hold_label`.
+
+- **Approve.** `resolved_quarantine_reasons` must name the hold label (the
+  queue item's `hold_reason`); otherwise the route refuses with `422`,
+  "quarantine reason is unresolved". The run goes back to Score, and the
+  policy runs again with `ScoreInput::operator_review` set to the decision
+  and the hold label. Nothing on the input names the reviewer. A policy
+  that holds again on an approved input would loop, so the run fails closed
+  under `pipeline_score_hold_repeated`: nothing of the Score is committed and
+  no leg exists.
+- **Reject.** The policy is not run again. The server commits a zero Score
+  outcome itself: no award, no index command, rule
+  `operator_rejected_score_hold`, and evidence whose
+  `operator_rejected_hold` is the hold label. The run settles with no credit,
+  no settlement leg and no index write. It writes no `trace_gate_decisions`
+  row, because nothing was scored and the row's measurements would be
+  invented. The submission stays accepted.
+
+The audit event the assessment route appends records the recommendation as it
+does for a Review hold. A withdrawal or operator containment still releases
+a Score hold as before: the worker releases it, and the Score then ends the
+run as `submission_inoperable`.
+
+#### Qualifying a registered Score policy
+
+`PipelineQualificationStore::qualify_bundle` (and the production adapters
+observation) accepts a package whose Admission, Review and Settle policies
+are the compatibility family's and whose Score policy is either the
+compatibility policy or one the service's registry supplies
+(`validate_production_package_with_score_policies`). Ingest gives the store
+the registry of the pipeline service it assembled, so in the open build,
+which registers none, only the compatibility family qualifies, as before. A
+registered Score policy qualifies only when both hold:
+
+- its factory's `production_qualified()` is `true`, else
+  `bundle_score_policy_not_production_qualified`;
+- its factory's `configuration_is_qualifiable()` accepts the bytes the
+  manifest's Score `configuration_hash` names, else
+  `bundle_configuration_not_qualifiable` (a missing configuration artifact
+  is refused the same way).
+
+A Score id that no factory is registered under is refused as
+`bundle_implementation_unknown`. The development-marker check
+(`bundle_development_dependency`) applies to every package.
 
 ## Per-phase claim lease
 
@@ -2504,16 +2547,17 @@ answers `404` when no pipeline runtime is injected:
   `phase`, `hold_reason`, and `assessment_superseded` (below). `phase` is
   `review` for a run waiting for an assessment, and `score` for a run that a
   registered Score policy held for operator review instead of pricing it
-  ("A registered Score policy"). A `score` hold is listed only so that an
-  operator can see it: a claim of it answers `404`. `hold_reason` is what
+  ("A registered Score policy"). Both are claimed and assessed through the
+  two routes below ("Resolving a Score hold"). `hold_reason` is what
   holds the run: the Score policy's label for a `score` hold,
   `privacy_pass_review_required` when the privacy pass escalated the run,
   else the Admission reason.
 - `POST /v1/review/pipeline/runs/{run_id}/claim` claims a run for the
   reviewer for 30 minutes and returns a `lease_token`. `404` means the run is
-  not waiting for review (it is not at Review, neither quarantined nor
-  escalated, its privacy pass is not recorded yet, already assessed, or its
-  submission is no longer operable, for example because it was withdrawn).
+  not waiting for review (it is neither held at Review, quarantined or
+  escalated, nor held at Score; its privacy pass is not recorded yet; it
+  already has an assessment for the phase it is held at; or its submission
+  is no longer operable, for example because it was withdrawn).
   `409` means another reviewer holds a live claim.
 - `POST /v1/review/pipeline/runs/{run_id}/assessment` records the
   reviewer's `approve` or `reject` for the claim's `lease_token`, with a
