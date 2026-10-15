@@ -826,4 +826,40 @@ mod tests {
             "credential_forget_explains no longer explains revoked: false: {explains}"
         );
     }
+
+    /// An unnamed cancel answers only for a sign-in that is running.
+    ///
+    /// Over the handler, not just the registry: once an attempt has finished
+    /// the registry still holds it, and an unnamed cancel must not answer
+    /// `ok {status: cancelled}` for it. Naming it keeps its answer.
+    #[tokio::test]
+    async fn an_unnamed_cancel_answers_unknown_once_nothing_is_running() {
+        let (_directory, store) = crate::config::tests_support::temp_store();
+        let shared = DaemonShared::load(store).unwrap();
+        let request = |id: u64, params: serde_json::Value| Request {
+            id,
+            method: "near_ai_credential_cancel".into(),
+            params,
+        };
+        let started = ceremony::begin(&shared.store, "github").await.unwrap();
+        let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
+
+        let running = handle_cancel(&shared, &request(31, serde_json::json!({})));
+        let body = running.result.expect("a running sign-in is cancelled");
+        assert_eq!(body["status"], "cancelled", "{body}");
+        assert!(body.get("attempt_id").is_none(), "{body}");
+
+        let finished = handle_cancel(&shared, &request(32, serde_json::json!({})));
+        assert!(finished.result.is_none(), "{:?}", finished.result);
+        assert_eq!(
+            finished.error.unwrap().message,
+            "near_ai_credential_unknown"
+        );
+
+        let named = handle_cancel(
+            &shared,
+            &request(33, serde_json::json!({ "attempt_id": attempt_id })),
+        );
+        assert_eq!(named.result.unwrap()["status"], "cancelled");
+    }
 }

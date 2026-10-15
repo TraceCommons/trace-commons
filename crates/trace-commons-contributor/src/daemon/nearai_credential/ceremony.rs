@@ -566,8 +566,12 @@ fn cancel_locked(dir: &std::path::Path, attempt_id: Option<&str>) -> Option<Stat
     let mut map = attempts().lock().ok()?;
     let entry = map
         .get_mut(dir)
-        // `None` matches the attempt in flight; `Some` must name it.
-        .filter(|a| attempt_id.is_none_or(|id| id == a.state.attempt_id.as_str()))?;
+        // `None` matches only an attempt still in flight; `Some` must name
+        // the attempt, in flight or finished.
+        .filter(|a| match attempt_id {
+            Some(id) => id == a.state.attempt_id.as_str(),
+            None => matches!(a.state.status, "starting" | "waiting_for_browser"),
+        })?;
     if matches!(entry.state.status, "starting" | "waiting_for_browser") {
         entry.state.status = "cancelled";
         if let Some(task) = &entry.abort {
@@ -747,6 +751,36 @@ mod tests {
     async fn an_unnamed_cancel_with_no_ceremony_in_flight_is_refused() {
         let (dir, _store) = temp_store();
         assert!(cancel(dir.path(), None).is_none());
+    }
+
+    /// An attempt that has already finished is not "in flight" either.
+    ///
+    /// The registry keeps a finished attempt in its directory, so an unnamed
+    /// cancel that matched on presence alone would answer a made-up-looking
+    /// `cancelled` (or `complete`) for a sign-in that was not running. An
+    /// unnamed cancel means "stop what is running"; with nothing running it
+    /// finds nothing. A cancel that names the finished attempt keeps its
+    /// answer: that caller already holds the id and is asking about it.
+    #[tokio::test]
+    async fn an_unnamed_cancel_after_the_attempt_finished_finds_nothing() {
+        let (dir, store) = temp_store();
+        let started = begin(&store, "github").await.unwrap();
+        let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
+        assert_eq!(
+            cancel(dir.path(), Some(&attempt_id)).map(|s| s.status),
+            Some("cancelled")
+        );
+
+        assert!(
+            cancel(dir.path(), None).is_none(),
+            "an unnamed cancel answered for a sign-in that was not running"
+        );
+        // The finished attempt is untouched and still answers its own id.
+        assert_eq!(attempt_status(dir.path()), Some("cancelled"));
+        assert_eq!(
+            cancel(dir.path(), Some(&attempt_id)).map(|s| s.status),
+            Some("cancelled")
+        );
     }
 
     #[tokio::test]
