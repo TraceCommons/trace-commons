@@ -406,17 +406,54 @@ fn codex_auth_override(value: &toml::Value) -> bool {
 }
 
 pub fn find_native(tool: ToolId) -> Result<PathBuf, ManagedError> {
-    let name = match tool {
+    find_native_named(match tool {
         ToolId::Claude => "claude",
         ToolId::Codex => "codex",
         ToolId::Opencode => "opencode",
-    };
+    })
+}
+
+fn find_native_named(name: &str) -> Result<PathBuf, ManagedError> {
     let paths = std::env::var_os("PATH").unwrap_or_default();
-    let mut folders: Vec<PathBuf> = std::env::split_paths(&paths).collect();
-    if let Some(home) = dirs::home_dir() {
+    let folders = discovery_folders(&paths, dirs::home_dir().as_deref(), name);
+    find_native_in(name, folders)
+}
+
+fn installed(name: &str) -> bool {
+    let paths = std::env::var_os("PATH").unwrap_or_default();
+    let folders = discovery_folders(&paths, dirs::home_dir().as_deref(), name);
+    installed_in(name, folders, cfg!(windows))
+}
+
+/// Windows package managers may install command wrappers. These count as an
+/// installation, but are never handed to the managed native executable launcher.
+fn installed_in(name: &str, folders: Vec<PathBuf>, windows: bool) -> bool {
+    if !windows {
+        return find_native_in(name, folders).is_ok();
+    }
+    let current = std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::canonicalize(path).ok());
+    folders
+        .iter()
+        .filter(|folder| folder.is_absolute())
+        .any(|folder| {
+            ["exe", "cmd", "bat"].iter().any(|extension| {
+                let candidate = folder.join(format!("{name}.{extension}"));
+                candidate.is_file()
+                    && std::fs::canonicalize(candidate)
+                        .ok()
+                        .is_some_and(|resolved| Some(&resolved) != current.as_ref())
+            })
+        })
+}
+
+fn discovery_folders(paths: &std::ffi::OsStr, home: Option<&Path>, name: &str) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = std::env::split_paths(paths).collect();
+    if let Some(home) = home {
         folders.push(home.join(".local/bin"));
         folders.push(home.join(".cargo/bin"));
-        if tool == ToolId::Opencode {
+        if name == "opencode" {
             folders.push(home.join(".opencode/bin"));
         }
     }
@@ -425,6 +462,10 @@ pub fn find_native(tool: ToolId) -> Result<PathBuf, ManagedError> {
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
     ]);
+    folders
+}
+
+fn find_native_in(name: &str, folders: Vec<PathBuf>) -> Result<PathBuf, ManagedError> {
     for folder in folders {
         // Relative PATH entries depend on the launch project and are not a
         // stable executable identity for the daemon/helper handoff.
@@ -436,9 +477,10 @@ pub fn find_native(tool: ToolId) -> Result<PathBuf, ManagedError> {
         } else {
             name.into()
         });
-        if file.is_file() {
-            let resolved =
-                std::fs::canonicalize(file).map_err(|_| ManagedError::UnsupportedVersion)?;
+        if executable_file(&file) {
+            let Ok(resolved) = std::fs::canonicalize(file) else {
+                continue;
+            };
             if std::env::current_exe()
                 .ok()
                 .and_then(|p| std::fs::canonicalize(p).ok())
@@ -449,12 +491,139 @@ pub fn find_native(tool: ToolId) -> Result<PathBuf, ManagedError> {
             }
         }
     }
-    Err(ManagedError::UnsupportedVersion)
+    Err(ManagedError::ToolUnavailable)
+}
+
+fn executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Installed binaries, independently of trace sources or managed launch support.
+/// Discovery reads filesystem metadata only; it never runs a tool or scans traces.
+/// `install_url` is the tool's setup guide from `crate::install_guides`.
+pub fn tools() -> serde_json::Value {
+    use crate::install_guides::install_guide;
+    serde_json::json!([
+        {"tool": "claude", "installed": installed("claude"), "install_url": install_guide("claude-code")},
+        {"tool": "codex", "installed": installed("codex"), "install_url": install_guide("codex")},
+        {"tool": "opencode", "installed": installed("opencode"), "install_url": install_guide("opencode")}
+    ])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_installation_detects_wrappers_without_expanding_native_launch() {
+        let home = tempfile::tempdir().unwrap();
+        let folders = vec![home.path().to_path_buf()];
+        for extension in ["cmd", "bat", "exe"] {
+            let file = home.path().join(format!("codex.{extension}"));
+            std::fs::write(&file, b"must not execute during discovery").unwrap();
+            assert!(installed_in("codex", folders.clone(), true));
+            assert!(!installed_in("claude", folders.clone(), true));
+            if extension != "exe" {
+                assert!(find_native_in("codex", folders.clone()).is_err());
+            }
+            std::fs::remove_file(file).unwrap();
+        }
+        std::fs::create_dir(home.path().join("codex.cmd")).unwrap();
+        assert!(!installed_in("codex", folders, true));
+        assert!(!installed_in("codex", vec![PathBuf::from(".")], true));
+    }
+
+    #[test]
+    fn availability_rows_cover_every_managed_tool() {
+        let rows = tools();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        for (row, name) in rows.iter().zip(["claude", "codex", "opencode"]) {
+            assert_eq!(row["tool"], name);
+            assert!(row["installed"].is_boolean());
+            assert!(row["install_url"].as_str().unwrap().starts_with("https://"));
+            assert_eq!(row.as_object().unwrap().len(), 3);
+            // Every row is a managed tool (#1417 made OpenCode one).
+            assert!(serde_json::from_value::<ToolId>(row["tool"].clone()).is_ok());
+        }
+        for name in ["claude", "codex", "opencode"] {
+            assert!(serde_json::from_str::<ToolId>(&format!("\"{name}\"")).is_ok());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_requires_an_executable_and_keeps_searching() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let first = home.path().join("first");
+        let second = home.path().join(".opencode/bin");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("opencode"), b"not executable").unwrap();
+        std::fs::set_permissions(
+            first.join("opencode"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(
+            find_native_in("opencode", vec![first.clone()]),
+            Err(ManagedError::ToolUnavailable)
+        );
+        std::fs::write(second.join("opencode"), b"not run during discovery").unwrap();
+        std::fs::set_permissions(
+            second.join("opencode"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        assert_eq!(
+            find_native_in("opencode", vec![first.clone(), second.clone()]).unwrap(),
+            std::fs::canonicalize(second.join("opencode")).unwrap()
+        );
+        assert!(find_native_in("claude", vec![second.clone()]).is_err());
+        assert!(find_native_in("codex", vec![second.clone()]).is_err());
+        std::fs::remove_file(second.join("opencode")).unwrap();
+        assert_eq!(
+            find_native_in("opencode", vec![first, second]),
+            Err(ManagedError::ToolUnavailable)
+        );
+    }
+
+    #[test]
+    fn opencode_installer_directory_is_discovered_without_path() {
+        let home = tempfile::tempdir().unwrap();
+        let folders = discovery_folders(std::ffi::OsStr::new(""), Some(home.path()), "opencode");
+        assert!(folders.contains(&home.path().join(".opencode/bin")));
+        let claude = discovery_folders(std::ffi::OsStr::new(""), Some(home.path()), "claude");
+        assert!(!claude.contains(&home.path().join(".opencode/bin")));
+    }
+
+    #[test]
+    fn discovery_ignores_relative_paths_and_directories() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join("claude")).unwrap();
+        assert!(
+            find_native_in(
+                "claude",
+                vec![home.path().to_path_buf(), PathBuf::from(".")]
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn a_directory_another_launch_just_made_is_accepted() {
