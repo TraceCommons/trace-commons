@@ -200,20 +200,20 @@ for the proposal and a local cloud-api draft.
   `trace_settlement_rail_ledgers` (V129). It holds:
   - `cumulative_units` and `cumulative_micros` (`NUMERIC(39,0)`);
   - `confirmed_units`: what the external side last confirmed holding;
-  - a rounding carry and the hash of the rate the carry is denominated in;
   - a publish state.
 
   A trigger refuses any decrease of a total. `confirmed_units` can never
   exceed `cumulative_units`.
 - **Batch credits.** `trace_settlement_rail_credits` (V129) holds one
-  insert-only row per `(batch, rail)`: what that batch added, and at which
-  rate. A batch accrues once.
+  insert-only row per `(batch, rail)`: the batch's microcredits, the award
+  period it fell in, the award policy that priced it (`policy_ref` and its
+  hash) and what it added, zero included. A batch accrues once.
 - **Discriminators.** `rail_id` (`near_ai_trace_commons`) and
   `instrument_id` (`near_ai_credit_usd`, 9 decimals) identify the rail and
   instrument. A NEP-141 trace-credit rail or another instrument would be
   another rail id on the same tables.
-- **What V129 replaces.** It replaces the first draft's outbox, carry table
-  and per-delivery state machine (the never-merged V127). V127 and V128 are
+- **What V129 replaces.** It replaces the first draft's outbox, carry table,
+  fixed conversion rate and per-delivery state machine (the never-merged V127). V127 and V128 are
   taken by open PRs.
 
 ### 3.2 Epoch / batch boundary
@@ -225,17 +225,51 @@ decoupled from accrual and states the total, not the batch. A batch pays
 out on exactly one path: triggers refuse a rail credit beside a NEAR
 receipt outbox row for the same batch, and the reverse.
 
-### 3.3 Conversion
+### 3.3 Award policy
 
-- `TRACE_COMMONS_NEAR_AI_CREDIT_RATE` is `"num/den"` nano-USD per
-  microcredit. It has no default; unset refuses with
-  `missing_control:near_ai_credit_rate`.
-- Each accrual computes `floor((micros * num + carry) / den)` in checked
-  u128 arithmetic and keeps the remainder in the ledger's carry. If the rate
-  changes, the carry restarts at zero (less than one atomic unit is
-  forgone).
-- Every credit row records the rate text and its hash, so a past accrual is
-  never repriced.
+How much NEAR AI credit a recipient earns is not decided by the rail. It
+is decided by a `SettlementAwardPolicy`
+(`crates/trace-commons-gate-api/src/settlement_award.rs`), which the server
+holds as `Arc<dyn SettlementAwardPolicy>`. **The production policy is
+supplied by a private backend at this seam.** The open build ships only
+`ReferenceFlatRateAwardPolicy`, which, like the reference scorers, is real,
+deliberately simple and uncalibrated.
+
+- **Periods.** `period_key(finalized_at_unix_seconds)` names the period a
+  batch falls in. The time is the batch's `created_at`:
+  `trace_credit_settlement_batches` has no separate finalization time, the
+  versioned pipeline inserts its batches `finalized`, and a batch upserted
+  from `dry_run` to `finalized` keeps the dry run's `created_at`. The
+  reference policy uses the UTC calendar month (`YYYY-MM`).
+- **Targets, not increments.** `period_target(&PeriodSummary)` returns the
+  recipient's cumulative award for the period so far, in atomic units.
+  `PeriodSummary` is hash-only: the period key, the recipient's ref hash
+  (never a tenant id), the instrument and its decimals, and the period's
+  settled microcredits, batch count and source-submission count, each
+  including the batch being accrued, plus the units already awarded in the
+  period, excluding it. A policy is pure: no clock, no I/O. Per-trace
+  scores (`line_items_json`) are the intended extension point and are not
+  carried yet.
+- **Accrual.** Under the ledger's `FOR UPDATE`, `accrue_batch` sums the
+  period's earlier rows, asks for the target and adds
+  `target - already awarded` when the target is higher, nothing otherwise.
+  A target that falls never claws back. Because the target is recomputed
+  from period totals, there is no rounding carry: splitting a period into
+  batches loses nothing.
+- **Reference.** `TRACE_COMMONS_NEAR_AI_CREDIT_AWARD_POLICY=flat_rate` with
+  `TRACE_COMMONS_NEAR_AI_CREDIT_FLAT_RATE="num/den"` awards
+  `floor(period_micros * num / den)` nano-USD per month, in checked u128
+  arithmetic; overflow refuses.
+- **Injection.** An embedding binary registers other policies by name in
+  an `AwardPolicyRegistry` and resolves the config with
+  `NearAiCreditRailConfig::from_lookup_with_policies`. `flat_rate` is
+  reserved. An unknown name refuses.
+- **Recorded.** Every credit row stores `policy_ref` verbatim and its hash,
+  so a past accrual is never repriced. A policy whose parameters are not
+  public returns a version label as its `policy_ref`, not its parameters.
+- The rail's lifetime ceiling
+  (`TRACE_COMMONS_NEAR_AI_CREDIT_MAX_CUMULATIVE_NANO_USD`) stays an
+  independent last check at publish time, whatever the policy says.
 
 ### 3.4 Recipient mapping
 
@@ -323,7 +357,7 @@ is counted as such.
 ### 3.9 Audit
 
 - Labels only (`^[a-z0-9_]{1,64}$`) and hashes only: `org_ref_hash`,
-  `rate_ref_hash`, and `statement_ref`, a hash of rail, recipient hash and
+  `policy_ref_hash`, and `statement_ref`, a hash of rail, recipient hash and
   total.
 - No tenant id, org id or admin email appears in any log line or stored
   label.
@@ -340,7 +374,8 @@ is counted as such.
 | `TRACE_COMMONS_NEAR_AI_ADMIN_READ_KEY` | push `dry_run` without the write key; optional otherwise | read-only admin token |
 | `TRACE_COMMONS_NEAR_AI_ADMIN_USER_AGENT` | whenever an admin key is used | exact UA the key was minted with |
 | `TRACE_COMMONS_NEAR_AI_CREDIT_STATEMENT_KEY` | pull | base64 PKCS#8 Ed25519 signing key |
-| `TRACE_COMMONS_NEAR_AI_CREDIT_RATE` | always | `num/den` |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_AWARD_POLICY` | always | `flat_rate`, or a name an embedding binary registered |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_FLAT_RATE` | `flat_rate` only | `num/den`; set beside another policy, it refuses |
 | `TRACE_COMMONS_NEAR_AI_CREDIT_MAX_CUMULATIVE_NANO_USD` | always | per-recipient ceiling, at most 1e18; above it freezes |
 | `TRACE_COMMONS_NEAR_AI_ADMIN_TIMEOUT_MS` | — | 100 to 120000, default 15000 |
 
@@ -352,13 +387,15 @@ at `disabled` stops new publishes.
 
 | Needs nothing | Read-only key | Read-write key |
 |---|---|---|
-| accrual, conversion, recipient binding (contributor's own token), pull statements, fake-server tests | reconciler; push `dry_run` | push `live` |
+| accrual, award policy, recipient binding (contributor's own token), pull statements, fake-server tests | reconciler; push `dry_run` | push `live` |
 
 ## 4. What this slice built
 
 `settlement_rail.rs`, `near_ai_admin.rs`, `near_ai_inference_credit.rs`
 (both rails and the config), `near_ai_credit_statement.rs`,
-`near_ai_recipient.rs`, `settlement_rail_store.rs`, `V129`, the ingest boot
+`near_ai_recipient.rs`, `settlement_rail_store.rs`, the award policy seam
+in `trace-commons-gate-api` (`settlement_award.rs`, with the flat-rate
+reference in `reference.rs`), `V129`, the ingest boot
 refusal, a fake of the proposed route, and the runbook stub.
 
 Deferred:
@@ -378,8 +415,9 @@ Deferred:
    follow-up that removes our admin credential.
 3. **Conversion or addition?** Recommendation: conversion. A batch pays on
    exactly one path, which is enforced.
-4. **Rate.** Recommendation: set by the owner, with its hash recorded on
-   every credit row and past accruals never repriced.
+4. **Award policy.** Decided: supplied by a private backend at the
+   `SettlementAwardPolicy` seam, with its reference hash recorded on every
+   credit row and past accruals never repriced.
 5. **Which roles may receive.** Recommendation: `owner` or `admin` only.
 6. **Keys.** Recommendation: a read-write key for push and a read-only key
    for the reconciler, both minted with our exact User-Agent and rotated

@@ -248,7 +248,8 @@ configured, and prints all three assignments in env-file format.
 | `TRACE_COMMONS_NEAR_AI_ADMIN_READ_KEY` | R for push `dry_run` without the write key | — | Read-only NEAR AI admin token (reconciler). |
 | `TRACE_COMMONS_NEAR_AI_ADMIN_USER_AGENT` | R with any admin key | — | Exact User-Agent the admin key was minted with. |
 | `TRACE_COMMONS_NEAR_AI_CREDIT_STATEMENT_KEY` | R for pull | — | Base64 PKCS#8 Ed25519 key signing pull statements. |
-| `TRACE_COMMONS_NEAR_AI_CREDIT_RATE` | R when enabled | — | `num/den` nano-USD per microcredit. |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_AWARD_POLICY` | R when enabled | — | Award policy: `flat_rate` (uncalibrated reference) or a policy the binary registers. Unknown refuses startup. |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_FLAT_RATE` | R for `flat_rate` | — | `num/den` nano-USD per microcredit over a UTC month. Refuses beside another policy. |
 | `TRACE_COMMONS_NEAR_AI_CREDIT_MAX_CUMULATIVE_NANO_USD` | R when enabled | — | Per-recipient cumulative ceiling. |
 | `TRACE_COMMONS_NEAR_AI_ADMIN_TIMEOUT_MS` | optional | `15000` | Admin call timeout. |
 

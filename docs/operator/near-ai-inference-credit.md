@@ -15,9 +15,16 @@ NEAR AI proposal:
 ## What it does
 
 Each finalized settlement batch for a tenant that has elected a NEAR AI
-organization is converted at a configured rate into nano-USD. It is added
-once to that recipient's **cumulative** total in
-`trace_settlement_rail_ledgers`. The rail publishes the total. NEAR AI
+organization is priced in nano-USD by an **award policy**, and the result is
+added once to that recipient's **cumulative** total in
+`trace_settlement_rail_ledgers`. The policy works per recipient per period
+(for the reference policy, the UTC calendar month of the batch's
+`created_at`): it states the period's cumulative award, and the batch adds
+whatever that exceeds what the period was already awarded. A lower answer
+adds nothing; nothing is ever taken back.
+
+The production award policy is supplied by a private backend. The open
+build's `flat_rate` policy is an uncalibrated reference. The rail publishes the total. NEAR AI
 keeps the maximum it has seen, as it does for staking-farm credit, so
 publishing again is always safe. Totals never decrease: the database
 refuses it.
@@ -38,7 +45,8 @@ refuses it.
 | `TRACE_COMMONS_NEAR_AI_ADMIN_READ_KEY` | push `dry_run` without the write key; optional otherwise | read-only admin token |
 | `TRACE_COMMONS_NEAR_AI_ADMIN_USER_AGENT` | whenever an admin key is set | the exact User-Agent the key was minted with |
 | `TRACE_COMMONS_NEAR_AI_CREDIT_STATEMENT_KEY` | pull | base64 PKCS#8 Ed25519 key that signs statements |
-| `TRACE_COMMONS_NEAR_AI_CREDIT_RATE` | when enabled | `numerator/denominator`, nano-USD per microcredit. No default. |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_AWARD_POLICY` | when enabled | `flat_rate`, or the name of a policy the binary was built with. No default; an unknown name refuses. |
+| `TRACE_COMMONS_NEAR_AI_CREDIT_FLAT_RATE` | with `flat_rate` | `numerator/denominator`, nano-USD per microcredit over the month. No default. Refuses if set beside another policy. |
 | `TRACE_COMMONS_NEAR_AI_CREDIT_MAX_CUMULATIVE_NANO_USD` | when enabled | per-recipient ceiling; a total above it freezes |
 | `TRACE_COMMONS_NEAR_AI_ADMIN_TIMEOUT_MS` | no | 100 to 120000; default 15000 |
 
@@ -67,16 +75,20 @@ unfrozen. If you unfreeze without fixing the cause, it freezes again.
 | `settlement_rail_external_refused_total` | NEAR AI answered a publish with less than we sent | escalate to NEAR AI |
 | `near_ai_admin_read_only_key` | push is using a read-only key | fix the configuration |
 | `near_ai_org_not_found` | the organization is missing or inactive | the contributor rebinds |
-| `near_ai_cumulative_above_ceiling` | a total exceeds the configured ceiling | check the rate before raising the ceiling |
+| `near_ai_cumulative_above_ceiling` | a total exceeds the configured ceiling | check the award policy before raising the ceiling |
 
 ## Database grants (V129)
 
 - **`trace_near_ai_credit_recipients`:** `SELECT, INSERT`, plus
   `UPDATE (revoked_at)`.
 - **`trace_settlement_rail_credits`:** `SELECT, INSERT` only. It is
-  append-only.
+  append-only. Each row records `period_key`, `policy_ref` and
+  `policy_ref_hash`.
 - **`trace_settlement_rail_ledgers`:** `SELECT, INSERT`, plus column-level
-  `UPDATE`. A trigger refuses any decrease of a total.
+  `UPDATE` on `cumulative_micros`, `cumulative_units`, `confirmed_units`,
+  `publish_state`, `attempt_count`, `next_attempt_at`, `lease_token`,
+  `lease_expires_at`, `last_error_label`, `confirmed_at`, `verified_at` and
+  `updated_at`. A trigger refuses any decrease of a total.
 - **All three:** `trace_ingest_runtime` gets no `DELETE`, and row-level
   security is forced.
 - **Older tables:** the rail also reads `trace_credit_settlement_batches`,
