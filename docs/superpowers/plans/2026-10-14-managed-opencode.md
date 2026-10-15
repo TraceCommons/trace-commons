@@ -48,9 +48,9 @@ Design authorized in conversation: extend existing managed accounts, ticket rede
 
 ### Follow-up verification
 
-- Complete contributor suite: 3,820 passed, 14 ignored.
+- After integrating main at 5b954bf34: complete contributor suite, 4,557 passed, 14 ignored.
 - FFI ABI and header suites: 197 passed. Rebuilt native FFI.
-- Native macOS source setup, chooser, source-copy, session-roots and settings suites: 66 passed.
+- Native macOS managed sessions, source setup, chooser, source-copy, session-roots and settings suites: 79 passed against a freshly rebuilt, isolated FFI dylib.
 - License boundary: 4 passed; all four required dependency license configurations passed.
 - Contributor and FFI all-target Clippy passed with `RUSTFLAGS=-D warnings` and repository allowances; formatting and diff checks passed.
 - Native SQLite qualification uses OpenCode 1.19.0 on macOS. No Windows/Linux live-native qualification or release was performed.

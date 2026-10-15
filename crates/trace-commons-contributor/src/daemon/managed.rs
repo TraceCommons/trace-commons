@@ -453,6 +453,7 @@ async fn redeem_async(shared: &DaemonShared, request: &Request) -> Response {
         Err(error) => {
             // Nothing will run: say so now, not after a heartbeat gap.
             let _ = service.sessions.report(LifecycleReport {
+                collection: None,
                 session_id: p.session_id,
                 proof: context.proof.clone(),
                 state: SessionState::Failed,
@@ -555,6 +556,8 @@ mod tests {
             cwd: cwd.to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            model: None,
+            collect_traces: false,
         })
     }
 
