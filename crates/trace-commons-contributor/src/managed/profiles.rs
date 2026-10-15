@@ -557,6 +557,8 @@ mod tests {
             assert!(row["installed"].is_boolean());
             assert!(row["install_url"].as_str().unwrap().starts_with("https://"));
             assert_eq!(row.as_object().unwrap().len(), 3);
+            // Every row is a managed tool (#1417 made OpenCode one).
+            assert!(serde_json::from_value::<ToolId>(row["tool"].clone()).is_ok());
         }
         for name in ["claude", "codex", "opencode"] {
             assert!(serde_json::from_str::<ToolId>(&format!("\"{name}\"")).is_ok());

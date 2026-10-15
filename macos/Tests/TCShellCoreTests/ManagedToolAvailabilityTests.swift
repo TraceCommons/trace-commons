@@ -37,7 +37,7 @@ final class ManagedToolAvailabilityTests: XCTestCase {
         XCTAssertEqual(try snapshot(tools(["codex", "opencode"])).setupTools, ["codex", "opencode"])
         XCTAssertEqual(ManagedSurface.supportedTools, ["claude", "codex", "opencode"])
     }
-    func testEveryInstallationCombinationFiltersOnlyManagedTools() throws {
+    func testEveryInstallationCombinationFiltersSetup() throws {
         for mask in 0..<8 {
             let installed = ManagedSurface.supportedTools.enumerated().compactMap { mask & (1 << $0.offset) != 0 ? $0.element : nil }
             let value = try snapshot(tools(installed))
