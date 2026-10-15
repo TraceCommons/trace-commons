@@ -27,10 +27,18 @@ struct InsightsView: View {
                     storeCopy: [String: String]? = TCInsights.copy(),
                     daemon: (any DaemonDataClient)? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
-        let service: InsightsModel.Service = { request in try await router.call(request) }
-        let weekReader: InsightsModel.WeekReader? = daemon.map { client in
+        var service: InsightsModel.Service = { request in try await router.call(request) }
+        var weekReader: InsightsModel.WeekReader? = daemon.map { client in
             { isoWeek in try await client.insightsWeek(isoWeek: isoWeek) }
         }
+        #if DEBUG
+        // A design review's sample week, in place of the daemon's week and
+        // the store's analytics answers (`InsightsSampleWeek`).
+        if InsightsSampleWeek.enabled {
+            service = InsightsSampleWeek.service(fallback: service)
+            weekReader = nil
+        }
+        #endif
         let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
             { _ = try await client.setInsightsRecapCard(false) }
         }
@@ -129,6 +137,7 @@ struct InsightsView: View {
         .onAppear { overviewModel.open() }
         .onAppear { patternsModel.open() }
         .onAppear { sessionsModel.open(); sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id)) }
+        .onAppear { showSampleWeekIfAsked() }
         .onChange(of: comparisonTaskVersions) { _, _ in
             specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)
         }
@@ -147,6 +156,20 @@ struct InsightsView: View {
             model.close(); comparisonModel.close(); specificationModel.close(); overviewModel.close()
             patternsModel.close(); sessionsModel.close(); comparisonsModel.clear()
         }
+    }
+
+    /// Debug builds: the sample week as the daemon's week (feed T) and one
+    /// sample trace for Sessions, when `TRACE_COMMONS_INSIGHTS_SAMPLE=1`.
+    private func showSampleWeekIfAsked() {
+        #if DEBUG
+        guard InsightsSampleWeek.enabled,
+              let overview = try? InsightsSampleWeek.weekOverview,
+              let patterns = try? InsightsSampleWeek.weekPatterns else { return }
+        overviewModel.showCounter(overview)
+        patternsModel.showCounter(patterns)
+        comparisonsModel.load(counterWeeks: [], weekStart: InsightsSampleWeek.weekStart, recapCardEnabled: true)
+        if model.snapshots.isEmpty { sessionsModel.sync(snapshotIDs: ["sample"]) }
+        #endif
     }
 
     /// Put a week on screen in the feed showing: the daemon's for feed T,

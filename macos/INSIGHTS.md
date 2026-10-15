@@ -100,8 +100,18 @@ so instead of drawing days. Charts plot on `chartSurface` in `chartSeries1`
 to `chartSeries4` (the Near AI OS chart tokens), each 3:1 or more on it. A
 figure that does not drill is drawn plain. Drill-down rows are two lines,
 not a table. `InsightsPaneWidthRenderTests` renders each tab at 408pt from
-fixture weeks; set `TC_INSIGHTS_RENDER_DIR` (and `TC_GLASS_THEME=flat`) to
+the sample week; set `TC_INSIGHTS_RENDER_DIR` (and `TC_GLASS_THEME=flat`) to
 keep the PNGs.
+
+A dev build is ad-hoc signed, so it cannot read the team keychain access
+group that holds the Insights digest keys: its watched-folder counting
+answers `key_unavailable` and it cannot save an analysis, and every tab is
+empty. For a design review, a Debug build launched with
+`TRACE_COMMONS_INSIGHTS_SAMPLE=1` draws Insights from `InsightsSampleWeek`, a
+fixed watched-folder week with goals, the lever, the weekly summary and one
+trace for Sessions. Only the analytics answers are sampled; a goal, lever or
+summary write is answered and kept nowhere. A release build never reads the
+variable.
 
 Local operations run off the UI thread. Closing or leaving the screen discards
 late results; a save or deletion already started can still finish. Reopening
