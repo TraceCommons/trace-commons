@@ -1,6 +1,9 @@
 //! Durable lifecycle for managed native processes. A UI is only an observer.
 
-use super::{AccountId, AccountView, ConnectionKind, Generation, ManagedError, ToolId};
+use super::{
+    AccountId, AccountView, ConnectionKind, Generation, ManagedError, ToolId,
+    terminal::TerminalHandle,
+};
 use crate::config::ConfigStore;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -90,7 +93,19 @@ pub struct SessionView {
     pub started_at: DateTime<Utc>,
     pub state: SessionState,
     pub exit_code: Option<i32>,
+    /// The daemon opened this session in a terminal it can script, named
+    /// its window, and the session runs: a shell may bring that window to
+    /// the front. Computed on every read, never trusted from storage.
     pub can_focus: bool,
+    /// The daemon opened this session and its launcher reports a running
+    /// tool, so a stop can be handed to that launcher, which owns the
+    /// process. False for a launch from the command line.
+    #[serde(default)]
+    pub can_stop: bool,
+    /// The session ended and the same launch can be made again: its
+    /// account and folder are still there. Set by the daemon's snapshot.
+    #[serde(default)]
+    pub can_start_again: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -142,10 +157,35 @@ pub struct LifecycleReport {
     pub exit_code: Option<i32>,
 }
 
+/// A handle this build cannot read (a terminal it does not script, or a field
+/// a newer build added) reads as none: that session cannot be shown, and the
+/// registry still opens.
+fn known_terminal<'de, D>(d: D) -> Result<Option<TerminalHandle>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Entry {
     #[serde(default)]
     dismissed: bool,
+    /// The daemon opened this session's terminal itself, from its own
+    /// ticket check. A launch from the command line never sets it.
+    #[serde(default)]
+    launched: bool,
+    /// The window that launch opened, when the terminal could name it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "known_terminal"
+    )]
+    terminal: Option<TerminalHandle>,
+    /// A stop was asked for; the launcher is told on its next report.
+    #[serde(default)]
+    stop_requested: bool,
     view: SessionView,
     request: LaunchRequest,
     ticket_hash: Option<String>,
@@ -256,8 +296,103 @@ impl SessionRegistry {
             .entries
             .iter()
             .filter(|e| !e.dismissed)
-            .map(|e| e.view.clone())
+            .map(|e| {
+                let mut view = e.view.clone();
+                let owned = e.owned_running();
+                view.can_focus = owned && e.terminal.is_some();
+                view.can_stop = owned && !e.stop_requested;
+                view.can_start_again = false;
+                view
+            })
             .collect())
+    }
+
+    /// Record that the daemon opened `id` in a terminal, after its ticket
+    /// check and its own launch, with the window when one was named.
+    pub fn opened_in_terminal(
+        &mut self,
+        id: Uuid,
+        terminal: Option<TerminalHandle>,
+    ) -> Result<(), ManagedError> {
+        let mut next = self.data.clone();
+        let entry = next
+            .entries
+            .iter_mut()
+            .find(|e| e.view.id == id)
+            .ok_or(ManagedError::NotFound)?;
+        entry.launched = true;
+        entry.terminal = terminal;
+        self.commit(next)
+    }
+
+    fn owned(&self, id: Uuid) -> Result<&Entry, ManagedError> {
+        let entry = self
+            .data
+            .entries
+            .iter()
+            .find(|e| e.view.id == id)
+            .ok_or(ManagedError::NotFound)?;
+        if entry.owned_running() {
+            Ok(entry)
+        } else {
+            Err(ManagedError::Conflict)
+        }
+    }
+
+    /// The window of a running session the daemon opened, or a refusal.
+    pub fn terminal_for(&self, id: Uuid) -> Result<TerminalHandle, ManagedError> {
+        self.owned(id)?
+            .terminal
+            .clone()
+            .ok_or(ManagedError::Conflict)
+    }
+
+    /// Ask the launcher of a running session the daemon opened to stop its
+    /// tool. Nothing is signalled here: the launcher owns the process and
+    /// hears this on its next report. Asking twice changes nothing.
+    pub fn request_stop(&mut self, id: Uuid) -> Result<(), ManagedError> {
+        if self.owned(id)?.stop_requested {
+            return Ok(());
+        }
+        let mut next = self.data.clone();
+        if let Some(entry) = next.entries.iter_mut().find(|e| e.view.id == id) {
+            entry.stop_requested = true;
+        }
+        self.commit(next)
+    }
+
+    /// Whether the launcher of `id` is to stop its tool now.
+    pub fn stop_requested(&self, id: Uuid) -> bool {
+        self.data
+            .entries
+            .iter()
+            .any(|e| e.view.id == id && e.stop_requested && e.owned_running())
+    }
+
+    /// The launch request that started an ended coding session, under a
+    /// new request id. Its account and folder are checked by the caller.
+    pub fn start_again_request(
+        &self,
+        id: Uuid,
+        request_id: Uuid,
+    ) -> Result<LaunchRequest, ManagedError> {
+        let entry = self
+            .data
+            .entries
+            .iter()
+            .find(|e| e.view.id == id)
+            .ok_or(ManagedError::NotFound)?;
+        if entry.view.state.holds_profile() {
+            return Err(ManagedError::Conflict);
+        }
+        if entry.request.purpose != LaunchPurpose::Coding {
+            return Err(ManagedError::InvalidRequest);
+        }
+        Ok(LaunchRequest {
+            request_id,
+            save_default: false,
+            ..entry.request.clone()
+        })
     }
 
     /// Fail unredeemed launches whose ticket expired, and lapse redeemed
@@ -400,9 +535,14 @@ impl SessionRegistry {
             state: SessionState::Starting,
             exit_code: None,
             can_focus: false,
+            can_stop: false,
+            can_start_again: false,
         };
         let entry = Entry {
             dismissed: false,
+            launched: false,
+            terminal: None,
+            stop_requested: false,
             view,
             request,
             ticket_hash: Some(digest(&ticket)),
@@ -431,10 +571,31 @@ impl SessionRegistry {
         if entry.ticket_hash.as_deref() != Some(&digest(ticket))
             || Utc::now() >= entry.ticket_expires
             || entry.view.state != SessionState::Starting
+            || entry.launched
         {
             return Err(ManagedError::Conflict);
         }
         Ok(())
+    }
+
+    /// The session an earlier start-again with this request id made, when
+    /// `request` is that same request apart from the selection generation it
+    /// was stamped with. A retry then finds its session, whatever the
+    /// selection has done since.
+    pub fn replayed(&self, request: &LaunchRequest) -> Option<PreparedLaunch> {
+        let entry = self
+            .data
+            .entries
+            .iter()
+            .find(|e| e.request.request_id == request.request_id)?;
+        let same = LaunchRequest {
+            expected_generation: entry.request.expected_generation,
+            ..request.clone()
+        } == entry.request;
+        same.then_some(PreparedLaunch {
+            session_id: entry.view.id,
+            ticket: None,
+        })
     }
 
     pub fn redeem(
@@ -592,6 +753,18 @@ impl SessionRegistry {
         Ok(())
     }
 }
+impl Entry {
+    /// The daemon opened this session itself and its launcher reports the
+    /// tool running, under the proof only that launcher holds.
+    fn owned_running(&self) -> bool {
+        self.launched
+            && self.view.state == SessionState::Running
+            && self.view.purpose == LaunchPurpose::Coding
+            && self.proof_hash.is_some()
+            && self.process_id.is_some()
+    }
+}
+
 fn receipt_name(id: Uuid) -> String {
     format!("managed-exit-{id}.json")
 }
@@ -615,6 +788,41 @@ pub fn clear_exit(store: &ConfigStore, id: Uuid) {
 mod tests {
     use super::*;
     use crate::managed::accounts::AccountStore;
+
+    #[test]
+    fn a_registry_holding_a_terminal_handle_this_build_does_not_know_still_opens() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut accounts = AccountStore::open(&store).unwrap();
+        let account = accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let request = LaunchRequest {
+            model: None,
+            collect_traces: false,
+            purpose: LaunchPurpose::Coding,
+            request_id: Uuid::new_v4(),
+            tool: ToolId::Claude,
+            connection: ConnectionKind::Subscription,
+            account_id: account.id,
+            cwd: home.path().to_path_buf(),
+            expected_generation: Generation(0),
+            save_default: false,
+        };
+        let launch = registry.prepare(request, &account).unwrap();
+        let mut value = serde_json::to_value(&registry.data).unwrap();
+        for unknown in [
+            serde_json::json!({"kind":"ghostty","tty":"/dev/ttys007"}),
+            serde_json::json!({"kind":"apple_terminal","tty":"/dev/ttys007","extra":"x"}),
+            serde_json::json!("garbage"),
+        ] {
+            value["entries"][0]["terminal"] = unknown;
+            let parsed: Data = serde_json::from_value(value.clone()).unwrap();
+            assert!(parsed.entries[0].terminal.is_none());
+            assert_eq!(parsed.entries[0].view.id, launch.session_id);
+        }
+    }
 
     #[test]
     fn expired_ticket_cannot_start_a_tool_and_restart_invalidates_unredeemed_ticket() {

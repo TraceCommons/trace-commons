@@ -211,13 +211,26 @@ async fn run_native(
         process_identity: Some(identity.clone()),
         exit_code,
     };
-    let _: anyhow::Result<Value> = call(
+    let mut answer: anyhow::Result<Value> = call(
         store,
         "managed_session_report",
         json!(report(SessionState::Running, None)),
     );
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
     let status = loop {
+        // The daemon asked for a stop: this process owns the child, so it
+        // signals it exactly as a terminal's own SIGTERM would, and the
+        // escalation below kills it if it has not exited in time.
+        #[cfg(unix)]
+        if stop_asked(&answer) && shutdown_at.is_none() {
+            forward_signal(pid, &identity, sysinfo::Signal::Term);
+            shutdown_at = Some(std::time::Instant::now());
+        }
+        #[cfg(windows)]
+        if stop_asked(&answer) {
+            let _ = child.start_kill();
+        }
+        answer = Ok(Value::Null);
         #[cfg(unix)]
         tokio::select! {
             status = child.wait() => break status?,
@@ -226,7 +239,7 @@ async fn run_native(
             _ = signals.terminate.recv() => { forward_signal(pid, &identity, sysinfo::Signal::Term); shutdown_at.get_or_insert_with(std::time::Instant::now); },
             _ = heartbeat.tick() => {
                 if shutdown_at.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(5)) { let _ = child.start_kill(); }
-                let _: anyhow::Result<Value> = call(store, "managed_session_report", json!(report(SessionState::Running, None)));
+                answer = call(store, "managed_session_report", json!(report(SessionState::Running, None)));
             },
         }
         #[cfg(windows)]
@@ -234,7 +247,7 @@ async fn run_native(
             status = child.wait() => break status?,
             _ = signals.interrupt.recv() => {},
             _ = signals.break_signal.recv() => {},
-            _ = heartbeat.tick() => { let _: anyhow::Result<Value> = call(store, "managed_session_report", json!(report(SessionState::Running, None))); },
+            _ = heartbeat.tick() => { answer = call(store, "managed_session_report", json!(report(SessionState::Running, None))); },
         }
         #[cfg(not(any(unix, windows)))]
         tokio::select! {
@@ -332,6 +345,12 @@ fn near_ai_route(
     Ok(())
 }
 
+/// Whether the daemon's answer to a running report asks for a stop. Only
+/// an explicit `true` does; anything else leaves the tool running.
+fn stop_asked(answer: &anyhow::Result<Value>) -> bool {
+    matches!(answer, Ok(value) if value.get("stop") == Some(&Value::Bool(true)))
+}
+
 #[cfg(unix)]
 fn forward_signal(pid: u32, identity: &str, signal: sysinfo::Signal) {
     let mut system = sysinfo::System::new();
@@ -372,5 +391,23 @@ impl TerminalSignals {
             #[cfg(unix)]
             terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stop_asked;
+    use serde_json::json;
+
+    /// Only the daemon's explicit `stop: true` stops the tool. A missing
+    /// field, another value or a failed report leaves it running.
+    #[test]
+    fn only_an_explicit_stop_answer_stops_the_tool() {
+        assert!(stop_asked(&Ok(json!({"accepted":true,"stop":true}))));
+        assert!(!stop_asked(&Ok(json!({"accepted":true,"stop":false}))));
+        assert!(!stop_asked(&Ok(json!({"accepted":true}))));
+        assert!(!stop_asked(&Ok(json!({"accepted":true,"stop":"true"}))));
+        assert!(!stop_asked(&Ok(json!({"accepted":true,"stop":1}))));
+        assert!(!stop_asked(&Err(anyhow::anyhow!("daemon unavailable"))));
     }
 }

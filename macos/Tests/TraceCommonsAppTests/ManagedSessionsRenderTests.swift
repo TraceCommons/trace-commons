@@ -83,6 +83,39 @@ final class ManagedSessionsRenderTests: XCTestCase {
         try render(ManagedLaunchSheet(onClose: {}, accountID: "opencode-test").environmentObject(model), size: CGSize(width: 580, height: 580), to: directory.appendingPathComponent("managed-opencode-launch.png"))
     }
 
+    /// #1407: a running row the daemon can show and stop, a running row it
+    /// cannot, an ended row that can start again, and the stop
+    /// confirmation, rendered off screen.
+    @MainActor
+    func testSessionRowActionsAndStopConfirmationRender() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let fixture = try Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json"))
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture) as? [String: Any])
+        var sessions = try XCTUnwrap(value["sessions"] as? [[String: Any]])
+        var owned = sessions[0]
+        owned["can_focus"] = true
+        owned["can_stop"] = true
+        owned["started_at"] = "2026-10-14T09:30:00.123456789Z"
+        var cli = sessions[0]
+        cli["id"] = "00000000-0000-0000-0000-000000000004"
+        var ended = sessions[0]
+        ended["id"] = "00000000-0000-0000-0000-000000000005"
+        ended["state"] = "exited"
+        ended["exit_code"] = 0
+        ended["can_start_again"] = true
+        sessions = [owned, cli, ended]
+        value["sessions"] = sessions
+        let model = AppModel()
+        model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
+        let rows = try XCTUnwrap(model.managedSnapshot?.sessions)
+        XCTAssertEqual(rows.map { ManagedSurface.sessionActions($0, terminalLaunch: true) }, [[.show, .stop], [], [.startAgain, .dismiss]])
+        let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }
+        try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 720, height: 640), to: directory.appendingPathComponent("managed-session-actions.png"))
+        try render(ManagedStopSheet(session: rows[0], onClose: {}).environmentObject(model), size: CGSize(width: 520, height: 240), to: directory.appendingPathComponent("managed-stop.png"))
+    }
+
     @MainActor
     private func render<V: View>(_ view: V, size: CGSize, to url: URL) throws {
         _ = NSApplication.shared

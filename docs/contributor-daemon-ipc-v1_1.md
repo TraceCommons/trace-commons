@@ -8063,3 +8063,44 @@ of native process exit. Unredeemed launches that expire or fail during restart
 settle pending collection as failed. The snapshot includes OpenCode generation
 and default selection, plus additive shared copy keys. Older shell decoders may
 ignore these fields; macOS renders them.
+
+### Managed session focus, stop and start again (#1407)
+
+Session views carry three additive booleans, computed on every read:
+
+- `can_focus`: the daemon opened the session itself through
+  `managed_terminal_launch`, in a terminal it can script, named the window it
+  opened (today a Terminal window id, printed by the launch script), and the
+  session is a running coding session.
+- `can_stop`: the daemon opened the session itself, its launcher reports a
+  running coding tool, and no stop has been asked for yet.
+- `can_start_again`: the session ended (`exited` or `failed`), was a coding
+  launch, its folder still exists, and its account is still saved (or, for
+  the NEAR AI sign-in, the daemon is still signed in). Shells also need
+  `capabilities.terminal_launch`, as for any launch.
+
+A launch from the command line is never opened by the daemon, so it is never
+focusable or stoppable.
+
+- `managed_session_focus {session_id}` brings the session's window to the
+  front. Refused with `managed-conflict` unless `can_focus` holds, and with
+  `managed-not-found` when the session or its window is gone.
+- `managed_session_stop {session_id}` records a stop. The daemon signals
+  nothing: the launcher (`near-ai redeem-launch`), which spawned the tool and
+  still holds it as its child, reads `stop: true` in its next
+  `managed_session_report` answer (at most 5 seconds), sends the tool SIGTERM
+  (on Windows, terminates it), and kills it if it has not exited within a
+  further 5 to 10 seconds. The exit is reported as any other. Refused with
+  `managed-conflict` unless the daemon opened the session and it is running.
+  Asking twice is accepted and changes nothing.
+- `managed_session_start_again {session_id, request_id}` prepares the ended
+  session's launch again (same tool, connection, account, folder, model and
+  collection opt-in) and returns `managed_launch_prepare`'s answer; the shell
+  then calls `managed_terminal_launch`. The same `request_id` twice is one
+  session. Refused with `managed-conflict` while the session still holds its
+  account, `managed-invalid-request` for a sign-in (login) row or a missing
+  folder, `managed-not-found` for a removed account, and
+  `managed-near-ai-sign-in-required` for a sign-in session while signed out.
+
+`managed_session_report` answers `{accepted: true, stop: bool}`; an older
+launcher reads only `accepted`.
