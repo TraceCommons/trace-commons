@@ -174,6 +174,7 @@
     "launch_unknown": "Refresh, then try again.",
     "action_failed": "That didn't work. Try again.",
     "accounts_title": "Saved accounts",
+    "accounts_refresh_accessibility": "Refresh saved accounts",
     "state_starting": "Starting",
     "state_running": "Running",
     "state_exited": "Exited",
@@ -182,7 +183,13 @@
     "auth_sign_in_required": "Needs sign-in",
     "auth_checking": "Checking",
     "auth_ready": "Ready",
-    "auth_unavailable": "Unavailable"
+    "auth_unavailable": "Unavailable",
+    "start_claude": "Start Claude Code",
+    "start_codex": "Start Codex",
+    "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
+    "sign_in_needed": "Sign in to NEAR AI to start a session.",
+    "sign_in_near_ai": "Sign in",
+    "sign_in_near_ai_accessibility": "Sign in to NEAR AI"
   },
   "ledger_readable": false,
   "observed_destinations": [],
