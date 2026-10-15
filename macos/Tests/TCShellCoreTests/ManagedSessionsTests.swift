@@ -96,6 +96,30 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.connectionOptions(signedIn: false), ["subscription", "api_key", "near_ai"])
     }
 
+    /// #1408: the folder explainer shows until a session has started on
+    /// this computer, which the daemon reports as `has_launched`. An older
+    /// daemon that does not say reads as never launched.
+    func testTheFolderExplainerShowsUntilTheFirstLaunch() throws {
+        let never = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(Self.signedIn.utf8))
+        XCTAssertNil(never.hasLaunched)
+        XCTAssertTrue(never.explainsFolderChoice)
+        let notYet = Self.signedIn.replacingOccurrences(of: #""revision":1,"#, with: #""revision":1,"has_launched":false,"#)
+        XCTAssertTrue(try JSONDecoder().decode(ManagedSnapshot.self, from: Data(notYet.utf8)).explainsFolderChoice)
+        let launched = Self.signedIn.replacingOccurrences(of: #""revision":1,"#, with: #""revision":1,"has_launched":true,"#)
+        XCTAssertNotEqual(launched, Self.signedIn)
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(launched.utf8))
+        XCTAssertEqual(snapshot.hasLaunched, true)
+        XCTAssertFalse(snapshot.explainsFolderChoice)
+    }
+
+    func testTheFolderExplainerLineFillsToolAndDestination() {
+        let line = "Choose a folder for {tool} to work in. It opens in {destination}."
+        XCTAssertEqual(ManagedSurface.folderChoiceLine(line, tool: "Claude Code", destination: "Terminal", fallback: "your terminal"),
+                       "Choose a folder for Claude Code to work in. It opens in Terminal.")
+        XCTAssertEqual(ManagedSurface.folderChoiceLine(line, tool: "Codex", destination: nil, fallback: "your terminal"),
+                       "Choose a folder for Codex to work in. It opens in your terminal.")
+    }
+
     // MARK: #1407 row actions
 
     private func session(_ state: String, focus: Bool = false, stop: Bool = false, again: Bool = false, startedAt: String? = nil) throws -> ManagedSession {

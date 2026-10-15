@@ -35,6 +35,13 @@
 //! - `tool_unavailable` "{tool} wasn't found on this computer." Shells fill
 //!   `{tool}` with the tool's display name (`claude`, `codex`, `opencode`).
 //! - `refresh` "Refresh": a bare glyph's tooltip and accessible name.
+//!
+//! The explanation before the folder picker (#1408). Approved 2026-10-14:
+//! - `folder_choice` "Choose a folder for {tool} to work in. It opens in
+//!   {destination}." Shells fill `{tool}` with the tool's name key and
+//!   `{destination}` from `capabilities.terminal_destination`, as for
+//!   `sign_in_scope`. Its title is the Start button's own label, and its
+//!   buttons are `cancel` and `choose_folder`.
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "Managed sessions",
@@ -94,6 +101,7 @@ pub fn copy() -> serde_json::Value {
             "choose_account": "Choose account",
             "project_placeholder": "No folder chosen",
             "choose_folder": "Choose folder",
+            "folder_choice": "Choose a folder for {tool} to work in. It opens in {destination}.",
             "launch_scope": "Opens in {destination}.",
             "launch_short": "Launch",
             "terminal": "your terminal",
@@ -144,6 +152,15 @@ mod tests {
         assert_eq!(
             copy["accounts_refresh_accessibility"],
             "Refresh saved accounts"
+        );
+    }
+
+    /// #1408: the line before the folder picker, as approved 2026-10-14.
+    #[test]
+    fn the_folder_choice_line_has_its_words() {
+        assert_eq!(
+            copy()["folder_choice"],
+            "Choose a folder for {tool} to work in. It opens in {destination}."
         );
     }
 

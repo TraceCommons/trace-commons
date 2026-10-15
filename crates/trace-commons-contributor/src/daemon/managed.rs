@@ -182,7 +182,7 @@ impl ManagedService {
                 let defaults =
                     signin::defaults(saved, sign_in, |tool| self.accounts.generation(tool));
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"revision":self.sessions.revision(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":crate::managed::terminal::destination().is_some(),"terminal_destination":crate::managed::terminal::destination()}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":crate::managed::terminal::destination().is_some(),"terminal_destination":crate::managed::terminal::destination()}}),
                 )
             }
             "managed_account_add" => {
@@ -655,6 +655,51 @@ mod tests {
             call(service, "managed_launch_prepare", launch(tool, cwd), true).unwrap(),
         )
         .unwrap()
+    }
+
+    /// #1408: the snapshot says whether a coding session has started on
+    /// this computer, and the first one started flips it.
+    #[test]
+    fn the_snapshot_says_once_a_session_has_started() {
+        let (home, _store, mut service) = service();
+        let before = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
+        assert_eq!(before["has_launched"], false);
+        let account = service
+            .accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_launch_prepare",
+                json!(LaunchRequest {
+                    purpose: LaunchPurpose::Coding,
+                    request_id: Uuid::new_v4(),
+                    tool: ToolId::Claude,
+                    connection: ConnectionKind::Subscription,
+                    account_id: account.id,
+                    cwd: home.path().to_path_buf(),
+                    expected_generation: Generation(0),
+                    save_default: false,
+                    model: None,
+                    collect_traces: false,
+                }),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let prepared_only = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
+        assert_eq!(prepared_only["has_launched"], false);
+        call(
+            &mut service,
+            "managed_launch_redeem",
+            json!({"session_id":prepared.session_id,"ticket":prepared.ticket.unwrap()}),
+            false,
+        )
+        .unwrap();
+        let after = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
+        assert_eq!(after["has_launched"], true);
     }
 
     #[test]

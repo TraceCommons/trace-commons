@@ -1,5 +1,6 @@
 {
   "revision": 4,
+  "has_launched": false,
   "accounts": [
     {
       "id": "00000000-0000-0000-0000-000000000001",
@@ -116,6 +117,7 @@
     "choose_account": "Choose account",
     "project_placeholder": "No folder chosen",
     "choose_folder": "Choose folder",
+    "folder_choice": "Choose a folder for {tool} to work in. It opens in {destination}.",
     "launch_scope": "Opens in {destination}.",
     "launch_short": "Launch",
     "terminal": "your terminal",
