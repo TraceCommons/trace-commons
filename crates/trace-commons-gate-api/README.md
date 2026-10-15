@@ -15,5 +15,10 @@ bag-of-tokens embedder. They are uncalibrated and materially weaker than a
 production backend. They exist so the open reference server can gate traces
 without one.
 
+`reference::ReferenceFlatRateAwardPolicy` is the reference
+`SettlementAwardPolicy` (`settlement_award`): a flat rate per UTC calendar
+month, uncalibrated. A settlement rail's production award policy is
+supplied by a private backend at that seam.
+
 `Mock*` types in `trace-commons-gate-enclave` are hash-derived test doubles.
 They are not scorers and must not be used to gate anything.

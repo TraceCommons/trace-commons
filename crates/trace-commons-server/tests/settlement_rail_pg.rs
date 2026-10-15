@@ -564,9 +564,9 @@ async fn pull_mode_serves_a_signed_cumulative_statement() {
     assert_eq!(near.state.lock().unwrap().put_calls, 0);
 }
 
-/// A made-up period policy with the shapes a real one may have: nothing
-/// until a minimum number of submissions, then a floor, a slope above it and
-/// a cap. Monotone in every input, so a period's target never falls.
+/// A made-up period policy: nothing until a minimum number of submissions,
+/// then a floor, a slope above it and a cap. Monotone in every input, so a
+/// period's target never falls.
 struct FloorSlopeCap;
 
 impl SettlementAwardPolicy for FloorSlopeCap {
