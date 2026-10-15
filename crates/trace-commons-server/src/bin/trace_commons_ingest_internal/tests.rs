@@ -13212,22 +13212,36 @@ async fn pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_i
 /// `StaticPipelineAuthorityProvider::test_only` as the authority.
 /// (`RecordingNearAdapter`:
 /// `pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_is_enabled`.)
+///
+/// A Score policy an embedding binary registers is one more such dependency
+/// (`ScorePolicyRegistry`): a registered factory that does not declare
+/// itself qualified fails the gate under `runtime_score_policy_not_production`
+/// and no other blocker; one that declares both itself and its
+/// configuration qualified passes it, the same way the other seams do; and
+/// a package naming a Score implementation the service holds no factory for
+/// fails it too.
 #[tokio::test]
 async fn each_pipeline_test_double_fails_the_qualification_gate() {
     use trace_commons_gate_api::SettlementAdapter;
-    use trace_commons_gate_api::pipeline::InstrumentId;
+    use trace_commons_gate_api::pipeline::{
+        InstrumentId, PolicyError, ScoreInput, ScoreOutput, ScorePolicy,
+    };
     use trace_commons_server::trace_authority::{SubmissionAllowlists, SubmissionAuthority};
     use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
     use trace_commons_server::versioned_pipeline_authority::{
         PipelineAuthorityProvider, StaticPipelineAuthorityProvider,
     };
     use trace_commons_server::versioned_pipeline_bundle::{
-        MinimalPolicyBundle, PipelineBundleConfig,
+        MinimalPolicyBundle, PipelineBundleConfig, PipelineTraceCreditEvent,
     };
+    use trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig;
     use trace_commons_server::versioned_pipeline_credit::{
         RecordingSettlementAdapter, SettlementAdapterRegistry,
     };
     use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
+    use trace_commons_server::versioned_pipeline_score_registry::{
+        ScorePolicyDependencies, ScorePolicyFactory, ScorePolicyRegistry,
+    };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Double {
@@ -13235,29 +13249,103 @@ async fn each_pipeline_test_double_fails_the_qualification_gate() {
         Index,
         SettlementAdapter,
         Authority,
+        ScorePolicy,
+        QualifiedScorePolicy,
+        UnregisteredScorePolicy,
+    }
+
+    const TEST_SCORE_IMPLEMENTATION: &str = "substituted.score.test_only.v1";
+
+    struct NeverRunScorePolicy;
+
+    #[async_trait::async_trait]
+    impl ScorePolicy for NeverRunScorePolicy {
+        async fn execute(&self, _input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
+            Err(PolicyError::permanent("score_policy_test_only").expect("static label"))
+        }
+    }
+
+    struct TestScoreFactory {
+        qualified: bool,
+    }
+
+    impl ScorePolicyFactory for TestScoreFactory {
+        fn dependency_identity(&self) -> &str {
+            "substituted_score_policy_test_only"
+        }
+
+        fn trace_credit_event(&self) -> PipelineTraceCreditEvent {
+            PipelineTraceCreditEvent::PipelineScore
+        }
+
+        fn build(
+            &self,
+            _dependencies: ScorePolicyDependencies<'_>,
+        ) -> Result<Arc<dyn ScorePolicy>, &'static str> {
+            Ok(Arc::new(NeverRunScorePolicy))
+        }
+
+        fn production_qualified(&self) -> bool {
+            self.qualified
+        }
+
+        fn configuration_is_qualifiable(&self, _configuration: &[u8]) -> bool {
+            self.qualified
+        }
     }
 
     let dir = tempfile::tempdir().unwrap();
     let backend = pg_backend_without_a_database().await;
-    let build = |double: Double| -> Arc<PipelineService> {
+    let try_build = |double: Double| -> anyhow::Result<Arc<PipelineService>> {
         let scorer = Arc::new(QualifiedTestScorer(
             trace_commons_gate_api::ReferencePerplexityScorer::new(),
         ));
         let embedder = Arc::new(QualifiedTestEmbedder(
             trace_commons_gate_api::ReferenceEmbedder::new(),
         ));
+        let substitutes_score = matches!(
+            double,
+            Double::ScorePolicy | Double::QualifiedScorePolicy | Double::UnregisteredScorePolicy
+        );
         // The package pins the Trace Credit instrument, so its adapter is
         // one of the bundle's dependencies (decision P4-D7).
-        let package = MinimalPolicyBundle::minimal_package(
-            &PipelineBundleConfig {
-                instrument_awards: vec![qualified_test_trace_credit_award()],
-                include_index: false,
-                variant: None,
-            },
-            scorer.as_ref(),
-            embedder.as_ref(),
-        )
-        .unwrap();
+        let package = if substitutes_score {
+            // The compatibility triple with a Score policy a registry
+            // supplies. Its compatibility configuration is not consulted:
+            // the registered factory declares its own configuration term.
+            let mut package = MinimalPolicyBundle::compatibility_package(
+                &CompatibilityBundleConfig::local_reference(),
+                scorer.as_ref(),
+                embedder.as_ref(),
+            )
+            .unwrap();
+            package.manifest.score.policy_id = "substituted.score".to_string();
+            package.manifest.score.implementation_id = TEST_SCORE_IMPLEMENTATION.to_string();
+            package.bundle_id = package.manifest.bundle_id().unwrap();
+            package
+        } else {
+            MinimalPolicyBundle::minimal_package(
+                &PipelineBundleConfig {
+                    instrument_awards: vec![qualified_test_trace_credit_award()],
+                    include_index: false,
+                    variant: None,
+                },
+                scorer.as_ref(),
+                embedder.as_ref(),
+            )
+            .unwrap()
+        };
+        let score_policies = match double {
+            Double::ScorePolicy | Double::QualifiedScorePolicy => ScorePolicyRegistry::new()
+                .with_factory(
+                    TEST_SCORE_IMPLEMENTATION,
+                    Arc::new(TestScoreFactory {
+                        qualified: double == Double::QualifiedScorePolicy,
+                    }),
+                )
+                .unwrap(),
+            _ => ScorePolicyRegistry::new(),
+        };
         let adapter: Arc<dyn SettlementAdapter> = if double == Double::SettlementAdapter {
             RecordingSettlementAdapter::new(
                 InstrumentId::trace_credit(),
@@ -13307,16 +13395,27 @@ async fn each_pipeline_test_double_fails_the_qualification_gate() {
         } else {
             Arc::new(QualifiedTestAuthority)
         };
-        Arc::new(
+        Ok(Arc::new(
             builder
                 .with_scorer(scorer)
                 .with_embedder(embedder)
                 .with_authority(authority)
                 .with_privacy(Arc::new(QualifiedTestPrivacy))
-                .build()
-                .expect("build the pipeline service"),
-        )
+                .with_score_policies(score_policies)
+                .build()?,
+        ))
     };
+    let build = |double: Double| try_build(double).expect("build the pipeline service");
+
+    // A default package naming a Score policy the service holds no factory
+    // for does not build at all: construction refuses it, and nothing falls
+    // back to the compatibility Score policy.
+    assert_eq!(
+        try_build(Double::UnregisteredScorePolicy)
+            .err()
+            .map(|error| error.to_string()),
+        Some("bundle_policy_not_runnable".to_string())
+    );
 
     // (the double, its blockers, the gate's answer)
     let answers = [
@@ -13324,6 +13423,8 @@ async fn each_pipeline_test_double_fails_the_qualification_gate() {
         Double::Index,
         Double::SettlementAdapter,
         Double::Authority,
+        Double::ScorePolicy,
+        Double::QualifiedScorePolicy,
     ]
     .map(|double| {
         let service = build(double);
@@ -13359,6 +13460,33 @@ async fn each_pipeline_test_double_fails_the_qualification_gate() {
                 vec!["runtime_authority_not_production"],
                 false
             ),
+            (
+                Double::ScorePolicy,
+                vec![
+                    "runtime_score_policy_not_production",
+                    "bundle_configuration_not_qualifiable"
+                ],
+                false
+            ),
+            (Double::QualifiedScorePolicy, vec![], true),
+        ]
+    );
+
+    // Nor is such a package ever qualified by a service that holds no
+    // factory for it, even a fully qualified one.
+    let unregistered = try_build(Double::QualifiedScorePolicy)
+        .unwrap()
+        .default_package()
+        .clone();
+    let service = build(Double::None);
+    assert_eq!(
+        service
+            .bundle_qualification(&unregistered)
+            .expect("the package resolves")
+            .blockers(),
+        vec![
+            "runtime_score_policy_not_production",
+            "bundle_configuration_not_qualifiable"
         ]
     );
 }
