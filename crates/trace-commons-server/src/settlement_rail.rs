@@ -8,7 +8,9 @@
 //! the maximum it has seen, so publishing is idempotent and a retried, late or
 //! duplicated publish is harmless: no compare-and-swap, no idempotency key. The
 //! dispatcher holds a rail as `Arc<dyn SettlementRail>` and knows nothing
-//! about any particular external system. See
+//! about any particular external system. How much a recipient earns is not
+//! decided here: accrual asks a
+//! [`trace_commons_gate_api::SettlementAwardPolicy`]. See
 //! `docs/superpowers/specs/2026-10-14-near-ai-inference-credit-settlement-design.md`.
 //!
 //! # Hash-only
@@ -64,82 +66,6 @@ pub fn statement_ref(rail_id: &str, recipient_ref_hash: &str, cumulative_units: 
         "trace-commons:settlement-rail-statement:v1",
         &[rail_id, recipient_ref_hash, &cumulative_units.to_string()],
     )
-}
-
-/// A conversion rate from microcredits to an instrument's atomic units, as an
-/// integer rational. Configured, never hard-coded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConversionRate {
-    numerator: u128,
-    denominator: u128,
-}
-
-impl ConversionRate {
-    /// Parse `"<numerator>/<denominator>"`, both positive decimal integers.
-    /// A bare integer is accepted as `n/1`. Anything else, zero included, is
-    /// refused: a zero rate would silently settle nothing.
-    pub fn parse(text: &str) -> Result<Self, RailError> {
-        let refuse = || RailError::refused("conversion_rate_malformed");
-        let text = text.trim();
-        let (num, den) = match text.split_once('/') {
-            Some((n, d)) => (n.trim(), d.trim()),
-            None => (text, "1"),
-        };
-        let digits =
-            |s: &str| !s.is_empty() && s.len() <= 30 && s.bytes().all(|b| b.is_ascii_digit());
-        if !digits(num) || !digits(den) {
-            return Err(refuse());
-        }
-        let numerator: u128 = num.parse().map_err(|_| refuse())?;
-        let denominator: u128 = den.parse().map_err(|_| refuse())?;
-        if numerator == 0 || denominator == 0 {
-            return Err(refuse());
-        }
-        Ok(Self {
-            numerator,
-            denominator,
-        })
-    }
-
-    pub fn numerator(&self) -> u128 {
-        self.numerator
-    }
-
-    pub fn denominator(&self) -> u128 {
-        self.denominator
-    }
-
-    /// The canonical text, `n/d`, as stored beside every queued row.
-    pub fn canonical(&self) -> String {
-        format!("{}/{}", self.numerator, self.denominator)
-    }
-
-    /// A hash of the canonical text, recorded on each row so a later rate
-    /// change can be told apart from the rate a row was priced at.
-    pub fn ref_hash(&self) -> String {
-        sha256_ref(
-            "trace-commons:settlement-rail-rate:v1",
-            &[&self.canonical()],
-        )
-    }
-
-    /// Convert `micros`, adding the carried remainder from earlier batches.
-    ///
-    /// Returns `(units, new_carry)` with
-    /// `units * den + new_carry == micros * num + carry` and
-    /// `new_carry < den`, so across any sequence of batches nothing is lost
-    /// to rounding and nothing is invented. `carry` must be below the
-    /// denominator. Overflow refuses rather than wrapping.
-    pub fn convert(&self, micros: u128, carry: u128) -> Result<(u128, u128), RailError> {
-        if carry >= self.denominator {
-            return Err(RailError::refused("conversion_carry_out_of_range"));
-        }
-        let scaled = micros
-            .checked_mul(self.numerator)
-            .and_then(|v| v.checked_add(carry))
-            .ok_or_else(|| RailError::refused("conversion_overflow"))?;
-        Ok((scaled / self.denominator, scaled % self.denominator))
-    }
 }
 
 /// One recipient's cumulative total, as the dispatcher hands it to a rail.
@@ -275,60 +201,6 @@ pub fn is_safe_label(label: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_rate_parses_only_positive_integer_rationals() {
-        assert_eq!(ConversionRate::parse("3/2").unwrap().canonical(), "3/2");
-        assert_eq!(
-            ConversionRate::parse(" 1000 ").unwrap().canonical(),
-            "1000/1"
-        );
-        for bad in ["", "0/1", "1/0", "1.5/1", "-1/2", "a/b", "1/2/3", "1e3"] {
-            assert_eq!(
-                ConversionRate::parse(bad).unwrap_err(),
-                RailError::refused("conversion_rate_malformed"),
-                "{bad:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn conversion_carries_the_remainder_and_never_loses_value() {
-        let rate = ConversionRate::parse("7/3").unwrap();
-        let mut carry = 0u128;
-        let mut paid = 0u128;
-        let batches = [1u128, 1, 1, 5, 0, 2];
-        for micros in batches {
-            let (units, next) = rate.convert(micros, carry).unwrap();
-            assert!(next < 3);
-            paid += units;
-            carry = next;
-        }
-        let total: u128 = batches.iter().sum();
-        assert_eq!(paid * 3 + carry, total * 7);
-    }
-
-    #[test]
-    fn conversion_refuses_overflow_and_a_carry_at_or_above_the_denominator() {
-        let rate = ConversionRate::parse("2/1").unwrap();
-        assert_eq!(
-            rate.convert(u128::MAX, 0).unwrap_err().label,
-            "conversion_overflow"
-        );
-        let rate = ConversionRate::parse("1/4").unwrap();
-        assert_eq!(
-            rate.convert(1, 4).unwrap_err().label,
-            "conversion_carry_out_of_range"
-        );
-    }
-
-    #[test]
-    fn the_rate_hash_changes_with_the_rate() {
-        let a = ConversionRate::parse("1/1").unwrap().ref_hash();
-        let b = ConversionRate::parse("2/2").unwrap().ref_hash();
-        assert_ne!(a, b, "2/2 is not reduced, and is a different configuration");
-        assert!(a.starts_with("sha256:") && a.len() == 71);
-    }
 
     #[test]
     fn a_statement_ref_is_stable_and_depends_on_every_input() {

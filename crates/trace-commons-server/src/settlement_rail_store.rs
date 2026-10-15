@@ -20,12 +20,15 @@
 use crate::near_ai_admin::NearAiOrgId;
 use crate::near_ai_credit_statement::{CreditStatement, SignedCreditStatement, StatementSigner};
 use crate::settlement_rail::{
-    Comparison, ConversionRate, CumulativeStatement, Published, RailError, RailErrorKind,
-    RecipientRef, SettlementRail, compare, is_safe_label, statement_ref,
+    Comparison, CumulativeStatement, Published, RailError, RailErrorKind, RecipientRef,
+    SettlementRail, compare, is_safe_label, statement_ref,
 };
 use chrono::{DateTime, Utc};
 use deadpool_postgres::{Pool, Transaction};
 use std::time::Duration;
+use trace_commons_gate_api::PeriodSummary;
+use trace_commons_gate_api::SettlementAwardPolicy;
+use trace_commons_gate_api::settlement_award::is_valid_policy_ref;
 use uuid::Uuid;
 
 /// A store failure, by label.
@@ -134,7 +137,8 @@ pub async fn bind_near_ai_recipient(
 /// What accruing a batch did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccrueOutcome {
-    /// Added `units`; the recipient's total is now `cumulative_units`.
+    /// Added `units` (possibly zero); the recipient's total is now
+    /// `cumulative_units`.
     Accrued {
         units: u128,
         cumulative_units: u128,
@@ -144,22 +148,57 @@ pub enum AccrueOutcome {
     BatchNotFinalized,
 }
 
+async fn accrued(
+    tx: &Transaction<'_>,
+    tenant: &str,
+    settlement_batch_id: Uuid,
+    rail_id: &str,
+) -> Result<bool, StoreError> {
+    Ok(tx
+        .query_opt(
+            "SELECT 1 FROM trace_settlement_rail_credits
+              WHERE tenant_id = $1 AND settlement_batch_id = $2 AND rail_id = $3",
+            &[&tenant, &settlement_batch_id, &rail_id],
+        )
+        .await?
+        .is_some())
+}
+
 /// Add one finalized settlement batch to the active recipient's cumulative
-/// total, once.
+/// total, once, as `policy` prices it.
+///
+/// The policy chooses the batch's period from the batch's `created_at`
+/// (`trace_credit_settlement_batches` has no separate finalization time; a
+/// batch the versioned pipeline settles is inserted `finalized`, and a batch
+/// first written `dry_run` and later upserted to `finalized` keeps the
+/// dry run's `created_at`). Under the ledger row lock it sums what the
+/// recipient's period already holds, asks the policy for the period's
+/// cumulative target, and adds `target - already awarded` when the target is
+/// higher and nothing when it is not: a falling target never claws back.
+/// Every batch records a row, a zero addition included, so it is accrued
+/// exactly once. The rail's lifetime ceiling is checked independently when
+/// the total is published.
 pub async fn accrue_batch(
     pool: &Pool,
     tenant: &str,
     settlement_batch_id: Uuid,
     rail: &dyn SettlementRail,
-    rate: &ConversionRate,
+    policy: &dyn SettlementAwardPolicy,
 ) -> Result<AccrueOutcome, StoreError> {
     let rail_id = rail.rail_id();
+    let policy_ref = policy.policy_ref();
+    if !is_valid_policy_ref(&policy_ref) {
+        return Err(StoreError::Refused("settlement_award_policy_ref_malformed"));
+    }
+    let policy_ref_hash = policy.policy_ref_hash();
     let mut client = pool.get().await?;
     let tx = client.transaction().await?;
     scope(&tx, tenant).await?;
     let Some(batch) = tx
         .query_opt(
-            "SELECT status, settled_credit_micros FROM trace_credit_settlement_batches
+            "SELECT status, settled_credit_micros, created_at,
+                    cardinality(source_submission_ids)::bigint
+               FROM trace_credit_settlement_batches
               WHERE tenant_id = $1 AND settlement_batch_id = $2",
             &[&tenant, &settlement_batch_id],
         )
@@ -173,20 +212,15 @@ pub async fn accrue_batch(
     let micros_i64: i64 = batch.get(1);
     let micros =
         u128::try_from(micros_i64).map_err(|_| StoreError::Refused("settlement_batch_negative"))?;
-    if tx
-        .query_opt(
-            "SELECT 1 FROM trace_settlement_rail_credits
-              WHERE tenant_id = $1 AND settlement_batch_id = $2 AND rail_id = $3",
-            &[&tenant, &settlement_batch_id, &rail_id],
-        )
-        .await?
-        .is_some()
-    {
+    let finalized_at: DateTime<Utc> = batch.get(2);
+    let submissions = u64::try_from(batch.get::<_, i64>(3))
+        .map_err(|_| StoreError::Refused("settlement_batch_negative"))?;
+    if accrued(&tx, tenant, settlement_batch_id, rail_id).await? {
         return Ok(AccrueOutcome::AlreadyAccrued);
     }
     let Some(recipient) = tx
         .query_opt(
-            "SELECT recipient_id FROM trace_near_ai_credit_recipients
+            "SELECT recipient_id, org_ref_hash FROM trace_near_ai_credit_recipients
               WHERE tenant_id = $1 AND revoked_at IS NULL",
             &[&tenant],
         )
@@ -195,12 +229,15 @@ pub async fn accrue_batch(
         return Ok(AccrueOutcome::NoRecipient);
     };
     let recipient_id: Uuid = recipient.get(0);
+    let recipient_ref_hash: String = recipient.get(1);
+    let period_key = policy
+        .period_key(finalized_at.timestamp())
+        .map_err(|e| StoreError::Refused(e.label()))?;
 
-    let rate_hash = rate.ref_hash();
     tx.execute(
         "INSERT INTO trace_settlement_rail_ledgers
-            (tenant_id, rail_id, recipient_id, instrument_id, instrument_decimals, rate_ref_hash)
-         VALUES ($1, $2, $3, $4, $5, $6)
+            (tenant_id, rail_id, recipient_id, instrument_id, instrument_decimals)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (tenant_id, rail_id, recipient_id) DO NOTHING",
         &[
             &tenant,
@@ -208,28 +245,59 @@ pub async fn accrue_batch(
             &recipient_id,
             &rail.instrument_id(),
             &i16::from(rail.instrument_decimals()),
-            &rate_hash,
         ],
     )
     .await?;
     let ledger = tx
         .query_one(
-            "SELECT rate_ref_hash, carry_units::text, cumulative_units::text
-               FROM trace_settlement_rail_ledgers
+            "SELECT cumulative_units::text FROM trace_settlement_rail_ledgers
               WHERE tenant_id = $1 AND rail_id = $2 AND recipient_id = $3
               FOR UPDATE",
             &[&tenant, &rail_id, &recipient_id],
         )
         .await?;
-    let carry = if ledger.get::<_, String>(0) == rate_hash {
-        parse_units(&ledger.get::<_, String>(1))?
-    } else {
-        0
+    // Again under the lock: a concurrent accrual of this batch has
+    // committed by now, and so has every row the period sum must see.
+    if accrued(&tx, tenant, settlement_batch_id, rail_id).await? {
+        return Ok(AccrueOutcome::AlreadyAccrued);
+    }
+    let previous = parse_units(&ledger.get::<_, String>(0))?;
+    let period = tx
+        .query_one(
+            "SELECT COALESCE(SUM(c.source_micros), 0)::text,
+                    COUNT(*),
+                    COALESCE(SUM(cardinality(b.source_submission_ids)), 0)::bigint,
+                    COALESCE(SUM(c.atomic_units), 0)::text
+               FROM trace_settlement_rail_credits c
+               JOIN trace_credit_settlement_batches b
+                 ON b.tenant_id = c.tenant_id AND b.settlement_batch_id = c.settlement_batch_id
+              WHERE c.tenant_id = $1 AND c.rail_id = $2 AND c.recipient_id = $3
+                AND c.period_key = $4",
+            &[&tenant, &rail_id, &recipient_id, &period_key.as_str()],
+        )
+        .await?;
+    let count =
+        |v: i64| u64::try_from(v).map_err(|_| StoreError::Refused("settlement_batch_negative"));
+    let overflow = || StoreError::Refused("settlement_rail_period_overflow");
+    let summary = PeriodSummary {
+        period_key: period_key.clone(),
+        recipient_ref_hash,
+        instrument_id: rail.instrument_id().to_string(),
+        instrument_decimals: rail.instrument_decimals(),
+        period_source_micros: parse_units(&period.get::<_, String>(0))?
+            .checked_add(micros)
+            .ok_or_else(overflow)?,
+        period_batch_count: count(period.get(1))?.checked_add(1).ok_or_else(overflow)?,
+        period_submission_count: count(period.get(2))?
+            .checked_add(submissions)
+            .ok_or_else(overflow)?,
+        period_awarded_units: parse_units(&period.get::<_, String>(3))?,
     };
-    let previous = parse_units(&ledger.get::<_, String>(2))?;
-    let (units, next_carry) = rate
-        .convert(micros, carry)
-        .map_err(|e| StoreError::Refused(e.label))?;
+    let target = policy
+        .period_target(&summary)
+        .map_err(|e| StoreError::Refused(e.label()))?
+        .target_units;
+    let units = target.saturating_sub(summary.period_awarded_units);
     let cumulative = previous
         .checked_add(units)
         .ok_or(StoreError::Refused("settlement_rail_cumulative_overflow"))?;
@@ -237,8 +305,8 @@ pub async fn accrue_batch(
     tx.execute(
         "INSERT INTO trace_settlement_rail_credits
             (tenant_id, settlement_batch_id, rail_id, recipient_id, source_micros,
-             atomic_units, rate_text, rate_ref_hash)
-         VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7, $8)",
+             atomic_units, period_key, policy_ref, policy_ref_hash)
+         VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7, $8, $9)",
         &[
             &tenant,
             &settlement_batch_id,
@@ -246,8 +314,9 @@ pub async fn accrue_batch(
             &recipient_id,
             &micros_i64,
             &units.to_string(),
-            &rate.canonical(),
-            &rate_hash,
+            &period_key.as_str(),
+            &policy_ref,
+            &policy_ref_hash,
         ],
     )
     .await?;
@@ -255,7 +324,6 @@ pub async fn accrue_batch(
         "UPDATE trace_settlement_rail_ledgers
             SET cumulative_units = $4::text::numeric,
                 cumulative_micros = cumulative_micros + $5::bigint,
-                rate_ref_hash = $6, carry_units = $7::text::numeric,
                 publish_state = CASE
                     WHEN publish_state IN ('idle', 'published')
                          AND $4::text::numeric > confirmed_units THEN 'due'
@@ -271,8 +339,6 @@ pub async fn accrue_batch(
             &recipient_id,
             &cumulative.to_string(),
             &micros_i64,
-            &rate_hash,
-            &next_carry.to_string(),
         ],
     )
     .await?;

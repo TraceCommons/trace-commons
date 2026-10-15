@@ -1,8 +1,15 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The NEAR AI inference-credit rail: settles converted Trace Commons credit
-//! as a NEAR AI organization's cumulative `trace_commons` credit.
+//! The NEAR AI inference-credit rail: settles Trace Commons credit as a NEAR
+//! AI organization's cumulative `trace_commons` credit.
+//!
+//! How much NEAR AI credit a recipient has earned is decided by a
+//! [`SettlementAwardPolicy`] held as a trait object. The configuration names
+//! one: `flat_rate` is the uncalibrated reference
+//! ([`ReferenceFlatRateAwardPolicy`]); any other name must be supplied by the
+//! embedding binary through an [`AwardPolicyRegistry`], which is where a
+//! private backend's production policy plugs in.
 //!
 //! The model is NEAR AI's own staking-farm sync
 //! (`cloud-api:crates/services/src/staking_farm.rs:319-430`): a dedicated
@@ -25,12 +32,15 @@ use crate::near_ai_admin::{
 };
 use crate::near_ai_credit_statement::StatementSigner;
 use crate::settlement_rail::{
-    ConversionRate, CumulativeStatement, Published, RailError, RecipientRef, SettlementRail,
+    CumulativeStatement, Published, RailError, RecipientRef, SettlementRail, is_safe_label,
 };
 use async_trait::async_trait;
 use secrecy::SecretString;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
+use trace_commons_gate_api::settlement_award::is_valid_policy_ref;
+use trace_commons_gate_api::{ReferenceFlatRateAwardPolicy, SettlementAwardPolicy};
 
 pub const RAIL_ID: &str = "near_ai_trace_commons";
 pub const INSTRUMENT_ID: &str = "near_ai_credit_usd";
@@ -45,7 +55,11 @@ pub const ENV_BASE_URL: &str = "TRACE_COMMONS_NEAR_AI_ADMIN_BASE_URL";
 pub const ENV_KEY: &str = "TRACE_COMMONS_NEAR_AI_ADMIN_KEY";
 pub const ENV_READ_KEY: &str = "TRACE_COMMONS_NEAR_AI_ADMIN_READ_KEY";
 pub const ENV_USER_AGENT: &str = "TRACE_COMMONS_NEAR_AI_ADMIN_USER_AGENT";
-pub const ENV_RATE: &str = "TRACE_COMMONS_NEAR_AI_CREDIT_RATE";
+pub const ENV_AWARD_POLICY: &str = "TRACE_COMMONS_NEAR_AI_CREDIT_AWARD_POLICY";
+pub const ENV_FLAT_RATE: &str = "TRACE_COMMONS_NEAR_AI_CREDIT_FLAT_RATE";
+/// The award policy name that selects [`ReferenceFlatRateAwardPolicy`].
+/// Reserved: a registry entry under this name is never consulted.
+pub const FLAT_RATE_POLICY: &str = "flat_rate";
 pub const ENV_MAX_CUMULATIVE: &str = "TRACE_COMMONS_NEAR_AI_CREDIT_MAX_CUMULATIVE_NANO_USD";
 pub const ENV_STATEMENT_KEY: &str = "TRACE_COMMONS_NEAR_AI_CREDIT_STATEMENT_KEY";
 pub const ENV_TIMEOUT_MS: &str = "TRACE_COMMONS_NEAR_AI_ADMIN_TIMEOUT_MS";
@@ -89,6 +103,31 @@ const fn refuse(control: &'static str) -> ConfigRefused {
     ConfigRefused { control }
 }
 
+/// Award policies an embedding binary supplies, by the name
+/// `TRACE_COMMONS_NEAR_AI_CREDIT_AWARD_POLICY` selects them with. The open
+/// build's registry is empty, so only `flat_rate` resolves.
+#[derive(Clone, Default)]
+pub struct AwardPolicyRegistry {
+    policies: BTreeMap<String, Arc<dyn SettlementAwardPolicy>>,
+}
+
+impl AwardPolicyRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register `policy` under `name` (`^[a-z0-9_]{1,64}$`; `flat_rate` is
+    /// reserved).
+    pub fn with_policy(mut self, name: &str, policy: Arc<dyn SettlementAwardPolicy>) -> Self {
+        self.policies.insert(name.to_string(), policy);
+        self
+    }
+
+    fn get(&self, name: &str) -> Option<Arc<dyn SettlementAwardPolicy>> {
+        self.policies.get(name).cloned()
+    }
+}
+
 /// Resolved rail configuration. `Debug` omits every secret.
 #[derive(Clone)]
 pub struct NearAiCreditRailConfig {
@@ -99,7 +138,9 @@ pub struct NearAiCreditRailConfig {
     pub read_key: Option<SecretString>,
     pub user_agent: Option<String>,
     pub statement_signer: Option<StatementSigner>,
-    pub rate: ConversionRate,
+    /// The selector's value, for display.
+    pub award_policy_name: String,
+    pub award_policy: Arc<dyn SettlementAwardPolicy>,
     pub max_cumulative_nano_usd: u128,
     pub timeout: Duration,
 }
@@ -112,7 +153,7 @@ impl std::fmt::Debug for NearAiCreditRailConfig {
             .field("write_key_present", &self.write_key.is_some())
             .field("read_key_present", &self.read_key.is_some())
             .field("statement_key_present", &self.statement_signer.is_some())
-            .field("rate", &self.rate.canonical())
+            .field("award_policy", &self.award_policy_name)
             .field("max_cumulative_nano_usd", &self.max_cumulative_nano_usd)
             .finish_non_exhaustive()
     }
@@ -129,6 +170,15 @@ impl NearAiCreditRailConfig {
     /// to a less restrictive mode or another delivery.
     pub fn from_lookup(
         lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<Self>, ConfigRefused> {
+        Self::from_lookup_with_policies(lookup, &AwardPolicyRegistry::new())
+    }
+
+    /// [`Self::from_lookup`], resolving the award policy against
+    /// `policies` as well as the built-in `flat_rate`.
+    pub fn from_lookup_with_policies(
+        lookup: impl Fn(&str) -> Option<String>,
+        policies: &AwardPolicyRegistry,
     ) -> Result<Option<Self>, ConfigRefused> {
         let get = |name: &str| {
             lookup(name)
@@ -202,9 +252,30 @@ impl NearAiCreditRailConfig {
                 return Err(refuse("near_ai_admin_user_agent"));
             }
         }
-        let rate = get(ENV_RATE)
-            .ok_or(refuse("near_ai_credit_rate"))
-            .and_then(|v| ConversionRate::parse(&v).map_err(|_| refuse("near_ai_credit_rate")))?;
+        let award_policy_name = get(ENV_AWARD_POLICY)
+            .filter(|v| is_safe_label(v))
+            .ok_or(refuse("near_ai_credit_award_policy"))?;
+        let flat_rate = get(ENV_FLAT_RATE);
+        let award_policy: Arc<dyn SettlementAwardPolicy> = if award_policy_name == FLAT_RATE_POLICY
+        {
+            let rate = flat_rate.ok_or(refuse("near_ai_credit_flat_rate"))?;
+            Arc::new(
+                ReferenceFlatRateAwardPolicy::parse(&rate)
+                    .map_err(|_| refuse("near_ai_credit_flat_rate"))?,
+            )
+        } else {
+            let policy = policies
+                .get(&award_policy_name)
+                .ok_or(refuse("near_ai_credit_award_policy"))?;
+            // A flat rate beside another policy would read as in force.
+            if flat_rate.is_some() {
+                return Err(refuse("near_ai_credit_flat_rate"));
+            }
+            policy
+        };
+        if !is_valid_policy_ref(&award_policy.policy_ref()) {
+            return Err(refuse("near_ai_credit_award_policy"));
+        }
         let max_cumulative_nano_usd = get(ENV_MAX_CUMULATIVE)
             .ok_or(refuse("near_ai_credit_max_cumulative"))?
             .parse::<u128>()
@@ -228,7 +299,8 @@ impl NearAiCreditRailConfig {
             read_key,
             user_agent,
             statement_signer,
-            rate,
+            award_policy_name,
+            award_policy,
             max_cumulative_nano_usd,
             timeout,
         }))
@@ -407,7 +479,8 @@ mod tests {
             (ENV_BASE_URL, "https://cloud-api.near.ai/v1".into()),
             (ENV_KEY, "adm_test".into()),
             (ENV_USER_AGENT, "trace-commons-settlement/1".into()),
-            (ENV_RATE, "1000/1".into()),
+            (ENV_AWARD_POLICY, "flat_rate".into()),
+            (ENV_FLAT_RATE, "1000/1".into()),
             (ENV_MAX_CUMULATIVE, "100000000000".into()),
         ]
     }
@@ -458,7 +531,8 @@ mod tests {
         for (drop, control) in [
             (ENV_BASE_URL, "near_ai_admin_base_url"),
             (ENV_USER_AGENT, "near_ai_admin_user_agent"),
-            (ENV_RATE, "near_ai_credit_rate"),
+            (ENV_AWARD_POLICY, "near_ai_credit_award_policy"),
+            (ENV_FLAT_RATE, "near_ai_credit_flat_rate"),
             (ENV_MAX_CUMULATIVE, "near_ai_credit_max_cumulative"),
         ] {
             let pairs = with(push_live(), drop, None);
@@ -480,7 +554,13 @@ mod tests {
                 "http://cloud-api.near.ai/v1",
                 "near_ai_admin_base_url",
             ),
-            (ENV_RATE, "0/1", "near_ai_credit_rate"),
+            (ENV_FLAT_RATE, "0/1", "near_ai_credit_flat_rate"),
+            (ENV_AWARD_POLICY, "Flat Rate", "near_ai_credit_award_policy"),
+            (
+                ENV_AWARD_POLICY,
+                "private_policy_not_registered",
+                "near_ai_credit_award_policy",
+            ),
             (ENV_MAX_CUMULATIVE, "0", "near_ai_credit_max_cumulative"),
             (
                 ENV_MAX_CUMULATIVE,
@@ -506,7 +586,8 @@ mod tests {
         let pull = vec![
             (ENV_MODE, "live".to_string()),
             (ENV_DELIVERY, "pull".to_string()),
-            (ENV_RATE, "1/1".to_string()),
+            (ENV_AWARD_POLICY, "flat_rate".to_string()),
+            (ENV_FLAT_RATE, "1/1".to_string()),
             (ENV_MAX_CUMULATIVE, "1000".to_string()),
         ];
         assert_eq!(
@@ -539,7 +620,64 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!((cfg.mode, cfg.delivery), (RailMode::Live, Delivery::Push));
-        assert_eq!(cfg.rate.canonical(), "1000/1");
+        assert_eq!(cfg.award_policy.policy_ref(), "flat_rate:1000/1");
         assert!(!format!("{cfg:?}").contains("adm_test"));
+    }
+
+    /// A made-up stand-in for a private backend's policy.
+    struct Injected;
+
+    impl SettlementAwardPolicy for Injected {
+        fn policy_ref(&self) -> String {
+            "injected:v1".into()
+        }
+        fn period_key(
+            &self,
+            at: i64,
+        ) -> Result<trace_commons_gate_api::PeriodKey, trace_commons_gate_api::AwardError> {
+            trace_commons_gate_api::utc_month_period_key(at)
+        }
+        fn period_target(
+            &self,
+            _: &trace_commons_gate_api::PeriodSummary,
+        ) -> Result<trace_commons_gate_api::PeriodAward, trace_commons_gate_api::AwardError>
+        {
+            Ok(trace_commons_gate_api::PeriodAward { target_units: 0 })
+        }
+    }
+
+    #[test]
+    fn an_embedding_binary_supplies_a_policy_by_name_and_flat_rate_is_reserved() {
+        let registry = AwardPolicyRegistry::new()
+            .with_policy("injected", Arc::new(Injected))
+            .with_policy(FLAT_RATE_POLICY, Arc::new(Injected));
+        let pairs = with(push_live(), ENV_FLAT_RATE, None);
+        let pairs = with(pairs, ENV_AWARD_POLICY, Some("injected"));
+        // The open build has no such policy.
+        assert_eq!(
+            NearAiCreditRailConfig::from_lookup(env(&pairs))
+                .unwrap_err()
+                .control,
+            "near_ai_credit_award_policy"
+        );
+        let cfg = NearAiCreditRailConfig::from_lookup_with_policies(env(&pairs), &registry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(cfg.award_policy.policy_ref(), "injected:v1");
+        assert_eq!(cfg.award_policy_name, "injected");
+        // A flat rate left beside another policy refuses rather than read
+        // as in force.
+        let stray = with(pairs, ENV_FLAT_RATE, Some("1/1"));
+        assert_eq!(
+            NearAiCreditRailConfig::from_lookup_with_policies(env(&stray), &registry)
+                .unwrap_err()
+                .control,
+            "near_ai_credit_flat_rate"
+        );
+        // `flat_rate` always means the reference, whatever is registered.
+        let cfg = NearAiCreditRailConfig::from_lookup_with_policies(env(&push_live()), &registry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(cfg.award_policy.policy_ref(), "flat_rate:1000/1");
     }
 }

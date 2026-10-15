@@ -45,8 +45,13 @@ CREATE TABLE trace_settlement_rail_credits (
     atomic_units NUMERIC(39, 0) NOT NULL CHECK (
         atomic_units >= 0 AND atomic_units <= 340282366920938463463374607431768211455
     ),
-    rate_text TEXT NOT NULL CHECK (rate_text ~ '^[0-9]{1,30}/[0-9]{1,30}$'),
-    rate_ref_hash TEXT NOT NULL CHECK (rate_ref_hash ~ '^sha256:[0-9a-f]{64}$'),
+    -- The award policy's period (for the reference policy, the UTC calendar
+    -- month of the batch's created_at) and the policy that priced the row.
+    -- atomic_units is what this batch ADDED: the policy's cumulative target
+    -- for the period less what the period had already been awarded, or zero.
+    period_key TEXT NOT NULL CHECK (period_key ~ '^[a-z0-9_.-]{1,64}$'),
+    policy_ref TEXT NOT NULL CHECK (policy_ref ~ '^[a-z0-9_.:/-]{1,128}$'),
+    policy_ref_hash TEXT NOT NULL CHECK (policy_ref_hash ~ '^sha256:[0-9a-f]{64}$'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, settlement_batch_id, rail_id),
     FOREIGN KEY (tenant_id, settlement_batch_id)
@@ -55,6 +60,10 @@ CREATE TABLE trace_settlement_rail_credits (
     FOREIGN KEY (tenant_id, recipient_id)
         REFERENCES trace_near_ai_credit_recipients (tenant_id, recipient_id)
 );
+
+-- Accrual sums a recipient's period under the ledger row lock.
+CREATE INDEX trace_settlement_rail_credits_period
+    ON trace_settlement_rail_credits (tenant_id, rail_id, recipient_id, period_key);
 
 -- One row per (tenant, rail, recipient): the cumulative total and how far
 -- the external side has confirmed it.
@@ -70,10 +79,6 @@ CREATE TABLE trace_settlement_rail_ledgers (
     ),
     -- What the external side last confirmed holding. Never above the total.
     confirmed_units NUMERIC(39, 0) NOT NULL DEFAULT 0 CHECK (confirmed_units >= 0),
-    -- Rounding remainder, denominated under rate_ref_hash. A different rate
-    -- starts it over at zero (less than one atomic unit is forgone).
-    rate_ref_hash TEXT NOT NULL CHECK (rate_ref_hash ~ '^sha256:[0-9a-f]{64}$'),
-    carry_units NUMERIC(39, 0) NOT NULL DEFAULT 0 CHECK (carry_units >= 0),
     publish_state TEXT NOT NULL DEFAULT 'idle' CHECK (
         publish_state IN ('idle', 'due', 'leased', 'published', 'frozen')
     ),
@@ -206,7 +211,7 @@ GRANT UPDATE (revoked_at) ON trace_near_ai_credit_recipients TO trace_ingest_run
 GRANT SELECT, INSERT ON trace_settlement_rail_credits TO trace_ingest_runtime;
 
 GRANT SELECT, INSERT ON trace_settlement_rail_ledgers TO trace_ingest_runtime;
-GRANT UPDATE (cumulative_micros, cumulative_units, confirmed_units, rate_ref_hash,
-              carry_units, publish_state, attempt_count, next_attempt_at, lease_token,
-              lease_expires_at, last_error_label, confirmed_at, verified_at, updated_at)
+GRANT UPDATE (cumulative_micros, cumulative_units, confirmed_units, publish_state,
+              attempt_count, next_attempt_at, lease_token, lease_expires_at,
+              last_error_label, confirmed_at, verified_at, updated_at)
     ON trace_settlement_rail_ledgers TO trace_ingest_runtime;
