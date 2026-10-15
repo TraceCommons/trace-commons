@@ -553,11 +553,13 @@ struct FlowMapScene: Equatable {
         let keys = groups.keys.sorted()
         for (index, key) in keys.enumerated() {
             guard let rows = groups[key], let first = rows.first else { continue }
-            // Right of the global destination, down the band; a single
-            // route sits low so it never reads as the destination's own.
+            // Right of the global destination and in the band's lower
+            // third, below the destination's own card, so a managed route's
+            // name (drawn left of its icon) never sits on the destination.
             let band = Self.band(scene.space)
+            let top = band.lowerBound + (band.upperBound - band.lowerBound) * 0.66
             let y = keys.count > 1
-                ? band.lowerBound + CGFloat(index) * (band.upperBound - band.lowerBound) / CGFloat(keys.count - 1)
+                ? top + CGFloat(index) * (band.upperBound - top) / CGFloat(keys.count - 1)
                 : band.lowerBound + (band.upperBound - band.lowerBound) * 0.85
             let start = CGPoint(x: scene.space.width * 0.8, y: y)
             let end = CGPoint(x: scene.space.width * 0.93, y: y)

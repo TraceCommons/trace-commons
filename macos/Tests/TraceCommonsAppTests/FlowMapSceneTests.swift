@@ -71,6 +71,24 @@ final class FlowMapSceneTests: XCTestCase {
         XCTAssertTrue(FlowMapScene().addingManagedRoutes(nil).nodes.isEmpty)
     }
 
+    /// Managed routes sit right of and below the Private AI destination in
+    /// any design space, so their names never cover its card.
+    func test_managedRoutesStayClearOfTheDestination() throws {
+        let wire = #"{"tools":[],"managed_copy":{"title":"Managed sessions"},"managed_sessions":[{"id":"a","tool":"opencode","connection":"api_key","provider":"openai","model":"m","state":"running","collection_state":"off"},{"id":"b","tool":"opencode","connection":"near_ai","provider":"near_ai","model":"m","state":"running","collection_state":"off"},{"id":"c","tool":"claude","connection":"api_key","provider":"anthropic","model":null,"state":"running","collection_state":"off"}]}"#
+        let destinations = try JSONDecoder().decode(DaemonData.ToolDestinations.self, from: Data(wire.utf8))
+        for space in [FlowMapScene.size, FlowMapScene.space(for: CGSize(width: 1200, height: 500)), FlowMapScene.space(for: CGSize(width: 400, height: 1000))] {
+            let scene = FlowMapScene.privateAI(.none, destinationLabel: "D", privateAI: nil, sentence: { _ in nil }, state: { _ in .unknown }, space: space)
+                .addingManagedRoutes(destinations)
+            let destination = FlowMapScene.destination(in: space)
+            XCTAssertEqual(scene.nodes.count, 6)
+            for node in scene.nodes {
+                XCTAssertTrue(CGRect(origin: .zero, size: space).contains(node.at), "\(node.id) outside \(space)")
+                XCTAssertGreaterThan(node.at.x, destination.x, node.id)
+                XCTAssertGreaterThan(node.at.y - destination.y, 60, "\(node.id) sits on the destination in \(space)")
+            }
+        }
+    }
+
     func test_mapHidesAbsentToolsWithInstalledEvidenceButKeepsImportedSources() throws {
         let wire = #"{"tools":[{"tool":"claude-code","installed":false},{"tool":"codex","installed":false},{"tool":"opencode","installed":true}]}"#
         let destinations = try JSONDecoder().decode(DaemonData.ToolDestinations.self, from: Data(wire.utf8))
