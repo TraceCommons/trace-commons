@@ -1778,6 +1778,30 @@ final class AppModel: ObservableObject {
         guard let client else { return nil }
         return await Task.detached { try? client.nativeWalletFlow(action: action, flowID: flowID, commons: commons, account: account) }.value
     }
+    /// Whether the wallet step signs in through the NEAR signer app: the
+    /// setting is on (off by default), this build has the signer's client, and
+    /// the installed app passes its code-signature requirement.
+    func nearSignerRoute(browserChosen: Bool = false) -> WalletRoute {
+        chooseRoute(
+            settingOn: UserDefaults.standard.bool(forKey: nearSignerSettingKey),
+            signerInstalled: nearSignerCompiledIn && signerInstalled(),
+            browserChosen: browserChosen)
+    }
+
+    /// Runs the signer route for an open flow. Nil is success; otherwise the
+    /// refusal label. Never opens the browser: that is the person's choice.
+    func runNearSigner(flowID: String) async -> String? {
+        #if canImport(NearSignerClient)
+        guard let client else { return "near_signer_unavailable" }
+        let result = await runNativeSigner(
+            flowID: flowID, daemon: DaemonSignerBridge(client: client), signer: InstalledSigner())
+        if case .failure(let refusal) = result { return refusal.label }
+        return nil
+        #else
+        return "near_signer_unavailable"
+        #endif
+    }
+
     /// Join with the NEAR AI login, reporting the daemon's own control name.
     ///
     /// The label is passed back untouched for `TCNearAiEnroll` to turn into a

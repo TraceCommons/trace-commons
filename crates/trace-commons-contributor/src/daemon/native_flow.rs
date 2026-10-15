@@ -3,6 +3,10 @@
 use super::{
     account_onboarding,
     ipc::{DaemonShared, Request, Response},
+    nearai_credential::{
+        ceremony,
+        near_wallet::{NearWalletChallenge, NearWalletError},
+    },
 };
 use crate::witness_copy::witness_copy;
 use serde::Serialize;
@@ -14,6 +18,9 @@ use std::{
     time::Duration,
 };
 
+/// A challenge with less than this left is replaced, not handed to the signer:
+/// the passkey and consent ceremony takes longer than a few seconds.
+const NATIVE_EXPIRY_MARGIN_MS: u64 = 60_000;
 const POLL: Duration = Duration::from_secs(2);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum WalletState {
@@ -50,6 +57,11 @@ struct Flow {
     starting: bool,
     cancelled: bool,
     message: &'static str,
+    /// The live NEP-413 challenge handed to the native signer, if one was
+    /// asked for. Never serialized, logged or re-derived from the reply.
+    challenge: Option<NearWalletChallenge>,
+    /// The NEAR AI credential ceremony a native-signer proof was handed to.
+    credential: Option<String>,
 }
 impl Flow {
     fn new() -> Self {
@@ -63,6 +75,8 @@ impl Flow {
             starting: false,
             cancelled: false,
             message: "",
+            challenge: None,
+            credential: None,
         }
     }
     fn busy(&self) -> bool {
@@ -72,6 +86,7 @@ impl Flow {
                 WalletState::Checking | WalletState::WaitingForWallet
             )
             || self.attempt.is_some()
+            || self.credential.is_some()
     }
     fn view(&self) -> WalletView {
         let refused = self.state == WalletState::Refused;
@@ -109,7 +124,23 @@ impl Flow {
         self.message = witness_copy().wallet.cancelled;
         self.browser = None;
         self.starting = false;
+        self.challenge = None;
         self.attempt.take()
+    }
+    /// Progress of a native-signer proof inside the credential ceremony.
+    fn credential_progress(&mut self, status: Option<&str>) {
+        match status {
+            Some(ceremony::STATUS_COMPLETE) => {
+                self.credential = None;
+                self.state = WalletState::Complete;
+                self.message = "";
+            }
+            Some("starting" | "waiting_for_browser") => {}
+            _ => {
+                self.credential = None;
+                self.refuse(witness_copy().wallet.failed);
+            }
+        }
     }
     fn finish_start(&mut self, generation: u64, value: &Value) -> Option<String> {
         let attempt = value
@@ -231,19 +262,61 @@ pub async fn handle_wallet(shared: &DaemonShared, req: &Request) -> Response {
         return Response::ok(req.id, result);
     }
     if action == "cancel" {
-        let attempt = {
+        let (attempt, credential) = {
             let mut map = flows().lock().expect("native flow lock");
             map.get_mut(shared.store.dir())
                 .filter(|f| f.id == flow_id)
-                .and_then(Flow::cancel)
+                .map(|f| {
+                    let credential = f.credential.take();
+                    (f.cancel(), credential)
+                })
+                .unwrap_or_default()
         };
         if let Some(attempt) = attempt {
             cancel_attempt(shared, req.id, attempt);
         }
+        if let Some(credential) = credential {
+            ceremony::cancel(shared.store.dir(), Some(&credential));
+        }
         return snapshot(shared, req.id, flow_id);
+    }
+    if action == "native_payload" {
+        return native_payload(shared, req.id, flow_id);
+    }
+    if action == "native_complete" {
+        return native_complete(shared, req, flow_id).await;
     }
     if action == "wait" {
         tokio::time::sleep(POLL).await;
+        let credential = {
+            let map = flows().lock().expect("native flow lock");
+            map.get(shared.store.dir())
+                .filter(|f| f.id == flow_id && !f.cancelled)
+                .and_then(|f| f.credential.clone().map(|c| (c, f.generation)))
+        };
+        if let Some((credential, generation)) = credential {
+            let result = super::nearai_credential::handle_status_async(
+                shared,
+                &request(
+                    req.id,
+                    "near_ai_credential_status",
+                    json!({"attempt_id":credential}),
+                ),
+            )
+            .await
+            .result
+            .unwrap_or_default();
+            let mut map = flows().lock().expect("native flow lock");
+            if let Some(flow) = map.get_mut(shared.store.dir()).filter(|f| {
+                f.id == flow_id
+                    && f.generation == generation
+                    && !f.cancelled
+                    && f.credential.as_deref() == Some(credential.as_str())
+            }) {
+                flow.credential_progress(result.get("attempt_status").and_then(Value::as_str));
+            }
+            return snapshot(shared, req.id, flow_id);
+        }
         let pair = {
             let map = flows().lock().expect("native flow lock");
             map.get(shared.store.dir())
@@ -364,6 +437,116 @@ pub async fn handle_wallet(shared: &DaemonShared, req: &Request) -> Response {
     };
     if let Some(attempt) = cancel {
         cancel_attempt(shared, req.id, attempt);
+    }
+    snapshot(shared, req.id, flow_id)
+}
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+/// The NEP-413 payload of this flow's live challenge, minting one when the
+/// flow has none or the last one expired. The browser route's constants.
+fn native_payload(shared: &DaemonShared, id: u64, flow_id: &str) -> Response {
+    let mut map = flows().lock().expect("native flow lock");
+    let Some(flow) = map
+        .get_mut(shared.store.dir())
+        .filter(|f| f.id == flow_id && !f.busy())
+    else {
+        return Response::err(id, super::ipc::ERR_BAD_PARAMS, "native_wallet_state");
+    };
+    let now = unix_millis();
+    if flow.challenge.as_ref().is_none_or(|challenge| {
+        now.saturating_add(NATIVE_EXPIRY_MARGIN_MS) >= challenge.expires_at_ms()
+    }) {
+        match NearWalletChallenge::native(now) {
+            Ok(challenge) => flow.challenge = Some(challenge),
+            Err(_) => {
+                flow.challenge = None;
+                return Response::err(id, super::ipc::ERR_UNAVAILABLE, "native_wallet_state");
+            }
+        }
+    }
+    match flow.challenge.as_ref() {
+        Some(challenge) => Response::ok(id, challenge.native_payload()),
+        None => Response::err(id, super::ipc::ERR_BAD_PARAMS, "native_wallet_state"),
+    }
+}
+
+/// Verify the native signer's proof against this flow's own challenge, then
+/// hand it to the NEAR AI credential ceremony, which continues exactly as for
+/// a verified browser callback. No input reaches a reply or a log.
+async fn native_complete(shared: &DaemonShared, req: &Request, flow_id: &str) -> Response {
+    let field = |name: &str| req.params.get(name).and_then(Value::as_str).unwrap_or("");
+    let (proof, generation) = {
+        let mut map = flows().lock().expect("native flow lock");
+        let Some(flow) = map
+            .get_mut(shared.store.dir())
+            .filter(|f| f.id == flow_id && !f.busy())
+        else {
+            return Response::err(req.id, super::ipc::ERR_BAD_PARAMS, "native_wallet_state");
+        };
+        let Some(challenge) = flow.challenge.as_mut() else {
+            return Response::err(req.id, super::ipc::ERR_BAD_PARAMS, "native_wallet_state");
+        };
+        match challenge.verify_signed(
+            field("account_id"),
+            field("public_key"),
+            field("signature"),
+            unix_millis(),
+        ) {
+            Ok(proof) => {
+                flow.challenge = None;
+                flow.cancelled = false;
+                flow.starting = true;
+                flow.state = WalletState::Checking;
+                flow.message = "";
+                flow.generation += 1;
+                (proof, flow.generation)
+            }
+            Err(NearWalletError::Invalid) => {
+                return Response::err(
+                    req.id,
+                    super::ipc::ERR_BAD_PARAMS,
+                    "native_wallet_signature_invalid",
+                );
+            }
+            Err(_) => {
+                flow.challenge = None;
+                return Response::err(req.id, super::ipc::ERR_BAD_PARAMS, "native_wallet_state");
+            }
+        }
+    };
+    let started = ceremony::begin_verified(&shared.store, proof).await;
+    let attempt = started.as_ref().ok().and_then(|value| {
+        value
+            .get("attempt_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+    let late = {
+        let mut map = flows().lock().expect("native flow lock");
+        match map.get_mut(shared.store.dir()).filter(|f| f.id == flow_id) {
+            Some(flow) if flow.generation == generation && !flow.cancelled => {
+                flow.starting = false;
+                match attempt {
+                    Some(attempt) => {
+                        flow.credential = Some(attempt);
+                        flow.state = WalletState::WaitingForWallet;
+                    }
+                    None => flow.refuse(witness_copy().wallet.failed),
+                }
+                None
+            }
+            _ => attempt,
+        }
+    };
+    if let Some(attempt) = late {
+        ceremony::cancel(shared.store.dir(), Some(&attempt));
     }
     snapshot(shared, req.id, flow_id)
 }
@@ -508,6 +691,281 @@ mod tests {
         assert_eq!(refused["state"], "Refused");
         assert_eq!(unanswered["state"], "Refused");
         assert_ne!(unanswered["message"], copy.unavailable);
+    }
+
+    async fn opened() -> (DaemonShared, String) {
+        let (dir, store) = crate::config::tests_support::temp_store();
+        std::mem::forget(dir);
+        let shared = DaemonShared::load(store).unwrap();
+        let open = handle_wallet(
+            &shared,
+            &request(1, "native_wallet_flow", json!({"action":"open"})),
+        )
+        .await;
+        let flow_id = open.result.unwrap()["flow_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        (shared, flow_id)
+    }
+
+    #[tokio::test]
+    async fn native_complete_without_open_flow_is_refused() {
+        let (dir, store) = crate::config::tests_support::temp_store();
+        std::mem::forget(dir);
+        let shared = DaemonShared::load(store).unwrap();
+        let params = json!({
+            "action":"native_complete","flow_id":"not-a-flow",
+            "account_id":"alice.near","public_key":"ed25519:x","signature":"x"
+        });
+        let refused = handle_wallet(&shared, &request(1, "native_wallet_flow", params)).await;
+        let error = refused.error.expect("refused");
+        assert_eq!(error.message, "native_wallet_state");
+        // An open flow that never asked for a payload has nothing to complete.
+        let (shared, flow_id) = opened().await;
+        let params = json!({
+            "action":"native_complete","flow_id":flow_id,
+            "account_id":"alice.near","public_key":"ed25519:x","signature":"x"
+        });
+        let refused = handle_wallet(&shared, &request(2, "native_wallet_flow", params)).await;
+        assert_eq!(
+            refused.error.expect("refused").message,
+            "native_wallet_state"
+        );
+        let payload = handle_wallet(
+            &shared,
+            &request(
+                3,
+                "native_wallet_flow",
+                json!({"action":"native_payload","flow_id":"other"}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            payload.error.expect("refused").message,
+            "native_wallet_state"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_complete_with_a_bad_signature_is_labelled_and_retryable() {
+        let (shared, flow_id) = opened().await;
+        let payload = handle_wallet(
+            &shared,
+            &request(
+                1,
+                "native_wallet_flow",
+                json!({"action":"native_payload","flow_id":flow_id}),
+            ),
+        )
+        .await
+        .result
+        .expect("payload");
+        let params = json!({
+            "action":"native_complete","flow_id":flow_id,
+            "account_id":"alice.near","public_key":"ed25519:x","signature":"x"
+        });
+        let refused = handle_wallet(&shared, &request(2, "native_wallet_flow", params)).await;
+        let error = refused.error.expect("refused");
+        assert_eq!(error.message, "native_wallet_signature_invalid");
+        assert!(!error.message.contains("alice"));
+        let again = handle_wallet(
+            &shared,
+            &request(
+                3,
+                "native_wallet_flow",
+                json!({"action":"native_payload","flow_id":flow_id}),
+            ),
+        )
+        .await
+        .result
+        .expect("payload");
+        assert_eq!(
+            payload, again,
+            "a refused signature keeps the live challenge"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_payload_matches_browser_configuration() {
+        use base64::Engine;
+        let (shared, flow_id) = opened().await;
+        let payload = handle_wallet(
+            &shared,
+            &request(
+                1,
+                "native_wallet_flow",
+                json!({"action":"native_payload","flow_id":flow_id}),
+            ),
+        )
+        .await
+        .result
+        .expect("payload");
+        let browser = {
+            let map = flows().lock().unwrap();
+            map.get(shared.store.dir())
+                .and_then(|flow| flow.challenge.as_ref())
+                .expect("live challenge")
+                .browser_configuration()
+        };
+        assert_eq!(payload["message"], browser["message"]);
+        assert_eq!(payload["recipient"], browser["recipient"]);
+        let nonce = base64::engine::general_purpose::STANDARD
+            .decode(payload["nonce"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(json!(nonce), browser["nonce"]);
+    }
+
+    fn base58(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        let mut input = bytes.to_vec();
+        let zeros = input.iter().take_while(|byte| **byte == 0).count();
+        let mut out = Vec::new();
+        let mut start = zeros;
+        while start < input.len() {
+            let mut rem = 0u16;
+            for byte in &mut input[start..] {
+                let value = rem * 256 + u16::from(*byte);
+                *byte = (value / 58) as u8;
+                rem = value % 58;
+            }
+            out.push(ALPHABET[rem as usize]);
+            while start < input.len() && input[start] == 0 {
+                start += 1;
+            }
+        }
+        out.extend(std::iter::repeat_n(b'1', zeros));
+        out.reverse();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_complete_with_a_good_signature_consumes_the_challenge_and_hands_off() {
+        use crate::daemon::credential_store::{
+            CredentialError, CredentialReference, SecretBackend,
+        };
+        use base64::Engine;
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+        use sha2::{Digest, Sha256};
+        use std::sync::Arc;
+
+        struct Unentitled;
+        impl SecretBackend for Unentitled {
+            fn read(&self, _: &CredentialReference) -> Result<Vec<u8>, CredentialError> {
+                Err(CredentialError::Unentitled)
+            }
+            fn write(&self, _: &CredentialReference, _: &[u8]) -> Result<(), CredentialError> {
+                Err(CredentialError::Unavailable)
+            }
+            fn delete(&self, _: &CredentialReference) -> Result<(), CredentialError> {
+                Err(CredentialError::Unavailable)
+            }
+        }
+
+        let (shared, flow_id) = opened().await;
+        // The hand-off stops at the storage probe, before any network.
+        crate::daemon::cloud_credential_test_support::install_backend(
+            &shared.store,
+            Arc::new(Unentitled),
+        );
+        let payload = handle_wallet(
+            &shared,
+            &request(
+                1,
+                "native_wallet_flow",
+                json!({"action":"native_payload","flow_id":flow_id}),
+            ),
+        )
+        .await
+        .result
+        .expect("payload");
+        let nonce: [u8; 32] = base64::engine::general_purpose::STANDARD
+            .decode(payload["nonce"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        // NEP-413: SHA256(u32-LE tag || Borsh(message, nonce, recipient, none)).
+        let mut encoded = (2_147_484_061u32).to_le_bytes().to_vec();
+        let message = payload["message"].as_str().unwrap();
+        encoded.extend_from_slice(&(message.len() as u32).to_le_bytes());
+        encoded.extend_from_slice(message.as_bytes());
+        encoded.extend_from_slice(&nonce);
+        let recipient = payload["recipient"].as_str().unwrap();
+        encoded.extend_from_slice(&(recipient.len() as u32).to_le_bytes());
+        encoded.extend_from_slice(recipient.as_bytes());
+        encoded.push(0);
+        let digest = Sha256::digest(&encoded);
+        let key = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+        let params = json!({
+            "action":"native_complete","flow_id":flow_id,
+            "account_id":"alice.near",
+            "public_key": format!("ed25519:{}", base58(key.public_key().as_ref())),
+            "signature": base64::engine::general_purpose::STANDARD.encode(key.sign(&digest).as_ref()),
+        });
+        let done = handle_wallet(&shared, &request(2, "native_wallet_flow", params.clone())).await;
+        let view = done
+            .result
+            .expect("a verified proof gets a view, not an error");
+        assert_eq!(
+            view["state"], "Refused",
+            "the storage probe refused the hand-off"
+        );
+        assert_eq!(view["message"], witness_copy().wallet.failed);
+        assert!(view["browser_url"].is_null());
+        // The challenge is single use: the same proof cannot be replayed.
+        let replay = handle_wallet(&shared, &request(3, "native_wallet_flow", params)).await;
+        assert_eq!(
+            replay.error.expect("refused").message,
+            "native_wallet_state"
+        );
+        // Cancelling afterwards is safe and leaves the flow idle.
+        let cancelled = handle_wallet(
+            &shared,
+            &request(
+                4,
+                "native_wallet_flow",
+                json!({"action":"cancel","flow_id":flow_id}),
+            ),
+        )
+        .await;
+        assert_eq!(cancelled.result.expect("view")["state"], "Idle");
+    }
+
+    #[tokio::test]
+    async fn a_challenge_close_to_expiry_is_replaced_not_handed_out() {
+        let (shared, flow_id) = opened().await;
+        let request_payload = |id| {
+            request(
+                id,
+                "native_wallet_flow",
+                json!({"action":"native_payload","flow_id":flow_id}),
+            )
+        };
+        handle_wallet(&shared, &request_payload(1))
+            .await
+            .result
+            .expect("payload");
+        // Leave the live challenge 30 s of life.
+        let near_expiry = {
+            let mut map = flows().lock().unwrap();
+            let flow = map.get_mut(shared.store.dir()).unwrap();
+            let aged =
+                unix_millis() - crate::daemon::nearai_credential::near_wallet::MAX_AGE_MS + 30_000;
+            let challenge = NearWalletChallenge::native(aged).unwrap();
+            let payload = challenge.native_payload();
+            flow.challenge = Some(challenge);
+            payload
+        };
+        let second = handle_wallet(&shared, &request_payload(2))
+            .await
+            .result
+            .expect("payload");
+        let third = handle_wallet(&shared, &request_payload(3))
+            .await
+            .result
+            .expect("payload");
+        assert_ne!(near_expiry["nonce"], second["nonce"]);
+        assert_eq!(second, third, "a fresh challenge is kept, not re-minted");
     }
 
     #[test]

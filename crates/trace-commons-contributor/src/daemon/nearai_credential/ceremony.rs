@@ -20,7 +20,7 @@
 use super::api::CloudApi;
 use super::loopback;
 use crate::config::ConfigStore;
-use crate::daemon::nearai_credential::near_wallet::NearWalletError;
+use crate::daemon::nearai_credential::near_wallet::{NearWalletError, VerifiedNearWalletSignIn};
 use crate::daemon::nearai_credential::near_wallet_loopback::{self, NearWalletListener};
 use crate::daemon::settings::{DaemonSettings, NearAiInferenceCredential, NearAiSession};
 use crate::daemon::stored_cloud_credentials::StoredCloudCredentials;
@@ -212,6 +212,10 @@ enum BrowserSignIn {
         state: String,
     },
     Near(NearWalletListener),
+    /// A proof the native signer already produced and the daemon already
+    /// verified against its own challenge. It continues exactly as a verified
+    /// browser callback does: one submission to Cloud, then mint and persist.
+    Signed(VerifiedNearWalletSignIn),
 }
 
 impl BrowserSignIn {
@@ -241,24 +245,24 @@ impl BrowserSignIn {
         F: FnOnce(loopback::SessionTokens, Option<DateTime<Utc>>, String) -> Fut,
         Fut: std::future::Future<Output = Result<()>>,
     {
-        match self {
+        let proof = match self {
             Self::OAuth { listener, state } => {
                 let listener = tokio::net::TcpListener::from_std(listener)?;
-                loopback::receive_session(listener, &state, |session| {
+                return loopback::receive_session(listener, &state, |session| {
                     finish(session.tokens, None, session.user_agent)
                 })
-                .await
+                .await;
             }
-            Self::Near(listener) => {
-                let authenticated = api.sign_in_near(listener.wait().await?).await?;
-                finish(
-                    authenticated.session,
-                    Some(authenticated.refresh_token_expires_at),
-                    crate::daemon::nearai_credential::api::USER_AGENT.to_string(),
-                )
-                .await
-            }
-        }
+            Self::Near(listener) => listener.wait().await?,
+            Self::Signed(proof) => proof,
+        };
+        let authenticated = api.sign_in_near(proof).await?;
+        finish(
+            authenticated.session,
+            Some(authenticated.refresh_token_expires_at),
+            crate::daemon::nearai_credential::api::USER_AGENT.to_string(),
+        )
+        .await
     }
 }
 
@@ -269,6 +273,30 @@ impl BrowserSignIn {
 /// binding afterwards would leave a window in which another process could take
 /// the port and receive the session.
 pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Value> {
+    start_with(store, Prepared::Provider(provider.to_owned())).await
+}
+
+/// Begin a ceremony whose NEP-413 proof the native signer already produced.
+///
+/// Same attempt registry, storage probe, detached finish and persist guard as
+/// [`begin`]; only the browser leg is absent, so there is no URL to return.
+pub async fn begin_verified(
+    store: &ConfigStore,
+    proof: VerifiedNearWalletSignIn,
+) -> Result<serde_json::Value> {
+    let mut value = start_with(store, Prepared::Signed(proof)).await?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("browser_url");
+    }
+    Ok(value)
+}
+
+enum Prepared {
+    Provider(String),
+    Signed(VerifiedNearWalletSignIn),
+}
+
+async fn start_with(store: &ConfigStore, prepared: Prepared) -> Result<serde_json::Value> {
     // Before anything that reaches the network or a browser: a ceremony this
     // process could not store is a wasted sign-in at the service. The probe
     // is an OS read that can wait on a prompt or a locked store, so it runs
@@ -282,9 +310,15 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
     let api = CloudApi::live()?;
     let attempt_id = loopback::random_state()?;
     let dir = store.dir().to_path_buf();
-    let (browser_url, sign_in) = BrowserSignIn::prepare(&api, provider).await?;
-    #[cfg(test)]
-    record_browser_url_served(&dir);
+    let (browser_url, sign_in) = match prepared {
+        Prepared::Provider(provider) => {
+            let prepared = BrowserSignIn::prepare(&api, &provider).await?;
+            #[cfg(test)]
+            record_browser_url_served(&dir);
+            prepared
+        }
+        Prepared::Signed(proof) => (String::new(), BrowserSignIn::Signed(proof)),
+    };
 
     {
         let mut map = attempts().lock().expect("ceremony state lock");

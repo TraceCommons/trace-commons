@@ -46,7 +46,8 @@ pub enum NearWalletError {
 pub struct NearWalletChallenge {
     nonce: [u8; 32],
     state: String,
-    callback_url: String,
+    /// `None` for a native-signer challenge, which has no loopback page.
+    callback_url: Option<String>,
     created_at_ms: u64,
     expires_at_ms: u64,
     consumed: bool,
@@ -54,7 +55,18 @@ pub struct NearWalletChallenge {
 
 impl NearWalletChallenge {
     pub fn new(port: u16, now_ms: u64) -> Result<Self, NearWalletError> {
-        if port == 0 || now_ms == 0 || now_ms > i64::MAX as u64 - MAX_AGE_MS {
+        if port == 0 {
+            return Err(NearWalletError::Invalid);
+        }
+        let mut challenge = Self::native(now_ms)?;
+        challenge.callback_url = Some(format!("http://127.0.0.1:{port}{CALLBACK_PATH}"));
+        Ok(challenge)
+    }
+
+    /// A challenge for the native signer: the same message, recipient and
+    /// nonce shape as the browser route, but no loopback page to call back.
+    pub fn native(now_ms: u64) -> Result<Self, NearWalletError> {
+        if now_ms == 0 || now_ms > i64::MAX as u64 - MAX_AGE_MS {
             return Err(NearWalletError::Invalid);
         }
         let mut nonce = [0; 32];
@@ -70,7 +82,7 @@ impl NearWalletChallenge {
         Ok(Self {
             nonce,
             state: URL_SAFE_NO_PAD.encode(state),
-            callback_url: format!("http://127.0.0.1:{port}{CALLBACK_PATH}"),
+            callback_url: None,
             created_at_ms: now_ms,
             expires_at_ms: now_ms + MAX_AGE_MS,
             consumed: false,
@@ -81,7 +93,11 @@ impl NearWalletChallenge {
         if self.consumed {
             return Err(NearWalletError::AlreadyUsed);
         }
-        let mut url = Url::parse(&self.callback_url).map_err(|_| NearWalletError::Unavailable)?;
+        let callback_url = self
+            .callback_url
+            .as_deref()
+            .ok_or(NearWalletError::Unavailable)?;
+        let mut url = Url::parse(callback_url).map_err(|_| NearWalletError::Unavailable)?;
         url.set_fragment(Some(&self.state));
         Ok(url.into())
     }
@@ -92,6 +108,16 @@ impl NearWalletChallenge {
             "recipient": RECIPIENT,
             "nonce": self.nonce,
             "expires_at_ms": self.expires_at_ms,
+        })
+    }
+
+    /// The NEP-413 fields the native signer signs: the same constants and
+    /// nonce the browser route signs, the nonce as standard base64.
+    pub fn native_payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "message": MESSAGE,
+            "recipient": RECIPIENT,
+            "nonce": STANDARD.encode(self.nonce),
         })
     }
 
@@ -124,14 +150,35 @@ impl NearWalletChallenge {
         let account_id = callback.account_id.ok_or(NearWalletError::Invalid)?;
         let public_key = callback.public_key.ok_or(NearWalletError::Invalid)?;
         let encoded_signature = callback.signature.ok_or(NearWalletError::Invalid)?;
-        if !valid_account_id(&account_id) {
+        self.verify_signed(&account_id, &public_key, &encoded_signature, now_ms)
+    }
+
+    /// The checks shared by the browser callback and the native signer:
+    /// deadline, single use, account ID, key, signature length and canonical
+    /// encoding, and ed25519 over this challenge's own NEP-413 digest. The
+    /// signature is checked against what this value issued, never against
+    /// anything the signer echoes back. Invalid probes do not consume.
+    pub fn verify_signed(
+        &mut self,
+        account_id: &str,
+        public_key: &str,
+        signature: &str,
+        now_ms: u64,
+    ) -> Result<VerifiedNearWalletSignIn, NearWalletError> {
+        if self.consumed {
+            return Err(NearWalletError::AlreadyUsed);
+        }
+        if now_ms < self.created_at_ms || now_ms >= self.expires_at_ms {
+            return Err(NearWalletError::Expired);
+        }
+        if !valid_account_id(account_id) {
             return Err(NearWalletError::Invalid);
         }
-        let key = decode_public_key(&public_key)?;
+        let key = decode_public_key(public_key)?;
         let signature_bytes = STANDARD
-            .decode(&encoded_signature)
+            .decode(signature)
             .map_err(|_| NearWalletError::Invalid)?;
-        if signature_bytes.len() != 64 || STANDARD.encode(&signature_bytes) != encoded_signature {
+        if signature_bytes.len() != 64 || STANDARD.encode(&signature_bytes) != signature {
             return Err(NearWalletError::Invalid);
         }
         let digest = signing_digest(MESSAGE, &self.nonce, RECIPIENT, None);
@@ -141,10 +188,10 @@ impl NearWalletChallenge {
         self.consumed = true;
         Ok(VerifiedNearWalletSignIn {
             signed_message: SignedMessage {
-                account_id,
-                public_key,
-                signature: encoded_signature,
-                state: callback.state,
+                account_id: account_id.to_owned(),
+                public_key: public_key.to_owned(),
+                signature: signature.to_owned(),
+                state: self.state.clone(),
             },
             payload: Payload {
                 message: MESSAGE,
@@ -155,7 +202,7 @@ impl NearWalletChallenge {
     }
 }
 
-/// Only `verify_callback` constructs this POST `/v1/auth/near` request. Cloud
+/// Only `verify_signed` (reached from `verify_callback` too) constructs this POST `/v1/auth/near` request. Cloud
 /// remains responsible for proving that the signing key belongs to the account.
 /// It is deliberately not Clone, Deserialize or Debug.
 #[derive(Serialize)]
@@ -496,6 +543,154 @@ mod tests {
         );
         assert_eq!(
             challenge.verify_callback(&body, NOW).err(),
+            Some(NearWalletError::AlreadyUsed)
+        );
+    }
+
+    /// The native signer returns the three NEP-413 fields without a callback
+    /// body. Sign exactly what `native_payload` hands out.
+    fn native_parts(challenge: &NearWalletChallenge, nonce: &[u8; 32]) -> (String, String) {
+        let key = signature::Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+        let payload = challenge.native_payload();
+        let message = payload["message"].as_str().unwrap();
+        let recipient = payload["recipient"].as_str().unwrap();
+        let digest = signing_digest(message, nonce, recipient, None);
+        (
+            encode_key(key.public_key().as_ref()),
+            STANDARD.encode(key.sign(&digest).as_ref()),
+        )
+    }
+
+    #[test]
+    fn native_signed_matches_browser_digest() {
+        let mut challenge = NearWalletChallenge::native(NOW).unwrap();
+        let payload = challenge.native_payload();
+        assert_eq!(payload.as_object().unwrap().len(), 3);
+        assert_eq!(payload["message"], MESSAGE);
+        assert_eq!(payload["recipient"], RECIPIENT);
+        let nonce = STANDARD.decode(payload["nonce"].as_str().unwrap()).unwrap();
+        assert_eq!(nonce, challenge.nonce);
+        assert_eq!(nonce[..8], NOW.to_be_bytes());
+        assert!(
+            challenge.browser_url().is_err(),
+            "no loopback, no browser URL"
+        );
+        let (key, sig) = native_parts(&challenge, &challenge.nonce);
+        let result = challenge
+            .verify_signed("alice.near", &key, &sig, NOW + 1)
+            .unwrap();
+        assert_eq!(result.account_id(), "alice.near");
+        let json = serde_json::to_value(result).unwrap();
+        assert_eq!(json["signed_message"]["signature"], sig);
+        assert_eq!(json["signed_message"]["state"], challenge.state);
+        assert_eq!(json["payload"]["nonce"], serde_json::json!(challenge.nonce));
+    }
+
+    #[test]
+    fn native_signed_rejects_other_nonce() {
+        let mut challenge = NearWalletChallenge::native(NOW).unwrap();
+        let mut other_nonce = challenge.nonce;
+        other_nonce[31] ^= 1;
+        let (key, sig) = native_parts(&challenge, &other_nonce);
+        assert_eq!(
+            challenge.verify_signed("alice.near", &key, &sig, NOW).err(),
+            Some(NearWalletError::Invalid)
+        );
+        for (account, bad_key, bad_sig) in [
+            ("Alice.near", key.clone(), sig.clone()),
+            (
+                "alice.near",
+                key.replace("ed25519:", "secp256k1:"),
+                sig.clone(),
+            ),
+            ("alice.near", key.clone(), format!("A{sig}")),
+            (
+                "alice.near",
+                key.clone(),
+                sig.trim_end_matches('=').to_string(),
+            ),
+        ] {
+            assert_eq!(
+                challenge
+                    .verify_signed(account, &bad_key, &bad_sig, NOW)
+                    .err(),
+                Some(NearWalletError::Invalid)
+            );
+        }
+        let (key, sig) = native_parts(&challenge, &challenge.nonce);
+        assert_eq!(
+            challenge
+                .verify_signed("alice.near", &key, &sig, NOW - 1)
+                .err(),
+            Some(NearWalletError::Expired)
+        );
+        assert_eq!(
+            challenge
+                .verify_signed("alice.near", &key, &sig, challenge.expires_at_ms())
+                .err(),
+            Some(NearWalletError::Expired)
+        );
+        assert!(
+            challenge
+                .verify_signed("alice.near", &key, &sig, NOW)
+                .is_ok(),
+            "refused probes must not consume the attempt"
+        );
+    }
+
+    #[test]
+    fn native_signed_is_single_use() {
+        let mut challenge = NearWalletChallenge::native(NOW).unwrap();
+        let (key, sig) = native_parts(&challenge, &challenge.nonce);
+        assert!(
+            challenge
+                .verify_signed("alice.near", &key, &sig, NOW)
+                .is_ok()
+        );
+        assert_eq!(
+            challenge
+                .verify_signed("alice.near", &key, &sig, NOW + 1)
+                .err(),
+            Some(NearWalletError::AlreadyUsed)
+        );
+        // A browser challenge consumed by its callback refuses the native path too.
+        let mut browser = NearWalletChallenge::new(54321, NOW).unwrap();
+        let body = signed(&browser);
+        assert!(browser.verify_callback(&body, NOW).is_ok());
+        let (key, sig) = native_parts(&browser, &browser.nonce);
+        assert_eq!(
+            browser.verify_signed("alice.near", &key, &sig, NOW).err(),
+            Some(NearWalletError::AlreadyUsed)
+        );
+        for now in [0, u64::MAX] {
+            assert!(NearWalletChallenge::native(now).is_err());
+        }
+    }
+
+    /// The browser route is the same proof as before the split: a callback and
+    /// a native completion over one challenge produce byte-identical DTOs.
+    #[test]
+    fn verify_callback_unchanged() {
+        let browser = NearWalletChallenge::new(54321, NOW).unwrap();
+        let mut native = NearWalletChallenge {
+            nonce: browser.nonce,
+            state: browser.state.clone(),
+            callback_url: None,
+            created_at_ms: browser.created_at_ms,
+            expires_at_ms: browser.expires_at_ms,
+            consumed: false,
+        };
+        let mut browser = browser;
+        let body = signed(&browser);
+        let from_callback =
+            serde_json::to_value(browser.verify_callback(&body, NOW).unwrap()).unwrap();
+        let (key, sig) = native_parts(&native, &native.nonce);
+        let from_native =
+            serde_json::to_value(native.verify_signed("alice.near", &key, &sig, NOW).unwrap())
+                .unwrap();
+        assert_eq!(from_callback, from_native);
+        assert_eq!(
+            browser.verify_callback(&body, NOW).err(),
             Some(NearWalletError::AlreadyUsed)
         );
     }

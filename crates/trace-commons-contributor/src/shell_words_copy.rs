@@ -466,6 +466,15 @@ pub struct SettingsWords {
     /// this build does not know still gets [`Self::audit_changed`].
     pub audit_actions: BTreeMap<&'static str, &'static str>,
     pub audit_changed: &'static str,
+    /// DRAFT, NEEDS APPROVAL: the NEAR signer app setting's title.
+    pub near_signer_setting_title: &'static str,
+    /// DRAFT, NEEDS APPROVAL: the NEAR signer app setting's caption.
+    pub near_signer_setting_caption: &'static str,
+    /// DRAFT, NEEDS APPROVAL: the button that chooses the browser after the
+    /// signer app refused.
+    pub near_signer_use_browser: &'static str,
+    /// DRAFT, NEEDS APPROVAL: shown when the signer app did not sign in.
+    pub near_signer_failed: &'static str,
 }
 
 #[must_use]
@@ -541,6 +550,13 @@ pub fn settings_words() -> SettingsWords {
             ),
         ]),
         audit_changed: "Changed",
+        near_signer_setting_title: "Use the NEAR signer app",
+        near_signer_setting_caption: concat!(
+            "Sign in to NEAR with the NEAR signer app when it is installed. ",
+            "Otherwise the browser is used."
+        ),
+        near_signer_use_browser: "Use the browser instead",
+        near_signer_failed: "The NEAR signer app did not sign in.",
     }
 }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import TCShellCore
 import TCDesign
 
 /// Native transport and browser presentation only; Rust owns lifecycle and cadence.
@@ -11,6 +12,14 @@ struct NearAccountConnectView: View {
     @State private var pending = false
     @State private var closed = false
     @State private var transportFailed = false
+    /// The signer app refused or was unreachable. The browser route is then
+    /// offered, never taken on its own.
+    @State private var signerRefused = false
+    /// Set only by the person's tap on the browser link after a refusal.
+    @State private var browserChosen = false
+    /// Computed once per appearance and per choice, not on every render: the
+    /// signer's signature check is not cheap.
+    @State private var route: WalletRoute = .browser
     var onBusyChanged: (Bool) -> Void = { _ in }
     var onEnrolled: () -> Void
     private var busy: Bool { pending || flow?.busy == true }
@@ -30,10 +39,28 @@ struct NearAccountConnectView: View {
                         .buttonStyle(GlassButtonStyle(.glass))
                         .disabled(pending || !flow.canCheck)
                     if flow.canStart {
-                        GlassTextField(copy.account, text: $account).disabled(busy)
-                        Button(copy.start) { run("start") }
-                            .buttonStyle(GlassButtonStyle(.primary))
-                            .disabled(pending)
+                        if route == .nativeSigner {
+                            Button(copy.start) { run("native_signer") }
+                                .buttonStyle(GlassButtonStyle(.primary))
+                                .disabled(pending)
+                            if signerRefused {
+                                GlassAlert((ShellWords.table?.settings.nearSignerFailed ?? ""))
+                                Button((ShellWords.table?.settings.nearSignerUseBrowser ?? "")) {
+                                    // Shows the browser route's account field and Start;
+                                    // nothing opens until the person taps Start there.
+                                    signerRefused = false
+                                    browserChosen = true
+                                    route = model.nearSignerRoute(browserChosen: true)
+                                }
+                                    .buttonStyle(GlassButtonStyle(.link))
+                                    .disabled(pending)
+                            }
+                        } else {
+                            GlassTextField(copy.account, text: $account).disabled(busy)
+                            Button(copy.start) { run("start") }
+                                .buttonStyle(GlassButtonStyle(.primary))
+                                .disabled(pending)
+                        }
                     }
                     if busy { GlassSpinner(standalone: true) }
                     if !transportFailed, flow.tone != "refused", !flow.message.isEmpty {
@@ -55,6 +82,7 @@ struct NearAccountConnectView: View {
             }
         }
         .task {
+            route = model.nearSignerRoute(browserChosen: browserChosen)
             flow = await model.nativeWalletFlow(action: "open", flowID: "", commons: "", account: "")
             if closed { await cancel() }
         }
@@ -75,8 +103,21 @@ struct NearAccountConnectView: View {
         guard let flow else { return }
         pending = true
         transportFailed = false
+        signerRefused = false
         Task {
             defer { pending = false }
+            if action == "native_signer" {
+                if await model.runNearSigner(flowID: flow.flowID) != nil { signerRefused = true; return }
+                guard let next = await model.nativeWalletFlow(action: "wait", flowID: flow.flowID, commons: "", account: "") else { transportFailed = true; return }
+                self.flow = next
+                if closed { await cancel(); return }
+                while !closed, self.flow?.wait == true {
+                    guard let next = await model.nativeWalletFlow(action: "wait", flowID: flow.flowID, commons: "", account: "") else { transportFailed = true; return }
+                    self.flow = next
+                }
+                if !closed, self.flow?.state == "Complete" { account = ""; onEnrolled() }
+                return
+            }
             guard let result = await model.nativeWalletFlow(action: action, flowID: flow.flowID, commons: commons, account: account) else { transportFailed = true; return }
             self.flow = result
             if closed { await cancel(); return }
