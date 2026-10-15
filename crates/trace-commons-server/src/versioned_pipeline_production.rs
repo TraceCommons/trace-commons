@@ -709,6 +709,11 @@ pub struct ProductionPipelineInputs {
     pub unqualified_routing_allowed: bool,
     pub main_gate: MainGateConfig,
     pub components: Arc<PipelineGateComponents>,
+    /// The Score policy factories the service can bind
+    /// (`PipelineServiceBuilder::with_score_policies`): what the ingest
+    /// library entry was started with (`trace_commons_server::ingest`),
+    /// empty in the open build.
+    pub score_policies: crate::versioned_pipeline_score_registry::ScorePolicyRegistry,
 }
 
 /// The production pipeline assembly (spec A-D10): the compatibility bundle
@@ -765,7 +770,8 @@ pub fn production_pipeline_builder(
     .with_object_store_name(inputs.object_store_name)
     .with_lease_config(inputs.lease_config)
     .with_novelty_utility_checks(inputs.novelty_utility_checks)
-    .with_unqualified_routing(inputs.unqualified_routing_allowed);
+    .with_unqualified_routing(inputs.unqualified_routing_allowed)
+    .with_score_policies(inputs.score_policies);
     if let Some(privacy) = components.privacy.clone() {
         builder = builder.with_privacy(privacy);
     }

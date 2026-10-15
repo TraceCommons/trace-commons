@@ -3059,6 +3059,7 @@ fn production_harness_service_for(
             unqualified_routing_allowed: false,
             main_gate: pins.main_gate,
             components,
+            score_policies: Default::default(),
         },
     )?))
 }
@@ -3218,6 +3219,7 @@ async fn production_assembly_is_constructible_from_the_library() {
             novelty_utility_microcredits: 2_500_000,
         },
         components,
+        score_policies: Default::default(),
     })
     .expect("the production assembly builds over doubles");
     let candidate = service.default_package().clone();

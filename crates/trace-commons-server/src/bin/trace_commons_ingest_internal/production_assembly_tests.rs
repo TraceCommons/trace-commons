@@ -805,6 +805,7 @@ struct Boot {
     near_payout_controls: PipelineNearPayoutControls,
     main_gate: trace_commons_server::versioned_pipeline_compat::MainGateConfig,
     components: Option<Arc<PipelineGateComponents>>,
+    score_policies: ScorePolicyRegistry,
 }
 
 impl Boot {
@@ -820,6 +821,7 @@ impl Boot {
             },
             main_gate: MAIN_GATE,
             components: Some(test_components(classifying_privacy())),
+            score_policies: ScorePolicyRegistry::new(),
         }
     }
 
@@ -855,6 +857,7 @@ impl Boot {
             &issuer_checks(),
             self.main_gate,
             self.components,
+            self.score_policies,
         )
         .map(|service| service.expect("an assembler was given"))
     }
@@ -919,6 +922,105 @@ async fn production_assembler_passes_every_startup_refusal() {
     );
     assert_eq!(config.projection_id, PRODUCTION_COMPATIBILITY_PROJECTION_ID);
     assert_eq!(config.index_id, PRODUCTION_COMPATIBILITY_INDEX_ID);
+}
+
+/// A Score policy factory registered only to be found again on the
+/// assembled service: unqualified, and never built (no bundle here names
+/// its implementation id).
+struct RegisteredOnlyScorePolicy;
+
+impl trace_commons_server::versioned_pipeline_score_registry::ScorePolicyFactory
+    for RegisteredOnlyScorePolicy
+{
+    fn dependency_identity(&self) -> &str {
+        "registered_only_test_score_policy"
+    }
+
+    fn trace_credit_event(
+        &self,
+    ) -> trace_commons_server::versioned_pipeline_bundle::PipelineTraceCreditEvent {
+        trace_commons_server::versioned_pipeline_bundle::PipelineTraceCreditEvent::PipelineScore
+    }
+
+    fn build(
+        &self,
+        _dependencies: trace_commons_server::versioned_pipeline_score_registry::ScorePolicyDependencies<'_>,
+    ) -> Result<Arc<dyn trace_commons_gate_api::pipeline::ScorePolicy>, &'static str> {
+        Err("registered_only_test_score_policy_not_built")
+    }
+}
+
+/// The library entry's Score policy registry
+/// (`trace_commons_server::ingest::IngestOptions::with_score_policies`)
+/// reaches the service the production assembler builds through ingest's
+/// runtime seam, and the open build's empty registry leaves it empty.
+#[tokio::test]
+async fn production_assembler_binds_the_score_policies_ingest_was_started_with() {
+    let options = crate::ingest::IngestOptions::open_build().with_score_policies(
+        ScorePolicyRegistry::new()
+            .with_factory(
+                "test.registered_only.score.v1",
+                Arc::new(RegisteredOnlyScorePolicy),
+            )
+            .unwrap(),
+    );
+    let service = Boot {
+        score_policies: options.score_policies().clone(),
+        ..Boot::test_opt_in()
+    }
+    .assemble(&ProductionPipelineAssembler)
+    .await
+    .expect("the production assembly over doubles starts with the test opt-in");
+    let registered = service
+        .score_policies()
+        .get("test.registered_only.score.v1")
+        .expect("the registered factory reaches the assembled service");
+    assert_eq!(
+        registered.dependency_identity(),
+        "registered_only_test_score_policy"
+    );
+
+    let open = Boot {
+        score_policies: crate::ingest::IngestOptions::open_build()
+            .score_policies()
+            .clone(),
+        ..Boot::test_opt_in()
+    }
+    .assemble(&ProductionPipelineAssembler)
+    .await
+    .expect("the open build's production assembly starts with the test opt-in");
+    assert!(open.score_policies().is_empty());
+}
+
+/// The qualification store qualifies what the pipeline service can bind: the
+/// registry the assembled service holds, or, with no pipeline runtime, the
+/// one ingest was started with.
+#[tokio::test]
+async fn qualification_store_registry_follows_the_service_or_the_options() {
+    let registry = || {
+        ScorePolicyRegistry::new()
+            .with_factory(
+                "test.registered_only.score.v1",
+                Arc::new(RegisteredOnlyScorePolicy),
+            )
+            .unwrap()
+    };
+    let service = Boot {
+        score_policies: registry(),
+        ..Boot::test_opt_in()
+    }
+    .assemble(&ProductionPipelineAssembler)
+    .await
+    .expect("the production assembly over doubles starts with the test opt-in");
+
+    // A service wins over the options.
+    let from_service = qualification_score_policies(Some(&service), &ScorePolicyRegistry::new());
+    assert!(from_service.get("test.registered_only.score.v1").is_some());
+
+    // No pipeline runtime: the options' registry is what is qualified.
+    let from_options = qualification_score_policies(None, &registry());
+    assert!(from_options.get("test.registered_only.score.v1").is_some());
+    assert!(qualification_score_policies(None, &ScorePolicyRegistry::new()).is_empty());
 }
 
 /// An assembly that binds floors other than `main`'s: the production
@@ -1109,6 +1211,7 @@ async fn default_build_serves_no_pipeline() {
             &issuer_checks(),
             MAIN_GATE,
             None,
+            ScorePolicyRegistry::new(),
         )
         .unwrap()
         .is_none()
@@ -1562,7 +1665,7 @@ async fn a_boot_refused_after_assembly_writes_no_result() {
     .await
     .unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut state = (*crate::tests::test_state(root.path().to_path_buf())).clone();
+    let mut state = (*crate::ingest::app::tests::test_state(root.path().to_path_buf())).clone();
     state.pipeline_service = Some(service);
     let state = Arc::new(state);
     let dir = tempfile::tempdir().unwrap();
@@ -1571,7 +1674,7 @@ async fn a_boot_refused_after_assembly_writes_no_result() {
         let components = components.clone();
         let vars = emit_vars(dir.path(), &revision());
         async move {
-            crate::finish_ingest_startup(
+            crate::ingest::app::finish_ingest_startup(
                 &state,
                 Some(components.as_ref()),
                 &bind,
@@ -1758,12 +1861,13 @@ fn a_receipt_without_authority_is_a_labelled_503() {
         trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_READ_FAILED_LABEL,
         PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
     ] {
-        let (status, body) = crate::pipeline_receipt_error(anyhow::anyhow!(label));
+        let (status, body) = crate::ingest::app::pipeline_receipt_error(anyhow::anyhow!(label));
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.0.error, label);
     }
-    let (status, _) =
-        crate::pipeline_receipt_error(anyhow::anyhow!("context: authority_control_missing"));
+    let (status, _) = crate::ingest::app::pipeline_receipt_error(anyhow::anyhow!(
+        "context: authority_control_missing"
+    ));
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 

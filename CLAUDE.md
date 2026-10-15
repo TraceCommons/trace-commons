@@ -75,9 +75,10 @@ cargo test -p trace-commons-server --test trace_corpus_storage_contract
 cargo test -p trace-commons-server --test trace_corpus_pg_store   # requires PostgreSQL
 ```
 
-The `trace-commons-ingest` bin's PostgreSQL tests self-skip without
-`TRACE_COMMONS_PG_TEST_DATABASE_URL`, and the `postgres-suites` job runs only
-named slices of them. To run the whole bin locally, use a fresh
+The ingest service's PostgreSQL tests (`ingest::app::`, in the library)
+self-skip without `TRACE_COMMONS_PG_TEST_DATABASE_URL`, and the
+`postgres-suites` job runs only named slices of them. To run all of them
+locally, use a fresh
 `admission_test_*` database on the literal host `127.0.0.1`, set the
 login-resolver URL (a LOGIN role that is a member of `trace_login_resolver`,
 see `docs/operator/login-resolver-role.md`), and run single-threaded, because
@@ -87,7 +88,7 @@ the tests share the `tenant-a` fixture tenant:
 createdb -h 127.0.0.1 admission_test_ingest_local
 TRACE_COMMONS_PG_TEST_DATABASE_URL=postgres://$USER@127.0.0.1:5432/admission_test_ingest_local \
 TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL=postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_ingest_local \
-cargo test -p trace-commons-server --bin trace-commons-ingest -- --test-threads=1
+cargo test -p trace-commons-server --lib ingest::app:: -- --test-threads=1
 ```
 
 Without the resolver URL, about 74 account, passkey and login tests fail with
@@ -316,8 +317,18 @@ review checks.
 - Drills (`/v1/admin/*-drill`) produce hash-only evidence and feed rollout-smoke
   required checks. When you add a drill, wire it into the smoke evidence path.
 - `crates/trace-commons-server/src/bin/trace-commons-ingest.rs` is tens of
-  thousands of lines of production code. Its test module, larger still, lives
-  in a sibling file via `#[cfg(test)] #[path =
+  thousands of lines of production code. Despite its path it is a library
+  module, `trace_commons_server::ingest::app`, declared by `#[path]` in
+  `src/ingest.rs`; the `trace-commons-ingest` binary is the thin
+  `src/bin/trace_commons_ingest_main.rs` over `trace_commons_server::ingest::run`,
+  so a build that registers its own Score policies can start the same service
+  (`IngestOptions::with_score_policies`). Its unit tests therefore run under
+  `--lib` with names prefixed `ingest::app::` (`cargo test -p
+  trace-commons-server --lib ingest::app::`); `--bin trace-commons-ingest`
+  runs none. Inside it and its `trace_commons_ingest_internal/` modules,
+  `crate::` is the library root, so a reference to the service's own items
+  is `crate::ingest::app::...` or `super::`. Its test module, larger still,
+  lives in a sibling file via `#[cfg(test)] #[path =
   "trace_commons_ingest_internal/tests.rs"] mod tests;`. Reuse this pattern if other binaries need the same split; do not
   inline the tests back.
 - Pilot-bootstrap loads JSONL session files. Parquet + arrow deps were
@@ -334,7 +345,9 @@ review checks.
 - Pilot-bootstrap loader streams JSONL session files; parquet support was
   removed. See `crates/trace-commons-server/src/bin/pilot_bootstrap/hf_dataset.rs`.
 - `trace-commons-ingest.rs` test module is extracted to
-  `trace_commons_ingest_internal/tests.rs` via `#[path = ...]`.
+  `trace_commons_ingest_internal/tests.rs` via `#[path = ...]`. The file is
+  compiled into the library (`ingest::app`), so its tests run under `--lib`;
+  a `--bin trace-commons-ingest <filter>` test run matches nothing and passes.
 - `cargo test -p <crate>` compiles none of a module behind a non-default
   feature, then reports a green run of the tests it did build. Measured on
   `main`: `-p trace-commons-attestation` runs 35 tests, `--features receipt`
