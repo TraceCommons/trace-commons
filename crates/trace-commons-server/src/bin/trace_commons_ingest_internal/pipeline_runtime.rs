@@ -1713,21 +1713,21 @@ async fn append_pipeline_review_audit_item(
         )
         .await?;
     }
-    if item.settle_held_for_operator {
+    if let Some(held_at) = item.settle_held_for_operator_at {
         // #1313: a paid run whose Settle commit was refused for good is
         // held for an operator (`awaiting_operator`) rather than failed.
-        // Label-only, like the other hold events.
+        // Label-only, like the other hold events. The submission stays
+        // `accepted` (its Review approved it and its leg paid), so the event
+        // records that status, with the hold as its reason; it is not a
+        // status change. One event per hold: its id is derived from the run
+        // and the hold's time.
         append_pipeline_lifecycle_audit_event(
             state,
             db,
             tenant_id,
             item.submission_id,
-            deterministic_trace_uuid_for(
-                "pipeline-settle-held-for-operator-audit",
-                tenant_id,
-                item.run_id,
-            ),
-            TraceCorpusStatus::Quarantined,
+            pipeline_settle_hold_audit_event_id(tenant_id, item.run_id, held_at),
+            TraceCorpusStatus::Accepted,
             trace_commons_server::versioned_pipeline::PIPELINE_SETTLE_HELD_FOR_OPERATOR_LABEL,
             "pipeline settle operator hold audit event",
         )
@@ -1792,6 +1792,22 @@ async fn append_pipeline_review_audit_item(
 /// `submission_id`, with `status` and `reason_label`, when the database has no
 /// row of that id.
 #[allow(clippy::too_many_arguments)]
+/// The id of the audit event for the hold of `run_id` at `held_at` (V128
+/// `operator_held_at`): one per hold, so a run held again after a release
+/// gets a second event, and a repeated pass appends none.
+pub(crate) fn pipeline_settle_hold_audit_event_id(
+    tenant_id: &str,
+    run_id: Uuid,
+    held_at: chrono::DateTime<chrono::Utc>,
+) -> Uuid {
+    deterministic_trace_uuid_for_external_ref(
+        "pipeline-settle-held-for-operator-audit",
+        tenant_id,
+        run_id,
+        &held_at.timestamp_micros().to_string(),
+    )
+}
+
 async fn append_pipeline_lifecycle_audit_event(
     state: &AppState,
     db: &dyn Database,

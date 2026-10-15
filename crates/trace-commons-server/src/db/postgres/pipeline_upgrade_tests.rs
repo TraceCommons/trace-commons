@@ -181,6 +181,8 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
             "submission_rejected_at",
             // V128 (#1313): a finishable Settle run's one extra attempt
             "settle_finish_granted_at",
+            // V128 (#1313): the last time the run was held for an operator
+            "operator_held_at",
         ],
     ),
     ("phase_outcomes", "SELECT", &[]),
@@ -481,6 +483,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         ("pipeline_runs", "review_audit_pending_at"),
         ("pipeline_runs", "submission_rejected_at"),
         ("pipeline_runs", "settle_finish_granted_at"),
+        ("pipeline_runs", "operator_held_at"),
         ("pipeline_run_settlements", "payout_eligible"),
         ("pipeline_run_settlements", "credit_audited_at"),
         ("pipeline_index_invalidations", "next_attempt_at"),

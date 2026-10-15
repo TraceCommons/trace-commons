@@ -16724,13 +16724,15 @@ async fn without_the_accept_medium_setting_a_found_and_removed_upload_is_quarant
     assert_eq!(upload.row_status, "quarantined");
 }
 
-/// #1313: a run held for an operator (`awaiting_operator`, with the review
+/// #1313: a run held for an operator (`operator_held_at`, with the review
 /// audit marker its hold sets) gets one label-only `lifecycle_status_change`
-/// event from the review audit pass: status `quarantined`, reason
-/// `pipeline_settle_held_for_operator`, its id derived from the run. A second
-/// pass adds none. The hold itself (`mark_failed` on a paid run whose Settle
-/// commit was refused) is driven in `versioned_pipeline_runtime_pg`; here the
-/// state and marker are set directly, as the owner, to test the audit pass.
+/// event from the review audit pass: status `accepted`, which the submission
+/// keeps, reason `pipeline_settle_held_for_operator`, its id derived from the
+/// run and the hold's time. The event is appended even though an operator
+/// failed the run before the pass ran, and a second pass adds none. The hold
+/// itself (`mark_failed` on a paid run whose Settle commit was refused) is
+/// driven in `versioned_pipeline_runtime_pg`; here the columns are set
+/// directly, as the owner, to test the audit pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_review_audit_pass_records_a_run_held_for_an_operator() {
     let Some(fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
@@ -16761,30 +16763,39 @@ async fn the_review_audit_pass_records_a_run_held_for_an_operator() {
         envelope.submission_id,
     )
     .await;
-    {
+    let held_at: chrono::DateTime<chrono::Utc> = {
         let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
         let tx = tenant_tx(&mut client, &tenant).await;
+        let row = tx
+            .query_one(
+                "UPDATE pipeline_runs
+                    SET state = 'awaiting_operator',
+                        last_error_label = 'pipeline_gate_decision_conflict',
+                        operator_held_at = clock_timestamp(),
+                        review_audit_pending_at = clock_timestamp()
+                  WHERE tenant_id = $1 AND run_id = $2
+                  RETURNING operator_held_at",
+                &[&tenant, &created.run_id],
+            )
+            .await
+            .unwrap();
+        // The operator fails the run before the audit pass runs.
         tx.execute(
             "UPDATE pipeline_runs
-                SET state = 'awaiting_operator',
-                    last_error_label = 'pipeline_gate_decision_conflict',
-                    review_audit_pending_at = clock_timestamp()
+                SET state = 'failed', last_error_label = 'operator_failed_held_run'
               WHERE tenant_id = $1 AND run_id = $2",
             &[&tenant, &created.run_id],
         )
         .await
         .unwrap();
         tx.commit().await.unwrap();
-    }
+        row.get(0)
+    };
 
     run_review_audit_pass(&fixture)
         .await
         .expect("the pass runs");
-    let held_id = deterministic_trace_uuid_for(
-        "pipeline-settle-held-for-operator-audit",
-        &tenant,
-        created.run_id,
-    );
+    let held_id = pipeline_settle_hold_audit_event_id(&tenant, created.run_id, held_at);
     let events =
         audit_file_events_of_kind(&fixture, envelope.submission_id, "lifecycle_status_change");
     let held = events
@@ -16792,7 +16803,7 @@ async fn the_review_audit_pass_records_a_run_held_for_an_operator() {
         .filter(|event| event.event_id == held_id)
         .collect::<Vec<_>>();
     assert_eq!(held.len(), 1, "{events:?}");
-    assert_eq!(held[0].status, Some(TraceCorpusStatus::Quarantined));
+    assert_eq!(held[0].status, Some(TraceCorpusStatus::Accepted));
     assert_eq!(
         held[0].reason.as_deref(),
         Some(trace_commons_server::versioned_pipeline::PIPELINE_SETTLE_HELD_FOR_OPERATOR_LABEL)

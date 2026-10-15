@@ -50523,7 +50523,7 @@ async fn a_paid_run_whose_settle_commit_is_refused_waits_for_an_operator() {
         .iter()
         .find(|item| item.run_id == run_id)
         .expect("the hold is marked for its audit event");
-    assert!(audit.settle_held_for_operator, "{audit:?}");
+    assert!(audit.settle_held_for_operator_at.is_some(), "{audit:?}");
 
     let summary = PipelineProductStore::new(backend.clone())
         .operational_summary(&tenant)
@@ -50717,4 +50717,284 @@ async fn a_near_duplicate_score_records_the_unapplied_run_it_counted() {
         "a novel Score records no basis"
     );
     assert_eq!(count_tenant_rows(&tenant, "pipeline_score_bases").await, 1);
+}
+
+/// Drives a compatibility run through Review and Score, writes another run's
+/// pipeline gate decision row for its submission, and runs Settle: the Trace
+/// Credit leg pays, the commit is refused (`pipeline_gate_decision_conflict`)
+/// and the run is held for an operator. Returns the service, the index, the
+/// run id and the conflicting row's decision id.
+async fn hold_a_paid_run_for_an_operator(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    tenant: &str,
+) -> (
+    Arc<PipelineService>,
+    Arc<IsolatedPipelineIndex>,
+    uuid::Uuid,
+    uuid::Uuid,
+) {
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let run_id = receive_envelope(&service, tenant, "principal_sha256:operator-hold", &env).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(tenant, run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    let other_run = uuid::Uuid::new_v4();
+    let decision_id = expected_pipeline_decision_id(tenant, other_run);
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, tenant).await;
+        tx.execute(
+            "INSERT INTO trace_gate_decisions (
+                 tenant_id, decision_id, submission_id, gate_policy_version,
+                 gate_version_hash, perplexity_micros, tail_fraction_micros,
+                 perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                 novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+                 source, pipeline_run_id
+             ) VALUES ($1,$2,$3,'v','h',1,0,true,1,'n',true,'e','a','pipeline_settle',$4)",
+            &[&tenant, &decision_id, &env.submission_id, &other_run],
+        )
+        .await
+        .expect("another run's pipeline row");
+        tx.commit().await.unwrap();
+    }
+    let held = service
+        .process_run(tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(held.state, PipelineRunState::AwaitingOperator, "{held:?}");
+    (service, index, run_id, decision_id)
+}
+
+/// Whether the run's V128 `operator_held_at` is set.
+async fn operator_held_at(
+    backend: &Arc<PgBackend>,
+    tenant: &str,
+    run_id: uuid::Uuid,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT operator_held_at FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &run_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    row.get(0)
+}
+
+/// #1413 review: a released run whose attempt crashes is held for the
+/// operator again when the claim sweep finds its lease expired. It is not
+/// failed, so N-7 leaves its paid revision in the index, and the new hold is
+/// marked for its own audit event.
+#[tokio::test]
+async fn a_released_run_whose_attempt_crashes_is_held_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("release-crash-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (service, index, run_id, _) =
+        hold_a_paid_run_for_an_operator(&backend, &dir, &tenant).await;
+    let first_hold = operator_held_at(&backend, &tenant, run_id)
+        .await
+        .expect("the hold is recorded");
+    service
+        .store()
+        .resolve_operator_held_run(&tenant, run_id, PipelineOperatorHeldRunResolution::Release)
+        .await
+        .unwrap()
+        .expect("the held run resolves");
+    let claimed = service
+        .store()
+        .claim_run(&tenant, run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the released attempt is claimable");
+    assert_eq!(claimed.attempt_count, claimed.max_attempts);
+    // The worker dies here: the lease runs out with no outcome recorded.
+    expire_lease(&backend, &tenant, run_id).await;
+
+    assert!(
+        service.process_one(&tenant).await.unwrap().is_none(),
+        "the sweep holds the run; no claim selects it"
+    );
+    let swept = service
+        .store()
+        .get_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(swept.state, PipelineRunState::AwaitingOperator, "{swept:?}");
+    assert_eq!(
+        swept.last_error_label.as_deref(),
+        Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+    );
+    let (invalidations, _) = invalidations_and_finish_grant(&backend, &tenant, run_id).await;
+    assert_eq!(invalidations, 0, "the paid revision stays in the index");
+    assert_eq!(index.revision_count(&tenant_ref, MINIMAL_INDEX_ID), 1);
+    let second_hold = operator_held_at(&backend, &tenant, run_id)
+        .await
+        .expect("the new hold is recorded");
+    assert!(second_hold > first_hold, "{second_hold} > {first_hold}");
+    let audits = service
+        .store()
+        .list_pending_review_audits(&tenant, 10)
+        .await
+        .unwrap();
+    let audit = audits
+        .iter()
+        .find(|item| item.run_id == run_id)
+        .expect("the new hold is marked for its audit event");
+    assert_eq!(audit.settle_held_for_operator_at, Some(second_hold));
+}
+
+/// #1413 review: a released run whose attempt ends in a charged retry is
+/// held for the operator again rather than failed under N-7.
+#[tokio::test]
+async fn a_released_run_charged_on_its_attempt_is_held_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("release-retry-{}", uuid::Uuid::new_v4());
+    let (service, _, run_id, _) = hold_a_paid_run_for_an_operator(&backend, &dir, &tenant).await;
+    service
+        .store()
+        .resolve_operator_held_run(&tenant, run_id, PipelineOperatorHeldRunResolution::Release)
+        .await
+        .unwrap()
+        .expect("the held run resolves");
+    let claimed = service
+        .store()
+        .claim_run(&tenant, run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the released attempt is claimable");
+    let retried = service
+        .store()
+        .mark_retry(&claimed, PIPELINE_OPERATIONAL_ERROR_LABEL)
+        .await
+        .expect("the charged retry records");
+    assert_eq!(
+        retried.state,
+        PipelineRunState::AwaitingOperator,
+        "{retried:?}"
+    );
+    let (invalidations, _) = invalidations_and_finish_grant(&backend, &tenant, run_id).await;
+    assert_eq!(invalidations, 0, "the paid revision stays in the index");
+}
+
+/// #1413 review: the hold also covers a paid run whose commit is refused as
+/// `pipeline_gate_decision_evidence_incomplete`, not only as a conflict.
+#[tokio::test]
+async fn a_paid_run_refused_for_incomplete_evidence_waits_for_an_operator() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("held-incomplete-{}", uuid::Uuid::new_v4());
+    let (service, _, _, leased) =
+        crash_after_the_paid_leg_on_the_last_attempt(&backend, &dir, &tenant).await;
+    service
+        .store()
+        .mark_failed(&leased, PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL)
+        .await
+        .expect("the refusal records");
+    let held = service
+        .store()
+        .get_run(&tenant, leased.run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(held.state, PipelineRunState::AwaitingOperator, "{held:?}");
+    assert!(
+        operator_held_at(&backend, &tenant, leased.run_id)
+            .await
+            .is_some()
+    );
+    let (invalidations, _) = invalidations_and_finish_grant(&backend, &tenant, leased.run_id).await;
+    assert_eq!(invalidations, 0);
+}
+
+/// #1413 review: a leg paid through an adapter other than Trace Credit (a
+/// receipt, with no ledger event and, here, no external receipt hash) counts
+/// as paid for the hold.
+#[tokio::test]
+async fn a_run_paid_by_another_adapter_waits_for_an_operator() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("held-external-{}", uuid::Uuid::new_v4());
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        PipelineBundleConfig {
+            instrument_awards: vec![PipelineInstrumentAwardConfig {
+                instrument_id: "storage_rebate".into(),
+                atomic_units: AtomicUnits::from_raw(7),
+                descriptor: storage_rebate_descriptor(),
+            }],
+            include_index: true,
+            variant: None,
+        },
+        Some(PipelineCrashPoint::AfterInstrumentOperation),
+    )
+    .await;
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let crashed = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .expect_err("Settle crashes after the external leg");
+    assert_eq!(crashed.to_string(), INJECTED_PIPELINE_CRASH);
+    let leased = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    let legs = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert!(
+        !legs.is_empty()
+            && legs.iter().all(|leg| leg.operation_state == "complete"
+                && leg.credit_event_id.is_none()
+                && leg.result_ref_hash.is_some()),
+        "the leg paid with a receipt before the crash: {legs:?}"
+    );
+    service
+        .store()
+        .mark_failed(&leased, PIPELINE_GATE_DECISION_CONFLICT_LABEL)
+        .await
+        .expect("the refusal records");
+    let held = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(held.state, PipelineRunState::AwaitingOperator, "{held:?}");
 }

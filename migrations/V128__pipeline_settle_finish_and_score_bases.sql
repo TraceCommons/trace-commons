@@ -25,6 +25,17 @@ ALTER TABLE pipeline_runs
 
 GRANT UPDATE (settle_finish_granted_at) ON pipeline_runs TO trace_ingest_runtime;
 
+-- The time the run was last held for an operator. Set by every hold, never
+-- cleared: the review audit pass reads it, not the run's current state, so a
+-- hold's audit event is appended even after an operator has ended the hold,
+-- and each hold gets its own event. A run that has been held is one an
+-- operator chose to keep: an automatic path that would fail it after a
+-- release (a crash, a charged retry) holds it again instead.
+ALTER TABLE pipeline_runs
+    ADD COLUMN IF NOT EXISTS operator_held_at TIMESTAMPTZ;
+
+GRANT UPDATE (operator_held_at) ON pipeline_runs TO trace_ingest_runtime;
+
 -- The unapplied index commands of other runs that a compatibility Score
 -- counted (`unapplied_index_commands_on_tx`), written by the Score commit on
 -- the transaction that holds the tenant's Score lock. Only a Score that
