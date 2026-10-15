@@ -97,7 +97,7 @@ another in Settings." until another is chosen.
 
 | Platform | Terminal | id | How the command and folder reach it | Evidence |
 | --- | --- | --- | --- | --- |
-| macOS | Terminal | `terminal` | AppleScript `do script` | unchanged from before the choice |
+| macOS | Terminal | `terminal` | AppleScript `do script`, addressed by bundle id `com.apple.Terminal` | the launch shipped before the choice |
 | macOS | Ghostty | `ghostty` | AppleScript `new surface configuration`, `command`, `wait after command` | Ghostty AppleScript dictionary |
 | macOS | iTerm2 | `iterm2` | AppleScript `create window with default profile command` | iTerm2 AppleScript dictionary |
 | Windows | Windows Terminal | `windows_terminal` | `wt.exe new-tab --title "NEAR AI" -d <folder> <helper> <args>` | `new-tab --startingDirectory, -d` and `commandline` ("Executable with optional arguments"), <https://learn.microsoft.com/en-us/windows/terminal/command-line-arguments> |
