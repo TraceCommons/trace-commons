@@ -47,6 +47,18 @@ public struct ManagedTerminalChoice: Decodable, Equatable, Identifiable, Sendabl
     }
 }
 
+public struct ManagedToolAvailability: Decodable, Equatable, Identifiable, Sendable {
+    public let tool: String
+    public let installed: Bool
+    public let installURL: String
+    public var id: String { tool }
+    public var url: URL? {
+        guard let url = URL(string: installURL), url.scheme == "https" else { return nil }
+        return url
+    }
+    enum CodingKeys: String, CodingKey { case tool, installed; case installURL = "install_url" }
+}
+
 public struct ManagedSnapshot: Decodable, Equatable, Sendable {
     public struct Capabilities: Decodable, Equatable, Sendable {
         public let managedLaunch: Bool
@@ -67,6 +79,7 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
             case terminalCurrent = "terminal_current", terminalChoices = "terminal_choices"
         }
     }
+    public let tools: [ManagedToolAvailability]?
     public let copy: [String: String]?
     public let revision: UInt64
     public let accounts: [ManagedAccount]
@@ -78,7 +91,7 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
     public let sessions: [ManagedSession]
     public let capabilities: Capabilities
     enum CodingKeys: String, CodingKey {
-        case copy, revision, accounts, defaults, generations, sessions, capabilities
+        case tools, copy, revision, accounts, defaults, generations, sessions, capabilities
         case signInAccounts = "sign_in_accounts"
     }
 }
@@ -87,6 +100,22 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
 /// draws a raw wire value or a daemon error code. Every word is in the
 /// shared table (`managed/copy.rs`); this only picks the key.
 public enum ManagedSurface {
+    public static func visibleHarnesses(_ rows: [HarnessRow], tools: [ManagedToolAvailability]?) -> [HarnessRow] {
+        rows.filter { row in
+            // Saved routing and previous activity remain manageable after uninstall.
+            if row.connected || row.lastCallAt != nil { return true }
+            return tools?.first(where: { $0.tool == row.id })?.installed ?? row.installed
+        }
+    }
+
+    /// The managed tools, in the order the Add and Launch sheets offer them.
+    /// OpenCode is one since #1417.
+    public static let supportedTools = ["claude", "codex", "opencode"]
+    public static func setupTools(_ tools: [ManagedToolAvailability]?) -> [String] {
+        guard let tools else { return supportedTools }
+        return supportedTools.filter { tool in tools.first(where: { $0.tool == tool })?.installed == true }
+    }
+
     /// The lifecycle values the daemon sends today.
     public static let sessionStates: Set<String> = ["starting", "running", "exited", "failed", "unknown"]
     /// The sign-in values the daemon sends today.
@@ -128,6 +157,12 @@ public enum ManagedSurface {
         template.replacingOccurrences(of: "{destination}", with: destination ?? fallback)
     }
 
+    /// `tool_unavailable` ("{tool} wasn't found on this computer.") with the
+    /// tool's display name filled in.
+    public static func toolUnavailable(_ tool: String, copy: (String) -> String) -> String {
+        copy("tool_unavailable").replacingOccurrences(of: "{tool}", with: copy(toolKey(tool) ?? tool))
+    }
+
     /// The tool's name key, or nil for a tool this shell does not know.
     public static func toolKey(_ tool: String) -> String? {
         ["claude", "codex", "opencode"].contains(tool) ? tool : nil
@@ -135,7 +170,8 @@ public enum ManagedSurface {
 
     /// A failed action is said in the shared copy, never as the daemon's
     /// code: a launch whose outcome is unknown asks for a refresh, anything
-    /// else is the general failure.
+    /// else is the general failure. A missing tool is said on its account
+    /// row after the refresh that follows, where the tool can be named.
     public static func errorKey(code: String?, message: String?) -> String {
         let launchUnknown = ["launch-unknown", "managed-launch-unknown"]
         if launchUnknown.contains(code ?? "") || launchUnknown.contains(message ?? "") { return "launch_unknown" }
@@ -157,6 +193,17 @@ public enum ManagedSurface {
 }
 
 public extension ManagedSnapshot {
+    var setupTools: [String] { ManagedSurface.setupTools(tools) }
+    var needsToolInstallation: Bool {
+        guard let tools else { return false }
+        return !tools.contains { ManagedSurface.supportedTools.contains($0.tool) && $0.installed }
+    }
+    func canLaunch(tool: String) -> Bool {
+        guard ManagedSurface.supportedTools.contains(tool) else { return false }
+        guard let tools else { return true }
+        return tools.first { $0.tool == tool }?.installed == true
+    }
+
     /// A running, starting or unknown session holds its account: no sign-in,
     /// key change or removal while it does.
     func isHeld(_ account: ManagedAccount) -> Bool {
@@ -183,7 +230,7 @@ public extension ManagedSnapshot {
     /// The `managed_launch_prepare` request that starts `tool` on the NEAR
     /// AI sign-in in `cwd`; nil without a sign-in entry for it.
     func signInLaunchParams(tool: String, cwd: String, requestID: String) -> [String: Any]? {
-        guard let entry = signInEntry(tool) else { return nil }
+        guard canLaunch(tool: tool), let entry = signInEntry(tool) else { return nil }
         return [
             "request_id": requestID, "purpose": "coding", "tool": entry.tool,
             "connection": entry.connection, "account_id": entry.id, "cwd": cwd,

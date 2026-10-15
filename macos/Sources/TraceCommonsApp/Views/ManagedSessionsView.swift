@@ -82,7 +82,7 @@ struct ManagedSessionsSection: View {
     private func signInActions(_ snapshot: ManagedSnapshot) -> some View {
         if snapshot.nearAiSignedIn {
             if snapshot.capabilities.terminalLaunch {
-                let buttons = ForEach(ManagedSurface.signInTools.filter { snapshot.signInEntry($0) != nil }, id: \.self) { tool in
+                let buttons = ForEach(ManagedSurface.signInTools.filter { snapshot.signInEntry($0) != nil && snapshot.canLaunch(tool: $0) }, id: \.self) { tool in
                     Button { start(tool) } label: {
                         Text(ManagedSurface.startKey(tool).map(model.managedText) ?? "").lineLimit(1)
                     }
@@ -166,7 +166,7 @@ struct ManagedSessionsSection: View {
     /// list was read, nothing failed, there is a terminal, and no account.
     static func accountsBodyEmpty(_ snapshot: ManagedSnapshot?, failing: Bool) -> Bool {
         guard let snapshot else { return false }
-        return !failing && snapshot.capabilities.terminalDestination != nil && snapshot.accounts.isEmpty
+        return !(snapshot.tools != nil && snapshot.setupTools.isEmpty) && !failing && snapshot.capabilities.terminalDestination != nil && snapshot.accounts.isEmpty
     }
 
     /// Add and Launch once the list is read; Retry until then.
@@ -194,6 +194,9 @@ struct ManagedSessionsSection: View {
             }
             actionFailure
             if let snapshot {
+                if snapshot.needsToolInstallation {
+                    ManagedToolInstallation(tools: snapshot.tools ?? [], copy: model.managedText, retry: model.refreshManagedSessions)
+                }
                 if snapshot.capabilities.terminalDestination == nil {
                     GlassNotice(tone: .ask, title: model.managedText("terminal_unavailable")) { EmptyView() }
                 }
@@ -246,8 +249,8 @@ struct ManagedSessionsSection: View {
         .fixedSize()
         let launchable = Self.offersLaunch(snapshot)
         return ViewThatFits(in: .horizontal) {
-            HStack(spacing: GlassTokens.Space.s3) { add; if launchable { launch } }
-            VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) { add; if launchable { launch } }
+            HStack(spacing: GlassTokens.Space.s3) { if !snapshot.setupTools.isEmpty { add }; if launchable { launch } }
+            VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) { if !snapshot.setupTools.isEmpty { add }; if launchable { launch } }
         }
         .disabled(model.managedBusy)
     }
@@ -270,6 +273,15 @@ struct ManagedSessionsSection: View {
                         .lineLimit(1)
                     if snapshot.isDefault(account) {
                         GlassTag(model.managedText("default"), tone: .accent)
+                    }
+                }
+                if !snapshot.canLaunch(tool: account.tool) {
+                    Text(ManagedSurface.toolUnavailable(account.tool, copy: model.managedText))
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let availability = snapshot.tools?.first(where: { $0.tool == account.tool }) {
+                        ManagedInstallLink(tool: availability, copy: model.managedText)
                     }
                 }
                 Text(meta)
@@ -299,7 +311,9 @@ struct ManagedSessionsSection: View {
                         menuFor = nil
                         DispatchQueue.main.async { renaming = account }
                     }
-                    if account.connection == "subscription" {
+                    // Hidden, not disabled, while the tool is missing (Ron,
+                    // 2026-10-15): the row says so and offers Install.
+                    if account.connection == "subscription" && snapshot.canLaunch(tool: account.tool) {
                         GlassMenuItem(model.managedText("reconnect")) {
                             menuFor = nil
                             model.managedAction("managed_account_reconnect", params: ["account_id": account.id], openTerminal: true)
@@ -388,7 +402,7 @@ extension ManagedSessionsSection {
     /// Whether Launch is offered: a saved account to launch with and a
     /// terminal to launch in.
     static func offersLaunch(_ snapshot: ManagedSnapshot) -> Bool {
-        !snapshot.accounts.isEmpty && snapshot.capabilities.terminalLaunch
+        snapshot.accounts.contains { snapshot.canLaunch(tool: $0.tool) } && snapshot.capabilities.terminalLaunch
     }
 }
 
@@ -471,10 +485,11 @@ struct ManagedAccountSheet: View {
     @State private var label = ""
     @State private var key = ""
 
+    private var availableTools: [String] { model.managedSnapshot?.setupTools ?? ManagedSurface.supportedTools }
     private var subscription: Bool { connection == "subscription" }
 
     private var canSave: Bool {
-        !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        availableTools.contains(tool) && !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && (subscription || !key.isEmpty)
             && (!subscription || model.managedSnapshot?.capabilities.terminalLaunch == true)
     }
@@ -495,7 +510,7 @@ struct ManagedAccountSheet: View {
                     ManagedField(label: model.managedText("tool")) {
                         GlassSelect(
                             model.managedText("tool"), selection: Binding(get: { tool }, set: { tool = $0; if tool == "opencode" && connection == "subscription" { connection = "api_key" } }),
-                            options: ["claude", "codex", "opencode"].map { GlassPickerOption(model.managedText($0), value: $0) })
+                            options: availableTools.map { GlassPickerOption(model.managedText($0), value: $0) })
                     }
                     ManagedField(label: model.managedText("connection")) {
                         GlassSelect(
@@ -513,6 +528,12 @@ struct ManagedAccountSheet: View {
                 }
             }
         }
+        .onAppear { reconcileTool() }
+        .onChange(of: availableTools) { reconcileTool() }
+    }
+
+    private func reconcileTool() {
+        if !availableTools.contains(tool), let first = availableTools.first { tool = first }
     }
 
     private func save() {
@@ -531,6 +552,8 @@ struct ManagedLaunchSheet: View {
     @State private var collectTraces = false
     private var isOpenCode: Bool { model.managedSnapshot?.accounts.first(where: { $0.id == accountID })?.tool == "opencode" }
     @State private var project: URL?
+    private var selectedAccount: ManagedAccount? { model.managedSnapshot?.accounts.first { $0.id == accountID } }
+    private var toolAvailable: Bool { selectedAccount.map { model.managedSnapshot?.canLaunch(tool: $0.tool) == true } ?? false }
 
     init(onClose: @escaping () -> Void, accountID: String = "") {
         self.onClose = onClose
@@ -544,7 +567,7 @@ struct ManagedLaunchSheet: View {
                 .cancel(model.managedText("cancel"), action: onClose),
                 GlassModalAction(
                     model.managedText("launch_short"), isDefault: true,
-                    isEnabled: !accountID.isEmpty && project != nil && (!isOpenCode || !selectedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) && !model.managedBusy, id: "launch", action: launch),
+                    isEnabled: toolAvailable && !accountID.isEmpty && project != nil && (!isOpenCode || !selectedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) && !model.managedBusy, id: "launch", action: launch),
             ],
             busy: model.managedBusy,
             onCancel: onClose
@@ -554,13 +577,22 @@ struct ManagedLaunchSheet: View {
                     GlassPicker(
                         model.managedText("saved_account"),
                         selection: Binding(get: { accountID.isEmpty ? nil : accountID }, set: { accountID = $0 ?? "" }),
-                        options: (model.managedSnapshot?.accounts ?? []).map { account in
+                        options: (model.managedSnapshot?.accounts ?? []).filter { model.managedSnapshot?.canLaunch(tool: $0.tool) == true || $0.id == accountID }.map { account in
                             GlassPickerOption(
                                 [ManagedWords.tool(account.tool, model: model), account.label, model.managedText(account.connection)]
                                     .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "),
                                 value: account.id)
                         },
                         placeholder: model.managedText("choose_account"))
+                }
+                if let account = selectedAccount, !toolAvailable {
+                    ManagedNote(text: ManagedSurface.toolUnavailable(account.tool, copy: model.managedText))
+                    HStack(spacing: GlassTokens.Space.s3) {
+                        if let availability = model.managedSnapshot?.tools?.first(where: { $0.tool == account.tool }) {
+                            ManagedInstallLink(tool: availability, copy: model.managedText)
+                        }
+                        GlassRefreshButton(model.managedText("refresh")) { model.refreshManagedSessions() }
+                    }
                 }
                 if isOpenCode {
                     GlassTextField(model.managedText("model"), text: $selectedModel)
@@ -587,7 +619,7 @@ struct ManagedLaunchSheet: View {
     }
 
     private func launch() {
-        guard !model.managedBusy, let snapshot = model.managedSnapshot, let account = snapshot.accounts.first(where: { $0.id == accountID }), let project else { return }
+        guard toolAvailable, !model.managedBusy, let snapshot = model.managedSnapshot, let account = snapshot.accounts.first(where: { $0.id == accountID }), let project else { return }
         var params: [String: Any] = ["request_id": UUID().uuidString, "purpose": "coding", "tool": account.tool, "connection": account.connection, "account_id": account.id, "cwd": project.path, "expected_generation": snapshot.generations[account.tool] ?? 0, "save_default": false]
         if account.tool == "opencode" {
             params["model"] = selectedModel.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -648,5 +680,50 @@ struct ManagedRemoveSheet: View {
                 },
             ],
             onCancel: onClose)
+    }
+}
+
+/// Installation recovery uses the core's official links and words.
+struct ManagedInstallLink: View {
+    let tool: ManagedToolAvailability
+    let copy: (String) -> String
+    var body: some View {
+        if let url = tool.url {
+            Link(copy("install"), destination: url)
+                .accessibilityLabel(copy("install") + " " + copy(tool.tool))
+                .buttonStyle(GlassButtonStyle(.glass, small: true))
+        }
+    }
+}
+
+/// Shown only while no coding tool is installed: each managed tool with
+/// Install, and one bare refresh glyph beside the heading (Ron, 2026-10-15).
+struct ManagedToolInstallation: View {
+    let tools: [ManagedToolAvailability]
+    let copy: (String) -> String
+    let retry: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            HStack(spacing: GlassTokens.Space.s2) {
+                Text(copy("tools_title"))
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+                GlassRefreshButton(copy("refresh"), action: retry)
+            }
+            Text(copy("tools_empty"))
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(tools.filter { ManagedSurface.supportedTools.contains($0.tool) }) { tool in
+                HStack {
+                    GlassToolTile(.tool(ManagedWords.glassTool(tool.tool)))
+                    Text(copy(tool.tool))
+                        .glassType(GlassTokens.TypeScale.label)
+                        .foregroundStyle(GlassColor.textPrimary)
+                    Spacer()
+                    ManagedInstallLink(tool: tool, copy: copy)
+                }
+            }
+        }
     }
 }

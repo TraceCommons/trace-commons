@@ -1,3 +1,4 @@
+using System.Linq;
 using TraceCommons.Interop;
 using Xunit;
 
@@ -25,6 +26,62 @@ public sealed class ManagedSessionsTests
         Assert.Equal(2UL, snapshot.Generations["codex"]);
         Assert.False(snapshot.NearAiSignedIn);
         Assert.Null(snapshot.SignInLaunchParams("claude", "C:\\p", "r"));
+    }
+
+    [Fact]
+    public void AvailabilityFiltersSetupAndSignInWithoutLosingSavedAccounts()
+    {
+        var snapshot = ManagedSnapshot.Parse(SignedIn)! with {
+            Tools = [new("claude", false, "https://claude.ai/download"), new("codex", true, "https://developers.openai.com/codex/cli/"), new("opencode", true, "https://opencode.ai")],
+            Accounts = [new("saved", "claude", "subscription", "Personal", "ready")]
+        };
+        Assert.Equal(["codex"], snapshot.SetupTools);
+        Assert.Null(snapshot.SignInEntry("claude"));
+        Assert.NotNull(snapshot.SignInEntry("codex"));
+        Assert.False(snapshot.CanLaunch("opencode"));
+        Assert.Single(snapshot.Accounts);
+        // A tool is installed: no install block (Ron, 2026-10-15).
+        Assert.Empty(snapshot.InstallTools);
+        // The missing tool's account: Reconnect hidden, the tool named.
+        Assert.False(snapshot.OffersReconnect(snapshot.Accounts[0]));
+        Assert.True(snapshot.OffersReconnect(snapshot.Accounts[0] with { Tool = "codex" }));
+        Assert.False(snapshot.OffersReconnect(snapshot.Accounts[0] with { Tool = "codex", Connection = "api_key" }));
+        var worded = snapshot with { Copy = new() { ["tool_unavailable"] = "{tool} wasn't found on this computer.", ["claude"] = "Claude Code" } };
+        Assert.Equal("Claude Code wasn't found on this computer.", worded.ToolUnavailable("claude"));
+    }
+
+    [Fact]
+    public void AnInstalledOpenCodeAccountIsNotReportedMissing()
+    {
+        var snapshot = ManagedSnapshot.Parse(SignedIn)! with {
+            Tools = [new("claude", true, "a"), new("codex", false, "b"), new("opencode", true, "c")],
+        };
+        var account = new ManagedAccount("oc", "opencode", "subscription", "Zed", "ready");
+        Assert.False(snapshot.ToolMissing("opencode"));
+        Assert.True(snapshot.ToolMissing("codex"));
+        Assert.False(snapshot.ToolMissing("claude"));
+        Assert.True((snapshot with { Tools = [new("opencode", false, "c")] }).ToolMissing("opencode"));
+        Assert.False(ManagedSnapshot.Parse(SignedIn)!.ToolMissing("opencode"));
+        // Launch and Reconnect stay out for OpenCode on this shell.
+        Assert.False(snapshot.CanLaunch("opencode"));
+        Assert.False(snapshot.OffersReconnect(account));
+    }
+
+    [Fact]
+    public void EmptyInventoryAndOlderSnapshotsHaveDistinctBehavior()
+    {
+        var snapshot = ManagedSnapshot.Parse(SignedIn)!;
+        Assert.Equal(["claude", "codex"], snapshot.SetupTools);
+        Assert.Empty((snapshot with { Tools = [] }).SetupTools);
+        var decoded = ManagedSnapshot.Parse(SignedIn.Replace("\"revision\":1", "\"tools\":[{\"tool\":\"codex\",\"installed\":true,\"install_url\":\"https://example.test\"}],\"revision\":1"))!;
+        Assert.Equal(["codex"], decoded.SetupTools);
+        Assert.Equal("https://example.test", Assert.Single(decoded.Tools!).InstallUrl);
+        var empty = snapshot with { Tools = [new("claude", false, "a"), new("codex", false, "b"), new("opencode", false, "c")] };
+        // Windows stays on Claude Code and Codex until it launches OpenCode.
+        Assert.Equal(["claude", "codex"], empty.InstallTools.Select(t => t.Tool));
+        Assert.Empty(empty.SetupTools);
+        Assert.Empty(snapshot.InstallTools);
+        Assert.Empty((snapshot with { Tools = [new("opencode", true, "c")] }).SetupTools);
     }
 
     private const string SignedIn = """

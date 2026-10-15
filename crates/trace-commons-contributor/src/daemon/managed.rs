@@ -154,7 +154,7 @@ impl ManagedService {
                 let terminal_launch = terminal::launch_available()
                     && (cfg!(target_os = "macos") || !choices.is_empty());
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"revision":self.sessions.revision(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"revision":self.sessions.revision(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
                 )
             }
             "managed_account_add" => {
@@ -570,6 +570,7 @@ fn label(error: ManagedError) -> &'static str {
         ManagedError::NotFound => "managed-not-found",
         ManagedError::AmbiguousAccount => "managed-ambiguous-account",
         ManagedError::StorageUnavailable => "managed-storage-unavailable",
+        ManagedError::ToolUnavailable => "managed-tool-unavailable",
         ManagedError::UnsupportedVersion => "managed-unsupported-version",
         ManagedError::SignInRequired => "managed-sign-in-required",
         ManagedError::NearAiSignInRequired => "managed-near-ai-sign-in-required",
@@ -650,6 +651,10 @@ mod tests {
     fn the_snapshot_derives_sign_in_entries_and_defaults_from_the_sign_in() {
         let (_home, _store, mut service) = service();
         let without = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
+        let tools = without["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[2]["tool"], "opencode");
+        assert_eq!(without["generations"].as_object().unwrap().len(), 3);
         assert_eq!(without["capabilities"]["near_ai_signin"], false);
         assert_eq!(without["sign_in_accounts"], json!([]));
         assert_eq!(without["defaults"], json!([]));

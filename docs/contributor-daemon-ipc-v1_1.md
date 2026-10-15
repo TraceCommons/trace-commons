@@ -621,7 +621,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `near_account_cancel` | `attempt_id` | cancellation state | cancels the matching local attempt |
 | `near_ai_credential_start` | `provider` (optional, default `near`) | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. The browser URL is returned **once** and no poll re-serves it |
 | `near_ai_credential_status` | `attempt_id` (optional) | `state`, plus `attempt_id` and `attempt_status` for a caller that named the current attempt | never errors on a missing or stale `attempt_id`: `state` is a fact about the machine. See "The credential state" below |
-| `near_ai_credential_cancel` | `attempt_id` (**required**) | `attempt_id`, `status` | stops this machine waiting on the browser; `near_ai_credential_unknown` if the id is not the current attempt |
+| `near_ai_credential_cancel` | `attempt_id` (optional) | `attempt_id`, `status` when named; `status` alone when not | stops this machine waiting on the browser; unnamed, it stops whatever sign-in is in flight and never echoes the id; `near_ai_credential_unknown` if a named id is not the current attempt, or if an unnamed cancel finds no sign-in in flight (none ever started, or the last one finished); a named cancel of the finished current attempt answers its terminal status and changes nothing |
 | `near_ai_credential_forget` | — | `removed`, `revoked: false` | removes the key from **this machine only**; `revoked` is always false and is not a placeholder. See "The credential state" below |
 | `near_ai_credential_migrate` | — | `migrated`, `state` | asynchronous only; macOS. Copies the sign-in an earlier build kept in the login keychain into the data-protection store under the same reference, and never deletes the legacy entry. The one read of the login keychain, so it may raise a password prompt, which is why only a contributor's action sends it. `migrated: false` means neither store held it, and the dangling reference was dropped (`state` becomes `absent`). A refused legacy read is an error and changes nothing. See "The credential state" below |
 | `witness_preview_request` | `entry_id`, `raw_session_confirmed: true`; optional `outcome`, `correction` | `status: "ready"`, `summary` | awaits explicit remote review; saves and pins certified bytes without approval or upload |
@@ -8037,6 +8037,31 @@ configuration changes between POST and GET refuse the combined result. Both
 methods require an account session and discard responses when the local account
 or ingest configuration changes. Neither returns an invite code or session token.
 Acceptance can earn pending credit; this is not credit redemption.
+
+
+### Installed coding tools
+
+`managed_snapshot.tools` is an additive array of `{tool, installed, install_url}`
+rows for `claude`, `codex`, and `opencode`. Each row reports executable discovery
+independently of trace-source discovery, saved accounts, or sign-in. It does not
+verify tool versions, read traces, or grant consent. All three are managed
+tools; see "Managed OpenCode launch additions" below for OpenCode's launch
+fields. `install_url` is the tool's setup guide from the shared install-guide
+table (`tc_install_guides_json`). Missing native launch binaries return
+`managed-tool-unavailable`.
+
+Discovery checks absolute PATH entries and conventional install locations,
+including `~/.opencode/bin`, without launching subprocesses. Unix candidates must
+be regular files with an executable permission bit; directories and non-executable
+files are skipped. Windows installation detection includes `.exe`, `.cmd`, and
+`.bat` files. The existing managed launcher still requires a native `.exe`;
+wrapper-only installations can be reported installed without being launchable
+through managed sessions. Discovery never invokes a command interpreter. Each
+snapshot refresh checks again. Before daemon startup,
+`tc_managed_tools_json` returns the same array, `tc_managed_copy_json` returns
+the shared copy object, and `tc_install_guides_json` returns the install-guide
+table as `{source slug: url}` for every tool first run asks about; all three
+strings are freed with `tc_string_free`.
 
 ### Managed OpenCode launch additions
 
