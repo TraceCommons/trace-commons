@@ -5,7 +5,7 @@
 //! themselves are covered by `tests/legacy_invite_link_pg.rs`.
 
 use super::*;
-use crate::legacy_invite_link_routes::{NOT_ENABLED, challenge_handler, link_handler};
+use crate::ingest::app::legacy_invite_link_routes::{NOT_ENABLED, challenge_handler, link_handler};
 use axum::body::Body;
 use ring::signature::KeyPair as _;
 use tower::ServiceExt;

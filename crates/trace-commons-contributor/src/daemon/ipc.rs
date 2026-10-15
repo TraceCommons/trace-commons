@@ -349,6 +349,9 @@ pub const METHODS: &[&str] = &[
     "managed_terminal_launch",
     "managed_session_report",
     "managed_session_dismiss",
+    "managed_session_focus",
+    "managed_session_stop",
+    "managed_session_start_again",
     "managed_account_remove",
     "managed_account_reconnect",
     "managed_account_rename",
@@ -3504,6 +3507,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "managed_launch_redeem" => super::managed::handle(shared, req),
         "managed_session_report" => super::managed::handle(shared, req),
         "managed_session_dismiss" => super::managed::handle(shared, req),
+        "managed_session_focus" => super::managed::handle(shared, req),
+        "managed_session_stop" => super::managed::handle(shared, req),
+        "managed_session_start_again" => super::managed::handle(shared, req),
         "managed_account_remove" => super::managed::handle(shared, req),
         "managed_account_rename" => super::managed::handle(shared, req),
         "managed_account_set_key" => super::managed::handle(shared, req),
@@ -13467,6 +13473,11 @@ mod tests {
             ),
         );
         assert_eq!(r.error.unwrap().message, "near_ai_credential_unknown");
+        // So does an unnamed cancel with nothing in flight: a label, never a
+        // made-up `cancelled` for a sign-in that was not running.
+        let r = handle_request(&s, &req("near_ai_credential_cancel", serde_json::json!({})));
+        assert!(r.result.is_none(), "{:?}", r.result);
+        assert_eq!(r.error.unwrap().message, "near_ai_credential_unknown");
 
         s.settings.lock().unwrap().near_ai_inference =
             Some(crate::daemon::settings::NearAiInferenceCredential {
@@ -13490,8 +13501,10 @@ mod tests {
         let r = handle_request(&s, &req("near_ai_credential_forget", serde_json::json!({})));
         let body = r.result.unwrap();
         assert_eq!(body["removed"], true);
-        // Local only. Revoking needs a session, and the session was discarded
-        // the moment the key was minted.
+        // Local only: forget never calls the service, though the retained
+        // session would let it. `credential_forget_explains` says so, and
+        // `forget_answers_not_revoked_because_the_forget_sentence_says_so`
+        // ties the two together.
         assert_eq!(body["revoked"], false);
         assert!(
             DaemonSettings::load(&s.store)
@@ -17138,7 +17151,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 82, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 85, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

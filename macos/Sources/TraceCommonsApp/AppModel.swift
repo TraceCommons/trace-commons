@@ -622,9 +622,10 @@ final class AppModel: ObservableObject {
     /// The ceremony this shell started, while it is still going.
     ///
     /// Kept because `browser_url` is served ONCE, by start, and no poll
-    /// re-serves it -- and because cancel requires the attempt id, which is
-    /// also only ever handed over here. Dropped when the ceremony leaves the
-    /// state that has something to cancel.
+    /// re-serves it -- and so a cancel can name the attempt this shell
+    /// started. Not required for one: the daemon accepts an unnamed cancel
+    /// and stops whatever sign-in it is running. Dropped when the ceremony
+    /// leaves the state that has something to cancel.
     @Published private(set) var credentialAttempt: CredentialAttempt?
 
     /// The attempt the first run's near.ai login is waiting on, kept apart

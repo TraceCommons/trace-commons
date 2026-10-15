@@ -22,6 +22,19 @@ enum AddToolOutcome: Equatable {
 /// Every write goes through `FirstRunState.add(_:)`, `answerAdded`, or, on
 /// a tool row, `ToolAnswerRowLayout.select`.
 enum ToolsScreenLayout {
+    /// The core's executable discovery for a row's tool (`tc_managed_tools_json`),
+    /// or nil where it has none: Gemini CLI and Cline, or an unread table.
+    static func installed(_ kind: SourceKind, tools: [ManagedToolAvailability]?) -> Bool? {
+        let id: String
+        switch kind {
+        case .claudeCode: id = "claude"
+        case .codex: id = "codex"
+        case .opencode: id = "opencode"
+        case .geminiCli, .cline: return nil
+        }
+        return tools?.first(where: { $0.tool == id })?.installed
+    }
+
     /// The `tc_describe_folder` JSON for `path` as an outcome. Decoded with
     /// `FolderMatch.decodeList`, which keeps every row: a dropped trajectory
     /// row would turn a question into a certainty. A nil or undecodable
@@ -306,11 +319,19 @@ struct ToolList: View {
     let installURL: (SourceKind) -> URL?
     let retry: () -> Void
 
+    @State private var tools: [ManagedToolAvailability]?
+    private func refreshTools() {
+        tools = TCDiscovery.managedToolsJSON().flatMap { try? JSONDecoder().decode([ManagedToolAvailability].self, from: Data($0.utf8)) }
+    }
+
     var body: some View {
         Group {
             switch discovery {
             case .found(let discovered):
                 VStack(spacing: GlassTokens.Space.s4) {
+                    // Every tool keeps its row (Ron's review of #1419,
+                    // 2026-10-15): Install when missing, Choose folder when
+                    // installed with no folder found.
                     ForEach(ToolsScreenLayout.rows(discovered, state: runner.state), id: \.source) { candidate in
                         ToolAnswerRow(
                             copy: copy.folders,
@@ -319,7 +340,8 @@ struct ToolList: View {
                             meta: ToolsScreenLayout.meta(
                                 for: candidate, in: runner.state, discovered: discovered, copy: copy),
                             state: $runner.state,
-                            installURL: installURL(candidate.source)
+                            installURL: installURL(candidate.source),
+                            installed: ToolsScreenLayout.installed(candidate.source, tools: tools)
                         )
                     }
                     ForEach(ToolsScreenLayout.addedRows(runner.state), id: \.path) { folder in
@@ -373,6 +395,8 @@ struct ToolList: View {
                 }
             }
         }
+        .task { refreshTools() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in refreshTools() }
     }
 
     /// A folder added with the tile (Ron's custom tool row): named after

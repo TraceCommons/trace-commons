@@ -10,7 +10,7 @@
 //! WebAuthn ceremony driven by the dev-only SoftPasskey authenticator.
 
 use super::*;
-use crate::account_routes::ACCOUNT_UNBOUND;
+use crate::ingest::app::account_routes::ACCOUNT_UNBOUND;
 use axum::body::Body;
 use tower::ServiceExt;
 use trace_commons_server::account_native_passkey::{PerSourceCreationCap, UnboundAccountCeiling};
@@ -1509,7 +1509,7 @@ async fn pg_native_register_starts_are_capped_per_account() {
     }
     assert_eq!(
         accepted,
-        crate::native_passkey::NATIVE_PASSKEY_REGISTER_PER_ACCOUNT_LIMIT,
+        crate::ingest::app::native_passkey::NATIVE_PASSKEY_REGISTER_PER_ACCOUNT_LIMIT,
         "one account parked {accepted} ceremonies in a window"
     );
     assert_eq!(accepted + limited, 100);

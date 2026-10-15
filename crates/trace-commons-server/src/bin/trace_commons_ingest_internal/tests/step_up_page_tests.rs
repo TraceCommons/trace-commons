@@ -10,7 +10,7 @@
 //! dev-only SoftPasskey authenticator, from the origins a browser would report.
 
 use super::*;
-use crate::step_up_page::{
+use crate::ingest::app::step_up_page::{
     CSP_WITH_SCRIPT, CSP_WITHOUT_SCRIPT, STEP_UP_COPY, STEP_UP_PATH, STEP_UP_SCRIPT, STEP_UP_STYLE,
     StepUpAction,
 };
@@ -310,7 +310,7 @@ async fn a_return_outside_the_allowlist_is_refused() {
         assert!(!html.contains("evil"), "{query}: echoed");
         assert!(!html.contains("data-action"), "{query}: selected an action");
         assert!(
-            html.contains(crate::step_up_page::copy("invalid_heading")),
+            html.contains(crate::ingest::app::step_up_page::copy("invalid_heading")),
             "{query}"
         );
         assert!(reply.header(axum::http::header::LOCATION).is_none());
@@ -349,8 +349,10 @@ async fn without_a_relying_party_or_database_the_page_is_unavailable() {
             let html = reply.text();
             assert!(!html.contains("<script"), "{what}: runs a script");
             assert!(!html.contains("id=\"sign-in\""), "{what}: offers a sign-in");
-            assert!(html.contains(crate::step_up_page::copy("unavailable_heading")));
-            assert!(html.contains(crate::step_up_page::copy("unavailable_body")));
+            assert!(html.contains(crate::ingest::app::step_up_page::copy(
+                "unavailable_heading"
+            )));
+            assert!(html.contains(crate::ingest::app::step_up_page::copy("unavailable_body")));
         }
     }
 }

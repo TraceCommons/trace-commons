@@ -61,6 +61,10 @@
   },
   "copy": {
     "title": "Managed sessions",
+    "tools_title": "Coding tools",
+    "tools_empty": "Install a coding tool to get started.",
+    "install": "Install",
+    "tool_unavailable": "{tool} wasn't found on this computer.",
     "description": "Start a session with a saved account. Your other sessions keep running.",
     "launch": "Launch",
     "launch_title": "Launch managed session",
@@ -137,6 +141,11 @@
     "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
     "sign_in_needed": "Sign in to NEAR AI to start a session.",
     "sign_in_near_ai": "Sign in",
-    "sign_in_near_ai_accessibility": "Sign in to NEAR AI"
+    "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
+    "show": "Show",
+    "stop": "Stop",
+    "stop_question": "Stop this session?",
+    "stop_description": "{tool} stops what it's doing in {folder}.",
+    "start_again": "Start again"
   }
 }

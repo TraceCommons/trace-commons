@@ -12,9 +12,10 @@ use crate::{
         secrets::{ApiKey, SecretStore},
         sessions::{
             LaunchContext, LaunchPurpose, LaunchRequest, LifecycleReport, SessionRegistry,
-            SessionState,
+            SessionState, SessionView,
         },
         signin,
+        terminal::TerminalHandle,
     },
 };
 use serde::Deserialize;
@@ -30,6 +31,15 @@ pub struct ManagedService {
     /// Proxies the daemon hosts for sessions on the NEAR AI sign-in, by
     /// session id. Only the daemon holds the sign-in credential.
     routes: std::collections::HashMap<Uuid, ManagedRoute>,
+    /// Brings a session's window to the front. A field so tests can record
+    /// the call rather than drive a real terminal.
+    focus: fn(&TerminalHandle) -> Result<(), ManagedError>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionParams {
+    session_id: Uuid,
 }
 
 #[derive(Deserialize)]
@@ -48,7 +58,58 @@ impl ManagedService {
             config_dir: store.dir().to_path_buf(),
             secrets: SecretStore::new(store),
             routes: std::collections::HashMap::new(),
+            focus: crate::managed::terminal::focus,
         })
+    }
+
+    /// The account a launch request names: the NEAR AI sign-in's entry
+    /// for its tool, only while signed in and only for coding, or a saved
+    /// account.
+    fn launch_account(
+        &self,
+        p: &LaunchRequest,
+        sign_in: bool,
+    ) -> Result<AccountView, ManagedError> {
+        if p.connection == ConnectionKind::NearAiSignIn {
+            if !sign_in {
+                return Err(ManagedError::NearAiSignInRequired);
+            }
+            if signin::tool_for(p.account_id) != Some(p.tool) || p.purpose != LaunchPurpose::Coding
+            {
+                return Err(ManagedError::InvalidRequest);
+            }
+            signin::entry(p.tool).ok_or(ManagedError::InvalidRequest)
+        } else {
+            self.account(p.account_id)
+        }
+    }
+
+    /// Whether an ended coding row can be launched again as it was: same
+    /// account (still saved, or still signed in) and same folder (still
+    /// there). A shell also needs `capabilities.terminal_launch` to offer it,
+    /// as it does for any launch.
+    fn can_start_again(&self, view: &SessionView, sign_in: bool) -> bool {
+        !view.state.holds_profile()
+            && view.purpose == LaunchPurpose::Coding
+            && view.cwd.is_absolute()
+            && view.cwd.is_dir()
+            && self
+                .launch_account(
+                    &LaunchRequest {
+                        model: None,
+                        collect_traces: false,
+                        purpose: view.purpose,
+                        request_id: view.id,
+                        tool: view.tool,
+                        connection: view.connection,
+                        account_id: view.account_id,
+                        cwd: view.cwd.clone(),
+                        expected_generation: Generation(0),
+                        save_default: false,
+                    },
+                    sign_in,
+                )
+                .is_ok_and(|a| a.tool == view.tool && a.connection == view.connection)
     }
 
     /// Redeem a ticket. A session on the NEAR AI sign-in is refused without
@@ -106,7 +167,10 @@ impl ManagedService {
     fn handle(&mut self, request: &Request, sign_in: bool) -> Result<Value, ManagedError> {
         match request.method.as_str() {
             "managed_snapshot" => {
-                let sessions = self.sessions.views()?;
+                let mut sessions = self.sessions.views()?;
+                for view in &mut sessions {
+                    view.can_start_again = self.can_start_again(view, sign_in);
+                }
                 let saved = [
                     self.accounts.selection(ToolId::Claude),
                     self.accounts.selection(ToolId::Codex),
@@ -118,7 +182,7 @@ impl ManagedService {
                 let defaults =
                     signin::defaults(saved, sign_in, |tool| self.accounts.generation(tool));
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":crate::managed::terminal::destination().is_some(),"terminal_destination":crate::managed::terminal::destination()}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":crate::managed::terminal::destination().is_some(),"terminal_destination":crate::managed::terminal::destination()}}),
                 )
             }
             "managed_account_add" => {
@@ -148,23 +212,7 @@ impl ManagedService {
             }
             "managed_launch_prepare" => {
                 let p: LaunchRequest = parse(request)?;
-                let account = if p.connection == ConnectionKind::NearAiSignIn {
-                    if !sign_in {
-                        return Err(ManagedError::NearAiSignInRequired);
-                    }
-                    if signin::tool_for(p.account_id) != Some(p.tool)
-                        || p.purpose != LaunchPurpose::Coding
-                    {
-                        return Err(ManagedError::InvalidRequest);
-                    }
-                    signin::entry(p.tool).ok_or(ManagedError::InvalidRequest)?
-                } else {
-                    self.accounts
-                        .list()
-                        .into_iter()
-                        .find(|a| a.id == p.account_id)
-                        .ok_or(ManagedError::NotFound)?
-                };
+                let account = self.launch_account(&p, sign_in)?;
                 let generation = self.accounts.generation(p.tool);
                 if p.expected_generation != generation {
                     return Err(ManagedError::Conflict);
@@ -184,7 +232,9 @@ impl ManagedService {
                 }
                 let p: Params = parse(request)?;
                 self.sessions.validate_ticket(p.session_id, &p.ticket)?;
-                crate::managed::terminal::launch(&self.config_dir, p.session_id, &p.ticket)?;
+                let window =
+                    crate::managed::terminal::launch(&self.config_dir, p.session_id, &p.ticket)?;
+                self.sessions.opened_in_terminal(p.session_id, window)?;
                 Ok(json!({"opened":true,"destination":crate::managed::terminal::destination()}))
             }
             "managed_launch_redeem" => {
@@ -201,8 +251,42 @@ impl ManagedService {
             }
             "managed_session_report" => {
                 let report: LifecycleReport = parse(request)?;
+                let id = report.session_id;
                 self.sessions.report(report)?;
-                Ok(json!({"accepted":true}))
+                // Additive: an older launcher reads only `accepted`.
+                Ok(json!({"accepted":true,"stop":self.sessions.stop_requested(id)}))
+            }
+            "managed_session_focus" => {
+                let p: SessionParams = parse(request)?;
+                let window = self.sessions.terminal_for(p.session_id)?;
+                (self.focus)(&window)?;
+                Ok(json!({"focused":true}))
+            }
+            "managed_session_stop" => {
+                let p: SessionParams = parse(request)?;
+                self.sessions.request_stop(p.session_id)?;
+                Ok(json!({"stopping":true}))
+            }
+            "managed_session_start_again" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Params {
+                    session_id: Uuid,
+                    request_id: Uuid,
+                }
+                let p: Params = parse(request)?;
+                let mut again = self
+                    .sessions
+                    .start_again_request(p.session_id, p.request_id)?;
+                if let Some(existing) = self.sessions.replayed(&again) {
+                    return Ok(json!(existing));
+                }
+                let account = self.launch_account(&again, sign_in)?;
+                if !again.cwd.is_absolute() || !again.cwd.is_dir() {
+                    return Err(ManagedError::InvalidRequest);
+                }
+                again.expected_generation = self.accounts.generation(again.tool);
+                Ok(json!(self.sessions.prepare(again, &account)?))
             }
             "managed_session_dismiss" => {
                 #[derive(Deserialize)]
@@ -509,6 +593,7 @@ fn label(error: ManagedError) -> &'static str {
         ManagedError::NotFound => "managed-not-found",
         ManagedError::AmbiguousAccount => "managed-ambiguous-account",
         ManagedError::StorageUnavailable => "managed-storage-unavailable",
+        ManagedError::ToolUnavailable => "managed-tool-unavailable",
         ManagedError::UnsupportedVersion => "managed-unsupported-version",
         ManagedError::SignInRequired => "managed-sign-in-required",
         ManagedError::NearAiSignInRequired => "managed-near-ai-sign-in-required",
@@ -521,7 +606,7 @@ fn label(error: ManagedError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::managed::sessions::PreparedLaunch;
+    use crate::managed::{sessions::PreparedLaunch, terminal::TerminalHandle};
 
     fn service() -> (tempfile::TempDir, ConfigStore, ManagedService) {
         let home = tempfile::tempdir().unwrap();
@@ -621,6 +706,10 @@ mod tests {
     fn the_snapshot_derives_sign_in_entries_and_defaults_from_the_sign_in() {
         let (_home, _store, mut service) = service();
         let without = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
+        let tools = without["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[2]["tool"], "opencode");
+        assert_eq!(without["generations"].as_object().unwrap().len(), 3);
         assert_eq!(without["capabilities"]["near_ai_signin"], false);
         assert_eq!(without["sign_in_accounts"], json!([]));
         assert_eq!(without["defaults"], json!([]));
@@ -806,6 +895,497 @@ mod tests {
         assert_eq!(context.session.connection, ConnectionKind::NearAiSignIn);
         assert_eq!(context.session.account_label, "NEAR AI");
         assert!(service.take_routes(true).is_empty());
+    }
+
+    static FOCUSED: std::sync::Mutex<Vec<TerminalHandle>> = std::sync::Mutex::new(vec![]);
+
+    /// Records the window it was asked to raise. Tests never drive a real
+    /// terminal.
+    fn record_focus(handle: &TerminalHandle) -> Result<(), ManagedError> {
+        FOCUSED.lock().unwrap().push(handle.clone());
+        Ok(())
+    }
+
+    /// A saved-account session, redeemed and reported running, as the
+    /// launcher leaves it. Returns its id and the launcher's proof.
+    fn running(service: &mut ManagedService, cwd: &std::path::Path) -> (Uuid, String) {
+        let account = match service.accounts.list().into_iter().next() {
+            Some(account) => account,
+            None => service
+                .accounts
+                .add(ToolId::Claude, ConnectionKind::Subscription, "Work")
+                .unwrap(),
+        };
+        let mut request: LaunchRequest =
+            serde_json::from_value(launch(ToolId::Claude, cwd)).unwrap();
+        request.connection = ConnectionKind::Subscription;
+        request.account_id = account.id;
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(service, "managed_launch_prepare", json!(request), false).unwrap(),
+        )
+        .unwrap();
+        let context = service
+            .sessions
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        report(
+            service,
+            prepared.session_id,
+            &context.proof,
+            "running",
+            None,
+        )
+        .unwrap();
+        (prepared.session_id, context.proof)
+    }
+
+    fn report(
+        service: &mut ManagedService,
+        id: Uuid,
+        proof: &str,
+        state: &str,
+        exit_code: Option<i32>,
+    ) -> Result<Value, ManagedError> {
+        call(
+            service,
+            "managed_session_report",
+            json!({"session_id":id,"proof":proof,"state":state,"process_id":42,"process_identity":"42:1","exit_code":exit_code}),
+            false,
+        )
+    }
+
+    fn row(service: &mut ManagedService, id: Uuid, sign_in: bool) -> Value {
+        let snapshot = call(service, "managed_snapshot", json!({}), sign_in).unwrap();
+        snapshot["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == json!(id))
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn a_session_started_elsewhere_can_be_neither_shown_nor_stopped() {
+        let (home, _store, mut service) = service();
+        service.focus = record_focus;
+        let (id, proof) = running(&mut service, home.path());
+        let row = row(&mut service, id, false);
+        assert_eq!(row["can_focus"], false);
+        assert_eq!(row["can_stop"], false);
+        for method in ["managed_session_focus", "managed_session_stop"] {
+            assert_eq!(
+                call(&mut service, method, json!({"session_id":id}), false),
+                Err(ManagedError::Conflict),
+                "{method}"
+            );
+        }
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_stop",
+                json!({"session_id":Uuid::new_v4()}),
+                false
+            ),
+            Err(ManagedError::NotFound)
+        );
+        // The launcher is never told to stop a session nobody could stop.
+        assert_eq!(
+            report(&mut service, id, &proof, "running", None).unwrap()["stop"],
+            false
+        );
+    }
+
+    #[test]
+    fn a_session_the_daemon_opened_in_terminal_can_be_shown_and_stopped() {
+        let (home, _store, mut service) = service();
+        service.focus = record_focus;
+        let account = service
+            .accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Work")
+            .unwrap();
+        let mut request: LaunchRequest =
+            serde_json::from_value(launch(ToolId::Claude, home.path())).unwrap();
+        request.connection = ConnectionKind::Subscription;
+        request.account_id = account.id;
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_launch_prepare",
+                json!(request),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let handle = TerminalHandle::AppleTerminal {
+            tty: "/dev/ttys042".into(),
+        };
+        service
+            .sessions
+            .opened_in_terminal(prepared.session_id, Some(handle.clone()))
+            .unwrap();
+        // Not running yet: nothing to show or stop.
+        let starting = row(&mut service, prepared.session_id, false);
+        assert_eq!(starting["can_focus"], false);
+        assert_eq!(starting["can_stop"], false);
+        let context = service
+            .sessions
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        let id = prepared.session_id;
+        assert_eq!(
+            report(&mut service, id, &context.proof, "running", None).unwrap()["stop"],
+            false
+        );
+        let running = row(&mut service, id, false);
+        assert_eq!(running["can_focus"], true);
+        assert_eq!(running["can_stop"], true);
+
+        call(
+            &mut service,
+            "managed_session_focus",
+            json!({"session_id":id}),
+            false,
+        )
+        .unwrap();
+        assert!(FOCUSED.lock().unwrap().contains(&handle));
+
+        call(
+            &mut service,
+            "managed_session_stop",
+            json!({"session_id":id}),
+            false,
+        )
+        .unwrap();
+        // Asked once: the row offers no second Stop, still shows its window,
+        // and the launcher hears it on its next report.
+        let stopping = row(&mut service, id, false);
+        assert_eq!(stopping["can_stop"], false);
+        assert_eq!(stopping["can_focus"], true);
+        assert_eq!(stopping["state"], "running");
+        call(
+            &mut service,
+            "managed_session_stop",
+            json!({"session_id":id}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            report(&mut service, id, &context.proof, "running", None).unwrap()["stop"],
+            true
+        );
+
+        // The exit is recorded as any other.
+        report(&mut service, id, &context.proof, "exited", Some(143)).unwrap();
+        let ended = row(&mut service, id, false);
+        assert_eq!(ended["state"], "exited");
+        assert_eq!(ended["exit_code"], 143);
+        assert_eq!(ended["can_focus"], false);
+        assert_eq!(ended["can_stop"], false);
+        for method in ["managed_session_focus", "managed_session_stop"] {
+            assert_eq!(
+                call(&mut service, method, json!({"session_id":id}), false),
+                Err(ManagedError::Conflict),
+                "{method}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_opened_where_no_window_can_be_named_can_be_stopped_but_not_shown() {
+        let (home, _store, mut service) = service();
+        service.focus = record_focus;
+        let account = service
+            .accounts
+            .add(ToolId::Codex, ConnectionKind::Subscription, "Work")
+            .unwrap();
+        let mut request: LaunchRequest =
+            serde_json::from_value(launch(ToolId::Codex, home.path())).unwrap();
+        request.connection = ConnectionKind::Subscription;
+        request.account_id = account.id;
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_launch_prepare",
+                json!(request),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        service
+            .sessions
+            .opened_in_terminal(prepared.session_id, None)
+            .unwrap();
+        let context = service
+            .sessions
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        report(
+            &mut service,
+            prepared.session_id,
+            &context.proof,
+            "running",
+            None,
+        )
+        .unwrap();
+        let row = row(&mut service, prepared.session_id, false);
+        assert_eq!(row["can_focus"], false);
+        assert_eq!(row["can_stop"], true);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_focus",
+                json!({"session_id":prepared.session_id}),
+                false
+            ),
+            Err(ManagedError::Conflict)
+        );
+    }
+
+    #[test]
+    fn start_again_replays_an_ended_launch_in_the_same_folder() {
+        let (home, _store, mut service) = service();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let (id, proof) = running(&mut service, &folder);
+        let again = json!({"session_id":id,"request_id":Uuid::new_v4()});
+        // Running: nothing to start again.
+        assert_eq!(row(&mut service, id, false)["can_start_again"], false);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                again.clone(),
+                false
+            ),
+            Err(ManagedError::Conflict)
+        );
+        report(&mut service, id, &proof, "exited", Some(0)).unwrap();
+        assert_eq!(row(&mut service, id, false)["can_start_again"], true);
+
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                again.clone(),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_ne!(prepared.session_id, id);
+        assert!(prepared.ticket.is_some());
+        let fresh = row(&mut service, prepared.session_id, false);
+        let old = row(&mut service, id, false);
+        for field in ["tool", "connection", "account_id", "cwd", "purpose"] {
+            assert_eq!(fresh[field], old[field], "{field}");
+        }
+        assert_eq!(fresh["state"], "starting");
+        // The same request twice is one session.
+        let repeated: PreparedLaunch = serde_json::from_value(
+            call(&mut service, "managed_session_start_again", again, false).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(repeated.session_id, prepared.session_id);
+        assert!(repeated.ticket.is_none());
+    }
+
+    #[test]
+    fn start_again_retried_after_a_selection_change_is_still_one_session() {
+        let (home, _store, mut service) = service();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let (id, proof) = running(&mut service, &folder);
+        report(&mut service, id, &proof, "exited", Some(0)).unwrap();
+        let again = json!({"session_id":id,"request_id":Uuid::new_v4()});
+        let first: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                again.clone(),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        // The selection moves between the request and its retry.
+        let account = service.accounts.list().into_iter().next().unwrap();
+        let generation = service.accounts.generation(ToolId::Claude);
+        service
+            .accounts
+            .select(
+                Selection {
+                    tool: ToolId::Claude,
+                    connection: ConnectionKind::Subscription,
+                    account_id: account.id,
+                    generation,
+                },
+                generation,
+            )
+            .unwrap();
+        let retried: PreparedLaunch = serde_json::from_value(
+            call(&mut service, "managed_session_start_again", again, false).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(retried.session_id, first.session_id);
+        assert!(retried.ticket.is_none());
+    }
+
+    #[test]
+    fn a_second_terminal_launch_for_one_session_is_refused() {
+        let (home, _store, mut service) = service();
+        let account = service
+            .accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Work")
+            .unwrap();
+        let mut request: LaunchRequest =
+            serde_json::from_value(launch(ToolId::Claude, home.path())).unwrap();
+        request.connection = ConnectionKind::Subscription;
+        request.account_id = account.id;
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_launch_prepare",
+                json!(request),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let ticket = prepared.ticket.unwrap();
+        service
+            .sessions
+            .validate_ticket(prepared.session_id, &ticket)
+            .unwrap();
+        service
+            .sessions
+            .opened_in_terminal(prepared.session_id, None)
+            .unwrap();
+        assert_eq!(
+            service
+                .sessions
+                .validate_ticket(prepared.session_id, &ticket),
+            Err(ManagedError::Conflict)
+        );
+    }
+
+    #[test]
+    fn start_again_is_withheld_when_the_folder_or_account_is_gone() {
+        let (home, _store, mut service) = service();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let (id, proof) = running(&mut service, &folder);
+        report(&mut service, id, &proof, "exited", Some(0)).unwrap();
+        std::fs::remove_dir(&folder).unwrap();
+        assert_eq!(row(&mut service, id, false)["can_start_again"], false);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                false
+            ),
+            Err(ManagedError::InvalidRequest)
+        );
+
+        std::fs::create_dir(&folder).unwrap();
+        let account = service.accounts.list()[0].id;
+        call(
+            &mut service,
+            "managed_account_remove",
+            json!({"account_id":account}),
+            false,
+        )
+        .ok();
+        // Removing a subscription account needs the native tool; drop it
+        // from the store directly when that is absent here.
+        if !service.accounts.list().is_empty() {
+            service.accounts.remove(account).unwrap();
+        }
+        assert_eq!(row(&mut service, id, false)["can_start_again"], false);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                false
+            ),
+            Err(ManagedError::NotFound)
+        );
+    }
+
+    #[test]
+    fn a_sign_in_session_starts_again_only_while_signed_in() {
+        let (home, _store, mut service) = service();
+        let prepared = prepare(&mut service, ToolId::Claude, home.path());
+        let (context, _) = service
+            .redeem(
+                prepared.session_id,
+                prepared.ticket.as_deref().unwrap(),
+                true,
+            )
+            .unwrap();
+        let id = prepared.session_id;
+        report(&mut service, id, &context.proof, "running", None).unwrap();
+        report(&mut service, id, &context.proof, "exited", Some(0)).unwrap();
+        assert_eq!(row(&mut service, id, true)["can_start_again"], true);
+        assert_eq!(row(&mut service, id, false)["can_start_again"], false);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                false
+            ),
+            Err(ManagedError::NearAiSignInRequired)
+        );
+        assert!(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                true
+            )
+            .unwrap()["ticket"]
+                .is_string()
+        );
+    }
+
+    #[test]
+    fn a_sign_in_row_never_starts_again() {
+        let (_home, _store, mut service) = service();
+        let account = service
+            .accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Work")
+            .unwrap();
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_account_reconnect",
+                json!({"account_id":account.id}),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let context = service
+            .sessions
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        let id = prepared.session_id;
+        report(&mut service, id, &context.proof, "exited", Some(0)).unwrap();
+        assert_eq!(row(&mut service, id, false)["can_start_again"], false);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                false
+            ),
+            Err(ManagedError::InvalidRequest)
+        );
     }
 
     #[test]
