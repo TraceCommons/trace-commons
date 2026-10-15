@@ -288,6 +288,9 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_reward_principals",
     "trace_reward_principal_accounts",
     "trace_reward_participant_reservations",
+    "trace_near_ai_credit_recipients",
+    "trace_settlement_rail_credits",
+    "trace_settlement_rail_ledgers",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[
@@ -1817,6 +1820,16 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         126,
         "account_trust_live_attested",
         include_str!("../../../../migrations/V126__account_trust_live_attested.sql"),
+    ),
+    // V129 (2026-10-14): a rail-discriminated, cumulative settlement ledger
+    // (totals only grow; the external side keeps the maximum), the per-batch
+    // credits that feed it, and the NEAR AI organization a tenant elects to
+    // receive inference credit. RLS forced on all three; one payout path per
+    // batch. V127 and V128 are taken by open PRs.
+    (
+        129,
+        "settlement_rail_ledger",
+        include_str!("../../../../migrations/V129__settlement_rail_ledger.sql"),
     ),
 ];
 
@@ -8074,6 +8087,7 @@ mod tests {
             include_str!("../../../../migrations/V114__external_account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
             include_str!("../../../../migrations/V97__account_bindings.sql"),
+            include_str!("../../../../migrations/V129__settlement_rail_ledger.sql"),
         ];
         let force_rls_migrations = [
             include_str!("../../../../migrations/V92__versioned_pipeline_runs.sql"),
@@ -8120,6 +8134,7 @@ mod tests {
             include_str!("../../../../migrations/V114__external_account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
             include_str!("../../../../migrations/V97__account_bindings.sql"),
+            include_str!("../../../../migrations/V129__settlement_rail_ledger.sql"),
         ];
 
         for table in TRACE_COMMONS_RLS_TABLES {

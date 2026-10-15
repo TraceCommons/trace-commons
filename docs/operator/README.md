@@ -165,6 +165,10 @@ Every runbook in this directory, with a one-line description.
   costs, where expected measurements legitimately come from (a verified
   quote, never the endpoint's own JSON), and why a measurement mismatch after
   an image upgrade is fixed by re-pinning and never by disabling the check.
+- [`./near-ai-inference-credit.md`](./near-ai-inference-credit.md) — the NEAR
+  AI inference credit rail (not live): cumulative, monotonic totals published
+  by push or pull, its kill switch and fail-closed configuration, minting
+  User-Agent-bound admin keys, and what each freeze label means.
 - [`./env-reference.md`](./env-reference.md) — table of every
   `TRACE_COMMONS_*` env, default, required/optional, and surface touched.
 - [`./gpu-cost-ledger.md`](./gpu-cost-ledger.md) — append-only ledger of

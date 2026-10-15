@@ -1,0 +1,683 @@
+// Copyright (C) 2026 K&Z Partners LLC
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! The NEAR AI inference-credit rail: settles Trace Commons credit as a NEAR
+//! AI organization's cumulative `trace_commons` credit.
+//!
+//! How much NEAR AI credit a recipient has earned is decided by a
+//! [`SettlementAwardPolicy`] held as a trait object. The configuration names
+//! one: `flat_rate` is the uncalibrated reference
+//! ([`ReferenceFlatRateAwardPolicy`]); any other name must be supplied by the
+//! embedding binary through an [`AwardPolicyRegistry`], which is where a
+//! private backend's production policy plugs in.
+//!
+//! The model is NEAR AI's own staking-farm sync
+//! (`cloud-api:crates/services/src/staking_farm.rs:319-430`): a dedicated
+//! credit type that no other writer touches, whose limit is set to a
+//! cumulative total and only ever rises (`max(computed, last)`), written
+//! under the organization accounting lock. Publishing our cumulative total is
+//! therefore idempotent -- a retry, a duplicate or a late delivery of an
+//! older total changes nothing -- and needs no compare-and-swap.
+//!
+//! Two delivery modes sit behind the same [`SettlementRail`] seam:
+//!
+//! - [`PushTraceCommonsCreditRail`]: we call the proposed admin route with
+//!   our total. Needs a NEAR AI read-write admin key.
+//! - [`PullTraceCommonsCreditRail`]: NEAR AI fetches a signed statement of
+//!   our total on its own schedule (see `near_ai_credit_statement`). Needs no
+//!   admin key; a read-only key, if configured, lets the reconciler observe.
+
+use crate::near_ai_admin::{
+    AdminApiError, NearAiAdminApi, NearAiOrgId, SetTraceCommonsCreditRequest,
+};
+use crate::near_ai_credit_statement::StatementSigner;
+use crate::settlement_rail::{
+    CumulativeStatement, Published, RailError, RecipientRef, SettlementRail, is_safe_label,
+};
+use async_trait::async_trait;
+use secrecy::SecretString;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+use trace_commons_gate_api::settlement_award::is_valid_policy_ref;
+use trace_commons_gate_api::{ReferenceFlatRateAwardPolicy, SettlementAwardPolicy};
+
+pub const RAIL_ID: &str = "near_ai_trace_commons";
+pub const INSTRUMENT_ID: &str = "near_ai_credit_usd";
+/// NEAR AI amounts are nano-USD, scale 9 (`cloud-api:crates/api/src/models.rs:4623-4637`).
+pub const INSTRUMENT_DECIMALS: u8 = 9;
+/// NEAR AI refuses a limit above $1B (`cloud-api:crates/services/src/admin/mod.rs:1504`).
+pub const NEAR_AI_MAX_NANO_USD: u128 = 1_000_000_000_000_000_000;
+
+pub const ENV_MODE: &str = "TRACE_COMMONS_NEAR_AI_CREDIT_RAIL";
+pub const ENV_DELIVERY: &str = "TRACE_COMMONS_NEAR_AI_CREDIT_DELIVERY";
+pub const ENV_BASE_URL: &str = "TRACE_COMMONS_NEAR_AI_ADMIN_BASE_URL";
+pub const ENV_KEY: &str = "TRACE_COMMONS_NEAR_AI_ADMIN_KEY";
+pub const ENV_READ_KEY: &str = "TRACE_COMMONS_NEAR_AI_ADMIN_READ_KEY";
+pub const ENV_USER_AGENT: &str = "TRACE_COMMONS_NEAR_AI_ADMIN_USER_AGENT";
+pub const ENV_AWARD_POLICY: &str = "TRACE_COMMONS_NEAR_AI_CREDIT_AWARD_POLICY";
+pub const ENV_FLAT_RATE: &str = "TRACE_COMMONS_NEAR_AI_CREDIT_FLAT_RATE";
+/// The award policy name that selects [`ReferenceFlatRateAwardPolicy`].
+/// Reserved: a registry entry under this name is never consulted.
+pub const FLAT_RATE_POLICY: &str = "flat_rate";
+pub const ENV_MAX_CUMULATIVE: &str = "TRACE_COMMONS_NEAR_AI_CREDIT_MAX_CUMULATIVE_NANO_USD";
+pub const ENV_STATEMENT_KEY: &str = "TRACE_COMMONS_NEAR_AI_CREDIT_STATEMENT_KEY";
+pub const ENV_TIMEOUT_MS: &str = "TRACE_COMMONS_NEAR_AI_ADMIN_TIMEOUT_MS";
+
+/// The operator kill switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RailMode {
+    Disabled,
+    /// Everything except the external write.
+    DryRun,
+    Live,
+}
+
+impl RailMode {
+    /// Unset or unrecognised is `Disabled`: a typo never turns the rail on.
+    pub fn parse(value: Option<&str>) -> Self {
+        match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+            Some("live") => Self::Live,
+            Some("dry_run") => Self::DryRun,
+            _ => Self::Disabled,
+        }
+    }
+}
+
+/// How the total reaches NEAR AI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    Push,
+    Pull,
+}
+
+/// A configuration refusal: names the missing or invalid control and
+/// nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("missing_control:{control}")]
+pub struct ConfigRefused {
+    pub control: &'static str,
+}
+
+const fn refuse(control: &'static str) -> ConfigRefused {
+    ConfigRefused { control }
+}
+
+/// Award policies an embedding binary supplies, by the name
+/// `TRACE_COMMONS_NEAR_AI_CREDIT_AWARD_POLICY` selects them with. The open
+/// build's registry is empty, so only `flat_rate` resolves.
+#[derive(Clone, Default)]
+pub struct AwardPolicyRegistry {
+    policies: BTreeMap<String, Arc<dyn SettlementAwardPolicy>>,
+}
+
+impl AwardPolicyRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register `policy` under `name` (`^[a-z0-9_]{1,64}$`; `flat_rate` is
+    /// reserved).
+    pub fn with_policy(mut self, name: &str, policy: Arc<dyn SettlementAwardPolicy>) -> Self {
+        self.policies.insert(name.to_string(), policy);
+        self
+    }
+
+    fn get(&self, name: &str) -> Option<Arc<dyn SettlementAwardPolicy>> {
+        self.policies.get(name).cloned()
+    }
+}
+
+/// Resolved rail configuration. `Debug` omits every secret.
+#[derive(Clone)]
+pub struct NearAiCreditRailConfig {
+    pub mode: RailMode,
+    pub delivery: Delivery,
+    pub base_url: Option<String>,
+    pub write_key: Option<SecretString>,
+    pub read_key: Option<SecretString>,
+    pub user_agent: Option<String>,
+    pub statement_signer: Option<StatementSigner>,
+    /// The selector's value, for display.
+    pub award_policy_name: String,
+    pub award_policy: Arc<dyn SettlementAwardPolicy>,
+    pub max_cumulative_nano_usd: u128,
+    pub timeout: Duration,
+}
+
+impl std::fmt::Debug for NearAiCreditRailConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NearAiCreditRailConfig")
+            .field("mode", &self.mode)
+            .field("delivery", &self.delivery)
+            .field("write_key_present", &self.write_key.is_some())
+            .field("read_key_present", &self.read_key.is_some())
+            .field("statement_key_present", &self.statement_signer.is_some())
+            .field("award_policy", &self.award_policy_name)
+            .field("max_cumulative_nano_usd", &self.max_cumulative_nano_usd)
+            .finish_non_exhaustive()
+    }
+}
+
+fn is_loopback_http(url: &str) -> bool {
+    url.starts_with("http://127.0.0.1:") || url.starts_with("http://[::1]:")
+}
+
+impl NearAiCreditRailConfig {
+    /// Read the configuration through `lookup` (the process environment in
+    /// production, a map in tests). `Ok(None)` means disabled. An enabled
+    /// mode with a missing or invalid control refuses; there is no fallback
+    /// to a less restrictive mode or another delivery.
+    pub fn from_lookup(
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<Self>, ConfigRefused> {
+        Self::from_lookup_with_policies(lookup, &AwardPolicyRegistry::new())
+    }
+
+    /// [`Self::from_lookup`], resolving the award policy against
+    /// `policies` as well as the built-in `flat_rate`.
+    pub fn from_lookup_with_policies(
+        lookup: impl Fn(&str) -> Option<String>,
+        policies: &AwardPolicyRegistry,
+    ) -> Result<Option<Self>, ConfigRefused> {
+        let get = |name: &str| {
+            lookup(name)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let mode = RailMode::parse(get(ENV_MODE).as_deref());
+        if mode == RailMode::Disabled {
+            return Ok(None);
+        }
+        let delivery = match get(ENV_DELIVERY)
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            None | Some("push") => Delivery::Push,
+            Some("pull") => Delivery::Pull,
+            Some(_) => return Err(refuse("near_ai_credit_delivery")),
+        };
+        let key_of =
+            |name: &str, control: &'static str| -> Result<Option<SecretString>, ConfigRefused> {
+                match get(name) {
+                    None => Ok(None),
+                    Some(v) if v.starts_with("adm_") && !v.contains(char::is_whitespace) => {
+                        Ok(Some(SecretString::from(v)))
+                    }
+                    Some(_) => Err(refuse(control)),
+                }
+            };
+        let write_key = key_of(ENV_KEY, "near_ai_admin_key")?;
+        let read_key = key_of(ENV_READ_KEY, "near_ai_admin_read_key")?;
+        let base_url = get(ENV_BASE_URL);
+        if let Some(url) = &base_url {
+            if !(url.starts_with("https://") || is_loopback_http(url)) {
+                return Err(refuse("near_ai_admin_base_url"));
+            }
+        }
+        let user_agent = get(ENV_USER_AGENT);
+        let statement_signer = match get(ENV_STATEMENT_KEY) {
+            None => None,
+            Some(v) => Some(
+                StatementSigner::from_base64_pkcs8(&v)
+                    .map_err(|_| refuse("near_ai_credit_statement_key"))?,
+            ),
+        };
+        let needs_admin_api = match delivery {
+            Delivery::Push => {
+                match mode {
+                    RailMode::Live if write_key.is_none() => {
+                        return Err(refuse("near_ai_admin_key"));
+                    }
+                    RailMode::DryRun if write_key.is_none() && read_key.is_none() => {
+                        return Err(refuse("near_ai_admin_read_key"));
+                    }
+                    _ => {}
+                }
+                true
+            }
+            Delivery::Pull => {
+                if statement_signer.is_none() {
+                    return Err(refuse("near_ai_credit_statement_key"));
+                }
+                read_key.is_some()
+            }
+        };
+        if needs_admin_api {
+            if base_url.is_none() {
+                return Err(refuse("near_ai_admin_base_url"));
+            }
+            if user_agent.is_none() {
+                return Err(refuse("near_ai_admin_user_agent"));
+            }
+        }
+        let award_policy_name = get(ENV_AWARD_POLICY)
+            .filter(|v| is_safe_label(v))
+            .ok_or(refuse("near_ai_credit_award_policy"))?;
+        let flat_rate = get(ENV_FLAT_RATE);
+        let award_policy: Arc<dyn SettlementAwardPolicy> = if award_policy_name == FLAT_RATE_POLICY
+        {
+            let rate = flat_rate.ok_or(refuse("near_ai_credit_flat_rate"))?;
+            Arc::new(
+                ReferenceFlatRateAwardPolicy::parse(&rate)
+                    .map_err(|_| refuse("near_ai_credit_flat_rate"))?,
+            )
+        } else {
+            let policy = policies
+                .get(&award_policy_name)
+                .ok_or(refuse("near_ai_credit_award_policy"))?;
+            // A flat rate beside another policy would read as in force.
+            if flat_rate.is_some() {
+                return Err(refuse("near_ai_credit_flat_rate"));
+            }
+            policy
+        };
+        if !is_valid_policy_ref(&award_policy.policy_ref()) {
+            return Err(refuse("near_ai_credit_award_policy"));
+        }
+        let max_cumulative_nano_usd = get(ENV_MAX_CUMULATIVE)
+            .ok_or(refuse("near_ai_credit_max_cumulative"))?
+            .parse::<u128>()
+            .ok()
+            .filter(|v| *v > 0 && *v <= NEAR_AI_MAX_NANO_USD)
+            .ok_or(refuse("near_ai_credit_max_cumulative"))?;
+        let timeout = match get(ENV_TIMEOUT_MS) {
+            None => Duration::from_secs(15),
+            Some(v) => v
+                .parse::<u64>()
+                .ok()
+                .filter(|ms| (100..=120_000).contains(ms))
+                .map(Duration::from_millis)
+                .ok_or(refuse("near_ai_admin_timeout_ms"))?,
+        };
+        Ok(Some(Self {
+            mode,
+            delivery,
+            base_url,
+            write_key,
+            read_key,
+            user_agent,
+            statement_signer,
+            award_policy_name,
+            award_policy,
+            max_cumulative_nano_usd,
+            timeout,
+        }))
+    }
+
+    pub fn from_env() -> Result<Option<Self>, ConfigRefused> {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+}
+
+fn org_of(recipient: &RecipientRef) -> Result<NearAiOrgId, RailError> {
+    NearAiOrgId::parse(recipient.expose()).ok_or(RailError::frozen("near_ai_recipient_malformed"))
+}
+
+fn bounded(cumulative: u128, max: u128) -> Result<i64, RailError> {
+    if cumulative > max {
+        return Err(RailError::frozen("near_ai_cumulative_above_ceiling"));
+    }
+    i64::try_from(cumulative).map_err(|_| RailError::frozen("near_ai_cumulative_above_ceiling"))
+}
+
+fn units_of(nano_usd: i64) -> Result<u128, RailError> {
+    u128::try_from(nano_usd).map_err(|_| RailError::frozen("near_ai_admin_response_malformed"))
+}
+
+fn read_error(e: AdminApiError) -> RailError {
+    match e {
+        AdminApiError::Forbidden => RailError::frozen("near_ai_admin_forbidden"),
+        AdminApiError::NotFound | AdminApiError::Rejected => RailError::frozen(e.label()),
+        other => RailError::retry(other.label()),
+    }
+}
+
+fn write_error(e: AdminApiError) -> RailError {
+    match e {
+        AdminApiError::Forbidden => RailError::frozen("near_ai_admin_read_only_key"),
+        AdminApiError::NotFound | AdminApiError::Rejected => RailError::frozen(e.label()),
+        // Unreachable, ambiguous, unauthorized, unavailable, malformed: a
+        // cumulative write is safe to repeat.
+        other => RailError::retry(other.label()),
+    }
+}
+
+async fn observe_with(
+    api: &dyn NearAiAdminApi,
+    recipient: &RecipientRef,
+) -> Result<u128, RailError> {
+    let org = org_of(recipient)?;
+    let current = api
+        .get_trace_commons_credit(org)
+        .await
+        .map_err(read_error)?;
+    units_of(current.cumulative_nano_usd)
+}
+
+/// Push delivery: we state the total to NEAR AI's admin route.
+pub struct PushTraceCommonsCreditRail {
+    api: Arc<dyn NearAiAdminApi>,
+    max_cumulative_nano_usd: u128,
+    dry_run: bool,
+}
+
+impl PushTraceCommonsCreditRail {
+    pub fn new(api: Arc<dyn NearAiAdminApi>, max_cumulative_nano_usd: u128, dry_run: bool) -> Self {
+        Self {
+            api,
+            max_cumulative_nano_usd,
+            dry_run,
+        }
+    }
+}
+
+#[async_trait]
+impl SettlementRail for PushTraceCommonsCreditRail {
+    fn rail_id(&self) -> &'static str {
+        RAIL_ID
+    }
+    fn instrument_id(&self) -> &'static str {
+        INSTRUMENT_ID
+    }
+    fn instrument_decimals(&self) -> u8 {
+        INSTRUMENT_DECIMALS
+    }
+
+    async fn publish(&self, statement: &CumulativeStatement) -> Result<Published, RailError> {
+        let amount = bounded(statement.cumulative_units, self.max_cumulative_nano_usd)?;
+        let org = org_of(&statement.recipient)?;
+        if self.dry_run {
+            // Prove the read path and the recipient, then stop.
+            self.api
+                .get_trace_commons_credit(org)
+                .await
+                .map_err(read_error)?;
+            return Err(RailError::dry_run("near_ai_rail_dry_run"));
+        }
+        let response = self
+            .api
+            .set_trace_commons_credit(
+                org,
+                &SetTraceCommonsCreditRequest {
+                    cumulative_nano_usd: amount,
+                    statement_ref: statement.statement_ref.clone(),
+                },
+            )
+            .await
+            .map_err(write_error)?;
+        Ok(Published::Recorded {
+            effective_units: units_of(response.cumulative_nano_usd)?,
+            applied: response.applied,
+        })
+    }
+
+    async fn observe(&self, recipient: &RecipientRef) -> Result<Option<u128>, RailError> {
+        observe_with(self.api.as_ref(), recipient).await.map(Some)
+    }
+}
+
+/// Pull delivery: NEAR AI fetches our signed statement. Publishing only
+/// checks the total is servable; the statement is signed when served.
+pub struct PullTraceCommonsCreditRail {
+    observer: Option<Arc<dyn NearAiAdminApi>>,
+    max_cumulative_nano_usd: u128,
+}
+
+impl PullTraceCommonsCreditRail {
+    pub fn new(observer: Option<Arc<dyn NearAiAdminApi>>, max_cumulative_nano_usd: u128) -> Self {
+        Self {
+            observer,
+            max_cumulative_nano_usd,
+        }
+    }
+}
+
+#[async_trait]
+impl SettlementRail for PullTraceCommonsCreditRail {
+    fn rail_id(&self) -> &'static str {
+        RAIL_ID
+    }
+    fn instrument_id(&self) -> &'static str {
+        INSTRUMENT_ID
+    }
+    fn instrument_decimals(&self) -> u8 {
+        INSTRUMENT_DECIMALS
+    }
+
+    async fn publish(&self, statement: &CumulativeStatement) -> Result<Published, RailError> {
+        bounded(statement.cumulative_units, self.max_cumulative_nano_usd)?;
+        org_of(&statement.recipient)?;
+        Ok(Published::Deferred)
+    }
+
+    async fn observe(&self, recipient: &RecipientRef) -> Result<Option<u128>, RailError> {
+        match &self.observer {
+            None => Ok(None),
+            Some(api) => observe_with(api.as_ref(), recipient).await.map(Some),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn env(pairs: &[(&str, String)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        move |k| map.get(k).cloned()
+    }
+
+    fn push_live() -> Vec<(&'static str, String)> {
+        vec![
+            (ENV_MODE, "live".into()),
+            (ENV_BASE_URL, "https://cloud-api.near.ai/v1".into()),
+            (ENV_KEY, "adm_test".into()),
+            (ENV_USER_AGENT, "trace-commons-settlement/1".into()),
+            (ENV_AWARD_POLICY, "flat_rate".into()),
+            (ENV_FLAT_RATE, "1000/1".into()),
+            (ENV_MAX_CUMULATIVE, "100000000000".into()),
+        ]
+    }
+
+    fn with(
+        mut pairs: Vec<(&'static str, String)>,
+        name: &'static str,
+        value: Option<&str>,
+    ) -> Vec<(&'static str, String)> {
+        pairs.retain(|(k, _)| *k != name);
+        if let Some(v) = value {
+            pairs.push((name, v.to_string()));
+        }
+        pairs
+    }
+
+    #[test]
+    fn unset_or_unknown_mode_is_disabled() {
+        assert!(
+            NearAiCreditRailConfig::from_lookup(env(&[]))
+                .unwrap()
+                .is_none()
+        );
+        let on = vec![(ENV_MODE, "on".to_string())];
+        assert!(
+            NearAiCreditRailConfig::from_lookup(env(&on))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn push_live_without_the_admin_key_refuses_and_a_read_key_does_not_satisfy_it() {
+        let pairs = with(push_live(), ENV_KEY, None);
+        let err = NearAiCreditRailConfig::from_lookup(env(&pairs)).unwrap_err();
+        assert_eq!(err.to_string(), "missing_control:near_ai_admin_key");
+        let pairs = with(pairs, ENV_READ_KEY, Some("adm_read"));
+        assert_eq!(
+            NearAiCreditRailConfig::from_lookup(env(&pairs))
+                .unwrap_err()
+                .control,
+            "near_ai_admin_key"
+        );
+    }
+
+    #[test]
+    fn each_required_push_control_refuses_by_name() {
+        for (drop, control) in [
+            (ENV_BASE_URL, "near_ai_admin_base_url"),
+            (ENV_USER_AGENT, "near_ai_admin_user_agent"),
+            (ENV_AWARD_POLICY, "near_ai_credit_award_policy"),
+            (ENV_FLAT_RATE, "near_ai_credit_flat_rate"),
+            (ENV_MAX_CUMULATIVE, "near_ai_credit_max_cumulative"),
+        ] {
+            let pairs = with(push_live(), drop, None);
+            assert_eq!(
+                NearAiCreditRailConfig::from_lookup(env(&pairs))
+                    .unwrap_err()
+                    .control,
+                control
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_values_refuse_and_never_echo_the_value() {
+        for (name, value, control) in [
+            (ENV_KEY, "sk-not-admin", "near_ai_admin_key"),
+            (
+                ENV_BASE_URL,
+                "http://cloud-api.near.ai/v1",
+                "near_ai_admin_base_url",
+            ),
+            (ENV_FLAT_RATE, "0/1", "near_ai_credit_flat_rate"),
+            (ENV_AWARD_POLICY, "Flat Rate", "near_ai_credit_award_policy"),
+            (
+                ENV_AWARD_POLICY,
+                "private_policy_not_registered",
+                "near_ai_credit_award_policy",
+            ),
+            (ENV_MAX_CUMULATIVE, "0", "near_ai_credit_max_cumulative"),
+            (
+                ENV_MAX_CUMULATIVE,
+                "1000000000000000001",
+                "near_ai_credit_max_cumulative",
+            ),
+            (ENV_DELIVERY, "carrier-pigeon", "near_ai_credit_delivery"),
+            (
+                ENV_STATEMENT_KEY,
+                "not-base64-pkcs8",
+                "near_ai_credit_statement_key",
+            ),
+        ] {
+            let pairs = with(push_live(), name, Some(value));
+            let err = NearAiCreditRailConfig::from_lookup(env(&pairs)).unwrap_err();
+            assert_eq!(err.control, control, "{name}");
+            assert!(!err.to_string().contains(value));
+        }
+    }
+
+    #[test]
+    fn pull_needs_the_statement_key_and_no_admin_key() {
+        let pull = vec![
+            (ENV_MODE, "live".to_string()),
+            (ENV_DELIVERY, "pull".to_string()),
+            (ENV_AWARD_POLICY, "flat_rate".to_string()),
+            (ENV_FLAT_RATE, "1/1".to_string()),
+            (ENV_MAX_CUMULATIVE, "1000".to_string()),
+        ];
+        assert_eq!(
+            NearAiCreditRailConfig::from_lookup(env(&pull))
+                .unwrap_err()
+                .control,
+            "near_ai_credit_statement_key"
+        );
+        let key = crate::near_ai_credit_statement::tests_support::fresh_pkcs8_base64();
+        let pull = with(pull, ENV_STATEMENT_KEY, Some(&key));
+        let cfg = NearAiCreditRailConfig::from_lookup(env(&pull))
+            .unwrap()
+            .unwrap();
+        assert_eq!(cfg.delivery, Delivery::Pull);
+        assert!(cfg.write_key.is_none());
+        assert!(!format!("{cfg:?}").contains(&key));
+        // A read key for observation brings the admin-API controls with it.
+        let observed = with(pull, ENV_READ_KEY, Some("adm_read"));
+        assert_eq!(
+            NearAiCreditRailConfig::from_lookup(env(&observed))
+                .unwrap_err()
+                .control,
+            "near_ai_admin_base_url"
+        );
+    }
+
+    #[test]
+    fn a_complete_push_configuration_resolves_without_printing_keys() {
+        let cfg = NearAiCreditRailConfig::from_lookup(env(&push_live()))
+            .unwrap()
+            .unwrap();
+        assert_eq!((cfg.mode, cfg.delivery), (RailMode::Live, Delivery::Push));
+        assert_eq!(cfg.award_policy.policy_ref(), "flat_rate:1000/1");
+        assert!(!format!("{cfg:?}").contains("adm_test"));
+    }
+
+    /// A made-up stand-in for a private backend's policy.
+    struct Injected;
+
+    impl SettlementAwardPolicy for Injected {
+        fn policy_ref(&self) -> String {
+            "injected:v1".into()
+        }
+        fn period_key(
+            &self,
+            at: i64,
+        ) -> Result<trace_commons_gate_api::PeriodKey, trace_commons_gate_api::AwardError> {
+            trace_commons_gate_api::utc_month_period_key(at)
+        }
+        fn period_target(
+            &self,
+            _: &trace_commons_gate_api::PeriodSummary,
+        ) -> Result<trace_commons_gate_api::PeriodAward, trace_commons_gate_api::AwardError>
+        {
+            Ok(trace_commons_gate_api::PeriodAward { target_units: 0 })
+        }
+    }
+
+    #[test]
+    fn an_embedding_binary_supplies_a_policy_by_name_and_flat_rate_is_reserved() {
+        let registry = AwardPolicyRegistry::new()
+            .with_policy("injected", Arc::new(Injected))
+            .with_policy(FLAT_RATE_POLICY, Arc::new(Injected));
+        let pairs = with(push_live(), ENV_FLAT_RATE, None);
+        let pairs = with(pairs, ENV_AWARD_POLICY, Some("injected"));
+        // The open build has no such policy.
+        assert_eq!(
+            NearAiCreditRailConfig::from_lookup(env(&pairs))
+                .unwrap_err()
+                .control,
+            "near_ai_credit_award_policy"
+        );
+        let cfg = NearAiCreditRailConfig::from_lookup_with_policies(env(&pairs), &registry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(cfg.award_policy.policy_ref(), "injected:v1");
+        assert_eq!(cfg.award_policy_name, "injected");
+        // A flat rate left beside another policy refuses rather than read
+        // as in force.
+        let stray = with(pairs, ENV_FLAT_RATE, Some("1/1"));
+        assert_eq!(
+            NearAiCreditRailConfig::from_lookup_with_policies(env(&stray), &registry)
+                .unwrap_err()
+                .control,
+            "near_ai_credit_flat_rate"
+        );
+        // `flat_rate` always means the reference, whatever is registered.
+        let cfg = NearAiCreditRailConfig::from_lookup_with_policies(env(&push_live()), &registry)
+            .unwrap()
+            .unwrap();
+        assert_eq!(cfg.award_policy.policy_ref(), "flat_rate:1000/1");
+    }
+}

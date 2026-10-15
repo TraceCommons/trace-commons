@@ -92,6 +92,7 @@ jobs:
     env:
       PG_SUITE_DATABASES: >-
         admission_test_onboarding
+        admission_test_settlement_rail
         admission_test_ledger
         admission_test_account_ledger
         admission_test_account_trust_external
@@ -257,6 +258,12 @@ jobs:
         run: cargo test -p trace-commons-server --test account_trust_pg
         env:
           TRACE_COMMONS_ACCOUNT_TRUST_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust
+      # The cumulative settlement rail ledger (V129) under a least-privilege runtime role,
+      # driven end to end against a loopback fake of NEAR AI's admin API.
+      - name: settlement_rail_pg
+        run: cargo test -p trace-commons-server --test settlement_rail_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_SETTLEMENT_RAIL_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_settlement_rail
       # Earned account trust (shadow): fact recording, the worker's
       # least-privilege roles and the one cross-tenant enumeration seam.
       - name: account_trust_growth_pg

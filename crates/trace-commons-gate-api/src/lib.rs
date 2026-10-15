@@ -15,6 +15,7 @@ pub mod perplexity;
 pub mod pipeline;
 pub mod reference;
 pub mod settlement;
+pub mod settlement_award;
 pub mod vector_index;
 
 pub use decision::{
@@ -29,8 +30,11 @@ pub use perplexity::{
     ChunkPerplexity, PerplexityResult, PerplexityScorer, ScorerFailure, TokenRarityResult,
     TokenRarityScorer, scorer_status_is_transient,
 };
-pub use reference::{ReferenceEmbedder, ReferencePerplexityScorer};
+pub use reference::{ReferenceEmbedder, ReferenceFlatRateAwardPolicy, ReferencePerplexityScorer};
 pub use settlement::{SettlementAdapter, SettlementError, SettlementReceipt, SettlementRequest};
+pub use settlement_award::{
+    AwardError, PeriodAward, PeriodKey, PeriodSummary, SettlementAwardPolicy, utc_month_period_key,
+};
 pub use vector_index::{
     IndexEntryKey, IndexSnapshot, IndexUpsertResult, IndexWriteError, NearestNeighbor, VectorIndex,
     VectorIndexReader, VectorIndexSnapshot, VectorIndexWriter,

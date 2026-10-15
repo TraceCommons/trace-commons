@@ -1488,6 +1488,7 @@ async fn finish_ingest_startup(
         state.near_credit_outbox_scheduler.as_ref(),
     )
     .await?;
+    validate_near_ai_inference_credit_rail_config()?;
     validate_trace_retention_maintenance_scheduler_config(
         state.as_ref(),
         state.retention_maintenance_scheduler.as_ref(),
@@ -11611,6 +11612,26 @@ fn trace_export_scheduler_config_error(error: (StatusCode, Json<ApiError>)) -> a
         error.0,
         error.1.0.error
     )
+}
+
+/// Refuse to start when the NEAR AI inference credit rail is switched on
+/// with a missing or invalid control (spec 2026-10-14, section 3.9). The
+/// error carries only the `missing_control:<name>` label. Nothing drives the
+/// rail yet, so a valid configuration only logs that it is not driven.
+fn validate_near_ai_inference_credit_rail_config() -> anyhow::Result<()> {
+    match trace_commons_server::near_ai_inference_credit::NearAiCreditRailConfig::from_env() {
+        Ok(None) => Ok(()),
+        Ok(Some(config)) => {
+            tracing::warn!(
+                mode = ?config.mode,
+                "NEAR AI inference credit rail is configured but not driven by this build"
+            );
+            Ok(())
+        }
+        Err(refused) => Err(anyhow::anyhow!(
+            "invalid NEAR AI inference credit rail configuration: {refused}"
+        )),
+    }
 }
 
 async fn validate_trace_near_credit_outbox_scheduler_config(
