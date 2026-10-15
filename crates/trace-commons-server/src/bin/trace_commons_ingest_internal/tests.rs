@@ -8581,16 +8581,36 @@ async fn pg_owned_quarantined_repost_unchanged_and_corrected_mirror_one_audit_ro
 
 /// #332 test seam: a trigger on the test database that refuses one table's
 /// writes for one submission id. Test-side only; production has no seam.
-async fn issue_332_inject_write_failure(backend: &PgBackend, table: &str, submission_id: Uuid) {
+/// `once` refuses only the first matching write, so a rollback that
+/// re-mirrors the prior goes through; otherwise every write is refused, so
+/// the rollback's own re-mirror fails at the same stage.
+async fn issue_332_inject_write_failure(
+    backend: &PgBackend,
+    table: &str,
+    submission_id: Uuid,
+    once: bool,
+) {
     let client = backend
         .raw_pool_for_tests_and_diagnostics()
         .get()
         .await
         .unwrap();
+    let condition = if once {
+        "nextval('issue_332_injected_failure_seq') = 1"
+    } else {
+        "true"
+    };
     client
         .batch_execute(&format!(
-            "CREATE OR REPLACE FUNCTION issue_332_injected_failure() RETURNS trigger
-                 LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'issue 332 injected failure'; END $$;
+            "DROP SEQUENCE IF EXISTS issue_332_injected_failure_seq;
+             CREATE SEQUENCE issue_332_injected_failure_seq;
+             CREATE OR REPLACE FUNCTION issue_332_injected_failure() RETURNS trigger
+                 LANGUAGE plpgsql AS $$ BEGIN
+                     IF {condition} THEN
+                         RAISE EXCEPTION 'issue 332 injected failure';
+                     END IF;
+                     RETURN NEW;
+                 END $$;
              DROP TRIGGER IF EXISTS issue_332_injected_failure ON {table};
              CREATE TRIGGER issue_332_injected_failure BEFORE INSERT OR UPDATE ON {table}
                  FOR EACH ROW WHEN (NEW.submission_id = '{submission_id}')
@@ -8598,6 +8618,29 @@ async fn issue_332_inject_write_failure(backend: &PgBackend, table: &str, submis
         ))
         .await
         .unwrap();
+}
+
+/// Every stored artifact file under `root`, for before/after comparison.
+fn issue_332_artifact_files(root: &Path) -> BTreeSet<PathBuf> {
+    fn walk(dir: &Path, out: &mut BTreeSet<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path
+                .components()
+                .any(|part| part.as_os_str() == "artifacts")
+            {
+                out.insert(path);
+            }
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(root, &mut out);
+    out
 }
 
 async fn issue_332_clear_injected_failures(backend: &PgBackend) {
@@ -8638,7 +8681,11 @@ async fn pg_owned_quarantined_remediation_failure_at_each_mirror_stage_keeps_pri
         return;
     };
     issue_332_clear_injected_failures(&backend).await;
-    for table in ISSUE_332_MIRROR_STAGE_TABLES {
+    for (table, once) in ISSUE_332_MIRROR_STAGE_TABLES
+        .into_iter()
+        .flat_map(|table| [(table, false), (table, true)])
+    {
+        let stage = format!("{table}{}", if once { " (transient)" } else { "" });
         cleanup_pg_trace_tenant(&backend, "tenant-a").await;
         let temp = tempfile::tempdir().unwrap();
         let store = test_artifact_store(temp.path());
@@ -8667,25 +8714,26 @@ async fn pg_owned_quarantined_remediation_failure_at_each_mirror_stage_keeps_pri
             .unwrap()
             .unwrap();
 
-        issue_332_inject_write_failure(&backend, table, submission_id).await;
+        let artifacts_before = issue_332_artifact_files(temp.path());
+        issue_332_inject_write_failure(&backend, table, submission_id, once).await;
         let corrected = issue_332_corrected(&first);
         let failed = test_submit(state.clone(), "token-a", corrected.clone()).await;
         issue_332_clear_injected_failures(&backend).await;
         let error = failed.expect_err("an injected mirror failure fails the remediation");
-        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR, "{table}");
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR, "{stage}");
 
         let record = read_submission_record(temp.path(), "tenant-a", submission_id)
             .unwrap()
-            .unwrap_or_else(|| panic!("{table}: the submission record survives"));
+            .unwrap_or_else(|| panic!("{stage}: the submission record survives"));
         read_envelope_by_record(state.as_ref(), &record)
-            .unwrap_or_else(|error| panic!("{table}: the current envelope decrypts: {error:#}"));
+            .unwrap_or_else(|error| panic!("{stage}: the current envelope decrypts: {error:#}"));
         read_envelope_by_record(state.as_ref(), &prior)
-            .unwrap_or_else(|error| panic!("{table}: the prior envelope decrypts: {error:#}"));
+            .unwrap_or_else(|error| panic!("{stage}: the prior envelope decrypts: {error:#}"));
         assert!(
             read_derived_record(temp.path(), "tenant-a", submission_id)
                 .unwrap()
                 .is_some(),
-            "{table}: the derived record survives"
+            "{stage}: the derived record survives"
         );
         let db_status = backend
             .get_trace_submission("tenant-a", submission_id)
@@ -8696,14 +8744,27 @@ async fn pg_owned_quarantined_remediation_failure_at_each_mirror_stage_keeps_pri
         assert_eq!(
             db_status,
             storage_corpus_status(record.status),
-            "{table}: the DB and file records agree"
+            "{stage}: the DB and file records agree"
         );
+        // Known gap: the audit append runs after the mirror and outside the
+        // rollback, so a failure at that stage leaves the remediation applied
+        // with no remediation audit event. Its result is accepted here, not
+        // endorsed; a fix that brings the audit append into the rollback
+        // changes this branch.
         if table != "trace_audit_events" {
-            assert_eq!(record.status, TraceCorpusStatus::Quarantined, "{table}");
+            assert_eq!(record.status, TraceCorpusStatus::Quarantined, "{stage}");
             assert_eq!(
                 record.artifact_receipt.as_ref().map(|r| &r.object_key),
                 prior.artifact_receipt.as_ref().map(|r| &r.object_key),
-                "{table}: the file record still names the prior artifact"
+                "{stage}: the file record still names the prior artifact"
+            );
+        }
+        if once && table != "trace_audit_events" {
+            assert_eq!(
+                issue_332_artifact_files(temp.path()),
+                artifacts_before,
+                "{stage}: a rollback that restored the prior deletes the \
+                 remediation's artifact and nothing else"
             );
         }
         issue_332_assert_live_object_refs_resolve(
@@ -8711,33 +8772,33 @@ async fn pg_owned_quarantined_remediation_failure_at_each_mirror_stage_keeps_pri
             &store,
             temp.path(),
             submission_id,
-            table,
+            &stage,
         )
         .await;
         issue_332_assert_audit_stores_agree(&backend, temp.path(), submission_id, table).await;
 
         let Json(receipt) = test_submit(state.clone(), "token-a", corrected)
             .await
-            .unwrap_or_else(|error| panic!("{table}: the retry succeeds, got {}", error.0));
-        assert_eq!(receipt.status, "accepted", "{table}");
+            .unwrap_or_else(|error| panic!("{stage}: the retry succeeds, got {}", error.0));
+        assert_eq!(receipt.status, "accepted", "{stage}");
         let record = read_submission_record(temp.path(), "tenant-a", submission_id)
             .unwrap()
             .unwrap();
         read_envelope_by_record(state.as_ref(), &record)
-            .unwrap_or_else(|error| panic!("{table}: the remediated envelope decrypts: {error:#}"));
+            .unwrap_or_else(|error| panic!("{stage}: the remediated envelope decrypts: {error:#}"));
         issue_332_assert_live_object_refs_resolve(
             &backend,
             &store,
             temp.path(),
             submission_id,
-            &format!("{table} retry"),
+            &format!("{stage} retry"),
         )
         .await;
         issue_332_assert_audit_stores_agree(
             &backend,
             temp.path(),
             submission_id,
-            &format!("{table} retry"),
+            &format!("{stage} retry"),
         )
         .await;
     }
