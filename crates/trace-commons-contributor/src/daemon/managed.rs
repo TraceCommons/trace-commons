@@ -146,8 +146,15 @@ impl ManagedService {
                     .into_iter()
                     .map(|app| json!({"id":app.id(),"name":app.name()}))
                     .collect();
+                // Off macOS, with no offered terminal found there is nothing
+                // to choose and nothing to open: Launch stays off and the
+                // shells show their "unavailable" line, rather than a
+                // refusal pointing at a picker that is not drawn. macOS
+                // always has Terminal, so a failed probe never dims it.
+                let terminal_launch = terminal::launch_available()
+                    && (cfg!(target_os = "macos") || !choices.is_empty());
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"revision":self.sessions.revision(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":terminal::launch_available(),"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
+                    json!({"copy":crate::managed::copy::copy(),"revision":self.sessions.revision(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
                 )
             }
             "managed_account_add" => {
@@ -868,6 +875,19 @@ mod tests {
         .unwrap();
         assert_eq!(unknown["capabilities"]["terminal_current"], Value::Null);
         assert_eq!(unknown["capabilities"]["terminal_destination"], Value::Null);
+    }
+
+    /// Off macOS, no offered terminal found means no Launch, rather than a
+    /// refusal pointing at a picker that is not drawn.
+    #[test]
+    fn no_terminal_found_turns_launch_off_except_on_macos() {
+        let (_home, _store, mut service) = service();
+        service.installed_terminals = Vec::new;
+        let snapshot = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
+        let capabilities = &snapshot["capabilities"];
+        assert_eq!(capabilities["terminal_choices"], json!([]));
+        let expected = cfg!(target_os = "macos") && terminal::launch_available();
+        assert_eq!(capabilities["terminal_launch"], expected);
     }
 
     #[test]

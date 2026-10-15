@@ -101,7 +101,7 @@ another in Settings." until another is chosen.
 | macOS | Ghostty | `ghostty` | AppleScript `new surface configuration`, `command`, `wait after command` | Ghostty AppleScript dictionary |
 | macOS | iTerm2 | `iterm2` | AppleScript `create window with default profile command` | iTerm2 AppleScript dictionary |
 | Windows | Windows Terminal | `windows_terminal` | `wt.exe new-tab --title "NEAR AI" -d <folder> <helper> <args>` | `new-tab --startingDirectory, -d` and `commandline` ("Executable with optional arguments"), <https://learn.microsoft.com/en-us/windows/terminal/command-line-arguments> |
-| Linux | GNOME Terminal | `gnome_terminal` | `gnome-terminal --working-directory=<folder> -- <helper> <args>` | `--working-directory=DIRNAME` "Set the terminal's working directory"; `--` "interpret all subsequent options as a program and arguments" (`-e` and `-x` are deprecated), gnome-terminal(1), <https://manpages.debian.org/testing/gnome-terminal/gnome-terminal.1.en.html> |
+| Linux | GNOME Terminal | `gnome_terminal` | `gnome-terminal --working-directory=<folder> -- <helper> <args>` | `--working-directory=DIRNAME` "Set the terminal's working directory"; `--` is what the deprecated `-x, --execute` entry ("interpret all subsequent options as a program and arguments") says to use instead (`-e` is deprecated too), gnome-terminal(1), <https://manpages.debian.org/testing/gnome-terminal/gnome-terminal.1.en.html> |
 | Linux | Konsole | `konsole` | `konsole --workdir <folder> --hold -e <helper> <args>` | `--workdir dir` "Open with dir as the initial working directory"; `-e` "will catch all following arguments ... and execute it as command"; `--hold` "Do not close the initial session automatically when it ends", <https://docs.kde.org/stable_kf6/en/konsole/konsole/command-line-options.html> |
 | Linux | Ghostty | `ghostty` | `ghostty --working-directory=<folder> --wait-after-command=true -e <helper> <args>` | "Every configuration key is a valid CLI flag", <https://ghostty.org/docs/config>; `working-directory`, `wait-after-command`, and `-e` sets `initial-command` and "Disables shell expansion since the input is expected to already be shell-expanded", <https://ghostty.org/docs/config/reference> |
 
@@ -113,8 +113,18 @@ by semicolons"). A launch whose folder, helper path or config folder holds a
 **Left out.**
 
 - `x-terminal-emulator` (Debian alternatives, the previous Linux
-  destination) and xterm: `-e` takes a command, but there is no common flag
-  for a working directory.
+  destination) and xterm: Debian Policy requires only `-e command` and
+  `-T title` of a terminal emulator, with no working-directory option
+  (<https://www.debian.org/doc/debian-policy/ch-customized-programs.html>),
+  so the alternative cannot be relied on to take one.
+
+**What this costs.** A Linux computer with none of GNOME Terminal, Konsole or
+Ghostty (an XFCE, Sway or i3 desktop, say) could launch through
+`x-terminal-emulator` before and cannot now: the picker offers nothing and
+is not drawn, and the managed-sessions screen shows its "unavailable" line
+with Launch off, until another terminal is added by the test above. The
+same holds on Windows without Windows Terminal, as it did before. On macOS
+Launch is never turned off this way, because Terminal is always there.
 - The Windows console host, through PowerShell or directly: `powershell.exe`
   takes a command only as PowerShell source (`-Command`, or `-EncodedCommand`
   for the same text in base64), so the folder would have to be quoted into a

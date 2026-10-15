@@ -616,11 +616,14 @@ mod tests {
     use super::*;
 
     /// A config folder whose path tries to close the AppleScript string
-    /// and run its own script, and to escape the shell quoting too.
+    /// and run its own script, and to escape the shell quoting too, and
+    /// carries `$`, backticks and non-ASCII text.
     fn hostile_command() -> String {
         shell_command(
             Path::new("/Applications/Trace Commons.app/Contents/MacOS/near-ai"),
-            Path::new("/Users/x/a\"; do shell script \"touch /tmp/pwn\" --\\\n'b"),
+            Path::new(
+                "/Users/x/a\"; do shell script \"touch /tmp/pwn\" --\\\n'b/$HOME/`touch pwn`/año/日本語",
+            ),
             Uuid::nil(),
             "abcdef01",
         )
@@ -721,6 +724,8 @@ mod tests {
         }
     }
 
+    // The fixture paths are Unix paths, absolute only off Windows.
+    #[cfg(unix)]
     #[test]
     fn every_script_holds_the_command_only_as_one_string_literal() {
         let command = hostile_command();
@@ -750,6 +755,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The shell sees the hostile folder as one single-quoted word: a `'`
+    /// closes and reopens the quoting, and `$`, backticks and non-ASCII
+    /// text stay literal inside it.
+    #[cfg(unix)]
+    #[test]
+    fn the_shell_command_single_quotes_the_whole_folder() {
+        let command = hostile_command();
+        let folder = r#"'/Users/x/a"; do shell script "touch /tmp/pwn" --\
+'\''b/$HOME/`touch pwn`/año/日本語'"#;
+        assert!(
+            command.contains(&format!("--config-dir {folder} ")),
+            "{command}"
+        );
     }
 
     #[test]
@@ -949,6 +969,8 @@ mod tests {
         tail
     }
 
+    // The fixture paths are Unix paths, absolute only off Windows.
+    #[cfg(unix)]
     #[test]
     fn each_terminal_gets_the_folder_and_the_helper_as_argv() {
         let cwd = Path::new("/home/x/My Projects/app");
@@ -994,6 +1016,8 @@ mod tests {
         }
     }
 
+    // The fixture paths are Unix paths, absolute only off Windows.
+    #[cfg(unix)]
     #[test]
     fn a_hostile_folder_is_one_verbatim_argument() {
         for cwd in hostile_folders() {
@@ -1021,6 +1045,8 @@ mod tests {
         }
     }
 
+    // The fixture paths are Unix paths, absolute only off Windows.
+    #[cfg(unix)]
     #[test]
     fn a_semicolon_is_refused_for_windows_terminal_only() {
         let cwd = Path::new("/home/x/a;b");
@@ -1047,6 +1073,8 @@ mod tests {
         }
     }
 
+    // The fixture paths are Unix paths, absolute only off Windows.
+    #[cfg(unix)]
     #[test]
     fn a_plan_refuses_relative_paths_and_a_non_hex_ticket() {
         let ok = |program: &str, helper: &str, config: &str, cwd: &str, ticket: &str| {
