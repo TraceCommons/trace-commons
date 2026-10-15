@@ -346,7 +346,7 @@ fn parse_installed(stdout: &str) -> Vec<TerminalApp> {
 /// The macOS launch with its outside effect passed in. Refuses an
 /// unrecognized choice, and an app that was not found, before running
 /// anything. Never falls back to another app.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn launch_macos(
     choice: TerminalSetting,
     installed: &[TerminalApp],
@@ -616,6 +616,7 @@ fn external_terminal(name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     /// A config folder whose path tries to close the AppleScript string
     /// and run its own script, and to escape the shell quoting too, and
     /// carries `$`, backticks and non-ASCII text.
@@ -930,6 +931,7 @@ mod tests {
         assert_eq!(probes.get(), 3);
     }
 
+    #[cfg(unix)]
     /// Folders a launch must pass through unchanged: spaces, both quotes,
     /// `$`, backticks, a command substitution, a line break and non-ASCII.
     fn hostile_folders() -> Vec<PathBuf> {
@@ -947,6 +949,7 @@ mod tests {
         .collect()
     }
 
+    #[cfg(unix)]
     fn plan_for(app: TerminalApp, cwd: &Path) -> Result<Plan, ManagedError> {
         plan(
             app,
@@ -959,6 +962,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     /// The helper and its arguments, as the tail every plan ends with.
     fn helper_tail() -> Vec<std::ffi::OsString> {
         let mut tail = vec![std::ffi::OsString::from("/opt/Trace Commons/near-ai")];
