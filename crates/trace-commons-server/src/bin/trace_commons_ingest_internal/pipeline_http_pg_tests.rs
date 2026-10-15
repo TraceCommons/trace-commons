@@ -17195,3 +17195,283 @@ async fn the_worker_repairs_both_assessment_events_of_a_run_held_at_score() {
     );
     assert!(!review_audit_marker_is_set(&fixture, run_id).await);
 }
+
+/// #1313: a run held for an operator (`operator_held_at`, with the review
+/// audit marker its hold sets) gets one label-only `lifecycle_status_change`
+/// event from the review audit pass: status `accepted`, which the submission
+/// keeps, reason `pipeline_settle_held_for_operator`, its id derived from the
+/// run and the hold's time. The event is appended even though an operator
+/// failed the run before the pass ran, and a second pass adds none. The hold
+/// itself (`mark_failed` on a paid run whose Settle commit was refused) is
+/// driven in `versioned_pipeline_runtime_pg`; here the columns are set
+/// directly, as the owner, to test the audit pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_review_audit_pass_records_a_run_held_for_an_operator() {
+    let Some(fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_compatibility_pipeline_service(
+            runtime,
+            &ConfiguredTraceArtifactStore::legacy(artifacts),
+            IsolatedPipelineIndex::new(),
+            2_500_000,
+            Arc::new(PassThroughPipelinePrivacyBoundary),
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+    let held_at: chrono::DateTime<chrono::Utc> = {
+        let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let row = tx
+            .query_one(
+                "UPDATE pipeline_runs
+                    SET state = 'awaiting_operator',
+                        last_error_label = 'pipeline_gate_decision_conflict',
+                        operator_held_at = clock_timestamp(),
+                        review_audit_pending_at = clock_timestamp()
+                  WHERE tenant_id = $1 AND run_id = $2
+                  RETURNING operator_held_at",
+                &[&tenant, &created.run_id],
+            )
+            .await
+            .unwrap();
+        // The operator fails the run before the audit pass runs.
+        tx.execute(
+            "UPDATE pipeline_runs
+                SET state = 'failed', last_error_label = 'operator_failed_held_run'
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &created.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        row.get(0)
+    };
+
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let held_id =
+        pipeline_runtime::pipeline_settle_hold_audit_event_id(&tenant, created.run_id, held_at);
+    let events =
+        audit_file_events_of_kind(&fixture, envelope.submission_id, "lifecycle_status_change");
+    let held = events
+        .iter()
+        .filter(|event| event.event_id == held_id)
+        .collect::<Vec<_>>();
+    assert_eq!(held.len(), 1, "{events:?}");
+    assert_eq!(held[0].status, Some(TraceCorpusStatus::Accepted));
+    assert_eq!(
+        held[0].reason.as_deref(),
+        Some(trace_commons_server::versioned_pipeline::PIPELINE_SETTLE_HELD_FOR_OPERATOR_LABEL)
+    );
+    assert!(!review_audit_marker_is_set(&fixture, created.run_id).await);
+
+    set_review_audit_marker(&fixture, created.run_id).await;
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the second pass runs");
+    let again =
+        audit_file_events_of_kind(&fixture, envelope.submission_id, "lifecycle_status_change");
+    assert_eq!(
+        again
+            .iter()
+            .filter(|event| event.event_id == held_id)
+            .count(),
+        1,
+        "a second pass adds no event"
+    );
+}
+
+/// Holds `run_id` for an operator directly, as the owner: a route-level
+/// shortcut. The hold itself is driven in `versioned_pipeline_runtime_pg`.
+async fn hold_run_for_operator_as_owner(fixture: &ProductFixture, tenant: &str, run_id: Uuid) {
+    let mut owner = fixture
+        .base
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap();
+    let tx = tenant_tx(&mut owner, tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs
+            SET state = 'awaiting_operator',
+                last_error_label = 'pipeline_gate_decision_conflict',
+                operator_held_at = clock_timestamp()
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// #1413 review: `POST /v1/admin/pipeline/runs/{run_id}/held-run-resolution`
+/// is the operator's way to end a hold (`resolve_operator_held_run`). It
+/// needs `main`'s admin credential: a contributor is refused and another
+/// tenant's admin finds no held run. `release` and `fail` answer the run's
+/// new state, a run no longer held is `404`, and each resolution appends a
+/// label-only audit row: the submission's status, `accepted`, with the
+/// operator's decision as its reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_operator_route_resolves_a_held_run() {
+    let Some(fixture) = product_fixture().await else {
+        return;
+    };
+    let state = &fixture.base.state;
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let run = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    hold_run_for_operator_as_owner(&fixture, tenant, run.run_id).await;
+    let uri = format!("/v1/admin/pipeline/runs/{}/held-run-resolution", run.run_id);
+    let release = serde_json::json!({"resolution": "release"});
+    let run_state = |run_id: Uuid| {
+        let service = fixture.base.service.clone();
+        async move {
+            service
+                .store()
+                .get_run(tenant, run_id)
+                .await
+                .unwrap()
+                .expect("the run")
+                .state
+        }
+    };
+
+    let (status, _) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.base.token),
+        Some(release.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a contributor is refused");
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.other_tenant_admin_token),
+        Some(release.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, _) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.admin_token),
+        Some(serde_json::json!({"resolution": "complete"})),
+    )
+    .await;
+    assert!(status.is_client_error(), "an unknown resolution: {status}");
+    assert_eq!(
+        run_state(run.run_id).await,
+        PipelineRunState::AwaitingOperator,
+        "no refused request changed it"
+    );
+
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.admin_token),
+        Some(release.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, serde_json::json!({"state": "retry"}));
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.admin_token),
+        Some(release),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a run no longer held: {body}"
+    );
+
+    hold_run_for_operator_as_owner(&fixture, tenant, run.run_id).await;
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.admin_token),
+        Some(serde_json::json!({"resolution": "fail"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, serde_json::json!({"state": "failed"}));
+    assert_eq!(run_state(run.run_id).await, PipelineRunState::Failed);
+
+    let mut client = fixture
+        .base
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let rows = tx
+        .query(
+            "SELECT metadata_json->>'reason_code' AS reason,
+                    metadata_json->>'resulting_status' AS status
+               FROM trace_audit_events
+              WHERE tenant_id = $1 AND submission_id = $2
+                AND metadata_json->>'reason_code' IN ($3, $4)
+              ORDER BY audit_sequence",
+            &[
+                &tenant,
+                &run.submission_id,
+                &trace_commons_server::versioned_pipeline::PIPELINE_OPERATOR_RELEASED_HELD_RUN_LABEL,
+                &trace_commons_server::versioned_pipeline::PIPELINE_OPERATOR_FAILED_HELD_RUN_LABEL,
+            ],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let recorded = rows
+        .iter()
+        .map(|row| {
+            (
+                row.get::<_, String>("reason"),
+                row.get::<_, String>("status"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recorded,
+        vec![
+            (
+                "operator_released_held_run".to_string(),
+                "accepted".to_string()
+            ),
+            (
+                "operator_failed_held_run".to_string(),
+                "accepted".to_string()
+            ),
+        ],
+        "one row per resolution the route made"
+    );
+}
