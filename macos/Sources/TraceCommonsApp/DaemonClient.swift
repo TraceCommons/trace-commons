@@ -82,6 +82,19 @@ final class DaemonClient {
         try call("native_wallet_flow", params: ["action": action, "flow_id": flowID, "ingest_url": commons, "account_id": account], as: NativeWalletView.self)
     }
 
+    /// The NEP-413 payload of the flow's live challenge, for the NEAR signer.
+    func nativeWalletPayload(flowID: String) throws -> NearSignerPayload {
+        try call("native_wallet_flow", params: ["action": "native_payload", "flow_id": flowID], as: NearSignerPayload.self)
+    }
+
+    /// The signer's proof, which the daemon verifies against its own challenge.
+    func nativeWalletComplete(flowID: String, proof: NearSignerProof) throws -> NativeWalletView {
+        try call("native_wallet_flow", params: [
+            "action": "native_complete", "flow_id": flowID,
+            "account_id": proof.accountID, "public_key": proof.publicKey, "signature": proof.signature,
+        ], as: NativeWalletView.self)
+    }
+
     /// Join a commons with the NEAR AI login this daemon already holds.
     ///
     /// Takes no account id and no token, deliberately: the account is

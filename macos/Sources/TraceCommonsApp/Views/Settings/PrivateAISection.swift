@@ -27,6 +27,7 @@ struct PrivateAISection: View {
                let feed = model.daemonSettings?.insightsLedgerFeed {
                 GlassCard { ledgerFeed(feed) }
             }
+            if nearSignerCompiledIn { GlassCard { NearSignerSetting() } }
             switch model.routeDisclosureState {
             case .shown(let disclosure):
                 GlassEyebrowCard(disclosure.copy.title) {
@@ -162,5 +163,24 @@ struct RouteDisclosureUnreadableGlassLine: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(words)
+    }
+}
+
+/// "Use the NEAR signer app": off by default. With it on and the signer
+/// installed, the NEAR sign-in goes through the signer; otherwise through the
+/// browser.
+private struct NearSignerSetting: View {
+    @EnvironmentObject private var model: AppModel
+    @AppStorage(nearSignerSettingKey) private var on = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            Toggle(NearSignerCopy.settingTitle, isOn: $on)
+                .toggleStyle(GlassToggleStyle(.settings))
+            Text(NearSignerCopy.settingCaption)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }

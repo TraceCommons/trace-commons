@@ -18,6 +18,15 @@ import Foundation
 let ffiLibDir = ProcessInfo.processInfo.environment["TC_FFI_LIB_DIR"]
     .flatMap { $0.isEmpty ? nil : $0 } ?? "../target/debug"
 
+// The NEAR signer's caller library. Until the signer repo is published this is
+// a local path dependency, supplied by NEAR_SIGNER_PATH (a checkout of
+// nearai/near-signer). Without it the signer route is compiled out of the app
+// (`#if canImport(NearSignerClient)`), and CI, which has no such checkout,
+// builds exactly what it built before. A published release replaces this with
+// an exactly pinned URL dependency.
+let nearSignerPath = ProcessInfo.processInfo.environment["NEAR_SIGNER_PATH"]
+    .flatMap { $0.isEmpty ? nil : $0 }
+
 let package = Package(
     name: "TraceCommons",
     platforms: [.macOS(.v14)],
@@ -32,7 +41,7 @@ let package = Package(
         // repo's dependency policy -- see
         // docs/superpowers/specs/2026-08-17-desktop-auto-update-design.md.
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.6")
-    ],
+    ] + (nearSignerPath.map { [Package.Dependency.package(path: $0)] } ?? []),
     targets: [
         .systemLibrary(
             name: "CTraceCommons"
@@ -117,7 +126,7 @@ let package = Package(
                 "TCShellCore",
                 "TCUpdates",
                 .product(name: "Sparkle", package: "Sparkle"),
-            ],
+            ] + (nearSignerPath == nil ? [] : [.product(name: "NearSignerClient", package: "near-signer")]),
             swiftSettings: [.swiftLanguageMode(.v5)],
             linkerSettings: [
                 .unsafeFlags([
