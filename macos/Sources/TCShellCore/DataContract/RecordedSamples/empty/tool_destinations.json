@@ -105,7 +105,7 @@
     "map_scope": "Session routes; model calls are unverified.",
     "collection_disabled": "Trace collection off",
     "model_required": "Enter a model ID to launch OpenCode.",
-    "opencode_export_scope": "Import an OpenCode export, or turn on collection when launching a session.",
+    "opencode_export_scope": "Watch local sessions, import an export, or collect a managed session.",
     "tools_title": "Coding tools",
     "tools_empty": "Install a coding tool to start a managed session. Saved accounts and session history stay here.",
     "install": "Install",
