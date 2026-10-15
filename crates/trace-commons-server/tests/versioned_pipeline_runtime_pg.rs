@@ -50208,6 +50208,8 @@ const REGISTERED_SCORE_IMPLEMENTATION: &str = "substituted.score.runtime_test_on
 
 struct RegisteredTestScoreFactory {
     trace_credit_event: PipelineTraceCreditEvent,
+    /// Award adjustments the policy records on its Score evidence.
+    award_adjustments: Vec<trace_commons_gate_api::pipeline::AwardAdjustment>,
 }
 
 impl trace_commons_server::versioned_pipeline_score_registry::ScorePolicyFactory
@@ -50236,7 +50238,41 @@ impl trace_commons_server::versioned_pipeline_score_registry::ScorePolicyFactory
                 dependencies.index_reader,
             )
             .map_err(|_| "substituted_configuration_invalid")?;
-        Ok(Arc::new(policy))
+        if self.award_adjustments.is_empty() {
+            return Ok(Arc::new(policy));
+        }
+        Ok(Arc::new(AdjustingScorePolicy {
+            inner: Arc::new(policy),
+            award_adjustments: self.award_adjustments.clone(),
+        }))
+    }
+}
+
+/// A registered Score policy that records `award_adjustments` on the
+/// evidence of the policy it wraps.
+struct AdjustingScorePolicy {
+    inner: Arc<dyn trace_commons_gate_api::pipeline::ScorePolicy>,
+    award_adjustments: Vec<trace_commons_gate_api::pipeline::AwardAdjustment>,
+}
+
+#[async_trait::async_trait]
+impl trace_commons_gate_api::pipeline::ScorePolicy for AdjustingScorePolicy {
+    async fn execute(
+        &self,
+        input: &trace_commons_gate_api::pipeline::ScoreInput,
+    ) -> Result<
+        trace_commons_gate_api::pipeline::ScoreOutput,
+        trace_commons_gate_api::pipeline::PolicyError,
+    > {
+        let (mut result, index_command, neighbor_artifact) =
+            self.inner.execute(input).await?.into_parts();
+        result.evidence.award_adjustments = self.award_adjustments.clone();
+        Ok(trace_commons_gate_api::pipeline::ScoreOutput::new(
+            result,
+            index_command,
+            neighbor_artifact,
+        )
+        .expect("the adjusted output is consistent"))
     }
 }
 
@@ -50267,6 +50303,26 @@ fn registered_score_service(
     checks: PipelineNoveltyUtilityChecks,
     trace_credit_event: PipelineTraceCreditEvent,
 ) -> Arc<PipelineService> {
+    registered_score_service_with(
+        backend,
+        artifact_store,
+        config,
+        checks,
+        trace_credit_event,
+        Vec::new(),
+    )
+}
+
+/// `registered_score_service`, with a policy that records
+/// `award_adjustments` on its Score evidence.
+fn registered_score_service_with(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+    checks: PipelineNoveltyUtilityChecks,
+    trace_credit_event: PipelineTraceCreditEvent,
+    award_adjustments: Vec<trace_commons_gate_api::pipeline::AwardAdjustment>,
+) -> Arc<PipelineService> {
     let index = IsolatedPipelineIndex::new();
     let package = registered_score_package(&config);
     let registry = SettlementAdapterRegistry::new(vec![RecordingSettlementAdapter::new(
@@ -50279,7 +50335,10 @@ fn registered_score_service(
         trace_commons_server::versioned_pipeline_score_registry::ScorePolicyRegistry::new()
             .with_factory(
                 REGISTERED_SCORE_IMPLEMENTATION,
-                Arc::new(RegisteredTestScoreFactory { trace_credit_event }),
+                Arc::new(RegisteredTestScoreFactory {
+                    trace_credit_event,
+                    award_adjustments,
+                }),
             )
             .expect("register the test factory");
     Arc::new(
@@ -50486,4 +50545,49 @@ async fn a_duplicate_earns_nothing_under_a_registered_score_policy() {
         assert_eq!(rows[0].credit_quality_micros, None);
         assert_eq!(second.index_write_state, "none", "{second:?}");
     }
+}
+
+/// The award adjustments a registered Score policy records persist with its
+/// Score outcome, Settle reads them back, and the run settles and writes its
+/// gate decision row as it would without them.
+#[tokio::test]
+async fn a_registered_score_policy_award_adjustments_persist_with_its_evidence() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let adjustments = vec![
+        trace_commons_gate_api::pipeline::AwardAdjustment::new(
+            ReasonCode::new("coverage_factor").unwrap(),
+            750_000,
+            Some(600_000),
+        )
+        .unwrap(),
+    ];
+    let service = registered_score_service_with(
+        backend.clone(),
+        artifact_store(&dir),
+        CompatibilityBundleConfig::local_reference(),
+        issuing_checks(),
+        PipelineTraceCreditEvent::PipelineScore,
+        adjustments.clone(),
+    );
+    let tenant = format!("registered-adjustments-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    let stored = score_outcome_of(&service, &tenant, run.run_id)
+        .await
+        .evidence;
+    assert_eq!(
+        stored["award_adjustments"],
+        serde_json::json!([
+            {"label": "coverage_factor", "factor_micros": 750000, "basis_micros": 600000}
+        ])
+    );
+    let evidence: ScoreEvidence = serde_json::from_value(stored).unwrap();
+    assert_eq!(evidence.award_adjustments, adjustments);
+    assert_eq!(
+        gate_decision_rows(&tenant, run.submission_id).await.len(),
+        1
+    );
 }

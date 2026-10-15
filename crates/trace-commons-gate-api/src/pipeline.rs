@@ -972,6 +972,8 @@ pub enum ContractError {
     MalformedHash,
     #[error("tenant storage reference is not in its derived form")]
     InvalidTenantStorageRef,
+    #[error("an award adjustment is malformed")]
+    InvalidAwardAdjustment,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1756,6 +1758,59 @@ pub struct ScoreEvidence {
     pub credit_quality_version: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neighbor_artifact_hash: Option<String>,
+    /// The adjustments the Score policy applied to its award, in the order
+    /// it applied them, so an auditor can recompute the award from the
+    /// policy's base amount ([`AwardAdjustment`]). Optional and empty for
+    /// every built-in policy; an empty list is not serialized, so evidence
+    /// without adjustments keeps the bytes (and the stored outcome hash) it
+    /// had before the field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub award_adjustments: Vec<AwardAdjustment>,
+}
+
+/// The most adjustments one Score evidence records.
+pub const AWARD_ADJUSTMENTS_MAX: usize = 32;
+/// One whole, in micros: the largest `factor_micros` an adjustment takes.
+pub const AWARD_ADJUSTMENT_FACTOR_MICROS_MAX: u32 = 1_000_000;
+
+/// One adjustment a Score policy applied to an award: a factor in micros
+/// (`0..=1_000_000`, so an adjustment never raises an award) under a
+/// policy-chosen safe label, and optionally the measured input in micros
+/// the policy derived that factor from. An auditor recomputes a priced
+/// award by applying each factor, in order, to the policy's base amount;
+/// what the base amount is, and how a factor follows from its basis, is
+/// the registered Score policy's documented rule, which the bundle's Score
+/// `configuration_hash` pins. Labels are unique within one evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AwardAdjustment {
+    pub label: ReasonCode,
+    pub factor_micros: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis_micros: Option<u32>,
+}
+
+impl AwardAdjustment {
+    pub fn new(
+        label: ReasonCode,
+        factor_micros: u32,
+        basis_micros: Option<u32>,
+    ) -> Result<Self, ContractError> {
+        let adjustment = Self {
+            label,
+            factor_micros,
+            basis_micros,
+        };
+        adjustment.validate()?;
+        Ok(adjustment)
+    }
+
+    fn validate(&self) -> Result<(), ContractError> {
+        if self.factor_micros > AWARD_ADJUSTMENT_FACTOR_MICROS_MAX {
+            return Err(ContractError::InvalidAwardAdjustment);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -1811,6 +1866,8 @@ struct ScoreEvidenceFields {
     credit_quality_version: Option<i32>,
     #[serde(default)]
     neighbor_artifact_hash: Option<String>,
+    #[serde(default)]
+    award_adjustments: Vec<AwardAdjustment>,
 }
 
 impl TryFrom<ScoreEvidenceFields> for ScoreEvidence {
@@ -1844,6 +1901,7 @@ impl TryFrom<ScoreEvidenceFields> for ScoreEvidence {
             credit_quality_micros: fields.credit_quality_micros,
             credit_quality_version: fields.credit_quality_version,
             neighbor_artifact_hash: fields.neighbor_artifact_hash,
+            award_adjustments: fields.award_adjustments,
         };
         evidence.validate()?;
         Ok(evidence)
@@ -1879,6 +1937,7 @@ impl ScoreEvidence {
             credit_quality_micros: None,
             credit_quality_version: None,
             neighbor_artifact_hash: None,
+            award_adjustments: Vec::new(),
         }
     }
 
@@ -1889,7 +1948,18 @@ impl ScoreEvidence {
             self.projection_input_hash.as_deref(),
             self.nearest_neighbor_hash.as_deref(),
             self.neighbor_artifact_hash.as_deref(),
-        ])
+        ])?;
+        if self.award_adjustments.len() > AWARD_ADJUSTMENTS_MAX {
+            return Err(ContractError::InvalidAwardAdjustment);
+        }
+        let mut labels = BTreeSet::new();
+        for adjustment in &self.award_adjustments {
+            adjustment.validate()?;
+            if !labels.insert(adjustment.label.as_str()) {
+                return Err(ContractError::InvalidAwardAdjustment);
+            }
+        }
+        Ok(())
     }
 
     /// Coverage fields are all absent, or all present with
@@ -4517,5 +4587,171 @@ mod tests {
         assert_eq!(settle.validate(), Err(ContractError::MalformedHash));
         settle.settlement_progress[0].external_receipt_hash = Some(hash(b"receipt"));
         assert_eq!(settle.validate(), Ok(()));
+    }
+
+    /// Score evidence with every field set, as a priced compatibility Score
+    /// writes it.
+    fn populated_score_evidence() -> ScoreEvidence {
+        let awards = InstrumentAwards::new(vec![
+            InstrumentAward::new(
+                InstrumentId::trace_credit(),
+                AtomicUnits::from_raw(2_500_000),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let mut evidence = ScoreEvidence::fixed(awards);
+        evidence.embedding_artifact_hash = Some(hash(b"embedding"));
+        evidence.index_id = Some("index-v1".to_string());
+        evidence.index_snapshot_id = Some("snapshot-v1".to_string());
+        evidence.index_snapshot_hash = Some(hash(b"snapshot"));
+        evidence.scorer_model_id = Some("scorer-v1".to_string());
+        evidence.embedder_model_id = Some("embedder-v1".to_string());
+        evidence.projection_id = Some("projection-v1".to_string());
+        evidence.projection_input_hash = Some(hash(b"projection-input"));
+        evidence.perplexity_micros = Some(12_000_000);
+        evidence.tail_fraction_micros = Some(250_000);
+        evidence.novelty_score_micros = Some(700_000);
+        evidence.peak_perplexity_micros = Some(30_000_000);
+        evidence.peak_novelty_micros = Some(800_000);
+        evidence.quality_passed = Some(true);
+        evidence.novelty_passed = Some(true);
+        evidence.nearest_neighbor_hash = Some(hash(b"neighbor"));
+        evidence.index_cardinality = Some(42);
+        evidence.coverage_tokens = Some(4096);
+        evidence.chunk_count = Some(2);
+        evidence.total_chunk_count = Some(3);
+        evidence.chunks_capped = Some(true);
+        evidence.include_eligible = Some(true);
+        evidence.credit_quality_micros = Some(900_000);
+        evidence.credit_quality_version = Some(1);
+        evidence.neighbor_artifact_hash = Some(hash(b"neighbors"));
+        evidence
+    }
+
+    /// The serialized form of Score evidence is pinned: a stored outcome's
+    /// content hash (the gate decision row's `attestation_chain_hash`) is
+    /// over these bytes. A field added to `ScoreEvidence` must serialize to
+    /// nothing when it is empty, so evidence written before it keeps its
+    /// bytes and its hash.
+    #[test]
+    fn score_evidence_serialization_is_pinned() {
+        for (evidence, expected) in [
+            (
+                ScoreEvidence::fixed(InstrumentAwards::default()),
+                "sha256:226dd59f1c1c142d0174366c36ff4e49729dbf98b835e08cfa9e80c0df15614a",
+            ),
+            (
+                populated_score_evidence(),
+                "sha256:7930fb7b78960a1dc25a70b5153d775e9b7f8f73b448c6b5d68a62d3f2b87f3f",
+            ),
+        ] {
+            let bytes = serde_json::to_vec(&evidence).unwrap();
+            assert_eq!(
+                hash(&bytes),
+                expected,
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+    }
+
+    /// `award_adjustments` empty serializes to nothing: the pinned bytes
+    /// above are unchanged, and evidence stored without the field reads back
+    /// with it empty and re-serializes to the same bytes.
+    #[test]
+    fn empty_award_adjustments_serialize_as_before() {
+        for evidence in [
+            ScoreEvidence::fixed(InstrumentAwards::default()),
+            populated_score_evidence(),
+        ] {
+            assert!(evidence.award_adjustments.is_empty());
+            let value = serde_json::to_value(&evidence).unwrap();
+            assert!(value.get("award_adjustments").is_none(), "{value}");
+            let read: ScoreEvidence = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(read, evidence);
+            assert_eq!(serde_json::to_value(&read).unwrap(), value);
+        }
+    }
+
+    /// A recorded adjustment round-trips, so an auditor can recompute the
+    /// award from the base amount and each factor in order.
+    #[test]
+    fn award_adjustments_round_trip_and_validate() {
+        let mut evidence = populated_score_evidence();
+        evidence.award_adjustments = vec![
+            AwardAdjustment::new(
+                ReasonCode::new("coverage_factor").unwrap(),
+                750_000,
+                Some(600_000),
+            )
+            .unwrap(),
+            AwardAdjustment::new(ReasonCode::new("repeat_factor").unwrap(), 1_000_000, None)
+                .unwrap(),
+        ];
+        assert_eq!(evidence.validate(), Ok(()));
+        let value = serde_json::to_value(&evidence).unwrap();
+        assert_eq!(
+            value["award_adjustments"],
+            serde_json::json!([
+                {"label": "coverage_factor", "factor_micros": 750000, "basis_micros": 600000},
+                {"label": "repeat_factor", "factor_micros": 1000000}
+            ])
+        );
+        let read: ScoreEvidence = serde_json::from_value(value).unwrap();
+        assert_eq!(read, evidence);
+
+        // A factor above one whole (1_000_000 micros) is refused, by the
+        // constructor and when stored evidence is read.
+        assert_eq!(
+            AwardAdjustment::new(ReasonCode::new("coverage_factor").unwrap(), 1_000_001, None),
+            Err(ContractError::InvalidAwardAdjustment)
+        );
+        let mut stored = serde_json::to_value(populated_score_evidence()).unwrap();
+        stored["award_adjustments"] =
+            serde_json::json!([{"label": "coverage_factor", "factor_micros": 1000001}]);
+        assert!(serde_json::from_value::<ScoreEvidence>(stored.clone()).is_err());
+
+        // A label that is not a safe label is refused.
+        stored["award_adjustments"] =
+            serde_json::json!([{"label": "Coverage Factor", "factor_micros": 500000}]);
+        assert!(serde_json::from_value::<ScoreEvidence>(stored.clone()).is_err());
+        stored["award_adjustments"] = serde_json::json!([{"label": "", "factor_micros": 500000}]);
+        assert!(serde_json::from_value::<ScoreEvidence>(stored.clone()).is_err());
+
+        // A label recorded twice is ambiguous to an auditor, and refused.
+        stored["award_adjustments"] = serde_json::json!([
+            {"label": "coverage_factor", "factor_micros": 500000},
+            {"label": "coverage_factor", "factor_micros": 400000}
+        ]);
+        assert!(serde_json::from_value::<ScoreEvidence>(stored.clone()).is_err());
+
+        // An unknown field inside an adjustment is refused, not dropped.
+        stored["award_adjustments"] = serde_json::json!([
+            {"label": "coverage_factor", "factor_micros": 500000, "note": "x"}
+        ]);
+        assert!(serde_json::from_value::<ScoreEvidence>(stored.clone()).is_err());
+
+        // So is a list longer than the bound.
+        let mut long = populated_score_evidence();
+        long.award_adjustments = (0..=AWARD_ADJUSTMENTS_MAX)
+            .map(|index| {
+                AwardAdjustment::new(
+                    ReasonCode::new(format!("factor_{index}")).unwrap(),
+                    1_000_000,
+                    None,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(long.validate(), Err(ContractError::InvalidAwardAdjustment));
+
+        // `ScoreOutput::new` validates the evidence it is given.
+        let mut result = score_result(None, false);
+        result.evidence.award_adjustments = long.award_adjustments;
+        assert_eq!(
+            ScoreOutput::new(result, None, None).err(),
+            Some(ContractError::InvalidAwardAdjustment)
+        );
     }
 }
