@@ -76,6 +76,14 @@ public sealed class DaemonSettingsSnapshot
     public bool InferenceEvidenceEnabled => IronwireAttestedBodies == true;
 
     /// <summary>
+    /// The daemon's one missions switch. Off unless exactly true, so an older
+    /// daemon, a missing key and a malformed one all read as hidden.
+    /// </summary>
+    [JsonPropertyName("missions_enabled")]
+    public bool? MissionsEnabled { get; set; }
+    public bool MissionsShown => MissionsEnabled == true;
+
+    /// <summary>
     /// <c>watch</c>, <c>off</c> or <c>unset</c>, for the Claude Code source.
     /// </summary>
     /// <remarks>
