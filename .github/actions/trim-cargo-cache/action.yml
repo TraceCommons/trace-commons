@@ -1,8 +1,9 @@
 name: Trim the cargo target directory before it is cached
 description: >-
   Removes the parts of `target` that are large and worthless across runners,
-  so what actions/cache saves is the compiled dependency graph and not the
-  linked outputs. Run as the LAST step of a job that caches `target`.
+  so what actions/cache saves is the compiled third-party dependency graph
+  and not the linked outputs or the workspace's own crates. Run as the LAST
+  step of a job that caches `target`, just before its save step.
 #
 # Why this exists. The repository's active caches sat at 14-16 GB against
 # GitHub's 10 GB per-repository ceiling, so the LRU evictor ran continuously
@@ -24,10 +25,30 @@ description: >-
 # What it does NOT do: change any cache key. A key that nothing restores
 # looks exactly like success, and this action's whole contribution is that
 # the existing keys start to restore.
+#
+# Second pass, 2026-10-15. Trimming was not enough. On main's run at
+# a0e7f9da, 12 of the 15 Linux jobs that cache `target` restored nothing:
+# 22 jobs saved a cache, every pull request saved its own as well, and the
+# client jobs' Windows and macOS caches held about 6 GB of the 10. Three
+# changes followed:
+#
+# - Only a push to main saves. ci.yml splits actions/cache into
+#   actions/cache/restore and actions/cache/save, and the save step runs on
+#   a push to main only. A cache saved from a pull request or a merge-queue
+#   ref can be restored by that ref alone, so saving one did nothing but
+#   evict main's.
+# - The jobs in clients.yml, none of them required, and five short Linux
+#   jobs keep no cache.
+# - This action also removes the workspace's own crates (every path package
+#   is named trace-commons-*). A fresh checkout gives each source file a
+#   new mtime, so cargo rebuilds every workspace crate on every run whatever
+#   the cache holds. Their artifacts -- the server and contributor rlibs
+#   alone are about 1.1 GB in a local debug build -- were restored only to
+#   be thrown away.
 runs:
   using: composite
   steps:
-    - name: Trim linked outputs and incremental state from every target directory
+    - name: Trim linked outputs, workspace crates and incremental state from every target directory
       shell: bash
       run: |
         set -euo pipefail
@@ -58,5 +79,14 @@ runs:
             find "$profile/deps" -maxdepth 1 -type f "${linked[@]}" -delete
           fi
           find "$profile" -maxdepth 1 -type f "${linked[@]}" ! -name '*.d' -delete
+          # The workspace's own crates: cargo rebuilds them on every run
+          # anyway, because checkout makes their sources newer than any
+          # cached artifact. See the second pass above.
+          rm -rf "$profile"/.fingerprint/trace-commons-* "$profile"/build/trace-commons-*
+          for dir in "$profile/deps" "$profile"; do
+            [ -d "$dir" ] || continue
+            find "$dir" -maxdepth 1 -type f \( -name 'libtrace_commons*' \
+              -o -name 'trace_commons*' -o -name 'trace-commons*' \) -delete
+          done
         done
         echo "after trim:"; report
