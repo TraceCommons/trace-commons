@@ -248,7 +248,12 @@ struct ManagedSessionsSection: View {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                 GlassAlert(model.managedText("action_failed"))
                 if key != "action_failed" {
-                    GlassAlert(model.managedText(key)).textSelection(.enabled)
+                    // `{terminal}` is the chosen app the daemon names.
+                    GlassAlert(ManagedSurface.fillTerminal(
+                        model.managedText(key),
+                        terminal: model.managedSnapshot?.capabilities.terminalDestination,
+                        fallback: model.managedText("terminal")))
+                        .textSelection(.enabled)
                 }
                 if key == "unsupported_version" {
                     ForEach(model.managedSnapshot?.updateRecoveryTools(attemptedTool: model.managedErrorTool) ?? []) { availability in
