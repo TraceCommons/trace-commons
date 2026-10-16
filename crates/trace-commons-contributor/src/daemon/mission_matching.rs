@@ -412,6 +412,26 @@ pub(crate) fn current_facts(
     })
 }
 
+/// The refusal every mission IPC method returns while missions are hidden:
+/// `unavailable` / this fixed label.
+pub(crate) const ERR_MISSIONS_DISABLED: &str = "missions-disabled";
+
+/// Whether missions are shown (`DaemonSettings::missions_enabled`, default
+/// off). Takes the settings lock alone and releases it, so a caller must
+/// not hold it.
+pub(crate) fn missions_enabled(shared: &DaemonShared) -> bool {
+    shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .missions_enabled
+}
+
+/// `unavailable` / [`ERR_MISSIONS_DISABLED`] for `req`.
+pub(crate) fn missions_disabled(req: &Request) -> Response {
+    Response::err(req.id, super::ipc::ERR_UNAVAILABLE, ERR_MISSIONS_DISABLED)
+}
+
 /// How many of the live catalogue's matched missions each pending queue
 /// entry fits, by entry id: `list_pending`'s `mission_fit`. `None` when the
 /// slot holds no live catalogue -- unknown, which a caller renders as an
@@ -458,7 +478,13 @@ pub(crate) struct MissionJoin {
 impl MissionJoin {
     /// `None` when the slot holds no live catalogue: unknown, which every
     /// caller renders as an absent field, never as zero.
+    ///
+    /// `None` as well while missions are hidden (`missions_enabled` off),
+    /// whatever the slot holds, so no caller can draw a stale slot.
     pub(crate) fn read(shared: &DaemonShared, now: DateTime<Utc>, probe: Probe) -> Option<Self> {
+        if !missions_enabled(shared) {
+            return None;
+        }
         // The slot is a leaf lock: cloned out and released straight away.
         let (catalogue, received_at, cached) = {
             let slot = shared
@@ -593,6 +619,9 @@ impl MissionJoin {
 /// audit row is appended, and the log gets [`LOG_LABEL`] and nothing else
 /// (M1, M2). The answer goes back over the local socket only.
 pub fn handle_mission_matches(shared: &DaemonShared, req: &Request) -> Response {
+    if !missions_enabled(shared) {
+        return missions_disabled(req);
+    }
     let Some(raw) = req.params.get("catalogue") else {
         return Response::err(req.id, ERR_BAD_PARAMS, "catalogue-required");
     };
@@ -827,9 +856,45 @@ mod tests {
     use super::super::settings::SourceDeclaration;
     use super::super::state::CwdCacheEntry;
 
+    /// Missions shown: every test here is of the switch on. The hidden
+    /// case is [`hidden_shared`].
     fn shared() -> (tempfile::TempDir, DaemonShared) {
+        let (dir, s) = hidden_shared();
+        s.settings.lock().unwrap().missions_enabled = true;
+        (dir, s)
+    }
+
+    fn hidden_shared() -> (tempfile::TempDir, DaemonShared) {
         let (dir, store) = crate::config::tests_support::temp_store();
         (dir, DaemonShared::load(store).unwrap())
+    }
+
+    /// Hidden (the default), a live catalogue joins nothing: no join, no
+    /// `list_pending` fit, and `mission_matches` refuses. Shown, the same
+    /// slot joins again.
+    #[test]
+    fn hidden_missions_join_nothing_and_refuse_mission_matches() {
+        let (_dir, s) = hidden_shared();
+        receive_catalogue(
+            &s.mission_catalogue,
+            &serde_json::json!({"schema_version": 1, "missions": [{"mission_id": "any"}]}),
+            Utc::now(),
+        )
+        .unwrap();
+        assert!(MissionJoin::read(&s, Utc::now(), Probe::Folders).is_none());
+        assert!(pending_mission_fit(&s, Utc::now()).is_none());
+        let refused = ask(
+            &s,
+            serde_json::json!({"catalogue": {"schema_version": 1, "missions": []}}),
+        );
+        let e = refused.error.expect("refused");
+        assert_eq!(e.code, super::super::ipc::ERR_UNAVAILABLE);
+        assert_eq!(e.message, ERR_MISSIONS_DISABLED);
+        assert_eq!(ERR_MISSIONS_DISABLED, "missions-disabled");
+
+        s.settings.lock().unwrap().missions_enabled = true;
+        assert!(MissionJoin::read(&s, Utc::now(), Probe::Folders).is_some());
+        assert!(pending_mission_fit(&s, Utc::now()).is_some());
     }
 
     fn ask(s: &DaemonShared, params: serde_json::Value) -> Response {
@@ -843,7 +908,7 @@ mod tests {
         )
     }
 
-    /// A daemon with Claude Code on and Codex off, an Ask me folder that is
+    /// A daemon with Claude Code on and Codex off, an Ask folder that is
     /// a Rust repository, a Never folder that is a Python one, and sessions
     /// in both from both tools -- one with its project key not yet cached.
     fn seeded() -> (tempfile::TempDir, DaemonShared, tempfile::TempDir) {
@@ -918,7 +983,7 @@ mod tests {
     }
 
     /// Over IPC: the Never folder's sessions and the switched-off tool's
-    /// are not read, so only the mission the Ask me folder's Claude Code
+    /// are not read, so only the mission the Ask folder's Claude Code
     /// sessions fit matches, and the counts say one tool, one folder.
     #[test]
     fn mission_matches_reads_only_tools_on_in_folders_not_never() {
@@ -1421,7 +1486,7 @@ mod tests {
     }
 
     /// An entry from a switched-off adapter, or in a Never folder, fits
-    /// nothing, while an Ask me Claude Code entry fits the one matched
+    /// nothing, while an Ask Claude Code entry fits the one matched
     /// mission its criteria meet. The Python mission's only folder is
     /// Never, so it is never matched; `claude-3` asks for three sessions
     /// and only two are readable.
@@ -1561,7 +1626,7 @@ mod tests {
             &ask,
             "/s/claude-fresh.jsonl",
         );
-        // A third Claude Code session in the Ask me folder stays readable,
+        // A third Claude Code session in the Ask folder stays readable,
         // so the mission is matched and the fresh entry is the control.
         s.state.lock().unwrap().cwd_cache.insert(
             "/s/claude-fresh.jsonl".to_string(),
@@ -1697,7 +1762,7 @@ mod tests {
     /// `readable_sessions` would let the entry through. Under a languages
     /// catalogue, an entry in a Never folder and an entry whose adapter is
     /// off (codex, in a folder no readable session ran in) each leave their
-    /// folder unprobed, while an Ask me entry with its adapter on is probed.
+    /// folder unprobed, while an Ask entry with its adapter on is probed.
     #[test]
     fn waiting_entries_in_never_folders_or_off_adapters_are_not_language_probed() {
         let (_dir, s, work) = seeded();
@@ -1729,10 +1794,7 @@ mod tests {
         assert_eq!(fit_of(&listed, "sha256:never"), Some(0), "{listed}");
         assert_eq!(fit_of(&listed, "sha256:off"), Some(0), "{listed}");
         let cached = cached_languages(&s);
-        assert!(
-            cached.contains_key(&ask),
-            "Ask me folder probed: {cached:?}"
-        );
+        assert!(cached.contains_key(&ask), "Ask folder probed: {cached:?}");
         assert!(
             !cached.contains_key(&never),
             "Never folder probed: {cached:?}"

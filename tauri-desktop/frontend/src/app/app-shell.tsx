@@ -4,6 +4,7 @@ import { useLocation } from "react-router-dom";
 import { useOnboardingCompletion } from "../features/onboarding/public";
 import { TracesWorkspaceProvider } from "../features/waiting/public";
 import { privateAiKeys } from "../features/private-ai/public";
+import { useSettings } from "../features/settings/public";
 import { usePublicProfile } from "../features/profile/public";
 import { useCoreStatus } from "../lib/tauri/use-core-status";
 import { AppRoutes } from "./app-routes";
@@ -33,7 +34,10 @@ export function AppShell() {
   const publicProfile = usePublicProfile();
   const tenantId = core.data?.daemon.tenant_id ?? null;
   const onboarding = useOnboardingCompletion(tenantId);
-  const desktop = useDesktopEvents(refreshPrivateAiCredential);
+  // Missions are hidden unless the daemon says otherwise: off while the
+  // settings load, on error, or when the key is absent.
+  const missionsEnabled = useSettings().data?.missions_enabled === true;
+  const desktop = useDesktopEvents(refreshPrivateAiCredential, missionsEnabled);
   useNativeGlass();
   const errors = [
     desktop.error,
@@ -68,6 +72,7 @@ export function AppShell() {
   return (
     <TracesWorkspaceProvider key={core.scope}>
       <AppRoutes
+        missionsEnabled={missionsEnabled}
         requiresOnboarding={requiresOnboarding}
         core={core}
         publicProfile={publicProfile}

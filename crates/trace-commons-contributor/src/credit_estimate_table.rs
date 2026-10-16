@@ -21,6 +21,9 @@ use chrono::{DateTime, Duration, Utc};
 use reqwest::{StatusCode, Url};
 use trace_commons_operator_client::host_allowlist::HostAllowlist;
 use trace_commons_protocol::local_credit_estimate::LocalEstimateTable;
+use trace_commons_protocol::settlement_estimate::{
+    SETTLEMENT_TABLE_MAX_BYTES, SETTLEMENT_TABLE_PATH, SettlementEstimateTable,
+};
 
 use crate::config::allowlist_for;
 
@@ -41,9 +44,10 @@ pub const ESTIMATE_TABLE_MAX_BYTES: usize = 16 * 1024;
 /// OWNER DECISION E11: every 24 hours, with jitter.
 pub const ESTIMATE_TABLE_REFRESH: Duration = Duration::hours(24);
 
-/// The random offset added to every scheduled fetch, drawn uniformly from
-/// zero up to this, so fetches from many machines spread out and none of
-/// them line up with anything local.
+/// The random offset added to every scheduled fetch after the first, drawn
+/// uniformly from zero up to this, so fetches from many machines spread out
+/// and none of them line up with anything local. The first is at the
+/// daemon's start (owner, 2026-10-16).
 ///
 /// OWNER DECISION E11 says "with jitter" and does not value it; four hours
 /// is this implementation's choice and is open for the owner to set.
@@ -108,6 +112,43 @@ impl TableFetchEffect {
     }
 }
 
+/// What one settlement-table fetch outcome does to the settlement table in
+/// force.
+///
+/// Unlike the v1 table there is no built-in settlement table to fall back
+/// to, so a refusal or a 404 leaves no table at all -- never a stale one --
+/// and nothing is drawn. Only an outage keeps what is in force.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettlementFetchEffect {
+    /// An accepted table: it becomes the table in force.
+    Replace,
+    /// A refused table, an oversized one, or a server that publishes none:
+    /// no settlement table is in force any more.
+    Clear,
+    /// Nothing was learned: the network, or this machine's own
+    /// configuration. The table in force stays.
+    Keep,
+}
+
+impl SettlementFetchEffect {
+    #[must_use]
+    pub fn of(outcome: &Result<SettlementEstimateTable, EstimateTableClientError>) -> Self {
+        match outcome {
+            Ok(_) => Self::Replace,
+            Err(
+                EstimateTableClientError::Refused
+                | EstimateTableClientError::ResponseTooLarge
+                | EstimateTableClientError::NotFound,
+            ) => Self::Clear,
+            Err(
+                EstimateTableClientError::Unavailable
+                | EstimateTableClientError::EndpointInvalid
+                | EstimateTableClientError::HostNotAllowed,
+            ) => Self::Keep,
+        }
+    }
+}
+
 /// When the next fetch is due.
 ///
 /// Its only inputs are the clock and a random draw in `[0, 1)`; it holds no
@@ -120,13 +161,14 @@ pub struct EstimateTableSchedule {
 }
 
 impl EstimateTableSchedule {
-    /// The first fetch falls a random offset (up to
-    /// [`ESTIMATE_TABLE_REFRESH_JITTER`]) after `started_at`, the daemon's
-    /// start.
+    /// The first fetch is due at `started_at`, the daemon's start, so the
+    /// estimates are drawn as soon as the app runs (owner, 2026-10-16). Every
+    /// later fetch keeps the interval and the random offset. The cost: the
+    /// first request's time says roughly when the daemon started.
     #[must_use]
-    pub fn starting(started_at: DateTime<Utc>, draw: f64) -> Self {
+    pub fn starting(started_at: DateTime<Utc>) -> Self {
         Self {
-            next_at: started_at + jitter(draw),
+            next_at: started_at,
         }
     }
 
@@ -211,8 +253,36 @@ impl EstimateTableClient {
     /// Fetch the published table, accepted only through
     /// [`LocalEstimateTable::from_value`].
     pub async fn fetch(&self) -> Result<LocalEstimateTable, EstimateTableClientError> {
+        let body = self
+            .get_bounded(ESTIMATE_TABLE_PATH, ESTIMATE_TABLE_MAX_BYTES)
+            .await?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).map_err(|_| EstimateTableClientError::Refused)?;
+        LocalEstimateTable::from_value(&value).map_err(|_| EstimateTableClientError::Refused)
+    }
+
+    /// Fetch the published settlement table (schema v2), accepted only
+    /// through [`SettlementEstimateTable::from_slice`]. The same request as
+    /// [`Self::fetch`]: no credential, no redirect, a bounded read. Called
+    /// beside it on the same schedule; it has none of its own.
+    pub async fn fetch_settlement(
+        &self,
+    ) -> Result<SettlementEstimateTable, EstimateTableClientError> {
+        let body = self
+            .get_bounded(SETTLEMENT_TABLE_PATH, SETTLEMENT_TABLE_MAX_BYTES)
+            .await?;
+        SettlementEstimateTable::from_slice(&body).map_err(|_| EstimateTableClientError::Refused)
+    }
+
+    /// One unauthenticated GET of `path` on the configured origin, read up
+    /// to `max_bytes` and refused past it.
+    async fn get_bounded(
+        &self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, EstimateTableClientError> {
         let mut url = self.origin.clone();
-        url.set_path(ESTIMATE_TABLE_PATH);
+        url.set_path(path);
         url.set_query(None);
         url.set_fragment(None);
         self.allowlist
@@ -231,7 +301,7 @@ impl EstimateTableClient {
         }
         if response
             .content_length()
-            .is_some_and(|length| length > ESTIMATE_TABLE_MAX_BYTES as u64)
+            .is_some_and(|length| length > max_bytes as u64)
         {
             return Err(EstimateTableClientError::ResponseTooLarge);
         }
@@ -241,14 +311,12 @@ impl EstimateTableClient {
             .await
             .map_err(|_| EstimateTableClientError::Unavailable)?
         {
-            if body.len().saturating_add(chunk.len()) > ESTIMATE_TABLE_MAX_BYTES {
+            if body.len().saturating_add(chunk.len()) > max_bytes {
                 return Err(EstimateTableClientError::ResponseTooLarge);
             }
             body.extend_from_slice(&chunk);
         }
-        let value: serde_json::Value =
-            serde_json::from_slice(&body).map_err(|_| EstimateTableClientError::Refused)?;
-        LocalEstimateTable::from_value(&value).map_err(|_| EstimateTableClientError::Refused)
+        Ok(body)
     }
 }
 
@@ -322,6 +390,130 @@ mod tests {
         assert_eq!(table.tier_count(), 3);
         assert_eq!(table.calibration_label(), "lef1.t2/cq3");
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    /// A synthetic settlement table (schema v2). Every figure is made up.
+    fn settlement_table() -> serde_json::Value {
+        json!({
+            "schema_version": 2,
+            "features_version": "lef1",
+            "version": "s1",
+            "pricing_version": "p1",
+            "instrument_id": "trace_credit",
+            "atomic_units_per_credit": 1_000_000,
+            "usd_micros_per_credit": 1_000_000,
+            "published_at": "2026-10-08T00:00:00Z",
+            "bytes_per_token": 4,
+            "chunk_target_tokens": 2048,
+            "chunk_cap": 16,
+            "weights": [{"term": "ln_content_bytes", "weight": 1.0}],
+            "cut_offs": [5.0],
+            "tiers": [
+                {"mean_atomic_units": 1_000_000, "withheld_share_micros": 0},
+                {"mean_atomic_units": 2_000_000, "withheld_share_micros": 0}
+            ],
+            "aggregate_band": {"low_ratio_micros": 500_000, "high_ratio_micros": 1_500_000},
+            "fit_rows": 40
+        })
+    }
+
+    #[tokio::test]
+    async fn the_settlement_request_is_exact_and_carries_no_credentials() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&hits);
+        let app = Router::new().route(
+            SETTLEMENT_TABLE_PATH,
+            get(move |headers: HeaderMap| {
+                let counted = Arc::clone(&counted);
+                async move {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    for header in ["authorization", "cookie", "x-api-key", "x-tenant-id"] {
+                        assert!(!headers.contains_key(header), "{header} was sent");
+                    }
+                    Json(settlement_table())
+                }
+            }),
+        );
+        let (base, server) = serve(app).await;
+        let client = EstimateTableClient::new(&base, Some("127.0.0.1")).unwrap();
+        let outcome = client.fetch_settlement().await;
+        let table = outcome.as_ref().expect("the table is accepted");
+        assert_eq!(table.version, "s1");
+        assert_eq!(table.pricing_version.as_deref(), Some("p1"));
+        assert_eq!(table.tiers.len(), 2);
+        assert_eq!(
+            SettlementFetchEffect::of(&outcome),
+            SettlementFetchEffect::Replace
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_404_or_refused_settlement_table_clears_and_an_outage_keeps() {
+        // No route at all: a server that publishes no settlement table.
+        let (base, server) = serve(Router::new()).await;
+        let client = EstimateTableClient::new(&base, Some("127.0.0.1")).unwrap();
+        let outcome = client.fetch_settlement().await;
+        assert_eq!(outcome, Err(EstimateTableClientError::NotFound));
+        assert_eq!(
+            SettlementFetchEffect::of(&outcome),
+            SettlementFetchEffect::Clear
+        );
+        server.abort();
+
+        // A document this build refuses: a v1 table, a v2 table with an
+        // unknown instrument, and not JSON at all.
+        let mut wrong_instrument = settlement_table();
+        wrong_instrument["instrument_id"] = json!("other_credit");
+        for body in [three_tier(), wrong_instrument, json!("not a table")] {
+            let app = Router::new().route(
+                SETTLEMENT_TABLE_PATH,
+                get(move || {
+                    let body = body.clone();
+                    async move { Json(body) }
+                }),
+            );
+            let (base, server) = serve(app).await;
+            let client = EstimateTableClient::new(&base, Some("127.0.0.1")).unwrap();
+            let outcome = client.fetch_settlement().await;
+            assert_eq!(outcome, Err(EstimateTableClientError::Refused));
+            assert_eq!(
+                SettlementFetchEffect::of(&outcome),
+                SettlementFetchEffect::Clear
+            );
+            server.abort();
+        }
+
+        // Oversized: refused before it is parsed, and cleared.
+        let app = Router::new().route(
+            SETTLEMENT_TABLE_PATH,
+            get(|| async { "x".repeat(SETTLEMENT_TABLE_MAX_BYTES + 1) }),
+        );
+        let (base, server) = serve(app).await;
+        let client = EstimateTableClient::new(&base, Some("127.0.0.1")).unwrap();
+        let outcome = client.fetch_settlement().await;
+        assert_eq!(outcome, Err(EstimateTableClientError::ResponseTooLarge));
+        assert_eq!(
+            SettlementFetchEffect::of(&outcome),
+            SettlementFetchEffect::Clear
+        );
+        server.abort();
+
+        // An outage keeps whatever is in force.
+        let app = Router::new().route(
+            SETTLEMENT_TABLE_PATH,
+            get(|| async { StatusCode::SERVICE_UNAVAILABLE.into_response() }),
+        );
+        let (base, server) = serve(app).await;
+        let client = EstimateTableClient::new(&base, Some("127.0.0.1")).unwrap();
+        let outcome = client.fetch_settlement().await;
+        assert_eq!(outcome, Err(EstimateTableClientError::Unavailable));
+        assert_eq!(
+            SettlementFetchEffect::of(&outcome),
+            SettlementFetchEffect::Keep
+        );
         server.abort();
     }
 
@@ -403,13 +595,14 @@ mod tests {
     /// `ESTIMATE_TABLE_REFRESH` plus at most the jitter after the last.
     #[test]
     fn the_schedule_is_a_fixed_interval_plus_jitter_and_nothing_else() {
-        let schedule = EstimateTableSchedule::starting(t0(), 0.5);
-        assert_eq!(schedule.next_at(), t0() + Duration::hours(2));
-        assert!(!schedule.due(t0()));
-        assert!(schedule.due(t0() + Duration::hours(2)));
+        // The first fetch is due at the daemon's start (owner, 2026-10-16),
+        // so an estimate is drawn as soon as the app is running.
+        let schedule = EstimateTableSchedule::starting(t0());
+        assert_eq!(schedule.next_at(), t0());
+        assert!(schedule.due(t0()));
 
         for draw in [0.0, 0.25, 0.999_999, 1.0, -3.0, f64::NAN, f64::INFINITY] {
-            let mut schedule = EstimateTableSchedule::starting(t0(), draw);
+            let mut schedule = EstimateTableSchedule::starting(t0());
             let attempt = t0() + Duration::hours(3);
             schedule.attempted(attempt, draw);
             let next = schedule.next_at();

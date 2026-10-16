@@ -1,6 +1,9 @@
 //! Durable lifecycle for managed native processes. A UI is only an observer.
 
-use super::{AccountId, AccountView, ConnectionKind, Generation, ManagedError, ToolId};
+use super::{
+    AccountId, AccountView, ConnectionKind, Generation, ManagedError, ToolId,
+    terminal::TerminalHandle,
+};
 use crate::config::ConfigStore;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -9,6 +12,26 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 const FILE: &str = "managed-sessions.json";
+/// Present once a coding session has started on this computer, from the
+/// app or the command line (#1408). Its own file, not a field of
+/// [`FILE`], so a downgraded daemon still opens the registry.
+const FIRST_LAUNCH_FILE: &str = "managed-first-launch.json";
+
+/// How long a redeemed session may go unheard before it is no longer taken
+/// to be running. The launcher reports every 5 seconds, so this is nine
+/// missed reports; it is also inside the 120-second launch ticket.
+pub const LEASE: Duration = Duration::seconds(45);
+
+/// The state a session reaches when its lease runs out. A session on the
+/// NEAR AI sign-in has lost its daemon-hosted proxy by then, so it has
+/// ended whatever its tool is doing; any other session is unknown.
+fn lapsed(connection: ConnectionKind) -> SessionState {
+    if connection == ConnectionKind::NearAiSignIn {
+        SessionState::Failed
+    } else {
+        SessionState::Unknown
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +61,10 @@ impl SessionState {
 #[serde(deny_unknown_fields)]
 pub struct LaunchRequest {
     #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub collect_traces: bool,
+    #[serde(default)]
     pub purpose: LaunchPurpose,
     pub request_id: Uuid,
     pub tool: ToolId,
@@ -52,6 +79,12 @@ pub struct LaunchRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionView {
     #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub collect_traces: bool,
+    #[serde(default)]
+    pub collection: CollectionState,
+    #[serde(default)]
     pub purpose: LaunchPurpose,
     pub id: Uuid,
     pub tool: ToolId,
@@ -64,7 +97,19 @@ pub struct SessionView {
     pub started_at: DateTime<Utc>,
     pub state: SessionState,
     pub exit_code: Option<i32>,
+    /// The daemon opened this session in a terminal it can script, named
+    /// its window, and the session runs: a shell may bring that window to
+    /// the front. Computed on every read, never trusted from storage.
     pub can_focus: bool,
+    /// The daemon opened this session and its launcher reports a running
+    /// tool, so a stop can be handed to that launcher, which owns the
+    /// process. False for a launch from the command line.
+    #[serde(default)]
+    pub can_stop: bool,
+    /// The session ended and the same launch can be made again: its
+    /// account and folder are still there. Set by the daemon's snapshot.
+    #[serde(default)]
+    pub can_start_again: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -86,11 +131,34 @@ impl std::fmt::Debug for PreparedLaunch {
 pub struct LaunchContext {
     pub session: SessionView,
     pub proof: String,
+    /// The loopback port of a proxy the daemon hosts for this session. Set
+    /// only for a session on the NEAR AI sign-in, whose credential never
+    /// leaves the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_port: Option<u16>,
+    /// The model that proxy pinned: the one NEAR AI lists first, as for
+    /// any session that requests none. Set with `route_port`; a launcher
+    /// that must name a model (OpenCode) names this one. Additive: an
+    /// older launcher ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionState {
+    #[default]
+    Off,
+    Pending,
+    Collected,
+    Failed,
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LifecycleReport {
+    #[serde(default)]
+    pub collection: Option<CollectionState>,
     pub session_id: Uuid,
     pub proof: String,
     pub state: SessionState,
@@ -99,10 +167,35 @@ pub struct LifecycleReport {
     pub exit_code: Option<i32>,
 }
 
+/// A handle this build cannot read (a terminal it does not script, or a field
+/// a newer build added) reads as none: that session cannot be shown, and the
+/// registry still opens.
+fn known_terminal<'de, D>(d: D) -> Result<Option<TerminalHandle>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Entry {
     #[serde(default)]
     dismissed: bool,
+    /// The daemon opened this session's terminal itself, from its own
+    /// ticket check. A launch from the command line never sets it.
+    #[serde(default)]
+    launched: bool,
+    /// The window that launch opened, when the terminal could name it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "known_terminal"
+    )]
+    terminal: Option<TerminalHandle>,
+    /// A stop was asked for; the launcher is told on its next report.
+    #[serde(default)]
+    stop_requested: bool,
     view: SessionView,
     request: LaunchRequest,
     ticket_hash: Option<String>,
@@ -124,6 +217,7 @@ struct Data {
 pub struct SessionRegistry {
     store: ConfigStore,
     data: Data,
+    launched: bool,
 }
 
 fn secret() -> String {
@@ -154,21 +248,42 @@ impl SessionRegistry {
         // A recovered PID alone is not evidence that the same native tool lives.
         for entry in &mut data.entries {
             if entry.view.state.holds_profile() {
+                // A restarted daemon hosts no proxy for a sign-in session.
                 entry.view.state = if entry.proof_hash.is_none() {
                     SessionState::Failed
                 } else {
-                    SessionState::Unknown
+                    lapsed(entry.view.connection)
                 };
+            }
+            if entry.view.state == SessionState::Failed
+                && entry.view.collection == CollectionState::Pending
+            {
+                entry.view.collection = CollectionState::Failed;
             }
             entry.ticket_hash = None;
         }
+        let launched = store
+            .read_daemon_file(FIRST_LAUNCH_FILE)
+            .map_err(|_| ManagedError::StorageUnavailable)?
+            .is_some();
         let mut registry = Self {
             store: ConfigStore::open(store.dir().to_path_buf())
                 .map_err(|_| ManagedError::StorageUnavailable)?,
             data,
+            launched,
         };
         registry.commit(registry.data.clone())?;
         registry.reconcile_receipts()?;
+        // A session started before the fact was recorded still counts.
+        if !registry.launched
+            && registry
+                .data
+                .entries
+                .iter()
+                .any(|e| e.request.purpose == LaunchPurpose::Coding && e.proof_hash.is_some())
+        {
+            registry.record_launch()?;
+        }
         Ok(registry)
     }
 
@@ -195,13 +310,135 @@ impl SessionRegistry {
         Ok(())
     }
 
+    /// Whether a coding session has ever started on this computer: a
+    /// redeemed launch, from the app or the command line. A sign-in launch
+    /// does not count; it never asked for a folder.
+    pub fn has_launched(&self) -> bool {
+        self.launched
+    }
+
+    fn record_launch(&mut self) -> Result<(), ManagedError> {
+        self.store
+            .write_daemon_file(FIRST_LAUNCH_FILE, br#"{"schema_version":1}"#)
+            .map_err(|_| ManagedError::StorageUnavailable)?;
+        self.launched = true;
+        Ok(())
+    }
+
     pub fn revision(&self) -> u64 {
         self.data.revision
     }
 
     pub fn views(&mut self) -> Result<Vec<SessionView>, ManagedError> {
         self.reconcile_receipts()?;
-        let now = Utc::now();
+        self.sweep(Utc::now())?;
+        Ok(self
+            .data
+            .entries
+            .iter()
+            .filter(|e| !e.dismissed)
+            .map(|e| {
+                let mut view = e.view.clone();
+                let owned = e.owned_running();
+                view.can_focus = owned && e.terminal.is_some();
+                view.can_stop = owned && !e.stop_requested;
+                view.can_start_again = false;
+                view
+            })
+            .collect())
+    }
+
+    /// Record that the daemon opened `id` in a terminal, after its ticket
+    /// check and its own launch, with the window when one was named.
+    pub fn opened_in_terminal(
+        &mut self,
+        id: Uuid,
+        terminal: Option<TerminalHandle>,
+    ) -> Result<(), ManagedError> {
+        let mut next = self.data.clone();
+        let entry = next
+            .entries
+            .iter_mut()
+            .find(|e| e.view.id == id)
+            .ok_or(ManagedError::NotFound)?;
+        entry.launched = true;
+        entry.terminal = terminal;
+        self.commit(next)
+    }
+
+    fn owned(&self, id: Uuid) -> Result<&Entry, ManagedError> {
+        let entry = self
+            .data
+            .entries
+            .iter()
+            .find(|e| e.view.id == id)
+            .ok_or(ManagedError::NotFound)?;
+        if entry.owned_running() {
+            Ok(entry)
+        } else {
+            Err(ManagedError::Conflict)
+        }
+    }
+
+    /// The window of a running session the daemon opened, or a refusal.
+    pub fn terminal_for(&self, id: Uuid) -> Result<TerminalHandle, ManagedError> {
+        self.owned(id)?
+            .terminal
+            .clone()
+            .ok_or(ManagedError::Conflict)
+    }
+
+    /// Ask the launcher of a running session the daemon opened to stop its
+    /// tool. Nothing is signalled here: the launcher owns the process and
+    /// hears this on its next report. Asking twice changes nothing.
+    pub fn request_stop(&mut self, id: Uuid) -> Result<(), ManagedError> {
+        if self.owned(id)?.stop_requested {
+            return Ok(());
+        }
+        let mut next = self.data.clone();
+        if let Some(entry) = next.entries.iter_mut().find(|e| e.view.id == id) {
+            entry.stop_requested = true;
+        }
+        self.commit(next)
+    }
+
+    /// Whether the launcher of `id` is to stop its tool now.
+    pub fn stop_requested(&self, id: Uuid) -> bool {
+        self.data
+            .entries
+            .iter()
+            .any(|e| e.view.id == id && e.stop_requested && e.owned_running())
+    }
+
+    /// The launch request that started an ended coding session, under a
+    /// new request id. Its account and folder are checked by the caller.
+    pub fn start_again_request(
+        &self,
+        id: Uuid,
+        request_id: Uuid,
+    ) -> Result<LaunchRequest, ManagedError> {
+        let entry = self
+            .data
+            .entries
+            .iter()
+            .find(|e| e.view.id == id)
+            .ok_or(ManagedError::NotFound)?;
+        if entry.view.state.holds_profile() {
+            return Err(ManagedError::Conflict);
+        }
+        if entry.request.purpose != LaunchPurpose::Coding {
+            return Err(ManagedError::InvalidRequest);
+        }
+        Ok(LaunchRequest {
+            request_id,
+            save_default: false,
+            ..entry.request.clone()
+        })
+    }
+
+    /// Fail unredeemed launches whose ticket expired, and lapse redeemed
+    /// sessions unheard for longer than [`LEASE`], as of `now`.
+    pub fn sweep(&mut self, now: DateTime<Utc>) -> Result<(), ManagedError> {
         let mut next = self.data.clone();
         let mut changed = false;
         for entry in &mut next.entries {
@@ -210,28 +447,46 @@ impl SessionRegistry {
                 && now >= entry.ticket_expires
             {
                 entry.view.state = SessionState::Failed;
+                if entry.view.collection == CollectionState::Pending {
+                    entry.view.collection = CollectionState::Failed;
+                }
                 entry.ticket_hash = None;
                 changed = true;
             } else if matches!(
                 entry.view.state,
                 SessionState::Starting | SessionState::Running
             ) && entry.proof_hash.is_some()
-                && now.signed_duration_since(entry.last_seen) > Duration::seconds(45)
+                && now.signed_duration_since(entry.last_seen) > LEASE
             {
-                entry.view.state = SessionState::Unknown;
+                entry.view.state = lapsed(entry.view.connection);
                 changed = true;
             }
         }
         if changed {
             self.commit(next)?;
         }
-        Ok(self
-            .data
-            .entries
-            .iter()
-            .filter(|e| !e.dismissed)
-            .map(|e| e.view.clone())
-            .collect())
+        Ok(())
+    }
+
+    /// The NEAR AI sign-in is gone: every session on it has lost its proxy,
+    /// so none is running any more. Failed, the state for a session that
+    /// ended without an exit code from its tool.
+    pub fn end_sign_in_sessions(&mut self) -> Result<(), ManagedError> {
+        let mut next = self.data.clone();
+        let mut changed = false;
+        for entry in &mut next.entries {
+            if entry.view.connection == ConnectionKind::NearAiSignIn
+                && entry.view.state.holds_profile()
+            {
+                entry.view.state = SessionState::Failed;
+                entry.ticket_hash = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.commit(next)?;
+        }
+        Ok(())
     }
 
     pub fn holds_profile(&self, id: AccountId) -> bool {
@@ -246,6 +501,24 @@ impl SessionRegistry {
         request: LaunchRequest,
         account: &AccountView,
     ) -> Result<PreparedLaunch, ManagedError> {
+        if request.tool == ToolId::Opencode {
+            // On the NEAR AI sign-in the session's proxy pins the model, as
+            // it does for Claude Code and Codex, so the request names none.
+            // A saved key needs a model OpenCode can be told.
+            let model_ok = match request.connection {
+                ConnectionKind::Subscription => false,
+                ConnectionKind::NearAiSignIn => request.model.is_none(),
+                ConnectionKind::ApiKey | ConnectionKind::NearAi => request
+                    .model
+                    .as_deref()
+                    .is_some_and(super::opencode::valid_model),
+            };
+            if request.purpose != LaunchPurpose::Coding || !model_ok {
+                return Err(ManagedError::InvalidRequest);
+            }
+        } else if request.model.is_some() || request.collect_traces {
+            return Err(ManagedError::InvalidRequest);
+        }
         if request.account_id != account.id
             || request.tool != account.tool
             || request.connection != account.connection
@@ -281,6 +554,13 @@ impl SessionRegistry {
         let ticket = secret();
         let id = Uuid::new_v4();
         let view = SessionView {
+            model: request.model.clone(),
+            collect_traces: request.collect_traces,
+            collection: if request.collect_traces {
+                CollectionState::Pending
+            } else {
+                CollectionState::Off
+            },
             purpose: request.purpose,
             id,
             tool: request.tool,
@@ -298,9 +578,14 @@ impl SessionRegistry {
             state: SessionState::Starting,
             exit_code: None,
             can_focus: false,
+            can_stop: false,
+            can_start_again: false,
         };
         let entry = Entry {
             dismissed: false,
+            launched: false,
+            terminal: None,
+            stop_requested: false,
             view,
             request,
             ticket_hash: Some(digest(&ticket)),
@@ -329,10 +614,44 @@ impl SessionRegistry {
         if entry.ticket_hash.as_deref() != Some(&digest(ticket))
             || Utc::now() >= entry.ticket_expires
             || entry.view.state != SessionState::Starting
+            || entry.launched
         {
             return Err(ManagedError::Conflict);
         }
         Ok(())
+    }
+
+    /// The folder a session with a valid ticket starts in, for a terminal
+    /// that takes a working directory. Validates the ticket as
+    /// [`Self::validate_ticket`] does.
+    pub fn launch_cwd(&self, session_id: Uuid, ticket: &str) -> Result<PathBuf, ManagedError> {
+        self.validate_ticket(session_id, ticket)?;
+        self.data
+            .entries
+            .iter()
+            .find(|e| e.view.id == session_id)
+            .map(|e| e.view.cwd.clone())
+            .ok_or(ManagedError::NotFound)
+    }
+
+    /// The session an earlier start-again with this request id made, when
+    /// `request` is that same request apart from the selection generation it
+    /// was stamped with. A retry then finds its session, whatever the
+    /// selection has done since.
+    pub fn replayed(&self, request: &LaunchRequest) -> Option<PreparedLaunch> {
+        let entry = self
+            .data
+            .entries
+            .iter()
+            .find(|e| e.request.request_id == request.request_id)?;
+        let same = LaunchRequest {
+            expected_generation: entry.request.expected_generation,
+            ..request.clone()
+        } == entry.request;
+        same.then_some(PreparedLaunch {
+            session_id: entry.view.id,
+            ticket: None,
+        })
     }
 
     pub fn redeem(
@@ -357,8 +676,19 @@ impl SessionRegistry {
         entry.proof_hash = Some(digest(&proof));
         entry.last_seen = Utc::now();
         let session = entry.view.clone();
+        let coding = entry.request.purpose == LaunchPurpose::Coding;
         self.commit(next)?;
-        Ok(LaunchContext { session, proof })
+        // The launch has happened; failing to record it only shows the
+        // first-launch explanation again, so it never fails the launch.
+        if coding && !self.launched {
+            let _ = self.record_launch();
+        }
+        Ok(LaunchContext {
+            session,
+            proof,
+            route_port: None,
+            route_model: None,
+        })
     }
 
     pub fn report(&mut self, report: LifecycleReport) -> Result<(), ManagedError> {
@@ -372,7 +702,16 @@ impl SessionRegistry {
             return Err(ManagedError::Conflict);
         }
         if !entry.view.state.holds_profile() {
-            return if report.state == entry.view.state && report.exit_code == entry.view.exit_code {
+            // The daemon ended a sign-in session (sign-out, lapsed lease)
+            // before its launcher said how it ended. The launcher's final
+            // word is accepted and changes nothing, so its persisted exit
+            // receipt never blocks the registry from opening.
+            let ended_by_daemon = entry.view.connection == ConnectionKind::NearAiSignIn
+                && entry.view.state == SessionState::Failed
+                && matches!(report.state, SessionState::Exited | SessionState::Failed);
+            return if ended_by_daemon
+                || (report.state == entry.view.state && report.exit_code == entry.view.exit_code)
+            {
                 Ok(())
             } else {
                 Err(ManagedError::Conflict)
@@ -400,11 +739,43 @@ impl SessionRegistry {
         {
             return Err(ManagedError::Conflict);
         }
+        if let Some(collection) = report.collection {
+            if !entry.view.collect_traces
+                || !matches!(report.state, SessionState::Exited | SessionState::Failed)
+                || !matches!(
+                    collection,
+                    CollectionState::Collected | CollectionState::Failed
+                )
+            {
+                return Err(ManagedError::InvalidRequest);
+            }
+            entry.view.collection = collection;
+        }
         entry.process_id = report.process_id;
         entry.process_identity = report.process_identity;
         entry.view.state = report.state;
         entry.view.exit_code = report.exit_code;
         entry.last_seen = Utc::now();
+        self.commit(next)
+    }
+
+    /// The connection and state of a session, without consuming anything.
+    pub fn describe(&self, id: Uuid) -> Option<(ConnectionKind, SessionState)> {
+        self.data
+            .entries
+            .iter()
+            .find(|e| e.view.id == id)
+            .map(|e| (e.view.connection, e.view.state))
+    }
+
+    /// Fail a session that was never redeemed, for the ticket holder only.
+    pub fn fail_unredeemed(&mut self, session_id: Uuid, ticket: &str) -> Result<(), ManagedError> {
+        self.validate_ticket(session_id, ticket)?;
+        let mut next = self.data.clone();
+        if let Some(entry) = next.entries.iter_mut().find(|e| e.view.id == session_id) {
+            entry.view.state = SessionState::Failed;
+            entry.ticket_hash = None;
+        }
         self.commit(next)
     }
 
@@ -445,6 +816,18 @@ impl SessionRegistry {
         Ok(())
     }
 }
+impl Entry {
+    /// The daemon opened this session itself and its launcher reports the
+    /// tool running, under the proof only that launcher holds.
+    fn owned_running(&self) -> bool {
+        self.launched
+            && self.view.state == SessionState::Running
+            && self.view.purpose == LaunchPurpose::Coding
+            && self.proof_hash.is_some()
+            && self.process_id.is_some()
+    }
+}
+
 fn receipt_name(id: Uuid) -> String {
     format!("managed-exit-{id}.json")
 }
@@ -469,6 +852,118 @@ mod tests {
     use super::*;
     use crate::managed::accounts::AccountStore;
 
+    /// OpenCode on the NEAR AI sign-in runs on the model the session's
+    /// proxy pins, so its request names none; one that names a model is
+    /// refused. A saved key still needs a valid model, and a subscription
+    /// is still refused.
+    #[test]
+    fn opencode_on_the_sign_in_carries_no_model_and_a_key_still_needs_one() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let request = |connection, account_id, model: Option<&str>| LaunchRequest {
+            model: model.map(str::to_owned),
+            collect_traces: false,
+            purpose: LaunchPurpose::Coding,
+            request_id: Uuid::new_v4(),
+            tool: ToolId::Opencode,
+            connection,
+            account_id,
+            cwd: home.path().to_path_buf(),
+            expected_generation: Generation(0),
+            save_default: false,
+        };
+        let sign_in = crate::managed::signin::entry(ToolId::Opencode).unwrap();
+        assert_eq!(
+            registry
+                .prepare(
+                    request(ConnectionKind::NearAiSignIn, sign_in.id, Some("gpt-5")),
+                    &sign_in
+                )
+                .err(),
+            Some(ManagedError::InvalidRequest)
+        );
+        let prepared = registry
+            .prepare(
+                request(ConnectionKind::NearAiSignIn, sign_in.id, None),
+                &sign_in,
+            )
+            .unwrap();
+        assert!(prepared.ticket.is_some());
+
+        let mut accounts = AccountStore::open(&store).unwrap();
+        let key = accounts
+            .add(ToolId::Opencode, ConnectionKind::NearAi, "Work")
+            .unwrap();
+        for model in [None, Some(""), Some("bad model")] {
+            assert_eq!(
+                registry
+                    .prepare(request(ConnectionKind::NearAi, key.id, model), &key)
+                    .err(),
+                Some(ManagedError::InvalidRequest),
+                "{model:?}"
+            );
+        }
+        assert!(
+            registry
+                .prepare(
+                    request(
+                        ConnectionKind::NearAi,
+                        key.id,
+                        Some("deepseek-ai/DeepSeek-V3.1")
+                    ),
+                    &key
+                )
+                .is_ok()
+        );
+        let mut subscription = key.clone();
+        subscription.connection = ConnectionKind::Subscription;
+        assert_eq!(
+            registry
+                .prepare(
+                    request(ConnectionKind::Subscription, key.id, Some("gpt-5")),
+                    &subscription
+                )
+                .err(),
+            Some(ManagedError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn a_registry_holding_a_terminal_handle_this_build_does_not_know_still_opens() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut accounts = AccountStore::open(&store).unwrap();
+        let account = accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let request = LaunchRequest {
+            model: None,
+            collect_traces: false,
+            purpose: LaunchPurpose::Coding,
+            request_id: Uuid::new_v4(),
+            tool: ToolId::Claude,
+            connection: ConnectionKind::Subscription,
+            account_id: account.id,
+            cwd: home.path().to_path_buf(),
+            expected_generation: Generation(0),
+            save_default: false,
+        };
+        let launch = registry.prepare(request, &account).unwrap();
+        let mut value = serde_json::to_value(&registry.data).unwrap();
+        for unknown in [
+            serde_json::json!({"kind":"ghostty","tty":"/dev/ttys007"}),
+            serde_json::json!({"kind":"apple_terminal","tty":"/dev/ttys007","extra":"x"}),
+            serde_json::json!("garbage"),
+        ] {
+            value["entries"][0]["terminal"] = unknown;
+            let parsed: Data = serde_json::from_value(value.clone()).unwrap();
+            assert!(parsed.entries[0].terminal.is_none());
+            assert_eq!(parsed.entries[0].view.id, launch.session_id);
+        }
+    }
+
     #[test]
     fn expired_ticket_cannot_start_a_tool_and_restart_invalidates_unredeemed_ticket() {
         let home = tempfile::tempdir().unwrap();
@@ -479,6 +974,8 @@ mod tests {
             .unwrap();
         let mut registry = SessionRegistry::open(&store).unwrap();
         let request = LaunchRequest {
+            model: None,
+            collect_traces: false,
             purpose: LaunchPurpose::Coding,
             request_id: Uuid::new_v4(),
             tool: ToolId::Claude,
@@ -513,5 +1010,90 @@ mod tests {
         );
         assert_eq!(reopened.views().unwrap()[1].state, SessionState::Failed);
         assert!(!reopened.holds_profile(account.id));
+    }
+
+    fn coding(account: &AccountView, cwd: &std::path::Path) -> LaunchRequest {
+        LaunchRequest {
+            model: None,
+            collect_traces: false,
+            purpose: LaunchPurpose::Coding,
+            request_id: Uuid::new_v4(),
+            tool: account.tool,
+            connection: account.connection,
+            account_id: account.id,
+            cwd: cwd.to_path_buf(),
+            expected_generation: Generation(0),
+            save_default: false,
+        }
+    }
+
+    /// #1408: the first started coding session is recorded once, on this
+    /// computer, whichever caller redeemed it, and a restart keeps it. A
+    /// prepared launch that never started, and a sign-in launch, do not
+    /// count.
+    #[test]
+    fn the_first_started_coding_session_is_recorded_and_survives_a_restart() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut accounts = AccountStore::open(&store).unwrap();
+        let account = accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        assert!(!registry.has_launched());
+
+        let login = registry
+            .prepare(
+                LaunchRequest {
+                    purpose: LaunchPurpose::Login,
+                    ..coding(&account, home.path())
+                },
+                &account,
+            )
+            .unwrap();
+        registry
+            .redeem(login.session_id, login.ticket.as_deref().unwrap())
+            .unwrap();
+        assert!(
+            !registry.has_launched(),
+            "a sign-in is not a coding session"
+        );
+
+        let other = accounts
+            .add(ToolId::Codex, ConnectionKind::Subscription, "Work")
+            .unwrap();
+        let prepared = registry
+            .prepare(coding(&other, home.path()), &other)
+            .unwrap();
+        assert!(!registry.has_launched(), "prepared is not started");
+        assert!(!SessionRegistry::open(&store).unwrap().has_launched());
+
+        registry
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        assert!(registry.has_launched());
+        assert!(SessionRegistry::open(&store).unwrap().has_launched());
+    }
+
+    /// A computer that started a session before the fact was recorded is
+    /// not shown the first-launch explanation again.
+    #[test]
+    fn a_session_started_before_the_record_existed_counts() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut accounts = AccountStore::open(&store).unwrap();
+        let account = accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let prepared = registry
+            .prepare(coding(&account, home.path()), &account)
+            .unwrap();
+        registry
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        std::fs::remove_file(store.dir().join(FIRST_LAUNCH_FILE)).unwrap();
+        assert!(SessionRegistry::open(&store).unwrap().has_launched());
+        assert!(store.dir().join(FIRST_LAUNCH_FILE).is_file());
     }
 }

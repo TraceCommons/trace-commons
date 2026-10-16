@@ -143,15 +143,16 @@ enum DebugScreenshot {
             }
             // The edge rail open at each peek. Its switch is in the Startup
             // section's capture.
-            let compute = ComputeModel()
+            // The stores loaded above stand in for the rail's own, whose
+            // attaching task never runs here.
+            let railData = EdgeRailData(traces: traces, inference: inference, home: home)
             for peek in EdgeRailPeek.allCases {
                 let state = EdgeRailState()
                 state.open = true
                 state.peek = peek
                 render(
-                    EdgeRailView(state: state, onOpenChange: { _ in })
-                        .environmentObject(model)
-                        .environment(compute),
+                    EdgeRailView(state: state, data: railData, onOpenChange: { _ in })
+                        .environmentObject(model),
                     to: directory + "/macos-shell-edge-rail-\(peek).png",
                     size: CGSize(width: EdgeRailGeometry.openWidth, height: GlassTokens.Size.edgeRailOpenHeight)
                 )

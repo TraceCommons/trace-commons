@@ -36,6 +36,9 @@ fn empty_params(req: &Request) -> bool {
 }
 
 pub(super) async fn handle_catalogue(shared: &DaemonShared, req: &Request) -> Response {
+    if !super::mission_matching::missions_enabled(shared) {
+        return super::mission_matching::missions_disabled(req);
+    }
     if !empty_params(req) {
         return Response::err(req.id, ERR_BAD_PARAMS, INVALID);
     }
@@ -56,6 +59,9 @@ pub(super) async fn handle_catalogue(shared: &DaemonShared, req: &Request) -> Re
 }
 
 pub(super) async fn handle_status(shared: &DaemonShared, req: &Request) -> Response {
+    if !super::mission_matching::missions_enabled(shared) {
+        return super::mission_matching::missions_disabled(req);
+    }
     if !empty_params(req) {
         return Response::err(req.id, ERR_BAD_PARAMS, INVALID);
     }
@@ -439,7 +445,16 @@ pub(crate) async fn refresh_mission_slot(
     now: DateTime<Utc>,
     schedule: &mut MissionSlotSchedule,
 ) {
-    fetch_into_mission_slot(shared, now, schedule).await;
+    if super::mission_matching::missions_enabled(shared) {
+        fetch_into_mission_slot(shared, now, schedule).await;
+    } else {
+        // Missions hidden: nothing is fetched and the slot is emptied, so
+        // no `mission_fit` anywhere has a catalogue to draw from. The
+        // schedule is reset, so turning the switch on fetches on the next
+        // tick rather than waiting out an interval.
+        schedule.unconfigured();
+        super::mission_matching::clear_catalogue(&shared.mission_catalogue);
+    }
     let live = super::mission_matching::live_catalogue(&shared.mission_catalogue, now);
     if live != schedule.seen {
         schedule.seen = live;

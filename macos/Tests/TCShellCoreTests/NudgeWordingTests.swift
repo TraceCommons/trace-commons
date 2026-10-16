@@ -21,6 +21,7 @@ final class NudgeWordingTests: XCTestCase {
         "Suggested first", "Oldest first", "Showing idle traces", "Show suggestions",
         "Notifications from", "traces are judged", "Tell me when", "No thanks",
         "Not now", "See history", "Last week:", "nothing is waiting",
+        "of inference in traces", "Estimate what traces", "Estimate ready",
     ]
 
     private static func sources() -> URL {

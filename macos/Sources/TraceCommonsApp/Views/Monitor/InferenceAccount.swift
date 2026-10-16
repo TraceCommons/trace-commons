@@ -4,8 +4,9 @@ import TCDesign
 import TCShellCore
 
 /// The Private AI tab's account cards, after the Private AI summary and the
-/// calls: saved model accounts and managed sessions, the balance and the
-/// funding, then the card that opens the Private AI section of Settings.
+/// calls: the balance and the funding, then the card that opens the Private
+/// AI section of Settings. The managed cards lead the tab instead (owner,
+/// 2026-10-12: `InferenceTabView`).
 /// The standard settings, the local tools and the connection (the switch,
 /// then sign-in) are in that section (owner, 2026-10-10:
 /// `PrivateAISettingsPanels`).
@@ -22,9 +23,6 @@ struct InferenceAccountSection: View {
     var body: some View {
         if let copy = model.privateInferenceCopy {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                // Saved model accounts and managed sessions, which #1146
-                // has no panel for (owner ruling O3: in the main pane).
-                ManagedSessionsSection()
                 PrivateAIBalanceCard(copy: copy)
                 FundingRow(copy: copy)
                 PrivateAISettingsLinkCard(copy: copy, onOpen: onOpenSettings)

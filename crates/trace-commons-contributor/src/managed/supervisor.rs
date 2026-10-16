@@ -28,6 +28,10 @@ pub async fn redeem_and_run(store: &ConfigStore, prepared: PreparedLaunch) -> an
     .await;
     if result.is_err() && !spawned {
         let report = LifecycleReport {
+            collection: context
+                .session
+                .collect_traces
+                .then_some(super::sessions::CollectionState::Failed),
             session_id: context.session.id,
             proof: context.proof.clone(),
             state: SessionState::Failed,
@@ -80,66 +84,93 @@ async fn run_native(
         &row.cwd,
     )?;
     let mut route = None;
-    match row.connection {
-        ConnectionKind::Subscription => {}
-        ConnectionKind::ApiKey => {
-            let key = SecretStore::new(store).get(account.id)?;
-            match row.tool {
-                super::ToolId::Claude => {
-                    command.env("ANTHROPIC_API_KEY", key.expose());
-                }
-                super::ToolId::Codex => {
-                    command.env("NEAR_AI_SESSION_API_KEY", key.expose()).args([
-                        "-c",
-                        "model_provider=\"near_ai_openai\"",
-                        "-c",
-                        "model_providers.near_ai_openai.name=\"OpenAI API\"",
-                        "-c",
-                        "model_providers.near_ai_openai.base_url=\"https://api.openai.com/v1\"",
-                        "-c",
-                        "model_providers.near_ai_openai.env_key=\"NEAR_AI_SESSION_API_KEY\"",
-                        "-c",
-                        "model_providers.near_ai_openai.wire_api=\"responses\"",
-                    ]);
-                }
+    let opencode = if row.tool == super::ToolId::Opencode {
+        let session =
+            super::opencode::OpenCodeSession::new(store, &account, &native, row.id, &row.cwd)?;
+        // A saved key names its model; the sign-in's proxy has pinned one.
+        let model = || row.model.as_deref().ok_or(ManagedError::InvalidRequest);
+        session.prepare()?;
+        match row.connection {
+            ConnectionKind::Subscription => {
+                return Err(ManagedError::InvalidRequest.into());
+            }
+            ConnectionKind::NearAiSignIn => {
+                command = opencode_sign_in_command(&session, context)?;
+            }
+            ConnectionKind::ApiKey => {
+                let model = model()?;
+                command = session.command(
+                    model,
+                    "https://api.openai.com/v1",
+                    SecretStore::new(store).get(account.id)?.expose(),
+                )?;
+            }
+            ConnectionKind::NearAi => {
+                let model = model()?;
+                let proxy = super::route::ManagedRoute::start_selected(
+                    store,
+                    row.id,
+                    SecretStore::new(store).get(account.id)?,
+                    Some(model),
+                )
+                .await?;
+                command = session.command(
+                    model,
+                    &format!("http://127.0.0.1:{}/openai/v1", proxy.port()),
+                    "managed-local-session",
+                )?;
+                route = Some(proxy);
             }
         }
-        ConnectionKind::NearAi => {
-            let proxy = super::route::ManagedRoute::start(
-                store,
-                row.id,
-                SecretStore::new(store).get(account.id)?,
-            )
-            .await?;
-            let base = format!("http://127.0.0.1:{}", proxy.port());
-            match row.tool {
-                super::ToolId::Claude => {
-                    command
-                        .env("ANTHROPIC_BASE_URL", format!("{base}/anthropic"))
-                        .env("ANTHROPIC_AUTH_TOKEN", "managed-local-session");
-                }
-                super::ToolId::Codex => {
-                    command
-                        .env("NEAR_AI_SESSION_API_KEY", "managed-local-session")
-                        .args([
+        Some(session)
+    } else {
+        None
+    };
+    if opencode.is_none() {
+        match row.connection {
+            ConnectionKind::Subscription => {}
+            ConnectionKind::ApiKey => {
+                let key = SecretStore::new(store).get(account.id)?;
+                match row.tool {
+                    super::ToolId::Opencode => return Err(ManagedError::InvalidRequest.into()),
+                    super::ToolId::Claude => {
+                        command.env("ANTHROPIC_API_KEY", key.expose());
+                    }
+                    super::ToolId::Codex => {
+                        command.env("NEAR_AI_SESSION_API_KEY", key.expose()).args([
                             "-c",
-                            "model_provider=\"near_ai_managed\"",
+                            "model_provider=\"near_ai_openai\"",
                             "-c",
-                            "model_providers.near_ai_managed.name=\"NEAR AI\"",
+                            "model_providers.near_ai_openai.name=\"OpenAI API\"",
                             "-c",
-                        ])
-                        .arg(format!(
-                            "model_providers.near_ai_managed.base_url=\"{base}/openai/v1\""
-                        ))
-                        .args([
+                            "model_providers.near_ai_openai.base_url=\"https://api.openai.com/v1\"",
                             "-c",
-                            "model_providers.near_ai_managed.env_key=\"NEAR_AI_SESSION_API_KEY\"",
+                            "model_providers.near_ai_openai.env_key=\"NEAR_AI_SESSION_API_KEY\"",
                             "-c",
-                            "model_providers.near_ai_managed.wire_api=\"responses\"",
+                            "model_providers.near_ai_openai.wire_api=\"responses\"",
                         ]);
+                    }
                 }
             }
-            route = Some(proxy);
+            ConnectionKind::NearAi => {
+                let proxy = super::route::ManagedRoute::start(
+                    store,
+                    row.id,
+                    SecretStore::new(store).get(account.id)?,
+                )
+                .await?;
+                near_ai_route(&mut command, row.tool, proxy.port())?;
+                route = Some(proxy);
+            }
+            // The daemon holds the sign-in and hosts this session's proxy. This
+            // process learns its port and never the credential; no port, no run.
+            ConnectionKind::NearAiSignIn => {
+                near_ai_route(
+                    &mut command,
+                    row.tool,
+                    context.route_port.ok_or(ManagedError::LaunchUnknown)?,
+                )?;
+            }
         }
     }
     // Signals were registered before ticket redemption. A terminal closed
@@ -178,6 +209,7 @@ async fn run_native(
         .map(|p| format!("{}:{}", pid, p.start_time()))
         .unwrap_or_else(|| format!("{}:{}", pid, uuid::Uuid::new_v4()));
     let report = |state, exit_code| LifecycleReport {
+        collection: None,
         session_id: row.id,
         proof: context.proof.clone(),
         state,
@@ -185,13 +217,26 @@ async fn run_native(
         process_identity: Some(identity.clone()),
         exit_code,
     };
-    let _: anyhow::Result<Value> = call(
+    let mut answer: anyhow::Result<Value> = call(
         store,
         "managed_session_report",
         json!(report(SessionState::Running, None)),
     );
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
     let status = loop {
+        // The daemon asked for a stop: this process owns the child, so it
+        // signals it exactly as a terminal's own SIGTERM would, and the
+        // escalation below kills it if it has not exited in time.
+        #[cfg(unix)]
+        if stop_asked(&answer) && shutdown_at.is_none() {
+            forward_signal(pid, &identity, sysinfo::Signal::Term);
+            shutdown_at = Some(std::time::Instant::now());
+        }
+        #[cfg(windows)]
+        if stop_asked(&answer) {
+            let _ = child.start_kill();
+        }
+        answer = Ok(Value::Null);
         #[cfg(unix)]
         tokio::select! {
             status = child.wait() => break status?,
@@ -200,7 +245,7 @@ async fn run_native(
             _ = signals.terminate.recv() => { forward_signal(pid, &identity, sysinfo::Signal::Term); shutdown_at.get_or_insert_with(std::time::Instant::now); },
             _ = heartbeat.tick() => {
                 if shutdown_at.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(5)) { let _ = child.start_kill(); }
-                let _: anyhow::Result<Value> = call(store, "managed_session_report", json!(report(SessionState::Running, None)));
+                answer = call(store, "managed_session_report", json!(report(SessionState::Running, None)));
             },
         }
         #[cfg(windows)]
@@ -208,7 +253,7 @@ async fn run_native(
             status = child.wait() => break status?,
             _ = signals.interrupt.recv() => {},
             _ = signals.break_signal.recv() => {},
-            _ = heartbeat.tick() => { let _: anyhow::Result<Value> = call(store, "managed_session_report", json!(report(SessionState::Running, None))); },
+            _ = heartbeat.tick() => { answer = call(store, "managed_session_report", json!(report(SessionState::Running, None))); },
         }
         #[cfg(not(any(unix, windows)))]
         tokio::select! {
@@ -225,7 +270,24 @@ async fn run_native(
     };
     #[cfg(not(unix))]
     let code = status.code().unwrap_or(1);
-    let receipt = report(SessionState::Exited, Some(code));
+    let mut receipt = report(SessionState::Exited, Some(code));
+    if row.collect_traces {
+        receipt.collection = Some(
+            match opencode
+                .as_ref()
+                .ok_or(ManagedError::InvalidRequest)?
+                .collect(store)
+            {
+                Ok(()) => super::sessions::CollectionState::Collected,
+                Err(_) => {
+                    eprintln!(
+                        "OpenCode exited, but its trace could not be collected. The local session is preserved."
+                    );
+                    super::sessions::CollectionState::Failed
+                }
+            },
+        );
+    }
     let persisted = super::sessions::persist_exit(store, &receipt);
     let final_report: anyhow::Result<Value> = call(store, "managed_session_report", json!(receipt));
     if final_report.is_ok() {
@@ -248,6 +310,70 @@ async fn run_native(
         );
     }
     Ok(code)
+}
+
+/// OpenCode on the NEAR AI sign-in: the daemon hosts this session's proxy
+/// and says its loopback port and the model it pinned. This process never
+/// sees the credential; without the port or the model, no run.
+fn opencode_sign_in_command(
+    session: &super::opencode::OpenCodeSession,
+    context: &LaunchContext,
+) -> Result<std::process::Command, ManagedError> {
+    let port = context.route_port.ok_or(ManagedError::LaunchUnknown)?;
+    let model = context
+        .route_model
+        .as_deref()
+        .ok_or(ManagedError::LaunchUnknown)?;
+    session.command(
+        model,
+        &format!("http://127.0.0.1:{port}/openai/v1"),
+        "managed-local-session",
+    )
+}
+
+/// Point the tool at a session's local NEAR AI proxy. The tool gets the
+/// loopback URL and a placeholder token, never a credential.
+fn near_ai_route(
+    command: &mut std::process::Command,
+    tool: super::ToolId,
+    port: u16,
+) -> Result<(), ManagedError> {
+    let base = format!("http://127.0.0.1:{port}");
+    match tool {
+        super::ToolId::Opencode => return Err(ManagedError::InvalidRequest),
+        super::ToolId::Claude => {
+            command
+                .env("ANTHROPIC_BASE_URL", format!("{base}/anthropic"))
+                .env("ANTHROPIC_AUTH_TOKEN", "managed-local-session");
+        }
+        super::ToolId::Codex => {
+            command
+                .env("NEAR_AI_SESSION_API_KEY", "managed-local-session")
+                .args([
+                    "-c",
+                    "model_provider=\"near_ai_managed\"",
+                    "-c",
+                    "model_providers.near_ai_managed.name=\"NEAR AI\"",
+                    "-c",
+                ])
+                .arg(format!(
+                    "model_providers.near_ai_managed.base_url=\"{base}/openai/v1\""
+                ))
+                .args([
+                    "-c",
+                    "model_providers.near_ai_managed.env_key=\"NEAR_AI_SESSION_API_KEY\"",
+                    "-c",
+                    "model_providers.near_ai_managed.wire_api=\"responses\"",
+                ]);
+        }
+    }
+    Ok(())
+}
+
+/// Whether the daemon's answer to a running report asks for a stop. Only
+/// an explicit `true` does; anything else leaves the tool running.
+fn stop_asked(answer: &anyhow::Result<Value>) -> bool {
+    matches!(answer, Ok(value) if value.get("stop") == Some(&Value::Bool(true)))
 }
 
 #[cfg(unix)]
@@ -290,5 +416,95 @@ impl TerminalSignals {
             #[cfg(unix)]
             terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{opencode_sign_in_command, stop_asked};
+    use crate::config::ConfigStore;
+    use crate::managed::{
+        ConnectionKind, ManagedError, ToolId, opencode::OpenCodeSession, sessions::LaunchContext,
+        signin,
+    };
+    use serde_json::json;
+
+    /// OpenCode on the NEAR AI sign-in runs against the daemon's proxy for
+    /// this session, on the model that proxy pinned, with a placeholder
+    /// key. Without the port or the model there is no command: no run.
+    #[test]
+    fn opencode_on_the_sign_in_uses_the_route_port_and_model_or_does_not_run() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let native = home.path().join("opencode");
+        std::fs::write(&native, b"never executed").unwrap();
+        let account = signin::entry(ToolId::Opencode).unwrap();
+        let id = uuid::Uuid::new_v4();
+        let session = OpenCodeSession::new(&store, &account, &native, id, home.path()).unwrap();
+        let context = |port: Option<u16>, model: Option<&str>| -> LaunchContext {
+            serde_json::from_value(json!({
+                "session": {
+                    "id": id, "tool": "opencode", "connection": "near_ai_signin",
+                    "account_id": account.id, "account_label": "NEAR AI",
+                    "selection_generation": 0, "project_label": "p", "cwd": home.path(),
+                    "started_at": "2026-10-16T00:00:00Z", "state": "starting",
+                    "exit_code": null, "can_focus": false,
+                },
+                "proof": "proof",
+                "route_port": port,
+                "route_model": model,
+            }))
+            .unwrap()
+        };
+        let command = opencode_sign_in_command(
+            &session,
+            &context(Some(4321), Some("deepseek-ai/DeepSeek-V3.1")),
+        )
+        .unwrap();
+        assert_eq!(
+            context(None, None).session.connection,
+            ConnectionKind::NearAiSignIn
+        );
+        let env = |name: &str| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        let config: serde_json::Value =
+            serde_json::from_str(&env("OPENCODE_CONFIG_CONTENT").unwrap()).unwrap();
+        assert_eq!(config["model"], "trace-managed/deepseek-ai/DeepSeek-V3.1");
+        assert_eq!(
+            config["provider"]["trace-managed"]["options"]["baseURL"],
+            "http://127.0.0.1:4321/openai/v1"
+        );
+        assert_eq!(
+            env("TRACE_COMMONS_OPENCODE_KEY").as_deref(),
+            Some("managed-local-session")
+        );
+        for (port, model) in [
+            (None, Some("deepseek-ai/DeepSeek-V3.1")),
+            (Some(4321), None),
+            (None, None),
+        ] {
+            assert_eq!(
+                opencode_sign_in_command(&session, &context(port, model)).err(),
+                Some(ManagedError::LaunchUnknown),
+                "{port:?} {model:?}"
+            );
+        }
+    }
+
+    /// Only the daemon's explicit `stop: true` stops the tool. A missing
+    /// field, another value or a failed report leaves it running.
+    #[test]
+    fn only_an_explicit_stop_answer_stops_the_tool() {
+        assert!(stop_asked(&Ok(json!({"accepted":true,"stop":true}))));
+        assert!(!stop_asked(&Ok(json!({"accepted":true,"stop":false}))));
+        assert!(!stop_asked(&Ok(json!({"accepted":true}))));
+        assert!(!stop_asked(&Ok(json!({"accepted":true,"stop":"true"}))));
+        assert!(!stop_asked(&Ok(json!({"accepted":true,"stop":1}))));
+        assert!(!stop_asked(&Err(anyhow::anyhow!("daemon unavailable"))));
     }
 }

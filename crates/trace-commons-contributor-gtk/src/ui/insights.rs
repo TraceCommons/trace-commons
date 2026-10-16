@@ -2305,7 +2305,11 @@ fn outcome_label(outcome: TaskOutcome) -> &'static str {
 }
 
 /// The default launch surface never constructs a Worker or probes sources.
-pub fn present_local<F: Fn() + 'static>(application: &adw::Application, contribute: F) {
+pub fn present_local<F: Fn() + 'static>(
+    application: &adw::Application,
+    missions_shown: bool,
+    contribute: F,
+) {
     super::style::install();
     let window = adw::ApplicationWindow::builder()
         .application(application)
@@ -2313,7 +2317,7 @@ pub fn present_local<F: Fn() + 'static>(application: &adw::Application, contribu
         .default_width(840)
         .default_height(760)
         .build();
-    let stack = local_first_stack(&window);
+    let stack = local_first_stack(&window, missions_shown);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let header = adw::HeaderBar::new();
     let button = gtk::Button::with_label(copy("contributions"));
@@ -2329,19 +2333,26 @@ pub fn present_local<F: Fn() + 'static>(application: &adw::Application, contribu
     window.present();
 }
 
-pub(super) fn local_first_stack(window: &adw::ApplicationWindow) -> adw::ViewStack {
+pub(super) fn local_first_stack(
+    window: &adw::ApplicationWindow,
+    missions_shown: bool,
+) -> adw::ViewStack {
     let stack = adw::ViewStack::new();
     let insights = InsightsView::new(window);
-    let missions = super::mission_drafts::MissionDraftsView::new(window);
     stack
         .add_titled(&insights.root, Some("insights"), copy("title"))
         .set_icon_name(Some("view-statistics-symbolic"));
-    let mission_title = trace_commons_contributor::mission_draft_service::ui_copy()
-        .remove("title")
-        .expect("shared mission draft title");
-    stack
-        .add_titled(&missions.root, Some("mission-drafts"), &mission_title)
-        .set_icon_name(Some("document-edit-symbolic"));
+    // The mission-drafts tab exists only while the daemon's
+    // `missions_enabled` switch is on; its code and data are kept.
+    if missions_shown {
+        let missions = super::mission_drafts::MissionDraftsView::new(window);
+        let mission_title = trace_commons_contributor::mission_draft_service::ui_copy()
+            .remove("title")
+            .expect("shared mission draft title");
+        stack
+            .add_titled(&missions.root, Some("mission-drafts"), &mission_title)
+            .set_icon_name(Some("document-edit-symbolic"));
+    }
     stack.set_visible_child_name("insights");
     stack
 }
@@ -2352,7 +2363,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
-    fn local_first_window_exposes_insights_and_mission_drafts_without_a_worker() {
+    fn local_first_window_lists_mission_drafts_only_while_missions_are_shown() {
         assert_eq!(
             std::env::consts::OS,
             "linux",
@@ -2362,7 +2373,10 @@ mod tests {
         let _owner = context.acquire().unwrap();
         adw::init().expect("GTK display unavailable");
         let window = adw::ApplicationWindow::builder().build();
-        let stack = local_first_stack(&window);
+        let hidden = local_first_stack(&window, false);
+        assert!(hidden.child_by_name("insights").is_some());
+        assert!(hidden.child_by_name("mission-drafts").is_none());
+        let stack = local_first_stack(&window, true);
         assert!(stack.child_by_name("insights").is_some());
         assert!(stack.child_by_name("mission-drafts").is_some());
         stack.set_visible_child_name("mission-drafts");

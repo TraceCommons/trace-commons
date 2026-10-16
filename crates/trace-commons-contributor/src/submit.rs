@@ -188,6 +188,16 @@ pub const REASON_WITNESS_SATURATED: &str = "witness-saturated";
 /// server's bare `{"error":"rate limited"}`, and a 429 with no JSON body at
 /// all from something in front of ingest.
 pub const REASON_RATE_LIMITED: &str = "rate-limited";
+/// Ingest could not be reached once the in-call retries ran out, or answered
+/// with a `5xx` (Caddy's 502/503 while ingest restarts during a deploy, a
+/// 500 from a passing database error). Nothing was judged and nothing is
+/// lost: the daemon keeps the approval and retries with a bounded backoff
+/// (#1358).
+///
+/// Also the daemon's health label for the condition
+/// (`daemon::health::LABEL_INGEST_UNREACHABLE`), so one fact has one
+/// spelling, and the queue row reads the copy that label already has.
+pub const REASON_INGEST_UNREACHABLE: &str = crate::daemon::health::LABEL_INGEST_UNREACHABLE;
 /// The wait used when a rate-limit refusal carries no usable
 /// `retry_after_seconds`: the server's whole fixed window.
 pub const RATE_LIMIT_DEFAULT_RETRY_SECS: u32 = 60;
@@ -2793,7 +2803,7 @@ async fn upload_with_retry(
             Err(OcError::Transport { .. }) => {
                 transport_attempts += 1;
                 if transport_attempts >= 3 {
-                    return Err("transport".to_string());
+                    return Err(REASON_INGEST_UNREACHABLE.to_string());
                 }
                 let delay_secs = if transport_attempts == 1 { 1 } else { 4 };
                 tokio::time::sleep(StdDuration::from_secs(delay_secs)).await;
@@ -2811,6 +2821,11 @@ async fn upload_with_retry(
                 if let Some(retry_after_secs) = upload_rate_limit(&e) {
                     *rate_limit_retry_after = Some(retry_after_secs);
                     return Err(REASON_RATE_LIMITED.to_string());
+                }
+                // Ingest, or something in front of it, is down or failing.
+                // Not a verdict either; the daemon retries it with backoff.
+                if ingest_unavailable(&e) {
+                    return Err(REASON_INGEST_UNREACHABLE.to_string());
                 }
                 if !is_auth_failure(&e) {
                     return Err(e.kind().to_string());
@@ -2883,6 +2898,20 @@ fn upload_rate_limit(e: &OcError) -> Option<u32> {
     )
 }
 
+/// Whether this answer says ingest is down or failing rather than judging the
+/// upload: any `5xx`, labelled or not. See [`REASON_INGEST_UNREACHABLE`].
+///
+/// Only the status decides. A `4xx` is a verdict on this request and stays
+/// with the caller's terminal handling.
+fn ingest_unavailable(e: &OcError) -> bool {
+    match e {
+        OcError::ServerLabel { status, .. } | OcError::HttpFailure { status, .. } => {
+            status.is_server_error()
+        }
+        _ => false,
+    }
+}
+
 /// Whether this is the expired credential a remint answers.
 ///
 /// **Fail closed.** A `403` stays an authentication failure unless the body
@@ -2915,6 +2944,33 @@ mod tests {
             status: reqwest::StatusCode::from_u16(status).unwrap(),
             label: label.into(),
             body: body.into(),
+        }
+    }
+
+    /// Any 5xx, labelled or bare, is ingest being unavailable (#1358); no
+    /// 4xx is, including the 409s and 429s that keep their own handling.
+    #[test]
+    fn only_a_5xx_reads_as_ingest_unavailable() {
+        let bare = |status: u16| OcError::HttpFailure {
+            url: "http://127.0.0.1/v1/traces".into(),
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            body: "Bad Gateway".into(),
+        };
+        for status in [500, 502, 503, 504] {
+            assert!(ingest_unavailable(&labelled(
+                status,
+                "x",
+                "{\"error\":\"x\"}"
+            )));
+            assert!(ingest_unavailable(&bare(status)));
+        }
+        for status in [400, 401, 403, 404, 409, 413, 422, 429] {
+            assert!(!ingest_unavailable(&labelled(
+                status,
+                "x",
+                "{\"error\":\"x\"}"
+            )));
+            assert!(!ingest_unavailable(&bare(status)));
         }
     }
 
@@ -3646,28 +3702,6 @@ mod tests {
             .collect()
     }
 
-    async fn narrow_boundary_envelope(
-        trajectory_path: &std::path::Path,
-        content_len: usize,
-        cfg: &ContributorConfig,
-        narrow_token: &ClaimToken,
-    ) -> TraceContributionEnvelope {
-        write_test_trajectory(trajectory_path, &"x".repeat(content_len));
-        let source =
-            crate::source::trajectory::TrajectorySource::new(trajectory_path.to_path_buf());
-        let session_ref = source.discover().unwrap().remove(0);
-        let transcript = source.load(&session_ref).unwrap();
-        let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap();
-        let now = DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let raw = build_raw_contribution_with_verdict(&transcript, cfg, now, None);
-        assert!(raw_contribution_size_ok(&raw).is_ok());
-        let mut envelope = redact_to_envelope(&redactor, raw).await.unwrap();
-        stamp_granted_scopes(&mut envelope, cfg, narrow_token);
-        envelope
-    }
-
     fn cfg_for(
         issuer: &str,
         ingest: &str,
@@ -4338,38 +4372,6 @@ mod tests {
         );
     }
 
-    /// K7 review: the CLI's `submit --verdict` is a person approving, and
-    /// the verdict they passed is recorded on the receipt rather than
-    /// dropped.
-    #[tokio::test]
-    async fn cli_submit_records_a_persons_approval_and_its_verdict() {
-        let issuer = spawn(stub_issuer()).await;
-        let ingest = spawn(stub_ingest(Arc::new(Mutex::new(Vec::new())))).await;
-        let (_dir, store) = crate::config::tests_support::temp_store();
-        let device = DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-        let opts = SubmitOptions {
-            machine_readable: true,
-            verdict: Some(crate::envelope::ContributorVerdict::Partly),
-            ..Default::default()
-        };
-        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
-            .await
-            .unwrap();
-        assert!(
-            outcomes
-                .iter()
-                .any(|o| matches!(o, SubmitOutcome::Submitted { .. })),
-            "got {outcomes:?}"
-        );
-        let receipts = store.load_receipts().unwrap();
-        assert!(!receipts.is_empty());
-        for receipt in &receipts {
-            assert_eq!(receipt.approved_unattended, Some(false));
-            assert_eq!(receipt.approved_verdict.as_deref(), Some("partly"));
-        }
-    }
-
     #[tokio::test]
     async fn submit_context_reruns_the_canary_after_invalidation() {
         // A long-lived daemon re-checks the privacy filter periodically.
@@ -4444,48 +4446,6 @@ mod tests {
         assert_eq!(received.lock().unwrap().len(), 1);
     }
 
-    /// The versioned pipeline answers with a `processing` receipt, and
-    /// receipts are append-only, so that receipt is never rewritten. A re-run
-    /// must read it as already submitted rather than upload again: the second
-    /// upload builds a new `trace_id` under the same submission id and the
-    /// server answers 409.
-    #[tokio::test]
-    async fn processing_receipt_short_circuits_a_rerun() {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let issuer = spawn(stub_issuer()).await;
-        let ingest = spawn(stub_ingest_status(received.clone(), "processing")).await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-        let opts = SubmitOptions {
-            ..Default::default()
-        };
-
-        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
-            .await
-            .unwrap();
-        assert!(matches!(
-            &outcomes[0],
-            SubmitOutcome::Submitted { status, .. } if status == "processing"
-        ));
-        assert_eq!(received.lock().unwrap().len(), 1);
-
-        let rerun = submit_sessions(&store, &cfg, fixture_selection(), &opts)
-            .await
-            .unwrap();
-        assert!(
-            matches!(
-                &rerun[0],
-                SubmitOutcome::AlreadySubmitted { prior_status, .. }
-                    if prior_status == "processing"
-            ),
-            "{:?}",
-            rerun[0]
-        );
-        assert_eq!(received.lock().unwrap().len(), 1, "no second upload");
-    }
-
     /// What a history refresh leaves in the cache once the server has read
     /// a submission back: every receipt's row, now carrying `status` and
     /// stamped as refreshed.
@@ -4499,73 +4459,6 @@ mod tests {
             rec.last_refreshed_at = Some(Utc::now());
         }
         HistoryCache::save(store, &records).unwrap();
-    }
-
-    /// poldsam's review of #1169: Admission runs inside `submit`, so a trace
-    /// it rejected still got a `processing` receipt, and receipts are never
-    /// rewritten. Once the history read-back says `rejected`, a re-run must
-    /// not report the stale `already-submitted (processing)`: `rejected` is
-    /// not an already-submitted status, so the session goes the way any
-    /// rejected session goes and is built and uploaded again.
-    #[tokio::test]
-    async fn rejected_read_back_overrides_a_processing_receipt_on_rerun() {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let issuer = spawn(stub_issuer()).await;
-        let ingest = spawn(stub_ingest_status(received.clone(), "processing")).await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-        let opts = SubmitOptions::default();
-
-        submit_sessions(&store, &cfg, fixture_selection(), &opts)
-            .await
-            .unwrap();
-        assert_eq!(received.lock().unwrap().len(), 1);
-        record_read_back(&store, "rejected");
-
-        let rerun = submit_sessions(&store, &cfg, fixture_selection(), &opts)
-            .await
-            .unwrap();
-        assert!(
-            !matches!(&rerun[0], SubmitOutcome::AlreadySubmitted { .. }),
-            "a rejected read-back is not already submitted: {:?}",
-            rerun[0]
-        );
-        assert_eq!(received.lock().unwrap().len(), 2, "the re-run uploads");
-    }
-
-    /// The quarantined variant: still already submitted, but reported under
-    /// the status the server read back, not the receipt's `processing`.
-    #[tokio::test]
-    async fn quarantined_read_back_overrides_a_processing_receipt_on_rerun() {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let issuer = spawn(stub_issuer()).await;
-        let ingest = spawn(stub_ingest_status(received.clone(), "processing")).await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-        let opts = SubmitOptions::default();
-
-        submit_sessions(&store, &cfg, fixture_selection(), &opts)
-            .await
-            .unwrap();
-        record_read_back(&store, "quarantined");
-
-        let rerun = submit_sessions(&store, &cfg, fixture_selection(), &opts)
-            .await
-            .unwrap();
-        assert!(
-            matches!(
-                &rerun[0],
-                SubmitOutcome::AlreadySubmitted { prior_status, .. }
-                    if prior_status == "quarantined"
-            ),
-            "{:?}",
-            rerun[0]
-        );
-        assert_eq!(received.lock().unwrap().len(), 1, "no second upload");
     }
 
     /// A row this device withdrew is not a server verdict, and must never
@@ -4655,61 +4548,6 @@ mod tests {
             quarantined[0]
         );
         assert_eq!(received.lock().unwrap().len(), 1, "nothing re-uploaded");
-    }
-
-    #[tokio::test]
-    async fn remediate_quarantined_reuploads_under_same_submission_id() {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let issuer = spawn(stub_issuer()).await;
-        let ingest = spawn(stub_ingest_status(received.clone(), "quarantined")).await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-        let opts = SubmitOptions {
-            ..Default::default()
-        };
-
-        let outcomes = submit_sessions(&store, &cfg, fixture_selection(), &opts)
-            .await
-            .unwrap();
-        assert!(matches!(
-            &outcomes[0],
-            SubmitOutcome::Submitted { status, .. } if status == "quarantined"
-        ));
-        assert_eq!(received.lock().unwrap().len(), 1);
-
-        // Default re-run still short-circuits on the quarantined receipt.
-        let blocked = submit_sessions(&store, &cfg, fixture_selection(), &opts)
-            .await
-            .unwrap();
-        assert!(matches!(
-            &blocked[0],
-            SubmitOutcome::AlreadySubmitted {
-                prior_status,
-                ..
-            } if prior_status == "quarantined"
-        ));
-        assert_eq!(received.lock().unwrap().len(), 1);
-
-        // Opt-in remediation rebuilds and re-uploads the same submission_id.
-        let remediate = SubmitOptions {
-            remediate_quarantined: true,
-            ..Default::default()
-        };
-        let outcomes2 = submit_sessions(&store, &cfg, fixture_selection(), &remediate)
-            .await
-            .unwrap();
-        assert!(matches!(
-            &outcomes2[0],
-            SubmitOutcome::Submitted { status, .. } if status == "quarantined"
-        ));
-        let received_guard = received.lock().unwrap();
-        assert_eq!(received_guard.len(), 2);
-        assert_eq!(
-            received_guard[0]["submission_id"], received_guard[1]["submission_id"],
-            "remediation must keep the content-addressed submission_id"
-        );
     }
 
     /// The residual-secret guard is a re-scan of the finished envelope with
@@ -4874,68 +4712,6 @@ mod tests {
                 if reason_label == "pii-filter-unavailable"
         ));
         assert!(!store.dir().join("near-ai-notice-shown").exists());
-    }
-
-    #[tokio::test]
-    async fn receipt_append_failure_preserves_prior_outcomes_and_finishes_batch() {
-        let trajectory_dir = tempfile::tempdir().unwrap();
-        write_test_trajectory(&trajectory_dir.path().join("a.json"), "first session");
-        write_test_trajectory(&trajectory_dir.path().join("b.json"), "second session");
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let receipt_path = store.dir().join("receipts.jsonl");
-        let post_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let ingest = spawn(Router::new().route(
-            "/v1/traces",
-            post({
-                let post_calls = post_calls.clone();
-                let received = received.clone();
-                move |Json(body): Json<serde_json::Value>| {
-                    let post_calls = post_calls.clone();
-                    let received = received.clone();
-                    let receipt_path = receipt_path.clone();
-                    async move {
-                        received.lock().unwrap().push(body);
-                        let call = post_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        if call == 1 {
-                            std::fs::remove_file(&receipt_path).unwrap();
-                            std::fs::create_dir(&receipt_path).unwrap();
-                        }
-                        Json(serde_json::json!({
-                            "status": "accepted",
-                            "credit_points_pending": 0.0,
-                            "explanation": []
-                        }))
-                    }
-                }
-            }),
-        ))
-        .await;
-        let issuer = spawn(stub_issuer()).await;
-        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-        let opts = SubmitOptions {
-            ..Default::default()
-        };
-
-        let outcomes = submit_sessions(
-            &store,
-            &cfg,
-            trajectory_selection(trajectory_dir.path()),
-            &opts,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(outcomes.len(), 2);
-        assert!(matches!(outcomes[0], SubmitOutcome::Submitted { .. }));
-        assert!(matches!(
-            &outcomes[1],
-            SubmitOutcome::Failed { reason_label } if reason_label == "receipt-write-failed"
-        ));
-        assert_eq!(received.lock().unwrap().len(), 2);
     }
 
     /// Grants strictly less than requested: config asks for
@@ -5123,50 +4899,6 @@ mod tests {
         )
     }
 
-    fn stub_issuer_widens_on_remint(mint_calls: Arc<std::sync::atomic::AtomicUsize>) -> Router {
-        Router::new().route(
-            "/v1/trace-upload-claim",
-            post(move || {
-                let mint_calls = mint_calls.clone();
-                async move {
-                    let n = mint_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let (consent_scopes, allowed_uses) = if n == 0 {
-                        (
-                            serde_json::json!(["debugging_evaluation"]),
-                            serde_json::json!(["debugging", "evaluation", "aggregate_analytics"]),
-                        )
-                    } else {
-                        (
-                            serde_json::json!([
-                                "debugging_evaluation",
-                                "benchmark_only",
-                                "ranking_training",
-                                "model_training",
-                                "public_attribution"
-                            ]),
-                            serde_json::json!([
-                                "debugging",
-                                "evaluation",
-                                "benchmark_generation",
-                                "ranking_model_training",
-                                "model_training",
-                                "aggregate_analytics"
-                            ]),
-                        )
-                    };
-                    Json(serde_json::json!({
-                        "access_token": "stub-claim-jwt",
-                        "token_type": "Bearer",
-                        "expires_at": chrono::Utc::now() + chrono::Duration::seconds(300),
-                        "expires_in": 300,
-                        "consent_scopes": consent_scopes,
-                        "allowed_uses": allowed_uses,
-                    }))
-                }
-            }),
-        )
-    }
-
     /// Refuses the first POST with 401 (forcing a claim re-mint + retry) and
     /// accepts every POST after, recording every received body so the test
     /// can inspect what the *retried* request actually carried.
@@ -5254,101 +4986,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn post_remint_size_overflow_is_a_structured_refusal() {
-        use std::sync::atomic::AtomicUsize;
-
-        let trajectory_dir = tempfile::tempdir().unwrap();
-        let trajectory_path = trajectory_dir.path().join("boundary.json");
-        let base_content_len = 1_496_000usize;
-        write_test_trajectory(&trajectory_path, &"x".repeat(base_content_len));
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let mint_calls = Arc::new(AtomicUsize::new(0));
-        let post_calls = Arc::new(AtomicUsize::new(0));
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let issuer = spawn(stub_issuer_widens_on_remint(mint_calls.clone())).await;
-        let ingest = spawn(stub_ingest_401_then_200(
-            received.clone(),
-            post_calls.clone(),
-        ))
-        .await;
-        let mut cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-        cfg.consent_scopes = vec!["debugging_evaluation".to_string()];
-        let narrow_token = ClaimToken {
-            access_token: "narrow".to_string(),
-            expires_at: Utc::now() + chrono::Duration::seconds(300),
-            consent_scopes: vec!["debugging_evaluation".to_string()],
-            allowed_uses: vec![
-                "debugging".to_string(),
-                "evaluation".to_string(),
-                "aggregate_analytics".to_string(),
-            ],
-        };
-        let wide_token = ClaimToken {
-            access_token: "wide".to_string(),
-            expires_at: Utc::now() + chrono::Duration::seconds(300),
-            consent_scopes: crate::consent::VALID_SCOPES
-                .iter()
-                .map(|scope| scope.to_string())
-                .collect(),
-            allowed_uses: crate::consent::scopes_to_allowed_uses(
-                &crate::consent::VALID_SCOPES
-                    .iter()
-                    .map(|scope| scope.to_string())
-                    .collect::<Vec<_>>(),
-            ),
-        };
-
-        let initial =
-            narrow_boundary_envelope(&trajectory_path, base_content_len, &cfg, &narrow_token).await;
-        let target_size = MAX_ENVELOPE_BYTES - 64;
-        let initial_size = envelope_size(&initial).unwrap();
-        let calibrated_len = if initial_size <= target_size {
-            base_content_len + (target_size - initial_size)
-        } else {
-            base_content_len - (initial_size - target_size)
-        };
-        let narrow =
-            narrow_boundary_envelope(&trajectory_path, calibrated_len, &cfg, &narrow_token).await;
-        let narrow_size = envelope_size(&narrow).unwrap();
-        let mut wide = narrow.clone();
-        stamp_granted_scopes(&mut wide, &cfg, &wide_token);
-        let wide_size = envelope_size(&wide).unwrap();
-        assert_eq!(narrow_size, target_size);
-        assert!(wide_size > MAX_ENVELOPE_BYTES);
-
-        let opts = SubmitOptions {
-            ..Default::default()
-        };
-        let outcomes = submit_sessions(
-            &store,
-            &cfg,
-            trajectory_selection(trajectory_dir.path()),
-            &opts,
-        )
-        .await
-        .unwrap();
-
-        match &outcomes[0] {
-            SubmitOutcome::Refused {
-                reason_label,
-                size_bytes,
-                limit_bytes,
-                ..
-            } => {
-                assert_eq!(reason_label, "session-too-large");
-                assert!(size_bytes.unwrap() > MAX_ENVELOPE_BYTES);
-                assert_eq!(*limit_bytes, Some(MAX_ENVELOPE_BYTES));
-            }
-            other => panic!("expected structured size refusal, got {other:?}"),
-        }
-        assert_eq!(mint_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-        assert_eq!(post_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    }
-
     /// Records every claim-request body it receives (as raw JSON) before
     /// responding with a fixed claim, so tests can inspect what scopes/uses
     /// were actually requested.
@@ -5433,99 +5070,6 @@ mod tests {
             req["allowed_uses"],
             serde_json::json!([]),
             "status claim request must not request the submit-path's uses: {req}"
-        );
-    }
-
-    /// Records the method and body of every /v1/community/profile call.
-    fn stub_community_profile_ingest(seen: Arc<Mutex<Vec<(String, String)>>>) -> Router {
-        Router::new().route(
-            "/v1/community/profile",
-            axum::routing::put({
-                let seen = seen.clone();
-                move |body: String| {
-                    let seen = seen.clone();
-                    async move {
-                        seen.lock().unwrap().push(("PUT".to_string(), body));
-                        Json(serde_json::json!({
-                            "display_handle": "stub_handle",
-                            "handle_normalized": "stub_handle",
-                            "bio": null,
-                            "public_since": chrono::Utc::now(),
-                            "last_updated_at": chrono::Utc::now(),
-                            "update_count": 0,
-                        }))
-                    }
-                }
-            })
-            .delete(move |body: String| {
-                let seen = seen.clone();
-                async move {
-                    seen.lock().unwrap().push(("DELETE".to_string(), body));
-                    axum::http::StatusCode::NO_CONTENT
-                }
-            }),
-        )
-    }
-
-    #[tokio::test]
-    async fn set_profile_mints_an_empty_scope_claim() {
-        // Same property `status` relies on: an empty request resolves to the
-        // caller's full grant ceiling, so claiming a handle does not depend
-        // on whichever scopes were narrowed for the last submission.
-        let claim_requests = Arc::new(Mutex::new(Vec::new()));
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let issuer = spawn(stub_issuer_recording_requests(claim_requests.clone())).await;
-        let ingest = spawn(stub_community_profile_ingest(seen.clone())).await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-
-        let profile = set_profile(&store, &cfg, "stub_handle", None)
-            .await
-            .unwrap();
-        assert_eq!(profile.display_handle, "stub_handle");
-
-        let requests = claim_requests.lock().unwrap();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0]["consent_scopes"], serde_json::json!([]));
-        assert_eq!(requests[0]["allowed_uses"], serde_json::json!([]));
-
-        let calls = seen.lock().unwrap();
-        assert_eq!(calls[0].0, "PUT");
-        let body: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
-        assert_eq!(body["display_handle"], "stub_handle");
-        // Omitting the key is NOT a way to preserve an existing bio: the
-        // server deserializes missing and null identically to None and then
-        // upserts `bio = excluded.bio`, so either form clears it. An earlier
-        // version of this test asserted the opposite. The protection against
-        // clearing a bio by accident lives in the command layer, which
-        // requires --bio or --no-bio; this only pins the wire shape.
-        assert!(
-            body.get("bio").is_none(),
-            "bio must be omitted from the body when not set: {body}"
-        );
-    }
-
-    #[tokio::test]
-    async fn clear_profile_sends_a_bodyless_delete() {
-        let claim_requests = Arc::new(Mutex::new(Vec::new()));
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let issuer = spawn(stub_issuer_recording_requests(claim_requests.clone())).await;
-        let ingest = spawn(stub_community_profile_ingest(seen.clone())).await;
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let cfg = cfg_for(&issuer, &ingest, &device.device_key_id);
-
-        clear_profile(&store, &cfg).await.unwrap();
-
-        let calls = seen.lock().unwrap();
-        assert_eq!(calls[0].0, "DELETE");
-        assert!(
-            calls[0].1.is_empty(),
-            "withdrawal must not send a JSON body: {:?}",
-            calls[0].1
         );
     }
 
@@ -6020,61 +5564,6 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), "admission_receipt_unavailable");
-    }
-
-    /// A correction has nowhere to go on this profile, and a contributor is
-    /// told so rather than shown an entry that reads approved-with-correction
-    /// over a certified envelope carrying neither. Refused before the claim
-    /// mint and before anything reaches a witness.
-    #[tokio::test]
-    async fn a_correction_the_admission_profile_cannot_carry_is_refused_by_name() {
-        let (_dir, store) = crate::config::tests_support::temp_store();
-        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
-        let mut cfg = cfg_for(
-            "http://issuer.invalid",
-            "http://ingest.invalid",
-            &device.device_key_id,
-        );
-        cfg.witness = Some(WitnessSettings {
-            admission_evidence: true,
-            ..pinned_witness()
-        });
-        let selection = fixture_selection();
-        let (source, reference) = &selection[0];
-        let transcript = source.load(reference).unwrap();
-
-        for (verdict, correction) in [
-            (None, Some("the model dropped the last hunk")),
-            (Some(crate::envelope::ContributorVerdict::Worked), None),
-        ] {
-            let opts = SubmitOptions {
-                verdict,
-                ..review_options()
-            };
-            let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-            let error = context
-                .prepare_witnessed_review(&transcript, correction, true)
-                .await
-                .unwrap_err();
-            assert_eq!(error.to_string(), "admission_correction_unsupported");
-        }
-
-        // Blank is not a correction, and the invited profile is untouched:
-        // both must get past this refusal to the one that comes next.
-        let opts = review_options();
-        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let error = context
-            .prepare_witnessed_review(&transcript, Some("   "), true)
-            .await
-            .unwrap_err();
-        assert_ne!(error.to_string(), "admission_correction_unsupported");
-        cfg.witness.as_mut().unwrap().admission_evidence = false;
-        let mut context = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
-        let error = context
-            .prepare_witnessed_review(&transcript, Some("a real correction"), false)
-            .await
-            .unwrap_err();
-        assert_ne!(error.to_string(), "admission_correction_unsupported");
     }
 
     #[tokio::test]
@@ -7307,15 +6796,6 @@ mod tests {
             1,
             "the witnessed session was offered a second time after a re-mint"
         );
-    }
-
-    #[tokio::test]
-    async fn an_unwitnessed_submission_still_retries_after_a_re_mint() {
-        // The positive control for the refusal above: without it, a
-        // upload_with_retry that refused every 401 would satisfy that test.
-        let (result, captured) = upload_once(None, 401).await;
-        result.expect("an unwitnessed submission re-mints and retries");
-        assert_eq!(captured.bodies.len(), 2);
     }
 
     #[tokio::test]

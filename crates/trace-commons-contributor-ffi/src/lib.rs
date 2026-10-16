@@ -2260,12 +2260,10 @@ unsafe fn borrow_str<'a>(ptr: *const c_char) -> anyhow::Result<&'a str> {
 /// stops a daemon from starting.
 ///
 /// Returns an owned JSON array; free it with [`tc_string_free`]. Each
-/// element carries `source` (`claude-code`, `codex`, `gemini-cli` or
-/// `cline`), `path`, `exists`, `session_count`, `most_recent` (RFC 3339 or
-/// null), `relocated_by_env` and `answers_at` (the vendor this tool's own
-/// calls answer at by default, e.g. `"Anthropic"`, or null for a tool with
-/// no single default -- see [`tc_discover_opencode_export`]'s doc for why
-/// OpenCode is one of those and is absent from this list entirely).
+/// element carries `source` (`claude-code`, `codex`, `gemini-cli`, `cline`
+/// or `opencode`), `path`, `exists`, `session_count`, `most_recent`,
+/// `relocated_by_env` and `answers_at`. OpenCode identifies its database file;
+/// selecting it explicitly opts into local session discovery.
 ///
 /// `answers_at` is a fixed label this build ships with, never something
 /// checked against the tool actually installed: it names what the released
@@ -2276,8 +2274,8 @@ unsafe fn borrow_str<'a>(ptr: *const c_char) -> anyhow::Result<&'a str> {
 /// being told about a trace. Here the caller is the contributor's own
 /// machine asking the contributor which of their own folders to watch, and a
 /// consent prompt that will not name what it is asking about is not a
-/// consent prompt. It reads directory entries and metadata only, and never
-/// opens a session file.
+/// consent prompt. It reads directory entries and session metadata only;
+/// OpenCode uses a read-only database query, never transcript bodies.
 ///
 /// Returns NULL only on a caught panic.
 #[unsafe(no_mangle)]
@@ -2293,14 +2291,9 @@ pub extern "C" fn tc_discover_sources() -> *mut c_char {
 /// export directory, so a Customize screen can say "N sessions found" for
 /// the folder they just picked rather than trusting the folder name alone.
 ///
-/// Needs no handle, like [`tc_discover_sources`], and for a stronger reason:
-/// OpenCode has no conventional per-user store to guess at before anyone has
-/// said anything -- its export folder is picked by the contributor, one at a
-/// time -- so it is not one of [`tc_discover_sources`]'s rows at all, blind
-/// or otherwise. This call exists so OpenCode can still be described once a
-/// folder is actually named, whether that is moments after a folder chooser
-/// closes or on a later run, reading back whatever this contributor already
-/// declared (`opencode_source` in the daemon's settings).
+/// Needs no handle, like [`tc_discover_sources`]. A path ending in
+/// `opencode.db` describes a native store; a directory describes exports.
+/// Existing directory declarations retain their export-only scope.
 ///
 /// Returns an owned JSON object with the same shape as one row of
 /// [`tc_discover_sources`] -- `source` (always `"opencode"`), `path`,
@@ -2309,8 +2302,8 @@ pub extern "C" fn tc_discover_sources() -> *mut c_char {
 /// `answers_at` (always `null`: OpenCode ships with no single default
 /// vendor to name). Free it with [`tc_string_free`].
 ///
-/// Reads directory entries and metadata only, and never opens a session
-/// file, per the same rule [`tc_discover_sources`] follows.
+/// Reads session metadata only, including read-only SQLite metadata queries
+/// for an explicitly selected native database.
 ///
 /// Returns NULL for a NULL or non-UTF-8 `path`, recording `null-pointer` or
 /// `invalid-utf8`, and NULL on a caught panic.
@@ -5622,7 +5615,7 @@ pub unsafe extern "C" fn tc_arming_offer_copy_json(
 /// The menu-bar Contribution mode pill (#1173,
 /// `project_copy::contribution_mode_copy`): a JSON object `{title, mixed,
 /// choices, override_active, clear}`, `choices` being `[{mode, label,
-/// line}]` for Ask me, Automatic and Never, in that order. `mode` is
+/// line}]` for Ask, Automatic and Never, in that order. `mode` is
 /// what `set_contribution_override` takes.
 ///
 /// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
@@ -6765,5 +6758,85 @@ mod in_process_subscribe_tests {
             seen.iter().any(|e| e == ipc::EVENT_REENGAGE_DUE),
             "an accepting subscriber missed reengage_due: {seen:?}"
         );
+    }
+}
+
+/// Discovers installed coding tools without a daemon or subprocess.
+/// Returns the same tools array as managed_snapshot (Claude Code, Codex and
+/// OpenCode). Availability implies no trace access or contribution consent.
+/// Free the returned owned JSON string with tc_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_managed_tools_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(&serde_json::to_string(
+            &trace_commons_contributor::managed::profiles::tools(),
+        )?))
+    })
+}
+
+/// Each coding tool's setup guide, `{source slug: https url}`, from
+/// `install_guides`: the one table first run and managed sessions read.
+/// Returns an owned JSON object; free it with tc_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_install_guides_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(&serde_json::to_string(
+            &trace_commons_contributor::install_guides::json(),
+        )?))
+    })
+}
+
+/// Shared managed-session wording, available before daemon startup.
+/// Returns an owned JSON object; free it with tc_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_managed_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(&serde_json::to_string(
+            &trace_commons_contributor::managed::copy::copy(),
+        )?))
+    })
+}
+
+#[cfg(test)]
+mod managed_availability_tests {
+    use super::*;
+
+    fn owned_json(pointer: *mut c_char) -> serde_json::Value {
+        assert!(!pointer.is_null());
+        // SAFETY: these exports return owned NUL-terminated strings. Copy the
+        // JSON before releasing the allocation exactly once through the ABI.
+        let text = unsafe { CStr::from_ptr(pointer) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        unsafe { tc_string_free(pointer) };
+        serde_json::from_str(&text).unwrap()
+    }
+
+    #[test]
+    fn tools_and_copy_are_available_without_a_daemon_handle() {
+        let tools = owned_json(tc_managed_tools_json());
+        let rows = tools.as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        for (row, name) in rows.iter().zip(["claude", "codex", "opencode"]) {
+            assert_eq!(row["tool"], name);
+            assert!(row["installed"].is_boolean());
+            assert!(row["install_url"].as_str().unwrap().starts_with("https://"));
+            assert_eq!(row.as_object().unwrap().len(), 3);
+        }
+        let copy = owned_json(tc_managed_copy_json());
+        for key in [
+            "tools_title",
+            "tools_empty",
+            "install",
+            "refresh",
+            "tool_unavailable",
+        ] {
+            assert!(copy[key].is_string(), "missing {key}");
+        }
+        assert_eq!(copy, trace_commons_contributor::managed::copy::copy());
+        let guides = owned_json(tc_install_guides_json());
+        assert_eq!(guides, trace_commons_contributor::install_guides::json());
+        assert_eq!(guides["claude-code"], tools[0]["install_url"]);
     }
 }

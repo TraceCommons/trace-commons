@@ -73,6 +73,18 @@ export const viewPaths: Record<MonitorView, string> = {
   traces: routePaths.waiting,
 };
 
+/**
+ * The monitor view a path shows. With the daemon's `missions_enabled` off,
+ * the Missions path shows Home: no screen leads into Missions.
+ */
+export function visibleMonitorView(
+  pathname: string,
+  missionsEnabled: boolean,
+): MonitorView {
+  const view = monitorViewFromPath(pathname);
+  return view === "missions" && !missionsEnabled ? "home" : view;
+}
+
 /** Paths that open the Settings modal, and the section each lands on. */
 export function settingsSectionFromPath(pathname: string): string | null {
   const route = routeIdFromPath(pathname);
@@ -80,4 +92,16 @@ export function settingsSectionFromPath(pathname: string): string | null {
   if (route === "profile") return "profile";
   if (route === "compute") return "compute";
   return null;
+}
+
+/** Whether a path from a desktop event may be navigated to. */
+export function isNavigablePath(
+  value: unknown,
+  missionsEnabled: boolean,
+): value is (typeof routePaths)[RouteId] {
+  return (
+    typeof value === "string" &&
+    (missionsEnabled || value !== routePaths["mission-drafts"]) &&
+    Object.values(routePaths).some((path) => path === value)
+  );
 }

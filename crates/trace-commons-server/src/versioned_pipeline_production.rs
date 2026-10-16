@@ -709,6 +709,11 @@ pub struct ProductionPipelineInputs {
     pub unqualified_routing_allowed: bool,
     pub main_gate: MainGateConfig,
     pub components: Arc<PipelineGateComponents>,
+    /// The Score policy factories the service can bind
+    /// (`PipelineServiceBuilder::with_score_policies`): what the ingest
+    /// library entry was started with (`trace_commons_server::ingest`),
+    /// empty in the open build.
+    pub score_policies: crate::versioned_pipeline_score_registry::ScorePolicyRegistry,
 }
 
 /// The production pipeline assembly (spec A-D10): the compatibility bundle
@@ -765,7 +770,8 @@ pub fn production_pipeline_builder(
     .with_object_store_name(inputs.object_store_name)
     .with_lease_config(inputs.lease_config)
     .with_novelty_utility_checks(inputs.novelty_utility_checks)
-    .with_unqualified_routing(inputs.unqualified_routing_allowed);
+    .with_unqualified_routing(inputs.unqualified_routing_allowed)
+    .with_score_policies(inputs.score_policies);
     if let Some(privacy) = components.privacy.clone() {
         builder = builder.with_privacy(privacy);
     }
@@ -881,7 +887,7 @@ fn production_adapters_observation(
     near_settlement_mode: &str,
 ) -> anyhow::Result<(Vec<String>, serde_json::Value)> {
     use crate::versioned_pipeline_qualification::{
-        ProductionDependencyProfile, is_safe_label, validate_production_package,
+        ProductionDependencyProfile, is_safe_label, validate_production_package_with_score_policies,
     };
     let package = service.default_package();
     let bundle = service
@@ -912,7 +918,9 @@ fn production_adapters_observation(
     if components.index_root_shared_with_legacy {
         blockers.push(PIPELINE_VECTOR_INDEX_ROOT_SHARED_LABEL.to_string());
     }
-    if let Err(label) = validate_production_package(package) {
+    if let Err(label) =
+        validate_production_package_with_score_policies(package, service.score_policies())
+    {
         blockers.push(if is_safe_label(&label) {
             label
         } else {

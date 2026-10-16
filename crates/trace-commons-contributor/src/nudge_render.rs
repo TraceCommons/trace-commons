@@ -13,6 +13,7 @@
 
 use chrono::NaiveDate;
 use serde::Serialize;
+use trace_commons_protocol::settlement_estimate::{SettlementEntryEstimate, SettlementTotal};
 
 use crate::nudge_copy as copy;
 
@@ -154,6 +155,78 @@ pub fn band_text(value: f64) -> String {
     } else {
         format!("{}.5", halves / 2)
     }
+}
+
+/// A dollar figure from whole micro-dollars: "$4", "$4.50", "$0.50". Whole
+/// dollars drop the cents; any other amount shows two places (sub-cent
+/// remainders are cut). Integer-only, no thousands separator.
+#[must_use]
+pub fn usd_text(usd_micros: u64) -> String {
+    let dollars = usd_micros / 1_000_000;
+    let cents = (usd_micros % 1_000_000) / 10_000;
+    if cents == 0 {
+        format!("${dollars}")
+    } else {
+        format!("${dollars}.{cents:02}")
+    }
+}
+
+/// The settlement band's `{low}` and `{high}`, and whether it reads "up to".
+fn settlement_band(low: u64, high: u64) -> ([(&'static str, String); 2], bool) {
+    ([("low", usd_text(low)), ("high", usd_text(high))], low == 0)
+}
+
+/// The menu-bar line for the machine-wide estimate.
+#[must_use]
+pub fn settlement_total_line(total: &SettlementTotal) -> String {
+    let (values, up_to) = settlement_band(total.low_usd_micros, total.high_usd_micros);
+    let template = if up_to {
+        copy::ESTIMATE_TOTAL_LINE_UP_TO
+    } else {
+        copy::ESTIMATE_TOTAL_LINE
+    };
+    fill_owned(template, &values)
+}
+
+/// The settlement notification. `pricing_changed` picks the pricing body.
+#[must_use]
+pub fn settlement_notification(total: &SettlementTotal, pricing_changed: bool) -> NotificationText {
+    let (values, up_to) = settlement_band(total.low_usd_micros, total.high_usd_micros);
+    let template = match (pricing_changed, up_to) {
+        (true, true) => copy::NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO,
+        (true, false) => copy::NOTIFY_SETTLEMENT_BODY_PRICING,
+        (false, true) => copy::NOTIFY_SETTLEMENT_BODY_UP_TO,
+        (false, false) => copy::NOTIFY_SETTLEMENT_BODY,
+    };
+    NotificationText {
+        title: copy::NOTIFY_SETTLEMENT_TITLE.to_string(),
+        body: fill_owned(template, &values),
+        actions: vec![
+            action(ACTION_REVIEW, copy::NOTIFY_SETTLEMENT_ACTION_REVIEW),
+            action(ACTION_NOT_NOW, copy::NOTIFY_SETTLEMENT_ACTION_NOT_NOW),
+        ],
+    }
+}
+
+/// The mark's words while the settlement estimate is news.
+#[must_use]
+pub fn settlement_mark_text() -> MarkText {
+    MarkText {
+        accessibility: copy::MARK_A11Y_SETTLEMENT.to_string(),
+        tooltip: copy::MARK_TOOLTIP_SETTLEMENT.to_string(),
+    }
+}
+
+/// A queue row's dollar band.
+#[must_use]
+pub fn entry_usd_band(e: &SettlementEntryEstimate) -> String {
+    let (values, up_to) = settlement_band(e.low_usd_micros, e.high_usd_micros);
+    let template = if up_to {
+        copy::ENTRY_ESTIMATE_BAND_UP_TO
+    } else {
+        copy::ENTRY_ESTIMATE_BAND
+    };
+    fill_owned(template, &values)
 }
 
 /// `{date}`: "8 October".
@@ -553,15 +626,15 @@ pub fn digest_help(evening: bool, interval_secs: Option<u64>) -> Option<String> 
     ))
 }
 
-/// A `list_pending` row's `credit_estimate`, as a shell hands it back.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EntryEstimate {
-    pub low: f64,
-    pub high: f64,
-    /// `lower`, `middle` or `higher`; absent for a one-tier table.
+/// A `list_pending` row's `settlement_estimate`, as a shell hands it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryUsdEstimate {
+    pub low_usd_micros: u64,
+    pub high_usd_micros: u64,
+    /// `lower`, `middle` or `higher`; absent for a table whose tier the
+    /// daemon could not name.
     pub tier: Option<String>,
-    /// Whether the estimate is drawn at all; an older daemon's absent
-    /// `drawn` is `false`.
+    /// Whether the estimate is drawn at all; an absent `drawn` is `false`.
     pub drawn: bool,
 }
 
@@ -580,27 +653,26 @@ pub struct EntryTags {
     pub estimate_explainer: Option<String>,
 }
 
-/// One row's tags from its `mission_fit` and `credit_estimate`. The mission
-/// tag only above zero; the estimate only while `drawn`, and never for a
-/// band that is not a band (non-finite, not above zero, or upside down). A
-/// tier this build does not know draws no tier tag.
+/// One row's tags from its `mission_fit` and `settlement_estimate`. The
+/// mission tag only above zero; the estimate only while `drawn`, and never
+/// for a band turned upside down. A tier this build does not know draws no
+/// tier tag.
 #[must_use]
-pub fn entry_tags(mission_fit: Option<u64>, estimate: Option<&EntryEstimate>) -> EntryTags {
+pub fn entry_tags(mission_fit: Option<u64>, estimate: Option<&EntryUsdEstimate>) -> EntryTags {
     let mut tags = EntryTags {
         mission_fit: mission_fit
             .filter(|m| *m > 0)
             .map(|_| copy::ENTRY_MISSION_FIT.to_string()),
         ..EntryTags::default()
     };
-    let Some(e) = estimate.filter(|e| {
-        e.drawn && e.low.is_finite() && e.high.is_finite() && e.low > 0.0 && e.high >= e.low
-    }) else {
+    let Some(e) = estimate.filter(|e| e.drawn && e.high_usd_micros >= e.low_usd_micros) else {
         return tags;
     };
-    tags.estimate_band = Some(fill(
-        copy::ENTRY_ESTIMATE_BAND,
-        &[("low", &band_text(e.low)), ("high", &band_text(e.high))],
-    ));
+    tags.estimate_band = Some(entry_usd_band(&SettlementEntryEstimate {
+        low_usd_micros: e.low_usd_micros,
+        high_usd_micros: e.high_usd_micros,
+        tier: None,
+    }));
     tags.estimate_tier = match e.tier.as_deref() {
         Some("higher") => Some(copy::ENTRY_ESTIMATE_TIER_HIGHER),
         Some("middle") => Some(copy::ENTRY_ESTIMATE_TIER_MIDDLE),
@@ -608,13 +680,96 @@ pub fn entry_tags(mission_fit: Option<u64>, estimate: Option<&EntryEstimate>) ->
         _ => None,
     }
     .map(str::to_string);
-    tags.estimate_explainer = Some(copy::ESTIMATE_EXPLAINER.to_string());
+    tags.estimate_explainer = Some(copy::SETTLEMENT_ESTIMATE_EXPLAINER.to_string());
     tags
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn total(low: u64, high: u64) -> SettlementTotal {
+        SettlementTotal {
+            low_usd_micros: low,
+            high_usd_micros: high,
+            known: 3,
+            unknown: 0,
+        }
+    }
+
+    #[test]
+    fn usd_text_drops_cents_on_whole_dollars() {
+        assert_eq!(usd_text(4_000_000), "$4");
+        assert_eq!(usd_text(4_500_000), "$4.50");
+        assert_eq!(usd_text(500_000), "$0.50");
+        assert_eq!(usd_text(12_000_000), "$12");
+        assert_eq!(usd_text(0), "$0");
+        assert_eq!(usd_text(u64::MAX), "$18446744073709.55");
+    }
+
+    #[test]
+    fn the_total_line_is_about_or_up_to() {
+        assert_eq!(
+            settlement_total_line(&total(3_500_000, 9_000_000)),
+            "About $3.50 to $9 of inference in traces on this Mac"
+        );
+        assert!(settlement_total_line(&total(0, 500_000)).starts_with("Up to $0.50"));
+    }
+
+    #[test]
+    fn the_settlement_notification_has_core_words_and_two_actions() {
+        let t = total(3_500_000, 9_000_000);
+        let n = settlement_notification(&t, false);
+        assert_eq!(n.title, copy::NOTIFY_SETTLEMENT_TITLE);
+        assert_eq!(
+            n.body,
+            "About $3.50 to $9 of inference, estimated on this Mac. Nothing was sent."
+        );
+        let ids: Vec<&str> = n.actions.iter().map(|a| a.id).collect();
+        assert_eq!(ids, ["review", "not_now"]);
+        let p = settlement_notification(&t, true);
+        assert!(p.body.starts_with("Pricing changed."), "{}", p.body);
+        assert!(p.body.contains("$3.50 to $9"));
+        let up = settlement_notification(&total(0, 500_000), false);
+        assert_eq!(
+            up.body,
+            "Up to $0.50 of inference, estimated on this Mac. Nothing was sent."
+        );
+    }
+
+    /// A pricing change whose rounded low end is $0 reads "up to", never
+    /// "$0 to".
+    #[test]
+    fn a_pricing_change_with_a_zero_low_end_reads_up_to() {
+        let p = settlement_notification(&total(0, 1_500_000), true);
+        assert!(p.body.starts_with("Pricing changed."), "{}", p.body);
+        assert!(p.body.contains("up to $1.50"), "{}", p.body);
+        assert!(!p.body.contains("$0 to"), "{}", p.body);
+    }
+
+    #[test]
+    fn the_settlement_mark_has_core_words() {
+        let m = settlement_mark_text();
+        assert_eq!(m.accessibility, copy::MARK_A11Y_SETTLEMENT);
+        assert_eq!(m.tooltip, copy::MARK_TOOLTIP_SETTLEMENT);
+    }
+
+    #[test]
+    fn an_entry_band_is_dollars_or_up_to() {
+        let e = |low, high| SettlementEntryEstimate {
+            low_usd_micros: low,
+            high_usd_micros: high,
+            tier: None,
+        };
+        assert_eq!(
+            entry_usd_band(&e(2_000_000, 6_000_000)),
+            "Estimate: about $2 to $6 of inference"
+        );
+        assert_eq!(
+            entry_usd_band(&e(0, 500_000)),
+            "Estimate: up to $0.50 of inference"
+        );
+    }
 
     /// The digest help is finished here, singular at the one-hour minimum,
     /// and absent for an interval it cannot state in whole hours.
@@ -987,10 +1142,10 @@ mod tests {
         assert_eq!(finals.accessibility, "New: 4.0 credit is now final.");
     }
 
-    fn estimate(low: f64, high: f64, tier: Option<&str>, drawn: bool) -> EntryEstimate {
-        EntryEstimate {
-            low,
-            high,
+    fn estimate(low: u64, high: u64, tier: Option<&str>, drawn: bool) -> EntryUsdEstimate {
+        EntryUsdEstimate {
+            low_usd_micros: low,
+            high_usd_micros: high,
             tier: tier.map(str::to_string),
             drawn,
         }
@@ -1007,41 +1162,49 @@ mod tests {
     }
 
     #[test]
-    fn a_row_draws_its_estimate_only_when_the_core_says_to() {
-        let drawn = entry_tags(None, Some(&estimate(2.0, 4.5, Some("higher"), true)));
+    fn a_row_draws_its_dollar_estimate_only_when_the_core_says_to() {
+        let drawn = entry_tags(
+            None,
+            Some(&estimate(2_000_000, 6_000_000, Some("higher"), true)),
+        );
         assert_eq!(
             drawn.estimate_band.as_deref(),
-            Some("Estimate: about 2 to 4.5 credit")
+            Some("Estimate: about $2 to $6 of inference")
         );
         assert_eq!(drawn.estimate_tier.as_deref(), Some("Higher estimate"));
         assert_eq!(
             drawn.estimate_explainer.as_deref(),
-            Some(copy::ESTIMATE_EXPLAINER)
+            Some(copy::SETTLEMENT_ESTIMATE_EXPLAINER)
         );
-        let hidden = entry_tags(None, Some(&estimate(1.0, 3.0, None, false)));
+        let hidden = entry_tags(None, Some(&estimate(1_000_000, 3_000_000, None, false)));
         assert_eq!(hidden, EntryTags::default());
-        let middle = entry_tags(None, Some(&estimate(1.0, 3.0, Some("middle"), true)));
-        assert_eq!(middle.estimate_tier.as_deref(), Some("Typical estimate"));
-        let lower = entry_tags(None, Some(&estimate(0.5, 1.0, Some("lower"), true)));
-        assert_eq!(lower.estimate_tier.as_deref(), Some("Lower estimate"));
-        assert_eq!(
-            lower.estimate_band.as_deref(),
-            Some("Estimate: about 0.5 to 1 credit")
+        let middle = entry_tags(
+            None,
+            Some(&estimate(1_000_000, 3_000_000, Some("middle"), true)),
         );
+        assert_eq!(middle.estimate_tier.as_deref(), Some("Typical estimate"));
+        let lower = entry_tags(
+            None,
+            Some(&estimate(500_000, 1_000_000, Some("lower"), true)),
+        );
+        assert_eq!(lower.estimate_tier.as_deref(), Some("Lower estimate"));
     }
 
     #[test]
     fn a_row_estimate_the_core_cannot_read_draws_nothing() {
-        let unknown_tier = entry_tags(None, Some(&estimate(1.0, 3.0, Some("huge"), true)));
+        let unknown_tier = entry_tags(
+            None,
+            Some(&estimate(1_000_000, 3_000_000, Some("huge"), true)),
+        );
         assert!(unknown_tier.estimate_band.is_some());
         assert_eq!(unknown_tier.estimate_tier, None);
-        for (low, high) in [(0.0, 3.0), (-1.0, 2.0), (3.0, 1.0), (f64::NAN, 2.0)] {
-            assert_eq!(
-                entry_tags(None, Some(&estimate(low, high, Some("higher"), true))),
-                EntryTags::default(),
-                "{low} {high}"
-            );
-        }
+        assert_eq!(
+            entry_tags(
+                None,
+                Some(&estimate(3_000_000, 1_000_000, Some("higher"), true))
+            ),
+            EntryTags::default()
+        );
     }
 
     #[test]

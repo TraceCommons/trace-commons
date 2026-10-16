@@ -10,8 +10,9 @@ pub const REDACTION_CATEGORY_SENSITIVE_FIELD: &str =
     "Fields whose name marks them sensitive, like password or authorization.";
 pub const REDACTION_CATEGORY_TOOL_SENSITIVE_FIELD: &str =
     "Tool-call arguments whose name marks them sensitive.";
-pub const REDACTION_CATEGORY_RESIDUAL: &str = "Found, and still in what would be sent. Either a credential inside a correction \
-     you wrote, which is kept on purpose, or a field scrubbing does not reach.";
+pub const REDACTION_CATEGORY_RESIDUAL: &str = "Still in this trace: scrubbing found it but could not take it out. \
+     It is usually a credential you typed into a correction, which is kept on purpose, or text in a place \
+     scrubbing does not reach.";
 pub const REDACTION_CATEGORY_UNKNOWN: &str =
     "Removed by a pattern this version has no description for.";
 
@@ -25,16 +26,26 @@ pub fn redaction_row_counts(occurrences: u32, distinct: u32) -> String {
 
 /// A detection that survived scrubbing remains in the outgoing envelope.
 /// `count` measures detection sites, not the number of secret values.
+///
+/// Plain words (owner, 2026-10-12): the schema paths in `sites` name
+/// fields, not places a person can find, so they are left to Look inside.
+/// A scan that could not run at all is said as that, never as a count: the
+/// fail-closed survivor at [`crate::envelope::RESIDUAL_SCAN_UNAVAILABLE_SITE`]
+/// is not a secret anyone found.
 pub fn residual_secret_line(count: u32, sites: &[String]) -> String {
-    let head = if count == 1 {
-        "A secret found here is still in what would be sent".to_string()
-    } else {
-        format!("Secrets found in {count} places are still in what would be sent")
-    };
-    if sites.is_empty() {
-        return head;
+    let unchecked = !sites.is_empty()
+        && sites
+            .iter()
+            .all(|site| site == crate::envelope::RESIDUAL_SCAN_UNAVAILABLE_SITE);
+    if unchecked {
+        return "This trace could not be checked for leftover secrets, so treat it as holding one."
+            .to_string();
     }
-    format!("{head} ({})", sites.join(", "))
+    if count == 1 {
+        "1 secret is still in this trace".to_string()
+    } else {
+        format!("{count} secrets are still in this trace")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +228,7 @@ pub struct MonitorTracesCopy {
 //   [`MonitorShellCopy`], and the words that carry his Home and History
 //   structure (headings, project groups, community and credit record) are
 //   [`MonitorHomeHistoryCopy`].
-// - No "Share automatically": the folder rule is Ask me / Automatic /
+// - No "Share automatically": the folder rule is Ask / Automatic /
 //   Never, from `project_copy::FOLDER_MODE_LABELS`.
 
 /// Every placeholder the monitor tables use, each written `{name}`:
@@ -255,6 +266,16 @@ pub struct MonitorTreeCopy {
     pub tree_title: &'static str,
     /// While the queue is first read.
     pub reading_queue: &'static str,
+    /// The Traces search (owner, 2026-10-12): the icon button's name, the
+    /// field's prompt, its clear button's name, and the line shown when
+    /// nothing matches. DRAFT, NEEDS APPROVAL.
+    pub search: &'static str,
+    pub search_prompt: &'static str,
+    pub search_clear: &'static str,
+    pub search_none: &'static str,
+    /// The History icon button beside the order control, which opens
+    /// History on the Traces tab (owner, 2026-10-12). DRAFT, NEEDS APPROVAL.
+    pub open_history: &'static str,
     /// A folder's Submit pill with nothing eligible, with `{count}`
     /// eligible, and while it sends.
     pub submit: &'static str,
@@ -546,6 +567,11 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             tree_label: "Tools, folders and traces",
             tree_title: "Watched Directories",
             reading_queue: "Reading local queue\u{2026}",
+            search: "Search",
+            search_prompt: "Search traces",
+            search_clear: "Clear search",
+            search_none: "No traces match your search.",
+            open_history: "History",
             submit: "Submit",
             submit_count: "Submit \u{00b7} {count}",
             submitting: "Submitting\u{2026}",
@@ -623,7 +649,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             redactions_unavailable: "Redaction summary unavailable. Contribution is disabled.",
             removed: "Removed",
             nothing_removed: "Nothing matched for removal.",
-            still_present: "Found, and still in what would be sent",
+            still_present: "Not removed",
             residual_unavailable: "Residual secret warning unavailable. Contribution is disabled.",
             residual_loading: "Loading residual secret warning\u{2026}",
             consent_scopes: "Consent scopes",
@@ -925,25 +951,14 @@ pub struct MonitorEdgeRailCopy {
     /// The rail's accessible name, and the closed rail's handle's.
     pub rail_label: &'static str,
     pub handle_label: &'static str,
-    /// The parts of the Home peek this table names (owner, 2026-10-11: one
-    /// Home peek in place of the Waiting, Tools and Balance icons). The
-    /// icons themselves are named by the app's tabs (Home, Traces) and
-    /// Settings (Private AI, Compute).
-    pub waiting: &'static str,
-    pub balance: &'static str,
-    /// The mark at the foot of the rail.
+    /// The mark at the foot of the rail. The rail's icons are named by the
+    /// app's tabs (owner, 2026-10-11: one icon per tab, Home, Private AI
+    /// and Traces).
     pub open_app: &'static str,
     /// Each peek's link into the app, and its accessible name.
     pub open_section: &'static str,
     pub open_section_label: &'static str,
-    /// The Waiting peek's button.
-    pub review: &'static str,
-    /// The Tools peek with no tool found.
-    pub tools_empty: &'static str,
-    /// The Compute peek before the core has reported.
-    pub compute_unreported: &'static str,
-    /// The Traces peek: what is on this Mac and what was contributed, over
-    /// its map and graph.
+    /// The Traces peek: what is on this Mac and what was contributed.
     pub on_this_mac: &'static str,
     pub on_this_mac_line_one: &'static str,
     pub on_this_mac_line: &'static str,
@@ -1005,7 +1020,7 @@ pub struct MonitorFlowMapCopy {
     pub hub: &'static str,
     /// The library's card: `{label}` is the traces contributed. Approved
     /// 2026-10-07 (owner wording after the #1273 review): folders set to
-    /// Never do not wait, so it names Ask me rather than "every other".
+    /// Never do not wait, so it names Ask rather than "every other".
     pub library: &'static str,
     /// A tool's card title: `{label}` is its folders.
     pub tool_title: &'static str,
@@ -1027,7 +1042,8 @@ pub struct MonitorFlowMapCopy {
     pub connected: &'static str,
     pub connected_line: &'static str,
     /// The Traces legend's last item: a tool that is not watched, drawn
-    /// dashed.
+    /// dashed. "Not watched", without "Tool" (owner, 2026-10-12). DRAFT,
+    /// NEEDS APPROVAL.
     pub legend_not_watched: &'static str,
     /// The Private AI destination's label: the credential the tools'
     /// calls are answered with.
@@ -1181,6 +1197,31 @@ pub struct MonitorHomeHistoryCopy {
     pub missions_subtitle: &'static str,
     pub insights_subtitle: &'static str,
     pub catalogue_subtitle: &'static str,
+    /// Home's Uncontributed tile (owner, 2026-10-12): its label, the size
+    /// of what waits on this Mac, and the estimated credit it could earn.
+    /// DRAFT, NEEDS APPROVAL.
+    pub uncontributed: &'static str,
+    pub uncontributed_size: &'static str,
+    pub uncontributed_estimate: &'static str,
+    /// Home's Credit tile: the change in total credit since the last day
+    /// this Mac saw, `{amount}` signed; and no change. DRAFT, NEEDS APPROVAL.
+    pub credit_delta: &'static str,
+    pub credit_delta_none: &'static str,
+    /// Home's Insights promotion: today's routed tokens, and its line while
+    /// no figures are read. DRAFT, NEEDS APPROVAL.
+    pub insights_today: &'static str,
+    pub insights_teaser: &'static str,
+    /// Home's NEAR AI campaign card, under the stat tiles. PLACEHOLDER copy
+    /// until a campaign source exists (owner, 2026-10-12). DRAFT, NEEDS
+    /// APPROVAL.
+    pub campaign_eyebrow: &'static str,
+    pub campaign_title: &'static str,
+    pub campaign_body: &'static str,
+    pub campaign_action: &'static str,
+    /// The hero promotions' calls to action on Missions and Insights
+    /// (owner, 2026-10-12). DRAFT, NEEDS APPROVAL.
+    pub missions_action: &'static str,
+    pub insights_action: &'static str,
     /// The contribution list card's eyebrow and heading.
     pub submissions: &'static str,
     pub contribution_history: &'static str,
@@ -1419,7 +1460,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             tools: "{count} tools",
             hub: "Traces are collected here. {label} waiting for you; {count} contributed.",
             library: "{label} contributed from this machine. Folders set to contribute \
-                automatically send scrubbed traces here; folders set to Ask me wait for you.",
+                automatically send scrubbed traces here; folders set to Ask wait for you.",
             tool_title: "{tool} \u{00b7} {label}",
             tool_watched: "Watched: new traces are collected on this computer.",
             tool_waiting: "{count} waiting for you.",
@@ -1431,7 +1472,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             folder_counts: "{label} waiting, {count} contributed.",
             connected: "{label} connected.",
             connected_line: "{label} connected",
-            legend_not_watched: "Tool not watched",
+            legend_not_watched: "Not watched",
             credential: "NEAR AI credential",
             none_found: "No configured tools found.",
         },
@@ -1445,6 +1486,19 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             missions_subtitle: "Proposed runs waiting for your review.",
             insights_subtitle: "Patterns in how you use your agents, read on this Mac.",
             catalogue_subtitle: "What the commons is asking for.",
+            uncontributed: "Uncontributed",
+            uncontributed_size: "{size}",
+            uncontributed_estimate: "Could earn {min}\u{2013}{max}",
+            credit_delta: "{amount} since yesterday",
+            credit_delta_none: "No change since yesterday",
+            insights_today: "{total} tokens today",
+            insights_teaser: "See where your agents spend their tokens.",
+            campaign_eyebrow: "New on NEAR AI",
+            campaign_title: "A new model just launched",
+            campaign_body: "Placeholder campaign copy: try the newest model in Private AI.",
+            campaign_action: "Try it",
+            missions_action: "Review drafts",
+            insights_action: "See insights",
             submissions: "Submissions",
             contribution_history: "Contribution history",
             reading_history: "Reading local history\u{2026}",
@@ -1484,17 +1538,12 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         },
         edge_rail: MonitorEdgeRailCopy {
             setting_toggle: "Show the edge rail",
-            setting_caption: "Rest the pointer on the right edge of the screen to glance at Home, Private AI, your traces and compute.",
+            setting_caption: "Rest the pointer on the right edge of the screen to glance at Home, Private AI and your traces.",
             rail_label: "Edge rail",
             handle_label: "Open the edge rail",
-            waiting: "Waiting",
-            balance: "Balance",
             open_app: concat!("Open ", crate::app_name!()),
             open_section: "Open {section}",
             open_section_label: concat!("Open {section} in ", crate::app_name!()),
-            review: "Review",
-            tools_empty: "No tools found on this Mac yet.",
-            compute_unreported: "Compute has not reported yet.",
             on_this_mac: "On this Mac",
             on_this_mac_line_one: "1 session waiting here. Nothing leaves until you send it.",
             on_this_mac_line: "{count} sessions waiting here. Nothing leaves until you send it.",
@@ -1601,7 +1650,7 @@ mod tests {
     }
 
     /// Ron's #1146 inspector words (#1241): every one is there, and none of
-    /// them offers "Share automatically" -- the folder rule is Ask me /
+    /// them offers "Share automatically" -- the folder rule is Ask /
     /// Automatic / Never (`project_copy::contribution_mode_copy`).
     #[test]
     fn rons_inspector_words_are_whole_and_never_say_share_automatically() {
@@ -1879,7 +1928,7 @@ mod tests {
         assert_eq!(
             map.library,
             "{label} contributed from this machine. Folders set to contribute automatically \
-             send scrubbed traces here; folders set to Ask me wait for you."
+             send scrubbed traces here; folders set to Ask wait for you."
         );
         // Watched sessions are queued unscrubbed until preview, and the
         // tools record them: the hub and a watched tool claim neither.

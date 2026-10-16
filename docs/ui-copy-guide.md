@@ -106,6 +106,19 @@ PR #1288 explicitly left Tauri's own copies unchanged. Preserve that scope for
 this rule set; do not treat it as permission for a blanket Tauri rewrite or as
 an exemption from checking consumers of changed shared fields.
 
+## 9. Add no notice without explicit approval
+
+Do not add a new notice without the owner's explicit approval, both for the
+notice existing and for its wording. That covers banners, cards, one-time
+messages, interruptions on a screen, the daemon status fields and channels
+that carry them (such as `status.arming_rewordings`), and OS notifications.
+A spec, a design principle ("nothing changes silently") or a review finding is
+not approval. Raise the notice as a question instead.
+
+The switch-on rewording notice and the Scrub-check notice were built this way
+and removed on 2026-10-16 (owner decision) as noise the contributor did not
+need.
+
 ## Review checklist
 
 - Does each action label describe the immediate action, usually in 1–2 words?
@@ -114,6 +127,7 @@ an exemption from checking consumers of changed shared fields.
 - Do titles, buttons, and accessible names have the appropriate separate keys?
 - Can assistive technology distinguish repeated controls?
 - Do headings and hints match the current navigation and controls?
+- Does the change add a notice? If so, has the owner approved it explicitly?
 - Have all affected shared-copy consumers and their tests been updated?
 - Have copy contracts, bridge/decoder tests, wording ratchets, and relevant UI
   checks been run? Report platforms that were not compiled or exercised.

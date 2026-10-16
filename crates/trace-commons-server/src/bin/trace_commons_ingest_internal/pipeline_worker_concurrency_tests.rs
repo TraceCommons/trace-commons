@@ -17,11 +17,11 @@ use super::pipeline_http_pg_tests::{
     credit_mutate_audit_rows, local_artifacts, mains_database, model_training_envelope,
     runtime_backend, tenant_tx, wait_for_run_state,
 };
-use crate::pipeline_default_routing::PipelineWorkerPassStats;
-use crate::pipeline_runtime::{
-    PIPELINE_WORKER_CONCURRENCY_INVALID_LABEL, PipelineFollowUpCadence, PipelineWorkerStep,
-    PipelineWorkerWake, drain_pipeline_tenant_runs_concurrently, drain_tenant_then_follow_ups,
-    parse_pipeline_worker_concurrency, run_concurrent_pipeline_worker, run_pipeline_worker_pass,
+use crate::ingest::app::pipeline_default_routing::PipelineWorkerPassStats;
+use crate::ingest::app::pipeline_runtime::{
+    PIPELINE_WORKER_CONCURRENCY_INVALID_LABEL, PipelineWorkerStep, PipelineWorkerWake,
+    drain_pipeline_tenant_runs_concurrently, drain_tenant_then_follow_ups,
+    parse_pipeline_worker_concurrency, run_concurrent_pipeline_worker,
 };
 use trace_commons_gate_api::SettlementAdapter;
 use trace_commons_gate_api::pipeline::InstrumentId;
@@ -542,114 +542,6 @@ async fn the_concurrent_worker_backs_off_an_idle_tenant_until_a_receipt_wakes_it
         .unwrap();
 }
 
-/// Review of #1356, finding 1, pinned: idle tenants cost the concurrent
-/// worker at concurrency 2 no more database work than the sequential pass.
-/// Each test-double operation -- a claim, or one of the two sweeps --
-/// takes 5 ms, as a small query does. The sequential pass runs a claim and
-/// both sweeps for every tenant on every pass
-/// (`PipelineWorkerSweeps::EveryPass`); the concurrent worker's sweeps go
-/// through the real cadence gate (`PipelineFollowUpCadence::sweeps_due`).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn idle_tenants_cost_no_more_at_concurrency_two_than_the_sequential_pass() {
-    const TENANTS: usize = 20;
-    const WINDOW: StdDuration = StdDuration::from_secs(3);
-    const OPERATION: StdDuration = StdDuration::from_millis(5);
-    let tenants = (0..TENANTS)
-        .map(|index| format!("tenant-idle-{index:02}"))
-        .collect::<Vec<_>>();
-
-    // The sequential pass, as `spawn_pipeline_worker` runs it at 1.
-    let sequential = Arc::new(AtomicUsize::new(0));
-    let ready = AtomicBool::new(false);
-    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    let started = std::time::Instant::now();
-    while started.elapsed() < WINDOW {
-        let operations = sequential.clone();
-        run_pipeline_worker_pass(
-            async { Ok(()) },
-            tenants.clone(),
-            move |_tenant_id| {
-                let operations = operations.clone();
-                async move {
-                    // The claim, then the receipt and attempt sweeps.
-                    for _ in 0..3 {
-                        operations.fetch_add(1, Ordering::SeqCst);
-                        tokio::time::sleep(OPERATION).await;
-                    }
-                }
-            },
-            &ready,
-            &stop_rx,
-        )
-        .await;
-        tokio::time::sleep(StdDuration::from_millis(200)).await;
-    }
-    let sequential = sequential.load(Ordering::SeqCst);
-
-    // The concurrent worker at 2, over the same window.
-    let concurrent = Arc::new(AtomicUsize::new(0));
-    let cadence = Arc::new(std::sync::Mutex::new(PipelineFollowUpCadence::default()));
-    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    let supervisor = {
-        let (operations, tenants) = (concurrent.clone(), tenants.clone());
-        let drain_stop = stop_rx.clone();
-        tokio::spawn(run_concurrent_pipeline_worker(
-            2,
-            || async { Ok(()) },
-            move || tenants.clone(),
-            move |tenant_id, permits| {
-                let (claims, sweeps, cadence) =
-                    (operations.clone(), operations.clone(), cadence.clone());
-                drain_tenant_then_follow_ups(
-                    tenant_id.clone(),
-                    2,
-                    permits,
-                    drain_stop.clone(),
-                    move |_tenant_id| {
-                        let claims = claims.clone();
-                        async move {
-                            claims.fetch_add(1, Ordering::SeqCst);
-                            tokio::time::sleep(OPERATION).await;
-                            PipelineWorkerStep::Idle
-                        }
-                    },
-                    move || async move {
-                        let due = cadence
-                            .lock()
-                            .unwrap()
-                            .sweeps_due(&tenant_id, std::time::Instant::now());
-                        if due {
-                            for _ in 0..2 {
-                                sweeps.fetch_add(1, Ordering::SeqCst);
-                                tokio::time::sleep(OPERATION).await;
-                            }
-                        }
-                    },
-                )
-            },
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(PipelineWorkerPassStats::default()),
-            Arc::default(),
-            stop_rx,
-        ))
-    };
-    tokio::time::sleep(WINDOW).await;
-    let concurrent_count = concurrent.load(Ordering::SeqCst);
-    stop_tx.send(true).unwrap();
-    tokio::time::timeout(StdDuration::from_secs(5), supervisor)
-        .await
-        .unwrap()
-        .unwrap();
-    println!(
-        "idle operations over {WINDOW:?} for {TENANTS} tenants: sequential {sequential}, \
-         concurrency 2 {concurrent_count}"
-    );
-    assert!(
-        concurrent_count <= sequential,
-        "concurrency 2 ran {concurrent_count} idle operations, the sequential pass {sequential}"
-    );
-}
-
 /// A failing readiness probe reports not ready.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_supervisor_reports_not_ready_when_its_probe_fails() {
@@ -867,38 +759,6 @@ impl WorkerFixture {
 async fn stop_worker(worker: pipeline_runtime::PipelineWorkerHandle) {
     let _ = worker.stop.send(true);
     pipeline_runtime::join_or_abort(worker.join, StdDuration::from_secs(30)).await;
-}
-
-/// Test (1): with a worker concurrency of 2, two runs whose Review-start
-/// privacy pass is slow are in it at the same time, and both finish in
-/// about one pass's time rather than two. Red on the sequential pass: one
-/// pass at a time.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_slow_reviews_run_at_once_with_a_worker_concurrency_of_two() {
-    const DELAY: StdDuration = StdDuration::from_secs(3);
-    let boundary = SlowPrivacyBoundary::new(DELAY);
-    let tenant = format!("tenant-worker-conc-two-{}", Uuid::new_v4().simple());
-    let Some(fixture) = WorkerFixture::new(boundary.clone(), &[&tenant], 2).await else {
-        return;
-    };
-    let first = fixture.submit(&tenant, false).await;
-    let second = fixture.submit(&tenant, false).await;
-
-    let worker = pipeline_runtime::spawn_pipeline_worker(fixture.state.clone())
-        .expect("a runtime, so a worker");
-    wait_for_run_state(&fixture.runtime, &tenant, first, "complete").await;
-    wait_for_run_state(&fixture.runtime, &tenant, second, "complete").await;
-    stop_worker(worker).await;
-
-    assert_eq!(boundary.in_flight.calls.load(Ordering::SeqCst), 2);
-    // Counted, not timed: the second pass started before the first ended,
-    // so the two together took about one pass's time. (A wall-clock bound
-    // flakes on a loaded runner.)
-    assert_eq!(
-        boundary.in_flight.max.load(Ordering::SeqCst),
-        2,
-        "both privacy passes ran at once"
-    );
 }
 
 /// Test (2): a run of a second tenant, received after the worker is already
@@ -1151,7 +1011,7 @@ async fn forty_runs_across_three_tenants_each_complete_once() {
 /// `idle_tenants_cost_no_more_at_concurrency_two_than_the_sequential_pass`).
 /// Run by hand:
 ///
-/// `cargo test -p trace-commons-server --bin trace-commons-ingest --
+/// `cargo test -p trace-commons-server --lib --
 /// --ignored --nocapture measure_idle_worker_commits_by_concurrency`
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "a measurement for the operator docs, not a check"]

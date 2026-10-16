@@ -29,8 +29,31 @@ final class HomeStore {
     /// an older daemon's `unknown_method` is drawn the same way
     /// (`isNotServed`); today the live client sends nothing for it.
     private(set) var missions: DaemonData.MissionCatalogue?
+    /// Today's routed calls per tool (`insights_glance`), for Home's
+    /// Insights promotion; nil until read, or when the read failed or the
+    /// glance is off.
+    private(set) var glance: DaemonData.InsightsGlance?
+    /// Total credit by day as this Mac saw it, for the Credit tile's
+    /// day-over-day change (`CreditDailyTotals`).
+    private(set) var creditTotals = CreditDailyTotals.load()
     /// The last read that failed, by method; cleared when it next succeeds.
     private(set) var failures: [String: DaemonDataError] = [:]
+
+    /// Total credit: the commons' lifetime points while it knows them, else
+    /// the rollup's settled credit; nil when neither is known (never zero).
+    static func totalCredit(credit: DaemonData.CommonsCreditSummary?, rollup: DaemonData.HistoryRollup?) -> Double? {
+        if let credit, credit.pointsKnown, let lifetime = credit.commonsPointsLifetimeEarned { return Double(lifetime) }
+        return rollup?.creditFinal
+    }
+
+    /// The fresh total, after a read: recorded as today's on this Mac.
+    private func recordCreditTotal() {
+        let fresh = SummaryFacts.fresh(credit, unless: failures["commons_credit_summary"])
+        let rolled = SummaryFacts.fresh(rollup, unless: failures["history_rollup"])
+        guard let total = Self.totalCredit(credit: fresh, rollup: rolled) else { return }
+        creditTotals.record(total, on: .now)
+        creditTotals.save()
+    }
 
     /// History rows read at once: the page, not the whole record.
     static let historyLimit = 100
@@ -127,7 +150,15 @@ final class HomeStore {
         async let credit: Void = loadCredit()
         async let missions: Void = loadMissions()
         async let destinations: Void = loadDestinations()
-        _ = await (status, history, rollup, credit, missions, destinations)
+        async let glance: Void = loadGlance()
+        _ = await (status, history, rollup, credit, missions, destinations, glance)
+        recordCreditTotal()
+    }
+
+    private func loadGlance() async {
+        await read("insights_glance", { try await $0.insightsGlance(tzSeconds: TimeZone.current.secondsFromGMT()) }) {
+            self.glance = $0
+        }
     }
 
     private func loadStatus() async {

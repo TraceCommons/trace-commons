@@ -104,6 +104,14 @@ pub const N4_STANDALONE_PER_WEEK: u32 = 2;
 /// DRAFT, owner decisions 4 and 25.
 pub const N4_MIN_INTERVAL: Duration = Duration::hours(24);
 
+/// Settlement estimate (N5): minimum interval between two notifications.
+/// DRAFT, owner decision pending.
+pub const N5_MIN_INTERVAL: Duration = Duration::hours(72);
+
+/// Settlement estimate (N5): at most this many per local ISO week. DRAFT,
+/// owner decision pending.
+pub const N5_STANDALONE_PER_WEEK: u32 = 1;
+
 /// A re-engagement notification kind. The digest (N0) is not one: it is
 /// decided by `notify::digest_due_for_schedule` and arrives here as a
 /// [`DigestPlan`].
@@ -123,15 +131,19 @@ pub enum Kind {
     VerdictsLanded,
     /// N3, U3: the weekly recap. Held for the gamification ruling.
     WeeklyRecap,
+    /// N5: the machine-wide settlement estimate grew, or its pricing moved.
+    /// Never folds.
+    SettlementEstimate,
 }
 
 impl Kind {
-    /// Every kind, highest precedence first: N1 > N4 > N2 > N3.
-    pub const ALL: [Kind; 4] = [
+    /// Every kind, highest precedence first: N1 > N4 > N2 > N3 > N5.
+    pub const ALL: [Kind; 5] = [
         Kind::IdleSessions,
         Kind::InsightsTip,
         Kind::VerdictsLanded,
         Kind::WeeklyRecap,
+        Kind::SettlementEstimate,
     ];
 
     /// The stable label used on the wire, in settings keys and in logs.
@@ -142,6 +154,7 @@ impl Kind {
             Kind::InsightsTip => "insights_tip",
             Kind::VerdictsLanded => "verdicts_landed",
             Kind::WeeklyRecap => "weekly_recap",
+            Kind::SettlementEstimate => "settlement_estimate",
         }
     }
 
@@ -154,6 +167,7 @@ impl Kind {
             Kind::InsightsTip => 1,
             Kind::VerdictsLanded => 2,
             Kind::WeeklyRecap => 3,
+            Kind::SettlementEstimate => 4,
         }
     }
 
@@ -182,6 +196,11 @@ impl Kind {
                 per_week: Some(N3_PER_WEEK),
                 counts_folds: true,
             },
+            Kind::SettlementEstimate => KindCaps {
+                min_interval: N5_MIN_INTERVAL,
+                per_week: Some(N5_STANDALONE_PER_WEEK),
+                counts_folds: false,
+            },
         }
     }
 }
@@ -200,6 +219,9 @@ pub enum Fact {
     /// The session an Insights tip was about ended, or a new one started
     /// below the tip's threshold.
     SessionEnded,
+    /// The settlement estimate was announced; the candidate is built again
+    /// only when the estimate has grown past the figures last announced.
+    EstimateAnnounced,
 }
 
 impl Fact {
@@ -210,6 +232,7 @@ impl Fact {
             Fact::NewsAcknowledged => "news_acknowledged",
             Fact::WeekEnded => "week_ended",
             Fact::SessionEnded => "session_ended",
+            Fact::EstimateAnnounced => "estimate_announced",
         }
     }
 }
@@ -265,6 +288,8 @@ pub struct NotifySettings {
     pub insights_tip: bool,
     pub verdicts_landed: bool,
     pub weekly_recap: bool,
+    /// `notify.settlement_estimate`.
+    pub settlement_estimate: bool,
     /// At least one live subscriber declared it can render `reengage_due`.
     /// Gates standalone only: a fold rides in `digest_due`.
     pub renderer: bool,
@@ -278,6 +303,7 @@ impl NotifySettings {
             Kind::InsightsTip => self.insights_tip,
             Kind::VerdictsLanded => self.verdicts_landed,
             Kind::WeeklyRecap => self.weekly_recap,
+            Kind::SettlementEstimate => self.settlement_estimate,
         }
     }
 }
@@ -576,12 +602,13 @@ mod tests {
     fn cand(kind: Kind, since: DateTime<Utc>) -> Candidate {
         Candidate {
             kind,
-            foldable: kind != Kind::InsightsTip,
+            foldable: !matches!(kind, Kind::InsightsTip | Kind::SettlementEstimate),
             resolves: match kind {
                 Kind::IdleSessions => Fact::QueueDecided,
                 Kind::InsightsTip => Fact::SessionEnded,
                 Kind::VerdictsLanded => Fact::NewsAcknowledged,
                 Kind::WeeklyRecap => Fact::WeekEnded,
+                Kind::SettlementEstimate => Fact::EstimateAnnounced,
             },
             since,
             ttl: (kind == Kind::VerdictsLanded).then_some(N2_NEWS_TTL),
@@ -597,6 +624,7 @@ mod tests {
             insights_tip: true,
             verdicts_landed: true,
             weekly_recap: true,
+            settlement_estimate: true,
             renderer: true,
         }
     }
@@ -666,9 +694,14 @@ mod tests {
                 Kind::IdleSessions,
                 Kind::InsightsTip,
                 Kind::VerdictsLanded,
-                Kind::WeeklyRecap
+                Kind::WeeklyRecap,
+                Kind::SettlementEstimate
             ]
         );
+        assert_eq!(Kind::SettlementEstimate.label(), "settlement_estimate");
+        assert_eq!(Kind::SettlementEstimate.precedence(), 4);
+        assert_eq!(Fact::EstimateAnnounced.label(), "estimate_announced");
+        assert_eq!(Kind::ALL.len(), 5);
         assert_eq!(Kind::IdleSessions.label(), "idle_sessions");
         assert_eq!(Reason::NoRenderer.label(), "no_renderer");
     }
@@ -695,7 +728,7 @@ mod tests {
             .collect();
         let out = run(&cands, &quiet_plan(), &[], &s, now);
         assert_eq!(out.standalone, Some(Kind::IdleSessions));
-        assert_eq!(out.deferred.len(), 3);
+        assert_eq!(out.deferred.len(), 4);
         assert!(out.deferred.iter().all(|(_, r)| *r == Reason::MinGap));
     }
 
@@ -1272,7 +1305,7 @@ mod tests {
         };
         let mut pending = usize::from(saturate);
         let mut contributed = 0usize;
-        let mut present: [Option<DateTime<Utc>>; 4] = [None; 4];
+        let mut present: [Option<DateTime<Utc>>; 5] = [None; 5];
         let mut last_digest_at: Option<DateTime<Utc>> = None;
         let mut log: Vec<AttentionEntry> = Vec::new();
         let mut tally = Tally::default();
@@ -1280,8 +1313,8 @@ mod tests {
         while now < end {
             // The world moves. Draw the same number of values every tick so
             // the stream does not depend on the arbiter's answers.
-            let draws: Vec<bool> = (0..12)
-                .map(|i| rng.chance([4, 3, 2, 2, 2, 2, 1, 2, 1, 2, 1, 2][i]))
+            let draws: Vec<bool> = (0..13)
+                .map(|i| rng.chance([4, 3, 2, 2, 2, 2, 1, 2, 1, 2, 1, 2, 1][i]))
                 .collect();
             if !saturate {
                 if draws[0] {
@@ -1358,7 +1391,8 @@ mod tests {
                     let h = local.hour();
                     assert!((QUIET_END_HOUR..QUIET_START_HOUR).contains(&h), "{local}");
                 }
-                if kind != Kind::InsightsTip && settings.digest {
+                if !matches!(kind, Kind::InsightsTip | Kind::SettlementEstimate) && settings.digest
+                {
                     assert_eq!(pending, 0, "foldable standalone beside a guaranteed digest");
                 }
                 if let Some(last) = last_digest_at {

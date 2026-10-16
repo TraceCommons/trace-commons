@@ -29,6 +29,14 @@ final class TracesStore {
         }
     }
 
+    /// The Traces search (owner, 2026-10-12): the tree narrows to the
+    /// folders and sessions whose words contain it, on this Mac's last read;
+    /// nothing is asked of the core. Empty shows the whole tree.
+    var searchText = ""
+
+    /// The tree as drawn: `tree` narrowed by `searchText`.
+    var shownTree: TracesTree { tree.matching(searchText) }
+
     // MARK: The nudge (re-engagement)
 
     /// The order chosen with the order control (`list_pending {order}`).
@@ -310,15 +318,22 @@ final class TracesStore {
     /// armed, or a name the core does not know: nothing is said rather than
     /// a guess at which wording is true.
     func disclosureLines(_ disclosure: String?) -> [String] {
-        guard let disclosure else { return [] }
-        if let known = disclosureWords[disclosure] { return known }
-        let lines = AutomaticGrantCopy.decode(
-            fromJSON: TCCoreCopy.automaticGrantCopyJSON(disclosure: disclosure))?.lines ?? []
-        disclosureWords[disclosure] = lines
-        return lines
+        armedDisclosure(disclosure)?.lines ?? []
     }
 
-    @ObservationIgnored private var disclosureWords: [String: [String]] = [:]
+    /// The whole copy for an armed folder's disclosure: the one sentence a
+    /// card shows, and the long form behind it. Nil on the same terms as
+    /// `disclosureLines` being empty.
+    func armedDisclosure(_ disclosure: String?) -> AutomaticGrantCopy? {
+        guard let disclosure else { return nil }
+        if let known = disclosureCopies[disclosure] { return known }
+        let copy = AutomaticGrantCopy.decode(
+            fromJSON: TCCoreCopy.automaticGrantCopyJSON(disclosure: disclosure))
+        disclosureCopies[disclosure] = copy
+        return copy
+    }
+
+    @ObservationIgnored private var disclosureCopies: [String: AutomaticGrantCopy?] = [:]
 
     /// The eligibility and attestation sentences' fallbacks, from the core.
     let inferenceCopy: PrivateInferenceCopy? = PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? "")

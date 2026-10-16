@@ -95,4 +95,21 @@ final class NudgeMenuBarTests: XCTestCase {
         XCTAssertEqual(MenuPanelStatus.markAccessibility(base: "Base.", words: words), "Base.")
         XCTAssertEqual(MenuPanelStatus.markTooltip(words), "")
     }
+
+
+    /// The estimate lights the same ring the verdict news does, on the
+    /// daemon's say-so, and only while the strip can vouch for it.
+    func testTheNewsMarkLightsForTheEstimate() throws {
+        let json = #"""
+            {"nudge":{"state":"none","mark":"news","mark_kinds":["settlement_estimate"],
+             "mark_text":{"accessibility":"An estimate for traces on this Mac is ready.","tooltip":"Estimate ready"}}}
+            """#
+        let nudge = try DaemonDataDecoding.decoder().decode(DaemonData.Status.self, from: Data(json.utf8)).nudge
+        XCTAssertEqual(MenuPanelStatus.mark(nudge, available: true), .news)
+        XCTAssertEqual(MenuPanelStatus.mark(nudge, available: false), GlassMenuBarStrip.Mark.none)
+        let words = MenuPanelStatus.markWords(nudge, available: true, badge: nil, condition: .live)
+        XCTAssertEqual(MenuPanelStatus.markTooltip(words), "Estimate ready")
+        // A paused strip does not draw the ring.
+        XCTAssertNil(MenuPanelStatus.markWords(nudge, available: true, badge: nil, condition: .paused))
+    }
 }

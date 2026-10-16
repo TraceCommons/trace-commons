@@ -382,8 +382,10 @@ pub const NUDGE_ESTIMATE_CLAUSE: &str = "Estimated credit before scoring: about 
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_ESTIMATE_CLAUSE_PARTIAL: &str =
     "Estimated credit for {known} of them, before scoring: about {low} to {high}.";
-/// A row's detail line. DRAFT, NEEDS APPROVAL.
-pub const ENTRY_ESTIMATE_BAND: &str = "Estimate: about {low} to {high} credit";
+/// A row's detail line.
+pub const ENTRY_ESTIMATE_BAND: &str = "Estimate: about {low} to {high} of inference";
+/// [`ENTRY_ESTIMATE_BAND`] when the rounded low end is $0.
+pub const ENTRY_ESTIMATE_BAND_UP_TO: &str = "Estimate: up to {high} of inference";
 /// A row tag, multi-tier tables only. DRAFT, NEEDS APPROVAL.
 pub const ENTRY_ESTIMATE_TIER_HIGHER: &str = "Higher estimate";
 /// A row tag, multi-tier tables only. DRAFT, NEEDS APPROVAL.
@@ -394,6 +396,50 @@ pub const ENTRY_ESTIMATE_TIER_LOWER: &str = "Lower estimate";
 pub const ESTIMATE_EXPLAINER: &str = "Made on this device from the trace's size and makeup. \
      Nothing about the trace is sent to make it. The credit a trace gets is set when \
      the commons scores it, and can differ, including 0 when the server reads it as a repeat.";
+
+// ---------------------------------------------------------------------
+// The settlement estimate (machine-wide, in dollars of inference). In
+// these strings `{low}` and `{high}` are dollar figures from
+// `nudge_render::usd_text`, never credit.
+// ---------------------------------------------------------------------
+
+/// The menu-bar line over every trace on this Mac.
+pub const ESTIMATE_TOTAL_LINE: &str = "About {low} to {high} of inference in traces on this Mac";
+/// [`ESTIMATE_TOTAL_LINE`] when the rounded low end is $0.
+pub const ESTIMATE_TOTAL_LINE_UP_TO: &str =
+    "Up to {high} of inference in traces on this Mac, as an estimate";
+/// The line's small label.
+pub const ESTIMATE_TOTAL_LABEL: &str = "Estimate";
+/// The line's action.
+pub const ESTIMATE_TOTAL_ACTION: &str = "Review traces";
+/// The settlement notification's title.
+pub const NOTIFY_SETTLEMENT_TITLE: &str = "Estimate for traces on this Mac";
+/// The settlement notification's body.
+pub const NOTIFY_SETTLEMENT_BODY: &str =
+    "About {low} to {high} of inference, estimated on this Mac. Nothing was sent.";
+/// [`NOTIFY_SETTLEMENT_BODY`] when the rounded low end is $0.
+pub const NOTIFY_SETTLEMENT_BODY_UP_TO: &str =
+    "Up to {high} of inference, estimated on this Mac. Nothing was sent.";
+/// The body when the published pricing changed.
+pub const NOTIFY_SETTLEMENT_BODY_PRICING: &str =
+    "Pricing changed. Traces on this Mac are now estimated at about {low} to {high} of inference.";
+/// [`NOTIFY_SETTLEMENT_BODY_PRICING`] when the rounded low end is $0.
+pub const NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO: &str =
+    "Pricing changed. Traces on this Mac are now estimated at up to {high} of inference.";
+/// The settlement notification's primary action.
+pub const NOTIFY_SETTLEMENT_ACTION_REVIEW: &str = "Review traces";
+/// The settlement notification's dismissal; it sends nothing.
+pub const NOTIFY_SETTLEMENT_ACTION_NOT_NOW: &str = "Not now";
+/// The mark's accessibility sentence while an estimate is news.
+pub const MARK_A11Y_SETTLEMENT: &str = "An estimate for traces on this Mac is ready.";
+/// The Windows tooltip clause for the same.
+pub const MARK_TOOLTIP_SETTLEMENT: &str = "Estimate ready";
+/// The estimate's info popover.
+pub const SETTLEMENT_ESTIMATE_EXPLAINER: &str = "Made on this Mac from the traces' size and makeup. Nothing was sent to make it. The rate comes from Trace Commons' published pricing. What a trace actually gets is decided when it is scored. A single trace's figure is less certain than the total.";
+/// The Settings switch.
+pub const SETTING_SETTLEMENT_ESTIMATE: &str = "Estimate what traces on this Mac are worth";
+/// The Settings switch's help.
+pub const SETTING_SETTLEMENT_ESTIMATE_HELP: &str = "Worked out on this Mac from your traces' size and makeup. Nothing is sent to make the estimate.";
 
 /// Each counted string's key and its `_ONE` sibling's. The count the pair
 /// turns on is the string's first count placeholder (`{n}`, `{a}`, `{m}`,
@@ -612,6 +658,41 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("ENTRY_ESTIMATE_TIER_MIDDLE", ENTRY_ESTIMATE_TIER_MIDDLE),
     ("ENTRY_ESTIMATE_TIER_LOWER", ENTRY_ESTIMATE_TIER_LOWER),
     ("ESTIMATE_EXPLAINER", ESTIMATE_EXPLAINER),
+    ("ENTRY_ESTIMATE_BAND_UP_TO", ENTRY_ESTIMATE_BAND_UP_TO),
+    ("ESTIMATE_TOTAL_LINE", ESTIMATE_TOTAL_LINE),
+    ("ESTIMATE_TOTAL_LINE_UP_TO", ESTIMATE_TOTAL_LINE_UP_TO),
+    ("ESTIMATE_TOTAL_LABEL", ESTIMATE_TOTAL_LABEL),
+    ("ESTIMATE_TOTAL_ACTION", ESTIMATE_TOTAL_ACTION),
+    ("NOTIFY_SETTLEMENT_TITLE", NOTIFY_SETTLEMENT_TITLE),
+    ("NOTIFY_SETTLEMENT_BODY", NOTIFY_SETTLEMENT_BODY),
+    ("NOTIFY_SETTLEMENT_BODY_UP_TO", NOTIFY_SETTLEMENT_BODY_UP_TO),
+    (
+        "NOTIFY_SETTLEMENT_BODY_PRICING",
+        NOTIFY_SETTLEMENT_BODY_PRICING,
+    ),
+    (
+        "NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO",
+        NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO,
+    ),
+    (
+        "NOTIFY_SETTLEMENT_ACTION_REVIEW",
+        NOTIFY_SETTLEMENT_ACTION_REVIEW,
+    ),
+    (
+        "NOTIFY_SETTLEMENT_ACTION_NOT_NOW",
+        NOTIFY_SETTLEMENT_ACTION_NOT_NOW,
+    ),
+    ("MARK_A11Y_SETTLEMENT", MARK_A11Y_SETTLEMENT),
+    ("MARK_TOOLTIP_SETTLEMENT", MARK_TOOLTIP_SETTLEMENT),
+    (
+        "SETTLEMENT_ESTIMATE_EXPLAINER",
+        SETTLEMENT_ESTIMATE_EXPLAINER,
+    ),
+    ("SETTING_SETTLEMENT_ESTIMATE", SETTING_SETTLEMENT_ESTIMATE),
+    (
+        "SETTING_SETTLEMENT_ESTIMATE_HELP",
+        SETTING_SETTLEMENT_ESTIMATE_HELP,
+    ),
 ];
 
 #[cfg(test)]
@@ -746,6 +827,13 @@ mod tests {
         filled
     }
 
+    /// `template` with both dollar figures at `$99,999`.
+    fn fill_usd_max(template: &str) -> String {
+        template
+            .replace("{low}", "$99,999")
+            .replace("{high}", "$99,999")
+    }
+
     #[test]
     fn the_table_holds_every_section_6_key() {
         for key in SPEC_KEYS {
@@ -807,9 +895,15 @@ mod tests {
             "days left",
             "!",
         ];
+        // S1 makes the settlement figures money, and the spec gives the
+        // switch's label with "worth".
+        const EXEMPT: &[(&str, &str)] = &[("SETTING_SETTLEMENT_ESTIMATE", "worth")];
         for (key, text) in NUDGE_COPY {
             let lower = text.to_lowercase();
             for word in BANNED {
+                if EXEMPT.contains(&(*key, *word)) {
+                    continue;
+                }
                 assert!(!lower.contains(word), "{key} says {word:?}: {text}");
             }
         }
@@ -850,7 +944,7 @@ mod tests {
             .choices
             .into_iter()
             .find(|choice| choice.mode == "notify_only")
-            .expect("the Ask me choice")
+            .expect("the Ask choice")
             .label;
         assert!(NUDGE_BACKLOG_BODY.contains(ask), "{NUDGE_BACKLOG_BODY}");
     }
@@ -930,6 +1024,23 @@ mod tests {
                 fill_max(NUDGE_ESTIMATE_CLAUSE_PARTIAL, false),
             ),
             ("ENTRY_ESTIMATE_BAND", fill_max(ENTRY_ESTIMATE_BAND, false)),
+            // The settlement bodies, each end at a five-figure dollar amount.
+            (
+                "NOTIFY_SETTLEMENT_BODY",
+                fill_usd_max(NOTIFY_SETTLEMENT_BODY),
+            ),
+            (
+                "NOTIFY_SETTLEMENT_BODY_UP_TO",
+                fill_usd_max(NOTIFY_SETTLEMENT_BODY_UP_TO),
+            ),
+            (
+                "NOTIFY_SETTLEMENT_BODY_PRICING",
+                fill_usd_max(NOTIFY_SETTLEMENT_BODY_PRICING),
+            ),
+            (
+                "NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO",
+                fill_usd_max(NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO),
+            ),
         ];
         for (key, body) in bodies {
             let len = body.chars().count();
@@ -1212,13 +1323,14 @@ mod tests {
         for (key, text) in NUDGE_COPY {
             if text.contains("{low}") || text.contains("{high}") {
                 figures += 1;
+                let lower = text.to_lowercase();
                 assert!(
-                    text.to_lowercase().contains("estimate"),
+                    lower.contains("estimate") || lower.contains("about"),
                     "{key} carries an estimate figure without saying so: {text}"
                 );
             }
         }
-        assert_eq!(figures, 3);
+        assert_eq!(figures, 10);
     }
 
     /// Ron's #1303 design review, item 8: the backlog title names the

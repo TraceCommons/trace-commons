@@ -62,6 +62,51 @@
   </provides>
 
   <releases>
+    <release version="0.18.2" date="2026-10-16">
+      <description>
+        <p>The credit estimate appears as soon as the app starts, and two notices about automatic contributing are no longer shown.</p>
+      </description>
+    </release>
+    <release version="0.18.1" date="2026-10-16">
+      <description>
+        <p>Maintenance release for Linux: the version number follows the macOS app, whose Home screen now shows the dollar estimate.</p>
+      </description>
+    </release>
+    <release version="0.18.0" date="2026-10-16">
+      <description>
+        <p>Missions are hidden for now. The version number follows the macOS app, which can now estimate the credit the traces on a machine could earn.</p>
+      </description>
+    </release>
+    <release version="0.17.0" date="2026-10-16">
+      <description>
+        <p>Linux gains OpenCode trace discovery, managed sessions you can open in the terminal you choose, and a retry for uploads that could not be answered. The native macOS app gains the matching screens and a redesigned look.</p>
+      </description>
+    </release>
+    <release version="0.16.2" date="2026-10-14">
+      <description>
+        <p>Maintenance release for Linux: the version number follows the macOS app, which fixes two more window-resizing paths that could crash it.</p>
+      </description>
+    </release>
+    <release version="0.16.1" date="2026-10-13">
+      <description>
+        <p>Maintenance release for Linux: the version number follows the macOS app, which fixes a crash in its edge rail.</p>
+      </description>
+    </release>
+    <release version="0.16.0" date="2026-10-12">
+      <description>
+        <p>The command-line contributor can now enroll with a NEAR AI sign-in in your browser, with no invite needed. Invites still work.</p>
+      </description>
+    </release>
+    <release version="0.15.0" date="2026-10-12">
+      <description>
+        <p>Maintenance release for Linux: the version number follows the macOS and Windows apps, which can now start Claude Code or Codex on a NEAR AI sign-in.</p>
+      </description>
+    </release>
+    <release version="0.14.0" date="2026-10-12">
+      <description>
+        <p>If you joined with an invite, the app now offers to move your contributions to a NEAR AI account, and NEAR AI sign-in uses your NEAR wallet by default. More is removed from tool output before it leaves the device: git author names, IP addresses, private host names, account user names and phone numbers.</p>
+      </description>
+    </release>
     <release version="0.13.1" date="2026-10-11">
       <description>
         <p>When many notices are shown at once they now scroll instead of pushing the rest of the window out of view, and they can be dismissed together.</p>

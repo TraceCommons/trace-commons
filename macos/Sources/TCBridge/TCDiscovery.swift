@@ -11,6 +11,18 @@ import Foundation
 /// stays in this target and the decoding stays in `TCShellCore`, where it is
 /// unit-tested without linking the FFI dylib at all.
 public enum TCDiscovery {
+    public static func managedToolsJSON() -> String? {
+        guard let raw = tc_managed_tools_json() else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    public static func managedCopyJSON() -> String? {
+        guard let raw = tc_managed_copy_json() else { return nil }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// The discovery array as JSON, or nil if the ABI reported a caught
     /// panic. Never throws: a roots screen that cannot describe the machine
     /// still has to render, because a contributor can always name a folder

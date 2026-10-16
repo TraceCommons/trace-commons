@@ -41,7 +41,7 @@ struct FlowMapView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let fit = FlowMapGeometry(size: proxy.size, zoom: zoom, focus: focus, design: scene.canvas)
+            let fit = FlowMapGeometry(size: proxy.size, zoom: zoom, focus: focus, space: scene.space)
             ZStack(alignment: .topLeading) {
                 TimelineView(.animation(minimumInterval: 1 / 30, paused: reduceMotion || !scene.flows || !state.isHealthy)) { timeline in
                     Canvas { context, _ in
@@ -64,6 +64,16 @@ struct FlowMapView: View {
             .onTapGesture { pinned = nil }
             .overlay(alignment: .bottomTrailing) {
                 if zoomable { zoomControls.padding(GlassTokens.Space.mapOverlayInset) }
+            }
+            // The legend stays at the window's foot, whatever the map's
+            // zoom or focus (owner, 2026-10-12): it is not drawn in the
+            // map's own space, which scales and moves.
+            .overlay(alignment: .bottomLeading) {
+                if !legend.isEmpty {
+                    legendView
+                        .padding(GlassTokens.Space.mapOverlayInset)
+                        .accessibilityHidden(true)
+                }
             }
         }
         .accessibilityElement(children: .contain)
@@ -121,7 +131,6 @@ struct FlowMapView: View {
                 at: fit.point(overflow.at))
         }
 
-        if !legend.isEmpty { drawLegend(in: &context, fit: fit) }
     }
 
     private func drawNode(_ node: FlowMapScene.Node, in context: inout GraphicsContext, fit: FlowMapGeometry) {
@@ -141,9 +150,9 @@ struct FlowMapView: View {
             if active { ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassTokens.Color.blue.color.opacity(0.35), scale: fit.scale) }
         case .tool(let tool, let off):
             layer.fill(disc, with: .color(GlassColor.ink(0.12)))
-            mark(tool, centre: centre, side: Self.markSide(node.radius) * fit.scale, in: &layer)
+            mark(tool, centre: centre, side: 16 * fit.scale, in: &layer)
             if node.dashed {
-                // #1146's "Tool not watched": a dashed rim.
+                // The legend's "Not watched" (#1146's "Tool not watched"): a dashed rim.
                 layer.stroke(disc, with: .color(GlassTokens.Color.statusOff.color),
                              style: StrokeStyle(lineWidth: 1.5 * fit.scale, dash: [2 * fit.scale, 2 * fit.scale]))
             }
@@ -162,7 +171,7 @@ struct FlowMapView: View {
             layer.stroke(disc, with: .color(rule.stroke.color), lineWidth: 2 * fit.scale)
         case .harness(let tool, _):
             layer.fill(disc, with: .color(GlassColor.ink(0.12)))
-            if let tool { mark(tool, centre: centre, side: Self.markSide(node.radius) * fit.scale, in: &layer) }
+            if let tool { mark(tool, centre: centre, side: 16 * fit.scale, in: &layer) }
         case .destination(let lamp):
             let lit = lamp == .answering || lamp == .running
             layer.fill(disc, with: .color(lit ? GlassTokens.Color.mapCredentialOn.color : GlassTokens.Color.mapNodeOff.color))
@@ -174,7 +183,7 @@ struct FlowMapView: View {
             }
             // A key, not a shield: the node is the credential, and no
             // protection is claimed for it. #1146's outlined, level key.
-            layer.stroke(Self.keyGlyph(centre: centre, scale: fit.scale * node.radius / 26), with: .color(GlassColor.textPrimary),
+            layer.stroke(Self.keyGlyph(centre: centre, scale: fit.scale), with: .color(GlassColor.textPrimary),
                          style: StrokeStyle(lineWidth: 2 * fit.scale, lineCap: .round, lineJoin: .round))
         }
 
@@ -186,18 +195,22 @@ struct FlowMapView: View {
         // the primary ink, then 10 regular in the off tone, 14 below. Type
         // and gaps scale together, so the two lines never meet.
         let type = Self.labelType(scale: fit.scale)
-        let label = node.label.count > 18 ? node.label.prefix(17) + "…" : Substring(node.label)
-        if node.labelLeading {
-            // The compact maps' column: the label level with the node, on
-            // its leading side, so a tight column never stacks labels.
+        // Folder names are cut (they are the person's, and run long); the
+        // map's own words and the tools' names are drawn whole.
+        if node.labelBeside {
+            // A folder's name sits to the left of its dot, on its line, so a
+            // folder takes one line of height and a long list stays legible
+            // (owner, 2026-10-14: the map under load).
+            let text = if case .folder = node.kind { Self.shortLabel(node.label) } else { node.label }
             layer.draw(
-                Text(label).font(.system(size: type.labelSize, weight: .semibold)).foregroundStyle(GlassColor.textPrimary),
-                at: CGPoint(x: centre.x - radius - type.labelOffset * 0.6, y: centre.y), anchor: .trailing)
-            return
+                Text(text).font(.system(size: type.labelSize, weight: .semibold))
+                    .foregroundStyle(GlassColor.textPrimary),
+                at: CGPoint(x: centre.x - radius - 6 * max(fit.scale, Self.labelFloor), y: centre.y), anchor: .trailing)
+        } else {
+            layer.draw(
+                Text(node.label).font(.system(size: type.labelSize, weight: .semibold)).foregroundStyle(GlassColor.textPrimary),
+                at: CGPoint(x: centre.x, y: centre.y + radius + type.labelOffset))
         }
-        layer.draw(
-            Text(label).font(.system(size: type.labelSize, weight: .semibold)).foregroundStyle(GlassColor.textPrimary),
-            at: CGPoint(x: centre.x, y: centre.y + radius + type.labelOffset))
         if let sublabel = node.sublabel {
             layer.draw(
                 Text(sublabel).font(.system(size: type.sublabelSize))
@@ -214,12 +227,6 @@ struct FlowMapView: View {
                                               labelOffset: CGFloat, sublabelOffset: CGFloat) {
         let unit = max(scale, labelFloor)
         return (11 * unit, 10 * unit, 12 * unit, 26.5 * unit)
-    }
-
-    /// A tool's logo side for a disc of `radius` design units: 16 on
-    /// #1146's 13-unit disc, in proportion on the compact maps' larger ones.
-    static func markSide(_ radius: CGFloat) -> CGFloat {
-        radius * 16 / 13
     }
 
     /// The smallest factor the map's labels are drawn at.
@@ -270,33 +277,40 @@ struct FlowMapView: View {
         }
     }
 
-    private func drawLegend(in context: inout GraphicsContext, fit: FlowMapGeometry) {
-        var x: CGFloat = 24
-        for mode in legend {
-            let rule = Self.rule(mode)
-            let centre = fit.point(CGPoint(x: x, y: 730))
-            let r = 5 * fit.scale
-            let disc = Path(ellipseIn: CGRect(x: centre.x - r, y: centre.y - r, width: r * 2, height: r * 2))
-            context.fill(disc, with: .color(rule.fill.color))
-            context.stroke(disc, with: .color(rule.stroke.color), lineWidth: 1.5 * fit.scale)
-            let text = context.resolve(
-                Text(ProjectCopy.modeChoiceLabel(mode)).font(GlassTokens.TypeScale.micro.font.weight(.regular))
-                    .foregroundStyle(GlassColor.textTertiary))
-            let size = text.measure(in: CGSize(width: 400, height: 40))
-            context.draw(text, at: CGPoint(x: centre.x + r + 4, y: centre.y), anchor: .leading)
-            x += (r * 2 + 4 + size.width + 14) / fit.scale
+    /// The rule legend, then #1146's last item: a tool that is not watched,
+    /// a dashed ring. Fixed in size, at the map's foot.
+    private var legendView: some View {
+        HStack(spacing: GlassTokens.Space.s5) {
+            ForEach(legend, id: \.self) { mode in
+                let rule = Self.rule(mode)
+                legendItem(ProjectCopy.modeChoiceLabel(mode)) {
+                    Circle().fill(rule.fill.color).overlay(Circle().stroke(rule.stroke.color, lineWidth: 1.5))
+                }
+            }
+            if let word = FlowMapScene.words?.legendNotWatched {
+                legendItem(word) {
+                    Circle().stroke(GlassTokens.Color.statusOff.color, style: StrokeStyle(lineWidth: 1.5, dash: [2, 2]))
+                }
+            }
         }
-        // #1146's last item: a tool that is not watched, a dashed ring.
-        if let word = FlowMapScene.words?.legendNotWatched {
-            let centre = fit.point(CGPoint(x: x, y: 730))
-            let r = 5 * fit.scale
-            let disc = Path(ellipseIn: CGRect(x: centre.x - r, y: centre.y - r, width: r * 2, height: r * 2))
-            context.stroke(disc, with: .color(GlassTokens.Color.statusOff.color),
-                           style: StrokeStyle(lineWidth: 1.5 * fit.scale, dash: [2 * fit.scale, 2 * fit.scale]))
-            context.draw(
-                Text(word).font(GlassTokens.TypeScale.micro.font.weight(.regular)).foregroundStyle(GlassColor.textTertiary),
-                at: CGPoint(x: centre.x + r + 4, y: centre.y), anchor: .leading)
+        .fixedSize()
+    }
+
+    private func legendItem(_ word: String, @ViewBuilder dot: () -> some View) -> some View {
+        HStack(spacing: GlassTokens.Space.s2) {
+            dot().frame(width: 10, height: 10)
+            Text(word)
+                .glassType(GlassTokens.TypeScale.micro.weight(.regular))
+                .foregroundStyle(GlassColor.textTertiary)
         }
+    }
+
+    /// A folder's name on the map: at most `labelLimit` characters, the
+    /// last an ellipsis when it is cut (owner, 2026-10-12). The full name is
+    /// the node's tooltip and accessible name.
+    static let labelLimit = 14
+    static func shortLabel(_ label: String) -> String {
+        label.count > labelLimit ? String(label.prefix(labelLimit - 1)) + "\u{2026}" : label
     }
 
     /// A folder's dot by rule: the fill and the ring.
@@ -382,18 +396,21 @@ struct FlowMapGeometry {
 
     static let focusScale: CGFloat = 1.6
 
-    /// `design` is the scene's design space (`FlowMapScene.canvas`).
-    init(size: CGSize, zoom: CGFloat, focus: CGPoint? = nil, design: CGSize = FlowMapScene.size) {
+    /// `space` is the scene's design space (`FlowMapScene.space`), #1146's
+    /// 580×760 by default.
+    init(size: CGSize, zoom: CGFloat, focus: CGPoint? = nil, space: CGSize = FlowMapScene.size) {
+        let design = space
         let fit = min(size.width / design.width, size.height / design.height)
         let centred = CGPoint(x: (size.width - design.width * fit) / 2, y: (size.height - design.height * fit) / 2)
         if let focus {
             // #1146: translate(290 - 1.6(x - 50), 380 - 1.6y) scale(1.6), in
-            // design units, then fitted.
+            // design units, then fitted; 290 and 380 are the space's
+            // middle, 50 its nudge right of the focused node.
             let k = Self.focusScale
             scale = max(0.01, fit * k)
             origin = CGPoint(
-                x: centred.x + fit * (290 - k * (focus.x - 50)),
-                y: centred.y + fit * (380 - k * focus.y))
+                x: centred.x + fit * (design.width / 2 - k * (focus.x - 50)),
+                y: centred.y + fit * (design.height / 2 - k * focus.y))
         } else {
             scale = max(0.01, fit * zoom)
             origin = CGPoint(x: (size.width - design.width * scale) / 2, y: (size.height - design.height * scale) / 2)

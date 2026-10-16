@@ -13,8 +13,8 @@ final class ContributorDisclosureCopyExportTests: XCTestCase {
         XCTAssertEqual(copy.outcome.verdictNone, "No answer")
         XCTAssertEqual(copy.outcome.submitAllAs, "Submit as...")
         XCTAssertGreaterThan(copy.outcome.maxCorrectionChars, 0)
-        // Ask me / Automatic / Never, by wire mode.
-        XCTAssertEqual(copy.folderModeLabels["notify_only"], "Ask me")
+        // Ask / Automatic / Never, by wire mode.
+        XCTAssertEqual(copy.folderModeLabels["notify_only"], "Ask")
         XCTAssertEqual(copy.folderModeLabels["auto_upload"], "Automatic")
         XCTAssertEqual(copy.folderModeLabels["ignore"], "Never")
         XCTAssertEqual(copy.historyUi.statusUnavailable, "Status unavailable")

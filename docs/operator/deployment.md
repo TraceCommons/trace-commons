@@ -557,6 +557,51 @@ Two more things this incident showed:
   change."** It links the same library crate as ingest; its published sha256
   differed across a range in which its own `bin` file was untouched.
 
+### Then: re-arm the versioned pipeline (every new code revision)
+
+A deploy that changes the code revision (`python3 scripts/operator/pipeline.py
+revision` on the tree to ship differs from the running build's) is not done when
+`/health` shows the new `build_commit`. Every tenant whose routing row says
+`pipeline` -- every tenant default routing routed, and every tenant activated by
+hand -- is refused new uploads with `503` `pipeline_bundle_not_qualified` until
+its active bundle is qualified on the new revision. Default routing also
+disarms itself (`pipeline_default_routing_revision_mismatch` at start), so new
+tenants stop being routed. The refusal stores nothing on the server, but the
+contributor app marks each refused upload failed and reports the commons as
+unreachable, so intake for those tenants is closed and their contributors see
+an outage.
+
+The start log says so, as WARN lines:
+`pipeline_active_bundle_not_qualified` for each listed tenant, and
+`pipeline default routing is not armed`. Treat either as an unfinished deploy.
+
+The procedure is
+[`pipeline-activation.md`](pipeline-activation.md), "After a deploy: the
+qualification is read again for each new upload", and the "Default routing"
+re-arm. In order, on the deployed commit:
+
+1. the promote cycle's phase A on the host: `pipeline.py qualify`, then
+   `promote init`, `package-checks`, `hf-canary`, `remote-restore`;
+2. one ingest boot with the adapters-check variables, which writes
+   `pipeline_production_adapters` for the run (one restart);
+3. `promote adapters`, `promote sign`, `promote assemble`;
+4. replace the default-routing results directory's contents with the new
+   signed set (no restart), and qualify each hand-activated tenant's bundle
+   with `POST /v1/admin/pipeline/qualifications`.
+
+Then check that the start WARN lines are gone on the next pass and that `GET
+/v1/admin/pipeline/routing` answers `active_bundle_qualified_on_revision`
+`true`.
+
+A deploy that keeps the revision -- only documents, client shells, CI or
+`deploy/` changed -- needs none of this. To keep the closed window short, run
+phase A on the commit you are about to ship before installing it, as the
+procedure says.
+
+On 2026-10-12 four ingest deploys (17:02 to 22:09 UTC) skipped this, and every
+pipeline-routed tenant was refused new uploads from the first of them until
+the re-arm. Only a log of each error response's label (#1395) showed it.
+
 ### V74: the public-run functions move to a runtime role
 
 V64 meant to close its four public-run definer functions
@@ -799,6 +844,8 @@ also grants `main`'s gate driver role, `trace_gate_driver`, two columns of
 | `pipeline_run_settlements` | `UPDATE (credit_audited_at)`, the column V105 adds | the worker marks a leg's credit event audited once it appended the `CreditMutate` audit event |
 | `pipeline_runs` | `UPDATE (review_audit_pending_at)`, the column V118 adds | a Review commit, a review assessment, an escalated privacy pass and a failed privacy classification set the marker; the worker clears it once it appended the review audit events |
 | `pipeline_runs` | `UPDATE (submission_rejected_at)`, the column V123 adds | a run that fails before Review decided it records that it moved its `received` submission to `rejected` (#1346) |
+| `pipeline_runs` | `UPDATE (settle_finish_granted_at)` and `UPDATE (operator_held_at)`, the columns V128 adds | a finishable Settle run gets one extra attempt, and a paid run whose Settle commit is refused for good is held for an operator (#1313) |
+| `pipeline_score_bases` | `SELECT, INSERT`, the table V128 creates | a Score that runs under the runtime controls records the unapplied runs it counted (#1313) |
 | `pipeline_runs` (to `trace_gate_driver`) | `SELECT (tenant_id, submission_id)`, and a cross-tenant `SELECT` policy for that role only, as V36 gives it on `main`'s tables | `main`'s gate driver leaves every submission with a pipeline run out of its work list and backlog count; the pipeline's own Score scores it |
 | `pipeline_export_snapshots` | `SELECT, INSERT`; `UPDATE` on `state`, `export_manifest_id`, `completed_at`, `invalidated_at` | export creation and delivery, a withdrawal's invalidation, and the summaries |
 | `pipeline_export_snapshot_items` | `SELECT, INSERT`; `UPDATE` on `invalidated_at`, `invalidation_reason` | export creation, and a withdrawal's invalidation |

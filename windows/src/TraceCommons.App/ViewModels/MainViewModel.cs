@@ -459,11 +459,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public bool ShowingInsights => _pane == MainPane.Insights;
 
-    public bool ShowingMissionDrafts => _pane == MainPane.MissionDrafts;
+    public bool ShowingMissionDrafts => _missionsShown && _pane == MainPane.MissionDrafts;
+
+    private bool _missionsShown;
+
+    /// <summary>
+    /// The daemon's missions switch, off until get_settings says true. Hides
+    /// the Mission drafts rail row; the pane and its code stay.
+    /// </summary>
+    public bool MissionsShown => _missionsShown;
 
     public void ShowInsights() => SetPane(MainPane.Insights);
 
-    public void ShowMissionDrafts() => SetPane(MainPane.MissionDrafts);
+    public void ShowMissionDrafts()
+    {
+        if (!_missionsShown)
+        {
+            return;
+        }
+
+        SetPane(MainPane.MissionDrafts);
+    }
 
     public bool ShowingSettings => _pane == MainPane.Settings;
 
@@ -701,6 +717,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // The certificate section's reading, from the same settings read.
             // Passed through, never negated.
             _evidenceAdmitted = settings.AdmissionEvidenceRequired == true;
+            bool missionsShown = settings.MissionsShown;
+            if (missionsShown != _missionsShown)
+            {
+                _missionsShown = missionsShown;
+                Raise(nameof(MissionsShown));
+                Raise(nameof(ShowingMissionDrafts));
+                if (!missionsShown && _pane == MainPane.MissionDrafts)
+                {
+                    SetPane(MainPane.Queue);
+                }
+            }
+
             Raise(nameof(CertificateHeldTitle));
             Raise(nameof(CertificateHeldLine));
             _privateInferenceState = PrivateInferenceState.From(settings.PrivateInferenceReport);
@@ -1842,7 +1870,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     /// <summary>
-    /// "Ask me" on a rewording or held-folder notice: the Settings
+    /// "Ask" on a rewording or held-folder notice: the Settings
     /// call, unchanged, which also answers a rewording notice. A refusal
     /// changes nothing, and <paramref name="failed"/>, the core's refusal
     /// line, is shown.

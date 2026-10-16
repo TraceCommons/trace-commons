@@ -48,6 +48,7 @@ struct MenuBarGlassPanel: View {
                     .transition(.opacity)
             }
             nudgeRow
+            settlementRow
             legend
             graph
             glance
@@ -142,11 +143,10 @@ struct MenuBarGlassPanel: View {
         }
     }
 
-    /// The core's roll-up, never one worked out here from the folders.
-    private var rollup: MenuPanelData.ModeRollup {
-        guard !store.stale else { return .none }
-        return MenuPanelData.rollup(store.status?.contributionMode)
-    }
+    /// The core's roll-up (`store.status?.contributionMode`), never one
+    /// worked out here from the folders; a dash only while there is no
+    /// current status, whatever the other reads did.
+    private var rollup: MenuPanelData.ModeRollup { store.modeRollup }
 
     /// The pill's words, from the core (`tc_contribution_mode_copy_json`).
     private static let modeCopy = ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON())
@@ -201,7 +201,7 @@ struct MenuBarGlassPanel: View {
     /// the override line shows while one is in force. Choosing an override
     /// shows its core confirmation in place of the choices; only its
     /// confirm button writes. Choosing Mixed clears an override: after the
-    /// core's clear confirmation when the override is Ask me or Never and a
+    /// core's clear confirmation when the override is Ask or Never and a
     /// folder's own setting is Automatic, since clearing would resume
     /// unattended sending there; otherwise at once
     /// (`MenuPanelStore.chooseMixed`). While the core is down,
@@ -319,25 +319,26 @@ struct MenuBarGlassPanel: View {
 
     // MARK: Legend and graph
 
+    /// Shared and kept, each from its own read (`store.sharedCount`,
+    /// `store.keptCount`). A count that is not current is the core's
+    /// unknown word, never the last count and never a bare dash.
+    private var sharedValue: String { MenuPanelData.countWord(store.sharedCount, unknown: MonitorWords.unknown) }
+    private var keptValue: String { MenuPanelData.countWord(store.keptCount, unknown: MonitorWords.unknown) }
+
     private var legend: some View {
-        let columns = store.columns
-        // Stale data is a dash, never the last counts.
-        let stale = store.stale
-        return HStack(spacing: GlassTokens.Space.s3) {
-            GlassLegendCell(MenuWords.shared, value: stale ? "—" : String(columns.reduce(0) { $0 + $1.up }), status: .shared)
-            GlassLegendCell(MenuWords.kept, value: stale ? "—" : String(columns.reduce(0) { $0 + $1.down }), status: .kept)
+        HStack(spacing: GlassTokens.Space.s3) {
+            GlassLegendCell(MenuWords.shared, value: sharedValue, status: .shared)
+            GlassLegendCell(MenuWords.kept, value: keptValue, status: .kept)
         }
     }
 
     private var graph: some View {
-        let columns = store.columns
         let start = Calendar.current.date(byAdding: .day, value: -(MenuPanelData.days - 1), to: Date()) ?? Date()
-        let stale = store.stale
         return GlassDayGraph(
-            columns: columns, paused: paused || stale,
-            summary: "\(FlowMapScene.pair(MenuWords.shared, stale ? nil : columns.reduce(0) { $0 + $1.up })) · \(FlowMapScene.pair(MenuWords.kept, stale ? nil : columns.reduce(0) { $0 + $1.down }))",
-            sharedChip: stale ? "—" : String(columns.reduce(0) { $0 + $1.up }),
-            keptChip: stale ? "—" : String(columns.reduce(0) { $0 + $1.down }),
+            columns: store.columns, paused: paused || !store.columnsCurrent,
+            summary: "\(MenuWords.shared) \(sharedValue) · \(MenuWords.kept) \(keptValue)",
+            sharedChip: sharedValue,
+            keptChip: keptValue,
             leading: start.formatted(.dateTime.month(.abbreviated).day()),
             trailing: Date().formatted(.dateTime.month(.abbreviated).day()))
     }
@@ -379,12 +380,48 @@ struct MenuBarGlassPanel: View {
         }
     }
 
+    // MARK: The settlement estimate
+
+    /// The machine-wide estimate, in the core's words: the finished line, an
+    /// "Estimate" caption, and a button that opens Traces. Nothing here is
+    /// sent anywhere; the line is drawn only while the panel is current and
+    /// the daemon reported one.
+    @ViewBuilder
+    private var settlementRow: some View {
+        if let line = store.settlementLine {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                Text(line.label)
+                    .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .padding(.horizontal, GlassTokens.Space.s3)
+                Button {
+                    open(.traces(entryId: nil))
+                } label: {
+                    HStack {
+                        Text(line.text)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
+                    }
+                }
+                .buttonStyle(GlassMenuRowStyle())
+                .accessibilityLabel(line.text)
+                .accessibilityHint(line.action)
+                .padding(.vertical, -GlassTokens.Space.s2)
+            }
+        }
+    }
+
     // MARK: Recent activity
 
     @ViewBuilder
     private var recent: some View {
+        // Each source only while its own read is current.
         let rows = MenuPanelData.recent(
-            pending: store.pending, history: store.history, calls: store.calls,
+            pending: store.current(.pending) ? store.pending : [],
+            history: store.current(.history) ? store.history : [],
+            calls: store.current(.calls) ? store.calls : [],
             statusLabel: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) })
         if !rows.isEmpty && !store.stale {
             VStack(alignment: .leading, spacing: 0) {
@@ -420,7 +457,7 @@ struct MenuBarGlassPanel: View {
             hairline
             Button { open(.traces(entryId: nil)) } label: {
                 HStack {
-                    Text(FlowMapScene.dotPair(MenuWords.flagged, store.stale ? nil : MenuPanelData.flagged(store.pending)))
+                    Text("\(MenuWords.flagged) · \(MenuPanelData.countWord(store.flaggedCount, unknown: MonitorWords.unknown))")
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
                 }
@@ -494,8 +531,12 @@ private struct OverrideConfirmation: View {
     }
 }
 
-/// The popover's own glass, only where nothing else provides a material.
-/// Inside `MenuBarExtra` it pins the window's top edge instead.
+/// The popover's surface. Inside `MenuBarExtra` it is the app's own pane,
+/// the same glass, veil and gradient as the main window's and the edge
+/// rail's panes (owner, 2026-10-12: one glass spec), with the system
+/// window's own material hidden under it (`MenuBarMaterialMask`), so there
+/// is never glass on glass; and the window's top edge is pinned. The debug
+/// preview window, which has no material, draws the popover tier.
 private struct PanelSurface: ViewModifier {
     let owns: Bool
 
@@ -503,7 +544,107 @@ private struct PanelSurface: ViewModifier {
         if owns {
             content.glassSurface(.popover, radius: GlassTokens.Radius.menuPanel, floating: true)
         } else {
-            content.background(MenuBarTopEdgePin().frame(width: 0, height: 0))
+            content
+                .background {
+                    // Full bleed, rounded as the window is.
+                    Color.clear
+                        .glassTier(.pane, radius: GlassTokens.Radius.menuPanel)
+                        .ignoresSafeArea()
+                }
+                .background(MenuBarMaterialMask().frame(width: 0, height: 0))
+                .background(MenuBarTopEdgePin().frame(width: 0, height: 0))
+        }
+    }
+}
+
+/// Takes the `MenuBarExtra` window's own background away, so the popover's
+/// pane is the only glass: the window draws no background (on macOS 26 its
+/// material is the window's, drawn behind the content, with no view of its
+/// own), and any visual-effect view behind the panel's content has its
+/// material masked out (`maskImage`, which masks the material and never the
+/// views inside it). It runs again a runloop later: the system finishes the
+/// window after the content lands in it, and a change made before then was
+/// undone (seen with `TRACE_COMMONS_GLASS_PROBE`, 2026-10-12).
+struct MenuBarMaterialMask: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { Mask() }
+
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    /// An image with nothing in it: as a mask it shows none of a material.
+    static let empty: NSImage = {
+        let image = NSImage(size: NSSize(width: 1, height: 1))
+        image.capInsets = NSEdgeInsetsZero
+        image.resizingMode = .stretch
+        return image
+    }()
+
+    /// The visual-effect views under `root`, depth first.
+    static func effects(in root: NSView) -> [NSVisualEffectView] {
+        var found: [NSVisualEffectView] = []
+        if let effect = root as? NSVisualEffectView { found.append(effect) }
+        for child in root.subviews { found += effects(in: child) }
+        return found
+    }
+
+    private final class Mask: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            apply()
+            // The system finishes the window after the content lands in it.
+            DispatchQueue.main.async { [weak self] in self?.apply() }
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["TRACE_COMMONS_GLASS_PROBE"] != nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.apply() }
+            }
+            #endif
+        }
+
+        private func apply() {
+            guard let window, let frame = window.contentView?.superview ?? window.contentView else { return }
+            // The pane's own glass is an NSGlassEffectView or, before
+            // macOS 26, a vibrancy view inside the panel's content; only the
+            // window's, outside this view's hosting tree, are masked.
+            let hosting = enclosingHosting()
+            var masked: [String] = []
+            for effect in MenuBarMaterialMask.effects(in: frame) where hosting.map({ !effect.isDescendant(of: $0) }) ?? true {
+                effect.maskImage = MenuBarMaterialMask.empty
+                masked.append(String(describing: type(of: effect)))
+            }
+            #if DEBUG
+            // A development probe: what was masked, for checking the popover
+            // has one glass layer. Never on by default.
+            if let path = ProcessInfo.processInfo.environment["TRACE_COMMONS_GLASS_PROBE"] {
+                func tree(_ view: NSView, _ depth: Int) -> String {
+                    String(repeating: "  ", count: depth) + "\(type(of: view)) \(view.frame.size)\n"
+                        + view.subviews.map { tree($0, depth + 1) }.joined()
+                }
+                let root = window.contentView?.superview ?? window.contentView
+                let line = "\(type(of: window)) masked=\(masked) hosting=\(hosting.map { String(describing: type(of: $0)) } ?? "none")\n"
+                    + (root.map { tree($0, 0) } ?? "")
+                if let handle = FileHandle(forWritingAtPath: path) {
+                    handle.seekToEndOfFile()
+                    handle.write(Data(line.utf8))
+                    try? handle.close()
+                } else {
+                    try? line.write(toFile: path, atomically: true, encoding: .utf8)
+                }
+            }
+            #else
+            _ = masked
+            #endif
+            window.isOpaque = false
+            window.backgroundColor = .clear
+        }
+
+        /// The SwiftUI hosting view this view sits in.
+        private func enclosingHosting() -> NSView? {
+            var view: NSView? = superview
+            var last: NSView?
+            while let current = view {
+                if String(describing: type(of: current)).contains("NSHostingView") { last = current }
+                view = current.superview
+            }
+            return last
         }
     }
 }
@@ -549,10 +690,15 @@ struct MenuBarTopEdgePin: NSViewRepresentable {
             let center = NotificationCenter.default
             for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResizeNotification,
                          NSWindow.didMoveNotification, NSWindow.didChangeOcclusionStateNotification] {
+                // On the next turn: a resize arrives inside SwiftUI's own
+                // resize of the panel, and moving the window there
+                // re-enters that layout pass.
                 observers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self, weak window] _ in
                     MainActor.assumeIsolated {
-                        guard let self, let window, window.isVisible else { return }
-                        self.pin(window)
+                        GlassWindowFrame.onNextTurn { [weak self, weak window] in
+                            guard let self, let window, window.isVisible else { return }
+                            self.pin(window)
+                        }
                     }
                 })
             }
@@ -583,9 +729,12 @@ struct MenuBarStripLabel: View {
 
     var body: some View {
         let available = model.startup == .running && !store.stale
+        // The strip draws the columns, so it is unavailable when either read
+        // behind them did not answer, never the last bars as current.
         let condition = MenuPanelStatus.condition(
             decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
-            paused: model.status.paused, available: model.startup == .running, stale: store.stale)
+            paused: model.status.paused, available: model.startup == .running,
+            stale: store.stale || !store.columnsCurrent)
         let badge = MenuPanelStatus.badge(model.decisionsOwed)
         // The mark's words, only while the strip draws the mark: the badge
         // and condition come from a different read than the nudge, and a
@@ -687,6 +836,32 @@ enum MenuPanelStatus {
     /// The drawn mark's tooltip clause; empty while no mark is drawn.
     static func markTooltip(_ words: DaemonData.NudgeMarkText?) -> String {
         words?.tooltip ?? ""
+    }
+
+    /// The settlement estimate line: the core's text, its caption and the
+    /// action's name. The title and the accessibility name are separate keys
+    /// in the core; the button label is `action`.
+    struct SettlementLine: Equatable {
+        let text: String
+        let label: String
+        let action: String
+    }
+
+    /// The core's nudge table, read once.
+    static let nudgeCopy: NudgeCopy? = NudgeCopy.decode(fromJSON: TCCoreCopy.nudgeCopyJSON())
+
+    /// The line to draw, or nil: nothing while the panel cannot vouch for
+    /// its data, while the daemon reported no estimate (switch off, no
+    /// drawable table, nothing known: never $0), or while the core did not
+    /// word the caption or the action.
+    static func settlementLine(
+        _ status: DaemonData.Status?, available: Bool, copy: NudgeCopy? = MenuPanelStatus.nudgeCopy
+    ) -> SettlementLine? {
+        guard available, let estimate = status?.settlementEstimate,
+              !estimate.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let label = copy?[.estimateTotalLabel], let action = copy?[.estimateTotalAction]
+        else { return nil }
+        return SettlementLine(text: estimate.text, label: label, action: action)
     }
 
     /// The Private AI pill's state.

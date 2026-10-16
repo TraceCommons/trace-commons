@@ -24,12 +24,12 @@ export function HomeView({
 }: {
   status: CoreStatus | null;
   onOpenTraces: () => void;
-  onOpenMissions: () => void;
+  /** Absent while the daemon has Missions switched off: no card. */
+  onOpenMissions?: () => void;
   onOpenHistory: () => void;
 }) {
   const workspace = useTracesWorkspace();
   const history = useHistoryData();
-  const drafts = useMissionDrafts();
   const paused = status?.daemon.paused === true;
   const watching = workspace.tree.filter((tool) => tool.mode === "watch").length;
   const waiting = status?.daemon.queue_depth ?? workspace.entries.length;
@@ -71,39 +71,7 @@ export function HomeView({
           value={rollup ? rollup.credit_pending.toFixed(1) : "—"}
         />
       </div>
-      <EyebrowCard
-        eyebrow="Missions"
-        onClick={onOpenMissions}
-        accessory={
-          <span className="inline-flex items-center gap-1.5">
-            <Tag tone="ask">Drafts</Tag>
-            <span className="tc-text-tertiary" aria-hidden="true">
-              ›
-            </span>
-          </span>
-        }
-      >
-        {drafts.drafts.length === 0 ? (
-          <span className="tc-label font-normal tc-text-secondary">
-            No mission drafts on this machine.
-          </span>
-        ) : (
-          drafts.drafts.slice(0, 2).map((draft, index) => (
-            <div
-              key={draft.id}
-              className={`flex items-center justify-between gap-2.5 ${index ? "pt-1.5 tc-hairline-top" : ""}`}
-            >
-              <span className="flex min-w-0 flex-col">
-                <span className="truncate font-semibold">{draft.id}</span>
-                <span className="tc-label font-normal tc-text-secondary">
-                  {plural(draft.source_count, "source")}
-                </span>
-              </span>
-              <Tag>{draft.status}</Tag>
-            </div>
-          ))
-        )}
-      </EyebrowCard>
+      {onOpenMissions ? <MissionsCard onOpen={onOpenMissions} /> : null}
       <EyebrowCard
         eyebrow="History"
         onClick={onOpenHistory}
@@ -149,5 +117,45 @@ export function HomeView({
         )}
       </EyebrowCard>
     </div>
+  );
+}
+
+/** The way into Missions, drawn only while the daemon has them on. */
+function MissionsCard({ onOpen }: { onOpen: () => void }) {
+  const drafts = useMissionDrafts();
+  return (
+    <EyebrowCard
+      eyebrow="Missions"
+      onClick={onOpen}
+      accessory={
+        <span className="inline-flex items-center gap-1.5">
+          <Tag tone="ask">Drafts</Tag>
+          <span className="tc-text-tertiary" aria-hidden="true">
+            ›
+          </span>
+        </span>
+      }
+    >
+      {drafts.drafts.length === 0 ? (
+        <span className="tc-label font-normal tc-text-secondary">
+          No mission drafts on this machine.
+        </span>
+      ) : (
+        drafts.drafts.slice(0, 2).map((draft, index) => (
+          <div
+            key={draft.id}
+            className={`flex items-center justify-between gap-2.5 ${index ? "pt-1.5 tc-hairline-top" : ""}`}
+          >
+            <span className="flex min-w-0 flex-col">
+              <span className="truncate font-semibold">{draft.id}</span>
+              <span className="tc-label font-normal tc-text-secondary">
+                {plural(draft.source_count, "source")}
+              </span>
+            </span>
+            <Tag>{draft.status}</Tag>
+          </div>
+        ))
+      )}
+    </EyebrowCard>
   );
 }

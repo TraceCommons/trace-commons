@@ -189,6 +189,91 @@ pub async fn resolve_contribution_account(
     })
 }
 
+/// The principal a device key is provisioned under:
+/// `principal_sha256:` + hex(sha256(`device:<tenant>:<device_key_id>`)).
+///
+/// Every NEAR and NEAR AI provisioning path keys `trace_near_provisioned_devices`,
+/// `trace_account_principals` and the onboarding tenant-access grant by this
+/// value, and the upload-claim issuer looks grants up by it. It is NOT the
+/// principal ingest derives for a signed upload claim (that one hashes the
+/// claim's actor under the `signed_claim` method), so account resolution has
+/// to recover it from the claim: see [`device_claim_key_id`].
+pub fn device_principal_ref(tenant_id: &str, device_key_id: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(format!(
+        "device:{}:{}",
+        tenant_id.trim(),
+        device_key_id.trim()
+    ));
+    format!("principal_sha256:{}", hex::encode(digest))
+}
+
+/// A device key id as the onboarding registry stores it: `sha256:` and 64
+/// lowercase hex digits.
+pub fn is_device_key_id(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// Longest per-user subject the issuer accepts on a device claim.
+pub const DEVICE_CLAIM_SUBJECT_MAX_LEN: usize = 128;
+
+/// Whether `subject` is a per-user subject the issuer would accept: non-empty,
+/// at most [`DEVICE_CLAIM_SUBJECT_MAX_LEN`] bytes, ASCII alphanumerics and
+/// `:`, `_`, `-` only.
+pub fn is_device_claim_subject(subject: &str) -> bool {
+    !subject.is_empty()
+        && subject.len() <= DEVICE_CLAIM_SUBJECT_MAX_LEN
+        && subject
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'-'))
+}
+
+/// The upload-claim actor (`sub` and `principal_ref`) the issuer mints for a
+/// device-key-authenticated request: the bare device key id, or, when the
+/// device asserts a per-user subject, `instance:<tenant>:<device_key_id>:user:<subject>`.
+///
+/// The issuer builds the actor with this function and ingest parses it back
+/// with [`device_claim_key_id`]; keep the two together.
+pub fn device_claim_actor(tenant_id: &str, device_key_id: &str, subject: Option<&str>) -> String {
+    match subject {
+        Some(subject) => format!("instance:{tenant_id}:{device_key_id}:user:{subject}"),
+        None => device_key_id.to_string(),
+    }
+}
+
+/// The device key id inside a device-shaped upload-claim actor for `tenant_id`,
+/// the inverse of [`device_claim_actor`]. `None` for anything else, including
+/// an `instance:` actor naming a different tenant.
+///
+/// Parsed by length, not by splitting on `:`: the key id and the subject both
+/// contain colons.
+pub fn device_claim_key_id<'a>(tenant_id: &str, actor: &'a str) -> Option<&'a str> {
+    if is_device_key_id(actor) {
+        return Some(actor);
+    }
+    const KEY_LEN: usize = "sha256:".len() + 64;
+    let rest = actor
+        .strip_prefix("instance:")?
+        .strip_prefix(tenant_id)?
+        .strip_prefix(':')?;
+    let key = rest.get(..KEY_LEN)?;
+    let subject = rest.get(KEY_LEN..)?.strip_prefix(":user:")?;
+    (!tenant_id.is_empty() && is_device_key_id(key) && is_device_claim_subject(subject))
+        .then_some(key)
+}
+
+/// Whether an actor has the shape of a device claim actor for any tenant. The
+/// issuer refuses such an actor on every path that did not verify the device
+/// key, so that the shape alone is evidence a device signature was checked.
+pub fn is_device_shaped_actor(actor: &str) -> bool {
+    is_device_key_id(actor) || actor.starts_with("instance:")
+}
+
 /// A policy definition is parsed only when an operator explicitly supplies it.
 /// This module does not activate a policy or choose production quota values.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -370,4 +455,76 @@ pub fn parse_bounded_policy(
         period,
         external_growth,
     })
+}
+
+#[cfg(test)]
+mod device_principal_tests {
+    use super::*;
+
+    const KEY_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const KEY_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const SUBJECT: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn device_principal_ref_is_the_pinned_provisioning_value() {
+        // Same pin as `db::postgres::onboarding_device_principal_ref`'s test:
+        // the rows on the pilot are keyed by exactly this derivation.
+        assert_eq!(
+            device_principal_ref("tenant-1", "sha256:device-key"),
+            "principal_sha256:2bf5c8fb2e00d4b044f1e3d24aaf864d21197baaaca9de3da5de631a951caf9d"
+        );
+    }
+
+    #[test]
+    fn device_claim_actor_round_trips_both_forms() {
+        let tenant = "nearai-tenant";
+        let bare = device_claim_actor(tenant, KEY_A, None);
+        assert_eq!(bare, KEY_A);
+        assert_eq!(device_claim_key_id(tenant, &bare), Some(KEY_A));
+        let instance = device_claim_actor(tenant, KEY_A, Some(SUBJECT));
+        assert_eq!(
+            instance,
+            format!("instance:{tenant}:{KEY_A}:user:{SUBJECT}")
+        );
+        assert_eq!(device_claim_key_id(tenant, &instance), Some(KEY_A));
+        let other = device_claim_actor(tenant, KEY_B, Some(SUBJECT));
+        assert_eq!(device_claim_key_id(tenant, &other), Some(KEY_B));
+    }
+
+    #[test]
+    fn device_claim_key_id_refuses_other_shapes() {
+        let tenant = "nearai-tenant";
+        // A different tenant's instance actor names no device here.
+        let foreign = device_claim_actor("nearai-other", KEY_A, Some(SUBJECT));
+        assert_eq!(device_claim_key_id(tenant, &foreign), None);
+        // A tenant that is only a prefix of the embedded one.
+        let longer = device_claim_actor("nearai-tenant2", KEY_A, Some(SUBJECT));
+        assert_eq!(device_claim_key_id(tenant, &longer), None);
+        let rejected = [
+            "principal:agent-1".to_string(),
+            String::new(),
+            "sha256:AAAA".to_string(),
+            KEY_A.to_uppercase(),
+            format!("instance:{tenant}:{KEY_A}"),
+            format!("instance:{tenant}:{KEY_A}:user:"),
+            format!("instance:{tenant}:{KEY_A}:user:bad/slash"),
+            format!("instance:{tenant}:{KEY_A}:usr:{SUBJECT}"),
+            format!("instance:{tenant}:sha256:short:user:{SUBJECT}"),
+            format!("instance:{tenant}:{KEY_A}:user:{}", "a".repeat(129)),
+        ];
+        for actor in &rejected {
+            assert_eq!(device_claim_key_id(tenant, actor), None, "{actor}");
+        }
+        assert_eq!(
+            device_claim_key_id("", &format!("instance::{KEY_A}:user:{SUBJECT}")),
+            None
+        );
+    }
+
+    #[test]
+    fn device_shaped_actor_covers_both_forms() {
+        assert!(is_device_shaped_actor(KEY_A));
+        assert!(is_device_shaped_actor("instance:anything"));
+        assert!(!is_device_shaped_actor("principal:agent-1"));
+    }
 }

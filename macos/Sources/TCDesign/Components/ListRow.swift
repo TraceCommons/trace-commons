@@ -132,8 +132,8 @@ public struct GlassListRow: View {
             Group {
                 if let expanded, let onToggleExpand {
                     Button(action: onToggleExpand) {
-                        Text("›")
-                            .glassGlyph(14)
+                        Image(systemName: "chevron.right")
+                            .glassGlyph(10, weight: .semibold)
                             .foregroundStyle(selected ? Self.selectedInk.color : GlassTokens.Color.statusOff.color)
                             .rotationEffect(.degrees(expanded ? 90 : 0))
                             .glassPressedFill()

@@ -386,18 +386,17 @@ tc_handle*  tc_daemon_attach(const char* config_dir, char** err);
  * daemon from starting.
  *
  * Returns an owned JSON array; free it with tc_string_free. Each element:
- *   source            "claude-code" | "codex" | "gemini-cli" | "cline"
+ *   source            "claude-code" | "codex" | "gemini-cli" | "cline" | "opencode"
  *   path              where this store would be watched
- *   exists            whether that directory is there right now
- *   session_count     how many session files, counted recursively
+ *   exists            whether that store is there right now
+ *   session_count     how many sessions were discovered
  *   most_recent       RFC 3339 timestamp, or null
- *   relocated_by_env  whether CLAUDE_CONFIG_DIR / CODEX_HOME moved it
+ *   relocated_by_env  whether an environment override moved it
  *   answers_at        the vendor this tool's own calls answer at by
  *                     default (e.g. "Anthropic"), or null for a tool with
  *                     no single default. A fixed label this build ships
  *                     with, never a claim checked against the copy
- *                     actually installed. OpenCode has none of these
- *                     rows at all -- see tc_discover_opencode_export.
+ *                     actually installed. OpenCode has no single default.
  *
  * This is one of the places in this ABI that deliberately returns a
  * filesystem path -- see the exemptions listed at the top of this file.
@@ -406,23 +405,30 @@ tc_handle*  tc_daemon_attach(const char* config_dir, char** err);
  * which of their own folders to watch, and a consent prompt that will not
  * name what it is asking about is not a consent prompt.
  *
- * Reads directory entries and metadata only; never opens a session file.
+ * Reads session metadata only, using read-only SQLite for native OpenCode.
  * Returns NULL only on a caught panic.
  */
 char*       tc_discover_sources(void);
+
+/* Installed coding tools [{tool, installed, install_url}] for Claude Code,
+ * Codex and OpenCode, and the shared managed-session copy. Read-only metadata
+ * discovery, no daemon or subprocess. No trace access or contribution consent
+ * is implied. tc_install_guides_json is {source slug: https url}, each coding
+ * tool's setup guide: the one table first run and managed sessions read.
+ * All return owned JSON; tc_string_free. Returns NULL on failure;
+ * tc_last_error describes the error.
+ */
+char*       tc_managed_tools_json(void);
+char*       tc_managed_copy_json(void);
+char*       tc_install_guides_json(void);
 
 /* Describe a folder the contributor has already named as their OpenCode
  * export directory, so a Customize screen can say "N sessions found" for
  * the folder they just picked rather than trusting the folder name alone.
  *
- * Takes no handle, like tc_discover_sources, and for a stronger reason:
- * OpenCode has no conventional per-user store to guess at before anyone
- * has said anything -- its export folder is picked by the contributor, one
- * at a time -- so it is not one of tc_discover_sources's rows at all,
- * blind or otherwise. This call describes OpenCode once a folder IS named,
- * whether that is moments after a folder chooser closes or on a later run
- * reading back what was already declared (opencode_source in the daemon's
- * settings).
+ * Takes no handle, like tc_discover_sources. A path ending in opencode.db
+ * describes a native database; a directory describes explicit JSON exports.
+ * Existing directory declarations retain their export-only scope.
  *
  * Returns an owned JSON object with the same shape as one row of
  * tc_discover_sources: source (always "opencode"), path, exists,
@@ -430,7 +436,7 @@ char*       tc_discover_sources(void);
  * answers_at (always null: OpenCode ships with no single default vendor to
  * name). Free it with tc_string_free.
  *
- * Reads directory entries and metadata only; never opens a session file.
+ * Reads session metadata only, using read-only SQLite for native OpenCode.
  * Returns NULL for a NULL or non-UTF-8 path, and NULL on a caught panic.
  */
 char*       tc_discover_opencode_export(const char* path);
@@ -2196,10 +2202,12 @@ char*       tc_insights_copy_json(void);
 char*       tc_nudge_copy_json(void);
 /* A Traces row's tags, worded by the core from the row's own list_pending
  * fields. entry_json is a borrowed UTF-8 JSON object carrying the entry's
- * mission_fit and credit_estimate as the daemon sent them. Returns an owned
- * JSON object with mission_fit, estimate_band, estimate_tier and
- * estimate_explainer, each present only when there is something true to
- * draw: the mission tag above zero, the estimate only while drawn is true.
+ * mission_fit and settlement_estimate as the daemon sent them (the band is
+ * inference dollars; the older credit_estimate points band is ignored).
+ * Returns an owned JSON object with mission_fit, estimate_band,
+ * estimate_tier and estimate_explainer, each present only when there is
+ * something true to draw: the mission tag above zero, the estimate only
+ * while drawn is true.
  * NULL, unreadable or mistyped input answers {}, which draws nothing. Free
  * with tc_string_free. Returns NULL only after a caught panic. DRAFT, NEEDS
  * APPROVAL. */
@@ -2481,7 +2489,7 @@ char*       tc_arming_offer_copy_json(const char* project_label, uint32_t count)
 
 /* The menu-bar Contribution mode pill (#1173, project_copy::
  * contribution_mode_copy): {title, mixed, choices, override_active, clear},
- * choices being [{mode, label, line}] for Ask me, Automatic and Never.
+ * choices being [{mode, label, line}] for Ask, Automatic and Never.
  * NULL only on a caught panic.
  */
 char*       tc_contribution_mode_copy_json(void);

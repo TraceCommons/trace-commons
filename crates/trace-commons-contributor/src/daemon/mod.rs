@@ -85,6 +85,8 @@ pub mod queue;
 pub mod remembered_passkeys;
 pub mod second_look;
 pub mod settings;
+pub mod settlement_estimate;
+pub mod settlement_scan;
 pub mod skill_loop;
 pub mod state;
 pub mod stored_cloud_credentials;
@@ -554,13 +556,15 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
     proxy_cleanup_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut token_cleanup_tick = tokio::time::interval(std::time::Duration::from_secs(300));
     token_cleanup_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Lapsed managed sessions on the NEAR AI sign-in lose their proxy within
+    // the lease plus one of these ticks.
+    let mut managed_lease_tick = tokio::time::interval(std::time::Duration::from_secs(15));
+    managed_lease_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut token_cleanup_tasks = tokio::task::JoinSet::new();
     // The published estimate table's fetch schedule (OWNER DECISION E11).
     // A local of this loop, so nothing that answers a request can reach it.
-    let mut table_schedule = crate::credit_estimate_table::EstimateTableSchedule::starting(
-        Utc::now(),
-        crate::credit_estimate_table::random_draw(),
-    );
+    let mut table_schedule =
+        crate::credit_estimate_table::EstimateTableSchedule::starting(Utc::now());
     // The contribution-mission slot's fetch schedule: due on the first tick
     // with a config, then every `MISSION_SLOT_REFRESH`. A local of this loop
     // too.
@@ -596,6 +600,9 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 });
             }
             _ = token_cleanup_tasks.join_next(), if !token_cleanup_tasks.is_empty() => {}
+            _ = managed_lease_tick.tick() => {
+                managed::sweep(shared, Utc::now()).await;
+            }
             _ = ticker.tick() => {
                 let tick_started = std::time::Instant::now();
                 let now = Utc::now();
@@ -632,6 +639,11 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 if watcher::tick(shared, now).await.is_err() {
                     tracing::warn!(pass = "watch", "daemon pass failed");
                 }
+                // The settlement estimate's scan, when one is due. Started
+                // off the workers and not awaited, so a large machine never
+                // holds up this tick; it reads and sends nothing but local
+                // files, so pause and dry-run do not hold it back.
+                let _ = settlement_estimate::tick(shared, now);
                 expire_and_digest(shared, now);
                 // Everything above is read-only bookkeeping; uploading is
                 // what dry-run withholds.
@@ -1044,6 +1056,9 @@ async fn drain_approved(
     // one. Either ends the pass; what is left stays approved for the next.
     let mut claimed_this_pass: usize = 0;
     let mut rate_limited = false;
+    // Whether ingest or the issuer was unavailable for an entry this pass
+    // (#1358). Ends the pass the same way.
+    let mut outage = false;
 
     for entry in approved {
         if claimed_this_pass >= MAX_UPLOADS_PER_PASS {
@@ -1227,14 +1242,13 @@ async fn drain_approved(
                 uploaded_this_pass = true;
             }
             uploader::UploadDecision::Superseded { new_hash } => {
-                let meta = std::fs::metadata(&entry.path).ok();
-                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                // When the new content was last written, as the watcher
-                // would observe it: the group's newest write for a grouped
-                // source. Local-only; see `QueueEntry::last_modified_at`.
+                // Use the adapter's grouped/database observation, not the virtual path's stat.
+                let size = session_ref.size_bytes;
                 let written = eligibility::last_write(
                     session_ref.group_modified_at,
-                    meta.and_then(|m| m.modified().ok()),
+                    std::fs::metadata(&entry.path)
+                        .ok()
+                        .and_then(|m| m.modified().ok()),
                 );
                 if let Some(fresh) = q.supersede(entry.entry_id, &new_hash, size, written, now) {
                     let max = shared
@@ -1372,6 +1386,36 @@ async fn drain_approved(
                         queue::QueueState::Approved,
                         Some(reason_label),
                     );
+                } else if let Some(kind) = transient_upload_kind(&reason_label) {
+                    // Nothing was judged (#1358). The entry keeps its
+                    // approval, and with it every guard a retry re-runs,
+                    // until the budget is spent; then it ends `Failed`
+                    // under the same label, which reads as what it is.
+                    let failures = q.record_transient_upload_failure(entry.entry_id);
+                    if failures >= MAX_TRANSIENT_UPLOAD_FAILURES {
+                        q.record_attempt(entry.entry_id, None);
+                        q.set_state(
+                            entry.entry_id,
+                            queue::QueueState::Failed,
+                            Some(reason_label),
+                        );
+                    } else {
+                        let observed_at = now
+                            + chrono::Duration::from_std(tick_started.elapsed())
+                                .expect("daemon pass elapsed time fits chrono duration");
+                        q.record_attempt(
+                            entry.entry_id,
+                            Some(observed_at + transient_upload_retry_delay(failures)),
+                        );
+                        q.set_state(
+                            entry.entry_id,
+                            queue::QueueState::Approved,
+                            Some(reason_label),
+                        );
+                    }
+                    if kind == TransientUpload::Outage {
+                        outage = true;
+                    }
                 } else {
                     q.record_attempt(entry.entry_id, None);
                     q.set_state(
@@ -1433,10 +1477,10 @@ async fn drain_approved(
             }
         }
         changed = true;
-        if rate_limited {
-            // The limit is per device, not per session: every entry after
-            // this one would be refused the same way. They stay approved,
-            // untouched, for the next pass.
+        if rate_limited || outage {
+            // The limit is per device, not per session, and an outage is
+            // server-wide: every entry after this one would be turned away
+            // the same way. They stay approved, untouched, for the next pass.
             break;
         }
     }
@@ -1535,6 +1579,51 @@ fn witness_capacity_jitter(entry_id: uuid::Uuid, retry_after_secs: u32) -> chron
 /// refused: an outage longer than that still does not consume the trace, but
 /// a failure that only looks transient stops being re-sent to the classifier.
 const MAX_TRANSIENT_REDACTION_FAILURES: u32 = 24;
+
+/// Uploads in a row that may reach no verdict for a passing reason
+/// ([`transient_upload_kind`]) before the entry ends `Failed`. With
+/// [`transient_upload_retry_delay`] that is about six hours of retrying,
+/// well past a deploy's four or five minutes, and bounded so a server that
+/// never comes back does not re-run the privacy scan on the session for
+/// ever.
+const MAX_TRANSIENT_UPLOAD_FAILURES: u32 = 12;
+
+/// Why an upload reached no verdict for a reason that clears on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransientUpload {
+    /// Ingest or the issuer is down or failing. Server-wide, so the pass
+    /// stops at the first.
+    Outage,
+    /// `409 admission_in_progress`: another attempt at this one submission
+    /// holds the lease. About this entry only, so the pass goes on.
+    Lease,
+}
+
+/// Whether a `Failed` label is one the daemon retries rather than ends
+/// (#1358). Fail closed: anything not named here stays terminal, and
+/// that includes every other 409 -- a re-send of bytes ingest already holds
+/// is answered with the stored receipt, so a 409 never means "already
+/// received"; it means the id is bound to something else, or the session
+/// was withdrawn or revoked.
+fn transient_upload_kind(reason_label: &str) -> Option<TransientUpload> {
+    use trace_commons_protocol::admission::AdmissionRefusal;
+    match reason_label {
+        crate::submit::REASON_INGEST_UNREACHABLE | health::LABEL_CLAIM_MINT_FAILED => {
+            Some(TransientUpload::Outage)
+        }
+        other if AdmissionRefusal::from_label(other) == Some(AdmissionRefusal::InProgress) => {
+            Some(TransientUpload::Lease)
+        }
+        _ => None,
+    }
+}
+
+/// How long to wait after the `failures`-th upload in a row that reached no
+/// verdict: a minute, doubling, capped at an hour.
+fn transient_upload_retry_delay(failures: u32) -> chrono::Duration {
+    let exponent = failures.saturating_sub(1).min(6);
+    chrono::Duration::seconds((60_i64 * (1_i64 << exponent)).min(3_600))
+}
 
 /// Most sessions one upload pass puts on the wire.
 ///
@@ -1702,9 +1791,10 @@ async fn refresh_estimate_table(
     let Ok(origin) = crate::config::ingest_origin_url(&cfg.ingest_url, "/") else {
         return;
     };
-    let outcome = match EstimateTableClient::new(origin.as_str(), cfg.allowed_hosts.as_deref()) {
+    let client = EstimateTableClient::new(origin.as_str(), cfg.allowed_hosts.as_deref());
+    let outcome = match &client {
         Ok(client) => client.fetch().await,
-        Err(refused) => Err(refused),
+        Err(refused) => Err(*refused),
     };
     let before = {
         let mut slot = shared.estimate_table.lock().expect("estimate lock");
@@ -1716,6 +1806,16 @@ async fn refresh_estimate_table(
     // in force only renews its age and changes nothing they see, but a
     // refetch of one that had expired brings it back.
     shared.publish_estimate_in_force_change(now, Some(before));
+    // The settlement table rides this same fetch and schedule; it has none
+    // of its own. Fetched whatever the settlement switch says, so the
+    // request's timing never depends on it, and so turning the switch on
+    // finds a table in memory and scans at the next tick. The switch gates
+    // the scan and every surface, not this anonymous public read.
+    let settlement = match &client {
+        Ok(client) => client.fetch_settlement().await,
+        Err(refused) => Err(*refused),
+    };
+    settlement_estimate::apply_table_fetch(shared, settlement);
 }
 
 /// How long after an upload the server is asked for verdicts.
@@ -2483,7 +2583,6 @@ mod tests {
         session_path: std::path::PathBuf,
         project_cwd: String,
         classifier_status: Arc<AtomicU16>,
-        classifier_delay_ms: Arc<AtomicU64>,
         uploads: Arc<AtomicUsize>,
         /// What ingest answers an upload with instead of accepting it.
         ingest_reply: Arc<std::sync::Mutex<Option<(StatusCode, serde_json::Value)>>>,
@@ -2492,6 +2591,8 @@ mod tests {
         witness_saturated: Arc<std::sync::Mutex<Option<&'static str>>>,
         /// The workload header of every `/v1/witness` request, in order.
         witness_calls: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        /// Non-zero makes the claim issuer answer with that status.
+        issuer_status: Arc<AtomicU16>,
     }
 
     impl TransientRetryHarness {
@@ -2506,6 +2607,12 @@ mod tests {
             Self::build(false).await
         }
 
+        /// The harness with ingest at an address nothing listens on, so
+        /// every upload ends in a transport error.
+        async fn with_ingest_unreachable() -> Self {
+            Self::build_with(false, true).await
+        }
+
         /// The harness with the contributor pointed at its witness from the
         /// start, pinned to the fixture signer and measurement. From the
         /// start because the configuration is part of what an approval
@@ -2515,6 +2622,10 @@ mod tests {
         }
 
         async fn build(witness: bool) -> Self {
+            Self::build_with(witness, false).await
+        }
+
+        async fn build_with(witness: bool, ingest_unreachable: bool) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
             cloud_credential_test_support::install(&store);
@@ -2566,17 +2677,28 @@ mod tests {
                 }),
             ))
             .await;
+            let issuer_status = Arc::new(AtomicU16::new(0));
             let issuer = Self::spawn(Router::new().route(
                 "/v1/trace-upload-claim",
-                post(|| async {
-                    Json(serde_json::json!({
-                        "access_token": "stub-claim-jwt",
-                        "token_type": "Bearer",
-                        "expires_at": Utc::now() + chrono::Duration::seconds(300),
-                        "expires_in": 300,
-                        "consent_scopes": ["debugging_evaluation"],
-                        "allowed_uses": ["debugging", "evaluation"],
-                    }))
+                post({
+                    let issuer_status = issuer_status.clone();
+                    move || {
+                        let status = issuer_status.load(Ordering::SeqCst);
+                        async move {
+                            if status != 0 {
+                                return StatusCode::from_u16(status).unwrap().into_response();
+                            }
+                            Json(serde_json::json!({
+                                "access_token": "stub-claim-jwt",
+                                "token_type": "Bearer",
+                                "expires_at": Utc::now() + chrono::Duration::seconds(300),
+                                "expires_in": 300,
+                                "consent_scopes": ["debugging_evaluation"],
+                                "allowed_uses": ["debugging", "evaluation"],
+                            }))
+                            .into_response()
+                        }
+                    }
                 }),
             ))
             .await;
@@ -2612,6 +2734,15 @@ mod tests {
                 }),
             ))
             .await;
+            let ingest = if ingest_unreachable {
+                // Bound and released, so nothing answers on it.
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                drop(listener);
+                format!("http://{addr}")
+            } else {
+                ingest
+            };
             store
                 .save_config(&crate::config::ContributorConfig {
                     inference_receipt_endpoint: None,
@@ -2699,11 +2830,11 @@ mod tests {
                 session_path,
                 project_cwd,
                 classifier_status,
-                classifier_delay_ms,
                 uploads,
                 ingest_reply,
                 witness_saturated,
                 witness_calls,
+                issuer_status,
             }
         }
 
@@ -3811,93 +3942,6 @@ mod tests {
         );
     }
 
-    /// A witness that stays saturated is asked less and less often, never
-    /// more than hourly apart, and never gives up on the session.
-    #[tokio::test]
-    async fn a_witness_that_stays_saturated_is_backed_off_and_the_session_kept() {
-        let h = TransientRetryHarness::with_witness().await;
-        *h.witness_saturated.lock().unwrap() = Some("30");
-        let mut now = TransientRetryHarness::now();
-        let mut delays = Vec::new();
-        for _ in 0..8 {
-            // Measured, not guessed: the retry is scheduled from when the
-            // refusal arrived, which is up to one pass after `now`.
-            let started = std::time::Instant::now();
-            h.pass(now).await;
-            let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
-            let entry = h.entry();
-            assert_eq!(entry.state, queue::QueueState::Approved);
-            assert_eq!(
-                entry.reason_label.as_deref(),
-                Some(crate::submit::REASON_WITNESS_SATURATED)
-            );
-            let due = entry.retry_after.unwrap();
-            delays.push((due - now - pass_took, due - now));
-            now = due;
-        }
-        assert_eq!(h.witness_calls.lock().unwrap().len(), 8);
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
-        // The witness's 30 seconds doubling per refusal (jitter from this
-        // entry id is at most 15 seconds, so each floor is the bare delay).
-        let floors = [30, 60, 120, 240, 480, 960, 1_920, 3_600];
-        for ((lower, upper), floor) in delays.iter().zip(floors) {
-            assert!(
-                *upper >= chrono::Duration::seconds(floor)
-                    && *lower <= chrono::Duration::seconds(floor + 15),
-                "expected {floor}s plus at most 15s of jitter: {delays:?}"
-            );
-        }
-    }
-
-    /// Ingest's per-principal rate limit judged nothing, so it refuses
-    /// nothing: the session keeps its approval, waits the server's
-    /// `retry_after_seconds`, and goes out on a later pass. Before this, the
-    /// 429 read as an unknown server label, the entry went terminal
-    /// `Failed`, and a first-run backfill past 30 a minute lost sessions.
-    #[tokio::test]
-    async fn a_rate_limited_upload_stays_approved_and_goes_out_when_due() {
-        let h = TransientRetryHarness::new().await;
-        *h.ingest_reply.lock().unwrap() = Some((
-            StatusCode::TOO_MANY_REQUESTS,
-            serde_json::json!({"error": "submit_rate_limited", "retry_after_seconds": 17}),
-        ));
-        let now = TransientRetryHarness::now();
-        let started = std::time::Instant::now();
-        h.pass(now).await;
-        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
-
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "ingest was asked");
-        let held = h.entry();
-        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
-        assert_eq!(
-            held.reason_label.as_deref(),
-            Some(crate::submit::REASON_RATE_LIMITED)
-        );
-        assert_eq!(held.attempts, 1, "the attempt is recorded");
-        let due = held.retry_after.expect("a retry time");
-        assert!(
-            due >= now + chrono::Duration::seconds(17)
-                && due <= now + pass_took + chrono::Duration::seconds(17),
-            "the server's own hint: {due}"
-        );
-        assert_ne!(
-            h.shared.health.lock().unwrap().last_error_label.as_deref(),
-            Some(health::LABEL_INGEST_UNREACHABLE),
-            "a self-clearing pause is not an outage"
-        );
-
-        // Not before it is due.
-        h.pass(now + chrono::Duration::seconds(10)).await;
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
-        assert_eq!(h.entry().state, queue::QueueState::Approved);
-
-        // Due, and the server has room: it goes.
-        *h.ingest_reply.lock().unwrap() = None;
-        h.pass(now + chrono::Duration::seconds(60)).await;
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 2);
-        assert_eq!(h.entry().state, queue::QueueState::Uploaded);
-    }
-
     /// A server without the labelled refusal answers a bare
     /// `{"error":"rate limited"}` with no hint. Same handling, with the
     /// server's whole window as the wait.
@@ -3949,51 +3993,6 @@ mod tests {
         assert_eq!(h.entry().state, queue::QueueState::Approved);
     }
 
-    /// One refusal ends the pass: the rest of the approved sessions are not
-    /// sent into a limit that has just said no, and none of them is touched.
-    #[tokio::test]
-    async fn a_rate_limit_stops_the_pass_and_leaves_the_rest_approved() {
-        let h = TransientRetryHarness::new().await;
-        h.add_session(
-            "9e9e9e9e-9e9e-9e9e-9e9e-9e9e9e9e9e9e",
-            "tidy the lexer too, then mail alice.smith@example.org",
-        )
-        .await;
-        assert_eq!(h.entries().len(), 2);
-        *h.ingest_reply.lock().unwrap() = Some((
-            StatusCode::TOO_MANY_REQUESTS,
-            serde_json::json!({"error": "submit_rate_limited", "retry_after_seconds": 30}),
-        ));
-        let now = TransientRetryHarness::now();
-        h.pass(now).await;
-
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "stopped at the first");
-        let entries = h.entries();
-        assert!(
-            entries
-                .iter()
-                .all(|e| e.state == queue::QueueState::Approved),
-            "{entries:?}"
-        );
-        assert_eq!(
-            entries
-                .iter()
-                .filter(|e| e.reason_label.as_deref() == Some(crate::submit::REASON_RATE_LIMITED))
-                .count(),
-            1,
-            "only the session that was refused is marked"
-        );
-
-        *h.ingest_reply.lock().unwrap() = None;
-        h.pass(now + chrono::Duration::seconds(120)).await;
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 3);
-        assert!(
-            h.entries()
-                .iter()
-                .all(|e| e.state == queue::QueueState::Uploaded)
-        );
-    }
-
     /// A first-run backfill approves every past session at once. One pass
     /// sends no more than `MAX_UPLOADS_PER_PASS`, below the server's default
     /// of 30 a minute, and the rest go on the next pass.
@@ -4031,13 +4030,116 @@ mod tests {
         );
     }
 
-    /// The control: an unrecognised refusal is still terminal.
+    /// Ingest down altogether: the in-call retries run out on transport
+    /// errors, and the session is kept rather than lost.
     #[tokio::test]
-    async fn an_unrecognised_ingest_refusal_stays_terminal() {
+    async fn a_transport_failure_keeps_the_session_approved() {
+        let h = TransientRetryHarness::with_ingest_unreachable().await;
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        let held = h.entry();
+        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(health::LABEL_INGEST_UNREACHABLE)
+        );
+        assert!(held.retry_after.expect("a retry time") >= now + chrono::Duration::seconds(60));
+    }
+
+    /// The issuer briefly unreachable is the same kind of pause.
+    #[tokio::test]
+    async fn an_issuer_outage_keeps_the_session_and_sends_it_when_due() {
+        let h = TransientRetryHarness::new().await;
+        h.issuer_status.store(503, Ordering::SeqCst);
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        assert_eq!(
+            h.uploads.load(Ordering::SeqCst),
+            0,
+            "nothing reached ingest"
+        );
+        let held = h.entry();
+        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(health::LABEL_CLAIM_MINT_FAILED)
+        );
+        let due = held.retry_after.expect("a retry time");
+
+        h.issuer_status.store(0, Ordering::SeqCst);
+        h.pass(due).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(h.entry().state, queue::QueueState::Uploaded);
+    }
+
+    /// `409 admission_in_progress` is a lease another attempt at the same
+    /// submission holds -- typically the one a dropped connection cut off.
+    /// The next try resolves it, so the session is kept. It is about one
+    /// submission, not the server, so the pass goes on to the next.
+    #[tokio::test]
+    async fn admission_in_progress_is_retried_without_stopping_the_pass() {
+        let h = TransientRetryHarness::new().await;
+        h.add_session(
+            "9e9e9e9e-9e9e-9e9e-9e9e-9e9e9e9e9e9e",
+            "tidy the lexer too, then mail alice.smith@example.org",
+        )
+        .await;
+        *h.ingest_reply.lock().unwrap() = Some((
+            StatusCode::CONFLICT,
+            serde_json::json!({"error": "admission_in_progress"}),
+        ));
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 2, "the pass went on");
+        let entries = h.entries();
+        for entry in &entries {
+            assert_eq!(entry.state, queue::QueueState::Approved, "{entry:?}");
+            assert_eq!(entry.reason_label.as_deref(), Some("admission_in_progress"));
+            assert!(entry.retry_after.is_some());
+        }
+        let due = entries.iter().filter_map(|e| e.retry_after).max().unwrap();
+        *h.ingest_reply.lock().unwrap() = None;
+        h.pass(due).await;
+        assert!(
+            h.entries()
+                .iter()
+                .all(|e| e.state == queue::QueueState::Uploaded)
+        );
+    }
+
+    /// The control for the 409s that are not a pause. A re-send of bytes
+    /// ingest already holds is answered with the stored receipt, never a
+    /// 409; a 409 says the id is bound to something else, or the session
+    /// was withdrawn or revoked. Retrying cannot change that.
+    #[tokio::test]
+    async fn a_conflicting_409_stays_terminal() {
+        for label in [
+            "admission_identity_conflict",
+            "witness evidence conflict",
+            "submission id already belongs to another principal",
+            "source_session_withdrawn",
+        ] {
+            let h = TransientRetryHarness::new().await;
+            *h.ingest_reply.lock().unwrap() =
+                Some((StatusCode::CONFLICT, serde_json::json!({ "error": label })));
+            h.pass(TransientRetryHarness::now()).await;
+            let failed = h.entry();
+            assert_eq!(
+                failed.state,
+                queue::QueueState::Failed,
+                "{label}: {failed:?}"
+            );
+            assert_eq!(failed.retry_after, None, "{label}");
+        }
+    }
+
+    /// A 4xx policy refusal is a verdict, not a pause.
+    #[tokio::test]
+    async fn a_policy_refusal_stays_terminal() {
         let h = TransientRetryHarness::new().await;
         *h.ingest_reply.lock().unwrap() = Some((
-            StatusCode::BAD_REQUEST,
-            serde_json::json!({"error": "invalid envelope"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::json!({"error": "trace contribution policy refused"}),
         ));
         h.pass(TransientRetryHarness::now()).await;
         let failed = h.entry();
@@ -4079,93 +4181,6 @@ mod tests {
             h.last_error_label.as_deref(),
             Some(health::LABEL_INGEST_UNREACHABLE)
         );
-    }
-
-    /// Rule 3 through the upload pass itself: ingest turns the upload away
-    /// for a reason about account admission, and the yes it gave before no
-    /// longer lifts R3.
-    async fn an_upload_refusal_cancels_account_admission(status: StatusCode, label: &str) {
-        let h = TransientRetryHarness::new().await;
-        let cfg = h.shared.store.load_config().unwrap().unwrap();
-        h.shared
-            .account_admission
-            .record_for_test(&cfg, "bounded", true);
-        assert_eq!(
-            h.shared.account_admission.current(Some(&cfg)),
-            automatic_gate::AccountAdmission::Advertised
-        );
-        *h.ingest_reply.lock().unwrap() = Some((status, serde_json::json!({ "error": label })));
-
-        h.pass(TransientRetryHarness::now()).await;
-
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "ingest was asked");
-        assert_eq!(h.entry().reason_label.as_deref(), Some(label));
-        assert_eq!(
-            h.shared.account_admission.current(Some(&cfg)),
-            automatic_gate::AccountAdmission::NotAdvertised,
-            "{label} left R3 lifted"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_upload_refused_as_account_limit_reached_cancels_account_admission() {
-        an_upload_refusal_cancels_account_admission(
-            StatusCode::TOO_MANY_REQUESTS,
-            "account_limit_reached",
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn an_upload_refused_as_admission_refused_cancels_account_admission() {
-        an_upload_refusal_cancels_account_admission(StatusCode::FORBIDDEN, "admission_refused")
-            .await;
-    }
-
-    /// The control: a lease another attempt holds is not about the account,
-    /// and leaves the yes standing.
-    #[tokio::test]
-    async fn an_upload_held_by_another_attempt_leaves_account_admission() {
-        let h = TransientRetryHarness::new().await;
-        let cfg = h.shared.store.load_config().unwrap().unwrap();
-        h.shared
-            .account_admission
-            .record_for_test(&cfg, "bounded", true);
-        *h.ingest_reply.lock().unwrap() = Some((
-            StatusCode::CONFLICT,
-            serde_json::json!({ "error": "admission_in_progress" }),
-        ));
-        h.pass(TransientRetryHarness::now()).await;
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            h.shared.account_admission.current(Some(&cfg)),
-            automatic_gate::AccountAdmission::Advertised
-        );
-    }
-
-    #[tokio::test]
-    async fn transient_retry_delay_starts_after_slow_classifier_failure() {
-        let h = TransientRetryHarness::new().await;
-        h.classifier_status.store(500, Ordering::SeqCst);
-        h.classifier_delay_ms.store(250, Ordering::SeqCst);
-
-        h.pass(TransientRetryHarness::now()).await;
-        let failed = h.entry();
-        assert_eq!(failed.state, queue::QueueState::Approved);
-        assert!(
-            failed.retry_after.unwrap()
-                >= TransientRetryHarness::now()
-                    + chrono::Duration::seconds(60)
-                    + chrono::Duration::milliseconds(200),
-            "slow classification must not consume the retry backoff"
-        );
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
-
-        h.classifier_status.store(0, Ordering::SeqCst);
-        h.pass(TransientRetryHarness::now() + chrono::Duration::seconds(60))
-            .await;
-        assert_eq!(h.entry().state, queue::QueueState::Approved);
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -4314,55 +4329,6 @@ mod tests {
             e.state == queue::QueueState::Pending && e.session_hash != failed.session_hash
         }));
         assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
-    }
-
-    /// U4a: the offer the upload pass mints for content that moved records
-    /// when that content was written, not the old offer's last write.
-    #[tokio::test]
-    async fn the_pass_supersede_records_the_new_contents_last_write() {
-        let h = TransientRetryHarness::new().await;
-        h.classifier_status.store(500, Ordering::SeqCst);
-        h.pass(TransientRetryHarness::now()).await;
-        let failed = h.entry();
-        use std::io::Write as _;
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&h.session_path)
-            .unwrap();
-        file.write_all(
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "type": "user",
-                    "message": {"role": "user", "content": "new work"},
-                    "cwd": h.project_cwd,
-                    "timestamp": "2026-08-08T11:00:00Z",
-                    "version": "2.0.1",
-                    "sessionId": "7c7c7c7c-7c7c-7c7c-7c7c7c7c7c7c",
-                    "uuid": "a2"
-                })
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-        let written: chrono::DateTime<chrono::Utc> = "2026-08-08T11:30:00Z".parse().unwrap();
-        file.set_modified(written.into()).unwrap();
-        drop(file);
-        h.classifier_status.store(0, Ordering::SeqCst);
-
-        h.pass(failed.retry_after.unwrap()).await;
-
-        let q = h.shared.queue.lock().unwrap();
-        let fresh = q
-            .all()
-            .iter()
-            .find(|e| {
-                e.state == queue::QueueState::Pending && e.session_hash != failed.session_hash
-            })
-            .expect("the moved content is offered again")
-            .clone();
-        assert_eq!(fresh.last_modified_at, Some(written));
-        assert_ne!(fresh.last_modified_at, failed.last_modified_at);
     }
 
     #[tokio::test]
@@ -4654,7 +4620,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shared = shared_with_ingest(dir.path(), &ingest);
         let start = at("2026-10-08T12:00:00Z");
-        let mut schedule = EstimateTableSchedule::starting(start, 0.0);
+        let mut schedule = EstimateTableSchedule::starting(start);
 
         refresh_estimate_table(&shared, start, &mut schedule).await;
         assert_eq!(hits.load(Ordering::SeqCst), 1);
@@ -4719,7 +4685,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shared = shared_with_ingest(dir.path(), &ingest);
         let start = at("2026-10-08T12:00:00Z");
-        let mut schedule = EstimateTableSchedule::starting(start, 0.0);
+        let mut schedule = EstimateTableSchedule::starting(start);
         refresh_estimate_table(&shared, start, &mut schedule).await;
         assert_eq!(
             shared.estimate_table.lock().unwrap().basis,
@@ -4750,12 +4716,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shared = shared_with_ingest(dir.path(), &ingest);
         let start = at("2026-10-08T12:00:00Z");
-        let mut schedule = EstimateTableSchedule::starting(start, 0.0);
+        let mut schedule = EstimateTableSchedule::starting(start);
         refresh_estimate_table(&shared, start, &mut schedule).await;
 
         let lapsed = start + ESTIMATE_TABLE_MAX_AGE + chrono::Duration::minutes(1);
         let mut rx = shared.events.subscribe();
-        let mut schedule = EstimateTableSchedule::starting(lapsed, 0.0);
+        let mut schedule = EstimateTableSchedule::starting(lapsed);
         refresh_estimate_table(&shared, lapsed, &mut schedule).await;
         let seen = published(&mut rx);
         assert!(seen.contains(ipc::EVENT_QUEUE_CHANGED), "{seen:?}");
@@ -4806,6 +4772,7 @@ mod tests {
         let ingest = TransientRetryHarness::spawn(router).await;
         let dir = tempfile::tempdir().unwrap();
         let shared = shared_with_ingest(dir.path(), &ingest);
+        shared.settings.lock().unwrap().missions_enabled = true;
         let supervisor = tokio::spawn(run_supervisor(Arc::clone(&shared), false));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let filled = loop {
@@ -4827,6 +4794,46 @@ mod tests {
         assert_eq!(ids, vec!["claude"]);
     }
 
+    /// Missions hidden (the default): the tick loop never asks for the
+    /// activity catalogue, and empties a slot that already holds one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_supervisor_neither_fetches_nor_keeps_the_mission_slot_while_hidden() {
+        use axum::routing::get;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let router = Router::new().route(
+            "/v1/activity-missions",
+            get(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                async move { StatusCode::SERVICE_UNAVAILABLE }
+            }),
+        );
+        let ingest = TransientRetryHarness::spawn(router).await;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_with_ingest(dir.path(), &ingest);
+        assert!(!shared.settings.lock().unwrap().missions_enabled);
+        mission_matching::receive_catalogue(
+            &shared.mission_catalogue,
+            &serde_json::json!({"schema_version": 1, "missions": [{"mission_id": "any"}]}),
+            Utc::now(),
+        )
+        .unwrap();
+        let supervisor = tokio::spawn(run_supervisor(Arc::clone(&shared), false));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let emptied = loop {
+            let empty = shared.mission_catalogue.lock().unwrap().is_none();
+            if empty || std::time::Instant::now() > deadline {
+                break empty;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        shared.shutdown.store(true, Ordering::Relaxed);
+        shared.shutdown_signal.notify_one();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), supervisor).await;
+        assert!(emptied, "the first tick empties the slot");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "nothing is fetched");
+    }
+
     /// Without a config there is no origin to ask: nothing is sent and the
     /// built-in table stays.
     #[tokio::test]
@@ -4835,8 +4842,7 @@ mod tests {
         let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
         let shared = ipc::DaemonShared::load(store).unwrap();
         let start = at("2026-10-08T12:00:00Z");
-        let mut schedule =
-            crate::credit_estimate_table::EstimateTableSchedule::starting(start, 0.0);
+        let mut schedule = crate::credit_estimate_table::EstimateTableSchedule::starting(start);
         refresh_estimate_table(&shared, start, &mut schedule).await;
         assert_eq!(
             *shared.estimate_table.lock().unwrap(),

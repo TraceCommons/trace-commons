@@ -86,7 +86,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// notification without words.
     static func plan(_ due: DaemonData.ReengageDue) -> NudgePlan? {
         guard let note = NudgeSurface.notification(due) else { return nil }
-        let set = nudgeCategory(note.actions.map { (id: $0.intent.actionId, label: $0.label) })
+        let set = nudgeCategory(note.actions.map { (id: $0.intent.actionId, label: $0.label) }, kind: note.kind)
         var info = [kindKey: note.kind.rawValue]
         if let fallback = note.defaultIntent { info[defaultActionKey] = fallback.actionId }
         return NudgePlan(
@@ -104,9 +104,16 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// The category for a set of re-engagement buttons, by action id and
     /// label: one identifier per set of ids, and every button but `not_now`
     /// brings the app forward.
-    static func nudgeCategory(_ actions: [(id: String, label: String)]) -> CategorySpec {
-        CategorySpec(
-            identifier: nudgeActionPrefix + actions.map(\.id).joined(separator: "+"),
+    ///
+    /// The settlement estimate's buttons carry their own words ("Review
+    /// traces", not the idle "Review"), so its set has an identifier of its
+    /// own; two sets sharing one would register only one of the two.
+    static func nudgeCategory(
+        _ actions: [(id: String, label: String)], kind: NudgeSurface.Kind? = nil
+    ) -> CategorySpec {
+        let scope = kind == .settlementEstimate ? "settlement_estimate." : ""
+        return CategorySpec(
+            identifier: nudgeActionPrefix + scope + actions.map(\.id).joined(separator: "+"),
             buttons: actions.map {
                 Button(identifier: nudgeActionPrefix + $0.id, label: $0.label, opensApp: $0.id != notNowActionId)
             })
@@ -131,6 +138,10 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         }
         if let history = copy?[.notifyActionSeeHistory] {
             specs.append(nudgeCategory([(id: "see_history", label: history)]))
+        }
+        if let review = copy?[.notifySettlementActionReview], let notNow = copy?[.notifySettlementActionNotNow] {
+            specs.append(nudgeCategory(
+                [(id: "review", label: review), (id: notNowActionId, label: notNow)], kind: .settlementEstimate))
         }
         return specs
     }

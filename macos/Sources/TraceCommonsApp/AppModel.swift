@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
     /// The copy key of the last failed managed action (`ManagedSurface.errorKey`),
     /// never the daemon's code.
     @Published var managedErrorKey: String?
+    @Published var managedErrorTool: String?
     /// The last copy table the daemon sent, kept when a later read fails so
     /// the connecting and failure states still have their words.
     private var managedCopy: [String: String] = [:]
@@ -31,10 +32,20 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The terminal app managed sessions open in, by the id the daemon
+    /// offered in `capabilities.terminal_choices`. The daemon refuses any
+    /// other value; the snapshot is re-read after the write.
+    func setManagedTerminal(_ id: String) {
+        managedAction("set_managed_terminal", params: ["terminal": id])
+    }
+
     func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil) {
         guard let client, !managedBusy else { return }
         managedBusy = true
         managedErrorKey = nil
+        managedErrorTool = nil
+        let attemptedTool = params["tool"] as? String
+            ?? managedSnapshot?.accounts.first(where: { $0.id == (params["account_id"] as? String) })?.tool
         Task.detached(priority: .userInitiated) {
             let result = Result {
                 var response = try client.managedAction(method, params: params)
@@ -58,6 +69,7 @@ final class AppModel: ObservableObject {
                 if case .failure(let error) = result {
                     let failure = error as? DaemonClient.Failure
                     self.managedErrorKey = ManagedSurface.errorKey(code: failure?.code, message: failure?.message)
+                    self.managedErrorTool = attemptedTool
                 }
                 self.refreshManagedSessions()
             }
@@ -238,6 +250,10 @@ final class AppModel: ObservableObject {
     /// is also a reason this answer might have.
     @Published private(set) var armingOffer: ArmingOffer?
     @Published private(set) var consentScopes: [ConsentScope] = []
+    /// Whether missions are shown anywhere (`missions_enabled`); off until
+    /// the daemon says so, and off before its settings have arrived.
+    var missionsShown: Bool { daemonSettings?.missionsShown ?? false }
+
     @Published private(set) var daemonSettings: DaemonSettingsView? {
         // A settings write can change what leaves this machine -- inference
         // evidence adds or removes the prompt-and-reply line, a filter change
@@ -622,9 +638,10 @@ final class AppModel: ObservableObject {
     /// The ceremony this shell started, while it is still going.
     ///
     /// Kept because `browser_url` is served ONCE, by start, and no poll
-    /// re-serves it -- and because cancel requires the attempt id, which is
-    /// also only ever handed over here. Dropped when the ceremony leaves the
-    /// state that has something to cancel.
+    /// re-serves it -- and so a cancel can name the attempt this shell
+    /// started. Not required for one: the daemon accepts an unnamed cancel
+    /// and stops whatever sign-in it is running. Dropped when the ceremony
+    /// leaves the state that has something to cancel.
     @Published private(set) var credentialAttempt: CredentialAttempt?
 
     /// The attempt the first run's near.ai login is waiting on, kept apart
@@ -962,7 +979,7 @@ final class AppModel: ObservableObject {
     /// out of it, which is why it has one.
     @Published var lastActionNotice: String?
     /// What a finished first run must still say -- Automatic was refused, so
-    /// sharing is on Ask me -- shown above every section once the first-run
+    /// sharing is on Ask -- shown above every section once the first-run
     /// host has gone (`FirstRunDaemon.firstRunFinished`). The core's
     /// sentence; dismissed by the person.
     @Published var firstRunNotice: String?
@@ -1885,11 +1902,11 @@ final class AppModel: ObservableObject {
             + (showsLegacyMigrationOfferCard ? 1 : 0)
     }
 
-    /// Projects whose "Ask me" the daemon refused, by project id, so
+    /// Projects whose "Ask" the daemon refused, by project id, so
     /// the notice can show the Rust's refusal line. Cleared on a retry.
     @Published private(set) var askFirstRefused: Set<String> = []
 
-    /// "Ask me" on a rewording or held-folder notice. The same call as
+    /// "Ask" on a rewording or held-folder notice. The same call as
     /// Settings -- `set_project_mode` with the project's id and
     /// `notify_only` -- which also answers a rewording notice. A refusal
     /// changes nothing; the notice stays and says so.
@@ -2431,16 +2448,28 @@ final class AppModel: ObservableObject {
     /// `enroll`'s floor-only default happened to leave in place -- see the
     /// coordinator's atomicity note.
     ///
-    /// Watching only finishes too (Review Focus 5 of #1030's port): with no
-    /// enrollment there is no tenant, so its marker is
-    /// `isWatchOnlyComplete`. It counts only while the daemon holds no
-    /// enrollment; an enrolled person confirms on Start whatever an earlier
-    /// watch-only run wrote. Before the first status arrives `loggedIn`
-    /// reads false, so that marker alone decides until then: the main
-    /// window may show its content, then switch back into the first run.
+    /// The app needs a NEAR AI login (owner, 2026-10-12: sign-in
+    /// required): while the daemon holds no enrollment the first run is
+    /// required, whatever an earlier watch-only run wrote
+    /// (`isWatchOnlyComplete` no longer opens the app), so a sign-out sends
+    /// the person back to sign in. Before the first status arrives
+    /// `loggedIn` reads false, so onboarding reads required until then;
+    /// the hosts wait on `onboardingKnown` before acting on it.
     var requiresOnboarding: Bool {
         if startup == .needsRoots { return true }
-        return status.loggedIn ? !isOnboardingComplete : !isWatchOnlyComplete
+        if Self.reviewSkipsSignIn { return false }
+        return !status.loggedIn || !isOnboardingComplete
+    }
+
+    /// Debug builds only: `TC_REVIEW_SKIP_SIGN_IN=1` opens the main window
+    /// without the NEAR AI sign-in, so a design review can reach the screens
+    /// behind it (owner, 2026-10-12). A release build never reads it.
+    static var reviewSkipsSignIn: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["TC_REVIEW_SKIP_SIGN_IN"] == "1"
+        #else
+        false
+        #endif
     }
 
     /// Whether a watch-only first run was finished against this config

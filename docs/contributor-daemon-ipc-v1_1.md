@@ -621,7 +621,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `near_account_cancel` | `attempt_id` | cancellation state | cancels the matching local attempt |
 | `near_ai_credential_start` | `provider` (optional, default `near`) | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. The browser URL is returned **once** and no poll re-serves it |
 | `near_ai_credential_status` | `attempt_id` (optional) | `state`, plus `attempt_id` and `attempt_status` for a caller that named the current attempt | never errors on a missing or stale `attempt_id`: `state` is a fact about the machine. See "The credential state" below |
-| `near_ai_credential_cancel` | `attempt_id` (**required**) | `attempt_id`, `status` | stops this machine waiting on the browser; `near_ai_credential_unknown` if the id is not the current attempt |
+| `near_ai_credential_cancel` | `attempt_id` (optional) | `attempt_id`, `status` when named; `status` alone when not | stops this machine waiting on the browser; unnamed, it stops whatever sign-in is in flight and never echoes the id; `near_ai_credential_unknown` if a named id is not the current attempt, or if an unnamed cancel finds no sign-in in flight (none ever started, or the last one finished); a named cancel of the finished current attempt answers its terminal status and changes nothing |
 | `near_ai_credential_forget` | — | `removed`, `revoked: false` | removes the key from **this machine only**; `revoked` is always false and is not a placeholder. See "The credential state" below |
 | `near_ai_credential_migrate` | — | `migrated`, `state` | asynchronous only; macOS. Copies the sign-in an earlier build kept in the login keychain into the data-protection store under the same reference, and never deletes the legacy entry. The one read of the login keychain, so it may raise a password prompt, which is why only a contributor's action sends it. `migrated: false` means neither store held it, and the dangling reference was dropped (`state` becomes `absent`). A refused legacy read is an error and changes nothing. See "The credential state" below |
 | `witness_preview_request` | `entry_id`, `raw_session_confirmed: true`; optional `outcome`, `correction` | `status: "ready"`, `summary` | awaits explicit remote review; saves and pins certified bytes without approval or upload |
@@ -666,7 +666,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `managed_terminal` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -684,6 +684,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `nudge_opened` | `kind` (**required**: `idle_sessions`, `review_backlog` or `verdicts_landed`); `subject` (reserved, as above) | `opened: true` | sent only from the suggestion's own action, never for being shown; for `verdicts_landed` it acknowledges the news; local only; publishes `status_changed`; see "`status.nudge`" below |
 | `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
 | `set_menu_bar_mark_enabled` | `on` (**required**, boolean) | `menu_bar_mark_enabled` | the menu-bar news mark and halo switch; writes `menu_bar_mark_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
+| `set_managed_terminal` | `terminal` (**required**: one of this platform's ids -- macOS `terminal`, `ghostty`, `iterm2`; Windows `windows_terminal`; Linux `gnome_terminal`, `konsole`, `ghostty`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
 | `set_notifications_enabled` | `on` (**required**, boolean) | `notifications_enabled` | "Notifications from Trace Commons", the master switch; writes `notifications_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
 | `set_notify_kind` | `kind` (**required**: `digest`, `idle_sessions`, `verdicts_landed`, `weekly_recap` or `insights_tip`), `on` (**required**, boolean) | `kind`, `on` | one notification kind's switch; writes `notify.<kind>` through `set_settings`; answering `verdicts_landed` or `idle_sessions` ends that kind's one-time offer; publishes `status_changed` when it changes; see "Notification settings" below |
 | `subscribe` | `accepts[]` (optional: opt-in event names) | `subscribed: true`, plus `accepts[]` when the request carried `accepts`; then a `snapshot` event | see "Opt-in events" below |
@@ -980,7 +981,7 @@ A `Pending` entry in an `ignore` folder does not count (setting `ignore`
 refuses what was waiting, so one there is only a transient, and the
 contributor has already said "never offer these"), unless it is
 `held_for_review` or returned from Keep. Manual Scrub check does not override
-Ignore. `notify_only` ("Ask me") counts every `Pending` entry.
+Ignore. `notify_only` ("Ask") counts every `Pending` entry.
 
 Computed fresh on every `status` (and therefore on `snapshot`, since
 `subscribe` sends `status` inside it) from the queue, policy and Scrub check
@@ -2152,7 +2153,7 @@ The picker's Continue: approve exactly the sessions named, as a person's
 approval. Each one is pinned to a preview and held for the undo window
 exactly as a click on a card is (`approve` and this method share one
 implementation), and it is recorded as the person's own, so a later change
-of the folder's rule -- back to Ask me, or to Never -- does not take it back.
+of the folder's rule -- back to Ask, or to Never -- does not take it back.
 "Include every past session in {folder}" is a selection of every id the
 listing returned (at most 500, see `not_listed`), never `include_backlog`.
 
@@ -2248,7 +2249,7 @@ approval does not land the offer it leaves still waits for a person.
 ### The contribution override
 
 The menu-bar Contribution mode pill (R13, #1202; requested on #1173) offers
-three global overrides: **Ask me** (`notify_only`), **Auto contribute**
+three global overrides: **Ask** (`notify_only`), **Auto contribute**
 (`auto_upload`) and **Never** (`ignore`). `set_contribution_override` sets
 one; `clear_contribution_override` clears it.
 
@@ -2259,7 +2260,7 @@ back on exactly the mode it had. `set_project_mode` still works while an
 override is in force: it sets the folder's own mode (`list_projects`
 `folder_mode`), and the override still decides `mode` until it clears. Its
 reply then carries `overridden_by`: the override's mode when the override
-still decides that folder (for example a folder set to Ask me under Auto
+still decides that folder (for example a folder set to Ask under Auto
 contribute, whose new sessions are still approved unattended), and `null`
 when the folder now resolves to what was set -- always so with no override,
 and always so for Never, which every override leaves alone. A shell shows
@@ -2267,11 +2268,11 @@ the change as saved but not yet in effect when `overridden_by` is present.
 
 What each override does, with the stricter rule winning:
 
-| Override | Folder set to Automatic | Folder set to Ask me, or never ruled on | Folder set to Never | Unresolved bucket |
+| Override | Folder set to Automatic | Folder set to Ask, or never ruled on | Folder set to Never | Unresolved bucket |
 |---|---|---|---|---|
 | `ignore` | Never | Never | Never | Never |
-| `notify_only` | Ask me | Ask me | **Never** | Ask me (or Never if set) |
-| `auto_upload` | Automatic, under its own holds | **Automatic from now** | **Never** | Ask me (or Never if set) |
+| `notify_only` | Ask | Ask | **Never** | Ask (or Never if set) |
+| `auto_upload` | Automatic, under its own holds | **Automatic from now** | **Never** | Ask (or Never if set) |
 
 - **Never** queues and sends nothing from any folder (#1208). Nothing
   waiting is refused: entries already `pending` stay `pending` (they leave
@@ -2287,7 +2288,7 @@ What each override does, with the stricter rule winning:
   finished while it is in force are not queued; once it clears, the next
   pass offers them under each folder's own mode -- an Automatic folder
   sends them unattended.
-- **Ask me** leaves nothing to go unattended. Every unattended approval not
+- **Ask** leaves nothing to go unattended. Every unattended approval not
   yet sent in a folder that no longer resolves to Automatic goes back to
   `pending` (counted in `returned`), and the send path returns any that
   comes back from `uploading`. A folder set to Never stays Never.
@@ -2376,7 +2377,7 @@ status is unread or the daemon is down. `tc_contribution_override_confirm_json(m
 confirmation; for `auto_upload` it carries `arming`, the Flow 1 grant
 screens' disclosure table for the configuration in `config_dir`. For
 `mode` `"clear"` it returns the confirmation a shell shows before
-`clear_contribution_override` when the override in force is Ask me or Never
+`clear_contribution_override` when the override in force is Ask or Never
 and any folder's own setting is Automatic, or the folder list or a folder's
 own setting is unknown (under an Automatic override clearing resumes nothing,
 so it is not confirmed): its `mode` is
@@ -2849,13 +2850,13 @@ file says `auto_upload`, because the daemon refuses to act on that.
 #### `unpurposed_traces` (K7)
 
 A top-level count beside `projects[]`, for the design's suggestion: "27 scrubbed
-sessions are sitting on this Mac under folders set to Ask me. None has been
+sessions are sitting on this Mac under folders set to Ask. None has been
 decided." It is the number of queue entries that are, all three:
 
 - **`Pending`** -- undecided. An entry already `Approved`, `Uploaded`,
   `Refused`, `Expired`, or `Superseded` has already been decided, one way or
   another, and is not part of a backlog waiting on a person.
-- **In a project whose mode resolves to `notify_only`** ("Ask me"). An
+- **In a project whose mode resolves to `notify_only`** ("Ask"). An
   **armed** (`auto_upload`) project is excluded on its resolved mode, not on
   the entry's own approval state -- a gate-held armed session is also
   `Pending` with nothing decided about it (see the design's note that
@@ -4711,11 +4712,12 @@ Takes a JSON object whose top-level keys must come from
 `trajectory_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
 `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`,
-`notifications_enabled`, `menu_bar_mark_enabled`, `notify`,
+`settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`,
+`menu_bar_mark_enabled`, `notify`,
 `verdicts_offer_pending`, `idle_offer_pending`,
 `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`,
 `insights_context_threshold`, `insights_counter_pass`,
-`insights_recap_card_enabled` --
+`insights_recap_card_enabled`, `managed_terminal` --
 a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
@@ -4750,10 +4752,52 @@ row and the menu-bar mark -- on or off. It is the same setting `set_suggestions_
 and a change by either route publishes `status_changed`, because
 `status.nudge` reads it. See ["`status.nudge`"](#statusnudge).
 
+`settlement_estimate_enabled` (boolean, default `true`; a settings file
+written before the key existed loads `true`) is the settlement estimate's
+switch, "Estimate what traces on this Mac are worth". Off stops any scan in
+progress, deletes the estimate's feature cache, and drops
+`status.settlement_estimate`, publishing `settlement_estimate_changed` when
+it was present; on again starts a full scan. The estimate is made on this
+Mac and sends nothing about a trace anywhere. Any other JSON type is
+`bad_params` / `settings-invalid-value`.
+
+`missions_enabled` (boolean, default `false`; a settings file written
+before the key existed loads `false`) shows or hides missions (owner
+decision 2026-10-16: hidden for now). No shell offers a Settings row for it;
+it is set only through `set_settings`, and read back from `get_settings`.
+Off, the daemon does not fetch `GET /v1/activity-missions` and empties the
+catalogue it holds, so `status.nudge.mission_fit`,
+`status.idle_sessions.mission_fit`, `list_pending[].mission_fit` and the
+digest's idle mission clause are all absent; and `mission_catalogue`,
+`activity_missions_catalogue`, `activity_missions_status` and
+`mission_matches` are refused with `unavailable` / `missions-disabled`. The
+local mission-draft inbox is a C ABI function (`tc_mission_drafts_call`),
+not an IPC method, and does not consult the daemon; a shell hides it by
+this switch. On restores the
+behaviour from before the switch existed. A change publishes
+`status_changed`. Any other JSON type is `bad_params` /
+`settings-invalid-value`.
+
 `notifications_enabled`, `menu_bar_mark_enabled`, `notify`,
 `verdicts_offer_pending` and `idle_offer_pending` are the notification
 settings; see ["Notification settings"](#notification-settings) for their
 defaults and refusals.
+
+`managed_terminal` (string) is the terminal app a managed session opens
+in, one of this platform's ids and nothing else: on macOS `terminal`
+(the default), `ghostty` or `iterm2`; on Windows `windows_terminal` (the
+default); on Linux `gnome_terminal` (the default), `konsole` or
+`ghostty`. Another platform's id is refused like any other. Any other
+value, `null` included, is `bad_params` / `settings-invalid-value`; no app name, path or command is ever accepted. A
+settings file holding a value this build does not know loads it as
+unrecognized: `managed_snapshot` then reports no `terminal_current` and no
+`terminal_destination`, a launch is refused, and nothing falls back to
+the default. `set_managed_terminal` writes the same setting. The managed
+snapshot's `capabilities` carries `terminal_current` (the chosen id, or
+`null`), `terminal_choices` (`[{id, name}]` of the offered apps found on
+this computer; empty under Flatpak) and `terminal_destination` (the
+chosen app's name). A launch whose chosen app was not found is refused
+with `managed-terminal-not-found`.
 
 #### Notification settings
 
@@ -4770,8 +4814,9 @@ keeps them. `get_settings` reports them as stored.
   notification switch.
 - `notify` (object): one boolean per kind -- `digest` (N0, default `true`),
   `idle_sessions` (N1), `verdicts_landed` (N2), `weekly_recap` (N3, default
-  `false`, held for the gamification ruling) and `insights_tip` (N4, default
-  `false`, owner decision 25). One switch governs both the sentence folded
+  `false`, held for the gamification ruling), `insights_tip` (N4, default
+  `false`, owner decision 25) and `settlement_estimate` (N5, default `true`,
+  DRAFT, NEEDS APPROVAL). One switch governs both the sentence folded
   into a due digest and the standalone notification. Revision 2's
   `digest_enabled` is `notify.digest`; there is no `digest_extras_enabled`.
   A key this daemon does not know (a later kind written by a newer build)
@@ -7514,6 +7559,7 @@ relaxation of origin/CORS/CSP controls.
 | `managed_changed` | a saved model account or managed session changed (see `docs/managed-sessions.md`) | `{revision}` |
 | `usage_changed` | additive: the poll tick's ledger read added at least one call while the `insights_ledger_feed` setting is on | `{}` -- see below |
 | `history_changed` | the daemon's history poll found verdicts that are new against its own high-water mark (nudge S4); never on the silent first poll; always followed by `status_changed` | `{newly_accepted, newly_held, newly_final}` -- counts from that poll alone; see below |
+| `settlement_estimate_changed` | additive: `status.settlement_estimate` changed as a reader draws it -- its rounded band, its "up to" form, or the table or pricing it came from -- or it appeared or went away (a fetch that cleared the table, the `settlement_estimate_enabled` switch turned off). A re-scan that moves only the unrounded total publishes nothing; always followed by `status_changed` | `{}` |
 | `reengage_due` | **opt-in**: the attention arbiter chose one standalone re-engagement notification this tick; sent only to a subscriber that named it in `subscribe`'s `accepts` | `{kind, title, body, actions: [{id, label}]}` -- see "Re-engagement notifications" below |
 
 `inference_call_added` is published where the daemon already reads IronWire's
@@ -8020,3 +8066,87 @@ configuration changes between POST and GET refuse the combined result. Both
 methods require an account session and discard responses when the local account
 or ingest configuration changes. Neither returns an invite code or session token.
 Acceptance can earn pending credit; this is not credit redemption.
+
+
+### Installed coding tools
+
+`managed_snapshot.tools` is an additive array of `{tool, installed, install_url}`
+rows for `claude`, `codex`, and `opencode`. Each row reports executable discovery
+independently of trace-source discovery, saved accounts, or sign-in. It does not
+verify tool versions, read traces, or grant consent. All three are managed
+tools; see "Managed OpenCode launch additions" below for OpenCode's launch
+fields. `install_url` is the tool's setup guide from the shared install-guide
+table (`tc_install_guides_json`). Missing native launch binaries return
+`managed-tool-unavailable`.
+
+Discovery checks absolute PATH entries and conventional install locations,
+including `~/.opencode/bin`, without launching subprocesses. Unix candidates must
+be regular files with an executable permission bit; directories and non-executable
+files are skipped. Windows installation detection includes `.exe`, `.cmd`, and
+`.bat` files. The existing managed launcher still requires a native `.exe`;
+wrapper-only installations can be reported installed without being launchable
+through managed sessions. Discovery never invokes a command interpreter. Each
+snapshot refresh checks again. Before daemon startup,
+`tc_managed_tools_json` returns the same array, `tc_managed_copy_json` returns
+the shared copy object, and `tc_install_guides_json` returns the install-guide
+table as `{source slug: url}` for every tool first run asks about; all three
+strings are freed with `tc_string_free`.
+
+### Managed OpenCode launch additions
+
+`managed_account_add.tool` additionally accepts `opencode`, with connections
+`api_key` (OpenAI) and `near_ai`. `subscription` is refused for this tool.
+`managed_launch_prepare` accepts additive `model: string | null` and
+`collect_traces: boolean` fields. OpenCode coding launches require a nonempty
+model ID (at most 256 ASCII letters, digits, `/._:-`) and explicit collection
+opt-in; omission defaults to false. Other tools reject these OpenCode-only
+options. Old requests therefore keep their previous behavior.
+
+Session views persist `model`, `collect_traces` and `collection` (`off`,
+`pending`, `collected`, `failed`). Lifecycle reports optionally carry the final
+collection result; the helper proof remains required. Collection is independent
+of native process exit. Unredeemed launches that expire or fail during restart
+settle pending collection as failed. The snapshot includes OpenCode generation
+and default selection, plus additive shared copy keys. Older shell decoders may
+ignore these fields; macOS renders them.
+
+### Managed session focus, stop and start again (#1407)
+
+Session views carry three additive booleans, computed on every read:
+
+- `can_focus`: the daemon opened the session itself through
+  `managed_terminal_launch`, in a terminal it can script, named the window it
+  opened (today a Terminal window id, printed by the launch script), and the
+  session is a running coding session.
+- `can_stop`: the daemon opened the session itself, its launcher reports a
+  running coding tool, and no stop has been asked for yet.
+- `can_start_again`: the session ended (`exited` or `failed`), was a coding
+  launch, its folder still exists, and its account is still saved (or, for
+  the NEAR AI sign-in, the daemon is still signed in). Shells also need
+  `capabilities.terminal_launch`, as for any launch.
+
+A launch from the command line is never opened by the daemon, so it is never
+focusable or stoppable.
+
+- `managed_session_focus {session_id}` brings the session's window to the
+  front. Refused with `managed-conflict` unless `can_focus` holds, and with
+  `managed-not-found` when the session or its window is gone.
+- `managed_session_stop {session_id}` records a stop. The daemon signals
+  nothing: the launcher (`near-ai redeem-launch`), which spawned the tool and
+  still holds it as its child, reads `stop: true` in its next
+  `managed_session_report` answer (at most 5 seconds), sends the tool SIGTERM
+  (on Windows, terminates it), and kills it if it has not exited within a
+  further 5 to 10 seconds. The exit is reported as any other. Refused with
+  `managed-conflict` unless the daemon opened the session and it is running.
+  Asking twice is accepted and changes nothing.
+- `managed_session_start_again {session_id, request_id}` prepares the ended
+  session's launch again (same tool, connection, account, folder, model and
+  collection opt-in) and returns `managed_launch_prepare`'s answer; the shell
+  then calls `managed_terminal_launch`. The same `request_id` twice is one
+  session. Refused with `managed-conflict` while the session still holds its
+  account, `managed-invalid-request` for a sign-in (login) row or a missing
+  folder, `managed-not-found` for a removed account, and
+  `managed-near-ai-sign-in-required` for a sign-in session while signed out.
+
+`managed_session_report` answers `{accepted: true, stop: bool}`; an older
+launcher reads only `accepted`.

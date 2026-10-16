@@ -243,7 +243,7 @@ pub const CONTRIBUTION_MODE_TITLE: &str = "Contribution mode";
 pub const CONTRIBUTION_MODE_MIXED: &str = "Mixed";
 
 // The three folder-mode names. Owner decision, 2026-10-02: a folder mode
-// reads "Ask me", "Automatic" or "Never" on every surface -- this pill,
+// reads "Ask", "Automatic" or "Never" on every surface -- this pill,
 // Settings, onboarding, the arming and override words -- in every shell.
 // These constants are the only spelling; every other place that names a
 // mode reads them, here or through [`FOLDER_MODE_LABELS`], which crosses
@@ -262,7 +262,8 @@ pub(crate) use folder_mode_auto_label;
 /// The `notify_only` name as a literal, for the same reason.
 macro_rules! folder_mode_ask_label {
     () => {
-        "Ask me"
+        // "Ask", not "Ask" (owner, 2026-10-12).
+        "Ask"
     };
 }
 pub(crate) use folder_mode_ask_label;
@@ -292,7 +293,7 @@ pub fn folder_mode_label(mode: &str) -> Option<&'static str> {
 }
 
 /// The `notify_only` sub-list line, from the
-/// menu-bar handoff. True under an "Ask me" override: no folder sends
+/// menu-bar handoff. True under an "Ask" override: no folder sends
 /// unattended, and a folder set to Never stays off.
 pub const CONTRIBUTION_MODE_ASK_LINE: &str = "Every finished trace waits for you.";
 
@@ -323,7 +324,7 @@ pub const CONTRIBUTION_OVERRIDE_ACTIVE: &str =
 /// an override in force (`clear_contribution_override`).
 pub const CONTRIBUTION_OVERRIDE_CLEAR: &str = "Use each folder's setting";
 
-/// The "Ask me" override's confirmation.
+/// The "Ask" override's confirmation.
 pub const CONTRIBUTION_OVERRIDE_ASK_TITLE: &str = "Ask before contributing from every folder?";
 /// Held to `set_contribution_override`
 /// `notify_only`: every folder resolves to ask-first, what was approved
@@ -407,7 +408,7 @@ pub struct ContributionModeChoice {
 pub struct ContributionModeCopy {
     pub title: &'static str,
     pub mixed: &'static str,
-    /// Ask me, Automatic, Never, in that order.
+    /// Ask, Automatic, Never, in that order.
     pub choices: Vec<ContributionModeChoice>,
     pub override_active: &'static str,
     pub clear: &'static str,
@@ -617,7 +618,7 @@ mod contribution_override_copy_tests {
                 CONTRIBUTION_MODE_AUTO_LABEL,
                 CONTRIBUTION_MODE_NEVER_LABEL,
             ],
-            ["Ask me", "Automatic", "Never"]
+            ["Ask", "Automatic", "Never"]
         );
         assert_eq!(
             FOLDER_MODE_LABELS,

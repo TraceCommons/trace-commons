@@ -1900,6 +1900,123 @@ The same per-bundle check, with payout, is available as
 `pipeline_bundle_qualification` required check
 (`qualification_inspects_the_objects_the_constructor_receives`) exercises.
 
+### A registered Score policy
+
+The ingest binary registers no Score policies. Only a binary that embeds the
+server and supplies a substituted backend does, through
+`PipelineServiceBuilder::with_score_policies`. When it does, the registered
+factory is one more dependency of each bundle that names it:
+
+- `bundle_qualification` reports the factory as `score_policy`, with its
+  identity and its own `production_qualified()`, which is `false` by default.
+  An unqualified factory blocks the bundle under
+  `runtime_score_policy_not_production`.
+- The configuration term reads the factory's
+  `configuration_is_qualifiable()`, which is also `false` by default. A
+  configuration that the factory does not qualify blocks the bundle under
+  `bundle_configuration_not_qualifiable`.
+- A package that names a Score id the service has no factory for fails both
+  checks (its identity is `score_policy_missing`). Construction refuses that
+  package as `bundle_policy_not_runnable`, so a service whose default package
+  names such an id does not build.
+- `check_runnable_package` requires the credit issuer principal
+  (`pipeline_credit_issuer_principal_missing`) for each bundle that settles
+  under `NoveltyUtility`. That covers a compatibility bundle and also a
+  registered policy that declares `NoveltyUtility`.
+
+A built-in bundle reports no `score_policy`, and its qualification serializes
+exactly as before.
+
+A registered policy runs under the same Score runtime controls as the
+compatibility policy. Every Score policy that can bind does, except the
+minimal reference (`score_runs_under_runtime_controls`):
+
+- Its Score takes the tenant's Score lock, the same lock under the same name,
+  and is released uncharged as `score_lock_busy` when it finds the lock held.
+- `main`'s duplicate short-circuits (`skipped_duplicate`, then `cached`)
+  decide its Settle selection. A duplicate is kept out of the index, and its
+  Trace Credit leg completes withheld under the label with no ledger row, for
+  either Trace Credit event the factory declares. A duplicate earns nothing.
+- Settle writes its `trace_gate_decisions` row from its Score evidence. The
+  row needs `perplexity_micros`, `tail_fraction_micros`,
+  `novelty_score_micros`, `quality_passed`, `novelty_passed`, and
+  `nearest_neighbor_hash`. A registered policy whose evidence lacks one of
+  them fails its run at Settle under
+  `pipeline_gate_decision_evidence_incomplete` before any leg pays. The server
+  never fills one in.
+
+A registered policy can also record two more things on its Score output:
+
+- `award_adjustments` on its Score evidence: each entry is a safe label, a
+  factor in micros from 0 to 1,000,000, and an optional basis in micros.
+  They are listed in the order the policy applied them, so an auditor can
+  recompute the award from the policy's base amount. An empty list is not
+  serialized, so evidence without adjustments, and every stored Score outcome
+  hash, is unchanged.
+- A hold for operator review (`ScoreOutput::held_for_review`) in place of an
+  award. The run parks in `awaiting_review` at Score, uncharged, under the
+  policy's label. No Score outcome is committed, so no award and no
+  settlement leg exist. `GET /v1/review/pipeline/quarantine` lists the run
+  with `phase` `score` and the label as `hold_reason`. The built-in policies
+  never hold.
+
+#### Resolving a Score hold
+
+A reviewer resolves a Score hold through the same claim and assessment
+routes, with the same review credential, as a Review hold (below). The
+claim needs the run's submission to still be accepted and live. The
+assessment is the run's own Score assessment: `pipeline_review_assessments`
+holds at most one assessment per run and phase (V130, `phase` `review` or
+`score`), so an assessment the run got at Review does not block it. A Score
+assessment also records the policy's label as `hold_label`.
+
+- **Approve.** `resolved_quarantine_reasons` must name the hold label (the
+  queue item's `hold_reason`); otherwise the route refuses with `422`,
+  "quarantine reason is unresolved". The run goes back to Score, and the
+  policy runs again with `ScoreInput::operator_review` set to the decision
+  and the hold label. Nothing on the input names the reviewer. A policy
+  that holds again on an approved input would loop, so the run fails closed
+  under `pipeline_score_hold_repeated`: nothing of the Score is committed and
+  no leg exists.
+- **Reject.** The policy is not run again. The server commits a zero Score
+  outcome itself: no award, no index command, rule
+  `operator_rejected_score_hold`, and evidence whose
+  `operator_rejected_hold` is the hold label. The run settles with no credit,
+  no settlement leg and no index write. It writes no `trace_gate_decisions`
+  row, because nothing was scored and the row's measurements would be
+  invented. The submission stays accepted.
+
+The audit event the assessment route appends (and the worker's review audit
+pass appends when the route's append missed) records a Score hold's
+resolution without claiming a status change: its status is `accepted`, the
+status the submission keeps, and its reason is the label `score_hold_approved`
+or `score_hold_rejected`. A run can hold an assessment for each phase, and the
+pass appends the event of each. A withdrawal or operator containment still releases
+a Score hold as before: the worker releases it, and the Score then ends the
+run as `submission_inoperable`.
+
+#### Qualifying a registered Score policy
+
+`PipelineQualificationStore::qualify_bundle` (and the production adapters
+observation) accepts a package whose Admission, Review and Settle policies
+are the compatibility family's and whose Score policy is either the
+compatibility policy or one the service's registry supplies
+(`validate_production_package_with_score_policies`). Ingest gives the store
+the registry of the pipeline service it assembled, so in the open build,
+which registers none, only the compatibility family qualifies, as before. A
+registered Score policy qualifies only when both hold:
+
+- its factory's `production_qualified()` is `true`, else
+  `bundle_score_policy_not_production_qualified`;
+- its factory's `configuration_is_qualifiable()` accepts the bytes the
+  manifest's Score `configuration_hash` names, else
+  `bundle_configuration_not_qualifiable` (a missing configuration artifact
+  is refused the same way).
+
+A Score id that no factory is registered under is refused as
+`bundle_implementation_unknown`. The development-marker check
+(`bundle_development_dependency`) applies to every package.
+
 ## Per-phase claim lease
 
 Each pipeline phase claims its run under its own lease length, sized for how
@@ -2431,14 +2548,20 @@ answers `404` when no pipeline runtime is injected:
 - `GET /v1/review/pipeline/quarantine?limit=N` lists the tenant's
   quarantined or escalated runs that wait for an assessment, oldest first,
   with each run's Admission reason (default 50 runs). Each item also has
-  `hold_reason`, what holds the run (`privacy_pass_review_required` when
-  the privacy pass escalated it, else the Admission reason), and
-  `assessment_superseded` (below).
+  `phase`, `hold_reason`, and `assessment_superseded` (below). `phase` is
+  `review` for a run waiting for an assessment, and `score` for a run that a
+  registered Score policy held for operator review instead of pricing it
+  ("A registered Score policy"). Both are claimed and assessed through the
+  two routes below ("Resolving a Score hold"). `hold_reason` is what
+  holds the run: the Score policy's label for a `score` hold,
+  `privacy_pass_review_required` when the privacy pass escalated the run,
+  else the Admission reason.
 - `POST /v1/review/pipeline/runs/{run_id}/claim` claims a run for the
   reviewer for 30 minutes and returns a `lease_token`. `404` means the run is
-  not waiting for review (it is not at Review, neither quarantined nor
-  escalated, its privacy pass is not recorded yet, already assessed, or its
-  submission is no longer operable, for example because it was withdrawn).
+  not waiting for review (it is neither held at Review, quarantined or
+  escalated, nor held at Score; its privacy pass is not recorded yet; it
+  already has an assessment for the phase it is held at; or its submission
+  is no longer operable, for example because it was withdrawn).
   `409` means another reviewer holds a live claim.
 - `POST /v1/review/pipeline/runs/{run_id}/assessment` records the
   reviewer's `approve` or `reject` for the claim's `lease_token`, with a
@@ -2685,6 +2808,43 @@ live, Settle dispatches a `settlement_unreconciled` leg again on its next
 attempt -- the label only means the *last* reconciling call did not confirm
 a match, not that the leg is done being tried. A leg a withdrawal forfeits
 (below) can carry this same label, for the same reason.
+
+A Settle run whose legs are all terminal is not failed when it runs out of
+attempts (#1313, V128). Its legs are all `complete` or `forfeited`, its
+selection is persisted, and its index write is not `pending` or `failed`.
+Instead of failing it, the claim sweep or the exhausting retry gives it one
+extra attempt, labeled `settle_finish_granted` (`settle_finish_granted_at`
+records when). That attempt calls no adapter and writes no ledger row; it
+only commits the run `complete`. So a run whose Trace Credit leg paid keeps
+its revision in the index. The attempt is given once: a run charged again
+on it fails as above, and its revision is removed (N-7).
+
+A run with a paid leg (any `complete` leg: each carries a receipt) whose
+Settle commit is refused for good waits in
+**`awaiting_operator`**. The refusal is `pipeline_gate_decision_conflict` or
+`pipeline_gate_decision_evidence_incomplete`, and the run keeps that label.
+It is not failed, so its paid revision stays in the index. No claim selects
+it, and the contributor sees it as pending.
+
+- **Audit.** The review audit pass appends a `lifecycle_status_change`
+  event with status `accepted` (the submission's status, which the hold
+  does not change) and reason `pipeline_settle_held_for_operator`, one per
+  hold (`operator_held_at` records when).
+- **Where to see it.** `GET /v1/admin/pipeline/operational-summary` counts
+  these runs as `operator_held_run_count`, and lists them in `work` under
+  `settle` / `awaiting_operator` / the refusal label.
+- **Deciding.** `POST /v1/admin/pipeline/runs/{run_id}/held-run-resolution`
+  with the admin credential and `{"resolution": "fail"}` or
+  `{"resolution": "release"}`. It answers `{"state": ...}`, or `404` for a
+  run that is not held, and appends a `lifecycle_status_change` row with
+  the decision as its reason:
+  - `Fail` ends the run `failed` with `operator_failed_held_run`, and queues
+    its revision's removal.
+  - `Release` gives it one more attempt with `operator_released_held_run`,
+    after the cause is fixed. For a conflict, that means removing the other
+    run's pipeline gate decision row. The attempt pays nothing again. If
+    it fails -- refused again, retried to exhaustion, or its worker
+    crashes -- the run is held again, never failed.
 
 A withdrawal (or another way a submission stops being operable -- revoked,
 purged, or expired) forfeits every leg that is not `complete` without an
@@ -3710,7 +3870,7 @@ commands:
 ```bash
 cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg -- \
   rollback_selects activation_requires
-cargo test -p trace-commons-server --bin trace-commons-ingest -- --test-threads=1 \
+cargo test -p trace-commons-server --lib -- --test-threads=1 \
   containment_refuses_new_receipts the_legacy_drain_report_counts_real_pending_work_and_reaches_zero
 ```
 

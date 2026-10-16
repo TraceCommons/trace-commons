@@ -275,6 +275,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_receipt_ownership",
     "pipeline_policy_interventions",
     "pipeline_index_rebuild_fences",
+    "pipeline_score_bases",
     "trace_public_runs",
     "trace_reward_operators",
     "trace_reward_programs",
@@ -1817,6 +1818,33 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         126,
         "account_trust_live_attested",
         include_str!("../../../../migrations/V126__account_trust_live_attested.sql"),
+    ),
+    // V127 (#1237): `trace_transition_admission` also releases a
+    // `processing` attempt, cost bound included, for a caller that knows the
+    // upload's refusal wrote nothing (`released_without_effect`). Replaces
+    // the function in place; its owner and grants are unchanged.
+    (
+        127,
+        "admission_release_without_effect",
+        include_str!("../../../../migrations/V127__admission_release_without_effect.sql"),
+    ),
+    // V128 (#1313): a finishable Settle run's one extra attempt
+    // (`settle_finish_granted_at`), the `awaiting_operator` run state for a
+    // paid run whose Settle commit is refused for good, and
+    // `pipeline_score_bases`, the unapplied runs a Score that runs under
+    // the runtime controls counted.
+    (
+        128,
+        "pipeline_settle_finish_and_score_bases",
+        include_str!("../../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"),
+    ),
+    // V130: a human assessment per phase (`phase`, and the Score hold's
+    // `hold_label`), one per run and phase, so an operator can resolve a
+    // Score hold. No grant changes. V129 is taken by an open PR.
+    (
+        130,
+        "pipeline_score_hold_assessments",
+        include_str!("../../../../migrations/V130__pipeline_score_hold_assessments.sql"),
     ),
 ];
 
@@ -5699,6 +5727,84 @@ impl Database for PgBackend {
             .collect())
     }
 
+    async fn list_settlement_labels(
+        &self,
+        tenant_id: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<Vec<crate::trace_corpus_storage::SettlementLabelRow>, DatabaseError> {
+        use crate::trace_corpus_storage::{SettlementLabel, SettlementLabelRow};
+        if submission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // The run is the one that wrote the submission's pipeline gate
+        // decision (at most one per submission, V116), not the latest run:
+        // a re-run in flight never relabels a settled trace. Forced RLS on
+        // the tenant GUC scopes every table; the explicit `tenant_id = $1`
+        // predicates are belt-and-braces and keep the plans on the keys.
+        // `atomic_units` is NUMERIC(39,0); it is read as text and parsed, so
+        // an amount past u64 is excluded rather than truncated.
+        let rows = tx
+            .query(
+                "SELECT d.submission_id,
+                        r.state AS run_state,
+                        (o.run_id IS NOT NULL) AS has_score_outcome,
+                        s.atomic_units::TEXT AS atomic_units,
+                        s.operation_state
+                 FROM (
+                     SELECT DISTINCT ON (submission_id) submission_id, pipeline_run_id
+                     FROM trace_gate_decisions
+                     WHERE tenant_id = $1
+                       AND submission_id = ANY($2)
+                       AND pipeline_run_id IS NOT NULL
+                     ORDER BY submission_id, decided_at DESC, decision_id DESC
+                 ) d
+                 LEFT JOIN pipeline_runs r
+                        ON r.tenant_id = $1
+                       AND r.run_id = d.pipeline_run_id
+                       AND r.submission_id = d.submission_id
+                 LEFT JOIN phase_outcomes o
+                        ON o.tenant_id = $1
+                       AND o.run_id = r.run_id
+                       AND o.phase = 'score'
+                 LEFT JOIN pipeline_run_settlements s
+                        ON s.tenant_id = $1
+                       AND s.run_id = r.run_id
+                       AND s.instrument_id = 'trace_credit'",
+                &[&tenant_id, &submission_ids],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let run_state: Option<String> = row.get("run_state");
+                let has_score_outcome: bool = row.get("has_score_outcome");
+                let atomic_units: Option<String> = row.get("atomic_units");
+                let operation_state: Option<String> = row.get("operation_state");
+                let label = if run_state.as_deref() != Some("complete")
+                    || !has_score_outcome
+                    || operation_state.as_deref() == Some("held")
+                {
+                    SettlementLabel::Excluded
+                } else {
+                    match atomic_units {
+                        None => SettlementLabel::WithheldAtZero,
+                        Some(units) => units
+                            .parse::<u64>()
+                            .map_or(SettlementLabel::Excluded, SettlementLabel::Settled),
+                    }
+                };
+                SettlementLabelRow {
+                    submission_id: row.get("submission_id"),
+                    label,
+                }
+            })
+            .collect())
+    }
+
     async fn list_recent_gate_decision_keys(
         &self,
         limit: i64,
@@ -6208,13 +6314,9 @@ fn onboarding_device_tenant_access_grant_id(tenant_id: &str, device_key_id: &str
     )
 }
 
+/// One derivation for provisioning, the issuer and ingest's account lookup.
 fn onboarding_device_principal_ref(tenant_id: &str, device_key_id: &str) -> String {
-    let digest = Sha256::digest(format!(
-        "device:{}:{}",
-        tenant_id.trim(),
-        device_key_id.trim()
-    ));
-    format!("principal_sha256:{}", hex::encode(digest))
+    crate::account_trust::device_principal_ref(tenant_id, device_key_id)
 }
 
 fn sha256_prefixed(input: &str) -> String {
@@ -8052,6 +8154,7 @@ mod tests {
             ),
             include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
             include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
+            include_str!("../../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -8094,6 +8197,7 @@ mod tests {
             ),
             include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
             include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
+            include_str!("../../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),

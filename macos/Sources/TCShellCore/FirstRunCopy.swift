@@ -72,14 +72,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let signedOut: String
     }
 
-    public struct InstallUrls: Decodable, Equatable, Sendable {
-        public let claudeCode: String
-        public let codex: String
-        public let geminiCli: String
-        public let cline: String
-        public let opencode: String
-    }
-
     public struct Folders: Decodable, Equatable, Sendable {
         public let titleLight: String
         public let titleBold: String
@@ -90,24 +82,14 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         /// `{tool}` in each of the next four.
         public let watchQuestion: String
         public let chooseFolder: String
+        /// An installed tool with no folder found: the button where the
+        /// picker would be, and (`{tool}`) its accessible name.
+        public let chooseToolFolder: String
+        public let chooseToolFolderAccessibility: String
+        /// A tool that is not installed; where it leads is `InstallGuides`.
         public let getTool: String
         public let downloadTool: String
-        /// Each asked-about tool's install page.
-        public let installUrls: InstallUrls
 
-        /// The install page for `kind`, or nil when the core gave none.
-        public func installURL(for kind: SourceKind) -> URL? {
-            let raw: String
-            switch kind {
-            case .claudeCode: raw = installUrls.claudeCode
-            case .codex: raw = installUrls.codex
-            case .geminiCli: raw = installUrls.geminiCli
-            case .cline: raw = installUrls.cline
-            case .opencode: raw = installUrls.opencode
-            }
-            guard let url = URL(string: raw), url.scheme == "https" else { return nil }
-            return url
-        }
         /// Discovery returned no row the shell could read.
         public let discoveryFailed: String
         public let retry: String
@@ -198,7 +180,7 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let moreAbout: String
         public let start: String
         /// Start's failures, one per call that can stop it, and the refused
-        /// grant, which finishes on Ask me.
+        /// grant, which finishes on Ask.
         public let sharingRefused: String
         public let scopesFailed: String
         public let rulesFailed: String

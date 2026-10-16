@@ -69,7 +69,7 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertEqual(checked(nil), [])
         let before = try await client.status()
         XCTAssertEqual(before.contributionMode, "notify_only")
-        XCTAssertEqual(checked(before), ["notify_only"], "every folder on Ask me checks Ask me, not Mixed")
+        XCTAssertEqual(checked(before), ["notify_only"], "every folder on Ask checks Ask, not Mixed")
         XCTAssertEqual(checked(try Self.status(before, contributionMode: "mixed")), [nil])
         XCTAssertEqual(checked(try Self.status(before, contributionMode: "auto_upload")), ["auto_upload"])
         XCTAssertEqual(checked(before, stale: true), [])
@@ -386,8 +386,8 @@ final class MenuBarGlassPanelTests: XCTestCase {
 
     /// Under an Automatic override, clearing starts no new unattended
     /// sending (a folder set to Automatic already sends under its own
-    /// arming, and Ask me folders go back to asking), so Mixed clears at
-    /// once; under Ask me or Never it is still confirmed (#1256 review).
+    /// arming, and Ask folders go back to asking), so Mixed clears at
+    /// once; under Ask or Never it is still confirmed (#1256 review).
     func test_mixedClearsAnAutomaticOverrideAtOnce() async throws {
         let ask = ProjectRow(projectId: "a", projectLabel: "a", mode: .ignore, folderMode: .ask)
         let auto = ProjectRow(projectId: "u", projectLabel: "u", mode: .ignore, folderMode: .autoUpload)
@@ -567,5 +567,57 @@ final class MenuBarGlassPanelTests: XCTestCase {
             screen: screen, visible: CGRect(x: 0, y: 0, width: 1512, height: 945), thickness: 24), 945)
         // The menu bar hidden: the visible frame reaches the top.
         XCTAssertEqual(MenuBarTopEdgePin.menuBarBottom(screen: screen, visible: screen, thickness: 24), 958)
+    }
+
+    /// A resize notification arrives inside SwiftUI's own resize of the
+    /// panel, so the pin moves the window on the next turn of the run loop
+    /// rather than there, the shape that crashed the edge rail (#1402).
+    func test_thePinMovesTheWindowOutsideTheResizePass() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("GlassWindowFrame.onNextTurn { [weak self, weak window] in"))
+    }
+
+
+    // MARK: The settlement estimate line
+
+    private static let settlementCopy = NudgeCopy(table: [
+        "ESTIMATE_TOTAL_LABEL": "Estimate", "ESTIMATE_TOTAL_ACTION": "Review traces",
+    ])
+
+    private static let settlementStatus = #"""
+        {"settlement_estimate":{"low_usd_micros":3500000,"high_usd_micros":9000000,"up_to":false,
+         "known":4,"unknown":1,"table_version":"t1","pricing_version":"p1","estimated_at":"2026-10-15T09:00:00Z",
+         "text":"About $3.50 to $9 of inference in traces on this Mac"}}
+        """#
+
+    private func decodeStatus(_ json: String) throws -> DaemonData.Status {
+        try DaemonDataDecoding.decoder().decode(DaemonData.Status.self, from: Data(json.utf8))
+    }
+
+    func testSettlementLineRendersFromAStatusFixture() throws {
+        let status = try decodeStatus(Self.settlementStatus)
+        let estimate = try XCTUnwrap(status.settlementEstimate)
+        XCTAssertEqual(estimate.lowUsdMicros, 3_500_000)
+        XCTAssertEqual(estimate.highUsdMicros, 9_000_000)
+        XCTAssertEqual(estimate.known, 4)
+        XCTAssertEqual(estimate.pricingVersion, "p1")
+        let line = MenuPanelStatus.settlementLine(status, available: true, copy: Self.settlementCopy)
+        XCTAssertEqual(line, MenuPanelStatus.SettlementLine(
+            text: "About $3.50 to $9 of inference in traces on this Mac", label: "Estimate", action: "Review traces"))
+    }
+
+    func testSettlementLineIsAbsentWhenNotDrawable() throws {
+        // No key: nothing is drawn, never a $0 line.
+        XCTAssertNil(MenuPanelStatus.settlementLine(try decodeStatus("{}"), available: true, copy: Self.settlementCopy))
+        XCTAssertNil(MenuPanelStatus.settlementLine(nil, available: true, copy: Self.settlementCopy))
+        // A panel that cannot vouch for its data draws nothing.
+        let status = try decodeStatus(Self.settlementStatus)
+        XCTAssertNil(MenuPanelStatus.settlementLine(status, available: false, copy: Self.settlementCopy))
+        // The core's words missing: nothing is drawn.
+        XCTAssertNil(MenuPanelStatus.settlementLine(status, available: true, copy: NudgeCopy(table: [:])))
+        XCTAssertNil(MenuPanelStatus.settlementLine(status, available: true, copy: nil))
     }
 }

@@ -3,6 +3,11 @@
 
 //! TraceCommons hosted server crate.
 
+// The ingest service (`ingest::app`) was the `trace-commons-ingest` binary
+// and names this crate by its external name throughout; this keeps those
+// `trace_commons_server::` paths resolving now that it is a library module.
+extern crate self as trace_commons_server;
+
 pub mod account_binding;
 pub mod account_native_auth;
 pub mod account_native_passkey;
@@ -33,6 +38,7 @@ pub mod driver_liveness;
 pub mod error;
 pub mod inference_connection;
 pub mod inference_funding;
+pub mod ingest;
 pub mod instance_enroll_guard;
 pub mod invite_lookup;
 pub mod legacy_invite_link;
@@ -75,6 +81,7 @@ pub mod versioned_pipeline_product;
 pub mod versioned_pipeline_production;
 pub mod versioned_pipeline_qualification;
 pub mod versioned_pipeline_remote_restore;
+pub mod versioned_pipeline_score_registry;
 pub mod witness_service;
 
 pub const TRACE_COMMONS_SERVER_EXTRACTION_STAGE: &str = "server-storage-owned";

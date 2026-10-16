@@ -64,7 +64,7 @@ final class FoldersScreenTests: XCTestCase {
         ToolAnswerRowLayout.select(.dontUse, for: found, in: &answered)
         XCTAssertTrue(FirstRunNavigation.canContinue(answered, candidates: [found, missing], requiredScope: nil))
 
-        // The row's words are the core's: "Download", and no install line
+        // The row's words are the core's: "Install", and no install line
         // (owner, 2026-10-08). The button is the folder picker's neutral
         // glass pill, not a coloured one.
         let folders = try copy().folders
@@ -75,8 +75,11 @@ final class FoldersScreenTests: XCTestCase {
         let getStyle = String(row[getTool.upperBound...].prefix(800))
         XCTAssertTrue(getStyle.contains(".buttonStyle(GlassButtonStyle(.glass))"), getStyle)
         XCTAssertFalse(row.contains("GlassButtonStyle(.secondary"))
-        // "Download", with the tool named for VoiceOver (owner, 2026-10-08).
-        XCTAssertEqual(folders.getTool, "Download")
+        // "Install", with the tool named for VoiceOver (Ron, 2026-10-15).
+        XCTAssertEqual(folders.getTool, "Install")
+        XCTAssertEqual(folders.downloadTool, "Install {tool}")
+        XCTAssertEqual(folders.chooseToolFolder, "Choose folder")
+        XCTAssertEqual(folders.chooseToolFolderAccessibility, "Choose {tool} folder")
         XCTAssertTrue(getStyle.contains(".accessibilityLabel(ToolAnswerRowLayout.fill(copy.downloadTool, tool: candidate.source))"), getStyle)
         XCTAssertTrue(row.contains("GlassToolTile("))
         XCTAssertTrue(row.contains("large: true"))
@@ -86,6 +89,53 @@ final class FoldersScreenTests: XCTestCase {
         for screen in ["FoldersScreen.swift", "ToolsScreen.swift"] {
             XCTAssertTrue(try Self.source(screen).contains("recordDiscovery("), screen)
         }
+    }
+
+    func test_nativeOpenCodeDatabaseRequiresExplicitWatchAndPreservesExactPath() throws {
+        let candidate = SourceCandidate(
+            source: .opencode, path: "/synthetic/opencode/opencode.db", exists: true,
+            sessionCount: 2, mostRecent: nil, relocatedByEnv: false)
+        // Discovery includes missing required tools so roots can declare
+        // them off without inventing a contributor answer.
+        let candidates = [candidate, Self.candidate(.claudeCode, exists: false),
+                          Self.candidate(.codex, exists: false)]
+        var state = FirstRunState(step: .folders)
+        state.recordDiscovery(candidates)
+
+        XCTAssertEqual(ToolAnswerRowLayout.options(for: candidate, in: state), [.watch, .dontUse])
+        XCTAssertNil(ToolAnswerRowLayout.answer(in: state, for: candidate))
+        XCTAssertEqual(state.sessionRoots.opencode, .undecided)
+        XCTAssertNil(state.sessionRoots.opencode.settingsParams(for: .opencode))
+        XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
+
+        ToolAnswerRowLayout.select(.watch, for: candidate, in: &state)
+        XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: candidate), .watch)
+        XCTAssertEqual(ToolAnswerRowLayout.shownPath(in: state, for: candidate), "/synthetic/opencode/opencode.db")
+        XCTAssertEqual(state.sessionRoots.opencode, .watch(path: "/synthetic/opencode/opencode.db"))
+        let params = try XCTUnwrap(state.sessionRoots.opencode.settingsParams(for: .opencode))
+        XCTAssertEqual(params["opencode_source"] as? [String: String],
+                       ["mode": "watch", "path": "/synthetic/opencode/opencode.db"])
+        XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
+    }
+
+    func test_nativeOpenCodeDatabaseOffSurvivesRediscovery() throws {
+        let candidate = SourceCandidate(
+            source: .opencode, path: "/synthetic/opencode/opencode.db", exists: true,
+            sessionCount: 2, mostRecent: nil, relocatedByEnv: false)
+        // Discovery includes missing required tools so roots can declare
+        // them off without inventing a contributor answer.
+        let candidates = [candidate, Self.candidate(.claudeCode, exists: false),
+                          Self.candidate(.codex, exists: false)]
+        var state = FirstRunState(step: .folders)
+        state.recordDiscovery(candidates)
+        ToolAnswerRowLayout.select(.dontUse, for: candidate, in: &state)
+        state.recordDiscovery(candidates)
+
+        XCTAssertEqual(ToolAnswerRowLayout.answer(in: state, for: candidate), .dontUse)
+        XCTAssertEqual(state.sessionRoots.opencode, .off)
+        let params = try XCTUnwrap(state.sessionRoots.opencode.settingsParams(for: .opencode))
+        XCTAssertEqual(params["opencode_source"] as? [String: String], ["mode": "off"])
+        XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
     }
 
     func test_continueIsDisabledUntilEveryFoundRowIsAnswered() {
@@ -356,24 +406,25 @@ final class FoldersScreenTests: XCTestCase {
         XCTAssertEqual(fresh.toolAnswers[.claudeCode], .watch(path: claude.path))
     }
 
-    /// "Download" opens the tool's install page: every tool the Mac is
-    /// asked about has one, from the core, over https.
+    /// "Install" opens the tool's setup guide: every tool the Mac is asked
+    /// about has one, from the core's one table, over https.
     func test_everyToolHasAnInstallLink() throws {
-        let folders = try copy().folders
+        let guides = InstallGuides(json: TCCoreCopy.installGuidesJSON())
         for kind in SourceKind.allCases {
-            let url = try XCTUnwrap(folders.installURL(for: kind), "\(kind)")
+            let url = try XCTUnwrap(guides.url(for: kind), "\(kind)")
             XCTAssertEqual(url.scheme, "https", "\(kind)")
         }
     }
 
-    /// Both screens pass the core's links to the row, so the button is live.
+    /// Both screens pass the core's one install table to the row, so the
+    /// button is live.
     func test_bothScreensPassTheInstallLinks() throws {
         let coordinator = try String(
             contentsOf: URL(fileURLWithPath: #filePath)
                 .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
                 .appendingPathComponent("Sources/TraceCommonsApp/Views/OnboardingCoordinatorView.swift"),
             encoding: .utf8)
-        XCTAssertTrue(coordinator.contains("FoldersScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:))"))
-        XCTAssertTrue(coordinator.contains("ToolsScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:))"))
+        XCTAssertTrue(coordinator.contains("FoldersScreen(copy: copy, runner: runner, installURL: Self.installGuides.url(for:))"))
+        XCTAssertTrue(coordinator.contains("ToolsScreen(copy: copy, runner: runner, installURL: Self.installGuides.url(for:))"))
     }
 }

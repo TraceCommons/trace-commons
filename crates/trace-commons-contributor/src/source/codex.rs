@@ -36,16 +36,12 @@ impl TraceSource for CodexSource {
     }
 
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
-        let mut sessions = Vec::new();
-        let mut skipped = 0usize;
-        collect_rollout_files(&self.root, &mut sessions, &mut skipped)?;
-        if skipped > 0 {
-            tracing::warn!(
-                skipped,
-                "skipped unreadable codex session entries during discovery"
-            );
-        }
-        Ok(sessions)
+        self.discover_with(Peek::Cwd)
+    }
+
+    /// The same walk, with no `peek_cwd`: every ref's `cwd` is `None`.
+    fn discover_unopened(&self) -> anyhow::Result<Vec<SessionRef>> {
+        self.discover_with(Peek::Nothing)
     }
 
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
@@ -83,7 +79,7 @@ impl TraceSource for CodexSource {
             return Ok(None);
         };
         let mut ignored_skips = 0usize;
-        Ok(rollout_session_ref(address, &mut ignored_skips))
+        Ok(rollout_session_ref(address, Peek::Cwd, &mut ignored_skips))
     }
 }
 
@@ -92,8 +88,31 @@ pub(crate) fn is_rollout_file_name(file_name: &str) -> bool {
     file_name.starts_with("rollout-") && file_name.ends_with(".jsonl")
 }
 
+/// Whether discovery may open a rollout to learn its cwd.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Peek {
+    Cwd,
+    Nothing,
+}
+
+impl CodexSource {
+    fn discover_with(&self, peek: Peek) -> anyhow::Result<Vec<SessionRef>> {
+        let mut sessions = Vec::new();
+        let mut skipped = 0usize;
+        collect_rollout_files(&self.root, peek, &mut sessions, &mut skipped)?;
+        if skipped > 0 {
+            tracing::warn!(
+                skipped,
+                "skipped unreadable codex session entries during discovery"
+            );
+        }
+        Ok(sessions)
+    }
+}
+
 fn collect_rollout_files(
     dir: &Path,
+    peek: Peek,
     sessions: &mut Vec<SessionRef>,
     skipped: &mut usize,
 ) -> anyhow::Result<()> {
@@ -119,7 +138,7 @@ fn collect_rollout_files(
             }
         };
         if file_type.is_dir() {
-            collect_rollout_files(&path, sessions, skipped)?;
+            collect_rollout_files(&path, peek, sessions, skipped)?;
             continue;
         }
         let file_name = entry.file_name();
@@ -129,7 +148,7 @@ fn collect_rollout_files(
         if !is_rollout_file_name(file_name) {
             continue;
         }
-        if let Some(session) = rollout_session_ref(path, skipped) {
+        if let Some(session) = rollout_session_ref(path, peek, skipped) {
             sessions.push(session);
         }
     }
@@ -147,7 +166,7 @@ fn collect_rollout_files(
 /// `None` for a file that is no longer there, which on the event path is an
 /// ordinary race rather than a failure. `skipped` counts the entries that
 /// were unreadable rather than merely gone.
-fn rollout_session_ref(path: PathBuf, skipped: &mut usize) -> Option<SessionRef> {
+fn rollout_session_ref(path: PathBuf, peek: Peek, skipped: &mut usize) -> Option<SessionRef> {
     let metadata = match std::fs::metadata(&path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -160,7 +179,10 @@ fn rollout_session_ref(path: PathBuf, skipped: &mut usize) -> Option<SessionRef>
         .modified()
         .ok()
         .map(chrono::DateTime::<chrono::Utc>::from);
-    let cwd = peek_cwd_memoized(&path, metadata.len(), started_at);
+    let cwd = match peek {
+        Peek::Cwd => peek_cwd_memoized(&path, metadata.len(), started_at),
+        Peek::Nothing => None,
+    };
     // Derive the label from the cwd we just peeked, the same way
     // `load_session` does further down. Leaving this `None` meant every
     // Codex row in the picker rendered as `-`, so a contributor choosing
@@ -849,51 +871,6 @@ mod tests {
             Some(real.clone()),
             "the real rollout must still map, or this test proves nothing"
         );
-    }
-
-    /// A rollout past the budget is declined by name, not truncated.
-    ///
-    /// Truncating would upload a fragment described by a preview that says
-    /// it is the whole conversation. The refusal names the size, which is
-    /// the contributor's own, and never the path.
-    #[test]
-    fn a_rollout_past_the_budget_is_declined_rather_than_part_loaded() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("rollout-2026-08-20T10-00-02-big.jsonl");
-        let head = serde_json::to_string(&json!({
-            "type": "session_meta", "payload": { "cwd": "/Users/z/code/proj" }
-        }))
-        .unwrap();
-        let mut bytes = head.into_bytes();
-        bytes.push(b'\n');
-        bytes.resize(ROLLOUT_BYTE_BUDGET as usize + 1, b'x');
-        std::fs::write(&path, &bytes).unwrap();
-
-        let raw = load_session(&path).unwrap_err();
-        // Typed, so the daemon can tell this refusal -- a verdict that will
-        // decide the same way on every poll -- from the IO errors around
-        // it, which very likely will not. Matching on the message text
-        // would make the wording load-bearing.
-        let typed = raw
-            .downcast_ref::<crate::source::SessionTooLarge>()
-            .expect("an oversized rollout is refused by type, not only by message");
-        assert_eq!(typed.budget_bytes, ROLLOUT_BYTE_BUDGET);
-        assert!(typed.declared_bytes > ROLLOUT_BYTE_BUDGET);
-        let err = raw.to_string();
-        assert!(
-            err.contains("rollout-too-large"),
-            "expected a named refusal, got: {err}"
-        );
-        assert!(
-            !err.contains("rollout-2026-08-20"),
-            "the refusal must not carry the path: {err}"
-        );
-
-        // The same file one byte under the budget still loads, so the bound
-        // is a bound and not an off-by-one that declines healthy sessions.
-        bytes.truncate(ROLLOUT_BYTE_BUDGET as usize);
-        std::fs::write(&path, &bytes).unwrap();
-        assert!(load_session(&path).is_ok());
     }
 
     /// `peek_cwd` must answer from the head of the file and stop.

@@ -530,14 +530,13 @@ final class FirstRunRunnerTests: XCTestCase {
             JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy),
             copy.folders.signInFailed)
 
-        // Choosing watch only there moves on with no near.ai call.
+        // There is no watch only to move on as (owner, 2026-10-12: sign-in
+        // required): Continue stays on Join until near.ai is chosen again.
+        XCTAssertFalse(JoinScreenLayout.canForward(runner.state))
+        let held = runner.state
         runner.state = JoinScreenLayout.forward(runner.state)
-        daemon.log = []
-        await runner.commit(.leaveRoots)
-        XCTAssertEqual(daemon.log, [])
-        XCTAssertNil(runner.failure)
-        XCTAssertEqual(runner.state.account, .watchOnly)
-        XCTAssertEqual(runner.state.step, .uses)
+        XCTAssertEqual(runner.state, held)
+        XCTAssertEqual(runner.state.step, .join)
     }
 
     /// Choosing near.ai again on Join is what lets the next Continue sign in;

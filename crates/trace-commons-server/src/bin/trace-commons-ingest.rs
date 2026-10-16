@@ -1,6 +1,15 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+// The ingest service. Despite its place under `src/bin/`, this file is a
+// module of the `trace_commons_server` library (`crate::ingest::app`,
+// declared by `#[path]` in `src/ingest.rs`), so a build that registers its
+// own Score policies can start the same service from its own binary through
+// `trace_commons_server::ingest::run`. The `trace-commons-ingest` binary is
+// `src/bin/trace_commons_ingest_main.rs`, a thin `main` that starts it with
+// the open-build options. It stays at this path so its history, and the
+// paths the operator docs cite, do not move.
+
 #[path = "trace_commons_ingest_internal/account_routes.rs"]
 mod account_routes;
 #[path = "trace_commons_ingest_internal/account_trust_growth.rs"]
@@ -105,6 +114,7 @@ use trace_commons_server::trace_summary_similarity::{
 // legacy gates, and under `near-ai-scorer` the one constructor of the NEAR AI
 // scorer and fastembed embedder (PR #1295 review round 2, Major 1).
 use trace_commons_server::versioned_pipeline_production::gate_env::*;
+use trace_commons_server::versioned_pipeline_score_registry::ScorePolicyRegistry;
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
@@ -1277,8 +1287,10 @@ SUBCOMMANDS:
     -h, --help                        Print this help text
 ";
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// What the `trace-commons-ingest` binary's `main` did before the service
+/// moved into the library: select the pipeline runtime, then start ingest
+/// with `options` (`trace_commons_server::ingest::run`).
+pub(crate) async fn run_ingest_main(options: super::IngestOptions) -> anyhow::Result<()> {
     // A subcommand (help, version, keypair, TLS self-check) reads no
     // configuration, so it never sees the pipeline runtime selection.
     let selection = if std::env::args().nth(1).is_some() {
@@ -1286,7 +1298,20 @@ async fn main() -> anyhow::Result<()> {
     } else {
         production_assembly::pipeline_runtime_selection_from_env()?
     };
-    run_ingest(selection.assembler()).await
+    run_ingest(selection.assembler(), options).await
+}
+
+/// The Score policy registry the qualification store qualifies: the one the
+/// assembled pipeline service holds, or, with no pipeline runtime, the one
+/// ingest was started with (empty in the open build either way).
+fn qualification_score_policies(
+    service: Option<&PipelineService>,
+    started_with: &ScorePolicyRegistry,
+) -> ScorePolicyRegistry {
+    match service {
+        Some(service) => service.score_policies().clone(),
+        None => started_with.clone(),
+    }
 }
 
 /// Starts ingest with an optional production pipeline assembly.
@@ -1301,8 +1326,13 @@ async fn main() -> anyhow::Result<()> {
 /// (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS`), unless the test-only
 /// `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` opt-in is set. See
 /// `assemble_ingest_pipeline_runtime`.
+///
+/// `options` carries the Score policy factories the pipeline service and
+/// the qualification store can bind (empty in the open build) and the binary
+/// name `--version` reports.
 pub async fn run_ingest(
     pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
+    options: super::IngestOptions,
 ) -> anyhow::Result<()> {
     // Choose the rustls crypto provider before anything can open a TLS
     // connection.
@@ -1366,10 +1396,7 @@ pub async fn run_ingest(
         Some("-V") | Some("--version") => {
             println!(
                 "{}",
-                trace_commons_build_info::identity(
-                    env!("CARGO_BIN_NAME"),
-                    env!("CARGO_PKG_VERSION")
-                )
+                trace_commons_build_info::identity(options.bin_name(), env!("CARGO_PKG_VERSION"))
             );
             return Ok(());
         }
@@ -1388,8 +1415,11 @@ pub async fn run_ingest(
         policy = PiiClassifyPolicy::from_env().as_label(),
         "Trace Commons PII classify policy"
     );
-    let (state, pipeline_gate_components) =
-        AppState::from_env_with_pipeline_runtime_assembler(pipeline_runtime_assembler).await?;
+    let (state, pipeline_gate_components) = AppState::from_env_with_pipeline_runtime_assembler(
+        pipeline_runtime_assembler,
+        options.score_policies().clone(),
+    )
+    .await?;
     let state = Arc::new(state);
     let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let listener = finish_ingest_startup(
@@ -1674,6 +1704,11 @@ struct AppState {
     /// serves: the operator-installed one, validated at boot, else the
     /// protocol's built-in table. Never empty.
     credit_estimate_table: Arc<trace_commons_protocol::local_credit_estimate::LocalEstimateTable>,
+    /// The settlement table `GET /v1/credit-estimate/settlement-table`
+    /// serves: the operator-installed one, validated at boot. `None` when
+    /// none is installed; the route then answers 404. No built-in.
+    credit_settlement_table:
+        Option<Arc<trace_commons_protocol::settlement_estimate::SettlementEstimateTable>>,
     inference_connection_catalog:
         Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
@@ -3415,6 +3450,49 @@ impl TenantCtx {
         &self.auth.principal_ref
     }
 
+    /// The principal account admission looks the caller up by: the
+    /// provisioned device principal for a device-key upload claim, and
+    /// `principal_ref()` for every other credential.
+    ///
+    /// NEAR and NEAR AI provisioning key the account, its admission anchor
+    /// and the ledger's live-device check by
+    /// `account_trust::device_principal_ref(tenant, device_key_id)`. A
+    /// signed upload claim's own principal hashes the claim's actor under the
+    /// `signed_claim` method instead, so it never matches a provisioned row;
+    /// looking it up refused every `nearai-` upload with
+    /// `account_trust_refused` (2026-10-12).
+    ///
+    /// Which device: the one whose key id is in the claim's actor. The issuer
+    /// writes that actor (`account_trust::device_claim_actor`) only after
+    /// verifying the device key's signature for this tenant, and refuses a
+    /// device-shaped actor on the workload path, so the actor's key id is
+    /// the authenticated device. The actor is recovered from `sub` and
+    /// accepted only if it re-derives this request's principal, so a claim
+    /// whose `principal_ref` and `sub` disagree falls back rather than
+    /// borrowing `sub`. `principal_ref()` itself is unchanged: it remains the
+    /// ownership key every submission row is written under.
+    fn account_principal_ref(&self) -> String {
+        self.device_principal_ref()
+            .unwrap_or_else(|| self.auth.principal_ref.clone())
+    }
+
+    fn device_principal_ref(&self) -> Option<String> {
+        let auth = &self.auth;
+        if auth.auth_method != TraceAuthMethod::SignedClaim {
+            return None;
+        }
+        let actor = auth.signed_claim_subject.as_deref()?;
+        if signed_claim_principal_refs(&auth.tenant_id, actor).0 != auth.principal_ref {
+            return None;
+        }
+        let device_key_id =
+            trace_commons_server::account_trust::device_claim_key_id(&auth.tenant_id, actor)?;
+        Some(trace_commons_server::account_trust::device_principal_ref(
+            &auth.tenant_id,
+            device_key_id,
+        ))
+    }
+
     fn tenant_storage_ref(&self) -> String {
         tenant_storage_ref(self.tenant_id())
     }
@@ -3855,6 +3933,7 @@ impl AppState {
     /// was assembled over (`None` unless that runtime was selected).
     async fn from_env_with_pipeline_runtime_assembler(
         pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
+        score_policies: ScorePolicyRegistry,
     ) -> anyhow::Result<(
         Self,
         Option<Arc<production_assembly::PipelineGateComponents>>,
@@ -4176,6 +4255,7 @@ impl AppState {
             &pipeline_novelty_utility_checks,
             pipeline_main_gate,
             pipeline_gate_components.clone(),
+            score_policies.clone(),
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
         if let Some(service) = pipeline_service.as_ref() {
@@ -4203,10 +4283,16 @@ impl AppState {
         let pipeline_activation = db_connections.as_ref().map(|connections| {
             Arc::new(PipelineActivationStore::new(connections.postgres.clone()))
         });
+        // The qualification store qualifies the Score policies the pipeline
+        // service can bind: the registry the assembled service holds, or,
+        // with no pipeline runtime, the one ingest was started with (empty
+        // in the open build either way).
         let pipeline_qualification = db_connections.as_ref().map(|connections| {
-            Arc::new(PipelineQualificationStore::new(
-                connections.postgres.clone(),
-            ))
+            let store = PipelineQualificationStore::new(connections.postgres.clone());
+            Arc::new(store.with_score_policies(qualification_score_policies(
+                pipeline_service.as_deref(),
+                &score_policies,
+            )))
         });
         // Task 10: the two trust stores the qualification and activation
         // routes verify against. A set variable whose file does not hold a
@@ -4953,6 +5039,7 @@ impl AppState {
             inference_connection_catalog: Arc::new(inference_connection_routes::catalog_from_env()?),
             activity_missions_policy: activity_missions::policy_from_env()?,
             credit_estimate_table: credit_estimate::table_from_env()?,
+            credit_settlement_table: credit_estimate::settlement_table_from_env()?,
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -8558,6 +8645,12 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/credit-estimate/table",
             get(credit_estimate::table_handler),
         )
+        // Same reason: the settlement table is public, non-personal data.
+        // 404 when the operator installed none.
+        .route(
+            trace_commons_protocol::settlement_estimate::SETTLEMENT_TABLE_PATH,
+            get(credit_estimate::settlement_table_handler),
+        )
         .route(
             "/v1/traces",
             get(list_traces_handler)
@@ -8661,6 +8754,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/pipeline/index-invalidations/requeue-failed",
             post(pipeline_requeue_failed_index_invalidations_handler),
+        )
+        .route(
+            "/v1/admin/pipeline/runs/{run_id}/held-run-resolution",
+            post(pipeline_resolve_held_run_handler).layer(pipeline_admin_body_limit()),
         )
         .route(
             "/.well-known/trace-commons-attestation-keyset.json",
@@ -15041,9 +15138,11 @@ enum UploadRoute<'a> {
 /// retry is checked against no qualification. A refusal that only the receipt
 /// transaction finds (a routing row or a policy that changes after this read:
 /// a `contain` or a `suspend` that commits while the upload is in flight)
-/// comes after `attempt.processing`, as `main`'s quota refusal does: the
-/// attempt then stays `processing` until its lease ends, because
-/// `Attempt::finish` releases an attempt only from `reserved`. A legacy
+/// comes after `attempt.processing`, as `main`'s quota refusal does.
+/// `Attempt::finish` releases an attempt only from `reserved`, so
+/// `route_pipeline_receipt` releases it there, from `processing`, with
+/// `Attempt::finish_without_effect`: the receipt's refusal wrote nothing
+/// (#1237). The legacy quota refusal still keeps its charge. A legacy
 /// upload that passed this decision before a `contain` committed completes on
 /// the legacy path: the legacy claim reads no routing.
 async fn decide_upload_route<'a>(
@@ -15175,17 +15274,47 @@ async fn decide_upload_route<'a>(
 /// The text is compared whole: only the label itself, never an error that
 /// carries it.
 fn pipeline_receipt_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+    match pipeline_receipt_refusal_label(&error) {
+        Some(label) => api_error(StatusCode::SERVICE_UNAVAILABLE, label),
+        None => internal_error(error),
+    }
+}
+
+/// The label of a pipeline receipt error that `pipeline_receipt_error`
+/// answers as a `503`, or `None`. Each is raised before the receipt writes
+/// anything (the authority is resolved before any database work; a suspended
+/// policy is refused in the receipt's transaction, which writes nothing), so
+/// the upload's admission attempt is released without effect (#1237). Any
+/// other error's effects are not known.
+fn pipeline_receipt_refusal_label(error: &anyhow::Error) -> Option<&'static str> {
     let text = error.to_string();
-    for label in [
+    [
         PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
         trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL,
         trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_READ_FAILED_LABEL,
-    ] {
-        if text == label {
-            return api_error(StatusCode::SERVICE_UNAVAILABLE, label);
-        }
-    }
-    internal_error(error)
+    ]
+    .into_iter()
+    .find(|label| text == *label)
+}
+
+/// #1237: releases the upload's admission attempt, and gives back its cost
+/// bound or charge, for a pipeline receipt refused by a refusal that wrote
+/// nothing -- also when the attempt is already `processing`, which the
+/// handler's trailing `finish(false)` never releases. Called only from the
+/// refusal arms of `route_pipeline_receipt` that store nothing; a failure
+/// whose effects are not known keeps its charge.
+///
+/// The refusal is the upload's answer either way. A release the ledger
+/// refuses is logged under its admission label and leaves the attempt as it
+/// was, which is the behaviour from before this release existed.
+async fn release_attempt_without_effect(
+    state: &AppState,
+    admission: Option<&mut admission::Attempt>,
+) {
+    let (Some(attempt), Some(db)) = (admission, state.db_mirror.as_ref()) else {
+        return;
+    };
+    let _ = attempt.finish_without_effect(db.as_ref()).await;
 }
 
 /// Acts on the route `decide_upload_route` chose for a new upload: the legacy
@@ -15216,6 +15345,12 @@ fn pipeline_receipt_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) 
 /// pipeline-routed tenant never writes the legacy file record the ordinary
 /// `can_access_submission` check reads, so without this check here that
 /// check would never run against a receipt key at all.
+///
+/// `admission` is the upload's admission attempt, already `processing`. The
+/// refusals below that write nothing release it
+/// (`release_attempt_without_effect`, #1237); every other outcome leaves it
+/// to the handler's trailing `finish`.
+#[allow(clippy::too_many_arguments)]
 async fn route_pipeline_receipt(
     state: &AppState,
     tenant: &TenantCtx,
@@ -15224,6 +15359,7 @@ async fn route_pipeline_receipt(
     residual_risk_basis: &[ResidualRiskCondition],
     source_claim: Option<(Uuid, [u8; 32])>,
     route: UploadRoute<'_>,
+    mut admission: Option<&mut admission::Attempt>,
 ) -> ApiResult<Option<TraceSubmissionReceipt>> {
     let pipeline_service = match route {
         UploadRoute::Legacy { claim } => {
@@ -15233,7 +15369,7 @@ async fn route_pipeline_receipt(
         UploadRoute::Pipeline(pipeline_service) => pipeline_service,
     };
     let idempotency_key = envelope.submission_id.to_string();
-    let result = pipeline_service
+    let submitted = pipeline_service
         .submit(PipelineReceiptRequest {
             source_session: source_claim,
             tenant_id: tenant.tenant_id(),
@@ -15249,8 +15385,16 @@ async fn route_pipeline_receipt(
                 max_per_principal_per_hour: state.submission_quota.max_per_principal_per_hour,
             },
         })
-        .await
-        .map_err(pipeline_receipt_error)?;
+        .await;
+    let result = match submitted {
+        Ok(result) => result,
+        Err(error) => {
+            if pipeline_receipt_refusal_label(&error).is_some() {
+                release_attempt_without_effect(state, admission.take()).await;
+            }
+            return Err(pipeline_receipt_error(error));
+        }
+    };
     match result {
         PipelineReceiptResult::Created(run) => {
             state.pipeline_worker_wake.wake(tenant.tenant_id());
@@ -15329,10 +15473,17 @@ async fn route_pipeline_receipt(
         // transaction's own check. The transaction's answer is the one that
         // holds: a contained tenant is refused; one returned to the legacy
         // path is claimed for it.
-        PipelineReceiptResult::NotRouted(RoutingState::Contained) => Err(api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL,
-        )),
+        // Refused in the transaction, which wrote nothing, after the
+        // attempt was marked `processing` (#1237): the attempt is released
+        // and its cost bound or charge given back, so a retry is neither
+        // refused as in progress nor charged twice.
+        PipelineReceiptResult::NotRouted(RoutingState::Contained) => {
+            release_attempt_without_effect(state, admission.take()).await;
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL,
+            ))
+        }
         PipelineReceiptResult::NotRouted(RoutingState::Legacy) => {
             claim_legacy_receipt(state, tenant, envelope.submission_id, raw_body, true).await
         }
@@ -15822,6 +15973,7 @@ async fn submit_trace_handler(
             &residual_risk_basis,
             source_claim,
             upload_route,
+            admission.as_mut(),
         )
         .await?
         {
@@ -15875,6 +16027,14 @@ async fn submit_trace_handler(
         } else {
             "submitted-envelope"
         };
+        let db_first = state.require_db_mirror_writes || state.account_admission.is_some();
+        // What a failed DB-first remediation restores (#332), read before
+        // `store_envelope` can overwrite the prior's plaintext path. Kept as
+        // a result: a prior that cannot be read blocks only the rollback.
+        let remediation_prior_snapshot = remediating_prior
+            .as_ref()
+            .filter(|_| db_first)
+            .map(|prior| quarantine_remediation_prior_snapshot(state.as_ref(), prior));
         let stored_envelope = store_envelope(
             &state,
             tenant.tenant_id(),
@@ -15970,7 +16130,7 @@ async fn submit_trace_handler(
         // (same id, same chain fields), appended once both submission writes
         // below are done.
         let audit_row = submission_audit_row_mirror(&record).map_err(internal_error)?;
-        if state.require_db_mirror_writes || state.account_admission.is_some() {
+        if db_first {
             let mirror_result = mirror_submission_to_db_with_options(
                 &state,
                 tenant.auth(),
@@ -15989,8 +16149,19 @@ async fn submit_trace_handler(
                     submission_id = %record.submission_id,
                     "Trace Commons DB dual-write mirror failed"
                 );
-                cleanup_submission_file_side_writes(state.as_ref(), &record)
-                    .map_err(internal_error)?;
+                match (remediating_prior.as_ref(), remediation_prior_snapshot) {
+                    (Some(prior), Some(snapshot)) => roll_back_failed_quarantine_remediation(
+                        state.as_ref(),
+                        tenant.auth(),
+                        prior,
+                        snapshot,
+                        &record,
+                    )
+                    .await
+                    .map_err(internal_error)?,
+                    _ => cleanup_submission_file_side_writes(state.as_ref(), &record)
+                        .map_err(internal_error)?,
+                }
             }
             enforce_db_mirror_write_result(state.as_ref(), "submission", mirror_result)
                 .map_err(internal_error)?;
@@ -18558,6 +18729,89 @@ async fn pipeline_requeue_failed_index_invalidations_handler(
     Ok(Json(PipelineInvalidationRequeueResponse { requeued }))
 }
 
+/// The operator's decision on a run held for an operator, as
+/// `POST /v1/admin/pipeline/runs/{run_id}/held-run-resolution` takes it.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PipelineHeldRunResolutionRequest {
+    Fail,
+    Release,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PipelineHeldRunResolutionBody {
+    resolution: PipelineHeldRunResolutionRequest,
+}
+
+/// Response body of
+/// `POST /v1/admin/pipeline/runs/{run_id}/held-run-resolution`: the run's
+/// state after the decision, a label only.
+#[derive(Debug, Serialize)]
+struct PipelineHeldRunResolutionResponse {
+    state: trace_commons_server::versioned_pipeline::PipelineRunState,
+}
+
+/// `POST /v1/admin/pipeline/runs/{run_id}/held-run-resolution`: ends the
+/// hold of a run in `awaiting_operator` (#1313,
+/// `PgPipelineStore::resolve_operator_held_run`). `fail` ends it `failed`
+/// and applies N-7; `release` gives it one more Settle attempt, which pays
+/// nothing again, for an operator who has fixed what refused its commit. It
+/// needs `main`'s admin credential, as the other pipeline admin routes do;
+/// the tenant is the credential's. A run the tenant does not have, or one
+/// that is not held, is `404`; without a pipeline runtime it is `404` too.
+/// Each decision appends a label-only `lifecycle_status_change` row: the
+/// submission keeps its status, `accepted`, and the decision is the reason.
+async fn pipeline_resolve_held_run_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<Uuid>,
+    Json(body): Json<PipelineHeldRunResolutionBody>,
+) -> ApiResult<Json<PipelineHeldRunResolutionResponse>> {
+    use trace_commons_server::versioned_pipeline::{
+        PIPELINE_OPERATOR_FAILED_HELD_RUN_LABEL, PIPELINE_OPERATOR_RELEASED_HELD_RUN_LABEL,
+        PipelineOperatorHeldRunResolution,
+    };
+    let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(tenant.auth())?;
+    let pipeline = require_pipeline_service(state.as_ref())?;
+    let (resolution, reason_label) = match body.resolution {
+        PipelineHeldRunResolutionRequest::Fail => (
+            PipelineOperatorHeldRunResolution::Fail,
+            PIPELINE_OPERATOR_FAILED_HELD_RUN_LABEL,
+        ),
+        PipelineHeldRunResolutionRequest::Release => (
+            PipelineOperatorHeldRunResolution::Release,
+            PIPELINE_OPERATOR_RELEASED_HELD_RUN_LABEL,
+        ),
+    };
+    let resolved = pipeline
+        .store()
+        .resolve_operator_held_run(tenant.tenant_id(), run_id, resolution)
+        .await
+        .map_err(internal_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "pipeline_run_not_held"))?;
+    append_lifecycle_status_audit(
+        state.as_ref(),
+        tenant.auth(),
+        LifecycleAuditActor::Tenant,
+        resolved.submission_id,
+        TraceCorpusStatus::Accepted,
+        reason_label,
+    )
+    .await
+    .map_err(internal_error)?;
+    tracing::warn!(
+        tenant_storage_ref = %tenant_storage_ref(tenant.tenant_id()),
+        run_ref_hash = %sha256_prefixed(&run_id.to_string()),
+        reason_label,
+        "an operator resolved a held pipeline run"
+    );
+    Ok(Json(PipelineHeldRunResolutionResponse {
+        state: resolved.state,
+    }))
+}
+
 /// `GET /.well-known/trace-commons-attestation-keyset.json` — publishes the
 /// attestation verifying key(s) so a collector can check a signature without
 /// out-of-band key distribution. Unauthenticated by design, mirroring
@@ -19720,6 +19974,8 @@ async fn account_trace_content_handler(
         Some(record) if ctx.principal_set.contains(&record.auth_principal_ref) => record,
         _ => return Err(not_found()),
     };
+    // After ownership, so a submission the caller does not own stays a 404.
+    refuse_a_pipeline_submission(state.as_ref(), &ctx.tenant_id, submission_id).await?;
     let record = trace_commons_record_from_storage_submission(record)
         .ok_or_else(not_found)?
         .map_err(internal_error)?;
@@ -19747,22 +20003,24 @@ async fn account_trace_content_handler(
 
     let audit_tenant = account_audit_tenant(&ctx);
 
-    // Read the envelope through the EXISTING KMS-bound path. On ANY failure
-    // (KMS unwrap/decrypt, hash mismatch, store error, missing config) fail
-    // closed: audit the FAILED read, then return a generic label-only 500. The
-    // error itself is hashed for logs; never surfaced to the caller.
-    let envelope = match read_envelope_by_record(state.as_ref(), &record) {
-        Ok(envelope) => envelope,
+    // Read the envelope through the active object ref (the KMS-bound path),
+    // or the file only where object-primary submit/review is off. On ANY
+    // failure (missing ref, KMS unwrap/decrypt, hash mismatch, store error,
+    // missing config) fail closed: audit the FAILED read, then return a
+    // generic label-only 500. The error itself is hashed for logs; never
+    // surfaced to the caller.
+    let body_read = match read_envelope_body_for_account(&state, &ctx.tenant_id, record).await {
+        Ok(body_read) => body_read,
         Err(error) => {
             tracing::warn!(
                 error_hash = %safe_display_error_hash(&error),
-                submission_id = %record.submission_id,
+                submission_id = %submission_id,
                 "Trace Commons account content read-back failed; failing closed"
             );
             return Err(audit_account_content_read_failure(
                 state.as_ref(),
                 &audit_tenant,
-                record.submission_id,
+                submission_id,
             )
             .await);
         }
@@ -19770,18 +20028,18 @@ async fn account_trace_content_handler(
 
     // Serialize the already-redacted stored envelope. A serialization failure is
     // also fail-closed and audited (it is still a failed content read).
-    let body = match serde_json::to_vec(&envelope) {
+    let body = match serde_json::to_vec(&body_read.envelope) {
         Ok(body) => body,
         Err(error) => {
             tracing::warn!(
                 error_hash = %safe_display_error_hash(&anyhow::Error::new(error)),
-                submission_id = %record.submission_id,
+                submission_id = %submission_id,
                 "Trace Commons account content read-back serialization failed; failing closed"
             );
             return Err(audit_account_content_read_failure(
                 state.as_ref(),
                 &audit_tenant,
-                record.submission_id,
+                submission_id,
             )
             .await);
         }
@@ -19794,7 +20052,7 @@ async fn account_trace_content_handler(
         if let Err(audit_error) = append_trace_content_read_audit_per_source(
             state.as_ref(),
             &audit_tenant,
-            record.submission_id,
+            submission_id,
             &[],
             "account_trace_content",
             Some("read_too_large"),
@@ -19803,7 +20061,7 @@ async fn account_trace_content_handler(
         {
             tracing::warn!(
                 error_hash = %safe_display_error_hash(&audit_error),
-                submission_id = %record.submission_id,
+                submission_id = %submission_id,
                 "Trace Commons account content read-back over-ceiling audit append failed"
             );
         }
@@ -19813,14 +20071,18 @@ async fn account_trace_content_handler(
         ));
     }
 
-    // Audit the SUCCESSFUL read (hash-only, per-source). The file-fallback read
-    // path resolves no DB object ref, so there is no object_ref id to attribute;
-    // an empty ref slice records a single source-less row.
+    // Audit the SUCCESSFUL read (hash-only, per-source), against the object
+    // ref it read. The file-fallback read resolves no object ref; its empty
+    // ref slice records a single source-less row.
+    let read_refs: &[Uuid] = match body_read.object_ref_id.as_ref() {
+        Some(id) => std::slice::from_ref(id),
+        None => &[],
+    };
     append_trace_content_read_audit_per_source(
         state.as_ref(),
         &audit_tenant,
-        record.submission_id,
-        &[],
+        submission_id,
+        read_refs,
         "account_trace_content",
         None,
     )
@@ -44032,6 +44294,18 @@ async fn release_review_lease_handler(
 /// `reviewer_sha256:` plus the lowercase hex SHA-256 of the authenticated
 /// reviewer principal -- the `pipeline_review_claims.reviewer_principal_ref`
 /// shape `PgPipelineStore::claim_review` requires.
+/// The audit label of a reviewer's resolution of a Score hold. Score runs on
+/// an accepted submission and settles it either way, so the resolution
+/// changes no corpus status; the event records the status the submission
+/// keeps, and this label says which way the hold was resolved.
+fn score_hold_audit_reason(approved: bool) -> &'static str {
+    if approved {
+        "score_hold_approved"
+    } else {
+        "score_hold_rejected"
+    }
+}
+
 fn pipeline_reviewer_principal_ref(principal_ref: &str) -> String {
     format!(
         "reviewer_sha256:{}",
@@ -44088,8 +44362,16 @@ struct PipelineReviewQueueItem {
     run_id: Uuid,
     submission_id: Uuid,
     admission_reason: Option<String>,
-    /// What holds the run: `privacy_pass_review_required` when the
-    /// Review-start privacy pass escalated it, else `admission_reason`.
+    /// The phase the run is held at: `review` for a run waiting for a
+    /// reviewer's assessment, `score` for a run its Score policy held for
+    /// operator review instead of pricing it. Both are claimed and assessed
+    /// through the same routes and the same reviewer credential; a `score`
+    /// approval must resolve the hold reason, and a `score` rejection
+    /// settles the run with no credit.
+    phase: &'static str,
+    /// What holds the run: the Score policy's label for a `score` hold;
+    /// `privacy_pass_review_required` when the Review-start privacy pass
+    /// escalated it; else `admission_reason`.
     hold_reason: Option<String>,
     /// The run's assessment was recorded before the privacy pass escalated
     /// it, so Review ignores it; such a run cannot be claimed again.
@@ -44099,7 +44381,8 @@ struct PipelineReviewQueueItem {
 
 /// `GET /v1/review/pipeline/quarantine?limit=N`: pipeline runs waiting for a
 /// human assessment (quarantined by Admission or escalated by the privacy
-/// pass), oldest first, each with its hold reason (labels only). `PgPipelineStore::
+/// pass), and runs a Score policy held for operator review (`phase`
+/// `score`), oldest first, each with its hold reason (labels only). `PgPipelineStore::
 /// list_review_queue` already excludes a run whose submission is no longer
 /// operable (Ruling T3-6).
 async fn pipeline_review_quarantine_handler(
@@ -44121,6 +44404,11 @@ async fn pipeline_review_quarantine_handler(
             run_id: entry.run.run_id,
             submission_id: entry.run.submission_id,
             admission_reason: entry.run.admission_reason,
+            phase: if entry.run.next_phase == Some(trace_commons_gate_api::pipeline::Phase::Score) {
+                "score"
+            } else {
+                "review"
+            },
             hold_reason: entry.hold_reason,
             assessment_superseded: entry.assessment_superseded,
             created_at: entry.run.created_at,
@@ -44361,10 +44649,7 @@ async fn pipeline_review_assessment_handler(
         // stored claim -- not against this field.
         lease_expires_at: Utc::now(),
     };
-    let resulting_status = match recommendation {
-        ReviewRecommendation::Approve => TraceCorpusStatus::Accepted,
-        ReviewRecommendation::Reject => TraceCorpusStatus::Rejected,
-    };
+    let approved = recommendation == ReviewRecommendation::Approve;
     // Zaki review 1, round 2, N-2: the privileged-action consent check
     // `main`'s review decision applies (`apply_review_decision`): the
     // reviewer's claims and the tenant's current policy must allow a
@@ -44387,13 +44672,33 @@ async fn pipeline_review_assessment_handler(
     }
     // The audit row's labels, formed before the commit, so nothing that can
     // fail without an append stands between the commit and the answer.
-    let audit_row =
-        review_decision_audit_row(resulting_status, &reason_label, None).map_err(internal_error)?;
-    let assessment = pipeline_service
+    // Both phases' rows are formed here, the one that applies chosen once the
+    // hold's phase is known.
+    let review_status = if approved {
+        TraceCorpusStatus::Accepted
+    } else {
+        TraceCorpusStatus::Rejected
+    };
+    let review_row =
+        review_decision_audit_row(review_status, &reason_label, None).map_err(internal_error)?;
+    let score_label = score_hold_audit_reason(approved);
+    let score_row = review_decision_audit_row(TraceCorpusStatus::Accepted, score_label, None)
+        .map_err(internal_error)?;
+    let (assessment, at_score) = pipeline_service
         .store()
-        .record_review_assessment(&claim, recommendation, reason, resolved_quarantine_reasons)
+        .record_review_assessment_for_hold(
+            &claim,
+            recommendation,
+            reason,
+            resolved_quarantine_reasons,
+        )
         .await
         .map_err(pipeline_review_db_error)?;
+    let (resulting_status, event_reason, audit_row) = if at_score {
+        (TraceCorpusStatus::Accepted, score_label, score_row)
+    } else {
+        (review_status, reason_label.as_str(), review_row)
+    };
     // Zaki review 1, minor item M-a: the audit row `main`'s review decision
     // appends: the reason as a hash, and labels only in the metadata. The
     // status is the one the recommendation leads to once Review runs.
@@ -44412,7 +44717,7 @@ async fn pipeline_review_assessment_handler(
             &tenant,
             submission_id,
             resulting_status,
-            Some(&trace_free_text_audit_reason(&reason_label)),
+            Some(&trace_free_text_audit_reason(event_reason)),
         );
         event.event_id = assessment.assessment_id;
         append_audit_event_mirrored(state.as_ref(), &tenant, event, audit_row, "audit event")
@@ -62648,7 +62953,7 @@ fn visible_submission_records_scoped(
 // `list_account_trace_submissions_keyset`), so this function is not called on the
 // request path; it is retained as the executable reference for the predicate and
 // — crucially — to anchor the Hardening-C type-level surface separation, asserted
-// by the `compile_fail` doctests above and the runtime witness test. Hence the
+// by the `compile_fail` doctests above. Hence the
 // `#[allow(dead_code)]`: removing the function would drop the compile-fail
 // guarantee, not just an unused helper.
 #[allow(dead_code)]
@@ -69099,6 +69404,58 @@ async fn read_envelope_body_for_review_decision(
     })
 }
 
+/// Reads an owned submission's envelope for the account surfaces: the content
+/// read-back and the public-run session detail and publish routes (#1168).
+///
+/// The record these routes hold is built from the database row and carries no
+/// artifact receipt, so `read_envelope_by_record` alone can only read the
+/// plaintext file under `state.root`, which object-primary submit/review never
+/// writes. Where object-primary submit/review is on for the tenant, the active
+/// envelope object ref is read instead (a rescrubbed envelope ahead of the
+/// submitted one), as the object-primary review path does, and a missing ref
+/// fails closed. Where it is off, the file is read as before: a file-backed
+/// deployment rewrites that file in place (process evaluation), so its older
+/// file-store ref no longer matches the bytes.
+///
+/// The object-store read and decrypt run on the blocking pool.
+async fn read_envelope_body_for_account(
+    state: &Arc<AppState>,
+    tenant_id: &str,
+    record: TraceCommonsSubmissionRecord,
+) -> anyhow::Result<TraceEnvelopeBodyRead> {
+    anyhow::ensure!(
+        record.tenant_id == tenant_id,
+        "trace metadata tenant mismatch"
+    );
+    let object_ref = if state.object_primary_submit_review_for_tenant(tenant_id) {
+        let db = state
+            .db_mirror
+            .as_ref()
+            .context("object-primary submit/review is enabled without a DB mirror")?;
+        let object_ref =
+            get_latest_active_envelope_object_ref(db.as_ref(), tenant_id, record.submission_id)
+                .await
+                .context("failed to read active envelope object ref for account read")?;
+        Some(object_ref.context("missing active envelope object ref for account read")?)
+    } else {
+        None
+    };
+    let read_state = Arc::clone(state);
+    let tenant_id = tenant_id.to_string();
+    tokio::task::spawn_blocking(move || match object_ref {
+        Some(object_ref) => Ok(TraceEnvelopeBodyRead {
+            envelope: read_envelope_from_object_ref(&read_state, &tenant_id, &object_ref)?,
+            object_ref_id: Some(object_ref.object_ref_id),
+        }),
+        None => Ok(TraceEnvelopeBodyRead {
+            envelope: read_envelope_by_record(&read_state, &record)?,
+            object_ref_id: None,
+        }),
+    })
+    .await
+    .context("account envelope read task failed")?
+}
+
 async fn read_envelope_body_for_replay_export(
     state: &AppState,
     tenant: &TenantAuth,
@@ -69428,6 +69785,65 @@ fn cleanup_submission_file_side_writes(
         record.submission_id,
     ))?;
     delete_trace_objects_for_record(state, record)?;
+    Ok(())
+}
+
+/// The prior submission's derived record and envelope, which
+/// [`roll_back_failed_quarantine_remediation`] restores.
+fn quarantine_remediation_prior_snapshot(
+    state: &AppState,
+    prior: &TraceCommonsSubmissionRecord,
+) -> anyhow::Result<(TraceCommonsDerivedRecord, TraceContributionEnvelope)> {
+    let derived = read_derived_record(&state.root, &prior.tenant_id, prior.submission_id)?
+        .context("prior derived record unavailable for remediation rollback")?;
+    Ok((derived, read_envelope_by_record(state, prior)?))
+}
+
+/// Undoes a quarantine remediation whose DB-first mirror failed (#332).
+///
+/// The mirror's writes are separate transactions, so a failure part-way
+/// leaves the DB naming the remediation's artifact. The prior submission is
+/// re-mirrored first, so no live object ref points at the artifact deleted
+/// next; only then are this request's own writes removed. The prior's file
+/// metadata and derived record are not touched: the DB-first path writes
+/// them only after the mirror succeeds, so on this path they are still the
+/// prior's. If the prior cannot be read or re-mirrored, nothing is deleted.
+///
+/// Witness evidence the failed remediation already replaced or removed is
+/// not restored: the re-mirror offers none and leaves what is stored.
+async fn roll_back_failed_quarantine_remediation(
+    state: &AppState,
+    tenant: &TenantAuth,
+    prior: &TraceCommonsSubmissionRecord,
+    prior_snapshot: anyhow::Result<(TraceCommonsDerivedRecord, TraceContributionEnvelope)>,
+    record: &TraceCommonsSubmissionRecord,
+) -> anyhow::Result<()> {
+    let (prior_derived, prior_envelope) = prior_snapshot?;
+    mirror_submission_to_db_with_options(
+        state,
+        tenant,
+        prior,
+        &prior_derived,
+        &prior_envelope,
+        None,
+        SubmissionMirrorKind::Submission,
+    )
+    .await
+    .context("failed to restore the prior submission after a failed remediation")?;
+    let path = state.root.join(&record.object_key);
+    if record.object_key != prior.object_key {
+        remove_file_if_exists(&path)?;
+    } else if path.exists() {
+        // `store_envelope` overwrote the prior's plaintext at the same path.
+        write_json_file(&path, &prior_envelope, "trace contribution envelope")?;
+    }
+    if let (Some(store), Some(receipt)) = (
+        state.artifact_store.as_ref(),
+        record.artifact_receipt.as_ref(),
+    ) && prior.artifact_receipt.as_ref().map(|r| &r.object_key) != Some(&receipt.object_key)
+    {
+        store.delete_artifact(&record.tenant_storage_ref, receipt)?;
+    }
     Ok(())
 }
 
@@ -78384,11 +78800,36 @@ struct ApiError {
     blockers: Option<Vec<String>>,
 }
 
+/// The label an error response is logged under: the response's own label
+/// when it is label-shaped, `unlabelled` otherwise. A few callers build their
+/// message with `format!`, and the log line must stay hash-only, so anything
+/// that is not a short fixed-vocabulary token is never written out.
+fn api_error_log_label(message: &str) -> &str {
+    let label_shaped = !message.is_empty()
+        && message.len() <= 64
+        && message.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b':' | b'.' | b'-')
+        });
+    if label_shaped { message } else { "unlabelled" }
+}
+
+/// One line per error response, so an operator can see which refusal a
+/// client received without the request body or any identifier.
+fn log_api_error(status: StatusCode, message: &str) {
+    tracing::info!(
+        status = status.as_u16(),
+        api_error = api_error_log_label(message),
+        "Trace Commons request answered with an error"
+    );
+}
+
 fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
+    let message = message.into();
+    log_api_error(status, &message);
     (
         status,
         Json(ApiError {
-            error: message.into(),
+            error: message,
             retry_after_seconds: None,
             blockers: None,
         }),
@@ -78400,10 +78841,12 @@ fn api_error_with_retry(
     message: impl Into<String>,
     retry_after_seconds: Option<i64>,
 ) -> (StatusCode, Json<ApiError>) {
+    let message = message.into();
+    log_api_error(status, &message);
     (
         status,
         Json(ApiError {
-            error: message.into(),
+            error: message,
             retry_after_seconds,
             blockers: None,
         }),
