@@ -638,6 +638,8 @@ const VOLATILE_KEYS: &[&str] = &[
 /// sample file the decoder cannot parse defeats the entire point of
 /// recording real replies.
 const VOLATILE_TIMESTAMP_PLACEHOLDER: &str = "1970-01-01T00:00:00Z";
+/// `managed_terminal` as macOS reports it by default; see `normalize`.
+const MACOS_DEFAULT_TERMINAL: &str = "terminal";
 
 fn normalize(value: &mut Value, key: Option<&str>) {
     match value {
@@ -661,6 +663,13 @@ fn normalize(value: &mut Value, key: Option<&str>) {
                 "account scope carries a complete SHA-256 digest"
             );
             *s = format!("sha256:{}", "0".repeat(64));
+        }
+        // The default terminal is the first app the recording platform
+        // offers: "terminal" on macOS, "gnome_terminal" on Linux. The samples
+        // are macOS's, and the drift check runs on Linux in CI, so record
+        // and compare macOS's default wherever the daemon ran.
+        Value::String(s) if key == Some("managed_terminal") => {
+            *s = MACOS_DEFAULT_TERMINAL.to_string();
         }
         Value::String(s) if key.is_some_and(|k| VOLATILE_KEYS.contains(&k)) && !s.is_empty() => {
             *s = VOLATILE_TIMESTAMP_PLACEHOLDER.to_string();
@@ -1457,6 +1466,18 @@ fn first_diff_reports_a_field_added_or_removed_even_when_null() {
         first_diff(&json!({"a": null}), &json!({"a": null}), ""),
         None
     );
+}
+
+#[test]
+fn managed_terminal_normalizes_to_the_macos_default_on_every_platform() {
+    for recorded in ["terminal", "gnome_terminal", "windows_terminal"] {
+        let mut value = serde_json::json!({"managed_terminal": recorded});
+        normalize(&mut value, None);
+        assert_eq!(value, serde_json::json!({"managed_terminal": "terminal"}));
+    }
+    let mut absent = serde_json::json!({});
+    normalize(&mut absent, None);
+    assert_eq!(absent, serde_json::json!({}));
 }
 
 #[test]
