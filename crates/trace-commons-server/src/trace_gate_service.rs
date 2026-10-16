@@ -803,6 +803,32 @@ where
             safe_kind: safe_kind.into(),
         }
     }
+
+    /// Decrypts a submission's stored envelope object for the passes that
+    /// read it back (perplexity re-score, dedup re-derivation, estimate
+    /// features): the same DEK unwrap and AEAD decrypt as `evaluate_trace`,
+    /// then the pipeline artifact wrapper removed when there is one. A
+    /// pipeline run stores its envelope inside that wrapper; a gate-path
+    /// submission stores it bare.
+    fn decrypt_stored_envelope(
+        &self,
+        tenant_ctx: &TenantCtx,
+        envelope_ciphertext: &[u8],
+        wrapped_dek: &WrappedDek,
+        object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<Vec<u8>> {
+        let ciphertext = decode_envelope_ciphertext(envelope_ciphertext);
+        let ctx = KekContext {
+            tenant_storage_ref: tenant_ctx.tenant_storage_ref().to_string(),
+            artifact_kind: object_kind,
+        };
+        let dek = self.decryptor.unwrap_dek(wrapped_dek, &ctx)?;
+        let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
+        Ok(
+            crate::versioned_pipeline::pipeline_artifact_inner_bytes(&plaintext)?
+                .unwrap_or(plaintext),
+        )
+    }
 }
 
 impl EnclaveGateService<MockPerplexityScorer, MockEmbedder, MockVectorIndex> {
@@ -922,14 +948,14 @@ where
     ) -> anyhow::Result<PerplexityOnlyGateOutcome> {
         // Identical decrypt path to `evaluate_trace` — same DEK unwrap under the
         // canonical KEK context and the same AEAD decrypt — so the plaintext fed
-        // to the scorer is byte-identical to a full evaluation.
-        let ciphertext = decode_envelope_ciphertext(envelope_ciphertext);
-        let ctx = KekContext {
-            tenant_storage_ref: tenant_ctx.tenant_storage_ref().to_string(),
-            artifact_kind: object_kind.clone(),
-        };
-        let dek = self.decryptor.unwrap_dek(wrapped_dek, &ctx)?;
-        let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
+        // to the scorer is byte-identical to a full evaluation. A pipeline
+        // run's stored object is unwrapped to the envelope the pipeline scored.
+        let plaintext = self.decrypt_stored_envelope(
+            tenant_ctx,
+            envelope_ciphertext,
+            wrapped_dek,
+            object_kind,
+        )?;
 
         // Perplexity-only: chunk + score + aggregate with the SAME orchestrator
         // config, but no embedding, no nearest-neighbor query, no index insert.
@@ -953,14 +979,15 @@ where
         // Exactly what `evaluate_trace` does up to the hash: the same DEK
         // unwrap under the canonical KEK context, the same AEAD decrypt, the
         // same render. The orchestrator is not consulted at all -- no
-        // scoring, no embedding, no index read or write.
-        let ciphertext = decode_envelope_ciphertext(envelope_ciphertext);
-        let ctx = KekContext {
-            tenant_storage_ref: tenant_ctx.tenant_storage_ref().to_string(),
-            artifact_kind: object_kind.clone(),
-        };
-        let dek = self.decryptor.unwrap_dek(wrapped_dek, &ctx)?;
-        let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
+        // scoring, no embedding, no index read or write. A pipeline run's
+        // stored object is unwrapped, so the hash is over its envelope and
+        // not over the wrapper's base64.
+        let plaintext = self.decrypt_stored_envelope(
+            tenant_ctx,
+            envelope_ciphertext,
+            wrapped_dek,
+            object_kind,
+        )?;
         Ok(DedupSignalDerivation {
             simhash: algorithm.simhash(&dedup_canonical_text(&plaintext)) as i64,
             signal_version: dedup_signal_version_for(algorithm),
@@ -976,17 +1003,12 @@ where
     ) -> anyhow::Result<LocalEstimateFeatures> {
         // The decrypt `derive_dedup_signal` does; the orchestrator is not
         // consulted at all.
-        let ciphertext = decode_envelope_ciphertext(envelope_ciphertext);
-        let ctx = KekContext {
-            tenant_storage_ref: tenant_ctx.tenant_storage_ref().to_string(),
-            artifact_kind: object_kind.clone(),
-        };
-        let dek = self.decryptor.unwrap_dek(wrapped_dek, &ctx)?;
-        let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
-        // A pipeline run stores its envelope inside the pipeline artifact
-        // wrapper; a gate-path submission stores it bare.
-        let plaintext = crate::versioned_pipeline::pipeline_artifact_inner_bytes(&plaintext)?
-            .unwrap_or(plaintext);
+        let plaintext = self.decrypt_stored_envelope(
+            tenant_ctx,
+            envelope_ciphertext,
+            wrapped_dek,
+            object_kind,
+        )?;
         // A parser error can quote the input, so it is replaced by a label
         // built only from the schema side of the error.
         let envelope: TraceContributionEnvelope = serde_json::from_slice(&plaintext)
@@ -1831,6 +1853,43 @@ mod enclave_gate_service_tests {
     /// The enclave path derives exactly what `evaluate_trace` stamps for the
     /// same envelope under v1, and the v2 value of the same render under v2,
     /// through the same decrypt path -- and touches no index.
+    /// The read-back passes (perplexity re-score and dedup re-derivation)
+    /// see a pipeline run's stored object as the envelope inside its
+    /// wrapper: a wrapped envelope scores and hashes exactly as the bare one.
+    #[test]
+    fn read_back_passes_see_through_the_pipeline_wrapper() {
+        use base64::Engine as _;
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
+        let tenant = TenantCtx::new("tenant-a");
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let plaintext = dedup_fixture_envelope("44444444-4444-4444-4444-444444444444");
+        let wrapper = serde_json::to_vec(&serde_json::json!({
+            "schema": "trace_commons.pipeline_artifact_bytes.v1",
+            "bytes_base64": base64::engine::general_purpose::STANDARD.encode(&plaintext),
+        }))
+        .unwrap();
+        let bare = aead_encrypt_with_dek(&dek, &plaintext).expect("encrypt bare");
+        let wrapped_object = aead_encrypt_with_dek(&dek, &wrapper).expect("encrypt wrapper");
+        let kind = || TraceArtifactKind::ContributionEnvelope;
+
+        let dedup = |ciphertext: &[u8]| {
+            svc.derive_dedup_signal(&tenant, ciphertext, &wrapped, kind(), DedupAlgorithm::V2)
+                .expect("dedup derivation")
+        };
+        assert_eq!(dedup(&wrapped_object), dedup(&bare));
+        assert_eq!(
+            dedup(&wrapped_object).simhash,
+            crate::dedup_simhash::trace_simhash_v2(&dedup_canonical_text(&plaintext)) as i64
+        );
+
+        let rescore = |ciphertext: &[u8]| {
+            svc.evaluate_trace_perplexity_only(&tenant, ciphertext, &wrapped, kind())
+                .expect("perplexity-only evaluation")
+        };
+        assert_eq!(rescore(&wrapped_object), rescore(&bare));
+    }
+
     #[test]
     fn enclave_derive_dedup_signal_matches_evaluate_trace_and_targets_either_algorithm() {
         let decryptor = fixture_decryptor();
