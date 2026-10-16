@@ -262,15 +262,15 @@ final class NudgeTracesTests: XCTestCase {
         let rows = try entries(#"""
             {"pending":[
              {"entry_id":"fit","source":"codex","project_id":"p","project_label":"P","state":"pending","mission_fit":2,
-              "credit_estimate":{"low":2.0,"high":4.5,"tier":"higher","calibration":"c","basis":"published","drawn":true}},
+              "settlement_estimate":{"low_usd_micros":2000000,"high_usd_micros":6000000,"tier":"higher","drawn":true}},
              {"entry_id":"hidden","source":"codex","project_id":"p","project_label":"P","state":"pending","mission_fit":0,
-              "credit_estimate":{"low":1.0,"high":3.0,"calibration":"c","basis":"built_in","drawn":false}},
+              "settlement_estimate":{"low_usd_micros":1000000,"high_usd_micros":3000000,"drawn":false}},
              {"entry_id":"plain","source":"codex","project_id":"p","project_label":"P","state":"pending"}]}
             """#)
         let tags = TracesStore.rowTags(rows)
         XCTAssertEqual(Set(tags.keys), ["fit"])
         XCTAssertEqual(tags["fit"]?.missionFit, "Fits a mission")
-        XCTAssertEqual(tags["fit"]?.estimateBand, "Estimate: about 2 to 4.5 credit")
+        XCTAssertEqual(tags["fit"]?.estimateBand, "Estimate: about $2 to $6 of inference")
         XCTAssertEqual(tags["fit"]?.estimateTier, "Higher estimate")
     }
 

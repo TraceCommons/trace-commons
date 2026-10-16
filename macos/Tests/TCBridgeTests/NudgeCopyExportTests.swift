@@ -79,4 +79,30 @@ final class NudgeCopyExportTests: XCTestCase {
         XCTAssertEqual(NudgeEntryTags.decode(fromJSON: TCCoreCopy.nudgeEntryTagsJSON(entryJSON: undrawn)), NudgeEntryTags())
         XCTAssertEqual(NudgeEntryTags.decode(fromJSON: TCCoreCopy.nudgeEntryTagsJSON(entryJSON: nil)), NudgeEntryTags())
     }
+
+
+    /// The settlement estimate's keys all decode from the real table, and
+    /// the line keeps its placeholders for the core to fill: a shell never
+    /// fills them.
+    func testCopyExportCarriesTheSettlementKeys() throws {
+        let copy = try XCTUnwrap(NudgeCopy.decode(fromJSON: TCCoreCopy.nudgeCopyJSON()))
+        let keys: [NudgeCopy.Key] = [
+            .estimateTotalLine, .estimateTotalLineUpTo, .estimateTotalLabel, .estimateTotalAction,
+            .notifySettlementTitle, .notifySettlementBody, .notifySettlementBodyUpTo,
+            .notifySettlementBodyPricing, .notifySettlementActionReview, .notifySettlementActionNotNow,
+            .markA11ySettlement, .markTooltipSettlement, .settlementEstimateExplainer,
+            .settingSettlementEstimate, .settingSettlementEstimateHelp,
+        ]
+        for key in keys {
+            XCTAssertNotNil(copy[key], key.rawValue)
+        }
+        XCTAssertTrue(try XCTUnwrap(copy[.estimateTotalLine]).contains("{low}"))
+    }
+
+    /// A row's dollar band is worded by the core from `settlement_estimate`.
+    func testARowsDollarBandIsTheCoresWords() throws {
+        let json = #"{"settlement_estimate":{"low_usd_micros":2000000,"high_usd_micros":6000000,"drawn":true}}"#
+        let tags = try XCTUnwrap(NudgeEntryTags.decode(fromJSON: TCCoreCopy.nudgeEntryTagsJSON(entryJSON: json)))
+        XCTAssertNotNil(tags.estimateBand)
+    }
 }

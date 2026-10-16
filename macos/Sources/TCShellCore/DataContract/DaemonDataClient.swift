@@ -145,6 +145,9 @@ public protocol DaemonDataClient: Sendable {
     func setMenuBarMarkEnabled(_ on: Bool) async throws
     /// `set_notifications_enabled {on}`: "Notifications from Trace Commons".
     func setNotificationsEnabled(_ on: Bool) async throws
+    /// `set_settings {settlement_estimate_enabled}`: the estimate switch.
+    /// Off hides every surface and stops the daemon reading traces for it.
+    func setSettlementEstimateEnabled(_ on: Bool) async throws
     /// `set_notify_kind {kind, on}`. Answering `verdicts_landed` or
     /// `idle_sessions` either way also ends that kind's one-time offer.
     func setNotifyKind(_ kind: String, on: Bool) async throws

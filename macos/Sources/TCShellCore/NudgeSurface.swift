@@ -16,6 +16,10 @@ public enum NudgeSurface {
         case idleSessions = "idle_sessions"
         case reviewBacklog = "review_backlog"
         case verdictsLanded = "verdicts_landed"
+        /// The machine-wide settlement estimate. Never a `status.nudge`
+        /// lead and never a card: it reaches a shell as a notification and
+        /// as `status.settlement_estimate`.
+        case settlementEstimate = "settlement_estimate"
     }
 
     /// Where a card is drawn: Traces leads with the asks, History with the
@@ -90,6 +94,8 @@ public enum NudgeSurface {
     public enum Request: Equatable, Sendable {
         case opened(Kind)
         case declined(Kind)
+        /// Nothing is sent (the settlement estimate's Review and Not now).
+        case dismissed
     }
 
     /// What an action does: one request, then (except for "Not now") a
@@ -129,6 +135,8 @@ public enum NudgeSurface {
         switch (actionId, kind) {
         case ("review", .idleSessions), ("review", .reviewBacklog): .review(kind)
         case ("not_now", .idleSessions), ("not_now", .reviewBacklog): .notNow(kind)
+        case ("review", .settlementEstimate): .review(kind)
+        case ("not_now", .settlementEstimate): .notNow(kind)
         case ("see_history", .verdictsLanded): .seeHistory
         default: nil
         }
@@ -194,10 +202,18 @@ public enum NudgeSurface {
     /// What `intent` sends and where it goes.
     public static func effect(_ intent: Intent) -> Effect {
         switch intent {
+        case .review(.settlementEstimate):
+            // Looking changes nothing and the daemon has no opened stamp for
+            // this kind (`nudge_opened` would refuse it): open Traces only.
+            Effect(request: .dismissed, destination: .traces(idleOnly: false))
         case .review(let kind):
             Effect(request: .opened(kind), destination: .traces(idleOnly: kind == .idleSessions))
         case .seeHistory:
             Effect(request: .opened(.verdictsLanded), destination: .history)
+        case .notNow(.settlementEstimate):
+            // A plain dismiss: the daemon refuses to decline this kind and
+            // no cooldown exists for it, so nothing is sent.
+            Effect(request: .dismissed, destination: nil)
         case .notNow(let kind):
             Effect(request: .declined(kind), destination: nil)
         }
@@ -208,6 +224,7 @@ public enum NudgeSurface {
         switch effect.request {
         case .opened(let kind): try await client.nudgeOpened(kind)
         case .declined(let kind): try await client.nudgeDecline(kind)
+        case .dismissed: break
         }
     }
 }

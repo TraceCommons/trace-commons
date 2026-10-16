@@ -258,4 +258,23 @@ final class NudgeSurfaceTests: XCTestCase {
         XCTAssertNil(NudgeSurface.notification(.init(kind: "weekly_recap", title: "T", body: "B", actions: [])))
         XCTAssertNil(NudgeSurface.notification(.init(kind: "idle_sessions", title: "", body: "", actions: [])))
     }
+
+
+    func testSettlementEstimateIntentsAndEffects() {
+        XCTAssertEqual(NudgeSurface.intent(actionId: "review", kind: .settlementEstimate), .review(.settlementEstimate))
+        XCTAssertEqual(NudgeSurface.intent(actionId: "not_now", kind: .settlementEstimate), .notNow(.settlementEstimate))
+        XCTAssertNil(NudgeSurface.intent(actionId: "see_history", kind: .settlementEstimate))
+        // The daemon has no opened or declined stamp for this kind.
+        XCTAssertEqual(NudgeSurface.effect(.review(.settlementEstimate)).request, .dismissed)
+        XCTAssertEqual(NudgeSurface.effect(.notNow(.settlementEstimate)).request, .dismissed)
+        // It is never a card.
+        for place in [NudgeSurface.Place.traces, .history] {
+            XCTAssertFalse(place.kinds.contains(.settlementEstimate))
+        }
+        let due = DaemonData.ReengageDue(
+            kind: "settlement_estimate", title: "T", body: "B",
+            actions: [.init(id: "review", label: "Review traces"), .init(id: "not_now", label: "Not now")])
+        let note = NudgeSurface.notification(due)
+        XCTAssertEqual(note?.defaultIntent, .review(.settlementEstimate))
+    }
 }

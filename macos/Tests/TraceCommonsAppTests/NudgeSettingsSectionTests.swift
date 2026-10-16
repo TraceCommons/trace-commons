@@ -114,4 +114,27 @@ final class NudgeSettingsSectionTests: XCTestCase {
         await store.set(.suggestions, on: false)
         XCTAssertEqual(store.writeError, .unreachable)
     }
+
+
+    func testSettingsShowTheEstimateSwitch() throws {
+        let copy = NudgeCopy(table: [
+            "SETTING_SETTLEMENT_ESTIMATE": "Estimate what traces on this Mac are worth",
+            "SETTING_SETTLEMENT_ESTIMATE_HELP": "Worked out on this Mac.",
+        ])
+        let settings = try JSONDecoder().decode(
+            DaemonData.Settings.self, from: Data(#"{"settlement_estimate_enabled":true}"#.utf8))
+        let rows = NudgeSettings.rows(settings, copy: copy, digestHelp: nil)
+        XCTAssertEqual(rows.map(\.id), [.settlementEstimate])
+        XCTAssertEqual(rows.first?.label, "Estimate what traces on this Mac are worth")
+        XCTAssertEqual(rows.first?.isOn, true)
+        // Unknown is no switch, never off.
+        let unread = try JSONDecoder().decode(DaemonData.Settings.self, from: Data("{}".utf8))
+        XCTAssertEqual(NudgeSettings.rows(unread, copy: copy, digestHelp: nil), [])
+    }
+
+    func testTheEstimateSwitchWritesSettlementEstimateEnabled() async throws {
+        let client = SampleDaemonClient(.normalDay)
+        try await NudgeSettings.write(.settlementEstimate, on: false, through: client)
+        XCTAssertEqual(client.nudgeCalls, ["set_settings settlement_estimate_enabled false"])
+    }
 }

@@ -48,6 +48,7 @@ struct MenuBarGlassPanel: View {
                     .transition(.opacity)
             }
             nudgeRow
+            settlementRow
             legend
             graph
             glance
@@ -376,6 +377,39 @@ struct MenuBarGlassPanel: View {
             }
             .buttonStyle(GlassMenuRowStyle())
             .padding(.vertical, -GlassTokens.Space.s2)
+        }
+    }
+
+    // MARK: The settlement estimate
+
+    /// The machine-wide estimate, in the core's words: the finished line, an
+    /// "Estimate" caption, and a button that opens Traces. Nothing here is
+    /// sent anywhere; the line is drawn only while the panel is current and
+    /// the daemon reported one.
+    @ViewBuilder
+    private var settlementRow: some View {
+        if let line = store.settlementLine {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                Text(line.label)
+                    .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .padding(.horizontal, GlassTokens.Space.s3)
+                Button {
+                    open(.traces(entryId: nil))
+                } label: {
+                    HStack {
+                        Text(line.text)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
+                    }
+                }
+                .buttonStyle(GlassMenuRowStyle())
+                .accessibilityLabel(line.text)
+                .accessibilityHint(line.action)
+                .padding(.vertical, -GlassTokens.Space.s2)
+            }
         }
     }
 
@@ -802,6 +836,32 @@ enum MenuPanelStatus {
     /// The drawn mark's tooltip clause; empty while no mark is drawn.
     static func markTooltip(_ words: DaemonData.NudgeMarkText?) -> String {
         words?.tooltip ?? ""
+    }
+
+    /// The settlement estimate line: the core's text, its caption and the
+    /// action's name. The title and the accessibility name are separate keys
+    /// in the core; the button label is `action`.
+    struct SettlementLine: Equatable {
+        let text: String
+        let label: String
+        let action: String
+    }
+
+    /// The core's nudge table, read once.
+    static let nudgeCopy: NudgeCopy? = NudgeCopy.decode(fromJSON: TCCoreCopy.nudgeCopyJSON())
+
+    /// The line to draw, or nil: nothing while the panel cannot vouch for
+    /// its data, while the daemon reported no estimate (switch off, no
+    /// drawable table, nothing known: never $0), or while the core did not
+    /// word the caption or the action.
+    static func settlementLine(
+        _ status: DaemonData.Status?, available: Bool, copy: NudgeCopy? = MenuPanelStatus.nudgeCopy
+    ) -> SettlementLine? {
+        guard available, let estimate = status?.settlementEstimate,
+              !estimate.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let label = copy?[.estimateTotalLabel], let action = copy?[.estimateTotalAction]
+        else { return nil }
+        return SettlementLine(text: estimate.text, label: label, action: action)
     }
 
     /// The Private AI pill's state.

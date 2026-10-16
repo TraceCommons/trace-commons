@@ -72,6 +72,12 @@ final class MenuPanelStore {
         stale ? nil : NudgeSurface.panelRow(status?.nudge)
     }
 
+    /// The machine-wide settlement estimate's line; nil while the panel is
+    /// stale or the daemon reported none.
+    var settlementLine: MenuPanelStatus.SettlementLine? {
+        MenuPanelStatus.settlementLine(status, available: !stale)
+    }
+
     /// The row was tapped: records that the suggestion was opened, then
     /// answers where to open the Monitor. The stamp is best effort here;
     /// a refused one still opens the place, since looking changes nothing.
