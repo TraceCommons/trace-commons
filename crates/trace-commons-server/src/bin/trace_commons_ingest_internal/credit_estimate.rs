@@ -227,6 +227,24 @@ pub(super) struct CreditEstimateEvalResponse {
     pub(super) settlement_rows: Vec<SettlementEvalRow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) settlement_fit: Option<SettlementFitReport>,
+    /// Failed submissions counted by reason ([`derive_failure_reason`]):
+    /// a content-free parse reason, or an error hash. Never a submission.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) failed_reasons: BTreeMap<String, usize>,
+}
+
+/// Why one submission's features were not derived, safe to log and return.
+/// An envelope parse failure carries its schema-only reason; anything else
+/// (a load or decrypt error, whose text can name storage) is hashed.
+pub(super) fn derive_failure_reason(error: &anyhow::Error) -> String {
+    let text = error.to_string();
+    if text.starts_with(
+        trace_commons_server::trace_gate_service::ESTIMATE_FEATURES_ENVELOPE_UNREADABLE,
+    ) {
+        text
+    } else {
+        safe_display_error_hash(error)
+    }
 }
 
 /// One submission's label, whichever target the run reads.
@@ -262,6 +280,7 @@ pub(super) async fn run_credit_estimate_eval(
         decisions: decisions.len(),
         ..CreditEstimateEvalCounts::default()
     };
+    let mut failed_reasons: BTreeMap<String, usize> = BTreeMap::new();
 
     // Latest decision time per (tenant, submission), matching the label
     // read, which is latest-per-submission. The enumeration is newest
@@ -375,12 +394,15 @@ pub(super) async fn run_credit_estimate_eval(
                 Ok(features) => features,
                 Err(error) => {
                     counts.failed += 1;
+                    let reason = derive_failure_reason(&error);
                     tracing::warn!(
                         tenant_hash = %tenant_hash,
                         submission_hash = %sha256_prefixed(&submission_id.to_string()),
                         error_hash = %safe_display_error_hash(&error),
+                        reason = %reason,
                         "credit estimate eval could not derive one submission"
                     );
+                    *failed_reasons.entry(reason).or_default() += 1;
                     continue;
                 }
             };
@@ -435,6 +457,7 @@ pub(super) async fn run_credit_estimate_eval(
         fit,
         settlement_rows,
         settlement_fit,
+        failed_reasons,
     })
 }
 
