@@ -151,6 +151,14 @@ before you add them.
   touched dependencies. CI runs the same check, plus advisories and sources,
   on every push.
 
+## Executing a multi-task plan
+
+When a plan's tasks are carried out one after another, write each task's
+tests but run the tests and CI checks once, after the last task. Per task,
+run at most a plain `cargo check` on the touched crates, so the next task
+builds on code that compiles. `CLAUDE.md` ("Executing a multi-task plan")
+has the details and the final run's command list.
+
 ## Everything else
 
 See `CLAUDE.md`: build and verification commands (note CI applies
