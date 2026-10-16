@@ -2,6 +2,33 @@ import XCTest
 @testable import TCShellCore
 
 final class ManagedSessionsTests: XCTestCase {
+    func testLaunchDefaultsComeFromDaemonAndNeverUseSubscriptionDefaults() throws {
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":1,"accounts":[{"id":"n","tool":"claude","connection":"near_ai","label":"NEAR AI","auth_state":"ready"},{"id":"p","tool":"claude","connection":"subscription","label":"Personal","auth_state":"ready"}],"defaults":[{"tool":"claude","account_id":"p","generation":1}],"launch_defaults":{"claude":"n"},"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true}}"#.utf8))
+        XCTAssertTrue(snapshot.isDefault(snapshot.accounts[0]))
+        XCTAssertFalse(snapshot.isDefault(snapshot.accounts[1]))
+        XCTAssertEqual(snapshot.defaultLaunchAccount(for: "claude")?.id, "n")
+        XCTAssertNil(snapshot.defaultLaunchAccount(for: "codex"))
+    }
+
+    func testManagedSnapshotDecodesLaunchDefaultsAndSignInAccountsTogether() throws {
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":1,"accounts":[{"id":"p","tool":"claude","connection":"subscription","label":"Personal","auth_state":"ready"},{"id":"k","tool":"codex","connection":"near_ai","label":"Work","auth_state":"ready"}],"sign_in_accounts":[{"id":"sc","tool":"claude","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready"},{"id":"sx","tool":"codex","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready"}],"defaults":[{"tool":"claude","account_id":"p","generation":1}],"launch_defaults":{"claude":"sc","codex":"k"},"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"near_ai_signin":true}}"#.utf8))
+        XCTAssertEqual(snapshot.launchDefaults, ["claude": "sc", "codex": "k"])
+        XCTAssertEqual(snapshot.signInAccounts?.map(\.id), ["sc", "sx"])
+        // Signed in with a legacy subscription default, Claude preselects the
+        // sign-in; a saved NEAR AI key wins for Codex.
+        XCTAssertEqual(snapshot.defaultLaunchAccount(for: "claude")?.id, "sc")
+        XCTAssertEqual(snapshot.defaultLaunchAccount(for: "codex")?.id, "k")
+        XCTAssertFalse(snapshot.isDefault(snapshot.accounts[0]))
+        XCTAssertEqual(snapshot.launchChoices.filter { $0.tool == "claude" }.map(\.id), ["p", "sc"])
+    }
+
+    func testTheFixtureLaunchDefaultsResolveToAKeyAndASignIn() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json")))
+        XCTAssertEqual(snapshot.defaultLaunchAccount(for: "claude")?.connection, "near_ai")
+        XCTAssertEqual(snapshot.defaultLaunchAccount(for: "codex")?.connection, "near_ai_signin")
+    }
+
     func testUnknownLifecycleKeepsAccountLocked() throws {
         let row = try JSONDecoder().decode(ManagedSession.self, from: Data(#"{"id":"s","tool":"claude","connection":"subscription","account_id":"a","account_label":"Personal","project_label":"Project","cwd":"/tmp","state":"future_state","purpose":"coding"}"#.utf8))
         XCTAssertTrue(row.holdsAccount)
@@ -74,7 +101,7 @@ final class ManagedSessionsTests: XCTestCase {
         let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":1,"accounts":[{"id":"a","tool":"claude","connection":"subscription","label":"Personal","auth_state":"ready"},{"id":"b","tool":"claude","connection":"api_key","label":"Work","auth_state":"ready"}],"defaults":[{"tool":"claude","connection":"subscription","account_id":"a","generation":1}],"generations":{"claude":1},"sessions":[{"id":"s","tool":"claude","connection":"subscription","account_id":"a","account_label":"Personal","project_label":"Project","cwd":"/tmp","state":"running","purpose":"coding"},{"id":"t","tool":"claude","connection":"api_key","account_id":"b","account_label":"Work","project_label":"Project","cwd":"/tmp","state":"exited","purpose":"coding"}],"capabilities":{"managed_launch":true,"terminal_launch":false}}"#.utf8))
         XCTAssertTrue(snapshot.isHeld(snapshot.accounts[0]))
         XCTAssertFalse(snapshot.isHeld(snapshot.accounts[1]))
-        XCTAssertTrue(snapshot.isDefault(snapshot.accounts[0]))
+        XCTAssertFalse(snapshot.isDefault(snapshot.accounts[0]))
         XCTAssertFalse(snapshot.isDefault(snapshot.accounts[1]))
     }
 

@@ -330,3 +330,96 @@ async fn two_managed_accounts_and_a_standard_session_run_together() {
     }
     daemon.close();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_lists_choices_and_explains_missing_or_ambiguous_near_ai_defaults() {
+    let home = tempfile::tempdir().unwrap();
+    let state = home.path().join("state");
+    let daemon = start_embedded(ConfigStore::open(state.clone()).unwrap())
+        .await
+        .unwrap();
+    let cli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_near-ai"))
+            .arg("--config-dir")
+            .arg(&state)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let missing = cli(&["launch", "claude"]);
+    assert!(!missing.status.success());
+    let error = String::from_utf8(missing.stderr).unwrap();
+    assert!(error.contains("--connection near-ai"), "{error}");
+    assert!(error.contains("near-ai accounts list"), "{error}");
+    for (connection, label) in [
+        ("subscription", "Personal"),
+        ("near_ai", "One"),
+        ("near_ai", "Two"),
+    ] {
+        let response = handle_request(
+            &daemon.shared,
+            &Request {
+                id: 1,
+                method: "managed_account_add".into(),
+                params: json!({"tool":"claude","connection":connection,"label":label}),
+            },
+        );
+        assert!(response.error.is_none());
+    }
+    let ambiguous = cli(&["launch", "claude"]);
+    assert!(!ambiguous.status.success());
+    let error = String::from_utf8(ambiguous.stderr).unwrap();
+    assert!(error.contains("--account <name-or-id>"), "{error}");
+    assert!(error.contains("near-ai accounts select"), "{error}");
+    // A subscription named like a NEAR AI key, and a second subscription.
+    for label in ["Two", "Other"] {
+        let response = handle_request(
+            &daemon.shared,
+            &Request {
+                id: 1,
+                method: "managed_account_add".into(),
+                params: json!({"tool":"claude","connection":"subscription","label":label}),
+            },
+        );
+        assert!(response.error.is_none());
+    }
+    // A name shared across backends: pass the ID, not --account again.
+    let named = cli(&["launch", "claude", "--account", "Two"]);
+    assert!(!named.status.success());
+    let error = String::from_utf8(named.stderr).unwrap();
+    assert!(
+        error.contains("Pass its ID from near-ai accounts list"),
+        "{error}"
+    );
+    assert!(!error.contains("accounts select"), "{error}");
+    // Several accounts on a named backend: select cannot help there.
+    let backend = cli(&["launch", "claude", "--connection", "subscription"]);
+    assert!(!backend.status.success());
+    let error = String::from_utf8(backend.stderr).unwrap();
+    assert!(error.contains("Pass --account with an ID"), "{error}");
+    assert!(!error.contains("accounts select"), "{error}");
+    let listing = cli(&["accounts", "list"]);
+    assert!(listing.status.success());
+    let text = String::from_utf8(listing.stdout).unwrap();
+    assert!(text.contains("Personal | claude | Subscription"), "{text}");
+    assert!(text.contains("One | claude | NEAR AI"), "{text}");
+    // Select looks only among NEAR AI keys, so the subscription also named
+    // Two is no ambiguity.
+    let selected = cli(&["accounts", "select", "Two", "--tool", "claude"]);
+    assert!(selected.status.success(), "{:?}", selected);
+    let rejected = cli(&["accounts", "select", "Personal", "--tool", "claude"]);
+    assert!(!rejected.status.success());
+    let error = String::from_utf8(rejected.stderr).unwrap();
+    assert!(error.contains("Only NEAR AI keys"), "{error}");
+    let listing = cli(&["accounts", "list", "--json"]);
+    assert!(listing.status.success());
+    let rows: serde_json::Value = serde_json::from_slice(&listing.stdout).unwrap();
+    let defaults: Vec<_> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["launch_default"] == true)
+        .collect();
+    assert_eq!(defaults.len(), 1);
+    assert_eq!(defaults[0]["label"], "Two");
+}

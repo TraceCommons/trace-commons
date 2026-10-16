@@ -397,3 +397,33 @@ fn unsupported_version_refuses_ticket_and_preserves_account() {
     assert_eq!(snapshot["accounts"][0], account);
     assert_eq!(snapshot["tools"][0]["installed"], true);
 }
+
+#[test]
+fn snapshot_exposes_effective_near_ai_defaults_and_requires_ambiguous_choice() {
+    let home = tempfile::tempdir().unwrap();
+    let daemon = DaemonShared::load(ConfigStore::open(home.path().to_path_buf()).unwrap()).unwrap();
+    let first = call(
+        &daemon,
+        "managed_account_add",
+        json!({"tool":"claude","connection":"near_ai","label":"One"}),
+    );
+    assert_eq!(
+        call(&daemon, "managed_snapshot", json!({}))["launch_defaults"]["claude"],
+        first["id"]
+    );
+    let second = call(
+        &daemon,
+        "managed_account_add",
+        json!({"tool":"claude","connection":"near_ai","label":"Two"}),
+    );
+    assert!(call(&daemon, "managed_snapshot", json!({}))["launch_defaults"]["claude"].is_null());
+    call(
+        &daemon,
+        "managed_select",
+        json!({"selection":{"tool":"claude","connection":"near_ai","account_id":second["id"],"generation":0},"expected_generation":0}),
+    );
+    assert_eq!(
+        call(&daemon, "managed_snapshot", json!({}))["launch_defaults"]["claude"],
+        second["id"]
+    );
+}

@@ -132,6 +132,10 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
     /// saved. Empty, or absent from an older daemon, without one.
     public let signInAccounts: [ManagedAccount]?
     public let defaults: [ManagedSelection]
+    /// Each tool's implicit launch account ID: a saved NEAR AI key, else
+    /// the NEAR AI sign-in entry. Optional for compatibility with older
+    /// daemons. Never infer a subscription default.
+    public let launchDefaults: [String: String]?
     public let generations: [String: UInt64]
     public let sessions: [ManagedSession]
     public let capabilities: Capabilities
@@ -141,6 +145,7 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case tools, copy, revision, accounts, defaults, generations, sessions, capabilities
         case signInAccounts = "sign_in_accounts", hasLaunched = "has_launched"
+        case launchDefaults = "launch_defaults"
     }
 }
 
@@ -319,8 +324,21 @@ public extension ManagedSnapshot {
         sessions.contains { $0.accountID == account.id && $0.holdsAccount }
     }
 
+    /// The saved accounts, then the sign-in entries: everything a launch
+    /// can name.
+    var launchChoices: [ManagedAccount] { accounts + (signInAccounts ?? []) }
+
+    /// The daemon's implicit launch for `tool`, only if it is a NEAR AI key
+    /// or the NEAR AI sign-in.
+    func defaultLaunchAccount(for tool: String) -> ManagedAccount? {
+        guard let id = launchDefaults?[tool] else { return nil }
+        return launchChoices.first {
+            $0.id == id && $0.tool == tool && ($0.connection == "near_ai" || $0.connection == "near_ai_signin")
+        }
+    }
+
     func isDefault(_ account: ManagedAccount) -> Bool {
-        defaults.contains { $0.accountID == account.id }
+        defaultLaunchAccount(for: account.tool)?.id == account.id
     }
 
     /// Whether Start explains the folder choice before the picker: until a

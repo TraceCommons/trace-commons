@@ -51,10 +51,14 @@ pub fn entries(signed_in: bool) -> Vec<AccountView> {
     }
 }
 
-/// The defaults a shell sees. A choice the person saved wins; a tool with
-/// no saved choice defaults to its sign-in entry while signed in.
+/// The defaults a shell sees: every saved choice, plus a tool's sign-in
+/// entry where it is the tool's implicit NEAR AI launch, which is while
+/// signed in with no saved NEAR AI default and no saved NEAR AI key for that
+/// tool. A saved subscription or API-key default stays listed, for a launch
+/// that names that backend, but it does not keep the sign-in out.
 pub fn defaults(
     saved: Vec<Selection>,
+    accounts: &[AccountView],
     signed_in: bool,
     generation: impl Fn(ToolId) -> Generation,
 ) -> Vec<Selection> {
@@ -64,7 +68,12 @@ pub fn defaults(
             let Some(account_id) = account_id(tool) else {
                 continue;
             };
-            if !out.iter().any(|s| s.tool == tool) {
+            let near_ai = |connection: ConnectionKind| connection == ConnectionKind::NearAi;
+            if !out.iter().any(|s| s.tool == tool && near_ai(s.connection))
+                && !accounts
+                    .iter()
+                    .any(|a| a.tool == tool && near_ai(a.connection))
+            {
                 out.push(Selection {
                     tool,
                     connection: ConnectionKind::NearAiSignIn,
@@ -99,23 +108,43 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_default_wins_and_an_unset_one_falls_to_the_sign_in() {
+    fn the_sign_in_fills_the_near_ai_slot_beside_a_legacy_default() {
         let saved = Selection {
             tool: ToolId::Claude,
             connection: ConnectionKind::Subscription,
             account_id: AccountId(Uuid::new_v4()),
             generation: Generation(3),
         };
-        let out = defaults(vec![saved.clone()], true, |_| Generation(7));
-        assert_eq!(out.len(), 2);
+        // A legacy subscription default stays listed, and the sign-in is
+        // still the NEAR AI default for both tools.
+        let out = defaults(vec![saved.clone()], &[], true, |_| Generation(7));
+        assert_eq!(out.len(), 3);
         assert_eq!(out[0], saved);
-        assert_eq!(out[1].tool, ToolId::Codex);
-        assert_eq!(Some(out[1].account_id), account_id(ToolId::Codex));
-        assert_eq!(out[1].generation, Generation(7));
+        assert_eq!(out[1].tool, ToolId::Claude);
+        assert_eq!(out[1].connection, ConnectionKind::NearAiSignIn);
+        assert_eq!(out[2].tool, ToolId::Codex);
+        assert_eq!(Some(out[2].account_id), account_id(ToolId::Codex));
+        assert_eq!(out[2].generation, Generation(7));
         assert_eq!(
-            defaults(vec![saved.clone()], false, |_| Generation(7)),
+            defaults(vec![saved.clone()], &[], false, |_| Generation(7)),
             vec![saved]
         );
-        assert!(defaults(vec![], false, |_| Generation(0)).is_empty());
+        assert!(defaults(vec![], &[], false, |_| Generation(0)).is_empty());
+    }
+
+    #[test]
+    fn a_saved_near_ai_key_keeps_the_sign_in_out() {
+        let key = AccountView {
+            id: AccountId(Uuid::new_v4()),
+            tool: ToolId::Claude,
+            connection: ConnectionKind::NearAi,
+            label: "Work".into(),
+            auth_state: AuthState::Ready,
+            verified_at: None,
+        };
+        let out = defaults(vec![], &[key], true, |_| Generation(0));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].tool, ToolId::Codex);
+        assert_eq!(out[0].connection, ConnectionKind::NearAiSignIn);
     }
 }

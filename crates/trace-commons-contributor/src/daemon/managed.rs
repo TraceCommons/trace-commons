@@ -201,8 +201,19 @@ impl ManagedService {
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>();
-                let defaults =
-                    signin::defaults(saved, sign_in, |tool| self.accounts.generation(tool));
+                let accounts = self.accounts.list();
+                let sign_in_accounts = signin::entries(sign_in);
+                let defaults = signin::defaults(saved, &accounts, sign_in, |tool| {
+                    self.accounts.generation(tool)
+                });
+                // Each tool's implicit launch, by the same rule the command
+                // line uses: a saved NEAR AI default or sole NEAR AI key,
+                // then the sign-in. Never a subscription or API-key default.
+                let launch_defaults = crate::managed::accounts::launch_defaults(
+                    &accounts,
+                    &sign_in_accounts,
+                    &defaults,
+                );
                 // The offered apps found here, for a shell's picker.
                 let choices: Vec<Value> = self
                     .installed_terminals(None)
@@ -217,7 +228,7 @@ impl ManagedService {
                 let terminal_launch = terminal::launch_available()
                     && (cfg!(target_os = "macos") || !choices.is_empty());
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":accounts,"sign_in_accounts":sign_in_accounts,"launch_defaults":launch_defaults,"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
                 )
             }
             "managed_account_add" => {
@@ -241,6 +252,13 @@ impl ManagedService {
                     expected_generation: Generation,
                 }
                 let p: Params = parse(request)?;
+                // Only a saved NEAR AI key can be the launch default. A
+                // subscription or API-key default would never win an
+                // implicit launch, and storing one would overwrite the
+                // tool's NEAR AI default. A sign-in entry is never saved.
+                if p.selection.connection != ConnectionKind::NearAi {
+                    return Err(ManagedError::InvalidRequest);
+                }
                 let selection = self.accounts.select(p.selection, p.expected_generation)?;
                 self.sessions.changed()?;
                 Ok(json!(selection))
@@ -823,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_default_wins_over_the_sign_in() {
+    fn a_legacy_default_stays_listed_but_the_sign_in_is_the_launch() {
         let (_home, _store, mut service) = service();
         let saved = service
             .accounts
@@ -838,17 +856,45 @@ mod tests {
         service.accounts.select(selection, Generation(0)).unwrap();
         let snapshot = call(&mut service, "managed_snapshot", json!({}), true).unwrap();
         let defaults = snapshot["defaults"].as_array().unwrap();
-        assert_eq!(defaults.len(), 2);
-        let claude = defaults.iter().find(|d| d["tool"] == "claude").unwrap();
-        assert_eq!(claude["account_id"], json!(saved.id));
-        let codex = defaults.iter().find(|d| d["tool"] == "codex").unwrap();
-        assert_eq!(
-            codex["account_id"],
-            json!(signin::account_id(ToolId::Codex))
-        );
-        // Signed out, the saved default stands alone.
+        assert_eq!(defaults.len(), 3);
+        // The saved subscription choice is still listed, for a launch that
+        // names that backend.
+        assert!(defaults.iter().any(|d| d["tool"] == "claude"
+            && d["connection"] == "subscription"
+            && d["account_id"] == json!(saved.id)));
+        for tool in [ToolId::Claude, ToolId::Codex] {
+            let name = serde_json::to_value(tool).unwrap();
+            let id = json!(signin::account_id(tool));
+            assert!(defaults.iter().any(|d| d["tool"] == name
+                && d["connection"] == "near_ai_signin"
+                && d["account_id"] == id));
+            // The implicit launch is the sign-in, never the subscription.
+            assert_eq!(snapshot["launch_defaults"][name.as_str().unwrap()], id);
+        }
+        // Signed out, the saved default stands alone and nothing launches
+        // implicitly.
         let snapshot = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
         assert_eq!(snapshot["defaults"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["launch_defaults"], json!({}));
+    }
+
+    #[test]
+    fn a_saved_near_ai_key_is_the_launch_ahead_of_the_sign_in() {
+        let (_home, _store, mut service) = service();
+        let key = service
+            .accounts
+            .add(ToolId::Claude, ConnectionKind::NearAi, "Work")
+            .unwrap();
+        let snapshot = call(&mut service, "managed_snapshot", json!({}), true).unwrap();
+        assert_eq!(snapshot["launch_defaults"]["claude"], json!(key.id));
+        assert_eq!(
+            snapshot["launch_defaults"]["codex"],
+            json!(signin::account_id(ToolId::Codex))
+        );
+        // `defaults` agrees: no sign-in selection for the tool with a key.
+        let defaults = snapshot["defaults"].as_array().unwrap();
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0]["tool"], "codex");
     }
 
     #[test]
@@ -881,6 +927,32 @@ mod tests {
     }
 
     #[test]
+    fn only_a_near_ai_key_can_be_selected_as_the_default() {
+        let (_home, _store, mut service) = service();
+        let near = service
+            .accounts
+            .add(ToolId::Claude, ConnectionKind::NearAi, "Work")
+            .unwrap();
+        let select = |account: &AccountView, generation: u64| json!({"selection":{"tool":account.tool,"connection":account.connection,"account_id":account.id,"generation":generation},"expected_generation":generation});
+        call(&mut service, "managed_select", select(&near, 0), false).unwrap();
+        for connection in [ConnectionKind::Subscription, ConnectionKind::ApiKey] {
+            let other = service
+                .accounts
+                .add(ToolId::Claude, connection, "Other")
+                .unwrap();
+            assert_eq!(
+                call(&mut service, "managed_select", select(&other, 1), false),
+                Err(ManagedError::InvalidRequest),
+                "{connection:?}"
+            );
+        }
+        // The NEAR AI default is untouched.
+        let selection = service.accounts.selection(ToolId::Claude).unwrap();
+        assert_eq!(selection.account_id, near.id);
+        assert_eq!(service.accounts.generation(ToolId::Claude), Generation(1));
+    }
+
+    #[test]
     fn a_sign_in_entry_can_be_neither_saved_nor_chosen_as_a_default() {
         let (home, store, mut service) = service();
         assert_eq!(
@@ -895,7 +967,7 @@ mod tests {
         let selection = json!({"selection":{"tool":"claude","connection":"near_ai_signin","account_id":signin::account_id(ToolId::Claude),"generation":0},"expected_generation":0});
         assert_eq!(
             call(&mut service, "managed_select", selection, true),
-            Err(ManagedError::Conflict)
+            Err(ManagedError::InvalidRequest)
         );
         for method in [
             "managed_account_remove",

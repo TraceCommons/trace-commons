@@ -15,6 +15,13 @@
       "connection": "subscription",
       "label": "Work",
       "auth_state": "ready"
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000004",
+      "tool": "claude",
+      "connection": "near_ai",
+      "label": "NEAR AI",
+      "auth_state": "ready"
     }
   ],
   "sign_in_accounts": [
@@ -48,7 +55,14 @@
       "purpose": "coding"
     }
   ],
-  "defaults": [],
+  "defaults": [
+    {
+      "tool": "codex",
+      "connection": "near_ai_signin",
+      "account_id": "6e656172-2d61-4900-8000-000000000002",
+      "generation": 0
+    }
+  ],
   "generations": {
     "claude": 0,
     "codex": 0,
@@ -107,12 +121,13 @@
     "remove": "Remove",
     "remove_description": "Its saved sign-in and profile are deleted from this computer.",
     "manage": "More",
-    "default": "Default",
+    "default": "NEAR AI default",
     "use_default": "Make default",
     "rename_short": "Rename",
     "reconnect": "Sign in",
     "verify": "Check sign-in",
     "near_ai": "NEAR AI",
+    "near_ai_signin": "NEAR AI sign-in",
     "api_key": "API key",
     "openai_api_key": "OpenAI API key",
     "subscription": "Subscription",
@@ -140,6 +155,7 @@
     "choose_folder": "Choose folder",
     "folder_choice": "Choose a folder for {tool} to work in. It opens in {destination}.",
     "launch_scope": "Opens in {destination}.",
+    "launch_default_scope": "Uses NEAR AI: your NEAR AI default, or your NEAR AI sign-in when no key is saved. Choose another account to change the backend.",
     "launch_short": "Launch",
     "terminal": "your terminal",
     "global_title": "Standard settings",
@@ -170,6 +186,10 @@
     "stop_question": "Stop this session?",
     "stop_description": "{tool} stops what it's doing in {folder}.",
     "start_again": "Start again"
+  },
+  "launch_defaults": {
+    "claude": "00000000-0000-0000-0000-000000000004",
+    "codex": "6e656172-2d61-4900-8000-000000000002"
   },
   "tools": [
     {
