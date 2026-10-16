@@ -44,9 +44,10 @@ pub const ESTIMATE_TABLE_MAX_BYTES: usize = 16 * 1024;
 /// OWNER DECISION E11: every 24 hours, with jitter.
 pub const ESTIMATE_TABLE_REFRESH: Duration = Duration::hours(24);
 
-/// The random offset added to every scheduled fetch, drawn uniformly from
-/// zero up to this, so fetches from many machines spread out and none of
-/// them line up with anything local.
+/// The random offset added to every scheduled fetch after the first, drawn
+/// uniformly from zero up to this, so fetches from many machines spread out
+/// and none of them line up with anything local. The first is at the
+/// daemon's start (owner, 2026-10-16).
 ///
 /// OWNER DECISION E11 says "with jitter" and does not value it; four hours
 /// is this implementation's choice and is open for the owner to set.
@@ -160,13 +161,14 @@ pub struct EstimateTableSchedule {
 }
 
 impl EstimateTableSchedule {
-    /// The first fetch falls a random offset (up to
-    /// [`ESTIMATE_TABLE_REFRESH_JITTER`]) after `started_at`, the daemon's
-    /// start.
+    /// The first fetch is due at `started_at`, the daemon's start, so the
+    /// estimates are drawn as soon as the app runs (owner, 2026-10-16). Every
+    /// later fetch keeps the interval and the random offset. The cost: the
+    /// first request's time says roughly when the daemon started.
     #[must_use]
-    pub fn starting(started_at: DateTime<Utc>, draw: f64) -> Self {
+    pub fn starting(started_at: DateTime<Utc>) -> Self {
         Self {
-            next_at: started_at + jitter(draw),
+            next_at: started_at,
         }
     }
 
@@ -593,13 +595,14 @@ mod tests {
     /// `ESTIMATE_TABLE_REFRESH` plus at most the jitter after the last.
     #[test]
     fn the_schedule_is_a_fixed_interval_plus_jitter_and_nothing_else() {
-        let schedule = EstimateTableSchedule::starting(t0(), 0.5);
-        assert_eq!(schedule.next_at(), t0() + Duration::hours(2));
-        assert!(!schedule.due(t0()));
-        assert!(schedule.due(t0() + Duration::hours(2)));
+        // The first fetch is due at the daemon's start (owner, 2026-10-16),
+        // so an estimate is drawn as soon as the app is running.
+        let schedule = EstimateTableSchedule::starting(t0());
+        assert_eq!(schedule.next_at(), t0());
+        assert!(schedule.due(t0()));
 
         for draw in [0.0, 0.25, 0.999_999, 1.0, -3.0, f64::NAN, f64::INFINITY] {
-            let mut schedule = EstimateTableSchedule::starting(t0(), draw);
+            let mut schedule = EstimateTableSchedule::starting(t0());
             let attempt = t0() + Duration::hours(3);
             schedule.attempted(attempt, draw);
             let next = schedule.next_at();
