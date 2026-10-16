@@ -341,6 +341,12 @@ When adding or changing user-facing UI text, follow
 preserved context, separate titles and accessibility names, and shared-copy
 review checks.
 
+**No new notices without explicit approval.** Do not add a banner, card,
+one-time message, interruption, notification, or a daemon status channel that
+feeds one, unless the owner has explicitly approved both the notice and its
+wording. A spec or design principle calling for one is not approval: ask.
+See rule 9 of the copy guide.
+
 ## Conventions specific to this repo
 
 - **Hash-only audit and logging.** Audit rows, error logs, and operational
