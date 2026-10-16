@@ -382,10 +382,9 @@ pub const NUDGE_ESTIMATE_CLAUSE: &str = "Estimated credit before scoring: about 
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_ESTIMATE_CLAUSE_PARTIAL: &str =
     "Estimated credit for {known} of them, before scoring: about {low} to {high}.";
-/// A row's detail line. DRAFT, NEEDS APPROVAL.
+/// A row's detail line.
 pub const ENTRY_ESTIMATE_BAND: &str = "Estimate: about {low} to {high} of inference";
-/// [`ENTRY_ESTIMATE_BAND`] when the rounded low end is $0. DRAFT, NEEDS
-/// APPROVAL.
+/// [`ENTRY_ESTIMATE_BAND`] when the rounded low end is $0.
 pub const ENTRY_ESTIMATE_BAND_UP_TO: &str = "Estimate: up to {high} of inference";
 /// A row tag, multi-tier tables only. DRAFT, NEEDS APPROVAL.
 pub const ENTRY_ESTIMATE_TIER_HIGHER: &str = "Higher estimate";
@@ -404,47 +403,42 @@ pub const ESTIMATE_EXPLAINER: &str = "Made on this device from the trace's size 
 // `nudge_render::usd_text`, never credit.
 // ---------------------------------------------------------------------
 
-/// The menu-bar line over every trace on this Mac. DRAFT, NEEDS APPROVAL.
+/// The menu-bar line over every trace on this Mac.
 pub const ESTIMATE_TOTAL_LINE: &str = "About {low} to {high} of inference in traces on this Mac";
-/// [`ESTIMATE_TOTAL_LINE`] when the rounded low end is $0. DRAFT, NEEDS
-/// APPROVAL.
+/// [`ESTIMATE_TOTAL_LINE`] when the rounded low end is $0.
 pub const ESTIMATE_TOTAL_LINE_UP_TO: &str =
     "Up to {high} of inference in traces on this Mac, as an estimate";
-/// The line's small label. DRAFT, NEEDS APPROVAL.
+/// The line's small label.
 pub const ESTIMATE_TOTAL_LABEL: &str = "Estimate";
-/// The line's action. DRAFT, NEEDS APPROVAL.
+/// The line's action.
 pub const ESTIMATE_TOTAL_ACTION: &str = "Review traces";
-/// The settlement notification's title. DRAFT, NEEDS APPROVAL.
+/// The settlement notification's title.
 pub const NOTIFY_SETTLEMENT_TITLE: &str = "Estimate for traces on this Mac";
-/// The settlement notification's body. DRAFT, NEEDS APPROVAL.
+/// The settlement notification's body.
 pub const NOTIFY_SETTLEMENT_BODY: &str =
     "About {low} to {high} of inference, estimated on this Mac. Nothing was sent.";
-/// [`NOTIFY_SETTLEMENT_BODY`] when the rounded low end is $0. DRAFT, NEEDS
-/// APPROVAL.
+/// [`NOTIFY_SETTLEMENT_BODY`] when the rounded low end is $0.
 pub const NOTIFY_SETTLEMENT_BODY_UP_TO: &str =
     "Up to {high} of inference, estimated on this Mac. Nothing was sent.";
-/// The body when the published pricing changed. DRAFT, NEEDS APPROVAL.
+/// The body when the published pricing changed.
 pub const NOTIFY_SETTLEMENT_BODY_PRICING: &str =
     "Pricing changed. Traces on this Mac are now estimated at about {low} to {high} of inference.";
-/// [`NOTIFY_SETTLEMENT_BODY_PRICING`] when the rounded low end is $0. DRAFT,
-/// NEEDS APPROVAL.
+/// [`NOTIFY_SETTLEMENT_BODY_PRICING`] when the rounded low end is $0.
 pub const NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO: &str =
     "Pricing changed. Traces on this Mac are now estimated at up to {high} of inference.";
-/// The settlement notification's primary action. DRAFT, NEEDS APPROVAL.
+/// The settlement notification's primary action.
 pub const NOTIFY_SETTLEMENT_ACTION_REVIEW: &str = "Review traces";
-/// The settlement notification's dismissal; it sends nothing. DRAFT, NEEDS
-/// APPROVAL.
+/// The settlement notification's dismissal; it sends nothing.
 pub const NOTIFY_SETTLEMENT_ACTION_NOT_NOW: &str = "Not now";
-/// The mark's accessibility sentence while an estimate is news. DRAFT,
-/// NEEDS APPROVAL.
+/// The mark's accessibility sentence while an estimate is news.
 pub const MARK_A11Y_SETTLEMENT: &str = "An estimate for traces on this Mac is ready.";
-/// The Windows tooltip clause for the same. DRAFT, NEEDS APPROVAL.
+/// The Windows tooltip clause for the same.
 pub const MARK_TOOLTIP_SETTLEMENT: &str = "Estimate ready";
-/// The estimate's info popover. DRAFT, NEEDS APPROVAL.
+/// The estimate's info popover.
 pub const SETTLEMENT_ESTIMATE_EXPLAINER: &str = "Made on this Mac from the traces' size and makeup. Nothing was sent to make it. The rate comes from Trace Commons' published pricing. What a trace actually gets is decided when it is scored. A single trace's figure is less certain than the total.";
-/// The Settings switch. DRAFT, NEEDS APPROVAL.
+/// The Settings switch.
 pub const SETTING_SETTLEMENT_ESTIMATE: &str = "Estimate what traces on this Mac are worth";
-/// The Settings switch's help. DRAFT, NEEDS APPROVAL.
+/// The Settings switch's help.
 pub const SETTING_SETTLEMENT_ESTIMATE_HELP: &str = "Worked out on this Mac from your traces' size and makeup. Nothing is sent to make the estimate.";
 
 /// Each counted string's key and its `_ONE` sibling's. The count the pair
