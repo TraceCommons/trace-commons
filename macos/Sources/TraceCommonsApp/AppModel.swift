@@ -250,6 +250,10 @@ final class AppModel: ObservableObject {
     /// is also a reason this answer might have.
     @Published private(set) var armingOffer: ArmingOffer?
     @Published private(set) var consentScopes: [ConsentScope] = []
+    /// Whether missions are shown anywhere (`missions_enabled`); off until
+    /// the daemon says so, and off before its settings have arrived.
+    var missionsShown: Bool { daemonSettings?.missionsShown ?? false }
+
     @Published private(set) var daemonSettings: DaemonSettingsView? {
         // A settings write can change what leaves this machine -- inference
         // evidence adds or removes the prompt-and-reply line, a filter change

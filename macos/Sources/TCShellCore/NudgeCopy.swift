@@ -104,6 +104,13 @@ public struct NudgeEntryTags: Codable, Equatable, Sendable {
 
     public var isEmpty: Bool { self == NudgeEntryTags() }
 
+    /// These tags without the mission tag unless missions are shown.
+    public func showing(missions enabled: Bool) -> NudgeEntryTags {
+        var tags = self
+        if !enabled { tags.missionFit = nil }
+        return tags
+    }
+
     public static func decode(fromJSON json: String?) -> NudgeEntryTags? {
         guard let json else { return nil }
         return try? JSONDecoder().decode(NudgeEntryTags.self, from: Data(json.utf8))

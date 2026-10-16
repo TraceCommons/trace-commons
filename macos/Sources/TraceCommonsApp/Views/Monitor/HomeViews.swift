@@ -40,6 +40,10 @@ struct HomeTabView: View {
     /// `TraceCommonsAppMain`.
     let insightsStoreSelection: InsightsStoreSelection
     let missionDrafts: MissionDraftsModel
+    /// Whether missions are shown (the daemon's `missions_enabled`). Off:
+    /// no Missions card, no catalogue card, no mission page, and the
+    /// drafts inbox is not read.
+    var missionsEnabled: Bool = false
 
     /// The core's Insights copy, read once: it is fixed for the life of the
     /// process, and reading it is a C ABI call and a JSON decode, which
@@ -62,13 +66,13 @@ struct HomeTabView: View {
         // History and Missions are reached from here and lead back here; the
         // breadcrumb that says so is the shell's, under the tabs
         // (`MonitorWindowView.breadcrumb`), as #1146 draws it.
-        switch page {
+        switch page.shown(missions: missionsEnabled) {
         case .overview:
             HomeOverview(
                 store: store, traces: traces, statusLabel: statusLabel, openTraces: openTraces,
                 openPrivateAI: openPrivateAI,
                 insightsHeading: Self.hostedHeading(.insights, missionDrafts: missionDrafts),
-                missionDrafts: missionDrafts,
+                missionDrafts: missionDrafts, missionsEnabled: missionsEnabled,
                 openHistory: openHistory, openMissionDrafts: { page = .missionDrafts },
                 openInsights: { page = .insights }, openMissions: { page = .missions })
         case .history:
@@ -109,6 +113,7 @@ private struct HomeOverview: View {
     /// and then its card is not drawn.
     let insightsHeading: String?
     let missionDrafts: MissionDraftsModel
+    let missionsEnabled: Bool
     let openHistory: () -> Void
     let openMissionDrafts: () -> Void
     let openInsights: () -> Void
@@ -168,14 +173,16 @@ private struct HomeOverview: View {
                 // Ron's Missions card, as a hero promotion (owner,
                 // 2026-10-12): the drafts' line under the subtitle, and
                 // Review drafts; no pill.
-                GlassHeroCard(
-                    gradient: GlassTokens.Gradient.heroMissions,
-                    title: MonitorWords.missions, subtitle: words?.missionsSubtitle,
-                    actionTitle: words?.missionsAction, action: openMissionDrafts
-                ) {
-                    GlassHeroSymbol(Self.missionsHeroSymbol)
-                } content: {
-                    drafts
+                if missionsEnabled {
+                    GlassHeroCard(
+                        gradient: GlassTokens.Gradient.heroMissions,
+                        title: MonitorWords.missions, subtitle: words?.missionsSubtitle,
+                        actionTitle: words?.missionsAction, action: openMissionDrafts
+                    ) {
+                        GlassHeroSymbol(Self.missionsHeroSymbol)
+                    } content: {
+                        drafts
+                    }
                 }
                 // What #1146 has no place for, after its cards: Insights,
                 // and the commons catalogue once the daemon answers it.
@@ -192,7 +199,7 @@ private struct HomeOverview: View {
                         HomeInsightsVisual(glance: freshGlance, words: words)
                     }
                 }
-                if store.missions != nil, let catalogue = words?.missionCatalogue {
+                if missionsEnabled, store.missions != nil, let catalogue = words?.missionCatalogue {
                     hostedCard(
                         systemImage: Self.catalogueIcon, title: catalogue,
                         subtitle: words?.catalogueSubtitle, action: openMissions)
@@ -200,7 +207,10 @@ private struct HomeOverview: View {
             }
         }
         .scrollIndicators(.never)
-        .task { missionDrafts.preview() }
+        .task(id: missionsEnabled) {
+            // Hidden missions read nothing: the drafts inbox stays on disk.
+            if missionsEnabled { missionDrafts.preview() }
+        }
     }
 
     /// The Home cards' icons, in the Private AI cards' place for them.

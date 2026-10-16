@@ -750,6 +750,12 @@ struct DaemonSettingsView: Decodable, Equatable {
     /// by default); "Hide" on the card turns it off. Absent from an older
     /// daemon: no switch, never an "off".
     var insightsRecapCardEnabled: Bool? = nil
+    /// Whether the app shows missions at all (`missions_enabled`, owner
+    /// decision 2026-10-16: hidden for now, off by default, flipped only
+    /// through `set_settings`). Absent from an older daemon, which reads as
+    /// off: only an exact `true` shows them.
+    var missionsEnabled: Bool? = nil
+    var missionsShown: Bool { missionsEnabled == true }
 
     /// The four source modes as the routing surface takes them. Absent
     /// means `unset`, which watches the conventional location and is
@@ -788,6 +794,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case privateInferenceOfferSeen = "private_inference_offer_seen"
         case privateInferenceState = "private_inference_state"
         case insightsLedgerFeed = "insights_ledger_feed"
+        case missionsEnabled = "missions_enabled"
         case insightsCounterPass = "insights_counter_pass"
         case insightsRecapCardEnabled = "insights_recap_card_enabled"
     }

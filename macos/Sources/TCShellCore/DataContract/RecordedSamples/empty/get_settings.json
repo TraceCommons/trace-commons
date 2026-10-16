@@ -43,6 +43,7 @@
   "insights_context_threshold": null,
   "insights_counter_pass": false,
   "insights_recap_card_enabled": true,
+  "missions_enabled": false,
   "suggestions_enabled": true,
   "settlement_estimate_enabled": true,
   "notifications_enabled": true,
