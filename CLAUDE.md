@@ -75,6 +75,35 @@ cargo test -p trace-commons-server --test trace_corpus_storage_contract
 cargo test -p trace-commons-server --test trace_corpus_pg_store   # requires PostgreSQL
 ```
 
+### Shared compile cache (recommended)
+
+Each worktree has its own `target/`, so a new worktree compiles the whole
+third-party dependency graph from scratch, and the copies add up: on one
+machine on 2026-10-15, sixteen worktree `target/` directories held 523 GB
+and filled the disk. Install sccache and point cargo at it in your
+user-level config:
+
+```bash
+brew install sccache        # or: cargo install sccache --locked
+```
+
+```toml
+# ~/.cargo/config.toml
+[build]
+rustc-wrapper = "sccache"
+```
+
+Worktrees then share compiled third-party crates. The workspace's own
+crates build incrementally under the dev profile, which sccache does not
+cache, so those still compile once per worktree. `sccache --show-stats`
+shows the hit rate, the cache location and its size limit (10 GiB by
+default; on macOS, raise it with `[cache.disk]` `size = <bytes>` in
+`~/Library/Application Support/Mozilla.sccache/config`). With the cache in
+place, deleting the `target/` of a worktree whose PR has merged is cheap.
+
+Never set `rustc-wrapper` in the repository's own `.cargo/config.toml`:
+CI runners do not install sccache, and every build there would fail.
+
 The ingest service's PostgreSQL tests (`ingest::app::`, in the library)
 self-skip without `TRACE_COMMONS_PG_TEST_DATABASE_URL`, and the
 `postgres-suites` job runs only named slices of them. To run all of them
@@ -110,6 +139,34 @@ Tauri app (`--manifest-path tauri-desktop/src-tauri/Cargo.toml`, plus
 `pnpm test` and `pnpm build` in `tauri-desktop/frontend`). The Tauri checks
 run in `.github/workflows/tauri-desktop.yml`.
 
+## Executing a multi-task plan
+
+When a plan's tasks are carried out one after another, test and check once,
+after the last task is written, not after each task. This overrides the
+global guidance to run each change's targeted test straight away. A full
+compile-and-test cycle of the server and contributor crates takes minutes,
+and paying it once per task made a nine-task plan take hours.
+
+- Each task still writes every test its plan step specifies, with the
+  assertions, as TDD would. Only running them is deferred.
+- Per task, run at most a plain `cargo check -p <crate> --all-targets` on
+  the crates it touched (add `--features` for a feature-gated module), so
+  the next task builds on code that compiles. No test runs, no clippy, no
+  `RUSTFLAGS=-D warnings`, no Swift suite, no PostgreSQL suites.
+- Do not report a task as passing. Report which tests it wrote and did not
+  run.
+- After the last task, run everything once: the commands in "Local
+  development", clippy, `cargo fmt --all -- --check`, the PostgreSQL suites
+  the plan touched, the FFI build followed by `swift test`, and the
+  separate GTK and Tauri workspaces if touched. Fix every failure against
+  the spec, never by weakening a test. A failure that also fails on `main`
+  is pre-existing: note it and leave it.
+- Reviews of the branch come after that run, so they read code that passes.
+
+This covers implementation inside one branch. It does not relax "never claim
+green from a partial run", and it does not apply to a single fix, where the
+targeted test still runs immediately.
+
 ## CI
 
 `.github/workflows/ci.yml` holds the server-side jobs and runs every one of
@@ -126,14 +183,18 @@ it touches a client path (its `paths:` filter). None of its jobs is a
 required status check, so a server-only PR never waits on a macOS or Windows
 runner, and a client regression surfaces on `main` after the merge.
 
-Every job that caches `target` ends with `./.github/actions/trim-cargo-cache`,
-which deletes linked test and bin executables and `incremental/` before
-actions/cache saves. The repository's caches were over GitHub's 10 GB
-ceiling and a main-written cache was evicted within minutes; a job that
-adds a `target` cache must end with that step too, or it re-creates the
-churn. Push-to-main runs are exempt from `cancel-in-progress` for the same
-reason: a cancelled job saves no cache, and merges to `main` land close
-together.
+A job that caches `target` restores with `actions/cache/restore@v5` and
+saves with `actions/cache/save@v5` on a push to `main` only, after
+`./.github/actions/trim-cargo-cache`, which deletes linked test and bin
+executables, `incremental/`, and the workspace's own `trace-commons-*`
+crates (checkout makes cargo rebuild those every run anyway). The
+repository's caches were over GitHub's 10 GB ceiling and a main-written
+cache was evicted within minutes: a pull request's cache is restorable by
+that pull request alone, so saving one only evicted `main`'s. A job that
+adds a `target` cache must follow the same shape, or it re-creates the
+churn, and the jobs in `clients.yml` keep no cache at all. Push-to-main
+runs are exempt from `cancel-in-progress` for the same reason: a cancelled
+job saves no cache, and merges to `main` land close together.
 
 Running is not the same as blocking. **Eleven** of the nineteen are required
 status checks on `main`, and only those block a merge -- `README.md` lists

@@ -188,6 +188,8 @@
     "sign_in_needed": "Sign in to NEAR AI to start a session.",
     "sign_in_near_ai": "Sign in",
     "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
+    "terminal_choice": "Open sessions in",
+    "terminal_not_found": "{terminal} wasn't found on this computer. Choose another in Settings.",
     "show": "Show",
     "stop": "Stop",
     "stop_question": "Stop this session?",

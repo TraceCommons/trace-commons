@@ -170,6 +170,9 @@ pub struct SettingsView {
     /// the daemon and nothing on it can be painted as working: the indicator
     /// belongs beside the control, on the screen that has both.
     private_inference_link: gtk::Button,
+    /// "Open sessions in": the terminal managed sessions open in, drawn by
+    /// `terminal_choice` only while the daemon offers one.
+    pub managed_terminal: gtk::Box,
     /// The move to a NEAR AI account, drawn only while the daemon offers it.
     pub legacy_move: super::legacy_move::Controls,
     /// The port a running IronWire published, or `None` for a machine that
@@ -422,6 +425,12 @@ impl SettingsView {
             .build();
         private_inference_card.append(&private_inference_link);
         content.append(&private_inference_card);
+
+        // Which terminal managed sessions open in (#1406), under Private AI
+        // as on macOS. Hidden until the daemon offers a terminal.
+        let managed_terminal = gtk::Box::new(gtk::Orientation::Vertical, space::M);
+        managed_terminal.set_visible(false);
+        content.append(&managed_terminal);
 
         // K11: where sessions go, above the witness it names. Its title and
         // card are both drawn by `render_disclosure` -- the title only when
@@ -739,6 +748,7 @@ impl SettingsView {
             routing_evidence_pending: std::cell::Cell::new(false),
             filling_routing: std::cell::Cell::new(false),
             private_inference_link,
+            managed_terminal,
             legacy_move,
             routing_discovered_port: std::cell::Cell::new(None),
             witness_status,
@@ -1857,6 +1867,7 @@ pub fn refresh(app: &Rc<App>) {
     if app.settings.routing_discovered_port.get().is_none() {
         discover_routing(app);
     }
+    super::terminal_choice::refresh(app);
     app.call("list_projects", serde_json::json!({}), |app, result| {
         let projects: Vec<Project> = result
             .ok()

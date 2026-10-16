@@ -108,7 +108,14 @@ public sealed class ManagedSessionsView : UserControl
         _unsupportedVersion = false;
         _unsupportedTool = null;
         try { await action(); }
-        catch (Refused refused) { _error.Text = T(_unsupportedVersion ? "unsupported_version" : ManagedSignIn.ErrorKey(refused.Code)); }
+        catch (Refused refused)
+        {
+            // `{terminal}` is the chosen terminal the daemon names.
+            _error.Text = ManagedSignIn.FillTerminal(
+                T(_unsupportedVersion ? "unsupported_version" : ManagedSignIn.ErrorKey(refused.Code)),
+                _snapshot?.Capabilities.TerminalDestination,
+                T("terminal"));
+        }
         catch { _error.Text = T("action_failed"); }
         finally { _busy = false; await RefreshAsync(); }
     }

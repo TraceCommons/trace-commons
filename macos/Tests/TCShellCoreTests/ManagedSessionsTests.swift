@@ -13,6 +13,36 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(snapshot.capabilities.terminalDestination, "Terminal")
     }
 
+    func testSnapshotCarriesTheTerminalChoiceAndTheInstalledApps() throws {
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":2,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Ghostty","terminal_current":"ghostty","terminal_choices":[{"id":"terminal","name":"Terminal"},{"id":"ghostty","name":"Ghostty"}]}}"#.utf8))
+        XCTAssertEqual(snapshot.capabilities.terminalDestination, "Ghostty")
+        XCTAssertEqual(snapshot.capabilities.terminalCurrent, "ghostty")
+        XCTAssertEqual(snapshot.terminalChoices, [ManagedTerminalChoice(id: "terminal", name: "Terminal"), ManagedTerminalChoice(id: "ghostty", name: "Ghostty")])
+    }
+
+    func testAnOlderSnapshotOffersNoTerminalChoice() throws {
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":1,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Terminal"}}"#.utf8))
+        XCTAssertNil(snapshot.capabilities.terminalCurrent)
+        XCTAssertEqual(snapshot.terminalChoices, [])
+    }
+
+    func testTheFixtureCarriesTheTerminalFields() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json")))
+        XCTAssertEqual(snapshot.capabilities.terminalCurrent, "terminal")
+        XCTAssertEqual(snapshot.terminalChoices.map(\.name), ["Terminal", "Ghostty"])
+        XCTAssertEqual(snapshot.copy?["terminal_choice"], "Open sessions in")
+    }
+
+    func testAMissingTerminalHasItsOwnLine() {
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-terminal-not-found", message: "managed-terminal-not-found"), "terminal_not_found")
+        let line = "{terminal} wasn't found on this computer. Choose another in Settings."
+        XCTAssertEqual(ManagedSurface.fillTerminal(line, terminal: "Ghostty", fallback: "your terminal"),
+                       "Ghostty wasn't found on this computer. Choose another in Settings.")
+        XCTAssertEqual(ManagedSurface.fillTerminal(line, terminal: nil, fallback: "your terminal"),
+                       "your terminal wasn't found on this computer. Choose another in Settings.")
+    }
+
     func testOpenCodeCollectionAndModelDecode() throws {
         let session = try JSONDecoder().decode(ManagedSession.self, from: Data(#"{"id":"s","tool":"opencode","connection":"api_key","account_id":"a","account_label":"Work","project_label":"Project","cwd":"/tmp","state":"exited","purpose":"coding","model":"gpt-5","collection":"failed"}"#.utf8))
         XCTAssertEqual(session.model, "gpt-5")

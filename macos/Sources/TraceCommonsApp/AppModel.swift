@@ -32,6 +32,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The terminal app managed sessions open in, by the id the daemon
+    /// offered in `capabilities.terminal_choices`. The daemon refuses any
+    /// other value; the snapshot is re-read after the write.
+    func setManagedTerminal(_ id: String) {
+        managedAction("set_managed_terminal", params: ["terminal": id])
+    }
+
     func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil) {
         guard let client, !managedBusy else { return }
         managedBusy = true

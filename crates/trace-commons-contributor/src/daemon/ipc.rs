@@ -400,6 +400,7 @@ pub const METHODS: &[&str] = &[
     "set_menu_bar_mark_enabled",
     "set_notifications_enabled",
     "set_notify_kind",
+    "set_managed_terminal",
     "enroll",
     "prepare_admission_session",
     "near_account_capabilities",
@@ -555,6 +556,8 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "set_menu_bar_mark_enabled",
     "set_notifications_enabled",
     "set_notify_kind",
+    // Writes only the settings file, through `set_settings`.
+    "set_managed_terminal",
     // `auto_upload` is refused inside these two; the other modes only stop
     // sends.
     "set_project_mode",
@@ -3708,6 +3711,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             handle_set_bool_setting(shared, req, "notifications_enabled")
         }
         "set_notify_kind" => handle_set_notify_kind(shared, req),
+        "set_managed_terminal" => handle_set_managed_terminal(shared, req),
         "set_project_mode" => handle_set_project_mode(shared, req),
         "set_contribution_override" => handle_set_contribution_override(shared, req),
         "clear_contribution_override" => handle_clear_contribution_override(shared, req),
@@ -5957,6 +5961,34 @@ fn handle_set_bool_setting(shared: &DaemonShared, req: &Request, key: &'static s
         return response;
     }
     Response::ok(req.id, serde_json::json!({ key: on }))
+}
+
+/// `set_managed_terminal {terminal}`: the terminal app managed sessions open
+/// in, one of this platform's ids (`TerminalApp::offered`). Anything else,
+/// another platform's id included, is refused here, before any write. Writes through `set_settings` as
+/// `handle_set_bool_setting` does, then moves the managed revision so every
+/// shell re-reads the snapshot (`managed_changed`), whose destination and
+/// picker follow the choice.
+fn handle_set_managed_terminal(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(app) = req
+        .params
+        .get("terminal")
+        .and_then(|v| v.as_str())
+        .and_then(crate::managed::terminal::TerminalApp::parse)
+    else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "terminal-unrecognized");
+    };
+    let write = Request {
+        id: req.id,
+        method: "set_settings".to_string(),
+        params: serde_json::json!({ "managed_terminal": app.id() }),
+    };
+    let response = handle_set_settings(shared, &write);
+    if response.error.is_some() {
+        return response;
+    }
+    super::managed::terminal_changed(shared);
+    Response::ok(req.id, serde_json::json!({ "managed_terminal": app.id() }))
 }
 
 /// Nudge A2: `set_notify_kind {kind, on}`: one notification kind's switch,
@@ -17294,7 +17326,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 85, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 86, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
@@ -19426,6 +19458,78 @@ mod tests {
                     "{method}: a refusal publishes nothing"
                 );
             }
+        }
+
+        /// The managed-session terminal: one of three ids, persisted
+        /// through `set_settings`, reported by `get_settings` and the
+        /// managed snapshot, and announced as `managed_changed`. Anything
+        /// else is refused before a write.
+        #[test]
+        fn the_managed_terminal_persists_and_moves_the_snapshot() {
+            let saw_managed = |rx: &mut tokio::sync::broadcast::Receiver<Event>| {
+                let mut saw = false;
+                while let Ok(event) = rx.try_recv() {
+                    saw |= event.event == "managed_changed";
+                }
+                saw
+            };
+            use crate::managed::terminal::{TerminalApp, TerminalSetting};
+            let default = TerminalSetting::default().app().unwrap().id();
+            // This platform's last app, so the choice moves off the default.
+            let chosen = *TerminalApp::offered().last().unwrap();
+            let s = live();
+            let snapshot = |s: &DaemonShared| {
+                handle_request(s, &req("managed_snapshot", serde_json::json!({})))
+                    .result
+                    .expect("snapshot")
+            };
+            assert_eq!(snapshot(&s)["capabilities"]["terminal_current"], default);
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_managed_terminal",
+                    serde_json::json!({"terminal": chosen.id()}),
+                ),
+            );
+            assert_eq!(
+                r.result.expect("set answers"),
+                serde_json::json!({"managed_terminal": chosen.id()})
+            );
+            assert!(saw_managed(&mut rx));
+            let settings = handle_request(&s, &req("get_settings", serde_json::json!({})))
+                .result
+                .unwrap();
+            assert_eq!(settings["managed_terminal"], chosen.id());
+            assert_eq!(
+                crate::daemon::settings::DaemonSettings::load(&s.store)
+                    .unwrap()
+                    .managed_terminal,
+                TerminalSetting::from(chosen)
+            );
+            assert_eq!(
+                snapshot(&s)["capabilities"]["terminal_current"],
+                chosen.id()
+            );
+
+            for bad in [
+                serde_json::json!({}),
+                serde_json::json!({"terminal": "Ghostty"}),
+                serde_json::json!({"terminal": "/Applications/Warp.app"}),
+                serde_json::json!({"terminal": "open -a Calculator"}),
+                serde_json::json!({"terminal": null}),
+                serde_json::json!({"terminal": "windows_terminal; konsole"}),
+            ] {
+                let r = handle_request(&s, &req("set_managed_terminal", bad.clone()));
+                let err = r.error.expect("refused");
+                assert_eq!(err.code, ERR_BAD_PARAMS, "{bad}");
+                assert_eq!(err.message, "terminal-unrecognized", "{bad}");
+            }
+            assert!(!saw_managed(&mut rx), "a refusal publishes nothing");
+            assert_eq!(
+                snapshot(&s)["capabilities"]["terminal_current"],
+                chosen.id()
+            );
         }
 
         /// Nudge A2: `set_notify_kind {kind, on}` takes the digest or an

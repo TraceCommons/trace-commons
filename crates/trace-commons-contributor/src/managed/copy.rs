@@ -17,6 +17,16 @@
 //! - `sign_in_near_ai_accessibility` "Sign in to NEAR AI" -- its accessible
 //!   name.
 //!
+//! The terminal choice, in Settings > Private AI on every shell. Approved by
+//! the design owner 2026-10-14 (#1406):
+//! - `terminal_choice` "Open sessions in" -- the Settings picker's label,
+//!   and its accessible name. Its options are the app names the snapshot
+//!   sends in `capabilities.terminal_choices`.
+//! - `terminal_not_found` "{terminal} wasn't found on this computer.
+//!   Choose another in Settings." The line a shell shows for the refusal
+//!   `managed-terminal-not-found` ("not found", never "not installed");
+//!   it fills `{terminal}` from `capabilities.terminal_destination`.
+//!
 //! A session row's actions (Ron, #1407, 2026-10-14):
 //! - `show` "Show" and `stop` "Stop" -- the row menu's items and the row's
 //!   accessibility actions. Clicking a running row also shows it.
@@ -135,6 +145,8 @@ pub fn copy() -> serde_json::Value {
             "sign_in_needed": "Sign in to NEAR AI to start a session.",
             "sign_in_near_ai": "Sign in",
             "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
+            "terminal_choice": "Open sessions in",
+            "terminal_not_found": "{terminal} wasn't found on this computer. Choose another in Settings.",
             "show": "Show",
             "stop": "Stop",
             "stop_question": "Stop this session?",
@@ -189,6 +201,17 @@ mod tests {
         );
         assert_eq!(copy["sign_in_near_ai"], "Sign in");
         assert_eq!(copy["sign_in_near_ai_accessibility"], "Sign in to NEAR AI");
+    }
+
+    /// The terminal choice reads these words, exactly as proposed.
+    #[test]
+    fn the_terminal_choice_has_its_words() {
+        let copy = copy();
+        assert_eq!(copy["terminal_choice"], "Open sessions in");
+        assert_eq!(
+            copy["terminal_not_found"],
+            "{terminal} wasn't found on this computer. Choose another in Settings."
+        );
     }
 
     /// Show, Stop and Start again on a session row read these words

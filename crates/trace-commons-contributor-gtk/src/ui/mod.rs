@@ -26,6 +26,7 @@ pub mod roots;
 pub mod settings;
 pub(crate) mod shortcuts;
 pub mod style;
+mod terminal_choice;
 pub mod update;
 
 use std::cell::{Cell, RefCell};

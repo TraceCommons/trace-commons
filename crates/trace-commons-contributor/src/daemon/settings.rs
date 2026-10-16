@@ -709,6 +709,15 @@ pub struct DaemonSettings {
     #[serde(default = "default_menu_bar_mark_enabled")]
     pub menu_bar_mark_enabled: bool,
 
+    /// The terminal app managed sessions open in, one of this platform's
+    /// (`managed::terminal::TerminalApp::offered`). A file written before
+    /// this key existed loads as the platform's default, the shipped
+    /// behaviour on macOS and Windows. A value this build does not know
+    /// loads as `Unrecognized`, which refuses a launch rather than becoming
+    /// the default (see `managed::terminal::TerminalSetting`).
+    #[serde(default)]
+    pub managed_terminal: crate::managed::terminal::TerminalSetting,
+
     /// Nudge: one switch per notification kind. Each governs both the
     /// sentence folded into a due digest and the standalone notification.
     /// Revision 2's `digest_enabled` is `notify.digest`, and no
@@ -1341,6 +1350,7 @@ impl Default for DaemonSettings {
             settlement_estimate_enabled: DEFAULT_SETTLEMENT_ESTIMATE_ENABLED,
             notifications_enabled: DEFAULT_NOTIFICATIONS_ENABLED,
             menu_bar_mark_enabled: DEFAULT_MENU_BAR_MARK_ENABLED,
+            managed_terminal: Default::default(),
             notify: NotifyKinds::default(),
             verdicts_offer_pending: false,
             idle_offer_pending: false,
@@ -2010,6 +2020,17 @@ pub fn apply_settings_object(
             "menu_bar_mark_enabled" => {
                 settings.menu_bar_mark_enabled =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // The terminal app managed sessions open in. One of this
+            // platform's fixed ids; anything else, `null` included, is refused,
+            // never read as an app name or a command. Also reachable as
+            // `set_managed_terminal`, which writes through here.
+            "managed_terminal" => {
+                settings.managed_terminal = value
+                    .as_str()
+                    .and_then(crate::managed::terminal::TerminalApp::parse)
+                    .ok_or(ERR_SETTINGS_INVALID_VALUE)?
+                    .into();
             }
             // A partial object of kind switches; see `apply_notify_object`.
             // Also reachable as `set_notify_kind`.
@@ -3058,6 +3079,64 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&s).unwrap()["notify"]["future_kind"],
             true
+        );
+    }
+
+    /// The managed-session terminal takes one of this platform's ids and
+    /// nothing else; a stored value this build does not know loads as
+    /// unrecognized and stays so across a save, never becoming the default.
+    #[test]
+    fn the_managed_terminal_takes_only_this_platforms_ids() {
+        use crate::managed::terminal::{TerminalApp, TerminalSetting};
+        let mut s = DaemonSettings::default();
+        assert_eq!(s.managed_terminal, TerminalSetting::default());
+        for app in TerminalApp::offered().iter().rev() {
+            assert_eq!(
+                apply_settings_object(&mut s, &serde_json::json!({"managed_terminal": app.id()})),
+                Ok(true)
+            );
+            assert_eq!(s.managed_terminal, TerminalSetting::from(*app));
+        }
+        let mut bad = vec![
+            serde_json::json!({"managed_terminal": "Ghostty"}),
+            serde_json::json!({"managed_terminal": "unrecognized"}),
+            serde_json::json!({"managed_terminal": "/Applications/Warp.app"}),
+            serde_json::json!({"managed_terminal": "open -a Calculator"}),
+            serde_json::json!({"managed_terminal": null}),
+            serde_json::json!({"managed_terminal": 1}),
+        ];
+        // Another platform's app is refused here too.
+        bad.extend(
+            TerminalApp::ALL
+                .into_iter()
+                .filter(|app| !TerminalApp::offered().contains(app))
+                .map(|app| serde_json::json!({"managed_terminal": app.id()})),
+        );
+        for bad in bad {
+            assert_eq!(
+                apply_settings_object(&mut s.clone(), &bad),
+                Err(ERR_SETTINGS_INVALID_VALUE),
+                "{bad}"
+            );
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut stored = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(
+            stored["managed_terminal"],
+            TerminalSetting::default().app().unwrap().id()
+        );
+        stored["managed_terminal"] = serde_json::json!("wezterm");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&stored).unwrap())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.managed_terminal, TerminalSetting::Unrecognized);
+        loaded.save(&store).unwrap();
+        assert_eq!(
+            DaemonSettings::load(&store).unwrap().managed_terminal,
+            TerminalSetting::Unrecognized
         );
     }
 

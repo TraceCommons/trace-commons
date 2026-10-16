@@ -110,6 +110,13 @@ cargo clippy -p trace-commons-server --all-targets -- \
 CI applies `RUSTFLAGS=-D warnings`, so a plain `cargo check` will not catch what
 CI catches.
 
+If you work in more than one checkout or worktree, a shared compile cache
+saves rebuilding every third-party crate in each one: install sccache and
+set `rustc-wrapper = "sccache"` under `[build]` in your own
+`~/.cargo/config.toml`. It is a local tool, not a project dependency, and
+does not belong in the repository's cargo config. `CLAUDE.md` ("Shared
+compile cache") has the details.
+
 New dependencies need explicit approval before you add them, and must be
 combinable into an AGPL-3.0 work (`cargo deny check licenses`, run under the
 default, `near-ai-scorer`, and `local-gpu-models` feature sets). CI runs
