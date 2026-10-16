@@ -154,14 +154,18 @@ it touches a client path (its `paths:` filter). None of its jobs is a
 required status check, so a server-only PR never waits on a macOS or Windows
 runner, and a client regression surfaces on `main` after the merge.
 
-Every job that caches `target` ends with `./.github/actions/trim-cargo-cache`,
-which deletes linked test and bin executables and `incremental/` before
-actions/cache saves. The repository's caches were over GitHub's 10 GB
-ceiling and a main-written cache was evicted within minutes; a job that
-adds a `target` cache must end with that step too, or it re-creates the
-churn. Push-to-main runs are exempt from `cancel-in-progress` for the same
-reason: a cancelled job saves no cache, and merges to `main` land close
-together.
+A job that caches `target` restores with `actions/cache/restore@v5` and
+saves with `actions/cache/save@v5` on a push to `main` only, after
+`./.github/actions/trim-cargo-cache`, which deletes linked test and bin
+executables, `incremental/`, and the workspace's own `trace-commons-*`
+crates (checkout makes cargo rebuild those every run anyway). The
+repository's caches were over GitHub's 10 GB ceiling and a main-written
+cache was evicted within minutes: a pull request's cache is restorable by
+that pull request alone, so saving one only evicted `main`'s. A job that
+adds a `target` cache must follow the same shape, or it re-creates the
+churn, and the jobs in `clients.yml` keep no cache at all. Push-to-main
+runs are exempt from `cancel-in-progress` for the same reason: a cancelled
+job saves no cache, and merges to `main` land close together.
 
 Running is not the same as blocking. **Eleven** of the nineteen are required
 status checks on `main`, and only those block a merge -- `README.md` lists
