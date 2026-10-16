@@ -2,9 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { isTauriRuntime, listenTauri } from "../../lib/tauri/core-api";
 import { consumeDeepLink, openExternalUrl } from "../../lib/tauri/platform-api";
-import { routePaths } from "../routes";
+import { isNavigablePath, routePaths } from "../routes";
 
-type RoutePath = (typeof routePaths)[keyof typeof routePaths];
 type DesktopDeepLink = NonNullable<Awaited<ReturnType<typeof consumeDeepLink>>>;
 type Navigate = ReturnType<typeof useNavigate>;
 
@@ -16,13 +15,6 @@ function readInitialPendingLink(): Promise<DesktopDeepLink | null> {
     initialPendingLinkRead = consumeDeepLink();
   }
   return initialPendingLinkRead;
-}
-
-function isRoutePath(value: unknown): value is RoutePath {
-  return (
-    typeof value === "string" &&
-    Object.values(routePaths).some((path) => path === value)
-  );
 }
 
 async function handleDesktopLink(
@@ -81,7 +73,10 @@ async function consumeAndOpenDesktopLink(
   }
 }
 
-export function useDesktopEvents(onCredentialCallback: () => void): {
+export function useDesktopEvents(
+  onCredentialCallback: () => void,
+  missionsEnabled: boolean,
+): {
   initialInvite: string | null;
   quitRequested: boolean;
   setQuitRequested: (open: boolean) => void;
@@ -92,10 +87,15 @@ export function useDesktopEvents(onCredentialCallback: () => void): {
   const [quitRequested, setQuitRequested] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const credentialCallback = useRef(onCredentialCallback);
+  const missionsEnabledRef = useRef(missionsEnabled);
 
   useEffect(() => {
     credentialCallback.current = onCredentialCallback;
   }, [onCredentialCallback]);
+
+  useEffect(() => {
+    missionsEnabledRef.current = missionsEnabled;
+  }, [missionsEnabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -122,7 +122,8 @@ export function useDesktopEvents(onCredentialCallback: () => void): {
       await registerTauriListener(
         "navigate",
         (path) => {
-          if (!cancelled && isRoutePath(path)) navigate(path);
+          if (!cancelled && isNavigablePath(path, missionsEnabledRef.current))
+            navigate(path);
         },
         isCancelled,
         cleanups,
