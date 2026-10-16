@@ -1160,13 +1160,44 @@ impl EstimateTableSlot {
 /// about the one in front of them. OWNER DECISION 2026-10-08.
 pub const ESTIMATE_MIN_DRAWN_TIERS: usize = 2;
 
-/// Whether shells draw estimates made under this slot's table, and whether
-/// core copy carries an estimate clause: only a published table with at
-/// least [`ESTIMATE_MIN_DRAWN_TIERS`] tiers. On the wire as `drawn`; the
-/// estimate itself stays on the wire either way.
+/// Whether shells draw the v1 points band: never. The owner replaced the
+/// points band with inference dollars (S8), so the v1 `credit_estimate`
+/// stays on the wire and is still fetched, and its `drawn` is always false;
+/// the batch clause is never worded. A row's dollar figure is
+/// `settlement_estimate`.
 #[must_use]
-pub fn estimate_is_drawn(slot: &EstimateTableSlot) -> bool {
-    slot.basis == ESTIMATE_BASIS_PUBLISHED && slot.table.tier_count() >= ESTIMATE_MIN_DRAWN_TIERS
+pub fn estimate_is_drawn(_slot: &EstimateTableSlot) -> bool {
+    false
+}
+
+/// `settlement_estimate` for one queue entry, or `None` (unknown, never $0):
+/// no drawable table, no features, or the entry is on its way or delivered
+/// (the same rule as [`local_credit_estimate_for`]).
+#[must_use]
+pub fn settlement_estimate_value(
+    e: &super::queue::QueueEntry,
+    table: Option<&trace_commons_protocol::settlement_estimate::SettlementEstimateTable>,
+    now: chrono::DateTime<Utc>,
+) -> Option<serde_json::Value> {
+    let sent = matches!(
+        e.state,
+        super::queue::QueueState::Uploading | super::queue::QueueState::Uploaded
+    ) || e.submission_id.is_some();
+    if sent {
+        return None;
+    }
+    let features = e.estimate_features.as_ref()?;
+    let estimate =
+        trace_commons_protocol::settlement_estimate::entry_estimate(features, table?, now)?;
+    let mut value = serde_json::json!({
+        "low_usd_micros": estimate.low_usd_micros,
+        "high_usd_micros": estimate.high_usd_micros,
+        "drawn": true,
+    });
+    if let Some(tier) = estimate.tier {
+        value["tier"] = serde_json::to_value(tier).ok()?;
+    }
+    Some(value)
 }
 
 /// The local estimate for one queue entry, or `None` (unknown, never 0).
@@ -4035,6 +4066,24 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
     // policy and queue locks below.
     let slot = shared.estimate_table.lock().expect("estimate lock").clone();
     let estimate_table = slot.in_force(Utc::now());
+    // The dollar table, only while the estimate switch is on (leaf locks,
+    // taken one at a time and released here).
+    let settlement_on = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .settlement_estimate_enabled;
+    let settlement_table = if settlement_on {
+        shared
+            .settlement
+            .lock()
+            .expect("settlement lock")
+            .table
+            .clone()
+    } else {
+        None
+    };
+    let settlement_now = Utc::now();
     // K5: an optional `project_id`, for Customize's past-session picker,
     // which lists one folder's waiting sessions at a time. Matched by the id
     // `entry_value` publishes, and refused rather than answered with an empty
@@ -4139,6 +4188,13 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
             // features, without an estimate, or once the entry is sent.
             if let Some(estimate) = credit_estimate_value(e, &estimate_table) {
                 value["credit_estimate"] = estimate;
+            }
+            // The row's inference dollars: absent without a drawable table,
+            // without features, with the switch off, or once sent.
+            if let Some(estimate) =
+                settlement_estimate_value(e, settlement_table.as_ref(), settlement_now)
+            {
+                value["settlement_estimate"] = estimate;
             }
             value
         })
@@ -20210,20 +20266,134 @@ mod tests {
                 .unwrap()
                 .apply_fetch(Ok(fetched_table()), Utc::now());
             assert_eq!(drawn(&s), no, "published, one tier");
+            // S8: the points band is never drawn, even under a published
+            // two-tier table. It stays on the wire.
             s.estimate_table
                 .lock()
                 .unwrap()
                 .apply_fetch(Ok(tiered_table()), Utc::now());
-            assert_eq!(
-                drawn(&s),
-                (serde_json::json!(true), serde_json::json!(true)),
-                "published, two tiers"
-            );
+            assert_eq!(drawn(&s), no, "published, two tiers");
             let rows = list_rows(&s, serde_json::json!({}));
             assert!(
                 rows[0]["credit_estimate"].get("tier").is_some(),
                 "{}",
                 rows[0]
+            );
+        }
+
+        /// A published three-tier slot still answers false (S8).
+        #[test]
+        fn the_points_band_is_never_drawn() {
+            let s = live();
+            seed_idle_estimated(&s, 5);
+            s.estimate_table
+                .lock()
+                .unwrap()
+                .apply_fetch(Ok(tiered_table()), Utc::now());
+            let slot = s.estimate_table.lock().unwrap().clone();
+            assert!(!estimate_is_drawn(&slot));
+            let rows = list_rows(&s, serde_json::json!({}));
+            assert_eq!(rows[0]["credit_estimate"]["drawn"], false);
+            let status = status_of(&s);
+            let text = status["nudge"]["text"].to_string();
+            assert!(!text.contains("Estimated credit"), "{text}");
+        }
+
+        /// A settlement table that is drawable now: a flat mean of four
+        /// dollars of inference per trace, a band of half to one and a half.
+        fn settlement_table_now()
+        -> trace_commons_protocol::settlement_estimate::SettlementEstimateTable {
+            trace_commons_protocol::settlement_estimate::SettlementEstimateTable::from_value(
+                &serde_json::json!({
+                    "schema_version": 2,
+                    "features_version": "lef1",
+                    "version": "s1",
+                    "pricing_version": "p1",
+                    "instrument_id": "trace_credit",
+                    "atomic_units_per_credit": 1_000_000,
+                    "usd_micros_per_credit": 1_000_000,
+                    "published_at": Utc::now().to_rfc3339(),
+                    "bytes_per_token": 4,
+                    "chunk_target_tokens": 2048,
+                    "chunk_cap": 16,
+                    "weights": [{"term": "ln_content_bytes", "weight": 1.0}],
+                    "cut_offs": [100.0],
+                    "tiers": [
+                        {"mean_atomic_units": 4_000_000, "withheld_share_micros": 0},
+                        {"mean_atomic_units": 8_000_000, "withheld_share_micros": 0}
+                    ],
+                    "aggregate_band": {
+                        "low_ratio_micros": 500_000,
+                        "high_ratio_micros": 1_500_000
+                    },
+                    "fit_rows": 40
+                }),
+            )
+            .expect("synthetic settlement table parses")
+        }
+
+        #[test]
+        fn list_pending_rows_carry_a_dollar_estimate_under_a_drawable_table() {
+            let s = live();
+            let with = seed_idle_estimated(&s, 1);
+            let without = seed_entry(&s, ASK);
+            s.settlement.lock().unwrap().table = Some(settlement_table_now());
+            let rows = list_rows(&s, serde_json::json!({}));
+            let row = |id: uuid::Uuid| {
+                rows.iter()
+                    .find(|r| r["entry_id"] == id.to_string())
+                    .unwrap()
+                    .clone()
+            };
+            let estimate = row(with)["settlement_estimate"].clone();
+            assert_eq!(estimate["low_usd_micros"], 2_000_000, "{estimate}");
+            assert_eq!(estimate["high_usd_micros"], 6_000_000, "{estimate}");
+            assert_eq!(estimate["drawn"], true);
+            assert!(row(without).get("settlement_estimate").is_none());
+        }
+
+        #[test]
+        fn no_row_estimate_without_a_drawable_table_or_once_sent() {
+            let s = live();
+            let id = seed_idle_estimated(&s, 1);
+            // No table at all.
+            let rows = list_rows(&s, serde_json::json!({}));
+            assert!(rows[0].get("settlement_estimate").is_none(), "{}", rows[0]);
+            // A table with no rate parses but draws nothing.
+            let mut no_rate = settlement_table_now();
+            no_rate.usd_micros_per_credit = None;
+            s.settlement.lock().unwrap().table = Some(no_rate);
+            let rows = list_rows(&s, serde_json::json!({}));
+            assert!(rows[0].get("settlement_estimate").is_none(), "{}", rows[0]);
+            s.settlement.lock().unwrap().table = Some(settlement_table_now());
+            let entry = s
+                .queue
+                .lock()
+                .unwrap()
+                .all()
+                .iter()
+                .find(|e| e.entry_id == id)
+                .cloned()
+                .unwrap();
+            assert!(
+                settlement_estimate_value(
+                    &entry,
+                    s.settlement.lock().unwrap().table.as_ref(),
+                    Utc::now()
+                )
+                .is_some()
+            );
+            let sent = crate::daemon::queue::QueueEntry {
+                state: crate::daemon::queue::QueueState::Uploaded,
+                ..entry
+            };
+            assert!(
+                settlement_estimate_value(
+                    &sent,
+                    s.settlement.lock().unwrap().table.as_ref(),
+                    Utc::now()
+                )
+                .is_none()
             );
         }
 

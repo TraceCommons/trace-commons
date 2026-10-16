@@ -24,7 +24,7 @@ pub extern "C" fn tc_nudge_copy_json() -> *mut c_char {
 
 /// A Traces row's tags, worded by the core from the row's own
 /// `list_pending` fields: `entry_json` is a borrowed UTF-8 JSON object
-/// carrying the entry's `mission_fit` and `credit_estimate` as the daemon
+/// carrying the entry's `mission_fit` and `settlement_estimate` as the daemon
 /// sent them (the whole entry, or just those two keys). Returns an owned
 /// JSON object with `mission_fit`, `estimate_band`, `estimate_tier` and
 /// `estimate_explainer`, each present only when there is something true to
@@ -48,10 +48,10 @@ pub unsafe extern "C" fn tc_nudge_entry_tags_json(entry_json: *const c_char) -> 
                 .unwrap_or(serde_json::Value::Null)
         };
         let mission_fit = entry.get("mission_fit").and_then(serde_json::Value::as_u64);
-        let estimate = entry.get("credit_estimate").and_then(|e| {
-            Some(trace_commons_contributor::nudge_render::EntryEstimate {
-                low: e.get("low")?.as_f64()?,
-                high: e.get("high")?.as_f64()?,
+        let estimate = entry.get("settlement_estimate").and_then(|e| {
+            Some(trace_commons_contributor::nudge_render::EntryUsdEstimate {
+                low_usd_micros: e.get("low_usd_micros")?.as_u64()?,
+                high_usd_micros: e.get("high_usd_micros")?.as_u64()?,
                 tier: e
                     .get("tier")
                     .and_then(serde_json::Value::as_str)
@@ -186,17 +186,32 @@ mod tests {
     #[test]
     fn a_row_gets_its_tags_from_its_own_wire_fields() {
         let value = tags(Some(
-            r#"{"entry_id":"e1","mission_fit":1,"credit_estimate":{"low":2.0,"high":4.5,"tier":"higher","calibration":"lef1.t2/cq3","basis":"published","drawn":true}}"#,
+            r#"{"entry_id":"e1","mission_fit":1,"settlement_estimate":{"low_usd_micros":2000000,"high_usd_micros":6000000,"tier":"higher","drawn":true}}"#,
         ));
         assert_eq!(value["mission_fit"], "Fits a mission");
         assert_eq!(
             value["estimate_band"],
-            "Estimate: about 2 to 4.5 of inference"
+            "Estimate: about $2 to $6 of inference"
         );
         assert_eq!(value["estimate_tier"], "Higher estimate");
         assert_eq!(
             value["estimate_explainer"],
-            trace_commons_contributor::nudge_copy::ESTIMATE_EXPLAINER
+            trace_commons_contributor::nudge_copy::SETTLEMENT_ESTIMATE_EXPLAINER
+        );
+    }
+
+    #[test]
+    fn entry_tags_read_the_settlement_estimate() {
+        let value = tags(Some(
+            r#"{"settlement_estimate":{"low_usd_micros":2000000,"high_usd_micros":6000000,"drawn":true}}"#,
+        ));
+        assert!(value.get("estimate_band").is_some());
+        // The v1 points band is ignored, drawn or not.
+        assert_eq!(
+            tags(Some(
+                r#"{"credit_estimate":{"low":2.0,"high":4.5,"tier":"higher","calibration":"c","basis":"published","drawn":true}}"#
+            )),
+            serde_json::json!({})
         );
     }
 
@@ -206,13 +221,13 @@ mod tests {
         // Not drawn, an older daemon's missing `drawn`, a zero fit, no fields.
         assert_eq!(
             tags(Some(
-                r#"{"mission_fit":0,"credit_estimate":{"low":1.0,"high":3.0,"calibration":"c","basis":"built_in","drawn":false}}"#
+                r#"{"mission_fit":0,"settlement_estimate":{"low_usd_micros":1000000,"high_usd_micros":3000000,"drawn":false}}"#
             )),
             empty
         );
         assert_eq!(
             tags(Some(
-                r#"{"credit_estimate":{"low":1.0,"high":3.0,"tier":"higher","calibration":"c","basis":"published"}}"#
+                r#"{"settlement_estimate":{"low_usd_micros":1000000,"high_usd_micros":3000000,"tier":"higher"}}"#
             )),
             empty
         );
