@@ -145,9 +145,19 @@ impl TerminalApp {
         match self {
             // Addressed by bundle id, like the others, so the app that
             // receives the command is the one the installed check found.
+            // The new tab's tty is printed, and read back only as a bare
+            // device path. Any failure there prints nothing: the launch
+            // stands and the session simply cannot be shown.
             TerminalApp::Terminal => vec![
-                format!("tell application id \"{id}\" to do script \"{literal}\""),
-                format!("tell application id \"{id}\" to activate"),
+                format!("tell application id \"{id}\""),
+                format!("set t to do script \"{literal}\""),
+                "activate".into(),
+                "set found to \"\"".into(),
+                "try".into(),
+                "set found to tty of t".into(),
+                "end try".into(),
+                "return found".into(),
+                "end tell".into(),
             ],
             TerminalApp::Ghostty => vec![
                 format!("tell application id \"{id}\""),
@@ -345,19 +355,25 @@ fn parse_installed(stdout: &str) -> Vec<TerminalApp> {
 
 /// The macOS launch with its outside effect passed in. Refuses an
 /// unrecognized choice, and an app that was not found, before running
-/// anything. Never falls back to another app.
+/// anything. Never falls back to another app. `run` returns what the
+/// script printed; only Terminal's script prints a tab, which is read back
+/// as a bare tty path and nothing else.
 #[cfg(target_os = "macos")]
 fn launch_macos(
     choice: TerminalSetting,
     installed: &[TerminalApp],
     command: &str,
-    run: impl FnOnce(Vec<String>) -> Result<(), ManagedError>,
-) -> Result<(), ManagedError> {
+    run: impl FnOnce(Vec<String>) -> Result<Vec<u8>, ManagedError>,
+) -> Result<Option<TerminalHandle>, ManagedError> {
     let app = choice.app().ok_or(ManagedError::InvalidRequest)?;
     if !installed.contains(&app) {
         return Err(ManagedError::TerminalNotFound);
     }
-    run(app.script(command))
+    let printed = run(app.script(command))?;
+    Ok(match app {
+        TerminalApp::Terminal => apple_terminal_tab(&printed),
+        _ => None,
+    })
 }
 
 /// What a Windows or Linux launch starts: `program` with `args`, each one
@@ -460,6 +476,95 @@ fn plan(
     })
 }
 
+/// What the daemon keeps, from its own launch, to find a session's terminal
+/// tab again. A launch that cannot name its tab keeps none, and that
+/// session cannot be shown. One variant per terminal the daemon can script;
+/// another terminal adds its own here, with its own `focus` arm.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TerminalHandle {
+    /// A Terminal tab, by the tty device the launch's tab reported. The tool
+    /// holds that tty for as long as it runs, so no other tab can have it
+    /// while the session can be shown, and a tab dragged into another window
+    /// is still found.
+    AppleTerminal {
+        #[serde(deserialize_with = "tty_path")]
+        tty: String,
+    },
+}
+
+/// A bare tty device path, `/dev/tty` and up to 16 letters or digits. Nothing
+/// else is ever put in a script, whether it came from the launch script's
+/// output or from a file on disk.
+fn valid_tty(text: &str) -> bool {
+    text.strip_prefix("/dev/tty").is_some_and(|rest| {
+        (1..=16).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_alphanumeric())
+    })
+}
+
+fn tty_path<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let text = String::deserialize(d)?;
+    if valid_tty(&text) {
+        Ok(text)
+    } else {
+        Err(serde::de::Error::custom("not a tty path"))
+    }
+}
+
+/// The tty the launch script printed, or none.
+pub fn apple_terminal_tab(output: &[u8]) -> Option<TerminalHandle> {
+    let text = std::str::from_utf8(output).ok()?;
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    valid_tty(text).then(|| TerminalHandle::AppleTerminal {
+        tty: text.to_string(),
+    })
+}
+
+/// Bring a session's tab to the front, in whichever window holds it now.
+/// Refused when the tab is gone or this build cannot script the terminal
+/// that holds it.
+pub fn focus(handle: &TerminalHandle) -> Result<(), ManagedError> {
+    match handle {
+        #[cfg(target_os = "macos")]
+        TerminalHandle::AppleTerminal { tty } => {
+            if !valid_tty(tty) {
+                return Err(ManagedError::InvalidRequest);
+            }
+            // `tty` passed `valid_tty`, so the script holds only letters,
+            // digits and slashes from it.
+            let script = format!(
+                "tell application \"Terminal\"\n\
+                 set done to false\n\
+                 repeat with w in windows\n\
+                 repeat with t in tabs of w\n\
+                 if tty of t is \"{tty}\" then\n\
+                 set selected of t to true\n\
+                 if miniaturized of w then set miniaturized of w to false\n\
+                 set index of w to 1\n\
+                 set done to true\n\
+                 exit repeat\n\
+                 end if\n\
+                 end repeat\n\
+                 if done then exit repeat\n\
+                 end repeat\n\
+                 if not done then error \"no tab\"\n\
+                 activate\n\
+                 end tell"
+            );
+            let mut command = std::process::Command::new("/usr/bin/osascript");
+            command.args(["-e", &script]);
+            let output = super::profiles::bounded_output(command)?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(ManagedError::NotFound)
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        TerminalHandle::AppleTerminal { .. } => Err(ManagedError::UnsupportedVersion),
+    }
+}
+
 pub fn shell_command(
     helper: &Path,
     config: &Path,
@@ -546,6 +651,10 @@ fn destination_for(choice: TerminalSetting) -> Option<&'static str> {
 /// `installed`, with `cwd` as its working directory where the app takes
 /// one by command line (Windows and Linux). On macOS the helper itself
 /// starts the tool in `cwd`, so the scripts stay as they were.
+///
+/// The handle names the window it opened in, when the terminal can say
+/// (Terminal's tab, by tty); a launch that cannot is still a launch, with no
+/// handle.
 pub fn launch(
     choice: TerminalSetting,
     installed: &[TerminalApp],
@@ -553,7 +662,7 @@ pub fn launch(
     cwd: &Path,
     session: Uuid,
     ticket: &str,
-) -> Result<(), ManagedError> {
+) -> Result<Option<TerminalHandle>, ManagedError> {
     #[cfg(target_os = "macos")]
     {
         let _ = cwd;
@@ -565,7 +674,7 @@ pub fn launch(
             }
             let output = super::profiles::bounded_output(script)?;
             if output.status.success() {
-                Ok(())
+                Ok(output.stdout)
             } else {
                 Err(ManagedError::LaunchUnknown)
             }
@@ -595,7 +704,7 @@ pub fn launch(
         std::thread::spawn(move || {
             let _ = process.wait();
         });
-        Ok(())
+        Ok(None)
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
@@ -741,7 +850,7 @@ mod tests {
             let line = holding[0];
             // The fixed template, then one literal running to the line's end.
             let fixed = match app {
-                TerminalApp::Terminal => "tell application id \"com.apple.Terminal\" to do script ",
+                TerminalApp::Terminal => "set t to do script ",
                 TerminalApp::Ghostty => "set command of sessionConfiguration to ",
                 TerminalApp::Iterm2 => "create window with default profile command ",
                 other => unreachable!("{other:?} is not a macOS app"),
@@ -780,8 +889,15 @@ mod tests {
         assert_eq!(
             lines(TerminalApp::Terminal),
             [
-                "tell application id \"com.apple.Terminal\" to do script \"'/x/near-ai' redeem-launch\"",
-                "tell application id \"com.apple.Terminal\" to activate",
+                "tell application id \"com.apple.Terminal\"",
+                "set t to do script \"'/x/near-ai' redeem-launch\"",
+                "activate",
+                "set found to \"\"",
+                "try",
+                "set found to tty of t",
+                "end try",
+                "return found",
+                "end tell",
             ]
         );
         assert_eq!(
@@ -825,7 +941,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_chosen_app_that_is_not_installed_is_refused_without_running() {
-        let never = |_: Vec<String>| -> Result<(), ManagedError> {
+        let never = |_: Vec<String>| -> Result<Vec<u8>, ManagedError> {
             panic!("nothing runs when the chosen app is missing")
         };
         assert_eq!(
@@ -857,11 +973,32 @@ mod tests {
             "'/x/near-ai'",
             |lines| {
                 ran = Some(lines);
-                Ok(())
+                // Whatever another app printed is never read as a tab.
+                Ok(b"/dev/ttys001\n".to_vec())
             },
         )
         .unwrap();
         assert_eq!(ran, Some(TerminalApp::Ghostty.script("'/x/near-ai'")));
+        assert_eq!(
+            launch_macos(
+                TerminalSetting::Terminal,
+                &[TerminalApp::Terminal],
+                "'/x/near-ai'",
+                |_| Ok(b"/dev/ttys001\n".to_vec())
+            ),
+            Ok(Some(TerminalHandle::AppleTerminal {
+                tty: "/dev/ttys001".into()
+            }))
+        );
+        assert_eq!(
+            launch_macos(
+                TerminalSetting::Terminal,
+                &[TerminalApp::Terminal],
+                "'/x/near-ai'",
+                |_| Ok(b"not a tty".to_vec())
+            ),
+            Ok(None)
+        );
     }
 
     #[test]

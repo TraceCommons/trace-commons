@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
     /// The copy key of the last failed managed action (`ManagedSurface.errorKey`),
     /// never the daemon's code.
     @Published var managedErrorKey: String?
+    @Published var managedErrorTool: String?
     /// The last copy table the daemon sent, kept when a later read fails so
     /// the connecting and failure states still have their words.
     private var managedCopy: [String: String] = [:]
@@ -42,6 +43,9 @@ final class AppModel: ObservableObject {
         guard let client, !managedBusy else { return }
         managedBusy = true
         managedErrorKey = nil
+        managedErrorTool = nil
+        let attemptedTool = params["tool"] as? String
+            ?? managedSnapshot?.accounts.first(where: { $0.id == (params["account_id"] as? String) })?.tool
         Task.detached(priority: .userInitiated) {
             let result = Result {
                 var response = try client.managedAction(method, params: params)
@@ -65,6 +69,7 @@ final class AppModel: ObservableObject {
                 if case .failure(let error) = result {
                     let failure = error as? DaemonClient.Failure
                     self.managedErrorKey = ManagedSurface.errorKey(code: failure?.code, message: failure?.message)
+                    self.managedErrorTool = attemptedTool
                 }
                 self.refreshManagedSessions()
             }

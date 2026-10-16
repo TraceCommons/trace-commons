@@ -349,6 +349,9 @@ pub const METHODS: &[&str] = &[
     "managed_terminal_launch",
     "managed_session_report",
     "managed_session_dismiss",
+    "managed_session_focus",
+    "managed_session_stop",
+    "managed_session_start_again",
     "managed_account_remove",
     "managed_account_reconnect",
     "managed_account_rename",
@@ -3507,6 +3510,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "managed_launch_redeem" => super::managed::handle(shared, req),
         "managed_session_report" => super::managed::handle(shared, req),
         "managed_session_dismiss" => super::managed::handle(shared, req),
+        "managed_session_focus" => super::managed::handle(shared, req),
+        "managed_session_stop" => super::managed::handle(shared, req),
+        "managed_session_start_again" => super::managed::handle(shared, req),
         "managed_account_remove" => super::managed::handle(shared, req),
         "managed_account_rename" => super::managed::handle(shared, req),
         "managed_account_set_key" => super::managed::handle(shared, req),
@@ -17177,7 +17183,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 83, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 86, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

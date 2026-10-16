@@ -30,6 +30,13 @@ near-ai sessions list
 
 CLI launches use the current terminal or multiplexer pane. All managed launches,
 including those initiated from the CLI, appear in the app's managed-session list.
+A session the app opened in Terminal can be shown (its tab brought to the
+front) and stopped from its row; a CLI launch cannot, because the app neither
+opened its window nor started its launcher. An ended session can be started
+again in the same folder with the same account while both still exist.
+Stop signals only the tool process the launcher supervises: SIGTERM, then
+SIGKILL after a bounded wait. Processes the tool itself started (a shell
+command, a dev server) are not signalled and can outlive it.
 Standard sessions and multiple managed accounts can run in parallel.
 
 For an API key, supply it through stdin using a secret-manager pipe, rather than
@@ -47,14 +54,43 @@ an explicit new selection before a CLI launch without `--account`.
 
 ## Availability and recovery
 
+The app checks for executable Claude Code, Codex and OpenCode installations
+using the same resolver as managed launches. This does not run the tool, scan
+its session store, or enable watching, importing or collection. **Install** opens
+the tool's official installation page; **Check again** refreshes availability.
+Removing a tool leaves its saved accounts and session history intact. The
+desktop screens do not offer a launch or sign-in for a tool the resolver cannot
+find. On an explicit launch or sign-in request, an executable the daemon finds
+is version-checked before a ticket is created, with a ten-second probe deadline;
+the helper resolves and checks the tool again where it runs, before starting
+it. A CLI launch is not refused because the daemon cannot see a tool that is on
+the launching terminal's PATH: the helper's check decides.
+
+The additive `managed_snapshot.tools` array contains `tool`, `installed` and
+`install_url`. The read-only `tc_managed_tools_json` FFI export returns that same
+array before daemon startup; `tc_managed_copy_json` provides its shared wording.
+`tool_destinations` includes `managed_copy` and a separate `managed_sessions`
+projection containing `id`, `tool`, `connection`, `provider`, `model`,
+`collection_state` and `state`. It excludes sign-in sessions, paths, account
+labels and native session identifiers. An unreadable registry yields null rather
+than an empty history. Collection states are `off`, `pending`, `collected` and
+`failed`; provider labels are `near_ai`, `anthropic` and `openai`. These session
+routes do not change the standard harness route or claim observed model calls.
+Map tool rows expose `installed` for the three managed tools and null for other
+tools whose executable availability is not checked.
+
+
 - Supported native adapter versions begin at Claude Code 2.1.289 (major 2) and
   Codex 0.160.0 (major 0). Older or unrecognized versions are refused before
   login, logout, or managed use.
+- On Windows, discovery requires the native `.exe` on PATH. npm `.cmd` wrappers
+  are not executed by this resolver; an installed wrapper alone is unavailable.
 - App sessions open in the terminal chosen at Settings > Private AI > **Open
   sessions in** (see "Terminal choice" below). The packaged `near-ai` helper
   must be present. Flatpak host-terminal launching is unavailable; it requires
   an explicit host bridge, so under Flatpak the picker offers nothing and is
-  not drawn. No terminal-focus operation is advertised.
+  not drawn. Show brings a session's Terminal tab to the front on macOS; a
+  session opened in another terminal app cannot be shown.
 - Each NEAR AI session owns an isolated IronWire proxy and key. It waits for
   NEAR's model catalogue and pins its own proxy to the first advertised model.
   It never changes the standard proxy or falls back to another provider/account.
@@ -160,8 +196,10 @@ Use an upstream model ID, without a provider prefix added by Trace Commons.
 For NEAR AI, use an ID advertised by that account's model catalogue. A model
 absent from the catalogue is refused; the route never substitutes the first
 model. Without `--collect-traces`, the native session remains local and no
-export is staged. The CLI is also the launch surface on Windows and Linux;
-this change does not extend the frozen desktop launch controls there.
+export is staged. The native macOS, Windows and GTK managed-session screens also offer
+OpenCode account setup, an explicit model and opt-in collection. The frozen
+Tauri controls are unchanged. Windows and GTK do not currently have a routing
+map; their managed rows show the selected account, model and collection state.
 
 Each launch owns a separate HOME/XDG profile beneath its saved account and
 uses OpenCode's pure mode. Project OpenCode configuration and external plugins
@@ -193,3 +231,23 @@ other versions fail closed. A local synthetic-model qualification covers
 import, exact-ID run, explicit model routing, export, validation and staging.
 It does not certify real provider credentials, NEAR AI receipts, or unattended
 end-to-end contribution without an invite.
+
+## Native shell visibility and map
+
+New setup and launch choices hide unavailable coding tools when at least one
+supported executable is installed. With none installed, the managed screens
+offer Claude Code, Codex and OpenCode installation instructions and Check again.
+Installation is user initiated. Existing accounts, imported sources and session
+history survive removal of a tool; unavailable accounts cannot launch.
+
+The macOS first-run tool screen uses the same read-only executable discovery
+before starting the daemon. Finding OpenCode does not grant source-watch consent
+or invent an export location. It explains that ordinary sessions need an export
+folder and managed sessions can opt into collection when launched.
+
+The macOS map includes managed provider/model and collection details. Separate
+managed route nodes describe session configuration, using still dashed arcs.
+Neither a running process nor a collected export is evidence of an answered
+model call, contribution, or global routing configuration. Sign-in-only sessions
+are excluded. An unreadable registry remains unknown, and older payloads remain
+readable without the added availability or managed-route fields.

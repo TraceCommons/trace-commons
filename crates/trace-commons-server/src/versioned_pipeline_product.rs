@@ -357,6 +357,11 @@ pub struct PipelineOperationalSummary {
     /// suspended by an operator, in any bundle and phase. A count only; the
     /// intervention records say which and why.
     pub suspended_policy_count: u64,
+    /// The tenant's runs held for an operator (`awaiting_operator`, #1313):
+    /// a paid Settle run whose commit was refused for good. Its reason label
+    /// is on the `work` row. `0` in a summary written before V128.
+    #[serde(default)]
+    pub operator_held_run_count: u64,
     pub tenant_isolation_control_passed: bool,
     pub audit_immutability_control_passed: bool,
 }
@@ -1209,7 +1214,10 @@ impl PipelineProductStore {
                         AS incomplete_exports,
                     (SELECT COUNT(*) FROM pipeline_bundle_policy_status
                       WHERE tenant_id = $1 AND NOT runnable)
-                        AS suspended_policies",
+                        AS suspended_policies,
+                    (SELECT COUNT(*) FROM pipeline_runs
+                      WHERE tenant_id = $1 AND state = 'awaiting_operator')
+                        AS operator_held_runs",
                 &[&tenant_id],
             )
             .await?;
@@ -1266,6 +1274,7 @@ impl PipelineProductStore {
             failed_invalidation_count: count_from_row(&summary, "failed_invalidation")?,
             incomplete_export_count: count_from_row(&summary, "incomplete_exports")?,
             suspended_policy_count: count_from_row(&summary, "suspended_policies")?,
+            operator_held_run_count: count_from_row(&summary, "operator_held_runs")?,
             tenant_isolation_control_passed: controls.tenant_isolation_passed,
             audit_immutability_control_passed: controls.audit_immutability_passed,
         })
@@ -1576,6 +1585,9 @@ fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError
             }
             PipelineRunState::Retry => PipelineProcessingStatus::Retry,
             PipelineRunState::AwaitingReview => PipelineProcessingStatus::AwaitingReview,
+            // #1313: a paid run held for an operator has not finished
+            // processing; the contributor sees it as pending, not failed.
+            PipelineRunState::AwaitingOperator => PipelineProcessingStatus::Pending,
             PipelineRunState::Complete => PipelineProcessingStatus::Complete,
             PipelineRunState::Failed => PipelineProcessingStatus::Failed,
         }
@@ -1998,7 +2010,7 @@ mod tests {
     }
 
     /// The tenant-isolation control covers every versioned-pipeline table:
-    /// the list read from `TRACE_COMMONS_RLS_TABLES` is the twenty tables
+    /// the list read from `TRACE_COMMONS_RLS_TABLES` is the tables
     /// the migrations define.
     #[test]
     fn the_isolation_control_covers_every_pipeline_table() {
@@ -2026,6 +2038,7 @@ mod tests {
                 "pipeline_receipt_ownership",
                 "pipeline_policy_interventions",
                 "pipeline_index_rebuild_fences",
+                "pipeline_score_bases",
             ])
         );
     }
