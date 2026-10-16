@@ -1293,6 +1293,7 @@ impl ConfigStore {
             INVITE_SUBJECT_FILE,
             LEGACY_INVITE_REFUSAL_FILE,
             REMEMBERED_PASSKEYS_FILE,
+            DAEMON_SETTLEMENT_FEATURES_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -1319,6 +1320,7 @@ impl ConfigStore {
             INVITE_SUBJECT_FILE,
             LEGACY_INVITE_REFUSAL_FILE,
             REMEMBERED_PASSKEYS_FILE,
+            DAEMON_SETTLEMENT_FEATURES_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))
@@ -1988,6 +1990,29 @@ mod tests {
         // Marker present: subsequent calls stay silent.
         assert!(!store.ensure_near_ai_notice_shown().unwrap());
         assert!(!store.ensure_near_ai_notice_shown().unwrap());
+    }
+
+    #[test]
+    fn wipe_removes_the_settlement_feature_cache_and_its_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().join("state")).unwrap();
+        store
+            .write_daemon_file(DAEMON_SETTLEMENT_FEATURES_FILE, b"{}")
+            .unwrap();
+        let orphan = dir
+            .path()
+            .join("state")
+            .join(format!(".{DAEMON_SETTLEMENT_FEATURES_FILE}.tmp-synthetic"));
+        std::fs::write(&orphan, b"{}").unwrap();
+        store.wipe().unwrap();
+        assert!(
+            store
+                .read_daemon_file(DAEMON_SETTLEMENT_FEATURES_FILE)
+                .unwrap()
+                .is_none(),
+            "wipe() left the settlement feature cache"
+        );
+        assert!(!orphan.exists(), "wipe() left a settlement cache temp file");
     }
 
     #[test]
