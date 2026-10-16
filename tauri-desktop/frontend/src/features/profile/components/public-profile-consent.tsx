@@ -43,7 +43,7 @@ export function PublicProfileConsent({
         if (!nextOpen) onCancel();
       }}
       title="Put your handle on the public roster?"
-      description="Public attribution changes identity metadata only. It grants no trace or session data use."
+      description="Public attribution changes identity metadata only. It grants no use of trace data."
       footer={
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <GlassButton type="button" onClick={onCancel} disabled={busy}>
@@ -78,7 +78,7 @@ export function PublicProfileConsent({
           <section className="grid gap-2">
             <h3>What never does</h3>
             <p className="text-sm text-tc-secondary">
-              Traces, trace contents, per-trace data, or anything about sessions
+              Traces, trace contents, per-trace data, or anything about traces
               you did not send.
             </p>
           </section>

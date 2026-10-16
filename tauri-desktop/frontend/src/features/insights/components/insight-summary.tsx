@@ -51,7 +51,7 @@ export function InsightSummary({ summary }: { summary: InsightSummaryData }) {
         </p>
       </div>
       <p className="m-0 tc-caption tc-text-tertiary">
-        Assessments are user-reported. Saved sessions are not independently
+        Assessments are user-reported. Saved traces are not independently
         verified tasks; unknown values are not zero.
       </p>
     </section>

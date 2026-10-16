@@ -4,9 +4,10 @@ use std::time::Duration;
 
 use serde_json::json;
 use trace_commons_protocol::privacy_filter_near_ai::{
-    MAX_CLASSIFY_ATTEMPTS, MAX_CLASSIFY_INPUT_TOKENS,
+    MAX_CLASSIFY_ATTEMPTS, MAX_CLASSIFY_INPUT_TOKENS, MAX_CLASSIFY_REQUEST_BODY_BYTES,
     MAX_CONCURRENT_CLASSIFY_WINDOWS as CLASSIFY_CONCURRENCY, NearAiPrivacyFilterAdapter,
 };
+use trace_commons_protocol::trace_contribution::TraceContributionError;
 
 /// Roughly the byte span of one full window for this filler, at the sparse
 /// (prose-like) end of token density. Windows are budgeted in TOKENS now, so
@@ -658,5 +659,156 @@ async fn different_windows_get_their_own_classification() {
     assert!(
         without.is_none() || !without.unwrap().redacted_text.contains("[REDACTED"),
         "a distinct window must not inherit another window's spans"
+    );
+}
+
+/// A padded table with escaped cells: runs of spaces and `=` carry ~64-128
+/// body bytes per token, so one token-budget window is far over the body
+/// limit the endpoint enforces (a permanent 413 at ~256 KiB).
+fn padded_table(rows: usize) -> String {
+    (0..rows)
+        .map(|i| format!("| \\\"{i}\\\" |{}|{}|\n", " ".repeat(300), "=".repeat(300)))
+        .collect()
+}
+
+/// A field whose token windows would each be hundreds of KiB of body is cut
+/// into windows under `MAX_CLASSIFY_REQUEST_BODY_BYTES`, and together they
+/// still cover it exactly.
+#[tokio::test]
+async fn a_field_is_windowed_under_the_body_cap() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "data": [{ "spans": [] }] })),
+        )
+        .mount(&server)
+        .await;
+    let text = padded_table(1_200);
+    let result = adapter(server.uri())
+        .redact_text(&text)
+        .await
+        .expect("call succeeds")
+        .expect("non-blank");
+    assert_eq!(result.redacted_text, text);
+    let requests = server.received_requests().await.expect("recording on");
+    let largest = requests.iter().map(|r| r.body.len()).max().unwrap();
+    assert!(
+        largest <= MAX_CLASSIFY_REQUEST_BODY_BYTES,
+        "a request body was {largest} bytes, over the {MAX_CLASSIFY_REQUEST_BODY_BYTES} cap"
+    );
+    let inputs: String = requests
+        .iter()
+        .map(|r| {
+            let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+            body["input"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert_eq!(inputs, text, "the windows cover the field exactly");
+}
+
+/// Responder that reports every "Zoë" with the given codepoint shift and the
+/// given `text` field (None omits it).
+fn shifted_name_spans(
+    shift: usize,
+    text: Option<&'static str>,
+) -> impl Fn(&wiremock::Request) -> ResponseTemplate + Send + Sync + 'static {
+    move |req: &wiremock::Request| {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        let input = body["input"].as_str().unwrap();
+        let spans: Vec<serde_json::Value> = input
+            .match_indices("Zoë")
+            .map(|(byte, _)| {
+                let start = input[..byte].chars().count() + shift;
+                let mut span = json!({
+                    "category": "private_person",
+                    "start": start,
+                    "end": start + 3,
+                    "score": 0.9,
+                });
+                if let Some(text) = text {
+                    span["text"] = json!(text);
+                }
+                span
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({ "data": [{ "spans": spans }] }))
+    }
+}
+
+async fn server_with(
+    responder: impl Fn(&wiremock::Request) -> ResponseTemplate + Send + Sync + 'static,
+) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(responder)
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn a_span_whose_text_matches_its_offsets_is_applied() {
+    let server = server_with(shifted_name_spans(0, Some("Zoë"))).await;
+    let adapter = adapter(server.uri());
+    for (input, expected) in [
+        ("😀 hi Zoë", "😀 hi [REDACTED:private_person]"),
+        ("李 Zoë", "李 [REDACTED:private_person]"),
+        ("Zoë 👨‍👩‍👧", "[REDACTED:private_person] 👨‍👩‍👧"),
+    ] {
+        let result = adapter.redact_text(input).await.unwrap().unwrap();
+        assert_eq!(result.redacted_text, expected);
+    }
+}
+
+/// An offset slip -- the right entity reported one codepoint late -- passes
+/// every range check and would redact the wrong characters, leaving the name
+/// in place and reporting success. The span's own `text` exposes it, so the
+/// call fails closed, non-transient, hash-only.
+#[tokio::test]
+async fn a_span_whose_text_differs_from_its_offsets_fails_closed() {
+    let server = server_with(shifted_name_spans(1, Some("Zoë"))).await;
+    let adapter = adapter(server.uri());
+    let error = adapter.redact_text("say hi to Zoë now").await.unwrap_err();
+    assert!(
+        matches!(error, TraceContributionError::RedactionFailed { .. }),
+        "permanent, not transient: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("privacy_filter_span_text_mismatch"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("Zoë"),
+        "the text is never echoed: {message}"
+    );
+
+    // A refused response is not cached: the same text is refused again.
+    let again = adapter.redact_text("say hi to Zoë now").await.unwrap_err();
+    assert!(
+        again
+            .to_string()
+            .contains("privacy_filter_span_text_mismatch")
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_span_without_text_fails_closed() {
+    let server = server_with(shifted_name_spans(0, None)).await;
+    let error = adapter(server.uri())
+        .redact_text("say hi to Zoë now")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        TraceContributionError::RedactionFailed { .. }
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("privacy_filter_span_text_mismatch")
     );
 }

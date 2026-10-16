@@ -1034,7 +1034,16 @@ const ALLOWLISTED_STATUS_REASONS: &[&str] = &[
     // the contributor's receipt reports. It is NOT a claim that the trace is
     // clean, and nothing may read it as one.
     WITNESS_ADMITTED_STATUS_REASON,
+    // #1346: the submission's pipeline run ended `failed` before Review
+    // decided it, so the trace was never scored.
+    PIPELINE_PROCESSING_FAILED_STATUS_REASON,
 ];
+
+/// Status reason recorded when a pipeline run ended `failed` while its
+/// submission was still `received` (#1346): the same transaction moves the
+/// submission to `rejected` under this label. It says the trace was not
+/// processed, not that anything was found in it.
+pub const PIPELINE_PROCESSING_FAILED_STATUS_REASON: &str = "pipeline_processing_failed";
 
 /// Status reason recorded when an attested redaction witness admitted a
 /// submission in place of the server's queued PII-backstop re-check.
@@ -1171,6 +1180,7 @@ pub enum TraceTenantAccessGrantRole {
     RevocationWorker,
     CompetitionReadWorker,
     RegisterStatsWorker,
+    AccountTrustWorker,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2140,7 +2150,7 @@ pub struct TraceGateDecisionRow {
     /// `None` means NOT INSTRUMENTED: every decision written before V53, and
     /// any path that records a decision without scoring it. It is not `Some(0)`
     /// — a below-floor trace earns a genuine composite of 0, and conflating
-    /// the two would enrol unmeasured rows into the sample as real
+    /// the two would enroll unmeasured rows into the sample as real
     /// observations. Readers MUST NOT default it.
     pub composite_score_micros: Option<i64>,
     /// Which vector-index shard the novelty score was computed against
@@ -2241,6 +2251,42 @@ impl DedupSignalRow {
     pub fn effective_signal_version(&self) -> &str {
         effective_dedup_signal_version(self.dedup_signal_version.as_deref())
     }
+}
+
+/// One decision row's identifiers and time, newest first, as the credit
+/// estimate eval enumerates them (through the narrow `trace_gate_driver`
+/// pool, no tenant GUC, every column granted by V45).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateDecisionKeyRow {
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+    pub decision_id: Uuid,
+    pub decided_at: DateTime<Utc>,
+}
+
+/// A submission's settlement label for the credit estimate eval under
+/// `target=settlement`, read tenant-scoped by
+/// `Database::list_settlement_labels`. Taken from the pipeline run that
+/// wrote the submission's gate decision (`trace_gate_decisions.pipeline_run_id`),
+/// not the latest run, so a re-run in flight never relabels a settled trace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementLabelRow {
+    pub submission_id: Uuid,
+    pub label: SettlementLabel,
+}
+
+/// What a settled run awarded in `trace_credit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettlementLabel {
+    /// The run is complete with a Score outcome and a `trace_credit`
+    /// settlement row: its `atomic_units`.
+    Settled(u64),
+    /// The run is complete with a Score outcome and no `trace_credit` row:
+    /// withheld at zero.
+    WithheldAtZero,
+    /// No pipeline run, no Score outcome, a run not complete, a `trace_credit`
+    /// row held, or an amount outside `u64`. Left out of the eval.
+    Excluded,
 }
 
 /// One decision row as the dedup re-derivation pass enumerates it (through
@@ -3586,7 +3632,12 @@ pub trait TraceCorpusStore: Send + Sync {
     /// are left untouched. Implementations MUST scope the update by `tenant_id`
     /// (the V23 table has forced RLS bound to `trace_current_tenant_id()`).
     ///
-    /// Defaults to a log-once warning + no-op; only the production Postgres
+    /// Returns the number of rows updated: 0 when there is nothing to update,
+    /// or when the submission has a pipeline row, which a re-score never
+    /// rewrites (spec 2026-10-08, Slice C, O-C3). The caller counts a 0 as a
+    /// skip, never as a re-score.
+    ///
+    /// Defaults to a log-once warning + no-op (0 rows); only the production Postgres
     /// backend has a real implementation. The default deliberately does not
     /// panic but does warn (label-only, no tenant/submission identifiers) so a
     /// future non-Postgres backend that exercises the re-score path cannot
@@ -3598,14 +3649,14 @@ pub trait TraceCorpusStore: Send + Sync {
         _perplexity_micros: i64,
         _peak_perplexity_micros: Option<i64>,
         _perplexity_passed: bool,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<u64, DatabaseError> {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| {
             tracing::warn!(
                 "update_trace_gate_decision_perplexity called on a backend without a real impl"
             );
         });
-        Ok(())
+        Ok(0)
     }
 
     /// Write ONLY the five per-author perplexity columns (migration V73) on
@@ -3617,21 +3668,23 @@ pub trait TraceCorpusStore: Send + Sync {
     /// different model than the row was gated under cannot rewrite gating
     /// history. Implementations MUST scope the update by `tenant_id`.
     ///
-    /// Defaults to a log-once warning + no-op, as
-    /// `update_trace_gate_decision_perplexity` does and for the same reason.
+    /// Returns the number of rows updated, as
+    /// `update_trace_gate_decision_perplexity` does: 0 for a pipeline
+    /// submission. Defaults to a log-once warning + no-op (0 rows), as that
+    /// method does and for the same reason.
     async fn update_trace_gate_decision_author_perplexity(
         &self,
         _tenant_id: &str,
         _submission_id: Uuid,
         _columns: [Option<i64>; 5],
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<u64, DatabaseError> {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| {
             tracing::warn!(
                 "update_trace_gate_decision_author_perplexity called on a backend without a real impl"
             );
         });
-        Ok(())
+        Ok(0)
     }
 
     /// Update ONLY the credit-quality columns for the decision row identified by
@@ -3825,6 +3878,35 @@ pub trait TraceCorpusStore: Send + Sync {
         _limit: i64,
     ) -> Result<Vec<Uuid>, DatabaseError> {
         Ok(Vec::new())
+    }
+
+    /// Record the post-backstop privacy summary on one RELEASED submission:
+    /// its `privacy_risk`, `redaction_counts` and `canonical_summary_hash`,
+    /// and nothing else.
+    ///
+    /// This is the remediation write for submissions the PII backstop released
+    /// before it recorded these itself (GHSA-q7pr-c684-grrq). It is a narrow
+    /// UPDATE rather than `upsert_trace_submission` on purpose: the upsert
+    /// rewrites `status` from the caller, so a pass racing a revocation could
+    /// put a revoked row back to accepted. Implementations MUST touch only a
+    /// row that is still `accepted` or `quarantined` and neither revoked nor
+    /// purged, and return the number of rows updated (0 when the row has moved
+    /// on, which the caller treats as "skip this submission").
+    ///
+    /// The default returns a "not implemented" error -- only the production
+    /// Postgres backend has a real implementation today.
+    async fn record_released_submission_privacy_summary(
+        &self,
+        _tenant_id: &str,
+        _submission_id: Uuid,
+        _privacy_risk: &str,
+        _redaction_counts: &BTreeMap<String, u32>,
+        _canonical_summary_hash: &str,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Query(
+            "record_released_submission_privacy_summary not implemented for this backend"
+                .to_string(),
+        ))
     }
 
     /// Clear the PII-backstop attempt budget for one submission, so a

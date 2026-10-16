@@ -148,9 +148,10 @@ final class MonitorNavigationTests: XCTestCase {
     /// A daemon restart while Home is reading: the old client's answers
     /// arrive after the new one was attached, and must not be drawn as its.
     func test_theHomeStoreDropsAReadTheOldClientAnswersAfterAttach() async {
-        // Five of Home's six reads reach the daemon; missions is provisional.
+        // Six of Home's seven reads reach the daemon (the Insights glance
+        // joined them, owner 2026-10-12); missions is provisional.
         let entered = expectation(description: "every read reached the old daemon")
-        entered.expectedFulfillmentCount = 5
+        entered.expectedFulfillmentCount = 6
         let gate = GatedTransport(.normalDay, entered: entered)
         let store = HomeStore(client: LiveDaemonClient(transport: gate))
         let loading = Task { await store.load() }
@@ -168,7 +169,7 @@ final class MonitorNavigationTests: XCTestCase {
 
     func test_theInferenceStoreDropsAReadTheOldClientAnswersAfterAttach() async {
         // Four of its five reads reach the daemon (harnesses, calls,
-        // destinations and the Private AI switch, a live `get_settings`
+        // destinations, and the Private AI switch, a live `get_settings`
         // read); the summary is provisional.
         let entered = expectation(description: "every read reached the old daemon")
         entered.expectedFulfillmentCount = 4
@@ -481,12 +482,11 @@ final class MonitorNavigationTests: XCTestCase {
                 case .monitor: openWindow(id: WindowID.monitor)
                 case nil: break
                 }
-                // Settings is the Monitor's modal (#1241 Task 10): a Settings
-                // destination raises the Monitor and asks it for Settings at the
-                // section.
+                // A Settings destination opens the Settings window at the section
+                // (owner, 2026-10-08: Settings is its own window).
                 if let section = opening.settings {
-                    openWindow(id: WindowID.monitor)
                     navigation.requestSettings(at: section)
+                    openWindow(id: WindowID.settings)
                 }
             }
         """), "Settings must open from the opening, outside the window switch")
@@ -500,14 +500,25 @@ final class MonitorNavigationTests: XCTestCase {
         var page = HomeTabView.Page.overview
         var session: MonitorSelection?
         var inspector = false
+        var missions = false
         func land(_ destination: MonitorDestination) {
             MonitorWindowView.land(destination, tab: &tab, homePage: &page,
-                                   selection: &session, showsInspector: &inspector)
+                                   selection: &session, showsInspector: &inspector,
+                                   missionsEnabled: missions)
         }
+
+        // Missions are hidden by default (owner, 2026-10-16): a mission page
+        // lands on the overview. The shown case is below.
+        land(.home(.missions))
+        XCTAssertEqual(tab, .home)
+        XCTAssertEqual(page, .overview)
+        land(.home(.missionDrafts))
+        XCTAssertEqual(page, .overview)
+        missions = true
 
         land(.inference)
         XCTAssertEqual(tab, .inference)
-        XCTAssertTrue(inspector, "the Private AI switch and sign-in live in the Inference inspector")
+        XCTAssertFalse(inspector, "the inspector stays closed on Inference (owner, 2026-10-09)")
 
         inspector = false
         land(.traces(entryId: nil))
@@ -519,14 +530,19 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertEqual(session, .session(entryID: "entry-7"))
         XCTAssertTrue(inspector)
 
+        // History lives on Traces (owner, 2026-10-12).
         land(.home(.history))
+        XCTAssertEqual(tab, .traces)
+        XCTAssertNotEqual(page, .history)
+
+        land(.home(.missions))
         XCTAssertEqual(tab, .home)
-        XCTAssertEqual(page, .history)
+        XCTAssertEqual(page, .missions)
 
         // Settings is the Monitor's modal: the tabs stay as they were.
         land(.settings(.compute))
         XCTAssertEqual(tab, .home)
-        XCTAssertEqual(page, .history)
+        XCTAssertEqual(page, .missions)
     }
 
     func test_onlySettingsDestinationsNameASettingsSection() {
@@ -612,10 +628,10 @@ final class MonitorNavigationTests: XCTestCase {
                        "open(MenuPanelData.manageRules(requiresOnboarding: model.requiresOnboarding))"] {
             XCTAssertTrue(panel.contains(needle), "the menu panel never opens \(needle)")
         }
+        // Settings' Private AI section holds the switch and the tools now
+        // (owner, 2026-10-10): no pointer back to the Monitor.
         let pointer = try Self.text("Views/Settings/PrivateAISection.swift")
-        // Outside the Settings modal (which closes itself and opens the
-        // Inference tab, `SettingsModalTests`), the pointer opens the Monitor.
-        XCTAssertTrue(pointer.contains("} else {\n                                OpenMonitor.request(.inference)\n"))
+        XCTAssertFalse(pointer.contains("OpenMonitor.request(.inference)"))
         // The Monitor consumes the destination on an always-present
         // container, initially too, per request rather than per value, and
         // lands Inference on its inspector.
@@ -637,8 +653,8 @@ final class MonitorNavigationTests: XCTestCase {
         // title switch comes first).
         let land = try XCTUnwrap(window.range(of: "static func land("))
         let inference = try XCTUnwrap(window.range(of: "case .inference:", range: land.upperBound ..< window.endIndex))
-        XCTAssertTrue(window[inference.upperBound...].prefix(200).contains("showsInspector = true"),
-                      "the Private AI switch and sign-in live in the Inference inspector")
+        XCTAssertFalse(window[inference.upperBound...].prefix(200).contains("showsInspector = true"),
+                       "the inspector stays closed on Inference (owner, 2026-10-09)")
         // Settings is the Monitor's modal (#1241 Task 10): a request while
         // it is open is a new request, and the modal scrolls to it.
         let modal = try Self.text("Views/Monitor/SettingsModal.swift")
@@ -658,49 +674,53 @@ final class MonitorNavigationTests: XCTestCase {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("MonitorWords.signedOut"))
         XCTAssertTrue(window.contains("""
-                        let gate = MonitorGate.of(
-                            startup: model.startup, onboardingKnown: model.onboardingKnown,
-                            requiresOnboarding: model.requiresOnboarding)
+            private var gate: MonitorGate {
+                MonitorGate.of(
+                    startup: model.startup, onboardingKnown: model.onboardingKnown,
+                    requiresOnboarding: model.requiresOnboarding)
+            }
+        """), "the gate is the core's startup and onboarding state")
+        XCTAssertTrue(window.contains("""
+                            ShellNotices()
+                            if gate != .awaiting {
+                                switch gate {
+                                case .down(let sentence):
+                                    StartupRefusedBanner(sentence: sentence)
+                                case .signedOut:
+                                    GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
+                                        Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
+                                    }
+                                case .awaiting, .open:
+                                    EmptyView()
+                                }
+                                GlassRuleTabs(
+                                    MonitorWords.table?.shell.tabsLabel ?? "",
+                                    selection: Binding(
+                                        get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
+                                        set: { tab = $0 }),
+                                    segments: MonitorWindowView.Tab.shown(requiresOnboarding: model.requiresOnboarding).map { item in
+        """), "the strip must show the onboarding-filtered tabs, under the notices")
+        XCTAssertTrue(window.contains("""
                         if gate == .awaiting {
                             SettingsAwaiting()
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        } else {
-                            switch gate {
-                            case .down(let sentence):
-                                StartupRefusedBanner(sentence: sentence)
-                            case .signedOut:
-                                GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
-                                    Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
-                                }
-                            case .awaiting, .open:
-                                EmptyView()
-                            }
-                            GlassSegmentedTabs(
-                                MonitorWords.table?.shell.tabsLabel ?? "",
-                                selection: Binding(
-                                    get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
-                                    set: { tab = $0 }),
-                                segments: MonitorWindowView.Tab.shown(requiresOnboarding: model.requiresOnboarding).map { item in
-        """), "the strip must show the onboarding-filtered tabs, under the notices")
+        """), "before the core says, the pane waits")
         let pane = try XCTUnwrap(window.range(of: "private struct MonitorMainPane"))
         let map = try XCTUnwrap(window.range(of: "private struct MonitorMapPane"))
-        XCTAssertEqual(window[pane.lowerBound ..< map.lowerBound].components(separatedBy: "GlassSegmentedTabs(").count - 1, 1,
+        XCTAssertEqual(window[pane.lowerBound ..< map.lowerBound].components(separatedBy: "GlassRuleTabs(").count - 1, 1,
                        "a second tab strip in the main pane would escape the gate")
-        // Both tab switches (the main pane's content and the inspector)
-        // switch on the shown tab, never the restored one.
-        XCTAssertEqual(window.components(separatedBy: "switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {").count - 1, 2)
+        // The main pane's content switches on the shown tab, never the
+        // restored one, and the inspector reads the shown tab too.
+        XCTAssertEqual(window.components(separatedBy: "switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {").count - 1, 1)
         XCTAssertFalse(window.contains("switch tab {"), "a switch on the restored tab would draw Home or Traces during onboarding")
-        XCTAssertTrue(window.contains("""
-                    GlassPane {
-                        // An empty branch would leave the pane nothing to draw, and
-                        // it would vanish while the layout still reserved its width.
-                        // While onboarding is required only Inference is shown, so
-                        // the Private AI inspector is the only one admitted (R-38).
-                        if !model.onboardingKnown {
-                            Color.clear
-                        } else {
-                            switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {
-        """), "the inspector must draw nothing until onboarding is known, and the shown tab's after")
+        XCTAssertTrue(window.contains("ScrollView {\n                    inspectorContent\n"),
+                      "the inspector pane draws the inspector column")
+        // The inspector draws nothing until onboarding is known, and
+        // nothing where it may not open: while onboarding is required only
+        // Inference is shown, and its inspector stays closed.
+        XCTAssertTrue(window.contains("if !model.onboardingKnown || !inspectorAvailable {\n            Color.clear\n"),
+                      "the inspector must draw nothing until onboarding is known")
+        XCTAssertTrue(window.contains("Self.inspectorAvailable(shownTab, homePage: homePage)"))
     }
 
     /// Finishing first run closes it and opens the Monitor on Home.
@@ -725,7 +745,7 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertFalse(firstRun.contains("fixedSize("), "a vertical fixedSize grows the pane past the window")
         XCTAssertTrue(firstRun.contains("""
                         .frame(width: FirstRunProgress.paneWidth)
-                        .padding(.vertical, GlassTokens.Space.windowPadding * 3)
+                        .padding(.vertical, GlassTokens.Space.paneGap * 3)
         """), "the pane is bounded by the window, less the scene's margin")
     }
 
@@ -774,7 +794,7 @@ final class MonitorNavigationTests: XCTestCase {
     func test_theSettingsButtonOpensSettingsBeforeOnboarding() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
         let button = """
-                            GlassRoundButton(MonitorWords.table?.settingsTitle ?? "", systemImage: "gearshape", small: true, action: onSettings)
+                                GlassRoundButton(MonitorWords.table?.settingsTitle ?? "", icon: .glyph(.gear), action: onSettings)
         """
         XCTAssertTrue(window.contains(button))
         XCTAssertFalse(window.contains(button + "\n                        .disabled("), "the gear is dead before onboarding")
@@ -788,7 +808,7 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertTrue(modal.contains("""
                 case .down(let sentence):
                     StartupRefusedBanner(sentence: sentence)
-                        .padding(GlassTokens.Space.panePadding)
+                        .padding(.horizontal, Self.bodyInset)
         """), "a writing section says a refused daemon as a refusal (B1)")
     }
 

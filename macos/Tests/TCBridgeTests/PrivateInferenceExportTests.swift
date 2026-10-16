@@ -137,9 +137,9 @@ final class PrivateInferenceExportTests: XCTestCase {
     func testEveryRefusalNamesTheWayOut() throws {
         let copy = try XCTUnwrap(copy())
         for sentence in [copy.statePortInUse, copy.stateStartFailed, copy.stateCrashed] {
-            XCTAssertTrue(sentence.contains("off and on again"), sentence)
+            XCTAssertTrue(sentence.contains("off and on"), sentence)
         }
-        XCTAssertTrue(copy.stateCrashed.contains("will not retry by itself"), copy.stateCrashed)
+        XCTAssertTrue(copy.stateCrashed.contains("won't retry on its own"), copy.stateCrashed)
     }
 
     func testTheServingSentenceNamesAPortOrIsEmpty() {

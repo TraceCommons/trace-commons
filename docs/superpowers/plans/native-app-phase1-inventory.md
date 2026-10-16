@@ -128,7 +128,7 @@ Main registers **163** commands (`tauri-desktop/src-tauri/src/commands/mod.rs`).
 
 | Command | macOS route | macOS uses? | Logic flag (P2) |
 |---|---|---|---|
-| start_private_ai_credential | IPC `near_ai_credential_start` | yes | Tauri defaults the provider to `"github"`. |
+| start_private_ai_credential | IPC `near_ai_credential_start` | yes | Tauri defaults the provider to `"near"`. |
 | private_ai_credential_status | IPC `near_ai_credential_status` + FFI `tc_near_ai_credential_state_line` / `_action` | yes | **P2:** the `keychain` block (state, key_prefix, minted_at, session_expires_at, migration) comes from `DaemonSettings::load_with_cloud_credentials` in Tauri, and **no core route serves it**. The `view` assembly also happens here. |
 | private_ai_balance | IPC `near_ai_balance` + FFI `tc_near_ai_balance_*` | yes | View assembly. |
 | private_ai_funding | IPC `near_ai_funding` | yes | Param shaping (both values or neither). |
@@ -396,7 +396,7 @@ The 11 with no route are residual_secret_line, redaction_summary_copy, project_i
 2. **Flow map, Private AI and model view.** Harness nodes, the NEAR AI credential link, model and outside-model nodes, and call counts, from `harness_list` plus `tool_destinations` and `inference_calls`. #1146 left out the model nodes, call counts and pulses.
 3. **Credit and settlement.** `commons_credit_summary` is IPC (K7: settlement posture plus account points) but unused. Use it for Home's credit/"Kept" tile and the History credit record. The design's "Top 8%" standing and credit multipliers have no route and are off-limits for projected credit.
 4. **Missions.** Vendor missions and credit multipliers have **no route** in the contributor core. Only local drafts exist (`tc_mission_drafts_call`).
-5. **Invite and enrolment.**
+5. **Invite and enrollment.**
    - The K12 inference-connection onboarding step: IPC `inference_connection_*` exists. Export `inference_connection_copy` and the disclosure per version, and move `select_params` and `with_disclosures` into the core.
    - The legacy invite migration panel: IPC `legacy_invite_migrate` exists. Export `legacy_migration_offer` and the refusal line, and add the macOS panel.
    - Invite deep links (shared with 4a item 9).
@@ -404,7 +404,7 @@ The 11 with no route are residual_secret_line, redaction_summary_copy, project_i
 7. **Private AI.**
    - Restyle the existing SwiftUI credential, balance, funding and harness screens into the Inference tab.
    - Move the `keychain` block that Tauri builds in `private_ai_credential_status` (key prefix, minted time, session expiry, migration) into the daemon's `near_ai_credential_status`. No route serves it today.
-   - Move the default provider ("github") and `can_commit` into the core.
+   - Move the default provider ("near") and `can_commit` into the core.
 8. **Updater.** Tauri only reports managed/unmanaged and has no feed. macOS is ahead (`TCUpdates`, `UpdateController`). Wire the design's "Check now" to `UpdateController`. Retire Tauri's `update_state` on macOS.
 9. **Wallet, witness preview and admission.** These already work on macOS. Restyle them only, and keep the single-use browser URL authorisation behaviour.
 10. **Release.** Retire the Tauri macOS bundle from `tauri-desktop.yml`, `test-verify-macos-entitlements.sh`, `check-release-credential-store.sh` and `macos_signing.rs`. Keep the native entitlements checks.

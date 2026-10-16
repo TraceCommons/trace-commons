@@ -7,7 +7,7 @@ TEE scoring path, and its boundary with the public register.
 
 ## Why
 
-A contributor can today enrol, submit, be accepted, and see nothing. No
+A contributor can today enroll, submit, be accepted, and see nothing. No
 credit, no leaderboard row, no feedback about their own work. That is not a
 bug in any one component — it is the shape of the system: every score computed
 here feeds the corpus, and nothing feeds back to the person who produced the
@@ -160,7 +160,7 @@ observations drawn from the contributor's own sessions, and no labels.
   that path working first.
 - The contributor CLI has no local-only mode; every command assumes an
   enrolled device with an instance. A private analyser that is useful before
-  joining implies enrolment becomes optional for analysis.
+  joining implies enrollment becomes optional for analysis.
 
 ## Recommendation
 

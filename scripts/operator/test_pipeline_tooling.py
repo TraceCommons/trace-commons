@@ -28,12 +28,30 @@ from pathlib import Path
 from unittest import mock
 
 import pipeline
-from pipeline_tooling import cargo, catalog, checks, corpus, environment, errors, results
+from pipeline_tooling import cargo, catalog, checks, comparison, corpus, environment, errors, results
 from pipeline_tooling import report as report_module
 
 
 def _fake_hash(label):
     return "sha256:" + hashlib.sha256(label.encode()).hexdigest()
+
+
+_SERVER_CRATE = "crates/trace-commons-server"
+
+# The smallest tree the code revision accepts: a workspace manifest and the
+# server crate's manifest.
+_MINIMAL_WORKSPACE = {
+    "Cargo.toml": '[workspace]\nmembers = ["crates/trace-commons-server"]\n',
+    f"{_SERVER_CRATE}/Cargo.toml": '[package]\nname = "trace-commons-server"\n',
+    f"{_SERVER_CRATE}/src/lib.rs": "// server\n",
+}
+
+
+def _write_tree(root, files):
+    for relative, content in files.items():
+        path = Path(root) / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
 
 
 def _iso(when):
@@ -1309,11 +1327,11 @@ class HfCorpusTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 _ADMIN_URL = "postgres://trace@127.0.0.1:55431/postgres"
-_HARNESS = "tests::pipeline_corpus_pg_tests::pipeline_corpus_run"
-_PACKAGE_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_package_write"
-_ATTESTATION_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
-_KEY_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
-_INGEST_ARGS = ("-p", "trace-commons-server", "--bin", "trace-commons-ingest")
+_HARNESS = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_corpus_run"
+_PACKAGE_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_package_write"
+_ATTESTATION_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
+_KEY_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
+_INGEST_ARGS = ("-p", "trace-commons-server", "--lib")
 
 
 def _digest(data):
@@ -1503,7 +1521,13 @@ def _harness_evidence_digests(partitions):
 
 
 def _write_harness_outputs(
-    env, fixtures_by_partition=None, emit=True, digests=None, result_overrides=None, evidence_overrides=None
+    env,
+    fixtures_by_partition=None,
+    emit=True,
+    digests=None,
+    result_overrides=None,
+    evidence_overrides=None,
+    report_assembly=None,
 ):
     """What `pipeline_corpus_run` leaves behind: the report at
     `TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH` and, when every fixture
@@ -1511,7 +1535,11 @@ def _write_harness_outputs(
     result names the corpus report's package (`digests=True`) or none
     (`digests=False`); by default only `pipeline_http_corpus_minimal`, which
     serves a test bundle, names none (P5-D15). `result_overrides` replaces
-    fields of the result (a digest that differs from the report's)."""
+    fields of the result (a digest that differs from the report's). Under
+    `TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY=production` the report and the
+    evidence say `harness_assembly: production` and the report carries the
+    production harness's blockers, as the Rust harness writes them;
+    `report_assembly` forces the report's mode either way."""
     paths = [("corpus", env["TRACE_COMMONS_PIPELINE_CORPUS_PATH"])]
     if "TRACE_COMMONS_PIPELINE_CORPUS_HOLDOUT_PATH" in env:
         paths = [
@@ -1526,6 +1554,11 @@ def _write_harness_outputs(
         partitions.append((name, _digest(data), fixtures))
     check_id = env["TRACE_COMMONS_PIPELINE_CORPUS_CHECK_ID"]
     report = _corpus_report(check_id, partitions)
+    production = env.get("TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY") == "production"
+    if (report_assembly or ("production" if production else "reference")) == "production":
+        report["harness_assembly"] = "production"
+        report["safe_blockers"] = list(corpus.PRODUCTION_HARNESS_BLOCKERS)
+        report = _resigned(report)
     report_bytes = results.canonical(report) + b"\n"
     Path(env["TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH"]).write_bytes(report_bytes)
     if not emit:
@@ -1541,6 +1574,8 @@ def _write_harness_outputs(
         "corpus_digest": corpus_digest,
         "input_digest": input_digest,
     }
+    if production:
+        evidence["harness_assembly"] = "production"
     for key, value in (evidence_overrides or {}).items():
         if value is _DROP:
             del evidence[key]
@@ -1984,6 +2019,79 @@ class CorpusReportValidationTests(unittest.TestCase):
         self.assertIn("admission_decision", corpus.markdown(resign(failed)))
 
 
+class ProductionCorpusReportTests(unittest.TestCase):
+    """Spec section 2, O-B3 (plan B3): a production-mode corpus report
+    compares only the deterministic fields, says it is a production-mode
+    report, and carries the harness's own blockers."""
+
+    def _production(self, **fixture_overrides):
+        report = _corpus_report(
+            "pipeline_http_corpus_compatibility",
+            [("corpus", _fake_hash("corpus"), [_fixture_report("alpha_fixture", **fixture_overrides)])],
+        )
+        report.pop("report_digest")
+        report["harness_assembly"] = "production"
+        report["safe_blockers"] = list(corpus.PRODUCTION_HARNESS_BLOCKERS)
+        return _resigned(report)
+
+    def test_production_corpus_mode_compares_only_deterministic_fields(self):
+        moved = {
+            "phase_count": 3,
+            "scoring_state": "complete",
+            "settlement_state": "incomplete",
+            "instrument_count": 0,
+            "instruments": [],
+            "instrument_states": {},
+        }
+        item = _fixture_report("alpha_fixture", **moved)
+        self.assertEqual(
+            corpus.fixture_mismatches(item),
+            ["outcome_count", "settlement_state", "instrument_count", "instrument_states"],
+        )
+        self.assertEqual(corpus.fixture_mismatches(item, "production"), [])
+        corpus.validate_report(self._production(**moved))  # must not raise
+        for field, value in (
+            ("state", "awaiting_review"),
+            ("admission_decision", "quarantine"),
+            ("consent_state", "refused"),
+            ("privacy_state", "medium"),
+            ("replay_same_run", False),
+            ("changed_content_refused", False),
+            ("tenant_isolation", False),
+        ):
+            with self.subTest(field=field):
+                changed = _fixture_report("alpha_fixture", **{field: value})
+                self.assertEqual(len(corpus.fixture_mismatches(changed, "production")), 1)
+
+        # A production report that names a scoring mismatch it no longer
+        # compares does not match its own rule.
+        with self.assertRaises(errors.ToolingError) as ctx:
+            corpus.validate_report(self._production(**moved, mismatches=["settlement_state"]))
+        self.assertEqual(str(ctx.exception), "qualification_mismatch_not_failed")
+
+    def test_production_blockers_agree_with_the_harness(self):
+        source = (
+            environment.ROOT / "crates/trace-commons-server/src/bin/trace_commons_ingest_internal/pipeline_corpus_pg_tests.rs"
+        ).read_text()
+        match = re.search(r"const PRODUCTION_HARNESS_BLOCKERS: \[&str; \d+\] = \[(.*?)\];", source, re.S)
+        self.assertIsNotNone(match)
+        self.assertEqual(tuple(re.findall(r'"([a-z0-9_]+)"', match.group(1))), corpus.PRODUCTION_HARNESS_BLOCKERS)
+
+    def test_production_report_carries_its_own_blockers_and_mode(self):
+        report = self._production()
+        corpus.validate_report(report)  # must not raise
+        cases = {
+            "missing_local_blockers": _resigned(dict(report, safe_blockers=["local_test_only"])),
+            "invalid_report_harness_assembly": _resigned(dict(report, harness_assembly="reference")),
+            "invalid_report_harness_assembly:other": _resigned(dict(report, harness_assembly="staging")),
+        }
+        for case, value in cases.items():
+            with self.subTest(case=case):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    corpus.validate_report(value)
+                self.assertEqual(str(ctx.exception), case.split(":")[0])
+
+
 class PackageCommandTests(_CorpusRunCase):
     def test_package_runs_the_package_writer_with_its_own_variables(self):
         output = self.tmp / "out" / "package.json"
@@ -2055,13 +2163,97 @@ class PackageCommandTests(_CorpusRunCase):
                 self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {label}")
                 self.assertEqual(self._cargo_calls(), [])
 
+    def test_package_production_passes_only_the_env_files_package_variables(self):
+        """Spec B-D5: `package --bundle production` builds the production
+        package offline from the deployment's env file. The writer receives
+        the descriptor and gate variables and nothing else from it: never
+        the NEAR AI key or endpoint, never a database URL."""
+        output = self.tmp / "out" / "package.json"
+        key_output = self.tmp / "out" / "trusted-key.json"
+        env_file = self.tmp / "ingest.env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "# the pilot's env file",
+                    "TRACE_COMMONS_GATE_SERVICE=enclave_near_ai",
+                    "TRACE_COMMONS_NEAR_AI_MODEL=Qwen/Qwen3.6-35B-A3B-FP8",
+                    'TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF="-8.0"',
+                    "TRACE_COMMONS_NEAR_AI_API_KEY=secret-near-ai-key",
+                    "TRACE_COMMONS_NEAR_AI_BASE_URL=https://example.invalid/v1",
+                    "TRACE_COMMONS_EMBEDDER_MODEL_ID='BAAI/bge-large-en-v1.5'",
+                    "TRACE_COMMONS_VECTOR_INDEX_DIM=1024",
+                    "TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=500000",
+                    "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=0",
+                    "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=2.5",
+                    "DATABASE_URL=postgres://ingest@db/trace",
+                    "",
+                ]
+            )
+        )
+
+        def fake_cargo(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+            Path(env["TRACE_COMMONS_PIPELINE_PACKAGE_OUTPUT"]).write_text(
+                json.dumps({"package": {"bundle_id": _fake_hash("bundle")},
+                            "signature": {"package_hash": _fake_hash("package")}})
+            )
+            Path(env["TRACE_COMMONS_PIPELINE_TRUSTED_KEY_OUTPUT"]).write_text("{}")
+
+        code = self._main(
+            ["package", "--bundle", "production", "--env-file", str(env_file), "--output", str(output),
+             "--public-key-output", str(key_output)],
+            cargo=fake_cargo,
+        )
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        [(_, step, cargo_args, test_filter, env, _, _)] = self._cargo_calls()
+        self.assertEqual((step, cargo_args, test_filter), ("package_write", _INGEST_ARGS, _PACKAGE_WRITER))
+        self.assertEqual(
+            {key: value for key, value in env.items() if key.startswith("TRACE_COMMONS_")},
+            {
+                "TRACE_COMMONS_PIPELINE_PACKAGE_BUNDLE": "production",
+                "TRACE_COMMONS_PIPELINE_PACKAGE_OUTPUT": str(output.resolve()),
+                "TRACE_COMMONS_PIPELINE_TRUSTED_KEY_OUTPUT": str(key_output.resolve()),
+                "TRACE_COMMONS_NEAR_AI_MODEL": "Qwen/Qwen3.6-35B-A3B-FP8",
+                "TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF": "-8.0",
+                "TRACE_COMMONS_EMBEDDER_MODEL_ID": "BAAI/bge-large-en-v1.5",
+                "TRACE_COMMONS_VECTOR_INDEX_DIM": "1024",
+                "TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS": "500000",
+                "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS": "0",
+                "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA": "2.5",
+            },
+        )
+        self.assertNotIn("secret-near-ai-key", self.stdout.getvalue() + self.stderr.getvalue())
+
+        bad_line = self.tmp / "bad.env"
+        bad_line.write_text("TRACE_COMMONS_NEAR_AI_API_KEY secret-near-ai-key\n")
+        for argv, label in (
+            (["--bundle", "production"], "package_env_file_required"),
+            (["--bundle", "minimal", "--env-file", str(env_file)], "package_env_file_unexpected"),
+            (["--bundle", "production", "--env-file", str(self.tmp / "missing.env")], "env_file_unreadable"),
+            (["--bundle", "production", "--env-file", str(bad_line)], "env_file_invalid"),
+        ):
+            with self.subTest(label=label):
+                self.calls.clear()
+                self.stderr = io.StringIO()
+                code = self._main(
+                    ["package", *argv, "--output", str(output), "--public-key-output", str(key_output)],
+                    cargo=fake_cargo,
+                )
+                self.assertEqual(code, 1)
+                self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {label}")
+                self.assertNotIn("secret-near-ai-key", self.stderr.getvalue())
+                self.assertEqual(self._cargo_calls(), [])
+
+        # `run` serves no production bundle: its package comes from `package`.
+        self.assertNotIn("production", pipeline.BUNDLES)
+
 
 # ---------------------------------------------------------------------------
 # Task 10: `pipeline.py restore-drill`.
 # ---------------------------------------------------------------------------
 
-_RESTORE_SEED = "tests::pipeline_restore_pg_tests::pipeline_restore_seed"
-_RESTORE_RESUME = "tests::pipeline_restore_pg_tests::pipeline_restore_resume"
+_RESTORE_SEED = "ingest::app::tests::pipeline_restore_pg_tests::pipeline_restore_seed"
+_RESTORE_RESUME = "ingest::app::tests::pipeline_restore_pg_tests::pipeline_restore_resume"
 _RESTORE_CHECK = "pipeline_restore_drill"
 
 
@@ -2109,6 +2301,7 @@ class _RestoreDrillCase(_CorpusRunCase):
                     "tenant_fingerprint": _fake_hash("tenants"),
                     "tenant_count": 2,
                     "audit_event_count": 2,
+                    "credit_delta_zero": False,
                 }
                 fingerprint.update(overrides.get("fingerprint", {}))
                 Path(env["TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH"]).write_bytes(
@@ -2132,6 +2325,8 @@ class _RestoreDrillCase(_CorpusRunCase):
                     "tenant_count": seed["tenant_count"],
                     "audit_events_verified": seed["audit_event_count"],
                 }
+                if seed["credit_delta_zero"]:
+                    evidence["credit_delta_zero"] = True
                 evidence.update(overrides.get("evidence", {}))
                 raw = {
                     "schema": results.SCHEMA,
@@ -2193,6 +2388,13 @@ class _RestoreDrillCase(_CorpusRunCase):
 
 
 class RestoreDrillTests(_RestoreDrillCase):
+    def test_a_zero_delta_seed_passes_and_its_evidence_says_so(self):
+        code = self._drill(fingerprint=_UNCREDITED_SEED)
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        evidence = json.loads((self.run.results_dir / f"{_RESTORE_CHECK}.evidence.json").read_text())
+        self.assertIs(evidence["credit_delta_zero"], True)
+        self.assertIn("legs_per_run=0 credit_events_per_run=0", self.stdout.getvalue())
+
     def test_restore_drill_order(self):
         code = self._drill()
         self.assertEqual(code, 0, self.stderr.getvalue())
@@ -2330,6 +2532,13 @@ class RestoreDrillTests(_RestoreDrillCase):
             ({"safe_blockers": []}, "restore_safe_blocker_missing"),
             ({"fingerprint": {"tenant_id": "tenant-a"}}, "restore_fingerprint_invalid"),
             ({"fingerprint": {"completed_credit_event_count": 0}}, "restore_fingerprint_invalid"),
+            ({"fingerprint": {"credit_delta_zero": None}}, "restore_fingerprint_invalid"),
+            # A zero-delta seed has no leg, no adapter request, no event.
+            ({"fingerprint": {"credit_delta_zero": True}}, "restore_fingerprint_invalid"),
+            ({"fingerprint": {**_UNCREDITED_SEED, "completed_settlement_count": 1}}, "restore_fingerprint_invalid"),
+            # A zero-delta drill must say so in its evidence.
+            ({"fingerprint": _UNCREDITED_SEED, "evidence": {"credit_delta_zero": False}}, "restore_evidence_mismatch"),
+            ({"evidence": {"credit_delta_zero": True}}, "restore_evidence_mismatch"),
             ({"fingerprint": {"completed_settlement_count": True}}, "restore_fingerprint_invalid"),
             ({"fingerprint": {"artifact_fingerprint": _fake_hash("not-the-tree")}},
              "restore_artifact_fingerprint_mismatch"),
@@ -2355,6 +2564,201 @@ class RestoreDrillTests(_RestoreDrillCase):
             pipeline.artifact_fingerprint(root),
             "sha256:9be20bc7d0122e748a727bf0433d393ba50edb9e2be45a3e106ab10e52be2716",
         )
+
+
+_PRODUCTION_HARNESS_ENV = {
+    "TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY": "production",
+    "TRACE_COMMONS_PIPELINE_HARNESS_PACKAGE_PATH": "/run/signed-package.json",
+    "TRACE_COMMONS_PIPELINE_HARNESS_TRUSTED_KEY_PATH": "/run/trusted-package-key.json",
+    "TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT": "/run/indexes",
+    "TRACE_COMMONS_NEAR_AI_BASE_URL": "https://near-ai.invalid/v1",
+    "TRACE_COMMONS_NEAR_AI_API_KEY": "near-ai-test-key",
+}
+
+
+class ProductionHarnessRunnerTests(_RestoreDrillCase):
+    """The runners `qualify` uses, in the production mode `promote
+    package-checks` starts them in (spec B-D1): the corpus and restore
+    evidence must say the production assembly made it exactly when the
+    harness variables switched to it, and `run_package_checks` starts the
+    four package checks with those variables and the pilot's features."""
+
+    @contextlib.contextmanager
+    def _environment(self, cargo):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(environment, "_invoke", self._invoke))
+            stack.enter_context(mock.patch.object(pipeline, "cargo_test", cargo))
+            stack.enter_context(contextlib.redirect_stdout(self.stdout))
+            stack.enter_context(contextlib.redirect_stderr(self.stderr))
+            with pipeline.Environment(self.run, postgres_admin_url=_ADMIN_URL) as env:
+                yield env
+
+    def _restore(self, extra_env, **overrides):
+        with self._environment(self._fake_cargo(**overrides)) as env:
+            return pipeline.run_restore_drill(
+                self.run, env, extra_env=extra_env, cargo_args=(*_INGEST_ARGS, *_PROMOTE_FEATURES)
+            )
+
+    def test_production_restore_evidence_says_production(self):
+        self._restore(_PRODUCTION_HARNESS_ENV, evidence={"harness_assembly": "production"})
+        cargo = self._cargo_calls()
+        self.assertEqual([call[3] for call in cargo], [_RESTORE_SEED, _RESTORE_RESUME])
+        for call, step in zip(cargo, ("seed", "resume")):
+            self.assertEqual(call[2], (*_INGEST_ARGS, *_PROMOTE_FEATURES))
+            for key, value in _PRODUCTION_HARNESS_ENV.items():
+                if key == "TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT":
+                    # The seed and the resume each open their own index.
+                    value = f"/run/indexes/{step}"
+                self.assertEqual(call[4][key], value, key)
+
+    def test_reference_restore_opens_no_production_index(self):
+        self._restore(None)
+        for call in self._cargo_calls():
+            self.assertNotIn("TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT", call[4])
+            self.assertNotIn("TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY", call[4])
+
+    def test_production_restore_refuses_evidence_without_the_assembly(self):
+        with self.assertRaises(errors.ToolingError) as ctx:
+            self._restore(_PRODUCTION_HARNESS_ENV)
+        self.assertEqual(str(ctx.exception), "restore_evidence_mismatch")
+
+    def test_reference_restore_refuses_production_evidence(self):
+        with self.assertRaises(errors.ToolingError) as ctx:
+            self._restore(None, evidence={"harness_assembly": "production"})
+        self.assertEqual(str(ctx.exception), "restore_evidence_mismatch")
+
+    def _corpus(self, step, extra_env, **harness):
+        corpus_path = self.tmp / f"{step}.json"
+        corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture", "beta_fixture"])))
+        corpus_run = pipeline.CorpusRun(
+            "compatibility",
+            None,
+            self.tmp / "signed-package.json",
+            self.tmp / "trusted-package-key.json",
+            [corpus_path],
+            [load_direct_corpus_digest(corpus_path)],
+        )
+
+        def cargo(run, step_name, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            self.calls.append(("cargo", step_name, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+            _write_harness_outputs(env, **harness)
+
+        with self._environment(cargo) as env:
+            return pipeline.run_corpus_check(
+                self.run, env, corpus_run, step=step, extra_env=extra_env, cargo_args=(*_INGEST_ARGS, *_PROMOTE_FEATURES)
+            )
+
+    def test_production_corpus_report_and_evidence_say_production(self):
+        _, report = self._corpus("corpus_production", _PRODUCTION_HARNESS_ENV)
+        self.assertEqual(report["harness_assembly"], "production")
+        [call] = self._cargo_calls()
+        self.assertEqual(call[2], (*_INGEST_ARGS, *_PROMOTE_FEATURES))
+        self.assertEqual(call[4]["TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY"], "production")
+        self.assertEqual(call[4]["TRACE_COMMONS_PIPELINE_CORPUS_CHECK_ID"], "pipeline_http_corpus_compatibility")
+        self.assertIn("TRACE_COMMONS_PIPELINE_CORPUS_PACKAGE_PATH", call[4])
+        self.assertNotIn("TRACE_COMMONS_PIPELINE_CORPUS_BUNDLE", call[4])
+
+    def test_corpus_mode_must_match_the_harness_variables(self):
+        cases = {
+            "corpus_report_harness_assembly_mismatch:reference report in production": (
+                _PRODUCTION_HARNESS_ENV,
+                {"report_assembly": "reference"},
+            ),
+            "corpus_report_harness_assembly_mismatch:production report in reference": (
+                None,
+                {"report_assembly": "production"},
+            ),
+            "corpus_evidence_mismatch:production evidence without the assembly": (
+                _PRODUCTION_HARNESS_ENV,
+                {"evidence_overrides": {"harness_assembly": _DROP}},
+            ),
+        }
+        for index, (case, (extra_env, harness)) in enumerate(cases.items()):
+            with self.subTest(case=case):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    self._corpus(f"corpus_case_{index}", extra_env, **harness)
+                self.assertEqual(str(ctx.exception), case.split(":")[0])
+
+    def test_run_package_checks_starts_the_four_checks_on_the_production_assembly(self):
+        bootstrap = self.tmp / "bootstrap-corpus.json"
+        holdout = self.tmp / "holdout-corpus.json"
+        bootstrap.write_text(json.dumps(_direct_corpus(["alpha_fixture"])))
+        holdout.write_text(json.dumps(_direct_corpus(["beta_fixture"], prefix="2")))
+        pin = self.tmp / "pin-network.json"
+        started = []
+
+        class FakeEnvironment:
+            def __init__(self, run, postgres_admin_url=None):
+                started.append(("environment", postgres_admin_url))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def scenario(self, step):
+                return ("scenario", step)
+
+        def partitions(run, path, expected_digest):
+            started.append(("partitions", Path(path), expected_digest))
+            return True, [bootstrap, holdout]
+
+        def database_check(run, scenario, check, *, extra_env=None):
+            started.append(("database", scenario, check, extra_env))
+
+        def corpus_check(run, environment_, corpus_run, *, step=None, extra_env=None, cargo_args=None):
+            started.append(("corpus", corpus_run, extra_env, cargo_args))
+
+        def restore(run, environment_, *, extra_env=None, cargo_args=None):
+            started.append(("restore", extra_env, cargo_args))
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(pipeline, "Environment", FakeEnvironment))
+            stack.enter_context(mock.patch.object(pipeline, "_corpus_partitions", partitions))
+            stack.enter_context(mock.patch.object(pipeline, "run_database_check", database_check))
+            stack.enter_context(mock.patch.object(pipeline, "run_corpus_check", corpus_check))
+            stack.enter_context(mock.patch.object(pipeline, "run_restore_drill", restore))
+            pipeline.run_package_checks(
+                self.run,
+                harness_env=_PRODUCTION_HARNESS_ENV,
+                cargo_features=_PROMOTE_FEATURES,
+                network_pin=pin,
+                postgres_admin_url=_ADMIN_URL,
+            )
+
+        def index_root(check_id):
+            return {**_PRODUCTION_HARNESS_ENV, "TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT": f"/run/indexes/{check_id}"}
+
+        cargo_args = (*_INGEST_ARGS, *_PROMOTE_FEATURES)
+        # The HF export runs before any database starts.
+        self.assertEqual(started[0], ("partitions", pin, None))
+        self.assertEqual(started[1], ("environment", _ADMIN_URL))
+        [database] = [event for event in started if event[0] == "database"]
+        self.assertEqual(database[2].check_id, "pipeline_bundle_qualification")
+        self.assertEqual(database[2].cargo_args[-2:], _PROMOTE_FEATURES)
+        self.assertEqual(database[1], ("scenario", "pipeline_bundle_qualification"))
+        self.assertEqual(database[3], index_root("pipeline_bundle_qualification"))
+        corpus_runs = [event for event in started if event[0] == "corpus"]
+        self.assertEqual(
+            [event[1].check_id for event in corpus_runs],
+            ["pipeline_http_corpus_compatibility", "pipeline_http_corpus_hf_local"],
+        )
+        for event in corpus_runs:
+            corpus_run = event[1]
+            self.assertIsNone(corpus_run.bundle)
+            self.assertEqual(corpus_run.package_path, Path("/run/signed-package.json"))
+            self.assertEqual(corpus_run.key_path, Path("/run/trusted-package-key.json"))
+            self.assertEqual(event[2], index_root(corpus_run.check_id))
+            self.assertEqual(event[3], cargo_args)
+        self.assertEqual(corpus_runs[0][1].partitions, [pipeline.DEFAULT_CORPUS])
+        self.assertEqual(corpus_runs[1][1].partitions, [bootstrap, holdout])
+        [restore_event] = [event for event in started if event[0] == "restore"]
+        self.assertEqual(restore_event[1:], (index_root("pipeline_restore_drill"), cargo_args))
+
+
+def load_direct_corpus_digest(path):
+    return pipeline.load_direct_corpus(path)[1]
 
 
 class RestorePrivilegeTests(unittest.TestCase):
@@ -2583,14 +2987,20 @@ class RequiredCheckTests(unittest.TestCase):
 
     def test_rust_package_checks_are_the_checks_that_require_digests(self):
         """`evaluate_promotion` enforces which checks name the package
-        (`PROMOTION_PACKAGE_CHECKS`) and this tooling enforces the same
-        (`digests_required`): the two lists are one set."""
+        (`PROMOTION_PACKAGE_CHECKS`) and this tooling enforces the same: the
+        four `qualify` produces with `digests_required`, and (spec
+        2026-10-08, A-D12) the three promotion-only checks, which run against
+        the production assembly and name its package. The lists are one
+        set, `checks.PROMOTION_PACKAGE_CHECK_IDS`."""
         rust = _rust_check_list("PROMOTION_PACKAGE_CHECKS")
         self.assertEqual(len(rust), len(set(rust)), "no duplicate package check id")
-        self.assertEqual(set(rust), set(_CANDIDATE_CHECKS))
+        self.assertEqual(set(rust), set(_CANDIDATE_CHECKS) | _PROMOTION_ONLY)
+        self.assertEqual(len(rust), 7)
         self.assertTrue(set(rust).issubset(_promotion_required_checks()))
+        self.assertEqual(frozenset(rust), checks.PROMOTION_PACKAGE_CHECK_IDS)
+        self.assertEqual(checks.PROMOTION_ONLY_CHECK_IDS, _PROMOTION_ONLY)
         self.assertEqual(
-            set(rust),
+            checks.PROMOTION_PACKAGE_CHECK_IDS - checks.PROMOTION_ONLY_CHECK_IDS,
             {spec.check_id for spec in checks.required_specs().values() if spec.digests_required},
         )
 
@@ -2627,7 +3037,7 @@ class RequiredCheckTests(unittest.TestCase):
             ),
             "pipeline_legacy_drain": (
                 checks._INGEST_BIN,
-                "tests::pipeline_activation_pg_tests::the_legacy_drain_report_counts_real_pending_work_and_reaches_zero",
+                "ingest::app::tests::pipeline_activation_pg_tests::the_legacy_drain_report_counts_real_pending_work_and_reaches_zero",
                 "pilot",
             ),
         }
@@ -4287,8 +4697,12 @@ class CodeRevisionExcludeTests(unittest.TestCase):
         self.addCleanup(env.stop)
         self._git("init", "-q")
         (self.repo / ".gitignore").write_text("ignored.txt\n")
-        (self.repo / "tracked.txt").write_text("tracked\n")
-        self._git("add", ".gitignore", "tracked.txt")
+        # The revision covers the server crate (#1249): the files these
+        # tests write live in it, so that only the ignore rules decide.
+        _write_tree(self.repo, _MINIMAL_WORKSPACE)
+        self.crate = self.repo / _SERVER_CRATE
+        (self.crate / "tracked.txt").write_text("tracked\n")
+        self._git("add", ".")
         info = self.repo / ".git" / "info"
         info.mkdir(exist_ok=True)
         (info / "exclude").write_text("locally_excluded.txt\n")
@@ -4300,7 +4714,7 @@ class CodeRevisionExcludeTests(unittest.TestCase):
         subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
 
     def _revision_after_writing(self, name, content):
-        (self.repo / name).write_text(content)
+        (self.crate / name).write_text(content)
         return environment._code_revision_hash()
 
     def test_local_and_global_excludes_hide_no_file(self):
@@ -4323,11 +4737,10 @@ class CodeRevisionExcludeTests(unittest.TestCase):
         the revision leaves out an untracked `.cargo/` directory itself, at
         the root and nested, as that line did."""
         base = environment._code_revision_hash()
-        (self.repo / "crates" / "one").mkdir(parents=True)
-        (self.repo / "crates" / "one" / "lib.rs").write_text("// one\n")
+        (self.crate / "src" / "one.rs").write_text("// one\n")
         with_crate = environment._code_revision_hash()
         self.assertNotEqual(base, with_crate)
-        for directory in (self.repo / ".cargo", self.repo / "crates" / "one" / ".cargo"):
+        for directory in (self.repo / ".cargo", self.crate / ".cargo"):
             directory.mkdir()
             for content in ("[build]\njobs = 5\n", "[build]\njobs = 6\n"):
                 (directory / "config.toml").write_text(content)
@@ -4342,8 +4755,7 @@ class CodeRevisionExcludeTests(unittest.TestCase):
         """A checked-in `.cargo/config.toml` is visible to git (no ignore
         line hides it) and changes the revision with each edit, at the root
         and nested."""
-        (self.repo / "crates" / "one").mkdir(parents=True)
-        for directory in (self.repo / ".cargo", self.repo / "crates" / "one" / ".cargo"):
+        for directory in (self.repo / ".cargo", self.crate / ".cargo"):
             directory.mkdir()
             config = directory / "config.toml"
             config.write_text("[build]\njobs = 5\n")
@@ -4367,6 +4779,374 @@ class CodeRevisionExcludeTests(unittest.TestCase):
         cargo config shows in `git status`."""
         lines = (Path(__file__).resolve().parents[2] / ".gitignore").read_text().splitlines()
         self.assertEqual([line for line in lines if line.strip().strip("/") == ".cargo"], [])
+
+
+# A workspace shaped like this repository's (#1249). The server crate
+# depends on `dep-a` (which depends on `dep-a-inner`), on `dep-ws` through
+# the workspace table, on `dep-target` for one target, and builds with
+# `dep-build`; `dev-only` is only a dev-dependency, and `unrelated` (a
+# client crate) is not a dependency at all. The server includes one document
+# from `docs/`.
+_SCOPE_WORKSPACE = {
+    "Cargo.toml": (
+        "[workspace]\n"
+        'members = ["crates/trace-commons-server", "crates/dep-a", "crates/unrelated"]\n'
+        "[workspace.dependencies]\n"
+        'dep-ws = { path = "crates/dep-ws" }\n'
+        'serde = "1"\n'
+    ),
+    "Cargo.lock": "# lock v1\n",
+    "README.md": "readme\n",
+    "cloudbuild.yaml": "steps: []\n",
+    "deny.toml": "[licenses]\n",
+    ".github/workflows/ci.yml": "on: push\n",
+    f"{_SERVER_CRATE}/Cargo.toml": (
+        "[package]\n"
+        'name = "trace-commons-server"\n'
+        "[dependencies]\n"
+        'dep-a = { path = "../dep-a" }\n'
+        "dep-ws = { workspace = true }\n"
+        "serde = { workspace = true }\n"
+        "[build-dependencies]\n"
+        'dep-build = { path = "../dep-build" }\n'
+        "[target.'cfg(unix)'.dependencies]\n"
+        'dep-target = { path = "../dep-target" }\n'
+        "[dev-dependencies]\n"
+        'dev-only = { path = "../dev-only" }\n'
+    ),
+    f"{_SERVER_CRATE}/src/lib.rs": (
+        'pub const RUNBOOK: &str = include_str!("../../../docs/included.md");\n'
+        'pub const SCHEMA: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/schema.bin"));\n'
+        '// A message that names the macro is text: "include_str!(\\"../{file}\\")".\n'
+    ),
+    f"{_SERVER_CRATE}/tests/fixtures/pin.json": "{}\n",
+    "crates/dep-a/Cargo.toml": '[package]\nname = "dep-a"\n[dependencies]\ndep-a-inner = { path = "../dep-a-inner" }\n',
+    "crates/dep-a/src/lib.rs": "// dep-a\n",
+    "crates/dep-a-inner/Cargo.toml": '[package]\nname = "dep-a-inner"\n',
+    "crates/dep-a-inner/src/lib.rs": "// dep-a-inner\n",
+    "crates/dep-ws/Cargo.toml": '[package]\nname = "dep-ws"\n',
+    "crates/dep-ws/src/lib.rs": "// dep-ws\n",
+    "crates/dep-build/Cargo.toml": '[package]\nname = "dep-build"\n',
+    "crates/dep-build/src/lib.rs": "// dep-build\n",
+    "crates/dep-target/Cargo.toml": '[package]\nname = "dep-target"\n',
+    "crates/dep-target/src/lib.rs": "// dep-target\n",
+    "crates/dev-only/Cargo.toml": '[package]\nname = "dev-only"\n',
+    "crates/dev-only/src/lib.rs": 'pub const ICON: &str = include_str!("../../../macos/icon.txt");\n',
+    "crates/unrelated/Cargo.toml": '[package]\nname = "unrelated"\n[dependencies]\ndep-a = { path = "../dep-a" }\n',
+    "crates/unrelated/src/lib.rs": "// unrelated\n",
+    "crates/trace-commons-contributor-gtk/Cargo.toml": '[package]\nname = "gtk"\n',
+    "crates/trace-commons-contributor-gtk/src/main.rs": "// gtk\n",
+    "migrations/V1__init.sql": "CREATE TABLE t ();\n",
+    "assets/schema.bin": "schema\n",
+    "assets/logo.svg": "<svg/>\n",
+    "docs/guide.md": "guide\n",
+    "docs/included.md": "included\n",
+    "docs/superpowers/specs/2026-09-11-versioned-pipeline-contract-test-manifest.json": "{}\n",
+    "docs/superpowers/specs/fixtures/versioned-pipeline-minimal-corpus-v1.json": "{}\n",
+    "docs/superpowers/specs/other-spec.md": "spec\n",
+    "macos/icon.txt": "icon\n",
+    "macos/App.swift": "// app\n",
+    "windows/App.cs": "// app\n",
+    "tauri-desktop/src-tauri/src/main.rs": "// tauri\n",
+    "community/index.astro": "<p/>\n",
+    "scripts/operator/pipeline.py": "# pipeline\n",
+    "scripts/operator/pipeline_tooling/environment.py": "# environment\n",
+    "scripts/operator/pipeline-deployment-inventory.py": "# inventory\n",
+    "scripts/operator/test_pipeline_tooling.py": "# self-test\n",
+    "scripts/operator/bakeoff_paraphrase.py": "# unrelated tool\n",
+    "scripts/windows/verify.ps1": "# windows\n",
+}
+
+
+class CodeRevisionScopeTests(unittest.TestCase):
+    """#1249: the code revision covers what can change the server's
+    binaries or the qualification's outcome, and nothing else, so a deploy
+    of a document or a client shell keeps every qualification. Real `git`
+    in a temporary repository."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="revision-scope-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        env = mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True, capture_output=True)
+        _write_tree(self.repo, _SCOPE_WORKSPACE)
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True, capture_output=True)
+        root = mock.patch.object(environment, "ROOT", self.repo)
+        root.start()
+        self.addCleanup(root.stop)
+        self.base = environment._code_revision_hash()
+
+    def _write(self, relative, content=None):
+        """Writes `content`; by default appends a comment line to the file
+        (a valid manifest stays valid), creating it if it is not there."""
+        path = self.repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if content is None:
+            content = (path.read_text() if path.exists() else "") + "# edited\n"
+        path.write_text(content)
+
+    def _after(self, relative, content=None):
+        self._write(relative, content)
+        return environment._code_revision_hash()
+
+    def test_a_document_or_client_shell_change_keeps_the_revision(self):
+        for relative in (
+            "docs/guide.md",
+            "docs/new-runbook.md",
+            "docs/superpowers/specs/other-spec.md",
+            "README.md",
+            "deny.toml",
+            ".github/workflows/ci.yml",
+            "macos/App.swift",
+            "windows/App.cs",
+            "tauri-desktop/src-tauri/src/main.rs",
+            "community/index.astro",
+            "crates/trace-commons-contributor-gtk/src/main.rs",
+            "crates/unrelated/src/lib.rs",
+            "assets/logo.svg",
+            "scripts/operator/bakeoff_paraphrase.py",
+            "scripts/windows/verify.ps1",
+        ):
+            with self.subTest(relative=relative):
+                self.assertEqual(self._after(relative), self.base, relative)
+
+    def test_a_dev_dependency_and_what_only_it_includes_keep_the_revision(self):
+        """Owner decision (#1249): a dev-dependency is compiled into test
+        binaries only, never into the server binaries the revision
+        identifies, so the crate, and a file that only it includes, are
+        outside the revision."""
+        for relative in ("crates/dev-only/src/lib.rs", "crates/dev-only/Cargo.toml", "macos/icon.txt"):
+            with self.subTest(relative=relative):
+                self.assertEqual(self._after(relative), self.base, relative)
+
+    def test_a_change_the_binary_or_the_qualification_can_see_moves_the_revision(self):
+        for relative in (
+            f"{_SERVER_CRATE}/src/lib.rs",
+            f"{_SERVER_CRATE}/src/new_module.rs",
+            f"{_SERVER_CRATE}/tests/fixtures/pin.json",
+            f"{_SERVER_CRATE}/Cargo.toml",
+            "crates/dep-a/src/lib.rs",
+            "crates/dep-a-inner/src/lib.rs",
+            "crates/dep-ws/src/lib.rs",
+            "crates/dep-build/src/lib.rs",
+            "crates/dep-target/src/lib.rs",
+            "Cargo.lock",
+            "Cargo.toml",
+            "rust-toolchain.toml",
+            "cloudbuild.yaml",
+            "migrations/V1__init.sql",
+            "migrations/V2__next.sql",
+            "docs/included.md",
+            "assets/schema.bin",
+            "docs/superpowers/specs/2026-09-11-versioned-pipeline-contract-test-manifest.json",
+            "docs/superpowers/specs/fixtures/versioned-pipeline-minimal-corpus-v1.json",
+            "scripts/operator/pipeline.py",
+            "scripts/operator/pipeline_tooling/environment.py",
+            "scripts/operator/pipeline-deployment-inventory.py",
+            "scripts/operator/test_pipeline_tooling.py",
+        ):
+            with self.subTest(relative=relative):
+                self.assertNotEqual(self._after(relative), self.base, relative)
+                subprocess.run(["git", "checkout", "-q", "--", "."], cwd=self.repo, check=True, capture_output=True)
+                subprocess.run(["git", "clean", "-qfd"], cwd=self.repo, check=True, capture_output=True)
+                self.assertEqual(environment._code_revision_hash(), self.base, "restored")
+
+    def _refused(self, label):
+        with self.assertRaises(errors.ToolingError) as caught:
+            environment._code_revision_hash()
+        self.assertEqual(str(caught.exception), label)
+
+    def test_a_server_crate_without_a_manifest_is_refused(self):
+        (self.repo / _SERVER_CRATE / "Cargo.toml").unlink()
+        self._refused("code_revision_manifest_missing")
+
+    def test_a_path_dependency_without_a_manifest_is_refused(self):
+        (self.repo / "crates/dep-a-inner/Cargo.toml").unlink()
+        self._refused("code_revision_manifest_missing")
+
+    def test_a_path_dependency_outside_the_tree_is_refused(self):
+        self._write("crates/dep-a/Cargo.toml", '[package]\nname = "dep-a"\n[dependencies]\nx = { path = "../../../x" }\n')
+        self._refused("code_revision_path_outside_tree")
+
+    def test_an_include_it_cannot_resolve_is_refused(self):
+        self._write("crates/dep-a/src/lib.rs", "const X: &str = include_str!(some_macro!());\n")
+        self._refused("code_revision_include_unresolved")
+
+    def test_an_include_of_a_file_that_is_not_there_is_refused(self):
+        self._write("crates/dep-a/src/lib.rs", 'const X: &str = include_str!("../../../docs/gone.md");\n')
+        self._refused("code_revision_include_missing")
+
+    def test_an_include_outside_the_tree_is_refused(self):
+        self._write("crates/dep-a/src/lib.rs", 'const X: &str = include_str!("../../../../outside.md");\n')
+        self._refused("code_revision_path_outside_tree")
+
+    def test_an_include_by_a_dependency_is_covered(self):
+        self._after("crates/dep-a/src/lib.rs", 'const X: &str = include_str!("../../../docs/guide.md");\n')
+        with_include = environment._code_revision_hash()
+        self.assertNotEqual(self._after("docs/guide.md", "guide v2\n"), with_include)
+
+    def test_a_path_module_outside_the_crate_is_covered(self):
+        self._write("crates/dep-a/src/lib.rs", '#[path = "../../../tools/shared.rs"]\nmod shared;\n')
+        self._refused("code_revision_include_missing")
+        with_module = self._after("tools/shared.rs", "// shared\n")
+        self.assertNotEqual(self._after("tools/shared.rs", "// shared v2\n"), with_module)
+
+    def test_what_a_module_outside_the_crate_includes_is_covered(self):
+        """A Rust file outside the covered crates that a covered crate loads
+        (`#[path]` or `include!`) is scanned in turn, so what it includes
+        is covered too (review of #1348, minor 1, case A)."""
+        for loader in ('#[path = "../../../tools/shared.rs"]\nmod shared;\n', 'include!("../../../tools/shared.rs");\n'):
+            with self.subTest(loader=loader):
+                _write_tree(
+                    self.repo,
+                    {
+                        "crates/dep-a/src/lib.rs": loader,
+                        "tools/shared.rs": 'pub const DATA: &str = include_str!("data.txt");\n',
+                        "tools/data.txt": "data v1\n",
+                    },
+                )
+                with_module = environment._code_revision_hash()
+                self.assertIn("tools/data.txt", environment._code_revision_paths())
+                self.assertNotEqual(self._after("tools/data.txt", "data v2\n"), with_module)
+
+    def test_an_include_missing_behind_a_module_outside_the_crate_is_refused(self):
+        _write_tree(
+            self.repo,
+            {
+                "crates/dep-a/src/lib.rs": '#[path = "../../../tools/shared.rs"]\nmod shared;\n',
+                "tools/shared.rs": 'pub const DATA: &str = include_str!("gone.txt");\n',
+            },
+        )
+        self._refused("code_revision_include_missing")
+
+    def test_a_module_outside_the_crate_with_an_out_of_line_child_is_refused(self):
+        """Its child module's file is not resolved by the scan, so the
+        revision is refused rather than computed without it. An inline
+        child module is fine."""
+        _write_tree(
+            self.repo,
+            {
+                "crates/dep-a/src/lib.rs": '#[path = "../../../tools/shared.rs"]\nmod shared;\n',
+                "tools/shared.rs": "pub mod inline { pub const X: u8 = 1; }\n",
+            },
+        )
+        environment._code_revision_hash()
+        self._write("tools/shared.rs", "pub mod child;\n")
+        self._refused("code_revision_include_unresolved")
+
+    def test_a_cfg_attr_path_module_outside_the_crate_is_covered(self):
+        """`#[cfg_attr(<cfg>, path = "...")]` loads a module file as
+        `#[path]` does (review of #1348, minor 1, case B)."""
+        self._write("crates/dep-a/src/lib.rs", '#[cfg_attr(not(test), path = "../../../tools/n.rs")]\nmod n;\n')
+        self._refused("code_revision_include_missing")
+        with_module = self._after("tools/n.rs", "// n v1\n")
+        self.assertNotEqual(self._after("tools/n.rs", "// n v2\n"), with_module)
+
+    def test_a_patched_crate_is_covered(self):
+        self._write("Cargo.toml", _SCOPE_WORKSPACE["Cargo.toml"] + '[patch.crates-io]\nserde = { path = "vendor/serde" }\n')
+        self._refused("code_revision_manifest_missing")
+        _write_tree(self.repo, {"vendor/serde/Cargo.toml": '[package]\nname = "serde"\n', "vendor/serde/src/lib.rs": "// v1\n"})
+        patched = environment._code_revision_hash()
+        self.assertNotEqual(self._after("vendor/serde/src/lib.rs", "// v2\n"), patched)
+
+    def test_the_revision_is_the_framed_hash_of_the_covered_files(self):
+        """The framing is unchanged (length-prefixed path, length-prefixed
+        content, in sorted path order); only the set of paths narrowed."""
+        paths = environment._code_revision_paths()
+        self.assertIn("Cargo.lock", paths)
+        self.assertNotIn("docs/guide.md", paths)
+        self.assertEqual(paths, sorted(paths))
+        tree = hashlib.sha256()
+        for relative in paths:
+            raw = relative.encode()
+            content = (self.repo / relative).read_bytes()
+            tree.update(len(raw).to_bytes(8, "big") + raw + len(content).to_bytes(8, "big") + content)
+        self.assertEqual(environment._code_revision_hash(), "sha256:" + tree.hexdigest())
+
+
+class CodeRevisionRepositoryTests(unittest.TestCase):
+    """#1249, on this repository's own tree: which crates the revision
+    covers, and that every file the qualification reads is inside it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.paths = set(environment._code_revision_paths())
+
+    def _covered(self, relative):
+        relative = Path(relative).as_posix()
+        return relative in self.paths or any(path.startswith(relative + "/") for path in self.paths)
+
+    def test_the_covered_crates_are_the_server_binaries_dependency_closure(self):
+        self.assertEqual(
+            environment._code_revision_crates(environment.ROOT),
+            [
+                "crates/trace-commons-attestation",
+                "crates/trace-commons-build-info",
+                "crates/trace-commons-gate-api",
+                "crates/trace-commons-gate-enclave",
+                "crates/trace-commons-operator-client",
+                "crates/trace-commons-protocol",
+                "crates/trace-commons-server",
+            ],
+        )
+
+    def test_documents_and_client_shells_are_outside_the_revision(self):
+        for prefix in (
+            "docs/operator/pipeline-activation.md",
+            "macos/",
+            "windows/",
+            "tauri-desktop/",
+            "community/",
+            "crates/trace-commons-contributor/",
+            "crates/trace-commons-contributor-ffi/",
+            "crates/trace-commons-contributor-gtk/",
+            "crates/trace-commons-mark/",
+        ):
+            with self.subTest(prefix=prefix):
+                self.assertEqual([path for path in self.paths if path.startswith(prefix)], [], prefix)
+
+    def test_every_file_the_qualification_reads_is_covered(self):
+        from pipeline_tooling import promote
+
+        root = environment.ROOT
+        inputs = [
+            pipeline.CONTRACT_MANIFEST.relative_to(root),
+            pipeline.HF_LOCAL_PIN.relative_to(root),
+            corpus.DEFAULT_CORPUS.relative_to(root),
+            promote._PIN_DIR.relative_to(root),
+            promote.HF_NETWORK_PIN_PATH,
+            Path("scripts/operator/pipeline.py"),
+            Path("scripts/operator/pipeline_tooling/environment.py"),
+            # Read by `test_package_digests_match_the_rust_vector` and by
+            # `versioned_pipeline_qualification.rs`'s tests.
+            Path("scripts/operator/fixtures/pipeline-package-digests-vector.json"),
+            # Read by `test_the_repository_gitignore_has_no_cargo_line`.
+            Path(".gitignore"),
+        ]
+        for step in (*checks.CONTRACTS_STEPS, *checks.RUNTIME_STEPS):
+            for argument in step.argv:
+                if argument.endswith(".py") and Path(argument).is_absolute():
+                    inputs.append(Path(argument).relative_to(root))
+        self.assertGreaterEqual(len(inputs), 9)
+        for relative in inputs:
+            with self.subTest(relative=str(relative)):
+                self.assertTrue(self._covered(relative), relative)
+
+    def test_the_release_build_takes_the_revision_from_this_computation(self):
+        """There is one computation: `cloudbuild.yaml` and the deployment
+        runbook pass `pipeline.py revision`'s output into the build, which
+        embeds it unchanged (`DEPLOYED_CODE_REVISION_HASH`)."""
+        cloudbuild = (environment.ROOT / "cloudbuild.yaml").read_text()
+        self.assertIn("REV=$(python3 scripts/operator/pipeline.py revision)", cloudbuild)
+        self.assertIn('export TRACE_COMMONS_BUILD_CODE_REVISION_HASH="${_CODE_REVISION_HASH}"', cloudbuild)
+        qualification = (
+            environment.ROOT / "crates/trace-commons-server/src/versioned_pipeline_qualification.rs"
+        ).read_text()
+        self.assertIn('option_env!("TRACE_COMMONS_BUILD_CODE_REVISION_HASH")', qualification)
 class ActivityMissionInventoryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -4381,6 +5161,13 @@ class ActivityMissionInventoryTests(unittest.TestCase):
         for path in ("/v1/activity-missions-extra", "/v1/activity-missions/status", "/v1/activity-missions/"):
             self.assertIsNone(self.inventory.classify_route(path), path)
 
+    def test_the_credit_estimate_table_is_a_public_catalogue(self):
+        """The local credit estimate table is public, non-personal data a
+        client fetches before it has an account, like the mission catalogue."""
+        self.assertEqual(self.inventory.classify_route("/v1/credit-estimate/table"), ("EXP-004", "CRD-004"))
+        for path in ("/v1/credit-estimate", "/v1/credit-estimate/table/extra", "/v1/credit-estimate/tables"):
+            self.assertIsNone(self.inventory.classify_route(path), path)
+
     def test_new_catalogue_is_in_inventory_and_unknown_interfaces_still_fail_closed(self):
         inventory = self.inventory.build_inventory()
         catalogue = [row for row in inventory["routes"] if row["path"] == "/v1/activity-missions"]
@@ -4389,6 +5176,3131 @@ class ActivityMissionInventoryTests(unittest.TestCase):
         with mock.patch.object(self.inventory, "source_routes", return_value=["/v1/activity-missions-future"]):
             with self.assertRaisesRegex(ValueError, "unclassified deployment interface"):
                 self.inventory.build_inventory()
+
+
+
+# ---------------------------------------------------------------------------
+# Spec 2026-10-08 Slice B-1: `pipeline.py promote` and `hf-pin record`, the
+# operator-run production checks. Every network and bucket call is an
+# injected callable here; nothing below downloads or touches a store.
+# ---------------------------------------------------------------------------
+
+from pipeline_tooling import promote  # noqa: E402
+
+_PROMOTE_FEATURES = ("--features", "near-ai-scorer,gcs-client,gcp-kms")
+_HEX40 = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _fake_policy(name, phase, data_artifact_hashes=()):
+    return {
+        "policy_id": f"trace_commons.{phase}.{name}",
+        "implementation_id": f"trace_commons.{phase}.{name}.v1",
+        "configuration_hash": _digest(f"{name}-{phase}".encode()),
+        "data_artifact_hashes": list(data_artifact_hashes),
+        "projection_ids": [],
+    }
+
+
+def _rederive_bundle_id(package):
+    """Re-derives the bundle identifier after a test edits the manifest, so
+    the package stays valid and only its hash moves."""
+    package["bundle_id"] = _digest(promote._manifest_canonical_bytes(package["manifest"]))
+    return package
+
+
+def _fake_signed_package(name="production"):
+    """A signed package the way `pipeline.py package` writes one: a valid
+    `BundlePackage` (artifact bytes that hash to their keys, a bundle
+    identifier derived from the manifest) and a signature whose
+    `package_hash` is `promote.bundle_package_hash` of it. That function is
+    pinned to the Rust rule by `test_package_digests_match_the_rust_vector`,
+    whose vector a Rust test holds to `BundlePackage::package_hash`, so using
+    it here is not an oracle of the tool's own making. The signature bytes
+    are not verified offline."""
+    data = {f"{name}-{phase}".encode() for phase in ("admission", "review", "score", "settle")}
+    data |= {f"{name}-embedder".encode(), f"{name}-scorer".encode()}
+    score_data = [_digest(f"{name}-scorer".encode()), _digest(f"{name}-embedder".encode())]
+    package = _rederive_bundle_id({
+        "bundle_id": None,
+        "manifest": {
+            "format_version": 2,
+            "admission": _fake_policy(name, "admission"),
+            "review": _fake_policy(name, "review"),
+            "score": _fake_policy(name, "score", score_data),
+            "settle": _fake_policy(name, "settle"),
+            "instruments": {
+                "storage_rebate": {"kind": "credit_account", "network": "pipeline-test", "contract": "storage-rebate", "decimals": 0},
+            },
+        },
+        "artifacts": {_digest(item): item.hex() for item in data},
+    })
+    return {
+        "package": package,
+        "signature": {
+            "algorithm": "Ed25519",
+            "key_id": "production_package_key",
+            "package_hash": promote.bundle_package_hash(package),
+            "signature_base64url": "A" * 86,
+        },
+    }
+
+
+def _package_triple(signed):
+    manifest = signed["package"]["manifest"]
+    return (
+        signed["signature"]["package_hash"],
+        _digest(results.canonical({phase: manifest[phase]["configuration_hash"] for phase in ("admission", "review", "score", "settle")})),
+        _digest(results.canonical(sorted(manifest["score"]["data_artifact_hashes"]))),
+    )
+
+
+def _hf_network_manifest(**overrides):
+    manifest = {
+        "schema": "trace_commons.pipeline_hf_corpus_manifest.v1",
+        "source": {
+            "repository": "jedisct1/security-audits",
+            "revision": _HEX40,
+            "split": "train",
+            "translator": "swival",
+            "bootstrap_count": 1,
+            "holdout_count": 1,
+            "min_words": 1,
+            "max_words": 2000,
+            "expected_instrument_count": 1,
+        },
+        "source_digest": _fake_hash("source"),
+        "order_digest": _fake_hash("order"),
+        "bootstrap_corpus_digest": _fake_hash("bootstrap"),
+        "holdout_corpus_digest": _fake_hash("holdout"),
+        "configuration_digest": _fake_hash("configuration"),
+        "sample_count": 2,
+        "bootstrap_count": 1,
+        "holdout_count": 1,
+        "contains_raw_trace_text": False,
+        "contains_contributor_identity": False,
+    }
+    manifest.update(overrides)
+    return manifest
+
+
+# The seed's credit counts under a zero `NoveltyUtility` delta (the pilot's).
+_UNCREDITED_SEED = {
+    "credit_delta_zero": True,
+    "adapter_request_count": 0,
+    "completed_settlement_count": 0,
+    "completed_credit_event_count": 0,
+}
+
+
+def _remote_report(**overrides):
+    report = {
+        "schema": "trace_commons.pipeline_remote_restore_report.v1",
+        "object_store_kind": "gcs",
+        "object_count": 42,
+        "artifact_fingerprint": _fake_hash("artifacts"),
+        "restored_artifact_fingerprint": _fake_hash("artifacts"),
+        "versioning_enabled": True,
+        "kek_unwrap_verified_count": 42,
+        "seed_database_fingerprint": _fake_hash("database"),
+        "resumed_database_fingerprint": _fake_hash("database"),
+        "pending_runs_resumed": 1,
+        "duplicate_effects": 0,
+    }
+    report.update(overrides)
+    return report
+
+
+class _PromoteCase(unittest.TestCase):
+    """A real `Run` and the real `main`, rooted in a scratch directory: the
+    tree hash, cargo, the HF export, and the remote restore harness are the
+    only things replaced."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.stdout, self.stderr = io.StringIO(), io.StringIO()
+        self.tree = _fake_hash("tree")
+        self.calls = []
+        self.signed = _fake_signed_package()
+        self.package_path = self.root / "inputs" / "production-package.json"
+        self.package_path.parent.mkdir(parents=True)
+        self.package_path.write_text(json.dumps(self.signed))
+        self.key_path = self.root / "inputs" / "production-package-key.json"
+        self.key_path.write_text(json.dumps({"key_id": "production_package_key", "public_key_base64url": "A" * 43}))
+        self.manifest = _hf_network_manifest()
+        self.downloaded = 2
+        self.report = _remote_report()
+        self.harness_calls = []
+        self.harness_admin_urls = []
+        # The deployment's env file: variables `package-checks` reads, and
+        # three it must never pass on (the live index root among them).
+        self.env_path = self.root / "inputs" / "ingest.env"
+        self.env_path.write_text(
+            "# the deployment's env file\n"
+            "TRACE_COMMONS_NEAR_AI_BASE_URL=https://near-ai.invalid/v1\n"
+            'TRACE_COMMONS_NEAR_AI_API_KEY="near-ai-test-key"\n'
+            "TRACE_COMMONS_NEAR_AI_MODEL=Qwen/Qwen3.6-35B-A3B-FP8\n"
+            "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS=90\n"
+            "TRACE_COMMONS_VECTOR_INDEX_DIM=1024\n"
+            "TRACE_COMMONS_VECTOR_INDEX_ROOT=/var/lib/trace-commons-vector-index\n"
+            "TRACE_COMMONS_EMBEDDER_CACHE_DIR=/var/cache/trace-commons-embedder\n"
+            "TRACE_COMMONS_DATABASE_URL=postgres://ingest@127.0.0.1/trace_commons\n"
+            "TRACE_COMMONS_ARTIFACT_MASTER_KEY_HEX=00112233\n"
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _runs_dir(self):
+        return self.root / ".local" / "pipeline" / "runs"
+
+    def _runs(self):
+        directory = self._runs_dir()
+        return sorted(path.name for path in directory.iterdir()) if directory.exists() else []
+
+    def _fake_cargo(self, run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+        self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+        if test_filter == _ATTESTATION_WRITER:
+            staging = Path(env["TRACE_COMMONS_PIPELINE_CHECK_ATTESTATION_DIR"])
+            results_dir = Path(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"])
+            for check_id in env["TRACE_COMMONS_PIPELINE_CHECK_IDS"].split(","):
+                raw = json.loads((results_dir / f"{check_id}.result.json").read_text())
+                (staging / f"{check_id}.attestation.json").write_text(
+                    json.dumps(_attestation_for(raw, env["TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_ID"],
+                                                int(env["TRACE_COMMONS_PIPELINE_CHECK_MAX_AGE_SECONDS"])))
+                )
+
+    def _fake_export(self, run, step, fields, output_dir, cache_dir):
+        self.calls.append(("export", step, dict(fields), Path(output_dir), Path(cache_dir)))
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "source-manifest.json").write_text(json.dumps(self.manifest))
+        snapshot = Path(cache_dir) / "datasets--jedisct1--security-audits" / "snapshots" / "abc"
+        snapshot.mkdir(parents=True, exist_ok=True)
+        for index in range(self.downloaded):
+            (snapshot / f"{index:02}.jsonl").write_text("{}\n")
+
+    def _fake_harness(self, run, step, source_store, scratch_store, report_path, *, postgres_admin_url=None):
+        self.harness_calls.append((step, source_store, scratch_store, Path(report_path)))
+        self.harness_admin_urls.append((step, source_store, scratch_store, Path(report_path), postgres_admin_url))
+        Path(report_path).write_text(json.dumps(self.report))
+
+    def _main(self, argv, *, ci=False, harness=True, tree=None):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(environment, "ROOT", self.root))
+            stack.enter_context(mock.patch.object(pipeline, "ROOT", self.root))
+            stack.enter_context(mock.patch.object(environment, "_code_revision_hash", lambda: tree or self.tree))
+            stack.enter_context(mock.patch.object(pipeline, "cargo_test", self._fake_cargo))
+            stack.enter_context(mock.patch.object(promote, "run_hf_export", self._fake_export))
+            if harness:
+                stack.enter_context(mock.patch.object(promote, "run_remote_restore_harness", self._fake_harness))
+            environ = stack.enter_context(mock.patch.dict(os.environ))
+            environ.pop("CI", None)
+            if ci:
+                environ["CI"] = "true"
+            stack.enter_context(contextlib.redirect_stdout(self.stdout))
+            stack.enter_context(contextlib.redirect_stderr(self.stderr))
+            return pipeline.main(argv)
+
+    def _init(self):
+        before = set(self._runs())
+        code = self._main(["promote", "init", "--package", str(self.package_path), "--trusted-key", str(self.key_path)])
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        [run_id] = sorted(set(self._runs()) - before)
+        self.stdout.seek(0)
+        self.stdout.truncate()
+        return run_id
+
+    def _results_dir(self, run_id):
+        return self._runs_dir() / run_id / "results"
+
+    def _result(self, run_id, check_id):
+        directory = self._results_dir(run_id)
+        return (
+            json.loads((directory / f"{check_id}.result.json").read_text()),
+            json.loads((directory / f"{check_id}.evidence.json").read_text()),
+        )
+
+    def _failure(self):
+        return self.stderr.getvalue().strip()
+
+    def _write_production_result(self, production_run_id, check_id, *, package=None, evidence=None, **overrides):
+        """A passing result of the production run. A package check's evidence
+        says `harness_assembly: production`, as the harness writes it in that
+        mode, unless `evidence` replaces it."""
+        run_id = production_run_id
+        package_hash, configuration_digest, dependency_digest = package or _package_triple(self.signed)
+        record = json.loads((self._runs_dir() / run_id / promote.PROMOTE_RUN_FILE).read_text())
+        if evidence is None:
+            evidence = {"observed": check_id}
+            if check_id in promote.package_check_ids():
+                evidence["harness_assembly"] = "production"
+        raw = {
+            "schema": results.SCHEMA,
+            "run_id": run_id,
+            "check_id": check_id,
+            "status": "pass",
+            "code_revision_hash": record["code_revision_hash"],
+            "package_hash": package_hash,
+            "configuration_digest": configuration_digest,
+            "dependency_digest": dependency_digest,
+            "observed_at": _iso(datetime.now(timezone.utc)),
+            "evidence_hash": _digest(results.canonical(evidence)),
+            "safe_blockers": [],
+        }
+        raw.update(overrides)
+        directory = self._results_dir(run_id)
+        (directory / f"{check_id}.result.json").write_text(json.dumps(raw))
+        (directory / f"{check_id}.evidence.json").write_text(json.dumps(evidence))
+        return raw
+
+
+def _attestation_for(raw, key_id, maximum_age_seconds):
+    return {
+        "schema": results.ATTESTATION_SCHEMA,
+        "result": raw,
+        "maximum_age_seconds": maximum_age_seconds,
+        "corpus_digest": None,
+        "input_digest": None,
+        "signature": {
+            "algorithm": "Ed25519",
+            "key_id": key_id,
+            "attestation_hash": _fake_hash(raw["check_id"]),
+            "signature_base64url": "A" * 86,
+        },
+    }
+
+
+class PromoteListTests(unittest.TestCase):
+    def test_promotion_only_ids_and_labels_match_the_rust_source(self):
+        self.assertEqual(frozenset(promote.PROMOTION_ONLY_CHECK_IDS), frozenset(_rust_check_list("PROMOTION_ONLY_CHECKS")))
+        source = _PROMOTION_SOURCE.read_text()
+        for name, value in (
+            ("REMOTE_RESTORE_CHECK_ID", promote.REMOTE_RESTORE_CHECK_ID),
+            ("RESTORE_DRILL_CHECK_ID", checks.RESTORE_CHECK_ID),
+            ("LOCAL_RESTORE_BLOCKER_LABEL", pipeline.RESTORE_SAFE_BLOCKER),
+        ):
+            self.assertIn(f'pub const {name}: &str = "{value}";', source, name)
+
+    def test_the_production_run_holds_the_package_checks_and_the_promotion_only_three(self):
+        package = frozenset(check_id for check_id, spec in checks.required_specs().items() if spec.digests_required)
+        self.assertEqual(frozenset(promote.package_check_ids()), package)
+        self.assertEqual(
+            frozenset(promote.production_check_ids()), package | frozenset(promote.PROMOTION_ONLY_CHECK_IDS)
+        )
+        self.assertEqual(frozenset(promote.mechanics_check_ids()), checks.REQUIRED_CHECK_IDS - package)
+        self.assertEqual(
+            frozenset(promote.mechanics_check_ids()) | frozenset(promote.production_check_ids()),
+            frozenset(_promotion_required_checks()),
+        )
+        self.assertEqual(frozenset(promote.mechanics_check_ids()) & frozenset(promote.production_check_ids()), frozenset())
+
+    def test_package_digests_match_the_rust_vector(self):
+        """`fixtures/pipeline-package-digests-vector.json` is written by Rust
+        and held to `package_digests` in `versioned_pipeline_qualification.rs`
+        by `the_cross_language_package_digest_vector_follows_the_rust_rule`.
+        The package hash is the hash of `BundlePackage::canonical_bytes`, a
+        binary encoding, not of the package's JSON."""
+        vector = json.loads((Path(__file__).resolve().parent / "fixtures" / "pipeline-package-digests-vector.json").read_text())
+        signed = {"package": vector["package"], "signature": {"package_hash": vector["package_hash"]}}
+        self.assertEqual(
+            promote.package_digests(signed),
+            (vector["package_hash"], vector["configuration_digest"], vector["dependency_digest"]),
+        )
+        self.assertEqual(promote.bundle_package_hash(vector["package"]), vector["package_hash"])
+
+        # Where Rust's `canonical_bytes` errors, Python refuses; it never
+        # produces a hash.
+        def edited(edit):
+            package = json.loads(json.dumps(vector["package"]))
+            edit(package)
+            return package
+
+        for edit in (
+            lambda p: p["manifest"].update(format_version=1),
+            lambda p: p["manifest"]["score"]["projection_ids"].append("pipeline-test-projection-v1"),
+            lambda p: p.update(bundle_id=_fake_hash("another bundle")),
+            lambda p: p["artifacts"].popitem(),
+            lambda p: p["artifacts"].update({k: v + "00" for k, v in list(p["artifacts"].items())[:1]}),
+            # A lone surrogate: `json.loads` accepts the escape, and no UTF-8
+            # encoding of it exists.
+            lambda p: p["manifest"]["score"].update(policy_id="\udc80"),
+        ):
+            with self.assertRaises(errors.ToolingError) as ctx:
+                promote.bundle_package_hash(edited(edit))
+            self.assertEqual(str(ctx.exception), "promote_package_invalid")
+
+    def test_package_digests_follow_the_rust_rule(self):
+        signed = _fake_signed_package()
+        self.assertEqual(promote.package_digests(signed), _package_triple(signed))
+        signed["signature"]["package_hash"] = _fake_hash("another package")
+        with self.assertRaises(errors.ToolingError) as ctx:
+            promote.package_digests(signed)
+        self.assertEqual(str(ctx.exception), "promote_package_hash_mismatch")
+        with self.assertRaises(errors.ToolingError) as ctx:
+            promote.package_digests({"package": {}})
+        self.assertEqual(str(ctx.exception), "promote_package_invalid")
+
+
+class PromoteTests(_PromoteCase):
+    def test_promote_refuses_in_ci(self):
+        run_id = self._init()
+        for argv in (
+            ["promote", "init", "--package", str(self.package_path), "--trusted-key", str(self.key_path)],
+            ["promote", "package-checks", "--run-id", run_id, "--env-file", str(self.env_path)],
+            ["promote", "hf-canary", "--run-id", run_id, "--pin", str(self.root / "pin.json")],
+            ["promote", "remote-restore", "--run-id", run_id, "--source-store", "live-bucket", "--scratch-store", "scratch-bucket"],
+            ["promote", "adapters", "--run-id", run_id],
+            ["promote", "sign", "--run-id", run_id, "--signing-key", str(self.key_path), "--signing-key-id", "k"],
+            ["promote", "assemble", "--run-id", run_id, "--mechanics-run-id", "q00000000", "--output", str(self.root / "out")],
+            ["hf-pin", "record", "--revision", _HEX40, "--output", str(self.root / "pin.json")],
+        ):
+            self.stderr.seek(0)
+            self.stderr.truncate()
+            self.assertEqual(self._main(argv, ci=True), 1, argv)
+            self.assertEqual(self._failure(), "PipelineFailure: promote_refused_in_ci", argv)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.harness_calls, [])
+        self.assertEqual(self._runs(), [run_id], "a refused command leaves no run directory")
+
+    def test_promote_requires_near_ai_build(self):
+        self.assertEqual(promote.PROMOTE_CARGO_ARGS, (*_INGEST_ARGS, *_PROMOTE_FEATURES))
+        run_id = self._init()
+        for check_id in promote.production_check_ids():
+            self._write_production_result(run_id, check_id)
+        key = self.root / "inputs" / "check-key.pk8"
+        key.write_bytes(b"fake pkcs8")
+        code = self._main(["promote", "sign", "--run-id", run_id, "--signing-key", str(key), "--signing-key-id", "operator_check_key"])
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        cargo_calls = [call for call in self.calls if call[0] == "cargo"]
+        self.assertTrue(cargo_calls)
+        for call in cargo_calls:
+            self.assertEqual(call[2], promote.PROMOTE_CARGO_ARGS)
+
+    def test_promote_init_records_the_run_revision_and_package(self):
+        run_id = self._init()
+        self.assertRegex(run_id, r"^q[0-9a-f]{8}$")
+        record = json.loads((self._runs_dir() / run_id / promote.PROMOTE_RUN_FILE).read_text())
+        package_hash, configuration_digest, dependency_digest = _package_triple(self.signed)
+        self.assertEqual(record["schema"], promote.PROMOTE_RUN_SCHEMA)
+        self.assertEqual(record["run_id"], run_id)
+        self.assertEqual(record["code_revision_hash"], self.tree)
+        self.assertEqual(
+            (record["package_hash"], record["configuration_digest"], record["dependency_digest"]),
+            (package_hash, configuration_digest, dependency_digest),
+        )
+        self.assertEqual(json.loads((self._runs_dir() / run_id / promote.PACKAGE_FILE).read_text()), self.signed)
+
+        # A valid package whose hash is not the signed one is refused.
+        tampered = _fake_signed_package()
+        tampered["package"]["manifest"]["score"]["policy_id"] = "trace_commons.score.edited"
+        _rederive_bundle_id(tampered["package"])
+        self.package_path.write_text(json.dumps(tampered))
+        code = self._main(["promote", "init", "--package", str(self.package_path), "--trusted-key", str(self.key_path)])
+        self.assertEqual(code, 1)
+        self.assertEqual(self._failure(), "PipelineFailure: promote_package_hash_mismatch")
+
+        # A package that does not validate (an edited configuration hash no
+        # longer names an artifact, and the bundle identifier no longer
+        # derives) is refused before any hash is compared.
+        tampered = _fake_signed_package()
+        tampered["package"]["manifest"]["score"]["configuration_hash"] = _fake_hash("edited")
+        self.package_path.write_text(json.dumps(tampered))
+        code = self._main(["promote", "init", "--package", str(self.package_path), "--trusted-key", str(self.key_path)])
+        self.assertEqual(code, 1)
+        self.assertEqual(self._failure().splitlines()[-1], "PipelineFailure: promote_package_invalid")
+
+    def test_init_prints_the_run_id_and_revision_and_no_path(self):
+        code = self._main(["promote", "init", "--package", str(self.package_path), "--trusted-key", str(self.key_path)])
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        [run_id] = self._runs()
+        output = self.stdout.getvalue()
+        self.assertIn(f"run_id={run_id}", output)
+        self.assertIn(f"code_revision_hash={self.tree}", output)
+        self.assertNotIn(str(self.root), output)
+
+    def test_promote_commands_reopen_the_init_run(self):
+        run_id = self._init()
+        env_file = ["--env-file", str(self.env_path)]
+        code = self._main(["promote", "package-checks", "--run-id", run_id, *env_file], tree=_fake_hash("another tree"))
+        self.assertEqual(code, 1)
+        self.assertEqual(self._failure(), "PipelineFailure: promote_code_revision_changed")
+        self.stderr.seek(0)
+        self.stderr.truncate()
+        self.assertEqual(self._main(["promote", "package-checks", "--run-id", "q00000000", *env_file]), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: promote_run_missing")
+        self.stderr.seek(0)
+        self.stderr.truncate()
+        self.assertEqual(self._main(["promote", "package-checks", "--run-id", "../escape", *env_file]), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: promote_run_id_invalid")
+        self.assertEqual(self._runs(), [run_id], "only init keeps a run directory")
+
+
+
+def _network_pin(manifest):
+    """`pin-local.json` as `hf-pin record` turns it into a network pin: no
+    local directory, a revision, and the digests `manifest` computed."""
+    local = json.loads(promote.HF_LOCAL_PIN.read_text())
+    pin = {key: value for key, value in local.items() if key != "local_jsonl_dir"}
+    pin["revision"] = _HEX40
+    for field in promote.HF_PIN_DIGEST_FIELDS:
+        pin[field] = manifest[field]
+    return pin
+
+
+class PromotePackageChecksTests(_PromoteCase):
+    """`promote package-checks` (spec B-D1, B-2): the four package checks on
+    the production assembly. `run_package_checks`, which starts the
+    harnesses, is replaced by a fake that writes the four results the way
+    the production harness does; `ProductionHarnessRunnerTests` covers it."""
+
+    def setUp(self):
+        super().setUp()
+        # The committed pin, where `promote` looks for it under the scratch root.
+        self.pin_path = self.root / promote.HF_NETWORK_PIN_PATH
+        self.pin_path.parent.mkdir(parents=True, exist_ok=True)
+        self.pin_path.write_text(json.dumps(_network_pin(self.manifest)))
+        self.hook_calls = []
+        self.hook_evidence = {}
+        self.hook_package = None
+
+    def _fake_package_checks(self, run, *, harness_env, cargo_features, network_pin, postgres_admin_url):
+        index_root = Path(harness_env[promote.PIPELINE_INDEX_ROOT_VAR])
+        self.hook_calls.append(
+            {
+                "run_id": run.run_id,
+                "harness_env": dict(harness_env),
+                "cargo_features": tuple(cargo_features),
+                "network_pin": Path(network_pin),
+                "postgres_admin_url": postgres_admin_url,
+                "index_root_left_over": index_root.exists(),
+                "attestations_left_over": sorted(path.name for path in run.results_dir.glob("*.attestation.json")),
+            }
+        )
+        for check_id in promote.package_check_ids():
+            self._write_production_result(
+                run.run_id, check_id, package=self.hook_package, evidence=self.hook_evidence.get(check_id)
+            )
+
+    def _package_checks(self, run_id, *extra, env_file=None):
+        argv = ["promote", "package-checks", "--run-id", run_id, "--env-file", str(env_file or self.env_path)]
+        with mock.patch.object(pipeline, "run_package_checks", self._fake_package_checks):
+            return self._main([*argv, *extra])
+
+    def test_package_checks_run_the_production_assembly_from_the_env_file(self):
+        run_id = self._init()
+        self.assertEqual(self._package_checks(run_id), 0, self.stderr.getvalue())
+        [call] = self.hook_calls
+        run_dir = (self._runs_dir() / run_id).resolve()
+        env = call["harness_env"]
+        self.assertEqual(call["run_id"], run_id)
+        self.assertEqual(
+            set(env),
+            {
+                "TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY",
+                "TRACE_COMMONS_PIPELINE_HARNESS_PACKAGE_PATH",
+                "TRACE_COMMONS_PIPELINE_HARNESS_TRUSTED_KEY_PATH",
+                "TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT",
+                "TRACE_COMMONS_NEAR_AI_BASE_URL",
+                "TRACE_COMMONS_NEAR_AI_API_KEY",
+                "TRACE_COMMONS_NEAR_AI_MODEL",
+                "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS",
+                "TRACE_COMMONS_EMBEDDER_CACHE_DIR",
+                "TRACE_COMMONS_VECTOR_INDEX_DIM",
+            },
+            "only the allowlisted variables of the env file reach the harness",
+        )
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY"], "production")
+        self.assertEqual(env["TRACE_COMMONS_NEAR_AI_API_KEY"], "near-ai-test-key")
+        self.assertEqual(Path(env["TRACE_COMMONS_PIPELINE_HARNESS_PACKAGE_PATH"]).resolve(), run_dir / promote.PACKAGE_FILE)
+        self.assertEqual(
+            Path(env["TRACE_COMMONS_PIPELINE_HARNESS_TRUSTED_KEY_PATH"]).resolve(), run_dir / promote.TRUSTED_KEY_FILE
+        )
+        self.assertEqual(Path(env["TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT"]).resolve(), run_dir / promote.INDEX_DIR)
+        self.assertEqual(call["cargo_features"], _PROMOTE_FEATURES)
+        self.assertEqual(call["network_pin"].resolve(), self.pin_path.resolve())
+        self.assertIsNone(call["postgres_admin_url"])
+        for check_id in promote.package_check_ids():
+            result, evidence = self._result(run_id, check_id)
+            self.assertEqual(
+                (result["package_hash"], result["configuration_digest"], result["dependency_digest"]),
+                _package_triple(self.signed),
+            )
+            self.assertEqual(evidence["harness_assembly"], "production")
+        output = self.stdout.getvalue()
+        self.assertIn("PipelinePromotePackageChecksOK:", output)
+        self.assertNotIn(str(self.root), output)
+        self.assertNotIn("near-ai-test-key", output + self.stderr.getvalue())
+
+    def test_package_checks_pass_the_admin_url_through(self):
+        run_id = self._init()
+        self.assertEqual(self._package_checks(run_id, "--postgres-admin-url", _ADMIN_URL), 0, self.stderr.getvalue())
+        self.assertEqual(self.hook_calls[0]["postgres_admin_url"], _ADMIN_URL)
+
+    def test_package_checks_refuse_an_incomplete_env_file_before_anything_runs(self):
+        run_id = self._init()
+        complete = self.env_path.read_text()
+        cases = {
+            "promote_env_file_incomplete:no key": complete.replace('TRACE_COMMONS_NEAR_AI_API_KEY="near-ai-test-key"\n', ""),
+            "promote_env_file_incomplete:blank key": complete.replace('"near-ai-test-key"', '""'),
+            "promote_env_file_incomplete:no model": complete.replace(
+                "TRACE_COMMONS_NEAR_AI_MODEL=Qwen/Qwen3.6-35B-A3B-FP8\n", ""
+            ),
+            "promote_env_file_incomplete:no endpoint": complete.replace(
+                "TRACE_COMMONS_NEAR_AI_BASE_URL=https://near-ai.invalid/v1\n", ""
+            ),
+            "env_file_invalid:not an assignment": complete + "export TRACE_COMMONS_NEAR_AI_MODEL\n",
+        }
+        for case, text in cases.items():
+            with self.subTest(case=case):
+                env_file = self.root / "inputs" / "case.env"
+                env_file.write_text(text)
+                self.stderr.seek(0)
+                self.stderr.truncate()
+                self.assertEqual(self._package_checks(run_id, env_file=env_file), 1)
+                self.assertEqual(self._failure(), f"PipelineFailure: {case.split(':')[0]}")
+        self.stderr.seek(0)
+        self.stderr.truncate()
+        self.assertEqual(self._package_checks(run_id, env_file=self.root / "inputs" / "absent.env"), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: env_file_unreadable")
+        self.assertEqual(self.hook_calls, [])
+        self.assertEqual(list(self._results_dir(run_id).iterdir()), [])
+
+    def test_package_checks_take_only_the_committed_network_pin(self):
+        run_id = self._init()
+        committed = self.pin_path.read_text()
+
+        def refused(label, *extra):
+            self.stderr.seek(0)
+            self.stderr.truncate()
+            self.assertEqual(self._package_checks(run_id, *extra), 1)
+            self.assertEqual(self._failure(), f"PipelineFailure: {label}")
+
+        # The same bytes elsewhere are the committed pin.
+        copy = self.root / "scratch" / "pin-network.json"
+        copy.parent.mkdir()
+        copy.write_text(committed)
+        self.assertEqual(self._package_checks(run_id, "--pin", str(copy)), 0, self.stderr.getvalue())
+        self.assertEqual(self.hook_calls[-1]["network_pin"].resolve(), self.pin_path.resolve())
+        calls = len(self.hook_calls)
+        # A pin for another revision, or none at the path given.
+        other = dict(_network_pin(self.manifest), revision="f" * 40)
+        copy.write_text(json.dumps(other))
+        refused("hf_network_pin_not_committed", "--pin", str(copy))
+        refused("hf_network_pin_not_committed", "--pin", str(self.root / "absent.json"))
+        # The committed pin itself must be a network pin, and must exist.
+        self.pin_path.write_text(json.dumps({**_network_pin(self.manifest), "local_jsonl_dir": "fixtures"}))
+        refused("hf_network_pin_has_local_dir")
+        self.pin_path.unlink()
+        refused("hf_network_pin_missing")
+        refused("hf_network_pin_missing", "--pin", str(copy))
+        self.assertEqual(len(self.hook_calls), calls)
+
+    def test_package_checks_refuse_a_result_not_from_the_production_assembly(self):
+        run_id = self._init()
+        for check_id in promote.package_check_ids():
+            for evidence in ({"observed": check_id}, {"observed": check_id, "harness_assembly": "reference"}):
+                with self.subTest(check_id=check_id, evidence=evidence):
+                    self.hook_evidence = {check_id: evidence}
+                    self.stderr.seek(0)
+                    self.stderr.truncate()
+                    self.assertEqual(self._package_checks(run_id), 1)
+                    self.assertEqual(
+                        self._failure(), f"PipelineFailure: promote_harness_assembly_not_production:{check_id}"
+                    )
+
+    def test_package_checks_refuse_another_package(self):
+        run_id = self._init()
+        self.hook_package = (_fake_hash("p"), _fake_hash("c"), _fake_hash("d"))
+        self.assertEqual(self._package_checks(run_id), 1)
+        self.assertIn(
+            self._failure(),
+            ("PipelineFailure: qualification_evidence_mixed_package", "PipelineFailure: promote_package_mismatch"),
+        )
+
+    def test_a_rerun_starts_from_empty_indexes_and_drops_attestations(self):
+        run_id = self._init()
+        run_dir = self._runs_dir() / run_id
+        (run_dir / promote.INDEX_DIR / "pipeline_restore_drill" / "resume").mkdir(parents=True)
+        (run_dir / promote.INDEX_DIR / "pipeline_restore_drill" / "resume" / "stale.usearch").write_bytes(b"stale")
+        (self._results_dir(run_id) / "pipeline_hf_network_canary.attestation.json").write_text("{}")
+        self.assertEqual(self._package_checks(run_id), 0, self.stderr.getvalue())
+        [call] = self.hook_calls
+        self.assertFalse(call["index_root_left_over"])
+        self.assertEqual(call["attestations_left_over"], [])
+
+    def test_promote_sign_refuses_a_package_check_not_from_the_production_assembly(self):
+        run_id = self._init()
+        production = promote.production_check_ids()
+        for check_id in production:
+            self._write_production_result(run_id, check_id)
+        [first] = promote.package_check_ids()[:1]
+        self._write_production_result(run_id, first, evidence={"observed": first})
+        key = self.root / "inputs" / "check-key.pk8"
+        key.write_bytes(b"fake pkcs8")
+        code = self._main(
+            ["promote", "sign", "--run-id", run_id, "--signing-key", str(key), "--signing-key-id", "operator_check_key"]
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(self._failure(), f"PipelineFailure: promote_harness_assembly_not_production:{first}")
+        self.assertEqual([call for call in self.calls if call[0] == "cargo"], [])
+
+
+class HfNetworkPinTests(_PromoteCase):
+    def _record(self, output, revision=_HEX40):
+        return self._main(["hf-pin", "record", "--revision", revision, "--output", str(output)])
+
+    def test_hf_pin_network_has_no_local_dir(self):
+        committed = environment.ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl/pin-network.json"
+        if committed.exists():
+            pin = json.loads(committed.read_text())
+            self.assertNotIn("local_jsonl_dir", pin)
+            self.assertEqual(pin["schema"], corpus.PIN_SCHEMA)
+        output = self.root / "pin-network.json"
+        self.assertEqual(self._record(output), 0, self.stderr.getvalue())
+        self.assertNotIn("local_jsonl_dir", json.loads(output.read_text()))
+
+        # The canary refuses a committed pin that names a local directory.
+        run_id = self._init()
+        local = json.loads(output.read_text())
+        local["local_jsonl_dir"] = "crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl"
+        committed_pin = self.root / promote.HF_NETWORK_PIN_PATH
+        committed_pin.parent.mkdir(parents=True, exist_ok=True)
+        committed_pin.write_text(json.dumps(local))
+        self.assertEqual(self._main(["promote", "hf-canary", "--run-id", run_id]), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: hf_network_pin_has_local_dir")
+
+    def test_hf_pin_record_writes_every_digest(self):
+        output = self.root / "pins" / "pin-network.json"
+        self.assertEqual(self._record(output), 0, self.stderr.getvalue())
+        pin = json.loads(output.read_text())
+        local = json.loads(promote.HF_LOCAL_PIN.read_text())
+        expected = {key: value for key, value in local.items() if key != "local_jsonl_dir"}
+        expected["revision"] = _HEX40
+        for field in promote.HF_PIN_DIGEST_FIELDS:
+            expected[field] = self.manifest[field]
+        self.assertEqual(pin, expected)
+        self.assertEqual(
+            set(promote.HF_PIN_DIGEST_FIELDS),
+            {"source_digest", "configuration_digest", "order_digest", "bootstrap_corpus_digest", "holdout_corpus_digest"},
+        )
+        # The download went to a cache inside the run directory, with no
+        # expected digests (a draft pin has none).
+        [(_, step, fields, output_dir, cache_dir)] = [call for call in self.calls if call[0] == "export"]
+        self.assertEqual(step, "hf_pin_record")
+        self.assertNotIn("source_digest", fields)
+        self.assertNotIn("local_jsonl_dir", fields)
+        [run_id] = [name for name in self._runs()]
+        self.assertTrue(cache_dir.is_relative_to(self._runs_dir() / run_id))
+        self.assertTrue(output_dir.is_relative_to(self._runs_dir() / run_id))
+
+        # Never overwritten; never from a revision that is not a commit.
+        before = output.read_bytes()
+        self.assertEqual(self._record(output), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: hf_pin_output_exists")
+        self.assertEqual(output.read_bytes(), before)
+        self.stderr.seek(0)
+        self.stderr.truncate()
+        self.assertEqual(self._record(self.root / "other.json", revision="main"), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: hf_pin_revision_invalid")
+
+        # A manifest that is not the pinned source is refused.
+        self.stderr.seek(0)
+        self.stderr.truncate()
+        self.manifest = _hf_network_manifest(source={**self.manifest["source"], "revision": "f" * 40})
+        self.assertEqual(self._record(self.root / "third.json"), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: hf_manifest_source_mismatch")
+        self.assertFalse((self.root / "third.json").exists())
+
+
+class HfCanaryTests(_PromoteCase):
+    def setUp(self):
+        super().setUp()
+        # The committed pin: where the repository keeps it, in the scratch root.
+        self.pin_path = self.root / promote.HF_NETWORK_PIN_PATH
+        self.pin_path.parent.mkdir(parents=True, exist_ok=True)
+        local = json.loads(promote.HF_LOCAL_PIN.read_text())
+        pin = {key: value for key, value in local.items() if key != "local_jsonl_dir"}
+        pin["revision"] = _HEX40
+        for field in promote.HF_PIN_DIGEST_FIELDS:
+            pin[field] = self.manifest[field]
+        self.pin_path.write_text(json.dumps(pin))
+        self.pin = pin
+
+    def _canary(self, run_id):
+        return self._main(["promote", "hf-canary", "--run-id", run_id, "--pin", str(self.pin_path)])
+
+    def test_hf_canary_evidence_shape(self):
+        run_id = self._init()
+        self.assertEqual(self._canary(run_id), 0, self.stderr.getvalue())
+        result, evidence = self._result(run_id, promote.HF_CANARY_CHECK_ID)
+        self.assertEqual(
+            evidence,
+            {
+                "schema": "trace_commons.pipeline_hf_network_canary.v1",
+                "repository_owner": "jedisct1",
+                "repository_name": "security-audits",
+                "revision": _HEX40,
+                "pin_hash": _digest(self.pin_path.read_bytes()),
+                "source_digest": self.manifest["source_digest"],
+                "order_digest": self.manifest["order_digest"],
+                "bootstrap_corpus_digest": self.manifest["bootstrap_corpus_digest"],
+                "holdout_corpus_digest": self.manifest["holdout_corpus_digest"],
+                "downloaded_file_count": 2,
+                "cache_dir_inside_run": True,
+            },
+        )
+        results.validate_evidence(evidence)
+        package_hash, configuration_digest, dependency_digest = _package_triple(self.signed)
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["run_id"], run_id)
+        self.assertEqual(result["code_revision_hash"], self.tree)
+        self.assertEqual(result["safe_blockers"], [])
+        self.assertEqual(
+            (result["package_hash"], result["configuration_digest"], result["dependency_digest"]),
+            (package_hash, configuration_digest, dependency_digest),
+        )
+        self.assertEqual(result["evidence_hash"], _digest(results.canonical(evidence)))
+        # The results load as a Rust result does.
+        run = environment.Run(run_id, datetime.now(timezone.utc) - timedelta(minutes=5), self._runs_dir() / run_id, self.tree)
+        loaded = results.load_results(run)
+        results.require_current_pass_results(run, loaded, {promote.HF_CANARY_CHECK_ID: checks.CheckSpec(promote.HF_CANARY_CHECK_ID, True)})
+        # The download used a fresh cache inside the production run.
+        [(_, step, fields, output_dir, cache_dir)] = [call for call in self.calls if call[0] == "export"]
+        self.assertTrue(cache_dir.is_relative_to(self._runs_dir() / run_id))
+        self.assertNotIn("local_jsonl_dir", fields)
+        self.assertIn(f"PipelinePromoteCheckOK: check={promote.HF_CANARY_CHECK_ID} status=pass", self.stdout.getvalue())
+
+        # A re-run replaces its own result, in the same run directory.
+        self.assertEqual(self._canary(run_id), 0, self.stderr.getvalue())
+        self.assertEqual(sorted(path.name for path in self._results_dir(run_id).iterdir()),
+                         [f"{promote.HF_CANARY_CHECK_ID}.evidence.json", f"{promote.HF_CANARY_CHECK_ID}.result.json"])
+
+    def test_hf_canary_fails_on_digest_mismatch(self):
+        run_id = self._init()
+        for field in promote.HF_PIN_DIGEST_FIELDS:
+            self.manifest = _hf_network_manifest(**{field: _fake_hash(f"moved-{field}")})
+            self.stderr.seek(0)
+            self.stderr.truncate()
+            self.assertEqual(self._canary(run_id), 1, field)
+            self.assertEqual(self._failure(), f"PipelineFailure: check_result_failed:{promote.HF_CANARY_CHECK_ID}")
+            result, evidence = self._result(run_id, promote.HF_CANARY_CHECK_ID)
+            self.assertEqual(result["status"], "fail", field)
+            self.assertEqual(result["safe_blockers"], [f"hf_pin_digest_mismatch_{field}"], field)
+            results.validate_evidence(evidence)
+
+    def test_hf_canary_fails_when_nothing_was_downloaded(self):
+        run_id = self._init()
+        self.downloaded = 0
+        self.assertEqual(self._canary(run_id), 1)
+        result, _ = self._result(run_id, promote.HF_CANARY_CHECK_ID)
+        self.assertEqual((result["status"], result["safe_blockers"]), ("fail", ["hf_network_download_missing"]))
+
+    def test_hf_canary_accepts_only_the_committed_pin(self):
+        """Review of #1293: a pin `hf-pin record` wrote for another revision,
+        outside the tree, matches its own fresh download in every digest. The
+        code revision does not cover it, so the canary refuses any pin whose
+        bytes are not the committed `pin-network.json`'s, before it downloads."""
+        run_id = self._init()
+        other = dict(self.pin, revision="f" * 40)
+        elsewhere = self.root / "elsewhere" / "pin-network.json"
+        elsewhere.parent.mkdir()
+        elsewhere.write_text(json.dumps(other))
+        # Every digest of the other revision's download matches its pin.
+        self.manifest = _hf_network_manifest(source={**self.manifest["source"], "revision": "f" * 40})
+        self.assertEqual(self._main(["promote", "hf-canary", "--run-id", run_id, "--pin", str(elsewhere)]), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: hf_network_pin_not_committed")
+        self.assertEqual([call for call in self.calls if call[0] == "export"], [])
+        self.assertFalse((self._results_dir(run_id) / f"{promote.HF_CANARY_CHECK_ID}.result.json").exists())
+
+        # A copy of the committed pin's bytes, wherever it is, is the
+        # committed pin.
+        self.manifest = _hf_network_manifest()
+        copy = self.root / "elsewhere" / "copy.json"
+        copy.write_bytes(self.pin_path.read_bytes())
+        self.stderr.seek(0)
+        self.stderr.truncate()
+        self.assertEqual(self._main(["promote", "hf-canary", "--run-id", run_id, "--pin", str(copy)]), 0,
+                         self.stderr.getvalue())
+        _, evidence = self._result(run_id, promote.HF_CANARY_CHECK_ID)
+        self.assertEqual(evidence["pin_hash"], _digest(self.pin_path.read_bytes()))
+
+        # With no `--pin`, the committed pin is the one used.
+        self.assertEqual(self._main(["promote", "hf-canary", "--run-id", run_id]), 0, self.stderr.getvalue())
+
+        # No committed pin: nothing is accepted in its place.
+        self.pin_path.unlink()
+        for argv in ([], ["--pin", str(copy)]):
+            self.stderr.seek(0)
+            self.stderr.truncate()
+            self.assertEqual(self._main(["promote", "hf-canary", "--run-id", run_id, *argv]), 1, argv)
+            self.assertEqual(self._failure(), "PipelineFailure: hf_network_pin_missing", argv)
+
+    def test_hf_canary_refuses_a_pin_without_every_digest(self):
+        run_id = self._init()
+        del self.pin["holdout_corpus_digest"]
+        self.pin_path.write_text(json.dumps(self.pin))
+        self.assertEqual(self._canary(run_id), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: hf_network_pin_invalid")
+        self.assertEqual([call for call in self.calls if call[0] == "export"], [])
+
+
+class RemoteRestoreTests(_PromoteCase):
+    def _restore(self, run_id, source="tracecommons-artifacts/live", scratch="tracecommons-restore-scratch/drill", **kwargs):
+        return self._main(
+            ["promote", "remote-restore", "--run-id", run_id, "--source-store", source, "--scratch-store", scratch], **kwargs
+        )
+
+    def test_remote_restore_evidence_shape(self):
+        run_id = self._init()
+        self.assertEqual(self._restore(run_id), 0, self.stderr.getvalue())
+        result, evidence = self._result(run_id, promote.REMOTE_RESTORE_CHECK_ID)
+        self.assertEqual(
+            evidence,
+            {
+                "schema": "trace_commons.pipeline_remote_restore.v1",
+                "object_store_kind": "gcs",
+                "source_store_name_hash": _digest(b"tracecommons-artifacts/live"),
+                "scratch_store_name_hash": _digest(b"tracecommons-restore-scratch/drill"),
+                "object_count": 42,
+                "artifact_fingerprint": self.report["artifact_fingerprint"],
+                "restored_artifact_fingerprint": self.report["restored_artifact_fingerprint"],
+                "versioning_enabled": True,
+                "kek_unwrap_verified_count": 42,
+                "database_fingerprint": self.report["seed_database_fingerprint"],
+                "pending_runs_resumed": 1,
+                "duplicate_effects": 0,
+            },
+        )
+        results.validate_evidence(evidence)
+        self.assertEqual((result["status"], result["safe_blockers"]), ("pass", []))
+        self.assertEqual(
+            (result["package_hash"], result["configuration_digest"], result["dependency_digest"]),
+            _package_triple(self.signed),
+        )
+        [(step, source, scratch, report_path)] = self.harness_calls
+        self.assertEqual((source, scratch), ("tracecommons-artifacts/live", "tracecommons-restore-scratch/drill"))
+        self.assertTrue(report_path.is_relative_to(self._runs_dir() / run_id))
+        for text in (self.stdout.getvalue(), self.stderr.getvalue(), json.dumps(result), json.dumps(evidence)):
+            self.assertNotIn("tracecommons-artifacts", text)
+            self.assertNotIn("tracecommons-restore-scratch", text)
+
+    def test_remote_restore_evidence_rejects_url_like_values(self):
+        run_id = self._init()
+        # An argument that looks like a URL never reaches argparse.
+        with self.assertRaises(errors.ToolingError) as ctx:
+            pipeline.parse_args(
+                ["promote", "remote-restore", "--run-id", run_id, "--source-store", "live",
+                 "--scratch-store", "gs://tracecommons-restore-scratch"]
+            )
+        self.assertEqual(str(ctx.exception), "argument_looks_like_url")
+        # A store name outside the bucket/prefix shape is refused too.
+        for name in ("Bucket With Spaces", "bucket/../live", "x", "bucket//double", "bucket/"):
+            self.stderr.seek(0)
+            self.stderr.truncate()
+            self.assertEqual(self._restore(run_id, scratch=name), 1, name)
+            self.assertEqual(self._failure(), "PipelineFailure: remote_restore_store_name_invalid", name)
+        # A report value that looks like a URL is refused, and no result is written.
+        for overrides in (
+            {"object_store_kind": "gs://tracecommons-artifacts"},
+            {"artifact_fingerprint": "https://storage.googleapis.com/x"},
+            {"extra": "value"},
+            {"object_count": 1.5},
+        ):
+            self.report = _remote_report(**overrides)
+            self.stderr.seek(0)
+            self.stderr.truncate()
+            self.assertEqual(self._restore(run_id), 1, overrides)
+            self.assertEqual(self._failure(), "PipelineFailure: remote_restore_report_invalid", overrides)
+            self.assertEqual(list(self._results_dir(run_id).iterdir()), [], overrides)
+
+    def test_remote_restore_fails_on_fingerprint_mismatch(self):
+        run_id = self._init()
+        for overrides, blocker in (
+            ({"restored_artifact_fingerprint": _fake_hash("other")}, "remote_restore_artifact_fingerprint_mismatch"),
+            ({"kek_unwrap_verified_count": 41}, "remote_restore_unwrap_count_mismatch"),
+            ({"versioning_enabled": False}, "remote_restore_versioning_disabled"),
+            ({"resumed_database_fingerprint": _fake_hash("other")}, "remote_restore_resume_mismatch"),
+            ({"pending_runs_resumed": 0}, "remote_restore_resume_mismatch"),
+            ({"duplicate_effects": 1}, "remote_restore_resume_mismatch"),
+            ({"object_store_kind": "file_system"}, "remote_restore_store_not_remote"),
+            ({"object_count": 0, "kek_unwrap_verified_count": 0}, "remote_restore_empty"),
+        ):
+            self.report = _remote_report(**overrides)
+            self.stderr.seek(0)
+            self.stderr.truncate()
+            self.assertEqual(self._restore(run_id), 1, overrides)
+            self.assertEqual(self._failure(), f"PipelineFailure: check_result_failed:{promote.REMOTE_RESTORE_CHECK_ID}")
+            result, evidence = self._result(run_id, promote.REMOTE_RESTORE_CHECK_ID)
+            self.assertEqual(result["status"], "fail", overrides)
+            self.assertIn(blocker, result["safe_blockers"], overrides)
+            results.validate_evidence(evidence)
+
+    def test_remote_restore_refuses_the_live_prefix_as_target(self):
+        run_id = self._init()
+        for source, scratch in (
+            ("tracecommons-artifacts", "tracecommons-artifacts"),
+            ("tracecommons-artifacts", "tracecommons-artifacts/scratch"),
+            ("tracecommons-artifacts/live", "tracecommons-artifacts"),
+            ("tracecommons-artifacts/live", "tracecommons-artifacts/live/drill"),
+        ):
+            self.stderr.seek(0)
+            self.stderr.truncate()
+            self.assertEqual(self._restore(run_id, source=source, scratch=scratch), 1, (source, scratch))
+            self.assertEqual(self._failure(), "PipelineFailure: remote_restore_scratch_overlaps_live_store")
+        self.assertEqual(self.harness_calls, [])
+        # A sibling prefix in the same bucket is not the live prefix.
+        self.assertEqual(
+            self._restore(run_id, source="tracecommons-artifacts/live", scratch="tracecommons-artifacts/live-drill"),
+            0,
+            self.stderr.getvalue(),
+        )
+
+    def test_remote_restore_passes_the_postgres_admin_url_to_the_harness(self):
+        run_id = self._init()
+        self.assertEqual(
+            self._main(
+                ["promote", "remote-restore", "--run-id", run_id, "--source-store", "tracecommons-artifacts",
+                 "--scratch-store", "tracecommons-restore-scratch",
+                 "--postgres-admin-url", "postgres://trace@127.0.0.1:5432/postgres"]
+            ),
+            0,
+            self.stderr.getvalue(),
+        )
+        [(_, _, _, _, admin_url)] = self.harness_admin_urls
+        self.assertEqual(admin_url, "postgres://trace@127.0.0.1:5432/postgres")
+
+
+class _FakeScenario:
+    def __init__(self, log):
+        self.log = log
+        self.runtime_url = "postgres://trace@127.0.0.1:5432/pipeline_remote_restore"
+        self.pilot_database = "pipeline_remote_restore_pilot"
+        self.restored_database = "pipeline_remote_restore_restored"
+        self.restored_url = "postgres://trace@127.0.0.1:5432/pipeline_remote_restore_restored"
+
+    def committed_transactions(self, database):
+        self.log.append(("committed", database))
+        return 100
+
+
+class _FakeEnvironment:
+    """`Environment`'s surface the remote restore harness uses, recording
+    each call in order."""
+
+    def __init__(self, log):
+        self.log = log
+
+    def __call__(self, run, *, postgres_admin_url=None):
+        self.log.append(("environment", postgres_admin_url))
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.log.append(("environment_closed",))
+        return False
+
+    def scenario(self, name):
+        self.log.append(("scenario", name))
+        return _FakeScenario(self.log)
+
+    def dump(self, database, path):
+        self.log.append(("dump", database))
+        Path(path).write_bytes(b"dump")
+
+    def create_database(self, database):
+        self.log.append(("create_database", database))
+
+    def restore(self, path, database):
+        self.log.append(("restore", database))
+
+
+class RemoteRestoreHarnessTests(_PromoteCase):
+    """The harness itself (`run_remote_restore_harness`): the seed, the
+    database restore, the copy, and the resume, with cargo and PostgreSQL
+    replaced."""
+
+    def setUp(self):
+        super().setUp()
+        self.log = []
+        self.seed_artifacts = _fake_hash("artifacts")
+        self.copy = {
+            "schema": "trace_commons.pipeline_remote_restore_copy.v1",
+            "object_store_kind": "gcs",
+            "object_count": 7,
+            "artifact_fingerprint": self.seed_artifacts,
+            "restored_artifact_fingerprint": self.seed_artifacts,
+            "kek_unwrap_verified_count": 7,
+            "versioning_enabled": True,
+        }
+        self.resume = {
+            "schema": "trace_commons.pipeline_remote_restore_resume.v1",
+            "database_fingerprint": _fake_hash("database"),
+            "artifact_fingerprint": self.seed_artifacts,
+            "pending_runs_resumed": 1,
+            "duplicate_effects": 0,
+        }
+
+    def _seed_fingerprint(self):
+        hashes = ("database_fingerprint", "artifact_fingerprint", "index_entry_set_hash", "pending_run_id_hash",
+                  "runtime_privilege_set_hash", "tenant_fingerprint", "rls_policy_set_hash", "rls_flag_set_hash")
+        value = {"schema": "trace_commons.pipeline_restore_fingerprint.v1"}
+        value.update({key: _fake_hash(key) for key in hashes})
+        value["database_fingerprint"] = _fake_hash("database")
+        value["artifact_fingerprint"] = self.seed_artifacts
+        value.update({key: 3 for key in ("adapter_request_count", "completed_settlement_count",
+                                          "completed_credit_event_count", "rls_table_count", "rls_policy_count",
+                                          "rls_flag_table_count", "runtime_privilege_count", "tenant_count",
+                                          "audit_event_count")})
+        return value
+
+    def _fake_harness_cargo(self, run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+        self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+        self.log.append(("cargo", step))
+        if step == "remote_restore_seed":
+            Path(env["TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH"]).write_text(json.dumps(self._seed_fingerprint()))
+        elif step == "remote_restore_copy":
+            Path(env["TRACE_COMMONS_PIPELINE_REMOTE_COPY_REPORT_PATH"]).write_text(json.dumps(self.copy))
+        elif step == "remote_restore_resume":
+            Path(env["TRACE_COMMONS_PIPELINE_REMOTE_RESUME_REPORT_PATH"]).write_text(json.dumps(self.resume))
+
+    def _restore(self, run_id, *, extra_environ=None):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(cargo, "cargo_test", self._fake_harness_cargo))
+            stack.enter_context(mock.patch.object(promote, "Environment", _FakeEnvironment(self.log)))
+            environ = stack.enter_context(mock.patch.dict(os.environ))
+            for key in ("TRACE_COMMONS_KEK_PROVIDER", "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME"):
+                environ.pop(key, None)
+            environ.update(extra_environ or {})
+            return self._main(
+                ["promote", "remote-restore", "--run-id", run_id, "--source-store", "tracecommons-artifacts",
+                 "--scratch-store", "tracecommons-restore-scratch/drill"],
+                harness=False,
+            )
+
+    def _cargo(self):
+        return {call[1]: call for call in self.calls if call[0] == "cargo"}
+
+    def test_the_harness_seeds_restores_copies_and_resumes_in_order(self):
+        run_id = self._init()
+        self.assertEqual(self._restore(run_id), 0, self.stderr.getvalue())
+        steps = [entry for entry in self.log if entry[0] in ("cargo", "dump", "create_database", "restore")]
+        self.assertEqual(
+            steps,
+            [
+                ("cargo", "remote_restore_seed"),
+                ("dump", "pipeline_remote_restore_pilot"),
+                ("create_database", "pipeline_remote_restore_restored"),
+                ("restore", "pipeline_remote_restore_restored"),
+                ("cargo", "remote_restore_copy"),
+                ("cargo", "remote_restore_resume"),
+            ],
+        )
+        self.assertEqual(self.log[-1], ("environment_closed",))
+        calls = self._cargo()
+        self.assertEqual(calls["remote_restore_seed"][3], "ingest::app::tests::pipeline_restore_pg_tests::pipeline_restore_seed")
+        self.assertEqual(calls["remote_restore_copy"][3], promote.REMOTE_RESTORE_RUN)
+        self.assertEqual(promote.REMOTE_RESTORE_RUN, "ingest::app::tests::pipeline_restore_pg_tests::pipeline_remote_restore_run")
+        self.assertEqual(calls["remote_restore_resume"][3], "ingest::app::tests::pipeline_restore_pg_tests::pipeline_restore_resume")
+        for _, step, cargo_args, _, env, exact, ignored in calls.values():
+            self.assertEqual(cargo_args, promote.PROMOTE_CARGO_ARGS, step)
+            self.assertTrue(exact and ignored, step)
+            self.assertNotIn("TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT", env, step)
+            self.assertNotIn("TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR", env, step)
+            self.assertEqual(env["TRACE_COMMONS_PIPELINE_REMOTE_STORE_KIND"], "gcs", step)
+        seed_env = calls["remote_restore_seed"][4]
+        copy_env = calls["remote_restore_copy"][4]
+        resume_env = calls["remote_restore_resume"][4]
+        # The seed writes into the live store, the resume reads the scratch
+        # store; the copy names both. One namespace, fresh, and one key.
+        self.assertEqual(seed_env["TRACE_COMMONS_PIPELINE_REMOTE_ARTIFACT_STORE"], "tracecommons-artifacts")
+        self.assertEqual(resume_env["TRACE_COMMONS_PIPELINE_REMOTE_ARTIFACT_STORE"], "tracecommons-restore-scratch/drill")
+        self.assertEqual(copy_env["TRACE_COMMONS_PIPELINE_REMOTE_SOURCE_STORE"], "tracecommons-artifacts")
+        self.assertEqual(copy_env["TRACE_COMMONS_PIPELINE_REMOTE_SCRATCH_STORE"], "tracecommons-restore-scratch/drill")
+        namespaces = {env["TRACE_COMMONS_PIPELINE_REMOTE_NAMESPACE"] for env in (seed_env, copy_env, resume_env)}
+        [namespace] = namespaces
+        self.assertRegex(namespace, rf"^pipeline-remote-restore-{run_id}-[0-9a-f]{{8}}$")
+        keys = {env["TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX"] for env in (seed_env, copy_env, resume_env)}
+        [key] = keys
+        self.assertRegex(key, r"^[0-9a-f]{64}$")
+        self.assertEqual(seed_env["TRACE_COMMONS_PG_TEST_DATABASE_URL"], _FakeScenario([]).runtime_url)
+        self.assertEqual(resume_env["TRACE_COMMONS_PG_TEST_DATABASE_URL"], _FakeScenario([]).restored_url)
+        self.assertNotIn("TRACE_COMMONS_PG_TEST_DATABASE_URL", copy_env)
+        # The result, from the measurements, names the store only by hash.
+        result, evidence = self._result(run_id, promote.REMOTE_RESTORE_CHECK_ID)
+        self.assertEqual((result["status"], result["safe_blockers"]), ("pass", []))
+        self.assertEqual(
+            evidence,
+            {
+                "schema": "trace_commons.pipeline_remote_restore.v1",
+                "object_store_kind": "gcs",
+                "source_store_name_hash": _digest(b"tracecommons-artifacts"),
+                "scratch_store_name_hash": _digest(b"tracecommons-restore-scratch/drill"),
+                "object_count": 7,
+                "artifact_fingerprint": self.seed_artifacts,
+                "restored_artifact_fingerprint": self.seed_artifacts,
+                "versioning_enabled": True,
+                "kek_unwrap_verified_count": 7,
+                "database_fingerprint": _fake_hash("database"),
+                "pending_runs_resumed": 1,
+                "duplicate_effects": 0,
+            },
+        )
+        # Nothing the harness wrote stays behind but its report: no dump, no key.
+        work = self._runs_dir() / run_id / "remote-restore"
+        self.assertEqual(sorted(path.name for path in work.iterdir()), ["remote-restore-report.json"])
+        for text in (self.stdout.getvalue(), self.stderr.getvalue()):
+            self.assertNotIn(key, text)
+            self.assertNotIn("tracecommons", text)
+
+    def test_the_harness_forwards_only_the_key_wrapper_selection(self):
+        run_id = self._init()
+        self.assertEqual(
+            self._restore(run_id, extra_environ={
+                "TRACE_COMMONS_KEK_PROVIDER": "gcp_cloud_kms",
+                "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME": "projects/p/locations/l/keyRings/r/cryptoKeys/k",
+                "GOOGLE_APPLICATION_CREDENTIALS": "/secret/credentials.json",
+                "TRACE_COMMONS_OBJECT_STORE_BUCKET": "tracecommons-artifacts",
+            }),
+            0,
+            self.stderr.getvalue(),
+        )
+        for _, step, _, _, env, _, _ in self._cargo().values():
+            self.assertEqual(env["TRACE_COMMONS_KEK_PROVIDER"], "gcp_cloud_kms", step)
+            self.assertEqual(
+                env["TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME"], "projects/p/locations/l/keyRings/r/cryptoKeys/k", step
+            )
+            self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", env, step)
+            self.assertNotIn("TRACE_COMMONS_OBJECT_STORE_BUCKET", env, step)
+        self.assertNotIn("keyRings", self.stdout.getvalue() + self.stderr.getvalue())
+        # Unset, nothing is forwarded: the children fall back to the local key.
+        self.calls.clear()
+        self.assertEqual(self._restore(run_id), 0, self.stderr.getvalue())
+        for _, step, _, _, env, _, _ in self._cargo().values():
+            self.assertNotIn("TRACE_COMMONS_KEK_PROVIDER", env, step)
+            self.assertNotIn("TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME", env, step)
+
+    def test_the_harness_refuses_a_source_that_moved_after_the_seed(self):
+        run_id = self._init()
+        self.copy["artifact_fingerprint"] = _fake_hash("moved")
+        self.assertEqual(self._restore(run_id), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: remote_restore_source_changed")
+        self.assertEqual(list(self._results_dir(run_id).iterdir()), [])
+
+    def test_the_harness_refuses_a_resume_on_other_artifacts(self):
+        run_id = self._init()
+        self.resume["artifact_fingerprint"] = _fake_hash("other")
+        self.assertEqual(self._restore(run_id), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: remote_restore_resume_report_invalid")
+        self.assertEqual(list(self._results_dir(run_id).iterdir()), [])
+
+    def test_the_harness_refuses_malformed_measurements(self):
+        run_id = self._init()
+        for target, overrides, label in (
+            ("copy", {"extra": 1}, "remote_restore_copy_report_invalid"),
+            ("copy", {"object_count": -1}, "remote_restore_copy_report_invalid"),
+            ("copy", {"schema": "trace_commons.pipeline_remote_restore_copy.v0"}, "remote_restore_copy_report_invalid"),
+            ("copy", {"versioning_enabled": 1}, "remote_restore_copy_report_invalid"),
+            ("copy", {"object_store_kind": "gs://bucket"}, "remote_restore_copy_report_invalid"),
+            ("resume", {"pending_runs_resumed": True}, "remote_restore_resume_report_invalid"),
+            ("resume", {"database_fingerprint": "sha256:short"}, "remote_restore_resume_report_invalid"),
+        ):
+            saved = (dict(self.copy), dict(self.resume))
+            getattr(self, target).update(overrides)
+            self.stderr.seek(0)
+            self.stderr.truncate()
+            self.assertEqual(self._restore(run_id), 1, (target, overrides))
+            self.assertEqual(self._failure(), f"PipelineFailure: {label}", (target, overrides))
+            self.assertEqual(list(self._results_dir(run_id).iterdir()), [], (target, overrides))
+            self.copy, self.resume = saved
+
+    def test_a_failing_measurement_is_a_failing_result(self):
+        run_id = self._init()
+        self.copy["versioning_enabled"] = False
+        self.copy["object_store_kind"] = "gcs_directory_double"
+        self.assertEqual(self._restore(run_id), 1)
+        result, _ = self._result(run_id, promote.REMOTE_RESTORE_CHECK_ID)
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(
+            result["safe_blockers"], ["remote_restore_store_not_remote", "remote_restore_versioning_disabled"]
+        )
+
+
+class PromoteAdaptersTests(_PromoteCase):
+    def test_promote_adapters_refuses_another_run_or_revision(self):
+        run_id = self._init()
+        check_id = promote.ADAPTERS_CHECK_ID
+        self.assertEqual(self._main(["promote", "adapters", "--run-id", run_id]), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: promote_adapters_result_missing")
+        for overrides in (
+            {"run_id": "q99999999"},
+            {"code_revision_hash": _fake_hash("deployed elsewhere")},
+            {"package": (_fake_hash("p"), _fake_hash("c"), _fake_hash("d"))},
+            {"status": "fail"},
+            {"safe_blockers": ["synthetic_index"]},
+        ):
+            package = overrides.pop("package", None)
+            self._write_production_result(run_id, check_id, package=package, **overrides)
+            self.stderr.seek(0)
+            self.stderr.truncate()
+            self.assertEqual(self._main(["promote", "adapters", "--run-id", run_id]), 1, overrides)
+            self.assertEqual(self._failure(), "PipelineFailure: promote_adapters_result_mismatch", overrides)
+        self._write_production_result(run_id, check_id)
+        self.stderr.seek(0)
+        self.stderr.truncate()
+        self.assertEqual(self._main(["promote", "adapters", "--run-id", run_id]), 0, self.stderr.getvalue())
+        self.assertIn(f"PipelinePromoteCheckOK: check={check_id} status=pass", self.stdout.getvalue())
+
+
+class PromoteSignTests(_PromoteCase):
+    def _sign(self, run_id):
+        key = self.root / "inputs" / "check-key.pk8"
+        key.write_bytes(b"fake pkcs8")
+        return self._main(
+            ["promote", "sign", "--run-id", run_id, "--signing-key", str(key), "--signing-key-id", "operator_check_key"]
+        )
+
+    def test_promote_sign_signs_exactly_seven(self):
+        run_id = self._init()
+        for check_id in promote.production_check_ids():
+            self._write_production_result(run_id, check_id)
+        self.assertEqual(self._sign(run_id), 0, self.stderr.getvalue())
+        [call] = [call for call in self.calls if call[0] == "cargo"]
+        signed = call[4]["TRACE_COMMONS_PIPELINE_CHECK_IDS"].split(",")
+        self.assertEqual(len(signed), 7)
+        self.assertEqual(frozenset(signed), frozenset(promote.production_check_ids()))
+        attestations = sorted(path.name for path in self._results_dir(run_id).glob("*.attestation.json"))
+        self.assertEqual(attestations, sorted(f"{check_id}.attestation.json" for check_id in promote.production_check_ids()))
+        self.assertIn("PipelinePromoteSignOK: attested=7", self.stdout.getvalue())
+
+    def test_promote_sign_refuses_a_missing_or_foreign_result(self):
+        run_id = self._init()
+        production = promote.production_check_ids()
+        for check_id in production[1:]:
+            self._write_production_result(run_id, check_id)
+        self.assertEqual(self._sign(run_id), 1)
+        self.assertEqual(self._failure(), f"PipelineFailure: check_result_missing:{production[0]}")
+        self._write_production_result(run_id, production[0], package=(_fake_hash("p"), _fake_hash("c"), _fake_hash("d")))
+        self.stderr.seek(0)
+        self.stderr.truncate()
+        self.assertEqual(self._sign(run_id), 1)
+        self.assertIn(self._failure(), ("PipelineFailure: qualification_evidence_mixed_package", "PipelineFailure: promote_package_mismatch"))
+        self.assertEqual(list(self._results_dir(run_id).glob("*.attestation.json")), [])
+        self.assertEqual([call for call in self.calls if call[0] == "cargo"], [])
+
+
+class PromoteAssembleTests(_PromoteCase):
+    def _mechanics_run(self, run_id="q0000beef", tree=None):
+        """A signed `qualify` run: all 19 of its results and attestations,
+        the four package checks naming the reference package."""
+        directory = self._runs_dir() / run_id / "results"
+        directory.mkdir(parents=True)
+        reference = _package_triple(_fake_signed_package("reference"))
+        for check_id in sorted(checks.REQUIRED_CHECK_IDS):
+            evidence = {"observed": check_id}
+            spec = checks.required_specs()[check_id]
+            package = reference if spec.digests_required else (None, None, None)
+            raw = {
+                "schema": results.SCHEMA,
+                "run_id": run_id,
+                "check_id": check_id,
+                "status": "pass",
+                "code_revision_hash": tree or self.tree,
+                "package_hash": package[0],
+                "configuration_digest": package[1],
+                "dependency_digest": package[2],
+                "observed_at": _iso(datetime.now(timezone.utc)),
+                "evidence_hash": _digest(results.canonical(evidence)),
+                "safe_blockers": [],
+            }
+            (directory / f"{check_id}.result.json").write_text(json.dumps(raw))
+            (directory / f"{check_id}.evidence.json").write_text(json.dumps(evidence))
+            (directory / f"{check_id}.attestation.json").write_text(json.dumps(_attestation_for(raw, "ci_check_key", 86400)))
+        return run_id
+
+    def _signed_production_run(self):
+        run_id = self._init()
+        for check_id in promote.production_check_ids():
+            raw = self._write_production_result(run_id, check_id)
+            (self._results_dir(run_id) / f"{check_id}.attestation.json").write_text(
+                json.dumps(_attestation_for(raw, "operator_check_key", 86400))
+            )
+        return run_id
+
+    def _assemble(self, run_id, mechanics, output):
+        return self._main(["promote", "assemble", "--run-id", run_id, "--mechanics-run-id", mechanics, "--output", str(output)])
+
+    def test_promote_assemble_builds_22_and_refuses_doubles(self):
+        mechanics = self._mechanics_run()
+        run_id = self._signed_production_run()
+        output = self.root / "submission"
+        self.assertEqual(self._assemble(run_id, mechanics, output), 0, self.stderr.getvalue())
+        names = sorted(path.name for path in output.glob("*.attestation.json"))
+        self.assertEqual(len(names), 22)
+        self.assertEqual(names, sorted(f"{check_id}.attestation.json" for check_id in _promotion_required_checks()))
+        for check_id in promote.mechanics_check_ids():
+            self.assertEqual(json.loads((output / f"{check_id}.attestation.json").read_text())["result"]["run_id"], mechanics)
+        for check_id in promote.production_check_ids():
+            self.assertEqual(json.loads((output / f"{check_id}.attestation.json").read_text())["result"]["run_id"], run_id)
+        self.assertEqual(json.loads((output / promote.PACKAGE_FILE).read_text()), self.signed)
+        self.assertIn("PipelinePromoteAssembleOK: attestations=22", self.stdout.getvalue())
+
+        # An output that already exists is never written into.
+        self.stderr.seek(0)
+        self.stderr.truncate()
+        self.assertEqual(self._assemble(run_id, mechanics, output), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: promote_assemble_output_exists")
+
+        # A mechanics id signed in the production run is a double.
+        mechanics_id = promote.mechanics_check_ids()[0]
+        raw = self._write_production_result(run_id, mechanics_id, package=(None, None, None))
+        (self._results_dir(run_id) / f"{mechanics_id}.attestation.json").write_text(
+            json.dumps(_attestation_for(raw, "operator_check_key", 86400))
+        )
+        self.stderr.seek(0)
+        self.stderr.truncate()
+        self.assertEqual(self._assemble(run_id, mechanics, self.root / "second"), 1)
+        self.assertEqual(self._failure(), f"PipelineFailure: promote_assemble_check_doubled:{mechanics_id}")
+        self.assertFalse((self.root / "second").exists())
+
+    def test_promote_assemble_leaves_an_existing_staging_name_alone(self):
+        """A directory that happens to have the staging name `.<output>.staging`
+        is never removed: the staging directory is a fresh one beside it."""
+        mechanics = self._mechanics_run()
+        run_id = self._signed_production_run()
+        output = self.root / "submission"
+        bystander = self.root / ".submission.staging"
+        bystander.mkdir()
+        (bystander / "keep.txt").write_text("not the tool's")
+        self.assertEqual(self._assemble(run_id, mechanics, output), 0, self.stderr.getvalue())
+        self.assertEqual((bystander / "keep.txt").read_text(), "not the tool's")
+        self.assertEqual(len(list(output.glob("*.attestation.json"))), 22)
+        # Nothing of the tool's own staging is left behind.
+        self.assertEqual(sorted(path.name for path in self.root.iterdir() if path.name.startswith(".submission")),
+                         [".submission.staging"])
+
+        # An output whose parent does not exist yet is still written.
+        nested = self.root / "out" / "nested" / "submission"
+        self.assertEqual(self._assemble(run_id, mechanics, nested), 0, self.stderr.getvalue())
+        self.assertEqual(len(list(nested.glob("*.attestation.json"))), 22)
+        self.assertEqual(sorted(path.name for path in nested.parent.iterdir()), ["submission"])
+
+    def test_promote_assemble_refuses_a_missing_or_mismatched_set(self):
+        mechanics = self._mechanics_run()
+        run_id = self._signed_production_run()
+        missing = promote.production_check_ids()[-1]
+        (self._results_dir(run_id) / f"{missing}.attestation.json").unlink()
+        self.assertEqual(self._assemble(run_id, mechanics, self.root / "a"), 1)
+        self.assertEqual(self._failure(), f"PipelineFailure: promote_assemble_check_missing:{missing}")
+
+        run_id = self._signed_production_run()
+        mechanics_id = promote.mechanics_check_ids()[0]
+        (self._runs_dir() / mechanics / "results" / f"{mechanics_id}.attestation.json").unlink()
+        self.stderr.seek(0)
+        self.stderr.truncate()
+        self.assertEqual(self._assemble(run_id, mechanics, self.root / "b"), 1)
+        self.assertEqual(self._failure(), f"PipelineFailure: promote_assemble_check_missing:{mechanics_id}")
+
+        # A mechanics run from another revision.
+        other = self._mechanics_run("q0000cafe", tree=_fake_hash("another tree"))
+        self.stderr.seek(0)
+        self.stderr.truncate()
+        self.assertEqual(self._assemble(run_id, other, self.root / "c"), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: promote_assemble_mixed_revision")
+        for name in ("a", "b", "c"):
+            self.assertFalse((self.root / name).exists(), name)
+
+
+
+# ---------------------------------------------------------------------------
+# The pipeline comparison: `pipeline.py compare`.
+# ---------------------------------------------------------------------------
+
+_COMPARE_HARNESS = "ingest::app::tests::pipeline_compare_pg_tests::pipeline_compare_run"
+_COMPARE_LOCAL = "pipeline_comparison_local"
+_COMPARE_DIGEST_FIELDS = (
+    "source_digest",
+    "order_digest",
+    "configuration_digest",
+    "bootstrap_corpus_digest",
+    "holdout_corpus_digest",
+)
+# What `pipeline.py compare` gives the harness for a full run: the Interfaces
+# section's variables without `LIMIT` and `SKEW`, and the timing file.
+_COMPARE_VARIABLES = frozenset(
+    {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL",
+        "TRACE_COMMONS_PIPELINE_COMPARE_BOOTSTRAP_PATH",
+        "TRACE_COMMONS_PIPELINE_COMPARE_HOLDOUT_PATH",
+        "TRACE_COMMONS_PIPELINE_COMPARE_MANIFEST_PATH",
+        "TRACE_COMMONS_PIPELINE_COMPARE_CHECK_ID",
+        "TRACE_COMMONS_PIPELINE_COMPARE_REPORT_PATH",
+        "TRACE_COMMONS_PIPELINE_COMPARE_RECORDS_PATH",
+        "TRACE_COMMONS_PIPELINE_COMPARE_TIMING_PATH",
+        "TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT",
+        "TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX",
+        "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR",
+        "TRACE_COMMONS_PIPELINE_CHECK_RUN_ID",
+        "TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH",
+    }
+)
+_COMPARE_CHECK_VARIABLES = frozenset(name for name in _COMPARE_VARIABLES if "_PIPELINE_CHECK_" in name)
+
+
+def _comparison_side(compared=10, **overrides):
+    """The distribution of one side for `compared` traces, each admitted and
+    scored, with evidence of each gate branch when `compared` is 2 or more.
+    The admission counts add up to `compared`, and each gate branch pair to
+    `scored`, as `SideDistribution::observe` counts them."""
+    side = {
+        "admit": compared,
+        "quarantine": 0,
+        "reject": 0,
+        "refused": 0,
+        "other": 0,
+        "scored": compared,
+        "quality_passed": compared - compared * 4 // 10,
+        "quality_failed": compared * 4 // 10,
+        "novelty_passed": compared - compared // 2,
+        "novelty_failed": compared // 2,
+        "member": compared - compared // 2,
+        "not_member": compared // 2,
+        "chunks_capped": 0,
+    }
+    side.update(overrides)
+    return side
+
+
+_PERMITTED_RULE = "medium_risk_privacy_review"
+_PERMITTED_RULES = [
+    {"rule": _PERMITTED_RULE, "source": "ruling.PC-D22", "fields": ["admission"]},
+]
+# `ComparisonRule::ALL` of `versioned_pipeline_comparison.rs`, in order.
+_EXCLUDED_RULES = [
+    {
+        "rule": "deterministic_index_keys",
+        "source": "compatibility_mapping.required_behavior_change_2",
+        "fields": ["index_entry_id", "nearest_neighbor_hash"],
+    },
+    {"rule": "ledger_reason_text", "source": "ruling.T15-2", "fields": ["ledger_reason"]},
+    {
+        "rule": "shadow_values_not_in_contract",
+        "source": "compatibility_mapping.membership_and_credit_rules",
+        "fields": ["dedup_penalty", "contributor_cap", "anomaly_withheld"],
+    },
+]
+
+
+def _compared_fields(compared=10, unexplained=None, trace_count=10, permitted=None, permitted_total=None):
+    """The count fields of a report that compared `compared` of its
+    `trace_count` traces. `unexplained` maps a compared field to its count;
+    the pairs that differ are the last pairs. `permitted` maps a rule id to
+    its count; those pairs come before the unexplained pairs.
+    `permitted_total` is the number of permitted pairs (default: the sum of
+    the counts, which is right while one rule permits a pair)."""
+    unexplained = dict(unexplained or {})
+    permitted = dict(permitted or {})
+    if permitted_total is None:
+        permitted_total = sum(permitted.values())
+    total = max(unexplained.values(), default=0)
+    return {
+        "compared_count": compared,
+        "partial": compared < trace_count,
+        "equal_count": compared - total - permitted_total,
+        "permitted_counts": permitted,
+        "permitted_total": permitted_total,
+        "unexplained_counts": unexplained,
+        "unexplained_total": total,
+        "unexplained": [
+            {"position": position, "trace_hash": _fake_hash(f"trace-{position}"), "fields": sorted(unexplained)}
+            for position in range(compared - total, compared)
+        ],
+        "first_unexplained_position": compared - total if total else None,
+    }
+
+
+def _comparison_report(check_id, **overrides):
+    """A valid `trace_commons.pipeline_comparison_report.v1` report: a full
+    run of 10 traces, each equal. `overrides` replaces fields before the
+    report is signed."""
+    report = {
+        "schema": comparison.REPORT_SCHEMA,
+        "check_id": check_id,
+        "scope": "local_test",
+        "production_ready": False,
+        "external_payout_enabled": False,
+        "partial": False,
+        "skew": None,
+        "safe_blockers": list(comparison.BLOCKERS),
+        "pin": {field: _fake_hash(field) for field in _COMPARE_DIGEST_FIELDS},
+        "bundle_id": _fake_hash("bundle"),
+        **_candidate_digests(),
+        "floors": {
+            "perplexity_floor_micros": 2_500_000,
+            "tail_fraction_floor_micros": 250_000,
+            "novelty_floor_micros": 120_000,
+        },
+        "trace_count": 10,
+        **_compared_fields(),
+        "alignment_lost_position": None,
+        "excluded_rules": json.loads(json.dumps(_EXCLUDED_RULES)),
+        "permitted_rules": json.loads(json.dumps(_PERMITTED_RULES)),
+        "branch_gaps": [],
+        "records_digest": _fake_hash("records"),
+    }
+    report.update(overrides)
+    # Each side observed each compared pair.
+    compared = report.get("compared_count")
+    report.setdefault(
+        "distribution", {"baseline": _comparison_side(compared), "candidate": _comparison_side(compared)}
+    )
+    return _resigned(report)
+
+
+def _write_compare_outputs(
+    env,
+    *,
+    unexplained=None,
+    permitted=None,
+    branch_gaps=(),
+    emit=True,
+    compared=None,
+    unexplained_list=None,
+    result_overrides=None,
+    evidence_overrides=None,
+    **overrides,
+):
+    """What `pipeline_compare_run` leaves behind: the records file, the
+    report, and, for a full run, one check result and its evidence (the
+    emitter does nothing without its three variables). The pin digests and
+    the trace count are those of the export manifest. `unexplained` maps a
+    compared field to its count and `permitted` maps a rule id to its count. `compared` is the number of pairs before an
+    early stop (default: the limit, or each trace). `overrides` replaces
+    report fields, and `unexplained_list` the report's `unexplained` list.
+    Returns the report."""
+    records = b'{"position":0,"side":"baseline"}\n{"position":0,"side":"candidate"}\n'
+    Path(env["TRACE_COMMONS_PIPELINE_COMPARE_RECORDS_PATH"]).write_bytes(records)
+    manifest = json.loads(Path(env["TRACE_COMMONS_PIPELINE_COMPARE_MANIFEST_PATH"]).read_text())
+    trace_count = manifest["sample_count"]
+    if compared is None:
+        compared = min(int(env.get("TRACE_COMMONS_PIPELINE_COMPARE_LIMIT", trace_count)), trace_count)
+    check_id = env["TRACE_COMMONS_PIPELINE_COMPARE_CHECK_ID"]
+    fields = {
+        "pin": {field: manifest[field] for field in _COMPARE_DIGEST_FIELDS},
+        "trace_count": trace_count,
+        **_compared_fields(compared, unexplained, trace_count, permitted),
+        "skew": env.get("TRACE_COMMONS_PIPELINE_COMPARE_SKEW"),
+        "branch_gaps": list(branch_gaps),
+        "records_digest": _digest(records),
+        **overrides,
+    }
+    if unexplained_list is not None:
+        fields["unexplained"] = unexplained_list
+    report = _comparison_report(check_id, **fields)
+    report_bytes = results.canonical(report) + b"\n"
+    Path(env["TRACE_COMMONS_PIPELINE_COMPARE_REPORT_PATH"]).write_bytes(report_bytes)
+    if not emit or report["partial"] or "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR" not in env:
+        return report
+    evidence = {
+        "traces": report["compared_count"],
+        "equal": report["equal_count"],
+        "permitted": report["permitted_total"],
+        "unexplained": 0,
+        "records_hash": _digest(records),
+        "report_hash": _digest(report_bytes),
+    }
+    evidence.update(evidence_overrides or {})
+    raw = {
+        "schema": results.SCHEMA,
+        "run_id": env["TRACE_COMMONS_PIPELINE_CHECK_RUN_ID"],
+        "check_id": check_id,
+        "status": "pass",
+        "code_revision_hash": env["TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH"],
+        "package_hash": report["package_hash"],
+        "configuration_digest": report["configuration_digest"],
+        "dependency_digest": report["dependency_digest"],
+        "observed_at": _iso(datetime.now(timezone.utc)),
+        "evidence_hash": _digest(results.canonical(evidence)),
+        "safe_blockers": [],
+    }
+    raw.update(result_overrides or {})
+    result_dir = Path(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"])
+    (result_dir / f"{check_id}.result.json").write_text(json.dumps(raw))
+    (result_dir / f"{check_id}.evidence.json").write_text(json.dumps(evidence))
+    return report
+
+
+class ComparisonReportValidationTests(unittest.TestCase):
+    def _refused(self, report, label=None):
+        with self.assertRaises(errors.ToolingError) as ctx:
+            comparison.validate_comparison_report(report)
+        if label is not None:
+            self.assertEqual(str(ctx.exception), label)
+
+    def test_a_valid_report_passes(self):
+        for check_id in sorted(comparison.CHECK_IDS):
+            with self.subTest(check_id):
+                comparison.validate_comparison_report(_comparison_report(check_id))
+        # A report of a failed run is valid: it names the differences.
+        failed = _comparison_report(
+            _COMPARE_LOCAL,
+            **_compared_fields(5, {"admission": 2, "member": 1}),
+            alignment_lost_position=4,
+            skew="baseline_quality_floor",
+            branch_gaps=[],
+            distribution={"baseline": _comparison_side(5), "candidate": _comparison_side(5, admit=4, refused=1)},
+        )
+        comparison.validate_comparison_report(failed)
+        # A report with permitted pairs is valid, and its Markdown view names
+        # the rule with its source.
+        with_permitted = _comparison_report(
+            _COMPARE_LOCAL, **_compared_fields(10, {"admission": 1}, permitted={_PERMITTED_RULE: 2})
+        )
+        comparison.validate_comparison_report(with_permitted)
+        text = comparison.markdown(with_permitted)
+        self.assertIn("| Permitted | 2 |", text)
+        self.assertIn(f"- `{_PERMITTED_RULE}` (ruling.PC-D22): 2", text)
+        self.assertIn(f"- `{_PERMITTED_RULE}` (ruling.PC-D22): 0", comparison.markdown(_comparison_report(_COMPARE_LOCAL)))
+        # The list of unexplained traces stops at 1,000 entries.
+        long_list = _comparison_report(
+            _COMPARE_LOCAL,
+            trace_count=2000,
+            compared_count=2000,
+            equal_count=999,
+            unexplained_counts={"admission": 1001},
+            unexplained_total=1001,
+            unexplained=[
+                {"position": position, "trace_hash": _fake_hash(f"trace-{position}"), "fields": ["admission"]}
+                for position in range(comparison.UNEXPLAINED_LIST_LIMIT)
+            ],
+            first_unexplained_position=0,
+        )
+        comparison.validate_comparison_report(long_list)
+        # Each compared field name, `record_pair`, and each gap label is valid.
+        every_field = {field: 1 for field in (*_COMPARED_FIELD_NAMES, "record_pair")}
+        self.assertEqual(len(every_field), 23)
+        comparison.validate_comparison_report(_comparison_report(_COMPARE_LOCAL, **_compared_fields(10, every_field)))
+        comparison.validate_comparison_report(_comparison_report(_COMPARE_LOCAL, branch_gaps=list(_BRANCH_GAP_LABELS)))
+
+        text = comparison.markdown(failed)
+        self.assertTrue(text.startswith("# Pipeline comparison report\n"))
+        for expected in (
+            f"`{_COMPARE_LOCAL}`",
+            failed["bundle_id"],
+            failed["pin"]["configuration_digest"],
+            "perplexity_floor_micros",
+            "| refused | 0 | 1 |",
+            "`admission`: 2",
+            failed["unexplained"][0]["trace_hash"],
+            "baseline_derived_scan_removed",
+            "position 4",
+            "Partial run: yes",
+            "baseline_quality_floor",
+        ):
+            self.assertIn(expected, text)
+        passed = comparison.markdown(_comparison_report(_COMPARE_LOCAL))
+        self.assertIn("Partial run: no", passed)
+        self.assertNotIn("stopped at position", passed)
+        # Only the first 20 unexplained traces are in the Markdown view.
+        self.assertIn(long_list["unexplained"][19]["trace_hash"], comparison.markdown(long_list))
+        self.assertNotIn(long_list["unexplained"][20]["trace_hash"], comparison.markdown(long_list))
+
+    def test_comparison_report_refuses_private_content(self):
+        entry = {"position": 9, "trace_hash": _fake_hash("trace-9"), "fields": ["admission"]}
+        with_entry = dict(_compared_fields(10, {"admission": 1}))
+        cases = {
+            "private_report_field": _comparison_report(_COMPARE_LOCAL, input="the text of one trace"),
+            "private_report_field:nested": _comparison_report(
+                _COMPARE_LOCAL, **{**with_entry, "unexplained": [{**entry, "secret_probe": "probe"}]}
+            ),
+            # A raw UUID is not a hash: the report must hold `trace_hash` only.
+            "unsafe_report": _comparison_report(
+                _COMPARE_LOCAL, **{**with_entry, "unexplained": [{**entry, "trace_hash": str(uuid.uuid4())}]}
+            ),
+            "unsafe_report_value": _comparison_report(_COMPARE_LOCAL, skew="token-compare-baseline-gate"),
+            "unsafe_report_value:text": _comparison_report(_COMPARE_LOCAL, branch_gaps=["free text with spaces"]),
+            "unsafe_report_value:float": _comparison_report(
+                _COMPARE_LOCAL,
+                floors={"perplexity_floor_micros": 2.5, "tail_fraction_floor_micros": 1, "novelty_floor_micros": 1},
+            ),
+        }
+        for case, report in cases.items():
+            with self.subTest(case=case):
+                self._refused(report, case.split(":")[0])
+
+    def test_counts_must_agree(self):
+        two = _compared_fields(10, {"admission": 2})
+        cases = (
+            ("comparison_count_mismatch", {"equal_count": 9}),
+            ("comparison_count_mismatch", {"permitted_counts": {_PERMITTED_RULE: 1}, "permitted_total": 1}),
+            ("comparison_count_mismatch", {**two, "equal_count": 9}),
+            # The list holds each unexplained trace, up to 1,000.
+            ("comparison_count_mismatch", {**two, "unexplained": two["unexplained"][:1]}),
+            ("comparison_count_mismatch", {"unexplained": two["unexplained"]}),
+            ("comparison_count_mismatch", {"compared_count": 11, "equal_count": 11}),
+            ("comparison_partial_mismatch", {"partial": True}),
+            ("comparison_partial_mismatch", {**_compared_fields(3), "partial": False}),
+            ("comparison_report_malformed", {"alignment_lost_position": -1}),
+            ("comparison_report_malformed", {"alignment_lost_position": "4"}),
+            ("comparison_report_malformed", {"alignment_lost_position": True}),
+            ("comparison_report_malformed", {"alignment_lost_position": [4]}),
+        )
+        for label, overrides in cases:
+            with self.subTest(label=label, overrides=sorted(overrides)):
+                self._refused(_comparison_report(_COMPARE_LOCAL, **overrides), label)
+        # A permitted pair is in the sum.
+        comparison.validate_comparison_report(
+            _comparison_report(_COMPARE_LOCAL, equal_count=9, permitted_counts={_PERMITTED_RULE: 1}, permitted_total=1)
+        )
+
+    def test_a_pair_that_two_rules_permit_is_one_pair(self):
+        second = {"rule": "second_rule", "source": "ruling.PC-D99", "fields": ["member"]}
+        with mock.patch.object(comparison, "PERMITTED_RULES", (*comparison.PERMITTED_RULES, second)):
+            both = {_PERMITTED_RULE: 1, "second_rule": 1}
+            fields = {"permitted_rules": [*_PERMITTED_RULES, second]}
+            # One pair, counted for each of its two rules.
+            report = _comparison_report(
+                _COMPARE_LOCAL, **fields, **_compared_fields(10, permitted=both, permitted_total=1)
+            )
+            comparison.validate_comparison_report(report)
+            self.assertIn("| Permitted | 1 |", comparison.markdown(report))
+            # The total does not agree with the equal and unexplained counts.
+            wrong = _comparison_report(
+                _COMPARE_LOCAL, **fields, **{**_compared_fields(10, permitted=both, permitted_total=1), "equal_count": 8}
+            )
+            self._refused(wrong, "comparison_count_mismatch")
+            # The sum of the rule counts is not the count of pairs.
+            summed = _comparison_report(
+                _COMPARE_LOCAL, **fields, **{**_compared_fields(10, permitted=both), "equal_count": 8}
+            )
+            comparison.validate_comparison_report(summed)
+            more = _comparison_report(
+                _COMPARE_LOCAL, **fields, **_compared_fields(10, permitted={_PERMITTED_RULE: 1}, permitted_total=2)
+            )
+            self._refused(more, "comparison_report_malformed")
+            # A rule permits at most each permitted pair: one pair cannot give
+            # a rule the count 2.
+            fewer = _comparison_report(
+                _COMPARE_LOCAL, **fields, **_compared_fields(10, permitted={_PERMITTED_RULE: 2, "second_rule": 1}, permitted_total=1)
+            )
+            self._refused(fewer, "comparison_report_malformed")
+
+    def test_the_digest_is_checked(self):
+        report = _comparison_report(_COMPARE_LOCAL)
+        self._refused({**report, "equal_count": 9, "permitted_counts": {_PERMITTED_RULE: 1}, "permitted_total": 1}, "report_digest_mismatch")
+        self._refused({**report, "report_digest": _fake_hash("another")}, "report_digest_mismatch")
+
+    def test_the_blockers_and_the_scope_are_required(self):
+        def without_blocker(name):
+            return [blocker for blocker in comparison.BLOCKERS if blocker != name]
+
+        self.assertEqual(
+            comparison.BLOCKERS,
+            (
+                *corpus.LOCAL_BLOCKERS,
+                "deterministic_privacy_only",
+                "baseline_derived_scan_removed",
+                "duplicate_short_circuits_not_compared",
+                "review_start_privacy_pass_not_compared",
+            ),
+        )
+        cases = (
+            ("missing_local_blockers", {"safe_blockers": without_blocker("deterministic_privacy_only")}),
+            ("missing_local_blockers", {"safe_blockers": without_blocker("baseline_derived_scan_removed")}),
+            # PC-D24 and PC-D25: a report that does not name the two paths
+            # of `main` that the run does not compare is not valid.
+            ("missing_local_blockers", {"safe_blockers": without_blocker("duplicate_short_circuits_not_compared")}),
+            ("missing_local_blockers", {"safe_blockers": without_blocker("review_start_privacy_pass_not_compared")}),
+            ("missing_local_blockers", {"safe_blockers": without_blocker("local_test_only")}),
+            ("invalid_report_scope", {"production_ready": True}),
+            ("invalid_report_scope", {"scope": "production"}),
+            ("payout_enabled", {"external_payout_enabled": True}),
+            ("invalid_report_check_id", {"check_id": "pipeline_http_corpus_hf_local"}),
+            ("unsupported_report_schema", {"schema": corpus.REPORT_SCHEMA}),
+        )
+        for label, overrides in cases:
+            with self.subTest(label=label, overrides=overrides):
+                check_id = overrides.pop("check_id", _COMPARE_LOCAL)
+                self._refused(_comparison_report(check_id, **overrides), label)
+
+    def test_the_comparison_blockers_agree_with_the_harness(self):
+        source = (environment.ROOT / "crates/trace-commons-server/src/versioned_pipeline_comparison.rs").read_text()
+        match = re.search(r"const COMPARISON_BLOCKERS: \[&str; \d+\] = \[(.*?)\];", source, re.S)
+        self.assertIsNotNone(match)
+        self.assertEqual(tuple(re.findall(r'"([a-z0-9_]+)"', match.group(1))), comparison.BLOCKERS)
+
+    def test_the_permitted_rules_agree_with_the_harness(self):
+        source = (environment.ROOT / "crates/trace-commons-server/src/versioned_pipeline_comparison.rs").read_text()
+        # The block of `impl PermittedDifference` (the enum and its tests are
+        # outside it), then the `match self` arms of one method.
+        block = re.search(r"impl PermittedDifference \{(.*?)\n\}\n", source, re.S)
+        self.assertIsNotNone(block)
+
+        def method(name):
+            body = re.search(rf"pub fn {name}\(self\).*?\n    \}}\n", block.group(1), re.S)
+            self.assertIsNotNone(body, name)
+            return body.group(0)
+
+        ids = dict(re.findall(r'PermittedDifference::(\w+) => "([a-z0-9_]+)",', method("id")))
+        sources = dict(re.findall(r'PermittedDifference::(\w+) => "([A-Za-z0-9_.-]+)",', method("source")))
+        fields = {
+            variant: re.findall(r'"([a-z0-9_]+)"', text)
+            for variant, text in re.findall(r"PermittedDifference::(\w+) => &\[([^\]]*)\],", method("fields"))
+        }
+        order = re.search(r"pub const ALL: \[PermittedDifference; (\d+)\] = \[(.*?)\];", block.group(1), re.S)
+        self.assertIsNotNone(order)
+        variants = re.findall(r"PermittedDifference::(\w+)", order.group(2))
+        self.assertEqual(len(variants), int(order.group(1)))
+        self.assertEqual(set(variants), set(ids))
+        rust = [{"rule": ids[v], "source": sources[v], "fields": fields[v]} for v in variants]
+        self.assertEqual(rust, list(comparison.PERMITTED_RULES))
+        self.assertEqual(rust, _PERMITTED_RULES)
+
+    def test_the_compared_fields_agree_with_the_harness(self):
+        source = (environment.ROOT / "crates/trace-commons-server/src/versioned_pipeline_comparison.rs").read_text()
+        match = re.search(r"const COMPARED: \[&str; (\d+)\] = \[(.*?)\];", source, re.S)
+        self.assertIsNotNone(match)
+        names = tuple(re.findall(r'"([a-z0-9_]+)"', match.group(2)))
+        self.assertEqual(len(names), int(match.group(1)))
+        self.assertEqual(names, _COMPARED_FIELD_NAMES)
+        self.assertEqual(comparison._COMPARED_FIELDS, frozenset(names) | {"record_pair"})
+
+    def test_each_permitted_rule_is_counted_and_bounded(self):
+        medium = _PERMITTED_RULE
+        # The counts name only the one rule.
+        for permitted in ({medium: 1}, {medium: 3}):
+            with self.subTest(permitted=permitted):
+                comparison.validate_comparison_report(
+                    _comparison_report(_COMPARE_LOCAL, **_compared_fields(10, permitted=permitted))
+                )
+        # The rule permits at most each permitted pair.
+        for permitted, total in (({medium: 1}, 0), ({medium: 1}, 2), ({medium: 2}, 1)):
+            with self.subTest(permitted=permitted, total=total):
+                self._refused(
+                    _comparison_report(
+                        _COMPARE_LOCAL, **_compared_fields(10, permitted=permitted, permitted_total=total)
+                    ),
+                    "comparison_report_malformed",
+                )
+        # The list holds the one rule.
+        for rules in (
+            [],
+            [*_PERMITTED_RULES, *_PERMITTED_RULES],
+            [{**_PERMITTED_RULES[0], "source": "ruling.PC-D27"}],
+            [{**_PERMITTED_RULES[0], "fields": ["admission", "member"]}],
+        ):
+            with self.subTest(rules=[rule["rule"] for rule in rules]):
+                self._refused(_comparison_report(_COMPARE_LOCAL, permitted_rules=rules), "comparison_report_malformed")
+        text = comparison.markdown(_comparison_report(_COMPARE_LOCAL, **_compared_fields(10, permitted={medium: 1})))
+        self.assertIn(f"- `{medium}` (ruling.PC-D22): 1", text)
+
+    def test_the_excluded_rules_are_the_closed_list(self):
+        self.assertEqual(list(comparison.EXCLUDED_RULES), _EXCLUDED_RULES)
+        comparison.validate_comparison_report(_comparison_report(_COMPARE_LOCAL))
+        first, second, third = _EXCLUDED_RULES
+        for excluded in (
+            [],
+            [first],
+            [first, second],
+            [second, first, third],
+            [*_EXCLUDED_RULES, {"rule": "another_rule", "source": "ruling.PC-D99", "fields": ["member"]}],
+            [{**first, "fields": ["index_entry_id"]}, second, third],
+            [{**first, "source": "ruling.PC-D99"}, second, third],
+            [first, second, {**third, "fields": [*third["fields"], "admission"]}],
+        ):
+            with self.subTest(excluded=[rule.get("rule") for rule in excluded]):
+                self._refused(_comparison_report(_COMPARE_LOCAL, excluded_rules=excluded), "comparison_report_malformed")
+
+    def test_each_side_counts_each_compared_pair(self):
+        # A partial run and an empty run are valid when the counts agree.
+        comparison.validate_comparison_report(_comparison_report(_COMPARE_LOCAL, **_compared_fields(3)))
+        comparison.validate_comparison_report(_comparison_report(_COMPARE_LOCAL, **_compared_fields(0)))
+        cases = {
+            # The admission counts of a side add up to `compared_count`.
+            "admission sum low": _comparison_side(admit=9),
+            "admission sum high": _comparison_side(quarantine=1),
+            "refused beside each admit": _comparison_side(refused=1),
+            # `scored` is the sum of each gate branch pair.
+            "scored above quality": _comparison_side(quality_passed=5),
+            "scored below quality": _comparison_side(quality_failed=5),
+            "novelty": _comparison_side(novelty_failed=4),
+            "member": _comparison_side(not_member=6),
+            "scored alone": _comparison_side(scored=9),
+            # A capped trace is a scored trace.
+            "capped": _comparison_side(chunks_capped=11, admit=10),
+        }
+        for case, side in cases.items():
+            for name in ("baseline", "candidate"):
+                with self.subTest(case=case, side=name):
+                    sides = {"baseline": _comparison_side(), "candidate": _comparison_side()}
+                    sides[name] = side
+                    self._refused(_comparison_report(_COMPARE_LOCAL, distribution=sides), "comparison_count_mismatch")
+        # The distribution of a partial run counts its compared pairs, not
+        # each trace of the pin.
+        self._refused(
+            _comparison_report(
+                _COMPARE_LOCAL,
+                **_compared_fields(3),
+                distribution={"baseline": _comparison_side(), "candidate": _comparison_side()},
+            ),
+            "comparison_count_mismatch",
+        )
+        # A quarantined trace that the review approved is scored: `scored`
+        # can exceed `admit`.
+        quarantined = _comparison_side(admit=4, quarantine=6)
+        comparison.validate_comparison_report(
+            _comparison_report(_COMPARE_LOCAL, distribution={"baseline": quarantined, "candidate": quarantined})
+        )
+
+    def test_a_malformed_report_gives_a_label(self):
+        base = _comparison_report(_COMPARE_LOCAL)
+        self.assertEqual(len(base), 30)
+        for field in base:
+            with self.subTest(missing=field):
+                report = {key: value for key, value in base.items() if key != field}
+                if field != "report_digest":
+                    report = _resigned(report)
+                self._refused(report, "unsupported_report_schema" if field == "schema" else "comparison_report_malformed")
+
+        def without(section, field):
+            value = json.loads(json.dumps(base[section]))
+            target = value["candidate"] if section == "distribution" else value
+            del target[field]
+            return {section: value}
+
+        one = _compared_fields(10, {"admission": 1})
+        malformed = (
+            without("distribution", "refused"),
+            without("floors", "novelty_floor_micros"),
+            without("pin", "configuration_digest"),
+            {"distribution": {"baseline": _comparison_side()}},
+            {"distribution": {"baseline": _comparison_side(), "candidate": _comparison_side(refused=-1)}},
+            {"unexplained_counts": ["admission"]},
+            {"permitted_counts": None},
+            {"branch_gaps": "novelty_passed_false"},
+            {"unexplained": None},
+            {**_compared_fields(10, {"admission": 1}), "unexplained": [None]},
+            {**_compared_fields(10, {"admission": 1}), "unexplained": [{"position": 9}]},
+            {"excluded_rules": [None]},
+            # The list of permitted rules is the closed list, and the counts
+            # name a rule of it.
+            {"permitted_rules": []},
+            {"permitted_rules": None},
+            {"permitted_rules": [{**_PERMITTED_RULES[0], "rule": "another_rule"}]},
+            {"permitted_rules": [{**_PERMITTED_RULES[0], "source": "ruling.PC-D99"}]},
+            {"permitted_rules": [{**_PERMITTED_RULES[0], "fields": ["admission", "member"]}]},
+            {"permitted_rules": [*_PERMITTED_RULES, {"rule": "another_rule", "source": "ruling.PC-D99", "fields": ["member"]}]},
+            {"permitted_rules": [{**_PERMITTED_RULES[0], "extra": 1}]},
+            _compared_fields(10, permitted={"another_rule": 1}),
+            _compared_fields(10, permitted={"deterministic_index_keys": 1}),
+            # The total counts pairs: it is zero exactly when no rule permitted
+            # a pair, and it is at most the sum of the rule counts.
+            {"permitted_total": 1},
+            {"permitted_counts": {_PERMITTED_RULE: 1}, "permitted_total": 0},
+            {"permitted_counts": {_PERMITTED_RULE: 1}, "permitted_total": 2, "equal_count": 7},
+            {"permitted_total": -1},
+            {"permitted_total": "1"},
+            {"skew": "another_skew"},
+            {"partial": 0},
+            {"trace_count": "10"},
+            {"first_unexplained_position": -1},
+            {"extra_field": 1},
+            # Values that the harness can never write: a name outside the
+            # closed sets, a position outside the compared pairs, and counts
+            # that do not agree on "no unexplained trace".
+            {"branch_gaps": ["A1B2C3D4-0000-4000-8000-ABCDEFABCDEF"]},
+            {"branch_gaps": ["s04m.jsonl"]},
+            {"branch_gaps": ["member_true", "admission"]},
+            {**one, "unexplained_counts": {"tenant-a": 1}},
+            {**one, "unexplained_counts": {"admission": 1, "position": 1}},
+            {**one, "unexplained": [{**one["unexplained"][0], "fields": ["tenant_id"]}]},
+            {**one, "unexplained": [{**one["unexplained"][0], "fields": ["admission", "s04m.jsonl"]}]},
+            {"unexplained_counts": {"admission": 1}},
+            {**one, "unexplained_counts": {}},
+            {"first_unexplained_position": 7},
+            {**one, "first_unexplained_position": None},
+            {"alignment_lost_position": 99},
+            {"alignment_lost_position": 10},
+            {**_compared_fields(5), "alignment_lost_position": 5},
+        )
+        for overrides in malformed:
+            with self.subTest(overrides=overrides):
+                self._refused(_comparison_report(_COMPARE_LOCAL, **overrides), "comparison_report_malformed")
+        self._refused(_comparison_report(_COMPARE_LOCAL, bundle_id="bundle"), "invalid_report_hash")
+        self._refused(_comparison_report(_COMPARE_LOCAL, records_digest="records"), "invalid_report_hash")
+        for value in ([], "report", 3, None):
+            with self.subTest(value=value):
+                self._refused(value)
+
+
+# The compared field names of the Interfaces section, and the labels of the
+# gate branches with no evidence.
+_COMPARED_FIELD_NAMES = (
+    "receipt_code",
+    "terminal",
+    "privacy_risk",
+    "privacy_basis",
+    "admission",
+    "scored",
+    "quality_passed",
+    "novelty_passed",
+    "perplexity_micros",
+    "tail_fraction_micros",
+    "peak_perplexity_micros",
+    "novelty_score_micros",
+    "peak_novelty_micros",
+    "chunk_count",
+    "total_chunk_count",
+    "chunks_capped",
+    "index_cardinality",
+    "credit_quality_micros",
+    "credit_quality_version",
+    "member",
+    "member_chunks",
+    "credit_events",
+)
+_BRANCH_GAP_LABELS = (
+    "quality_passed_true",
+    "quality_passed_false",
+    "novelty_passed_true",
+    "novelty_passed_false",
+    "member_true",
+    "member_false",
+)
+
+
+def _compare_pin(**overrides):
+    """A comparison pin with its five digests. A value of `_DROP` removes
+    the field."""
+    pin = {
+        "schema": corpus.PIN_SCHEMA,
+        "repository": "jedisct1/security-audits",
+        "revision": "deadbeef",
+        "split": "train",
+        "translator": "swival",
+        "bootstrap_count": 4,
+        "holdout_count": 6,
+        "min_words": 1,
+        "max_words": 20000,
+        "expected_instrument_count": 1,
+        "with_events": True,
+        **{field: _fake_hash(field) for field in _COMPARE_DIGEST_FIELDS},
+        "local_jsonl_dir": "crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl",
+        "session_names": ["s01.jsonl", "s02.jsonl"],
+    }
+    pin.update(overrides)
+    return {key: value for key, value in pin.items() if value is not _DROP}
+
+
+class CompareExportTests(unittest.TestCase):
+    """`comparison.export_compare_corpus`, with `run_child` replaced."""
+
+    def setUp(self):
+        self.run = _scratch_run("compare-export")
+        self.tmp = Path(tempfile.mkdtemp())
+        self.commands = []
+
+    def tearDown(self):
+        shutil.rmtree(self.run.run_dir, ignore_errors=True)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _export(self, pin, *, manifest=None, manifest_text=None, **options):
+        """`manifest` replaces fields of the manifest. `manifest_text` is
+        written as the whole file; `_DROP` leaves no file."""
+        pin_path = self.tmp / "pin.json"
+        pin_path.write_text(json.dumps(pin))
+        if manifest is None:
+            manifest = {}
+        written = {
+            **{field: pin[field] for field in _COMPARE_DIGEST_FIELDS if field in pin},
+            "source": {"repository": pin["repository"], "with_events": True},
+            "sample_count": 10,
+            "contains_raw_trace_text": False,
+            **manifest,
+        }
+
+        def fake_run_child(run, step, command, env):
+            self.commands.append((step, list(command)))
+            output_dir = Path(command[command.index("--output-dir") + 1])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            if manifest_text is not _DROP:
+                (output_dir / "source-manifest.json").write_text(manifest_text or json.dumps(written))
+
+        with mock.patch.object(comparison, "run_child", fake_run_child):
+            return comparison.export_compare_corpus(self.run, pin_path, {}, **options)
+
+    def test_the_export_command_has_the_pin_and_the_event_flags(self):
+        pin = _compare_pin(
+            session_names=["s01.jsonl", "s04m.jsonl", "s04h.jsonl"],
+            declared_privacy_risk={"s04m.jsonl": "medium", "s04h.jsonl": "high"},
+        )
+        outputs = self._export(pin, name="risk", local_dir="fixtures/pipeline-compare-jsonl")
+
+        output_dir = self.run.run_dir / "compare" / "risk"
+        self.assertEqual(
+            outputs,
+            (
+                output_dir / "bootstrap-compare.jsonl",
+                output_dir / "holdout-compare.jsonl",
+                output_dir / "source-manifest.json",
+            ),
+        )
+        [(step, command)] = self.commands
+        self.assertEqual(step, "compare_export_risk")
+        separator = command.index("--")
+        self.assertEqual(
+            command[:separator],
+            ["cargo", "run", "-q", "-p", "trace-commons-server", "--bin", "trace-commons-pipeline-corpus-export"],
+        )
+        arguments = command[separator + 1 :]
+
+        def values(flag):
+            return [arguments[index + 1] for index, item in enumerate(arguments) if item == flag]
+
+        self.assertIn("--with-events", arguments)
+        self.assertEqual(values("--output-dir"), [str(output_dir)])
+        self.assertEqual(values("--session-name"), ["s01.jsonl", "s04m.jsonl", "s04h.jsonl"])
+        self.assertEqual(values("--declared-privacy-risk"), ["s04m.jsonl=medium", "s04h.jsonl=high"])
+        self.assertEqual(values("--local-jsonl-dir"), ["fixtures/pipeline-compare-jsonl"])
+        self.assertEqual(values("--cache-dir"), [str(corpus.HF_CACHE_DIR)])
+        for flag, field in (
+            ("--repository", "repository"),
+            ("--revision", "revision"),
+            ("--split", "split"),
+            ("--translator", "translator"),
+            ("--bootstrap-count", "bootstrap_count"),
+            ("--holdout-count", "holdout_count"),
+            ("--min-words", "min_words"),
+            ("--max-words", "max_words"),
+            ("--expected-instrument-count", "expected_instrument_count"),
+            ("--expected-source-digest", "source_digest"),
+            ("--expected-order-digest", "order_digest"),
+        ):
+            self.assertEqual(values(flag), [str(pin[field])], flag)
+
+    def test_release_selects_the_optimized_build(self):
+        pin = _compare_pin()
+        self._export(pin, name="local", local_dir="fixtures")
+        self._export(pin, name="corpus", local_dir="fixtures", release=True)
+        (_, debug), (step, optimized) = self.commands
+        self.assertNotIn("--release", debug)
+        self.assertEqual(step, "compare_export_corpus")
+        self.assertIn("--release", optimized)
+        self.assertLess(optimized.index("--release"), optimized.index("--"))
+        self.assertEqual([item for item in optimized if item != "--release"][:7], debug[:7])
+
+    def test_the_export_refuses_a_pin_or_a_manifest_that_does_not_agree(self):
+        # The two list fields select files of a local directory.
+        network = {"local_jsonl_dir": _DROP}
+        for fields in (
+            {"session_names": ["s01.jsonl"]},
+            {"session_names": _DROP, "declared_privacy_risk": {"s01.jsonl": "high"}},
+        ):
+            with self.subTest(fields=sorted(fields)):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    self._export(_compare_pin(**network, **fields), name="corpus")
+                self.assertEqual(str(ctx.exception), "comparison_pin_field_needs_local_dir")
+                self.assertEqual(self.commands, [], "refused before the export starts")
+        # A network pin without them is exported with no local directory.
+        self._export(_compare_pin(**network, session_names=_DROP), name="corpus")
+        [(_, command)] = self.commands
+        self.assertNotIn("--local-jsonl-dir", command)
+        self.assertNotIn("--session-name", command)
+        self.assertNotIn("--declared-privacy-risk", command)
+
+        for field in _COMPARE_DIGEST_FIELDS:
+            with self.subTest(mismatch=field):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    self._export(_compare_pin(), name="corpus", manifest={field: _fake_hash("another")})
+                self.assertEqual(str(ctx.exception), f"hf_{field}_mismatch")
+        # A pin that does not have a digest yet does not compare it.
+        self._export(
+            _compare_pin(configuration_digest=_DROP),
+            name="corpus",
+            manifest={"configuration_digest": _fake_hash("another")},
+        )
+        for label, manifest in (
+            ("comparison_manifest_without_events", {"source": {"repository": "jedisct1/security-audits"}}),
+            ("comparison_manifest_without_events", {"source": None}),
+            ("hf_manifest_contains_raw_trace_text", {"contains_raw_trace_text": True}),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    self._export(_compare_pin(), name="corpus", manifest=manifest)
+                self.assertEqual(str(ctx.exception), label)
+
+    def test_an_export_without_a_manifest_object_gives_a_label(self):
+        for index, manifest_text in enumerate((_DROP, "{not json", "[]", '"manifest"', "null")):
+            with self.subTest(manifest_text=manifest_text):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    self._export(_compare_pin(), name=f"corpus{index}", manifest_text=manifest_text)
+                self.assertEqual(str(ctx.exception), "comparison_manifest_malformed")
+
+
+class CompareCommandTests(_CorpusRunCase):
+    _SELF_TEST = {
+        "compare_self_pass": {},
+        "compare_self_risk": {
+            "permitted": {_PERMITTED_RULE: 1},
+            # The declared high trace is held on the two sides (PC-D27), and
+            # the declared medium trace on the candidate side only.
+            "distribution": {
+                "baseline": _comparison_side(8, admit=7, quarantine=1),
+                "candidate": _comparison_side(8, admit=6, quarantine=2),
+            },
+        },
+        # The skew stops the run at its first pair (PC-D20).
+        "compare_self_skew": {
+            "fail": True,
+            "compared": 1,
+            "unexplained": {"quality_passed": 1, "member": 1},
+            "alignment_lost_position": 0,
+        },
+        "compare_self_repeat": {},
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.local_pin = str(pipeline.COMPARE_LOCAL_PIN)
+        self.local = self.tmp / "local"
+        # What the fake export writes: `sample_count` (default: the two
+        # counts of the pin), and the whole manifest file when a test sets
+        # `manifest_text` (`_DROP` leaves no file).
+        self.sample_count = None
+        self.manifest_text = None
+
+    def _fake_export(self, run, pin_path, env, *, name, local_dir=None, release=False):
+        """The export: the two corpus files and a manifest with the digests
+        of the pin (a digest that the pin lacks gets a value)."""
+        self.calls.append(("export", Path(pin_path), name, local_dir, release))
+        pin = json.loads(Path(pin_path).read_text())
+        sample_count = pin["bootstrap_count"] + pin["holdout_count"]
+        manifest = {
+            **{field: pin.get(field, _fake_hash(f"export-{field}")) for field in _COMPARE_DIGEST_FIELDS},
+            "source": {"with_events": True},
+            "sample_count": sample_count if self.sample_count is None else self.sample_count,
+            "contains_raw_trace_text": False,
+        }
+        output_dir = run.run_dir / "compare" / name
+        output_dir.mkdir(parents=True, exist_ok=True)
+        paths = tuple(
+            output_dir / file for file in ("bootstrap-compare.jsonl", "holdout-compare.jsonl", "source-manifest.json")
+        )
+        for path in paths[:2]:
+            path.write_text("{}\n")
+        if self.manifest_text is not _DROP:
+            paths[2].write_text(self.manifest_text or json.dumps(manifest))
+        return paths
+
+    def _harness(self, default=None, **by_step):
+        """`cargo_test` replaced by the comparison harness. The entry of
+        `by_step` for the step (or `default`) holds the arguments of
+        `_write_compare_outputs`, and two more: `write=False` for a harness
+        that leaves no file, and `fail=True` for one that fails after it
+        wrote its files (and emits no check result, as the harness does)."""
+
+        def fake_cargo_test(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+            behavior = dict(by_step.get(step, default or {}))
+            fail = behavior.pop("fail", False)
+            if behavior.pop("write", True):
+                _write_compare_outputs(env, **{"emit": not fail, **behavior})
+            if fail:
+                raise errors.StepFailed(step, 101, run.log_path(step))
+
+        return fake_cargo_test
+
+    def _compare(self, argv, harness=None):
+        self.stdout, self.stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(pipeline, "export_compare_corpus", self._fake_export):
+            return self._main(
+                ["compare", *argv, "--postgres-admin-url", _ADMIN_URL], cargo=harness or self._harness()
+            )
+
+    def _corpus(self, harness=None, *extra, pin=None):
+        return self._compare(["--corpus", pin or self.local_pin, *extra], harness)
+
+    def _again(self):
+        """A new run directory: one run has one result for a check id."""
+        shutil.rmtree(self.run.run_dir)
+        self.run = _scratch_run("corpus")
+        self.calls.clear()
+
+    def _write_pin(self, **overrides):
+        path = self.tmp / "pin.json"
+        path.write_text(json.dumps(_compare_pin(**overrides)))
+        return str(path)
+
+    def _failure(self):
+        return self.stderr.getvalue().strip()
+
+    def _exports(self):
+        return [call for call in self.calls if call[0] == "export"]
+
+    def _report_path(self, check_id=_COMPARE_LOCAL, partial=False, failed=False):
+        suffix = "-partial" if partial else "-failed" if failed else ""
+        return self.local / f"pipeline-comparison-{check_id}{suffix}.json"
+
+    def _local_files(self):
+        """The names of the files under `.local/`."""
+        return sorted(path.name for path in self.local.glob("*")) if self.local.is_dir() else []
+
+    def test_compare_passes_only_the_expected_variables(self):
+        code = self._corpus()
+
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        [(_, pin_path, name, local_dir, _)] = self._exports()
+        self.assertEqual(pin_path, pipeline.COMPARE_LOCAL_PIN)
+        self.assertEqual(
+            Path(local_dir), environment.ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl"
+        )
+        kinds = [call[0] for call in self.calls]
+        self.assertLess(kinds.index("export"), kinds.index("invoke"), "the export is checked before a database starts")
+        [(_, step, _, test_filter, env, exact, ignored)] = self._cargo_calls()
+        self.assertEqual(step, "compare_run")
+        self.assertEqual(test_filter, _COMPARE_HARNESS)
+        self.assertEqual(pipeline.COMPARE_HARNESS, _COMPARE_HARNESS)
+        self.assertTrue(exact)
+        self.assertTrue(ignored)
+        self.assertEqual({key for key in env if key.startswith("TRACE_COMMONS_")}, _COMPARE_VARIABLES)
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_COMPARE_CHECK_ID"], _COMPARE_LOCAL)
+        self.assertIn("/admission_test_", env["TRACE_COMMONS_PG_TEST_DATABASE_URL"])
+        export_dir = self.run.run_dir / "compare" / name
+        for variable, path in (
+            ("BOOTSTRAP_PATH", export_dir / "bootstrap-compare.jsonl"),
+            ("HOLDOUT_PATH", export_dir / "holdout-compare.jsonl"),
+            ("MANIFEST_PATH", export_dir / "source-manifest.json"),
+            # Each file of a harness run is in the run directory, never
+            # directly under `.local/`: the harness removes a report that
+            # exists at its report path.
+            ("REPORT_PATH", self.run.run_dir / "compare_run-report.json"),
+            ("RECORDS_PATH", self.run.run_dir / "compare_run-records.jsonl"),
+            ("TIMING_PATH", self.run.run_dir / "compare_run-timing.jsonl"),
+        ):
+            self.assertEqual(env[f"TRACE_COMMONS_PIPELINE_COMPARE_{variable}"], str(path), variable)
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"], str(self.run.results_dir))
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_RUN_ID"], self.run.run_id)
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH"], self.run.code_revision_hash)
+        master_key = env["TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX"]
+        self.assertRegex(master_key, r"^[0-9a-f]{64}$")
+        self.assertNotIn(master_key, self.stdout.getvalue() + self.stderr.getvalue())
+
+        lines = [line for line in self.stdout.getvalue().splitlines() if line]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertRegex(
+            lines[0],
+            r"^PipelineCompareOK: traces=10 equal=10 permitted=0 unexplained=0 partial=false "
+            rf"seconds=[0-9]+ run={self.run.run_id} report=pipeline-comparison-{_COMPARE_LOCAL}\.json$",
+        )
+        # The local report is a copy of the bytes that the evidence names.
+        local_report = self._report_path()
+        harness_bytes = (self.run.run_dir / "compare_run-report.json").read_bytes()
+        self.assertEqual(local_report.read_bytes(), harness_bytes)
+        evidence = json.loads((self.run.results_dir / f"{_COMPARE_LOCAL}.evidence.json").read_text())
+        self.assertEqual(evidence["report_hash"], _digest(local_report.read_bytes()))
+        self.assertTrue(local_report.with_suffix(".md").read_text().startswith("# Pipeline comparison report\n"))
+        self.assertFalse((self.local / "pipeline-lab-catalog.json").exists(), "compare writes no catalog")
+        self.assertEqual(self.tree_hash_calls, 1, "the tree is examined again at the end")
+
+    def test_a_pin_without_events_is_refused(self):
+        for overrides in ({"with_events": _DROP}, {"with_events": False}, {"with_events": "true"}):
+            with self.subTest(overrides=overrides):
+                self.assertEqual(self._corpus(pin=self._write_pin(**overrides)), 1)
+                self.assertEqual(self._failure(), "PipelineFailure: comparison_pin_without_events")
+                self.assertEqual(self.calls, [], "refused before any export, cargo, or Docker call")
+        # The declared risks and `trace_file_for` change only the corpus
+        # files, so a full run needs each digest of the pin.
+        optional = [field for field in _COMPARE_DIGEST_FIELDS if field not in ("source_digest", "order_digest")]
+        for field in optional:
+            with self.subTest(missing=field):
+                self.assertEqual(self._corpus(pin=self._write_pin(**{field: _DROP})), 1)
+                self.assertEqual(self._failure(), "PipelineFailure: comparison_pin_digest_missing")
+                self.assertEqual(self.calls, [], "refused before any export, cargo, or Docker call")
+        for field in ("source_digest", "order_digest"):
+            with self.subTest(missing=field):
+                self.assertEqual(self._corpus(pin=self._write_pin(**{field: _DROP})), 1)
+                self.assertEqual(self._failure(), "PipelineFailure: pin_missing_field")
+                self.assertEqual(self.calls, [])
+        # A partial run is not evidence: a pin that has no corpus digest yet
+        # can have one.
+        draft = self._write_pin(bootstrap_corpus_digest=_DROP, holdout_corpus_digest=_DROP)
+        self.assertEqual(self._corpus(None, "--limit", "3", pin=draft), 0, self.stderr.getvalue())
+        self.assertIn("partial=true", self.stdout.getvalue())
+        # A limit that does not make the run partial does not remove the
+        # rule. The manifest has the trace count, so the run is refused
+        # before a database starts.
+        for limit in ("10", "11"):
+            with self.subTest(limit=limit):
+                self._again()
+                self.assertEqual(self._corpus(None, "--limit", limit, pin=draft), 1)
+                self.assertEqual(self._failure(), "PipelineFailure: comparison_pin_digest_missing")
+                self.assertEqual([call[0] for call in self.calls], ["export"], "no database and no harness")
+        # The same rule after a pass, from the report's own `partial`.
+        self._again()
+        self.assertEqual(self._corpus(self._harness({"compared": 10}), "--limit", "3", pin=draft), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_pin_digest_missing")
+        self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
+        self.assertFalse(self._report_path().exists())
+
+    def test_a_network_pin_uses_the_hf_check_id(self):
+        pin = self._write_pin(local_jsonl_dir=_DROP, session_names=_DROP)
+        self.assertEqual(self._corpus(pin=pin), 0, self.stderr.getvalue())
+        [(_, _, _, local_dir, _)] = self._exports()
+        self.assertIsNone(local_dir)
+        [(_, _, _, _, env, _, _)] = self._cargo_calls()
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_COMPARE_CHECK_ID"], "pipeline_comparison_hf")
+        self.assertEqual(set(results.load_results(self.run)), {"pipeline_comparison_hf"})
+        self.assertTrue(self._report_path("pipeline_comparison_hf").is_file())
+        self.assertFalse(self._report_path().exists())
+        self.assertIn("report=pipeline-comparison-pipeline_comparison_hf.json", self.stdout.getvalue())
+
+    def test_limit_makes_a_partial_run(self):
+        self.assertEqual(self._corpus(None, "--limit", "3"), 0, self.stderr.getvalue())
+        [(_, _, _, _, env, _, _)] = self._cargo_calls()
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_COMPARE_LIMIT"], "3")
+        self.assertEqual(
+            {key for key in env if key.startswith("TRACE_COMMONS_")},
+            _COMPARE_VARIABLES | {"TRACE_COMMONS_PIPELINE_COMPARE_LIMIT"},
+        )
+        self.assertEqual(results.load_results(self.run), {}, "a partial run has no check result")
+        self.assertRegex(
+            self.stdout.getvalue(),
+            r"^PipelineCompareOK: traces=3 equal=3 permitted=0 unexplained=0 partial=true seconds=[0-9]+ ",
+        )
+        # A partial run does not replace the report of the full run.
+        self.assertTrue(self._report_path(partial=True).is_file())
+        self.assertTrue(self._report_path(partial=True).with_suffix(".md").is_file())
+        self.assertFalse(self._report_path().exists())
+        self.assertIn("report=pipeline-comparison-pipeline_comparison_local-partial.json", self.stdout.getvalue())
+
+    def test_unexplained_differences_fail_with_their_label(self):
+        code = self._corpus(self._harness({"fail": True, "unexplained": {"admission": 2}}))
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_has_unexplained_differences")
+        self.assertEqual(
+            self.stdout.getvalue().splitlines(),
+            [
+                "PipelineCompareReport: unexplained=2 alignment_lost=none partial=false "
+                f"run={self.run.run_id} report=pipeline-comparison-{_COMPARE_LOCAL}-failed.json"
+            ],
+        )
+        # The plain name is the name of a pass only.
+        self.assertFalse(self._report_path().exists())
+        report = json.loads(self._report_path(failed=True).read_text())
+        self.assertEqual(report["unexplained_total"], 2)
+        self.assertEqual(report["unexplained_counts"], {"admission": 2})
+        self.assertIn("`admission`: 2", self._report_path(failed=True).with_suffix(".md").read_text())
+        self.assertEqual(results.load_results(self.run), {})
+        # A driver error that ends the run after one difference: the label is
+        # the report's, and the line says that the run did not complete.
+        self._again()
+        cut_short = {"fail": True, "compared": 5, "unexplained": {"admission": 1}}
+        self.assertEqual(self._corpus(self._harness(cut_short)), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_has_unexplained_differences")
+        self.assertEqual(
+            self.stdout.getvalue().splitlines(),
+            [
+                "PipelineCompareReport: unexplained=1 alignment_lost=none partial=true "
+                f"run={self.run.run_id} report=pipeline-comparison-{_COMPARE_LOCAL}-partial.json"
+            ],
+        )
+
+    def test_a_branch_gap_fails_with_its_label(self):
+        gap = {"branch_gaps": ["novelty_passed_false"]}
+        self.assertEqual(self._corpus(self._harness({"fail": True, **gap})), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_gate_branch_not_exercised")
+        self.assertIn("PipelineCompareReport: unexplained=0 alignment_lost=none", self.stdout.getvalue())
+        self.assertEqual(
+            json.loads(self._report_path(failed=True).read_text())["branch_gaps"], ["novelty_passed_false"]
+        )
+        self.assertFalse(self._report_path().exists())
+        # A harness that passes with a gap is refused with the same label.
+        self._again()
+        self.assertEqual(self._corpus(self._harness(gap)), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_gate_branch_not_exercised")
+        self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
+
+    def test_a_failed_step_without_a_report_keeps_the_step_failure(self):
+        code = self._corpus(self._harness({"fail": True, "write": False}))
+        self.assertEqual(code, 101)
+        lines = [line for line in self.stderr.getvalue().splitlines() if line]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].startswith("PipelineFailure: step_failed:compare_run exit=101 log="), lines[0])
+        self.assertEqual(self.stdout.getvalue(), "")
+        self.assertFalse(self._report_path().exists())
+
+        # A report that is not valid does not replace the step failure.
+        log_path = self.run.log_path("compare_run")
+        for malformed in (b"{not json", b"[]", results.canonical(_comparison_report(_COMPARE_LOCAL, equal_count=3))):
+            with self.subTest(malformed=malformed[:16]):
+
+                def failing(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+                    Path(env["TRACE_COMMONS_PIPELINE_COMPARE_REPORT_PATH"]).write_bytes(malformed)
+                    raise errors.StepFailed(step, 101, log_path)
+
+                self.assertEqual(self._corpus(failing), 101)
+                self.assertTrue(self._failure().startswith("PipelineFailure: step_failed:compare_run exit=101 log="))
+                self.assertEqual(self.stdout.getvalue(), "")
+                self.assertFalse(self._report_path().exists())
+
+    def test_a_pass_without_a_report_fails(self):
+        self.assertEqual(self._corpus(self._harness({"write": False})), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_report_missing")
+        self.assertEqual(self.stdout.getvalue(), "")
+
+    def test_a_report_that_is_not_json_fails(self):
+        def harness(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            Path(env["TRACE_COMMONS_PIPELINE_COMPARE_REPORT_PATH"]).write_bytes(b"{not json")
+
+        self.assertEqual(self._corpus(harness), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_report_malformed")
+        self.assertFalse(self._report_path().exists())
+
+    def test_a_report_of_another_check_fails(self):
+        """The check id comes from the pin: a report that names the other
+        check id is not the report of this run."""
+
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                self._again()
+
+                def harness(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+                    other = {**env, "TRACE_COMMONS_PIPELINE_COMPARE_CHECK_ID": "pipeline_comparison_hf"}
+                    _write_compare_outputs(other, emit=not fail)
+                    if fail:
+                        raise errors.StepFailed(step, 101, run.log_path(step))
+
+                self.assertEqual(self._corpus(harness), 1)
+                self.assertEqual(self._failure(), "PipelineFailure: comparison_report_check_mismatch")
+                self.assertEqual(self.stdout.getvalue(), "")
+                self.assertEqual(self._local_files(), [])
+
+    def test_the_report_must_be_the_report_of_this_run(self):
+        """The report's pin, trace count, and skew are those of the run, for
+        a harness that passes and for one that fails."""
+        pin = json.loads(pipeline.COMPARE_LOCAL_PIN.read_text())
+        pinned = {field: pin[field] for field in _COMPARE_DIGEST_FIELDS}
+        cases = [
+            ((), {"pin": {field: _fake_hash(field) for field in _COMPARE_DIGEST_FIELDS}}, "comparison_report_pin_mismatch"),
+            ((), {"trace_count": 12, "compared": 12}, "comparison_report_trace_count_mismatch"),
+            # `--corpus` sets no skew: a report with one is not of this run.
+            (("--limit", "3"), {"skew": "baseline_quality_floor"}, "comparison_report_skew_mismatch"),
+            ((), {"compared": 3, "skew": "baseline_quality_floor"}, "comparison_report_skew_mismatch"),
+        ]
+        cases += [
+            ((), {"pin": {**pinned, field: _fake_hash(f"another-{field}")}}, "comparison_report_pin_mismatch")
+            for field in _COMPARE_DIGEST_FIELDS
+        ]
+        for extra, behavior, label in cases:
+            for fail in (False, True):
+                with self.subTest(label=label, behavior=sorted(behavior), fail=fail):
+                    self._again()
+                    self.assertEqual(self._corpus(self._harness({"fail": fail, **behavior}), *extra), 1)
+                    self.assertEqual(self._failure(), f"PipelineFailure: {label}")
+                    self.assertEqual(self.stdout.getvalue(), "")
+                    self.assertEqual(self._local_files(), [])
+
+    def test_a_pass_compares_the_expected_number_of_traces(self):
+        cases = (
+            # With no limit, a pass compares each trace of the pin.
+            ((), {"compared": 3}),
+            ((), {"compared": 0}),
+            (("--limit", "3"), {"compared": 2}),
+            (("--limit", "3"), {"compared": 0}),
+            (("--limit", "3"), {"compared": 10}),
+            (("--limit", "20"), {"compared": 3}),
+        )
+        for extra, behavior in cases:
+            with self.subTest(extra=extra, behavior=behavior):
+                self._again()
+                self.assertEqual(self._corpus(self._harness(behavior), *extra), 1)
+                self.assertEqual(self._failure(), "PipelineFailure: comparison_compared_count_mismatch")
+                self.assertEqual(self.stdout.getvalue(), "")
+                self.assertEqual(self._local_files(), [])
+        # A limit above the trace count gives a full run.
+        self._again()
+        self.assertEqual(self._corpus(None, "--limit", "20"), 0, self.stderr.getvalue())
+        self.assertIn("traces=10 equal=10 permitted=0 unexplained=0 partial=false", self.stdout.getvalue())
+        self.assertEqual(set(results.load_results(self.run)), {_COMPARE_LOCAL})
+
+    def test_the_results_of_a_run_are_exactly_its_own(self):
+        def with_result(check_id):
+            def harness(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+                _write_compare_outputs(env)
+                _emit_check(env, check_id)
+
+            return harness
+
+        # A partial run has no check result.
+        self.assertEqual(self._corpus(with_result(_COMPARE_LOCAL), "--limit", "3"), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_check_results_unexpected")
+        self.assertEqual(self.stdout.getvalue(), "")
+        self.assertEqual(self._local_files(), [])
+        # A full run has the result of its check and no other.
+        self._again()
+        self.assertEqual(self._corpus(with_result("pipeline_comparison_hf")), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_check_results_unexpected")
+        self.assertEqual(self.stdout.getvalue(), "")
+        self.assertEqual(self._local_files(), [])
+
+    def test_a_failed_step_with_a_report_of_a_pass_is_not_written_as_one(self):
+        """A harness that fails after a full report with no failure (the app
+        stop, the emitter): no check result exists for the report, so it
+        does not get the name of the full-run report."""
+        self.assertEqual(self._corpus(self._harness({"fail": True})), 101)
+        self.assertTrue(self._failure().startswith("PipelineFailure: step_failed:compare_run exit=101 log="))
+        name = f"pipeline-comparison-{_COMPARE_LOCAL}-failed"
+        self.assertEqual(
+            self.stdout.getvalue().splitlines(),
+            [
+                "PipelineCompareReport: unexplained=0 alignment_lost=none partial=false "
+                f"run={self.run.run_id} report={name}.json"
+            ],
+        )
+        self.assertEqual(self._local_files(), [f"{name}.json", f"{name}.md"])
+        self.assertEqual(
+            self._report_path(failed=True).read_bytes(), (self.run.run_dir / "compare_run-report.json").read_bytes()
+        )
+        # A partial report of a failed step keeps the name of a partial run.
+        self._again()
+        self.assertEqual(self._corpus(self._harness({"fail": True, "compared": 4})), 101)
+        self.assertIn(f"partial=true run={self.run.run_id} report=", self.stdout.getvalue())
+        self.assertTrue(self._report_path(partial=True).is_file())
+        self.assertFalse(self._report_path().exists())
+
+    def test_a_report_write_that_fails_keeps_the_failure_of_the_step(self):
+        for behavior, code, start in (
+            ({"fail": True}, 101, "PipelineFailure: step_failed:compare_run exit=101 log="),
+            ({"fail": True, "unexplained": {"admission": 2}}, 1, "PipelineFailure: comparison_has_unexplained_differences"),
+        ):
+            with self.subTest(behavior=behavior):
+                self._again()
+                with mock.patch.object(pipeline, "atomic_write", side_effect=OSError("no space")):
+                    self.assertEqual(self._corpus(self._harness(behavior)), code)
+                lines = [line for line in self.stderr.getvalue().splitlines() if line]
+                self.assertEqual(len(lines), 1, lines)
+                self.assertTrue(lines[0].startswith(start), lines[0])
+                self.assertEqual(self.stdout.getvalue(), "")
+
+    def test_a_full_pass_without_its_records_file_gives_a_label(self):
+        def harness(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            _write_compare_outputs(env)
+            Path(env["TRACE_COMMONS_PIPELINE_COMPARE_RECORDS_PATH"]).unlink()
+
+        self.assertEqual(self._corpus(harness), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_records_missing")
+        self.assertEqual(self.stdout.getvalue(), "")
+        self.assertEqual(self._local_files(), [])
+
+    def test_a_manifest_that_is_not_usable_gives_a_label(self):
+        usable = {
+            **{field: _fake_hash(field) for field in _COMPARE_DIGEST_FIELDS},
+            "source": {"with_events": True},
+            "sample_count": 10,
+            "contains_raw_trace_text": False,
+        }
+        texts = [_DROP, "{not json", "[]"]
+        texts += [json.dumps({key: value for key, value in usable.items() if key != field}) for field in ("sample_count", "order_digest")]
+        texts += [json.dumps({**usable, **changed}) for changed in ({"sample_count": "10"}, {"sample_count": -1}, {"sample_count": True}, {"source_digest": "digest"})]
+        for manifest_text in texts:
+            for argv in (["--corpus", self.local_pin], ["--self-test"]):
+                with self.subTest(manifest_text=manifest_text, argv=argv[0]):
+                    self._again()
+                    self.manifest_text = manifest_text
+                    self.assertEqual(self._compare(argv), 1)
+                    self.assertEqual(self._failure(), "PipelineFailure: comparison_manifest_malformed")
+                    self.assertEqual({call[0] for call in self.calls}, {"export"}, "no database and no harness")
+
+    def test_a_pin_file_that_cannot_be_read_gives_a_label(self):
+        missing = self.tmp / "no-such-pin.json"
+        not_json = self.tmp / "not-json.json"
+        not_json.write_text("{not json")
+        not_an_object = self.tmp / "list.json"
+        not_an_object.write_text("[]")
+        not_text = self.tmp / "bytes.json"
+        not_text.write_bytes(b"\xff\xfe\x00")
+        for pin_path in (missing, not_json, not_an_object, not_text, self.tmp):
+            with self.subTest(pin=pin_path.name):
+                self.assertEqual(self._corpus(pin=str(pin_path)), 1)
+                self.assertEqual(self._failure(), "PipelineFailure: comparison_pin_unreadable")
+                self.assertEqual(self.calls, [], "refused before any export, cargo, or Docker call")
+        # A JSON object that is not a pin keeps the label of `load_pin`.
+        other = self.tmp / "other.json"
+        other.write_text(json.dumps({"schema": corpus.CORPUS_SCHEMA}))
+        self.assertEqual(self._corpus(pin=str(other)), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: unsupported_pin_schema")
+
+    def test_a_pin_field_of_a_wrong_type_gives_a_label(self):
+        cases = (
+            {"local_jsonl_dir": ["x"]},
+            {"local_jsonl_dir": 5},
+            {"local_jsonl_dir": False},
+            {"session_names": 5},
+            {"session_names": "s01.jsonl"},
+            {"session_names": ["s01.jsonl", 2]},
+            {"declared_privacy_risk": ["s01.jsonl"]},
+            {"declared_privacy_risk": "medium"},
+            {"declared_privacy_risk": {"s01.jsonl": 1}},
+        )
+        for fields in cases:
+            for argv in ([], ["--limit", "3"]):
+                with self.subTest(fields=fields, argv=argv):
+                    self.assertEqual(self._corpus(None, *argv, pin=self._write_pin(**fields)), 1)
+                    self.assertEqual(self._failure(), "PipelineFailure: comparison_pin_unreadable")
+                    self.assertEqual(self.calls, [], "refused before any export, cargo, or Docker call")
+        # The three fields with their types, and a pin without them.
+        usable = {"declared_privacy_risk": {"s01.jsonl": "medium"}}
+        absent = {"local_jsonl_dir": _DROP, "session_names": _DROP}
+        for fields in (usable, absent):
+            with self.subTest(fields=sorted(fields)):
+                self._again()
+                self.assertEqual(self._corpus(pin=self._write_pin(**fields)), 0, self.stderr.getvalue())
+
+    def test_a_report_with_a_skew_gets_no_check_result(self):
+        self.assertEqual(self._corpus(self._harness({"skew": "baseline_quality_floor"})), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_skew_with_check_result")
+        self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
+        self.assertFalse(self._report_path().exists())
+
+    def test_a_pass_needs_a_current_check_result(self):
+        self.assertEqual(self._corpus(self._harness({"emit": False})), 1)
+        self.assertEqual(self._failure(), f"PipelineFailure: check_result_missing:{_COMPARE_LOCAL}")
+        self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
+        self.assertFalse(self._report_path().exists())
+        # A result of an earlier time, of another run, or of another tree is
+        # not a current result.
+        old = _iso(self.run.started_at - timedelta(hours=1))
+        for overrides, label in (
+            ({"observed_at": old}, "check_result_stale"),
+            ({"run_id": "q00000000"}, "check_result_foreign_run"),
+            ({"code_revision_hash": _fake_hash("another-tree")}, "check_result_foreign_revision"),
+            ({"status": "fail"}, f"check_result_failed:{_COMPARE_LOCAL}"),
+            ({"package_hash": None}, f"check_result_digest_missing:{_COMPARE_LOCAL}"),
+        ):
+            with self.subTest(label=label):
+                self._again()
+                self.assertEqual(self._corpus(self._harness({"result_overrides": overrides})), 1)
+                self.assertEqual(self._failure(), f"PipelineFailure: {label}")
+                self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
+
+    def test_a_pass_needs_a_result_and_evidence_that_agree_with_the_report(self):
+        cases = [
+            ({"result_overrides": {key: _fake_hash(f"another-{key}")}}, "comparison_report_package_mismatch")
+            for key in ("package_hash", "configuration_digest", "dependency_digest")
+        ]
+        cases += [
+            ({"evidence_overrides": overrides}, "comparison_evidence_mismatch")
+            for overrides in (
+                {"traces": 9},
+                {"equal": 9},
+                {"permitted": 1},
+                {"unexplained": 1},
+                {"records_hash": _fake_hash("other-records")},
+                {"report_hash": _fake_hash("other-report")},
+                {"fixtures": 10},
+            )
+        ]
+        for behavior, label in cases:
+            with self.subTest(behavior=behavior):
+                self._again()
+                self.assertEqual(self._corpus(self._harness(behavior)), 1)
+                self.assertEqual(self._failure(), f"PipelineFailure: {label}")
+                self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
+
+        # The evidence names the bytes of the report file.
+        def tampering(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            _write_compare_outputs(env)
+            report_path = Path(env["TRACE_COMMONS_PIPELINE_COMPARE_REPORT_PATH"])
+            report_path.write_bytes(report_path.read_bytes() + b" ")
+
+        self._again()
+        self.assertEqual(self._corpus(tampering), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_evidence_mismatch")
+
+    def test_the_database_guard_applies(self):
+        def low_invoke(calls):
+            def fake_invoke(command, *, env, capture=False, input_text=None, log_path=None):
+                calls.append(("invoke", list(command), input_text))
+                if not capture:
+                    return 0, None
+                return 0, "3" if "xact_commit" in (input_text or "") else "42"
+
+            return fake_invoke
+
+        with mock.patch.dict(globals(), {"_environment_invoke": low_invoke}):
+            code = self._corpus()
+        self.assertEqual(code, 1)
+        self.assertEqual(self._failure(), "PipelineFailure: database_check_executed_nothing:compare_run")
+        self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
+        self.assertFalse(self._report_path().exists())
+
+    def test_self_test_runs_four_scenarios(self):
+        code = self._compare(["--self-test"], self._harness(**self._SELF_TEST))
+
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        exports = self._exports()
+        self.assertEqual(
+            [(pin_path, name) for _, pin_path, name, _, _ in exports],
+            [(pipeline.COMPARE_LOCAL_PIN, "local"), (pipeline.COMPARE_RISK_PIN, "risk")],
+        )
+        fixtures = environment.ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl"
+        for _, _, _, local_dir, release in exports:
+            self.assertEqual(Path(local_dir), fixtures)
+            self.assertIs(release, False)
+        cargo_calls = self._cargo_calls()
+        self.assertEqual(
+            [call[1] for call in cargo_calls],
+            ["compare_self_pass", "compare_self_risk", "compare_self_skew", "compare_self_repeat"],
+        )
+        order = [call[0] for call in self.calls if call[0] in ("export", "cargo")]
+        self.assertEqual(order, ["export", "export", "cargo", "cargo", "cargo", "cargo"])
+        environments = [call[4] for call in cargo_calls]
+        inputs = [
+            tuple(
+                env[f"TRACE_COMMONS_PIPELINE_COMPARE_{name}_PATH"] for name in ("BOOTSTRAP", "HOLDOUT", "MANIFEST")
+            )
+            for env in environments
+        ]
+        self.assertEqual(inputs[0], inputs[2])
+        self.assertEqual(inputs[0], inputs[3])
+        self.assertFalse(set(inputs[1]) & set(inputs[0]), "the risk scenario has its own export")
+        self.assertTrue(all(str(self.run.run_dir / "compare" / "local") in path for path in inputs[0]))
+        self.assertTrue(all(str(self.run.run_dir / "compare" / "risk") in path for path in inputs[1]))
+        skews = [env.get("TRACE_COMMONS_PIPELINE_COMPARE_SKEW") for env in environments]
+        self.assertEqual(skews, [None, None, "baseline_quality_floor", None])
+        outputs = set()
+        databases = set()
+        for (_, step, cargo_args, test_filter, env, exact, ignored) in cargo_calls:
+            self.assertEqual(test_filter, _COMPARE_HARNESS)
+            self.assertEqual(cargo_args, _INGEST_ARGS, "the self-test uses the debug build")
+            self.assertTrue(exact and ignored)
+            self.assertEqual(env["TRACE_COMMONS_PIPELINE_COMPARE_CHECK_ID"], _COMPARE_LOCAL)
+            self.assertFalse(
+                [key for key in env if key.startswith("TRACE_COMMONS_PIPELINE_CHECK_")],
+                "a self-test scenario emits no check result",
+            )
+            self.assertNotIn("TRACE_COMMONS_PIPELINE_COMPARE_LIMIT", env)
+            self.assertEqual(
+                env["TRACE_COMMONS_PIPELINE_COMPARE_REPORT_PATH"], str(self.run.run_dir / f"{step}-report.json")
+            )
+            outputs.update(
+                env[f"TRACE_COMMONS_PIPELINE_COMPARE_{name}_PATH"] for name in ("REPORT", "RECORDS", "TIMING")
+            )
+            outputs.add(env["TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT"])
+            databases.add(env["TRACE_COMMONS_PG_TEST_DATABASE_URL"])
+        self.assertEqual(len(outputs), 16, "each scenario has its own files")
+        self.assertEqual(len(databases), 4, "each scenario has its own database")
+        self.assertEqual(len({url.rsplit("/", 1)[0] for url in databases}), 1, "one environment")
+        lock = [call for call in self.calls if call[0] == "invoke" and "pipeline_tooling_lock" in (call[2] or "")]
+        self.assertEqual(len(lock), 2, "the server lock is taken and released one time")
+
+        self.assertEqual(self.stdout.getvalue().splitlines(), ["PipelineCompareSelfTestOK: scenarios=4"])
+        self.assertEqual(results.load_results(self.run), {})
+        self.assertFalse(self.local.exists(), "the self-test writes no report under .local")
+
+    def test_self_test_fails_when_an_expected_failure_passes(self):
+        risk = self._SELF_TEST["compare_self_risk"]
+        skew = self._SELF_TEST["compare_self_skew"]
+
+        def held(**sides):
+            """The distribution of the risk scenario, with the counts of the
+            named sides replaced."""
+            return {
+                "baseline": _comparison_side(8, admit=7, quarantine=1),
+                "candidate": _comparison_side(8, admit=6, quarantine=2),
+                **{side: _comparison_side(8, **counts) for side, counts in sides.items()},
+            }
+
+        def refused(side):
+            # The risk pin has 8 traces, and the risk scenario compares each.
+            sides = {"baseline": _comparison_side(8), "candidate": _comparison_side(8)}
+            sides[side] = _comparison_side(8, admit=7, refused=1)
+            return sides
+
+        cases = (
+            ({"compare_self_skew": {}}, "compare_self_test_skew_passed"),
+            ({"compare_self_skew": {**skew, "alignment_lost_position": None}}, "compare_self_test_skew_fields"),
+            ({"compare_self_skew": {**skew, "unexplained": {"member": 1}}}, "compare_self_test_skew_fields"),
+            ({"compare_self_repeat": {"records_digest": _fake_hash("other-records")}}, "compare_self_test_not_deterministic"),
+            # The risk scenario has one exact result: a run that compares
+            # each trace and passes, with the declared medium risk as one pair
+            # of the rule, and the declared high risk held on the two sides
+            # (PC-D27). The `quarantine` count is 1 on the baseline and 2 on
+            # the candidate, and no side rejects a trace.
+            ({"compare_self_risk": {}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {"permitted": {_PERMITTED_RULE: 1}}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "permitted": {_PERMITTED_RULE: 2}}}, "compare_self_test_risk_fields"),
+            # The old behavior: the pipeline rejects the High trace.
+            ({"compare_self_risk": {**risk, "distribution": held(candidate=dict(admit=6, quarantine=1, reject=1))}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "distribution": held(baseline=dict(admit=6, quarantine=1, reject=1))}}, "compare_self_test_risk_fields"),
+            # A reject on the candidate with the right `quarantine` count.
+            ({"compare_self_risk": {**risk, "distribution": held(candidate=dict(admit=5, quarantine=2, reject=1))}}, "compare_self_test_risk_fields"),
+            # A wrong count of held traces.
+            ({"compare_self_risk": {**risk, "distribution": held(baseline=dict(admit=6, quarantine=2))}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "distribution": held(candidate=dict(admit=7, quarantine=1))}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "distribution": held(candidate=dict(admit=5, quarantine=3))}}, "compare_self_test_risk_fields"),
+            # A scenario that must pass and names a failure is refused with
+            # the label of that failure.
+            ({"compare_self_risk": {**risk, "unexplained": {"admission": 1}}}, "comparison_has_unexplained_differences"),
+            ({"compare_self_risk": {**risk, "unexplained": {"privacy_risk": 2}}}, "comparison_has_unexplained_differences"),
+            ({"compare_self_risk": {**risk, "branch_gaps": ["member_true"]}}, "comparison_gate_branch_not_exercised"),
+            ({"compare_self_risk": {**risk, "alignment_lost_position": 7}}, "comparison_alignment_lost"),
+            ({"compare_self_risk": {**risk, "distribution": refused("baseline")}}, "comparison_receipt_refused"),
+            ({"compare_self_risk": {**risk, "distribution": refused("candidate")}}, "comparison_receipt_refused"),
+            # The risk scenario compares each trace of its pin.
+            ({"compare_self_risk": {**risk, "compared": 3, "distribution": {side: _comparison_side(3) for side in pipeline.SIDES}}}, "compare_self_test_pass_incomplete"),
+            ({"compare_self_risk": {**risk, "compared": 7, "distribution": {side: _comparison_side(7) for side in pipeline.SIDES}}}, "compare_self_test_pass_incomplete"),
+            # A scenario that must pass compares each trace of its pin.
+            ({"compare_self_pass": {"compared": 0}}, "compare_self_test_pass_incomplete"),
+            ({"compare_self_pass": {"compared": 9}}, "compare_self_test_pass_incomplete"),
+            ({"compare_self_repeat": {"compared": 0}}, "compare_self_test_pass_incomplete"),
+            # The report of each scenario names the skew of its run, or none.
+            # `_compare_once` examines this, so the self-test has no check of
+            # its own for it.
+            ({"compare_self_skew": {**skew, "skew": None}}, "comparison_report_skew_mismatch"),
+            ({"compare_self_pass": {"skew": "baseline_quality_floor"}}, "comparison_report_skew_mismatch"),
+            # A scenario that must pass, with a report that names a failure.
+            ({"compare_self_pass": {"unexplained": {"admission": 1}}}, "comparison_has_unexplained_differences"),
+            ({"compare_self_repeat": {"branch_gaps": ["member_true"]}}, "comparison_gate_branch_not_exercised"),
+            ({"compare_self_pass": {"write": False}}, "comparison_report_missing"),
+        )
+        for changed, label in cases:
+            with self.subTest(label=label, step=sorted(changed)):
+                self._again()
+                code = self._compare(["--self-test"], self._harness(**{**self._SELF_TEST, **changed}))
+                self.assertEqual(code, 1)
+                self.assertEqual(self._failure(), f"PipelineFailure: {label}")
+                self.assertNotIn("PipelineCompareSelfTestOK", self.stdout.getvalue())
+        # A pin with no trace: a pass that compared nothing.
+        self._again()
+        self.sample_count = 0
+        self.assertEqual(self._compare(["--self-test"], self._harness(**self._SELF_TEST)), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: compare_self_test_pass_incomplete")
+        self.sample_count = None
+        # A scenario that must pass and fails keeps its step failure, with
+        # the scenario's name, and an expected failure that leaves no report
+        # does too.
+        for step, behavior in (
+            ("compare_self_pass", {"fail": True, "unexplained": {"admission": 1}}),
+            ("compare_self_repeat", {"fail": True, "write": False}),
+            ("compare_self_risk", {"fail": True, "write": False}),
+            ("compare_self_skew", {"fail": True, "write": False}),
+        ):
+            with self.subTest(step=step):
+                self._again()
+                code = self._compare(["--self-test"], self._harness(**{**self._SELF_TEST, step: behavior}))
+                self.assertEqual(code, 101)
+                self.assertTrue(self._failure().startswith(f"PipelineFailure: step_failed:{step} exit=101 log="))
+                self.assertNotIn("PipelineCompareSelfTestOK", self.stdout.getvalue())
+
+    def test_compare_options_are_validated(self):
+        cases = (
+            ([], "compare_corpus_or_self_test_required"),
+            (["--limit", "3"], "compare_corpus_or_self_test_required"),
+            (["--corpus", self.local_pin, "--self-test"], "compare_corpus_and_self_test_conflict"),
+            (["--self-test", "--limit", "3"], "compare_self_test_takes_no_option"),
+            (["--corpus", self.local_pin, "--limit", "0"], "compare_limit_invalid"),
+            (["--corpus", self.local_pin, "--limit", "-2"], "compare_limit_invalid"),
+        )
+        for argv, label in cases:
+            with self.subTest(argv=argv):
+                self.assertEqual(self._compare(argv), 1)
+                self.assertEqual(self._failure(), f"PipelineFailure: {label}")
+                self.assertEqual(self.calls, [], "refused before any export, cargo, or Docker call")
+        # `compare` has no archive option and no build option.
+        for option in (["--archive"], ["--release"], ["--limit", "three"]):
+            with self.subTest(option=option):
+                with self.assertRaises(SystemExit) as ctx:
+                    self._compare(["--corpus", self.local_pin, *option])
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertEqual(self.calls, [])
+
+    def test_an_alignment_loss_fails_with_its_label(self):
+        lost = {"compared": 5, "unexplained": {"member": 1}, "alignment_lost_position": 4}
+        self.assertEqual(self._corpus(self._harness({"fail": True, **lost})), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_alignment_lost")
+        self.assertEqual(
+            self.stdout.getvalue().splitlines(),
+            [
+                "PipelineCompareReport: unexplained=1 alignment_lost=4 partial=true "
+                f"run={self.run.run_id} report=pipeline-comparison-{_COMPARE_LOCAL}-partial.json"
+            ],
+        )
+        report = json.loads(self._report_path(partial=True).read_text())
+        self.assertEqual((report["partial"], report["alignment_lost_position"]), (True, 4))
+        self.assertIn("position 4", self._report_path(partial=True).with_suffix(".md").read_text())
+        # Position 0 is a position.
+        self._again()
+        first = {"compared": 1, "unexplained": {"member": 1}, "alignment_lost_position": 0}
+        self.assertEqual(self._corpus(self._harness({"fail": True, **first})), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_alignment_lost")
+        self.assertIn("alignment_lost=0 ", self.stdout.getvalue())
+        # A harness that passes with such a report is refused with the same label.
+        for behavior in (lost, {"compared": 5, "alignment_lost_position": 4}):
+            with self.subTest(behavior=behavior):
+                self._again()
+                self.assertEqual(self._corpus(self._harness(behavior)), 1)
+                self.assertEqual(self._failure(), "PipelineFailure: comparison_alignment_lost")
+                self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
+
+    def test_a_refused_receipt_fails_with_its_label(self):
+        def distribution(side, compared=10):
+            sides = {"baseline": _comparison_side(compared), "candidate": _comparison_side(compared)}
+            sides[side] = _comparison_side(compared, admit=compared - 1, refused=1)
+            return sides
+
+        refused = {"unexplained": {"receipt_code": 1}, "distribution": distribution("candidate")}
+        self.assertEqual(self._corpus(self._harness({"fail": True, **refused})), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_receipt_refused")
+        self.assertIn("PipelineCompareReport: unexplained=1 alignment_lost=none", self.stdout.getvalue())
+        # A harness that passes with such a report and a check result is
+        # refused with the same label, for each side.
+        for side in ("candidate", "baseline"):
+            with self.subTest(side=side):
+                self._again()
+                self.assertEqual(self._corpus(self._harness({"distribution": distribution(side)})), 1)
+                self.assertEqual(self._failure(), "PipelineFailure: comparison_receipt_refused")
+                self.assertTrue((self.run.results_dir / f"{_COMPARE_LOCAL}.result.json").is_file())
+                self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
+        # The order is alignment, refusal, unexplained, branch.
+        both = {
+            **refused,
+            "distribution": distribution("candidate", 5),
+            "compared": 5,
+            "alignment_lost_position": 4,
+            "branch_gaps": ["member_true"],
+        }
+        for behavior in ({"fail": True, **both}, both):
+            with self.subTest(fail=behavior.get("fail", False)):
+                self._again()
+                self.assertEqual(self._corpus(self._harness(behavior)), 1)
+                self.assertEqual(self._failure(), "PipelineFailure: comparison_alignment_lost")
+        self._again()
+        unexplained_and_gap = {"fail": True, "unexplained": {"admission": 1}, "branch_gaps": ["member_true"]}
+        self.assertEqual(self._corpus(self._harness(unexplained_and_gap)), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_has_unexplained_differences")
+        # A failed step with a report that names no failure keeps the step
+        # failure (a driver error, for example).
+        self._again()
+        self.assertEqual(self._corpus(self._harness({"fail": True})), 101)
+        self.assertTrue(self._failure().startswith("PipelineFailure: step_failed:compare_run exit=101 log="))
+        self.assertIn("PipelineCompareReport: unexplained=0 alignment_lost=none", self.stdout.getvalue())
+
+    def test_a_corpus_run_uses_the_optimized_build(self):
+        self.assertEqual(self._corpus(), 0, self.stderr.getvalue())
+        [(_, _, cargo_args, _, _, _, _)] = self._cargo_calls()
+        self.assertEqual(cargo_args, (*_INGEST_ARGS, "--release"))
+        [(_, _, _, _, release)] = self._exports()
+        self.assertIs(release, True)
+
+    def test_a_tree_edited_during_the_run_is_refused(self):
+        self.tree_edited = True
+        self.assertEqual(self._corpus(), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: code_revision_changed")
+        self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
+        self.assertEqual(self._local_files(), [], "a refused run leaves no report that reads as a pass")
 
 
 if __name__ == "__main__":

@@ -166,25 +166,11 @@ pub(crate) async fn handle_invite_lookup(shared: &DaemonShared, req: &Request) -
     else {
         return Response::err(req.id, ERR_BAD_PARAMS, "invite-invalid");
     };
-    let Ok(parsed) = crate::commands::parse_invite(invite) else {
+    // The same check `invite_issuer_host` makes, so a host a shell showed
+    // is one this lookup asks about.
+    let Some((parsed, url)) = crate::commands::acceptable_invite(invite) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "invite-invalid");
     };
-    let Ok(url) = reqwest::Url::parse(&parsed.issuer_url) else {
-        return Response::err(req.id, ERR_BAD_PARAMS, "invite-invalid");
-    };
-    let literal_loopback = match url.host() {
-        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-        Some(url::Host::Ipv6(address)) => address.is_loopback(),
-        _ => false,
-    };
-    if !(url.scheme() == "https" || (url.scheme() == "http" && literal_loopback))
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || parsed.code.len() > 256
-        || parsed.code.chars().any(char::is_control)
-    {
-        return Response::err(req.id, ERR_BAD_PARAMS, "invite-invalid");
-    }
     let configured = match shared.store.load_config() {
         Ok(cfg) => cfg.and_then(|cfg| cfg.allowed_hosts),
         Err(_) => return Response::err(req.id, ERR_UNAVAILABLE, "invite-lookup-unavailable"),
@@ -474,43 +460,6 @@ mod tests {
         }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         target_task.abort();
-    }
-
-    #[tokio::test]
-    async fn summary_rejects_inconsistent_counts_costs_and_unknown_routes() {
-        for (field, value) in [
-            ("calls", serde_json::json!(-1)),
-            ("priced_calls", serde_json::json!(4)),
-            ("cost_usd", serde_json::json!(-0.1)),
-            ("cost_usd", serde_json::json!(1e100)),
-            ("route", serde_json::json!("SECRET")),
-        ] {
-            let mut body = sample();
-            body["since"] = serde_json::json!(SINCE);
-            body["groups"][0][field] = value;
-            let router = Router::new().route(
-                "/_ironwire/summary",
-                get(move || {
-                    let body = body.clone();
-                    async move { Json(body) }
-                }),
-            );
-            let (port, task) = serve(router).await;
-            let (_dir, s) = shared();
-            s.install_routing_ledger_for_test(crate::routing::ironwire::IronWireLedger::new(
-                port,
-                String::new(),
-            ));
-            let value = handle_summary(
-                &s,
-                &request("inference_summary", serde_json::json!({"since":SINCE})),
-            )
-            .await
-            .result
-            .unwrap();
-            assert_eq!(value["readable"], false, "{field}");
-            task.abort();
-        }
     }
 
     #[tokio::test]

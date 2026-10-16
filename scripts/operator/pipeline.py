@@ -5,6 +5,10 @@ Python 3 standard library only. Every subcommand builds one `Run`, runs its
 handler, and on failure prints a single label-only line to standard error --
 never a child command line, its environment, or its output (repo
 convention: hash-only, label-only operational surfaces).
+
+`compare` sends the traces of one pin through the old gate path of `main`
+and through the versioned pipeline, and reports each difference
+(`pipeline_tooling.comparison`).
 """
 
 from __future__ import annotations
@@ -19,9 +23,11 @@ import secrets
 import shutil
 import stat
 import sys
+import time
 from pathlib import Path
 from typing import NamedTuple, Optional
 
+from pipeline_tooling import envfile, promote
 from pipeline_tooling.cargo import cargo_test
 from pipeline_tooling.catalog import CATALOG_NAME, update_catalog
 from pipeline_tooling.checks import (
@@ -37,10 +43,23 @@ from pipeline_tooling.checks import (
     corpus_check_spec,
     required_specs,
 )
+from pipeline_tooling.comparison import (
+    ALIGNMENT_LABEL,
+    BRANCH_LABEL,
+    PIN_DIGEST_FIELDS,
+    REFUSED_LABEL,
+    SIDES,
+    UNEXPLAINED_LABEL,
+    export_compare_corpus,
+    file_digest,
+    validate_comparison_report,
+)
+from pipeline_tooling.comparison import markdown as comparison_markdown
 from pipeline_tooling.corpus import (
     DEFAULT_CORPUS,
     PIN_SCHEMA,
     evidence_digests,
+    report_harness_assembly,
     export_hf_corpus,
     load_direct_corpus,
     load_pin,
@@ -62,16 +81,38 @@ from pipeline_tooling.results import (
 # catalog `--archive` writes (P4-D19). One name so the self-tests can move it.
 LOCAL_DIR = ROOT / ".local"
 
+# The harness assembly switch (`versioned_pipeline_harness.rs`, spec B-D1).
+# Only `promote package-checks` sets it, always to `production`; every other
+# command leaves it unset, so its children run the reference assembly.
+HARNESS_ASSEMBLY_VAR = "TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY"
+
+
+def _harness_assembly(extra_env):
+    """`production` when `extra_env` switches the harness to the production
+    assembly, `reference` otherwise."""
+    return "production" if (extra_env or {}).get(HARNESS_ASSEMBLY_VAR) == "production" else "reference"
+
+
+def _with_harness_assembly(evidence, assembly):
+    """The evidence a harness of `assembly` emits: `evidence` as is for the
+    reference assembly, which adds nothing, and with `harness_assembly` for
+    the production one, so a reference result never reads as production."""
+    return evidence if assembly == "reference" else {**evidence, "harness_assembly": assembly}
+
+
 # The ingest test binary hosts the shared app in-process (P4-D3): `run` and
 # `package` start one exact ignored test in it.
-INGEST_TEST_ARGS = ("-p", "trace-commons-server", "--bin", "trace-commons-ingest")
-CORPUS_HARNESS = "tests::pipeline_corpus_pg_tests::pipeline_corpus_run"
-PACKAGE_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_package_write"
+INGEST_TEST_ARGS = ("-p", "trace-commons-server", "--lib")
+CORPUS_HARNESS = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_corpus_run"
+PACKAGE_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_package_write"
 # `qualify --signing-key` and `keygen` (P5-D13): the signing step and the key
 # writer, two more ignored tests beside the package writer.
-ATTESTATION_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
-KEY_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
+ATTESTATION_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
+KEY_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
 BUNDLES = ("minimal", "compatibility")
+# `package` also builds the production package (spec B-D5), from the
+# deployment's env file; `run` never serves it as a built-in bundle.
+PACKAGE_BUNDLES = (*BUNDLES, "production")
 
 # The maximum age a signed result carries when `--evidence-max-age-seconds` is
 # not given, and the longest the server accepts
@@ -94,8 +135,8 @@ EPHEMERAL_COMMANDS = frozenset({"revision", "keygen"})
 
 # `restore-drill`: the two ignored tests around the dump, the restore, and
 # the artifact copy, and the one check the resume emits.
-RESTORE_SEED = "tests::pipeline_restore_pg_tests::pipeline_restore_seed"
-RESTORE_RESUME = "tests::pipeline_restore_pg_tests::pipeline_restore_resume"
+RESTORE_SEED = "ingest::app::tests::pipeline_restore_pg_tests::pipeline_restore_seed"
+RESTORE_RESUME = "ingest::app::tests::pipeline_restore_pg_tests::pipeline_restore_resume"
 RESTORE_FINGERPRINT_SCHEMA = "trace_commons.pipeline_restore_fingerprint.v1"
 RESTORE_SAFE_BLOCKER = "filesystem_restore_local_only"
 _RESTORE_FINGERPRINT_HASHES = (
@@ -125,6 +166,11 @@ _RESTORE_FINGERPRINT_COUNTS = (
     "tenant_count",
     "audit_event_count",
 )
+# The counts a seed under a zero `NoveltyUtility` delta has as zero: Score
+# awards nothing, so no run settles a leg or writes a ledger event.
+_RESTORE_CREDIT_COUNTS = frozenset(
+    {"adapter_request_count", "completed_settlement_count", "completed_credit_event_count"}
+)
 
 # `qualify`: the contract test manifest whose bytes it hashes (ruling T11-2),
 # and its three corpus runs, in `REQUIRED_CORPUS_CHECK_IDS` order, as
@@ -136,6 +182,12 @@ QUALIFY_CORPUS_RUNS = (
     ("compatibility", DEFAULT_CORPUS),
     ("compatibility", HF_LOCAL_PIN),
 )
+
+# `compare`: the ignored test that sends each trace of a pin through the old
+# gate path and through the pipeline, and the two pins of `--self-test`.
+COMPARE_HARNESS = "ingest::app::tests::pipeline_compare_pg_tests::pipeline_compare_run"
+COMPARE_LOCAL_PIN = ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl/pin-local.json"
+COMPARE_RISK_PIN = ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl/pin-local-risk.json"
 
 _HASH = re.compile(r"sha256:[a-f0-9]{64}\Z")
 _KEY_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
@@ -208,7 +260,13 @@ def build_parser():
     run_parser.set_defaults(handler=run_corpus)
 
     package_parser = subparsers.add_parser("package", help="Build and sign a bundle package (this does not qualify it)")
-    package_parser.add_argument("--bundle", choices=BUNDLES, required=True)
+    package_parser.add_argument("--bundle", choices=PACKAGE_BUNDLES, required=True)
+    package_parser.add_argument(
+        "--env-file",
+        dest="env_file",
+        default=None,
+        help="The deployment's env file (--bundle production only); only its descriptor and gate variables are read.",
+    )
     package_parser.add_argument("--output", required=True, help="Where to write the signed package.")
     package_parser.add_argument(
         "--public-key-output", dest="public_key_output", required=True, help="Where to write the trusted key."
@@ -230,6 +288,29 @@ def build_parser():
         help="Use this existing PostgreSQL server instead of starting a container.",
     )
     restore_parser.set_defaults(handler=restore_drill)
+
+    compare_parser = subparsers.add_parser(
+        "compare", help="Send one pin through the old gate path and the pipeline and report each difference"
+    )
+    compare_parser.add_argument(
+        "--corpus", default=None, help="A comparison pin (an HF pin descriptor with with_events: true)."
+    )
+    compare_parser.add_argument(
+        "--self-test",
+        dest="self_test",
+        action="store_true",
+        help="Run the four scenarios that show that the comparison permits the ruled differences and fails on any other. Not evidence.",
+    )
+    compare_parser.add_argument(
+        "--limit", type=int, default=None, help="Compare only the first N traces (a partial run; not evidence)."
+    )
+    compare_parser.add_argument(
+        "--postgres-admin-url",
+        dest="postgres_admin_url",
+        default=None,
+        help="Use this existing PostgreSQL server instead of starting a container.",
+    )
+    compare_parser.set_defaults(handler=run_compare)
 
     qualify_parser = subparsers.add_parser(
         "qualify", help="Run every required pipeline check and write one qualification report (local evidence)"
@@ -286,6 +367,12 @@ def build_parser():
         "revision", help="Print the code revision hash of the working tree (the one a qualification run records)"
     )
     revision_parser.set_defaults(handler=revision)
+
+    # Spec 2026-10-08 Slice B: the operator-run production checks.
+    promote.add_parsers(
+        subparsers,
+        promote.Hooks(signing_options=signing_options, sign=sign_promoted_results, package_checks=run_package_checks),
+    )
 
     return parser
 
@@ -444,13 +531,16 @@ def prepare_corpus_run(run, bundle, package_path, key_path, corpus_path, expecte
     return CorpusRun(label, bundle, package_path, key_path, partitions, digests)
 
 
-def run_corpus_check(run, environment, corpus_run, *, step=None):
+def run_corpus_check(run, environment, corpus_run, *, step=None, extra_env=None, cargo_args=INGEST_TEST_ARGS):
     """One corpus run in its own scenario of `environment`: the harness, the
     transaction guard, and every check of its report, result, and evidence.
     Writes the latest report of its kind under `.local/` and returns
     `(local report path, report)`. `step` labels the harness step and the
     scenario (default: the check id). `run` and `qualify` both call this
-    (ruling T11-4)."""
+    (ruling T11-4); `promote package-checks` passes the production harness
+    variables in `extra_env` and its feature set in `cargo_args`, and the
+    report and evidence must then say the production assembly made them."""
+    assembly = _harness_assembly(extra_env)
     check_id = corpus_run.check_id
     step = step or check_id
     report_path = _corpus_report_path(run, corpus_run.label)
@@ -467,6 +557,7 @@ def run_corpus_check(run, environment, corpus_run, *, step=None):
         "TRACE_COMMONS_PIPELINE_CHECK_RUN_ID": run.run_id,
         "TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH": run.code_revision_hash,
     }
+    extra.update(extra_env or {})
     if len(corpus_run.partitions) == 2:
         extra["TRACE_COMMONS_PIPELINE_CORPUS_HOLDOUT_PATH"] = str(corpus_run.partitions[1])
     if corpus_run.package_path is not None:
@@ -475,7 +566,7 @@ def run_corpus_check(run, environment, corpus_run, *, step=None):
     else:
         extra["TRACE_COMMONS_PIPELINE_CORPUS_BUNDLE"] = corpus_run.bundle
     try:
-        cargo_test(run, step, INGEST_TEST_ARGS, CORPUS_HARNESS, child_environment(extra), exact=True, ignored=True)
+        cargo_test(run, step, cargo_args, CORPUS_HARNESS, child_environment(extra), exact=True, ignored=True)
     except StepFailed:
         _keep_failed_report(report_path, corpus_run.label)
         raise
@@ -490,6 +581,7 @@ def run_corpus_check(run, environment, corpus_run, *, step=None):
         raise ToolingError("corpus_report_malformed") from error
     validate_report(report)
     require(report["check_id"] == check_id, "corpus_report_check_mismatch")
+    require(report_harness_assembly(report) == assembly, "corpus_report_harness_assembly_mismatch")
     require(
         [section["corpus_digest"] for section in report["partitions"]] == corpus_run.digests,
         "corpus_digest_mismatch",
@@ -515,16 +607,19 @@ def run_corpus_check(run, environment, corpus_run, *, step=None):
     corpus_digest, input_digest = evidence_digests(report)
     require(
         evidence
-        == {
-            "fixtures": report["fixture_count"],
-            "completed": report["completed_fixture_count"],
-            "replay_same_run": report["replay_same_run_count"],
-            "changed_content_refused": report["changed_content_refused_count"],
-            "tenant_isolation": True,
-            "report_hash": sha256_digest(report_bytes),
-            "corpus_digest": corpus_digest,
-            "input_digest": input_digest,
-        },
+        == _with_harness_assembly(
+            {
+                "fixtures": report["fixture_count"],
+                "completed": report["completed_fixture_count"],
+                "replay_same_run": report["replay_same_run_count"],
+                "changed_content_refused": report["changed_content_refused_count"],
+                "tenant_isolation": True,
+                "report_hash": sha256_digest(report_bytes),
+                "corpus_digest": corpus_digest,
+                "input_digest": input_digest,
+            },
+            assembly,
+        ),
         "corpus_evidence_mismatch",
     )
     return _write_local_report(corpus_run.label, report_bytes, report), report
@@ -544,17 +639,437 @@ def run_corpus(args, run):
     print(f"PipelineRunOK: bundle={report['bundle_id']} fixtures={report['fixture_count']}")
 
 
+def _compare_pin(pin_path):
+    """`(pin, local directory or None)` of a comparison pin. A file that
+    cannot be read, or that is not a JSON object, is
+    `comparison_pin_unreadable`. A pin without `with_events: true` is
+    `comparison_pin_without_events`: its export has no session events. A
+    local fixture pin names its JSONL directory; a pin without one exports
+    from the HF dataset that it names.
+
+    Each of the three fields that only a comparison pin has is absent or
+    has its type, or the pin is `comparison_pin_unreadable`:
+    `local_jsonl_dir` is a string, `session_names` is a list of strings,
+    and `declared_privacy_risk` is a map of strings."""
+    require(isinstance(_read_json(pin_path, "comparison_pin_unreadable"), dict), "comparison_pin_unreadable")
+    pin = load_pin(pin_path)
+    require(pin.get("with_events") is True, "comparison_pin_without_events")
+    local = pin.get("local_jsonl_dir")
+    names = pin.get("session_names")
+    risks = pin.get("declared_privacy_risk")
+    require(local is None or isinstance(local, str), "comparison_pin_unreadable")
+    require(
+        names is None or (isinstance(names, list) and all(isinstance(name, str) for name in names)),
+        "comparison_pin_unreadable",
+    )
+    require(
+        risks is None or (isinstance(risks, dict) and all(isinstance(risk, str) for risk in risks.values())),
+        "comparison_pin_unreadable",
+    )
+    return pin, (ROOT / local if local else None)
+
+
+class CompareInput(NamedTuple):
+    """One export, ready for the harness: its three files, and what its
+    manifest says of the sample (the five digests, and the number of
+    traces in the two corpus files)."""
+
+    bootstrap: Path
+    holdout: Path
+    manifest: Path
+    pin: dict
+    trace_count: int
+
+
+def _compare_input(exported):
+    """The `CompareInput` of one `export_compare_corpus` result. A manifest
+    that cannot be read, or that lacks one of the five digests or a whole
+    `sample_count`, is `comparison_manifest_malformed`."""
+    bootstrap, holdout, manifest_path = exported
+    manifest = _read_json(manifest_path, "comparison_manifest_malformed")
+    require(isinstance(manifest, dict), "comparison_manifest_malformed")
+    pin = {field: manifest.get(field) for field in PIN_DIGEST_FIELDS}
+    trace_count = manifest.get("sample_count")
+    require(
+        all(isinstance(digest, str) and _HASH.fullmatch(digest) is not None for digest in pin.values())
+        and type(trace_count) is int
+        and trace_count >= 0,
+        "comparison_manifest_malformed",
+    )
+    return CompareInput(Path(bootstrap), Path(holdout), Path(manifest_path), pin, trace_count)
+
+
+def _compare_records_path(run, step):
+    return run.run_dir / f"{step}-records.jsonl"
+
+
+def _compare_once(run, environment, exported, check_id, step, *, limit=None, skew=None, release=False, emit=True):
+    """One harness run in its own scenario of `environment`. Returns
+    `(report or None, StepFailed or None, report bytes or None)`.
+
+    Each file of the run is in the run directory, with the step in its
+    name: the harness removes a report that exists at its report path.
+    `release` selects Cargo's optimized build (PC-D21). Without `emit`, the
+    harness gets none of the three check result variables, so it emits no
+    result (`--self-test`: one check id, four runs).
+
+    A harness that fails keeps its failure: the transaction guard does not
+    apply, and a report that is missing or not valid is left out. A harness
+    that passes must show at least 5 committed transactions, and its
+    report, when there is one, must be valid.
+
+    A valid report must be the report of this run, for a harness that
+    passes and for one that fails: it names `check_id`
+    (`comparison_report_check_mismatch`), the five digests of the export
+    manifest (`comparison_report_pin_mismatch`), the manifest's trace count
+    (`comparison_report_trace_count_mismatch`), and the skew that this call
+    set, or none (`comparison_report_skew_mismatch`). A report with a skew
+    never has a check result (`comparison_skew_with_check_result`)."""
+    report_path = run.run_dir / f"{step}-report.json"
+    scenario = environment.scenario(step)
+    extra = {
+        "TRACE_COMMONS_PG_TEST_DATABASE_URL": scenario.runtime_url,
+        "TRACE_COMMONS_PIPELINE_COMPARE_BOOTSTRAP_PATH": str(exported.bootstrap),
+        "TRACE_COMMONS_PIPELINE_COMPARE_HOLDOUT_PATH": str(exported.holdout),
+        "TRACE_COMMONS_PIPELINE_COMPARE_MANIFEST_PATH": str(exported.manifest),
+        "TRACE_COMMONS_PIPELINE_COMPARE_CHECK_ID": check_id,
+        "TRACE_COMMONS_PIPELINE_COMPARE_REPORT_PATH": str(report_path),
+        "TRACE_COMMONS_PIPELINE_COMPARE_RECORDS_PATH": str(_compare_records_path(run, step)),
+        # The milliseconds of each trace. Not part of the report or of a digest.
+        "TRACE_COMMONS_PIPELINE_COMPARE_TIMING_PATH": str(run.run_dir / f"{step}-timing.jsonl"),
+        "TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT": str(scenario.artifact_root),
+        # One random key per harness run (P4-D18); only the child sees it.
+        "TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX": secrets.token_hex(32),
+    }
+    if emit:
+        extra["TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR"] = str(run.results_dir)
+        extra["TRACE_COMMONS_PIPELINE_CHECK_RUN_ID"] = run.run_id
+        extra["TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH"] = run.code_revision_hash
+    if limit is not None:
+        extra["TRACE_COMMONS_PIPELINE_COMPARE_LIMIT"] = str(limit)
+    if skew is not None:
+        extra["TRACE_COMMONS_PIPELINE_COMPARE_SKEW"] = skew
+    # `cargo_test` puts the arguments in its list command and in its run
+    # command, so the two use one profile.
+    cargo_args = (*INGEST_TEST_ARGS, "--release") if release else INGEST_TEST_ARGS
+    failure = None
+    try:
+        cargo_test(run, step, cargo_args, COMPARE_HARNESS, child_environment(extra), exact=True, ignored=True)
+    except StepFailed as error:
+        failure = error
+    if failure is None:
+        committed = scenario.committed_transactions(scenario.pilot_database)
+        require(committed >= 5, f"database_check_executed_nothing:{step}")
+
+    if not report_path.is_file():
+        return None, failure, None
+    report_bytes = report_path.read_bytes()
+    try:
+        try:
+            report = json.loads(report_bytes)
+        except ValueError as error:
+            raise ToolingError("comparison_report_malformed") from error
+        validate_comparison_report(report)
+    except ToolingError:
+        if failure is None:
+            raise
+        return None, failure, None
+    require(report["check_id"] == check_id, "comparison_report_check_mismatch")
+    require(report["pin"] == exported.pin, "comparison_report_pin_mismatch")
+    require(report["trace_count"] == exported.trace_count, "comparison_report_trace_count_mismatch")
+    # The more exact label first: a skew together with a result of the check.
+    require(
+        report["skew"] is None or not (run.results_dir / f"{check_id}.result.json").exists(),
+        "comparison_skew_with_check_result",
+    )
+    require(report["skew"] == skew, "comparison_report_skew_mismatch")
+    return report, failure, report_bytes
+
+
+def _compare_failure_label(report):
+    """The first failure that a valid report names, or `None`: a pair that
+    loses the alignment and a refused pair are also unexplained, and the
+    more exact label must win. The harness gives a failure that it kept (a
+    driver error, for example) before each of these. The command sees only
+    the report, so for a run that such a failure cut short after a
+    difference it gives the label of the difference; `partial` then says
+    that the run did not complete."""
+    if report["alignment_lost_position"] is not None:
+        return ALIGNMENT_LABEL
+    if any(report["distribution"][side]["refused"] for side in SIDES):
+        return REFUSED_LABEL
+    if report["unexplained_total"] > 0:
+        return UNEXPLAINED_LABEL
+    if report["branch_gaps"]:
+        return BRANCH_LABEL
+    return None
+
+
+def _require_passing_report(report):
+    """After a harness run that passed: it wrote a report
+    (`comparison_report_missing`), and the report names no failure."""
+    require(report is not None, "comparison_report_missing")
+    label = _compare_failure_label(report)
+    require(label is None, label)
+
+
+def _write_compare_report(check_id, report, report_bytes, *, failed=False):
+    """The latest report of this check under `.local/`, beside its Markdown
+    view. One name for each check id and for a partial run, so a `--limit`
+    run or a local-pin run does not replace the report of the full run. The
+    JSON bytes are the harness's own, so they keep the hash that the check
+    evidence names.
+
+    `failed`: the harness failed. No check result exists for its report, so
+    the name of a full report has `-failed`, and the plain name is the name
+    of a pass only. A partial report keeps `-partial`."""
+    if report["partial"]:
+        suffix = "-partial"
+    elif failed:
+        suffix = "-failed"
+    else:
+        suffix = ""
+    json_path = LOCAL_DIR / f"pipeline-comparison-{check_id}{suffix}.json"
+    atomic_write(json_path, report_bytes)
+    atomic_write(json_path.with_suffix(".md"), comparison_markdown(report).encode())
+    return json_path
+
+
+def _require_compare_result(run, results, check_id, report, report_bytes):
+    """A full run that passed: a current pass result for `check_id` from
+    this run, with the package that the report names and with evidence
+    equal to the report's counts and to the hashes of the records file
+    (`comparison_records_missing` without one) and of the report file."""
+    require_current_pass_results(run, results, {check_id: CheckSpec(check_id, digests_required=True)})
+    result = results[check_id]
+    require(
+        (result.package_hash, result.configuration_digest, result.dependency_digest)
+        == (report["package_hash"], report["configuration_digest"], report["dependency_digest"]),
+        "comparison_report_package_mismatch",
+    )
+    evidence = _read_json(run.results_dir / f"{check_id}.evidence.json", "comparison_evidence_malformed")
+    validate_evidence(evidence)
+    try:
+        records_hash = file_digest(_compare_records_path(run, "compare_run"))
+    except OSError as error:
+        raise ToolingError("comparison_records_missing") from error
+    require(
+        evidence
+        == {
+            "traces": report["compared_count"],
+            "equal": report["equal_count"],
+            "permitted": report["permitted_total"],
+            "unexplained": 0,
+            "records_hash": records_hash,
+            "report_hash": sha256_digest(report_bytes),
+        },
+        "comparison_evidence_mismatch",
+    )
+
+
+def _compare_self_test(args, run):
+    """`compare --self-test`: four harness runs of the two local pins in one
+    environment, with the debug build. Each run must give its one expected
+    result:
+
+    1. The local pin passes, and compares each of its traces
+       (`compare_self_test_pass_incomplete`).
+    2. The risk pin passes, and compares each of its traces. Its declared
+       medium risk is one pair that the rule `medium_risk_privacy_review`
+       permits. Its declared high risk is one pair that both sides
+       quarantine and that compares equal (PC-D27). The `quarantine` count
+       is 1 on the baseline and 2 on the candidate, and no side rejects a
+       trace. Nothing else is allowed: no unexplained difference, no other
+       rule, no refused receipt, no alignment loss. A wrong count gives
+       `compare_self_test_risk_fields`. The other failures give the label
+       of a run that must pass: `comparison_has_unexplained_differences`,
+       `comparison_receipt_refused`, `comparison_alignment_lost`,
+       `comparison_gate_branch_not_exercised`, or
+       `compare_self_test_pass_incomplete`.
+    3. The local pin with the baseline's quality floor skewed fails
+       (`compare_self_test_skew_passed`), and its report names the pair at
+       which the run stopped and `quality_passed`
+       (`compare_self_test_skew_fields`).
+    4. The local pin again gives the report of run 1
+       (`compare_self_test_not_deterministic`).
+
+    No scenario emits a check result, and no report goes under `.local/`:
+    the result is not evidence."""
+    check_id = "pipeline_comparison_local"
+    exports = {}
+    for name, pin_path in (("local", COMPARE_LOCAL_PIN), ("risk", COMPARE_RISK_PIN)):
+        _, local_dir = _compare_pin(pin_path)
+        exports[name] = _compare_input(
+            export_compare_corpus(run, pin_path, child_environment({}), name=name, local_dir=local_dir, release=False)
+        )
+
+    with Environment(run, postgres_admin_url=args.postgres_admin_url) as environment:
+
+        def scenario(step, name, *, skew=None, passed_label=None):
+            """The report of one scenario. Without `passed_label` the
+            harness must pass and compare each trace of a pin that has
+            one. With it, the harness must fail and leave a valid report."""
+            report, failure, _ = _compare_once(
+                run, environment, exports[name], check_id, step, skew=skew, emit=False
+            )
+            if passed_label is None:
+                if failure is not None:
+                    raise failure
+                _require_passing_report(report)
+                require(
+                    not report["partial"] and report["compared_count"] == report["trace_count"] > 0,
+                    "compare_self_test_pass_incomplete",
+                )
+                return report
+            require(failure is not None, passed_label)
+            if report is None:
+                raise failure
+            return report
+
+        first = scenario("compare_self_pass", "local")
+        risk = scenario("compare_self_risk", "risk")
+        # The alignment keeps the two indexes equal after an admission
+        # difference: no chain of later differences, and no early stop.
+        require(
+            risk["unexplained_counts"] == {}
+            and risk["unexplained_total"] == 0
+            and risk["permitted_counts"] == {"medium_risk_privacy_review": 1}
+            and risk["permitted_total"] == 1
+            and not risk["partial"]
+            and risk["alignment_lost_position"] is None
+            and not any(risk["distribution"][side]["refused"] for side in SIDES)
+            # The declared high trace is held on the two sides (PC-D27); the
+            # declared medium trace is held on the candidate side only.
+            and not any(risk["distribution"][side]["reject"] for side in SIDES)
+            and risk["distribution"]["baseline"]["quarantine"] == 1
+            and risk["distribution"]["candidate"]["quarantine"] == 2,
+            "compare_self_test_risk_fields",
+        )
+        skewed = scenario(
+            "compare_self_skew", "local", skew="baseline_quality_floor", passed_label="compare_self_test_skew_passed"
+        )
+        # PC-D20: the run stops at the pair after which the indexes can differ.
+        require(
+            skewed["alignment_lost_position"] is not None and "quality_passed" in skewed["unexplained_counts"],
+            "compare_self_test_skew_fields",
+        )
+        repeat = scenario("compare_self_repeat", "local")
+        require(repeat["report_digest"] == first["report_digest"], "compare_self_test_not_deterministic")
+    print("PipelineCompareSelfTestOK: scenarios=4")
+
+
+def run_compare(args, run):
+    """`compare --corpus PIN`: exports the pin with its session events,
+    checks the export against the pin before any database starts, and runs
+    the comparison harness one time, with Cargo's optimized build for the
+    two (PC-D21). The check id comes from the pin and from nothing else: a
+    pin with a local directory gives `pipeline_comparison_local`, a pin
+    without one `pipeline_comparison_hf`.
+
+    A harness that fails and leaves a valid report: the report goes under
+    `.local/` with `-partial` or `-failed` in its name, one line names the
+    run and the report, and the failure is the first label that the report
+    names (the alignment, a refused receipt, an unexplained difference, a
+    gate branch with no evidence), or else the step failure. A report write
+    that fails does not replace that failure.
+
+    A harness that passes must leave a report that names none of the four
+    and that compared the expected number of traces: the limit, or each
+    trace of the pin (`comparison_compared_count_mismatch`). A full run must
+    also have a pin with all five digests, a current pass result whose
+    evidence agrees with the report, and no other result. A partial run
+    (`--limit` below the trace count) has no check result
+    (`comparison_check_results_unexpected`) and is not evidence: its line
+    says `partial=true`. The tree is examined again before the report goes
+    under `.local/`. Nothing goes to the lab catalog.
+
+    `compare --self-test`: see `_compare_self_test`."""
+    require(args.corpus is not None or args.self_test, "compare_corpus_or_self_test_required")
+    require(args.corpus is None or not args.self_test, "compare_corpus_and_self_test_conflict")
+    require(args.limit is None or not args.self_test, "compare_self_test_takes_no_option")
+    require(args.limit is None or args.limit >= 1, "compare_limit_invalid")
+    if args.self_test:
+        _compare_self_test(args, run)
+        return
+
+    pin_path = Path(args.corpus).resolve()
+    pin, local_dir = _compare_pin(pin_path)
+    # The declared risks change only the corpus files, so a run that can
+    # emit a result needs each digest of the pin.
+    pinned = all(pin.get(field) is not None for field in PIN_DIGEST_FIELDS)
+    require(pinned or args.limit is not None, "comparison_pin_digest_missing")
+    check_id = "pipeline_comparison_local" if local_dir is not None else "pipeline_comparison_hf"
+    exported = _compare_input(
+        export_compare_corpus(run, pin_path, child_environment({}), name="corpus", local_dir=local_dir, release=True)
+    )
+    # The number of traces that a pass compares. A limit at or above the
+    # trace count does not make a partial run, so the rule for the pin's
+    # digests applies before a database starts.
+    expected = exported.trace_count if args.limit is None else min(args.limit, exported.trace_count)
+    require(pinned or expected < exported.trace_count, "comparison_pin_digest_missing")
+    with Environment(run, postgres_admin_url=args.postgres_admin_url) as environment:
+        started = time.monotonic()
+        report, failure, report_bytes = _compare_once(
+            run, environment, exported, check_id, "compare_run", limit=args.limit, release=True
+        )
+        seconds = int(time.monotonic() - started)
+
+    if failure is not None:
+        if report is None:
+            raise failure
+        label = _compare_failure_label(report)
+        try:
+            shown = _shown(_write_compare_report(check_id, report, report_bytes, failed=True))
+        except OSError:
+            # The failure of the run must win: the report stays in the run
+            # directory, and no line names a file under `.local/`.
+            shown = None
+        if shown is not None:
+            lost = report["alignment_lost_position"]
+            print(
+                f"PipelineCompareReport: unexplained={report['unexplained_total']} "
+                f"alignment_lost={'none' if lost is None else lost} "
+                f"partial={'true' if report['partial'] else 'false'} run={run.run_id} report={shown}"
+            )
+        raise ToolingError(label) if label is not None else failure
+    _require_passing_report(report)
+    require(pinned or report["partial"], "comparison_pin_digest_missing")
+    require(report["compared_count"] == expected, "comparison_compared_count_mismatch")
+    results = load_results(run)
+    if report["partial"]:
+        require(not results, "comparison_check_results_unexpected")
+    else:
+        _require_compare_result(run, results, check_id, report, report_bytes)
+        require(set(results) == {check_id}, "comparison_check_results_unexpected")
+    # Before the report goes under `.local/`: a run that is refused leaves
+    # no report there that reads as a pass.
+    run.require_code_revision_unchanged()
+    shown = _shown(_write_compare_report(check_id, report, report_bytes))
+    print(
+        f"PipelineCompareOK: traces={report['compared_count']} equal={report['equal_count']} "
+        f"permitted={report['permitted_total']} unexplained=0 "
+        f"partial={'true' if report['partial'] else 'false'} seconds={seconds} run={run.run_id} report={shown}"
+    )
+
+
 def run_package(args, run):
     require((args.signing_key is None) == (args.key_id is None), "package_signing_key_and_key_id_required")
     require(args.key_id is None or _KEY_ID.fullmatch(args.key_id) is not None, "package_key_id_invalid")
     output = Path(args.output).resolve()
     key_output = Path(args.public_key_output).resolve()
     require(output != key_output, "package_outputs_must_differ")
+    production = args.bundle == "production"
+    require(not production or args.env_file is not None, "package_env_file_required")
+    require(production or args.env_file is None, "package_env_file_unexpected")
     extra = {
         "TRACE_COMMONS_PIPELINE_PACKAGE_BUNDLE": args.bundle,
         "TRACE_COMMONS_PIPELINE_PACKAGE_OUTPUT": str(output),
         "TRACE_COMMONS_PIPELINE_TRUSTED_KEY_OUTPUT": str(key_output),
     }
+    if production:
+        # Spec B-D5: the production package from the deployment's own
+        # descriptor and gate variables, offline; nothing else of the file.
+        extra.update(envfile.allowlisted(envfile.read_env_file(args.env_file), envfile.PACKAGE_VARIABLES))
     if args.signing_key is not None:
         extra["TRACE_COMMONS_PIPELINE_PACKAGE_SIGNING_KEY_PATH"] = str(Path(args.signing_key).resolve())
         extra["TRACE_COMMONS_PIPELINE_PACKAGE_KEY_ID"] = args.key_id
@@ -651,32 +1166,53 @@ def require_same_artifact_bytes(source, destination):
 
 
 def _read_restore_fingerprint(path):
-    """The seed's fingerprint file: exactly its schema, seven hashes, and
-    eight positive counts, two tenants or more among them."""
+    """The seed's fingerprint file: exactly its schema, its hashes, its
+    counts, and `credit_delta_zero`, two tenants or more among them. Every
+    count is positive, except that a seed under a zero `NoveltyUtility`
+    delta (the pilot's) has exactly zero of the three credit counts."""
     value = _read_json(path, "restore_fingerprint_invalid")
     require(
         isinstance(value, dict)
-        and set(value) == {"schema", *_RESTORE_FINGERPRINT_HASHES, *_RESTORE_FINGERPRINT_COUNTS}
+        and set(value)
+        == {"schema", "credit_delta_zero", *_RESTORE_FINGERPRINT_HASHES, *_RESTORE_FINGERPRINT_COUNTS}
         and value["schema"] == RESTORE_FINGERPRINT_SCHEMA
+        and type(value["credit_delta_zero"]) is bool
         and all(
             isinstance(value[key], str) and _HASH.fullmatch(value[key]) is not None
             for key in _RESTORE_FINGERPRINT_HASHES
         )
-        and all(type(value[key]) is int and value[key] > 0 for key in _RESTORE_FINGERPRINT_COUNTS)
+        and all(type(value[key]) is int for key in _RESTORE_FINGERPRINT_COUNTS)
+        and all(
+            value[key] == 0 if value["credit_delta_zero"] and key in _RESTORE_CREDIT_COUNTS else value[key] > 0
+            for key in _RESTORE_FINGERPRINT_COUNTS
+        )
         and value["tenant_count"] >= 2,
         "restore_fingerprint_invalid",
     )
     return value
 
 
-def run_restore_drill(run, environment):
+def _step_index_root(extra_env, step):
+    """The restore drill's seed and resume each open their own production
+    pipeline index, `<root>/<step>`, so the resume starts from an empty one
+    and rebuilds it (its rebuild target is `<root>/<step>-rebuilt`). Nothing
+    without a production index root."""
+    root = (extra_env or {}).get(promote.PIPELINE_INDEX_ROOT_VAR)
+    return {} if root is None else {promote.PIPELINE_INDEX_ROOT_VAR: str(Path(root) / step)}
+
+
+def run_restore_drill(run, environment, *, extra_env=None, cargo_args=INGEST_TEST_ARGS):
     """One restore drill in its own scenario of `environment`, in this order:
     the seed (on `<db>_pilot`), the dump of `<db>_pilot`, `<db>_restored`
     created in the same cluster, the restore, the artifact copy and its
     byte comparison, then the resume against `<db>_restored`. Checks the
     resume's `pipeline_restore_drill` result against the seed and returns
     the seed's fingerprint. Takes the environment as an argument so that
-    `qualify` can run it beside its other checks."""
+    `qualify` can run it beside its other checks. `promote package-checks`
+    passes the production harness variables in `extra_env` (both processes
+    get them) and its feature set in `cargo_args`; the evidence must then say
+    the production assembly made it."""
+    assembly = _harness_assembly(extra_env)
     scenario = environment.scenario("restore_drill")
     source_root = scenario.artifact_root
     restored_root = source_root.with_name(f"{source_root.name}_restored")
@@ -687,15 +1223,17 @@ def run_restore_drill(run, environment):
         # the objects the seed wrote. Only the children see it.
         "TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX": secrets.token_hex(32),
         "TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH": str(fingerprint_path),
+        **(extra_env or {}),
     }
 
     seed_env = {
         **shared,
         "TRACE_COMMONS_PG_TEST_DATABASE_URL": scenario.runtime_url,
         "TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT": str(source_root),
+        **_step_index_root(extra_env, "seed"),
     }
     cargo_test(
-        run, "restore_seed", INGEST_TEST_ARGS, RESTORE_SEED, child_environment(seed_env), exact=True, ignored=True
+        run, "restore_seed", cargo_args, RESTORE_SEED, child_environment(seed_env), exact=True, ignored=True
     )
     require(
         scenario.committed_transactions(scenario.pilot_database) >= 5,
@@ -723,9 +1261,10 @@ def run_restore_drill(run, environment):
         "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR": str(run.results_dir),
         "TRACE_COMMONS_PIPELINE_CHECK_RUN_ID": run.run_id,
         "TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH": run.code_revision_hash,
+        **_step_index_root(extra_env, "resume"),
     }
     cargo_test(
-        run, "restore_resume", INGEST_TEST_ARGS, RESTORE_RESUME, child_environment(resume_env), exact=True, ignored=True
+        run, "restore_resume", cargo_args, RESTORE_RESUME, child_environment(resume_env), exact=True, ignored=True
     )
     require(
         scenario.committed_transactions(scenario.restored_database) >= 5,
@@ -742,22 +1281,26 @@ def run_restore_drill(run, environment):
     validate_evidence(evidence)
     require(
         evidence
-        == {
-            "database_fingerprint": seed["database_fingerprint"],
-            "artifact_fingerprint": seed["artifact_fingerprint"],
-            "index_entry_set_hash": seed["index_entry_set_hash"],
-            "pending_runs_resumed": 1,
-            "duplicate_effects": 0,
-            "rls_tables_checked": seed["rls_table_count"],
-            "rls_policy_set_hash": seed["rls_policy_set_hash"],
-            "rls_policy_count": seed["rls_policy_count"],
-            "rls_flag_set_hash": seed["rls_flag_set_hash"],
-            "rls_flag_table_count": seed["rls_flag_table_count"],
-            "runtime_privilege_set_hash": seed["runtime_privilege_set_hash"],
-            "tenant_fingerprint": seed["tenant_fingerprint"],
-            "tenant_count": seed["tenant_count"],
-            "audit_events_verified": seed["audit_event_count"],
-        },
+        == _with_harness_assembly(
+            {
+                "database_fingerprint": seed["database_fingerprint"],
+                "artifact_fingerprint": seed["artifact_fingerprint"],
+                "index_entry_set_hash": seed["index_entry_set_hash"],
+                "pending_runs_resumed": 1,
+                "duplicate_effects": 0,
+                "rls_tables_checked": seed["rls_table_count"],
+                "rls_policy_set_hash": seed["rls_policy_set_hash"],
+                "rls_policy_count": seed["rls_policy_count"],
+                "rls_flag_set_hash": seed["rls_flag_set_hash"],
+                "rls_flag_table_count": seed["rls_flag_table_count"],
+                "runtime_privilege_set_hash": seed["runtime_privilege_set_hash"],
+                "tenant_fingerprint": seed["tenant_fingerprint"],
+                "tenant_count": seed["tenant_count"],
+                "audit_events_verified": seed["audit_event_count"],
+                **({"credit_delta_zero": True} if seed["credit_delta_zero"] else {}),
+            },
+            assembly,
+        ),
         "restore_evidence_mismatch",
     )
     return seed
@@ -807,15 +1350,17 @@ def run_binding_checks(run):
     return digest
 
 
-def run_database_check(run, scenario, check):
+def run_database_check(run, scenario, check, *, extra_env=None):
     """One required database check in its own scenario: its exact test,
     pointed at the scenario's database and the run's result directory, then
     the transaction guard on the database the test ran in, then a current
-    pass result for its check id."""
+    pass result for its check id. `extra_env` is `promote package-checks`'
+    production harness variables."""
     extra = {
         "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR": str(run.results_dir),
         "TRACE_COMMONS_PIPELINE_CHECK_RUN_ID": run.run_id,
         "TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH": run.code_revision_hash,
+        **(extra_env or {}),
     }
     if check.database == "upgrade":
         extra["TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"] = scenario.upgrade_url
@@ -827,6 +1372,49 @@ def run_database_check(run, scenario, check):
     cargo_test(run, check.check_id, check.cargo_args, check.test_name, env, exact=True, ignored=check.ignored)
     require(scenario.committed_transactions(database) >= 5, f"database_check_executed_nothing:{check.check_id}")
     require_current_pass_results(run, load_results(run), {check.check_id: CheckSpec(check.check_id, check.digests)})
+
+
+def run_package_checks(run, *, harness_env, cargo_features, network_pin, postgres_admin_url):
+    """`promote package-checks` (spec B-D1): the four checks that test the
+    package, each in its own scenario with `harness_env` (the production
+    harness variables) and `cargo_features` added, so each runs on the
+    production assembly. Each check gets its own index directory under the
+    harness index root. The compatibility corpus serves the run's package as
+    `pipeline_http_corpus_compatibility`; the HF corpus is exported from the
+    network pin first, so a refused download starts no database."""
+    package_path = Path(harness_env[promote.HARNESS_PACKAGE_PATH_VAR])
+    key_path = Path(harness_env[promote.HARNESS_TRUSTED_KEY_PATH_VAR])
+    index_root = Path(harness_env[promote.PIPELINE_INDEX_ROOT_VAR])
+
+    def env_for(check_id):
+        return {**harness_env, promote.PIPELINE_INDEX_ROOT_VAR: str(index_root / check_id)}
+
+    [bundle_check] = [check for check in REQUIRED_DATABASE_CHECKS if check.digests]
+    bundle_check = dataclasses.replace(bundle_check, cargo_args=(*bundle_check.cargo_args, *cargo_features))
+    cargo_args = (*INGEST_TEST_ARGS, *cargo_features)
+    compatibility = CorpusRun(
+        "compatibility", None, package_path, key_path, [DEFAULT_CORPUS], [load_direct_corpus(DEFAULT_CORPUS)[1]]
+    )
+    is_pin, partitions = _corpus_partitions(run, Path(network_pin), None)
+    require(is_pin, "hf_network_pin_invalid")
+    hf = CorpusRun(
+        "hf_local", None, package_path, key_path, partitions, [load_direct_corpus(path)[1] for path in partitions]
+    )
+    require(
+        sorted([bundle_check.check_id, compatibility.check_id, hf.check_id, RESTORE_CHECK_ID])
+        == list(promote.package_check_ids()),
+        "promote_package_checks_invalid",
+    )
+    with Environment(run, postgres_admin_url=postgres_admin_url) as environment:
+        run_database_check(
+            run, environment.scenario(bundle_check.check_id), bundle_check, extra_env=env_for(bundle_check.check_id)
+        )
+        for corpus_run in (compatibility, hf):
+            run_corpus_check(
+                run, environment, corpus_run, extra_env=env_for(corpus_run.check_id), cargo_args=cargo_args
+            )
+        run_restore_drill(run, environment, extra_env=env_for(RESTORE_CHECK_ID), cargo_args=cargo_args)
+    require(not run.cleanup_failed, "cleanup_failed")
 
 
 def corpus_records(run):
@@ -967,7 +1555,7 @@ def _fail_closed(run, inputs, label):
     _write_failed_report(run, inputs, label)
 
 
-def attest_results(run, accepted, signing):
+def attest_results(run, accepted, signing, cargo_args=INGEST_TEST_ARGS):
     """The signing step: starts the ignored test
     `pipeline_check_attestations_write`, which signs the result file of each
     accepted check (`accepted`: check id to the `CheckResult` that
@@ -991,7 +1579,7 @@ def attest_results(run, accepted, signing):
         "TRACE_COMMONS_PIPELINE_CHECK_MAX_AGE_SECONDS": str(signing.maximum_age_seconds),
     }
     cargo_test(
-        run, "check_attestations", INGEST_TEST_ARGS, ATTESTATION_WRITER, child_environment(extra), exact=True, ignored=True
+        run, "check_attestations", cargo_args, ATTESTATION_WRITER, child_environment(extra), exact=True, ignored=True
     )
     return require_attestations(run, accepted, signing.key_id, signing.maximum_age_seconds, staging)
 
@@ -1015,6 +1603,25 @@ def publish_attestations(run, accepted):
         staging.rmdir()
     except OSError as error:
         raise ToolingError("check_attestation_publish_failed") from error
+
+
+def sign_promoted_results(run, accepted, signing, cargo_args):
+    """`promote sign`'s signing step: `attest_results` on `cargo_args`, then
+    `publish_attestations`. Anything that fails after signing started
+    removes what was signed before the failure is raised, so a failed sign
+    leaves no attestation in the run (or says
+    `check_attestation_discard_failed` beside the original label)."""
+    try:
+        attested = attest_results(run, accepted, signing, cargo_args)
+        run.require_code_revision_unchanged()
+        publish_attestations(run, accepted)
+    except BaseException as error:
+        if not discard_attestations(run):
+            print(f"PipelineFailure: {DISCARD_FAILED_LABEL}", file=sys.stderr)
+            if isinstance(error, ToolingError) and not isinstance(error, StepFailed):
+                raise ToolingError(f"{error}.{DISCARD_FAILED_LABEL}") from error
+        raise
+    return attested
 
 
 def qualify(args, run):
@@ -1096,6 +1703,12 @@ def qualify(args, run):
     )
 
 
+def _wrote_anything(run):
+    """Whether any file is in the run directory (`Run.create` makes only
+    empty directories)."""
+    return any(path.is_file() for path in run.run_dir.rglob("*"))
+
+
 def main(argv=None):
     args = parse_args(argv)
     run = Run.create()
@@ -1116,7 +1729,16 @@ def main(argv=None):
         primary_label = str(error)
     except KeyboardInterrupt:
         primary = 130
-    if getattr(args, "command", None) in EPHEMERAL_COMMANDS and (primary == 0 or not any(run.run_dir.rglob("*.log"))):
+    no_logs = not any(run.run_dir.rglob("*.log"))
+    mode = getattr(args, "run_dir_mode", None)
+    if (
+        (getattr(args, "command", None) in EPHEMERAL_COMMANDS and (primary == 0 or no_logs))
+        # `promote` subcommands after `init` work in the run `init` made.
+        or mode == promote.NEVER_USED
+        # `promote init` and `hf-pin record` keep their run unless refused
+        # before they wrote anything.
+        or (mode == promote.KEEP_UNLESS_REFUSED and primary != 0 and no_logs and not _wrote_anything(run))
+    ):
         # `revision` and `keygen` keep nothing: no empty run directory is left
         # behind. A failed step keeps its log, and the failure line names it.
         shutil.rmtree(run.run_dir, ignore_errors=True)

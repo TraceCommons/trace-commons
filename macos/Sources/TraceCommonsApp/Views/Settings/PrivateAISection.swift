@@ -3,41 +3,36 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-/// Where the Private AI switch moved to, and the route disclosure: the raw
-/// send, both enclaves, and where the witness came from. The pointer draws
-/// nothing if the core's words did not arrive; the disclosure always draws
+/// The Private AI section: the standard settings, the local tools and the
+/// connection (owner, 2026-10-10: moved here from the Private AI tab, whose
+/// foot card opens this section), then the route disclosure: the raw send,
+/// both enclaves, and where the witness came from. The panels draw nothing
+/// if the core's words did not arrive; the disclosure always draws
 /// something, so the outer container is always present and carries the
 /// refresh. Unreadable is said as such and never drawn as some other route.
 struct PrivateAISection: View {
     @EnvironmentObject private var model: AppModel
-    /// Where the pointer goes when Settings is the Monitor's modal: it closes
-    /// the modal and opens the Inference tab (Ron's #1146). With none, the
-    /// pointer opens the Monitor at Inference (`OpenMonitor`).
-    var onPointer: (() -> Void)? = nil
+    /// The switch and the tools, read through the data contract on this
+    /// window's own attachment to the daemon, as the Monitor's tab read them.
+    @State private var store = InferenceStore(client: nil)
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            if let copy = model.privateInferenceCopy {
-                GlassEyebrowCard(copy.settingsTitle) {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                        Text(copy.settingsMoved)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        // The label is the destination's own, so the tab
-                        // and this pointer can never name it differently.
-                        // It lands on the Inference inspector, where the
-                        // switch is.
-                        Button(copy.destination) {
-                            if let onPointer {
-                                onPointer()
-                            } else {
-                                OpenMonitor.request(.inference)
-                            }
-                        }
-                        .buttonStyle(GlassButtonStyle(.link))
-                    }
-                }
+            PrivateAISettingsPanels(store: store)
+            // Count Private AI tokens (Ron's #1287 review: moved here from
+            // Tools). This section is open before first run (R-38), so the
+            // switch waits for it (R-43): no Insights write is reachable
+            // outside first run.
+            if model.onboardingKnown, !model.requiresOnboarding,
+               let feed = model.daemonSettings?.insightsLedgerFeed {
+                GlassCard { ledgerFeed(feed) }
+            }
+            // Which terminal app managed sessions open in: its own card,
+            // outside the standard-settings panels, because it changes
+            // only managed sessions. Drawn only when the daemon found an
+            // app to offer.
+            if let snapshot = model.managedSnapshot, !snapshot.terminalChoices.isEmpty {
+                GlassCard { ManagedTerminalPicker(snapshot: snapshot) }
             }
             switch model.routeDisclosureState {
             case .shown(let disclosure):
@@ -57,6 +52,45 @@ struct PrivateAISection: View {
             }
         }
         .onAppear { model.refreshRouteDisclosure() }
+        // The managed snapshot the terminal picker reads.
+        .task { model.refreshManagedSessions() }
+        // The app's live client, re-attached whenever the daemon restarts
+        // or start-up ends (`MonitorWindowView.Attachment`).
+        .task(id: MonitorWindowView.Attachment(model)) {
+            let attachment = MonitorWindowView.Attachment(model)
+            store.attach(MonitorWindowView.sampleClient() ?? model.daemonData, awaiting: attachment.awaiting)
+            await store.run()
+        }
+    }
+}
+
+extension PrivateAISection {
+    /// The core's analytics words, which label the ledger feed's switch.
+    private static let insightsCopy = TCInsights.copy() ?? [:]
+
+    /// Whether Insights counts the tokens in calls routed here
+    /// (`insights_ledger_feed`). On by default (owner ruling, 2026-10-09);
+    /// this is the one place that turns it off. Drawn only from the
+    /// daemon's own value, never for a daemon that does not report it, and
+    /// moved only by a write the daemon confirmed.
+    @ViewBuilder
+    private func ledgerFeed(_ feed: Bool) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            Toggle(InsightsOverviewWords.text("analytics_setting_ledger_feed", Self.insightsCopy), isOn: Binding(
+                get: { feed },
+                set: { on in Task { await model.setInsightsLedgerFeed(on) } }
+            ))
+            .toggleStyle(GlassToggleStyle(.settings))
+            // It takes no second write while one is in flight.
+            .disabled(model.insightsLedgerFeedBusy)
+            Text(InsightsOverviewWords.text("analytics_feed_ledger", Self.insightsCopy))
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let refusal = model.insightsLedgerFeedRefusal {
+                GlassNotice(tone: .outside) { Text(refusal) }
+            }
+        }
     }
 }
 

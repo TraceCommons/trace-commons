@@ -151,9 +151,31 @@ before you add them.
   touched dependencies. CI runs the same check, plus advisories and sources,
   on every push.
 
+## Executing a multi-task plan
+
+When a plan's tasks are carried out one after another, write each task's
+tests but run the tests and CI checks once, after the last task. Per task,
+run at most a plain `cargo check` on the touched crates, so the next task
+builds on code that compiles. `CLAUDE.md` ("Executing a multi-task plan")
+has the details and the final run's command list.
+
+## Shared compile cache
+
+Install sccache and set `rustc-wrapper = "sccache"` under `[build]` in your
+user-level `~/.cargo/config.toml`, never the repository's, so worktrees
+share compiled third-party crates instead of each rebuilding them into its
+own `target/`. `CLAUDE.md` ("Shared compile cache") has the details.
+
 ## Everything else
 
 See `CLAUDE.md`: build and verification commands (note CI applies
 `RUSTFLAGS=-D warnings`, so plain `cargo check` does not catch what CI catches),
 the CI job inventory, hash-only logging, fail-closed defaults, tenant scoping,
 RLS, and the repo's known gotchas.
+
+## Product text
+
+When adding or changing user-facing UI text, follow
+[docs/ui-copy-guide.md](docs/ui-copy-guide.md). It covers short action labels,
+preserved context, separate titles and accessibility names, and shared-copy
+review checks.

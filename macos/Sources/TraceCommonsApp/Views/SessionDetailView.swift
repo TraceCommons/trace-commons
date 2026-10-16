@@ -117,16 +117,16 @@ struct SessionDetailView: View {
             } else if SkillLearningGate.offersInstallStatusRetry(state, detail: detail, recordStatus: record.status) {
                 GlassCard {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                        if let message = state.failure {
-                            GlassStatusLabel(message, status: .outside)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
                         Button(copy.retryRead) {
                             model.ensureLocalInstalledSkillStatus(for: record)
                         }
                         .buttonStyle(GlassButtonStyle(.glass))
                         .frame(minHeight: 44)
                         .disabled(state.isWorking)
+                        // The failed read, under the Retry it is about.
+                        if let message = state.failure {
+                            GlassAlert(message)
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -200,16 +200,14 @@ private struct PublicRunEditor: View {
                 } else {
                     editor
                 }
+                // A failed request, unboxed, under the buttons above it;
+                // its Dismiss a link after the line (Ron, 2026-10-09).
                 if let message = model.publicRunErrors[record.submissionID], message != dismissedError {
-                    GlassNotice(tone: .outside) {
-                        HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
-                            Text(message)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { dismissedError = message }
-                                .buttonStyle(GlassButtonStyle(.glass))
-                                .frame(minHeight: 44)
-                        }
+                    HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                        GlassAlert(message)
+                        Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { dismissedError = message }
+                            .buttonStyle(GlassButtonStyle(.link))
+                            .fixedSize()
                     }
                 }
             }
@@ -365,18 +363,20 @@ private struct PublicRunEditor: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            // The action first, Cancel edit after it as a link (Ron,
+            // 2026-10-09).
             HStack(spacing: GlassTokens.Space.s4) {
-                if detail.publication != nil {
-                    Button(copy.cancelEdit) { editingPublished = false }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                        .frame(minHeight: 44)
-                }
                 Button(copy.reviewPage) {
                     reviewDraft = makeDraft()
                 }
                 .buttonStyle(GlassButtonStyle(.primary))
                 .frame(minHeight: 44)
                 .disabled(makeDraft() == nil)
+                if detail.publication != nil {
+                    Button(copy.cancelEdit) { editingPublished = false }
+                        .buttonStyle(GlassButtonStyle(.link))
+                        .frame(minHeight: 44)
+                }
             }
         }
     }
@@ -414,16 +414,18 @@ private struct PublicRunEditor: View {
             if let sourceSlug = draft.sourceSlug {
                 previewField(copy.sourcePublicRun, "/runs/\(sourceSlug)")
             }
+            // Publish first, Edit draft after it as a link (Ron,
+            // 2026-10-09).
             HStack(spacing: GlassTokens.Space.s4) {
-                Button(copy.editDraft) { reviewDraft = nil }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    .frame(minHeight: 44)
                 Button(working ? copy.publishing : detail.publication == nil ? copy.publishPage : copy.updatePage) {
                     model.publishPublicRun(record, draft: draft)
                 }
                 .buttonStyle(GlassButtonStyle(.primary))
                 .frame(minHeight: 44)
                 .disabled(working)
+                Button(copy.editDraft) { reviewDraft = nil }
+                    .buttonStyle(GlassButtonStyle(.link))
+                    .frame(minHeight: 44)
             }
         }
     }

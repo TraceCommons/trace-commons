@@ -200,7 +200,7 @@ pub(super) async fn authenticated(
     }
     response.result.map_err(|error| {
         // The one server refusal on these routes a shell words on its own:
-        // an enrolment whose near.ai login is not the one this account is
+        // an enrollment whose near.ai login is not the one this account is
         // bound to. It names no account, and nothing was written.
         if error.server_label() == Some("near_ai_account_mismatch") {
             anyhow!("account-enrol-mismatch")
@@ -588,15 +588,19 @@ async fn complete(shared: &DaemonShared, action: Action, params: &Value) -> Resu
         .map_err(|_| anyhow!("passkey-finish-refused"))?;
         persist_session(&shared.store, &pending.snapshot, &pending.origin, &result)?;
         // Created here (with the name it was given) or signed in with here
-        // (no name: the login answer carries none). `persist_session`
-        // validated the account id.
+        // (with the label the server's login answer returned for the
+        // passkey that authenticated, `passkey_label`, when it has one).
+        // Read leniently: a missing, non-string or unusable label never
+        // refuses a sign-in; `remember` keeps the name this Mac already held.
+        // `persist_session` validated the account id, and refused a session
+        // for another enrollment before this, so nothing is remembered then.
         super::remembered_passkeys::remember(
             &shared.store,
             string(&result, "account_id")?,
             if action == Action::Create {
                 pending.label.as_deref()
             } else {
-                None
+                result.get("passkey_label").and_then(Value::as_str)
             },
         );
         Ok(json!({"binding_state":binding(&result)?}))

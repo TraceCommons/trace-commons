@@ -19,6 +19,7 @@ struct ComparisonTasksView: View {
                 Text(text("comparison_task_title")).insightsTitle()
                 Spacer()
                 Button(text("comparison_task_list")) { model.refresh() }
+                    .accessibilityLabel(text("comparison_task_list_accessibility"))
                 if model.busy { GlassSpinner() }
             }
             if let notice = model.notice { Text(text(notice)).foregroundStyle(GlassStatus.on.textColor) }
@@ -56,7 +57,7 @@ struct ComparisonTasksView: View {
 
     private var listView: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(text("comparison_task_create")).insightsHeading()
+            Text(text("comparison_task_create_heading")).insightsHeading()
             episodeChooser(selection: $model.createSelection)
             Button(text("comparison_task_create")) { model.create() }
                 .disabled(model.createSelection.isEmpty)
@@ -112,6 +113,7 @@ struct ComparisonTasksView: View {
             Button(text("comparison_task_reconfirm")) {
                 reconfirmation = model.reconfirmation()
             }
+            .accessibilityLabel(text("comparison_task_reconfirm_accessibility"))
         }
     }
 
@@ -187,7 +189,7 @@ struct ComparisonTasksView: View {
 
     private func contextEditor(_ detail: ComparisonTaskDetail) -> some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text(text("comparison_task_set_context")).insightsHeading()
+            Text(text("comparison_task_context_heading")).insightsHeading()
             GlassSelect(text("comparison_task_project"), selection: $model.projectID,
                         options: model.knownProjectIDs.map { GlassPickerOption($0, value: $0) }
                             + (model.knownProjectIDs.contains(model.projectID)
@@ -214,7 +216,7 @@ struct ComparisonTasksView: View {
 
     private func outcomeEditor(_ detail: ComparisonTaskDetail) -> some View {
         HStack {
-            GlassSelect(text("comparison_task_set_outcome"), selection: $model.outcome,
+            GlassSelect(text("outcome"), selection: $model.outcome,
                         options: ComparisonTaskOutcome.allCases.map {
                             GlassPickerOption(text("outcome_\($0.rawValue)"), value: $0)
                         })
@@ -225,6 +227,13 @@ struct ComparisonTasksView: View {
         }
     }
 
+    /// An episode's line in the chooser: its member count, the members word
+    /// and when it was last edited. Static so a test can read the line the
+    /// view draws without reading pixels.
+    static func episodeChoiceLine(_ entry: EpisodeListEntry, copy: [String: String]) -> String {
+        "\(entry.episode.members.count) \(copy["episode_members"] ?? "") · \(InsightsDate.label(entry.episode.updated_at))"
+    }
+
     private func episodeChooser(selection: Binding<Set<String>>) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             ForEach(episodes) { entry in
@@ -233,7 +242,7 @@ struct ComparisonTasksView: View {
                     else { selection.wrappedValue.remove(entry.id) }
                 })) {
                     VStack(alignment: .leading) {
-                        Text("\(entry.episode.members.count) \(text("episode_members")) · \(InsightsDate.label(entry.episode.updated_at))")
+                        Text(Self.episodeChoiceLine(entry, copy: copy))
                         Text(entry.episode.manual_assessment.map { text("outcome_\($0.outcome)") }
                              ?? text("episode_unassessed")).insightsCaption()
                     }

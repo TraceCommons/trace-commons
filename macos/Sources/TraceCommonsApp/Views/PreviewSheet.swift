@@ -134,6 +134,14 @@ struct PreviewSheet: View {
     /// in place of the header's own when the sheet is raised in one.
     static var modalTitle: String? { traces?.lookInside.title }
 
+    /// Ron's description: the modal's subtitle (#1146 `ResponsiveOverlay`
+    /// `description`).
+    static var modalSubtitle: String? { traces?.lookInside.description }
+
+    /// The modal's Close (its close button and its footer's one action), in
+    /// the core's words, as `closeWord` is the sheet's.
+    static var modalClose: String? { traces?.lookInside.close ?? fallbackClose }
+
     /// The core's other Close, for a sheet whose Look-inside table did not
     /// decode: the footer's one control is never drawn without a name.
     private static let fallbackClose = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.passkey.close
@@ -168,13 +176,34 @@ struct PreviewSheet: View {
             envelopeDigest: summary?.envelopeDigest)
     }
 
+    /// Raised in a `GlassModal` (`PreviewModal`): the modal draws the one
+    /// header (title, description, close button) and the footer's Close,
+    /// so the sheet draws neither, nor the rules between them.
+    private var inModal: Bool { onClose != nil }
+
+    /// Whether the tabs and the document are drawn: anything else (loading,
+    /// a refusal, the witness working) is one notice.
+    private var showsDocument: Bool {
+        !witnessWorking && !loading && failure == nil && summary != nil && words != nil && document != nil
+    }
+
+    /// In a modal, a notice is as tall as it is (#1146's overlay fits its
+    /// content); only the document takes the window's height.
+    static func fillsHeight(inModal: Bool, showsDocument: Bool) -> Bool {
+        !inModal || showsDocument
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Divider().overlay(GlassColor.hairline)
+            if !inModal {
+                Divider().overlay(GlassColor.hairline)
+            }
             content
-            Divider().overlay(GlassColor.hairline)
-            footer
+            if !inModal {
+                Divider().overlay(GlassColor.hairline)
+                footer
+            }
         }
         // The spec's canvas is the floor, not the fixed size: the transcript
         // and search tabs can use the additional reading space. Ideal
@@ -183,9 +212,11 @@ struct PreviewSheet: View {
         // In a modal the window sets the floor instead.
         .frame(
             minWidth: onClose == nil ? SheetMetric.width : nil, idealWidth: SheetMetric.width, maxWidth: .infinity,
-            minHeight: onClose == nil ? SheetMetric.height : nil, idealHeight: SheetMetric.height,
-            maxHeight: .infinity
+            minHeight: onClose == nil ? SheetMetric.height : nil,
+            idealHeight: Self.fillsHeight(inModal: inModal, showsDocument: showsDocument) ? SheetMetric.height : nil,
+            maxHeight: Self.fillsHeight(inModal: inModal, showsDocument: showsDocument) ? .infinity : nil
         )
+        .fixedSize(horizontal: false, vertical: !Self.fillsHeight(inModal: inModal, showsDocument: showsDocument))
         .background {
             // A shortcut needs a control to hang from. This one is never
             // seen and never focused; it exists so Command-F does what it
@@ -240,15 +271,17 @@ struct PreviewSheet: View {
     // MARK: - Chrome
 
     /// Ron's head of the inspector: what this is, the gate statement, the
-    /// sizes, the send disclosure, and the native review actions.
+    /// sizes, the send disclosure, and the native review actions. In a
+    /// modal it opens the body (#1146 `preview-inspector.tsx`): the LOOK
+    /// INSIDE eyebrow, then Ron's description again under the modal's.
     private var header: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+        VStack(alignment: .leading, spacing: inModal ? GlassTokens.Space.s8 : GlassTokens.Space.s4) {
             if let words {
+                Text(words.eyebrow)
+                    .glassType(GlassTokens.TypeScale.eyebrow)
+                    .foregroundStyle(GlassColor.textTertiary)
                 // In a modal the modal draws the title (`PreviewModal`).
-                if onClose == nil {
-                    Text(words.eyebrow)
-                        .glassType(GlassTokens.TypeScale.eyebrow)
-                        .foregroundStyle(GlassColor.textTertiary)
+                if !inModal {
                     Text(words.title)
                         .glassType(GlassTokens.TypeScale.title)
                         .foregroundStyle(GlassColor.textPrimary)
@@ -271,10 +304,14 @@ struct PreviewSheet: View {
             }
             nativeReview
         }
-        .padding(.horizontal, GlassTokens.Space.s9)
-        .padding(.vertical, GlassTokens.Space.s8)
+        .padding(.horizontal, inModal ? Self.modalInset : GlassTokens.Space.s9)
+        .padding(.top, inModal ? GlassTokens.Space.s6 : GlassTokens.Space.s8)
+        .padding(.bottom, inModal ? 0 : GlassTokens.Space.s8)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    /// The modal body's side inset (#1146 `px-[18px]`).
+    static let modalInset: CGFloat = 18
 
     /// Ron's quiet card: the session's tool and folder, and what would be
     /// sent against the file on disk.
@@ -305,7 +342,7 @@ struct PreviewSheet: View {
     /// witness review is no longer reached by a preview failing first --
     /// and never for a session that already holds a certificate.
     ///
-    /// Prepare admission is still gated on the enrolment, and gated nowhere
+    /// Prepare admission is still gated on the enrollment, and gated nowhere
     /// else: an invited contributor has no evidence-bearing path, so the
     /// control could only refuse them and is absent instead.
     @ViewBuilder
@@ -347,7 +384,7 @@ struct PreviewSheet: View {
             // Over the whole window, stacked over the preview's own modal.
             .glassModal(isPresented: $preparingAdmission) {
                 GlassModal(
-                    title: words.prepareAdmission, width: .narrow,
+                    title: words.prepareAdmission,
                     actions: [.cancel(words.close) { preparingAdmission = false }],
                     onCancel: { preparingAdmission = false }
                 ) {
@@ -360,14 +397,14 @@ struct PreviewSheet: View {
     @ViewBuilder
     private var content: some View {
         if witnessWorking, let copy = model.witnessCopy?.review {
-            SheetNotice(title: copy.heading, detail: copy.working)
+            SheetNotice(fills: !inModal, title: copy.heading, detail: copy.working)
         } else if loading {
             // Without the core's Look-inside table there is no loading line,
             // and the tabs will not draw: said now, not an empty notice.
             if let words {
-                SheetNotice(title: nil, detail: words.loadingTranscript)
+                SheetNotice(fills: !inModal, title: nil, detail: words.loadingTranscript)
             } else {
-                SheetNotice(title: Self.cannotShow, detail: cannotShowDetail)
+                SheetNotice(fills: !inModal, title: Self.cannotShow, detail: cannotShowDetail)
             }
         } else if failure != nil {
             // A refusal the daemon classified wins; otherwise the one fixed
@@ -378,12 +415,14 @@ struct PreviewSheet: View {
                 // A busy witness judged nothing: not a refusal. The
                 // daemon's busy sentence, and when to try again.
                 SheetNotice(
+                    fills: !inModal,
                     title: model.witnessCopy?.review?.heading,
                     detail: [witnessRefusal ?? model.witnessCopy?.review?.failed ?? cannotShowDetail, retry]
                         .joined(separator: "\n")
                 )
             } else {
                 SheetNotice(
+                    fills: !inModal,
                     title: Self.cannotShow,
                     detail: witnessRequested
                         ? (witnessRefusal ?? model.witnessCopy?.review?.failed ?? cannotShowDetail)
@@ -425,13 +464,13 @@ struct PreviewSheet: View {
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, GlassTokens.Space.s9)
-            .padding(.vertical, GlassTokens.Space.s8)
+            .padding(.horizontal, inModal ? Self.modalInset : GlassTokens.Space.s9)
+            .padding(.vertical, inModal ? GlassTokens.Space.s6 : GlassTokens.Space.s8)
         } else if summary != nil {
             // A summary with no body to show, or the core's Look-inside
             // table would not decode: said, never a blank pane or a row of
             // unnamed tabs.
-            SheetNotice(title: Self.cannotShow, detail: cannotShowDetail)
+            SheetNotice(fills: !inModal, title: Self.cannotShow, detail: cannotShowDetail)
         }
     }
 
@@ -470,9 +509,7 @@ struct PreviewSheet: View {
                     .disabled(loadingTurns)
             }
             if turnsFailed, let line = Self.traces?.requestFailed {
-                Text(line)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
+                GlassAlert(line)
             }
             if let turns, !turns.turns.isEmpty {
                 Text(words.turnIndexEyebrow)
@@ -510,8 +547,10 @@ struct PreviewSheet: View {
             // there is no visible control, and Escape still closes (an
             // unseen control in the sheet's background carries it).
             if let closeLabel = closeWord {
+                // The sheet's action bar: bar-sized (owner ruling,
+                // 2026-10-08), as Close stands in a modal's bar.
                 Button(closeLabel) { close() }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.glass, size: .bar))
                     .keyboardShortcut(.cancelAction)
             }
         }
@@ -668,9 +707,7 @@ private struct OriginalSearchTab: View {
                     .monospacedDigit()
                     .foregroundStyle(GlassColor.textPrimary)
             } else if failed, let line = Self.requestFailed {
-                Text(line)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
+                GlassAlert(line)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -746,6 +783,9 @@ private struct CaptureSafeScroll<Content: View>: View {
 /// words; the detail sits under it. Centred in the space the tabs would use.
 /// With no title words there is no title, and so no dot without words.
 private struct SheetNotice: View {
+    /// Outside a modal the notice centres in the sheet's floor; in one it
+    /// is as tall as its words, under the header.
+    var fills = true
     let title: String?
     let detail: String
 
@@ -755,7 +795,7 @@ private struct SheetNotice: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: 480)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: fills ? .infinity : nil, alignment: fills ? .center : .leading)
         .padding(GlassTokens.Space.s9)
     }
 }
@@ -1101,13 +1141,16 @@ struct TranscriptTab: View {
                 .onChange(of: geometry.size.width) { _, width in measure(width: width) }
             }
 
-            // Ron's Load more, naming what is left, and his link to the
-            // turn separators once the whole body is shown.
+            // Ron's Load more, with what is left as its caption, and his
+            // link to the turn separators once the whole body is shown.
             if let words, remaining > 0 || onAddSeparators != nil {
                 HStack(spacing: GlassTokens.Space.s4) {
                     if remaining > 0 {
-                        Button(FirstRunCopy.fill(words.loadMore, ["size": Format.bytes(remaining)]), action: onLoadMore)
+                        Button(words.loadMore, action: onLoadMore)
                             .buttonStyle(GlassButtonStyle(.glass))
+                        Text(FirstRunCopy.fill(words.loadMoreRemaining, ["size": Format.bytes(remaining)]))
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
                     }
                     if let onAddSeparators {
                         Button(words.addTurnSeparators, action: onAddSeparators)
@@ -1316,7 +1359,7 @@ private enum TranscriptMarkers {
             var chip = AttributedString(String(text[range]))
             chip.font = font.weight(.bold)
             chip.backgroundColor = GlassTokens.Color.controlSelected.color
-            chip.foregroundColor = GlassColor.textPrimary
+            chip.foregroundColor = GlassTokens.Color.textOnSelected.color
             out.append(chip)
             cursor = range.upperBound
         }
@@ -1355,7 +1398,7 @@ struct WitnessReviewConsent: View {
     /// Confirm is never the default: Return does not start a review.
     var body: some View {
         GlassModal(
-            title: copy.heading, width: .narrow,
+            title: copy.heading,
             actions: [
                 .cancel(copy.cancel, action: onCancel),
                 GlassModalAction(copy.confirm, isEnabled: confirmLine != nil && confirmed, isProminent: true) {
@@ -1401,10 +1444,11 @@ private struct PreviewChrome: ViewModifier {
     }
 }
 
-/// The preview raised in a `GlassModal` over the whole window: the same
-/// tabs, gates and footer as the sheet, the modal titled with the sheet's
-/// own Look-inside heading. Escape and Close both close it; nothing in it
-/// answers Return.
+/// The preview raised in a `GlassModal` over the whole window (#1146
+/// `PreviewInspector`): one header -- the sheet's Look-inside title, its
+/// description as the subtitle, and the close button -- the sheet's tabs
+/// and gates as the body, and Close as the footer. Escape, the close
+/// button, Close and the scrim all close it; nothing in it answers Return.
 struct PreviewModal: View {
     let entry: QueueEntry
     let onClose: () -> Void
@@ -1413,6 +1457,9 @@ struct PreviewModal: View {
     var body: some View {
         GlassModal(
             title: PreviewSheet.modalTitle ?? model.publicRunCopy?.sessionDetail ?? PreviewSheet.reviewWord ?? "",
+            subtitle: PreviewSheet.modalSubtitle,
+            closeLabel: PreviewSheet.modalClose ?? "",
+            actions: PreviewSheet.modalClose.map { [.cancel($0, action: onClose)] } ?? [],
             onCancel: onClose
         ) {
             PreviewSheet(entry: entry, onClose: onClose)

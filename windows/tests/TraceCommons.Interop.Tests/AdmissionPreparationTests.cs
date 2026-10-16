@@ -69,11 +69,11 @@ public sealed class AdmissionPreparationTests
     /// <summary>
     /// The sheet has to reach <see cref="AdmissionPreparation.Available"/>
     /// carrying the daemon's settings, because that is the only place the
-    /// enrolment is consulted.
+    /// enrollment is consulted.
     /// </summary>
     /// <remarks>
     /// <c>CanPrepareAdmission</c> reads as though it only asks whether the
-    /// daemon advertises the method; the enrolment check is one hop away, in
+    /// daemon advertises the method; the enrollment check is one hop away, in
     /// the assignment to the backing field. An audit read the property and
     /// concluded contributors on an invite were being shown a button that
     /// could only refuse them. They are not -- but nothing failed if that

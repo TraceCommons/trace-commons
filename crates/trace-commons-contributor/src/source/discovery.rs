@@ -9,10 +9,9 @@
 //! fill from memory. Nothing here selects anything, and nothing here writes
 //! a declaration.
 //!
-//! It reads directory entries and file metadata only. It never opens a
-//! session file: the point is to describe the store well enough to consent
-//! to, and reading the contents before consent would be the thing consent is
-//! for.
+//! It reads directory entries and session metadata only. OpenCode metadata
+//! comes from read-only SQLite queries; message and part bodies are never
+//! read before the contributor chooses the source.
 
 use std::path::{Path, PathBuf};
 
@@ -83,7 +82,7 @@ pub struct SourceCandidate {
     pub source: String,
     /// Where this store would be watched.
     pub path: PathBuf,
-    /// Whether that directory exists right now.
+    /// Whether that store exists right now (a database file for OpenCode).
     pub exists: bool,
     /// How many session files were found, counted recursively.
     ///
@@ -107,7 +106,7 @@ pub struct SourceCandidate {
     pub answers_at: Option<String>,
 }
 
-/// Probe both conventional session stores.
+/// Probe conventional session stores.
 ///
 /// `home` and `env` are injected so this is testable without touching the
 /// machine's real directories -- which matters more than usual here, since
@@ -177,36 +176,40 @@ where
             MESSAGES_JSON_SUFFIX,
             Walk::Recursive,
         ),
+        {
+            let mut row = describe_opencode(
+                &super::opencode_db::conventional_root(home, &env).join("opencode.db"),
+            );
+            row.relocated_by_env =
+                env("XDG_DATA_HOME").is_some_and(|v| Path::new(&v).is_absolute());
+            row
+        },
     ]
 }
 
-/// Probe using this machine's real home and environment.
-///
-/// OpenCode is deliberately absent from this list. Every other row here has
-/// a conventional per-user location this build can guess before anyone has
-/// said anything -- that guess is exactly what `Undeclared::Conventional` in
-/// `source::mod` is for. OpenCode has none: its export folder is picked by
-/// the contributor, one at a time, so there is nothing to probe blind and no
-/// path this call could put in a row without inventing one. See
-/// [`describe_opencode`] for the folder a contributor has actually named.
+/// Probe conventional stores, including OpenCode's local database.
+/// This describes candidates only; it does not declare or enable a source.
 pub fn probe_this_machine() -> Vec<SourceCandidate> {
     let home = super::home_dir();
     probe(&home, |key| std::env::var(key).ok())
 }
 
-/// Describe a folder the contributor has already named as their OpenCode
-/// export directory, the way [`probe`]'s rows describe a conventional store.
-///
-/// Unlike every source `probe` returns, this is never called blind: OpenCode
-/// has no conventional location (see [`probe_this_machine`]), so the only
-/// path worth describing is one the contributor picked, typically moments
-/// earlier through a folder chooser. A shell calls this right after that
-/// pick to say "N sessions found" with a real count rather than trusting the
-/// folder name alone, and again later to refresh the row for a folder
-/// recorded in settings (`opencode_source` in
-/// `daemon::settings::DaemonSettings`).
+/// Describe a native OpenCode store or a folder of explicit JSON exports.
+/// Database discovery reads session metadata, never message or part bodies.
 #[must_use]
 pub fn describe_opencode(path: &Path) -> SourceCandidate {
+    if path.file_name().is_some_and(|n| n == "opencode.db") {
+        let refs = super::opencode_db::discover(path.parent().unwrap_or(path)).unwrap_or_default();
+        return SourceCandidate {
+            source: SOURCE_OPENCODE.into(),
+            path: path.to_path_buf(),
+            exists: std::fs::symlink_metadata(path).is_ok(),
+            session_count: refs.len() as u64,
+            most_recent: refs.iter().filter_map(|r| r.group_modified_at).max(),
+            relocated_by_env: false,
+            answers_at: None,
+        };
+    }
     describe(
         SOURCE_OPENCODE,
         path.to_path_buf(),
@@ -249,15 +252,65 @@ const FOLDER_ENTRY_BUDGET: usize = 65_536;
 /// of `.json` files is both an OpenCode export and a trajectory export --
 /// reports both, and the shell asks; a folder that fits none, or is not
 /// there, reports nothing, and the shell refuses it. Each row's `path` is
-/// the picked folder itself.
+/// the picked folder itself, except for a tool's home:
 ///
-/// Like everything in this module it reads directory entries and metadata
-/// only and never opens a file. It follows no symlink below the picked
+/// - A moved Claude Code or Codex home -- the folder `CLAUDE_CONFIG_DIR` or
+///   `CODEX_HOME` would name, holding `projects/` or `sessions/` -- is that
+///   tool, read at that subfolder as [`probe`] reads the conventional one,
+///   and only that tool: the config files beside the store are not exports.
+/// - One Claude Code project folder (flat `<uuid>.jsonl`) matches nothing.
+///   The adapter reads the `projects` folder above it, not one project, and
+///   the trajectory reader would refuse every file, so any row would offer
+///   a reading that yields nothing.
+/// - A tool's own config files ([`CONFIG_FILE_NAMES`]) are never counted
+///   as flat exports.
+///
+/// Reads session metadata only, including read-only SQLite queries for
+/// OpenCode. It follows no symlink below the picked
 /// folder; the picked folder itself is taken as given, symlink or not, as
 /// [`describe_opencode`] takes it.
 #[must_use]
 pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
     if !path.is_dir() {
+        return Vec::new();
+    }
+    let row = |source: &str, at: PathBuf, tally: Tally| SourceCandidate {
+        source: source.to_string(),
+        path: at,
+        exists: true,
+        session_count: tally.count,
+        most_recent: tally.most_recent,
+        relocated_by_env: false,
+        answers_at: source_answers_at(source).map(str::to_string),
+    };
+    // A tool's home: its store is a subfolder, never followed through a
+    // symlink, as every walk below the picked folder is.
+    if std::fs::symlink_metadata(path.join("opencode.db")).is_ok() {
+        let candidate = describe_opencode(&path.join("opencode.db"));
+        return vec![candidate];
+    }
+    let homes: Vec<SourceCandidate> = [
+        (
+            SOURCE_CLAUDE_CODE,
+            "projects",
+            claude_code_layout as fn(&Path) -> Tally,
+        ),
+        (SOURCE_CODEX, "sessions", codex_layout),
+    ]
+    .into_iter()
+    .filter_map(|(source, store, layout)| {
+        let at = path.join(store);
+        if !std::fs::symlink_metadata(&at).is_ok_and(|m| m.is_dir()) {
+            return None;
+        }
+        let tally = layout(&at);
+        (tally.count > 0).then(|| row(source, at, tally))
+    })
+    .collect();
+    if !homes.is_empty() {
+        return homes;
+    }
+    if is_one_claude_code_project(path) {
         return Vec::new();
     }
     [
@@ -270,16 +323,37 @@ pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
     ]
     .into_iter()
     .filter(|(_, tally)| tally.count > 0)
-    .map(|(source, tally)| SourceCandidate {
-        source: source.to_string(),
-        path: path.to_path_buf(),
-        exists: true,
-        session_count: tally.count,
-        most_recent: tally.most_recent,
-        relocated_by_env: false,
-        answers_at: source_answers_at(source).map(str::to_string),
-    })
+    .map(|(source, tally)| row(source, path.to_path_buf(), tally))
     .collect()
+}
+
+/// The config files a coding tool keeps beside its store: never an export,
+/// whatever their suffix.
+pub const CONFIG_FILE_NAMES: &[&str] = &[
+    "settings.json",
+    "settings.local.json",
+    "auth.json",
+    "config.json",
+    "history.jsonl",
+];
+
+/// Whether `root` is one Claude Code project folder: it holds `.jsonl`
+/// files directly, and every one is named `<uuid>.jsonl`, as Claude Code
+/// names a top-level session.
+fn is_one_claude_code_project(root: &Path) -> bool {
+    let mut tally = Tally::new();
+    let stems: Vec<String> = tally
+        .files(root, |name| name.ends_with(JSONL_SUFFIX))
+        .iter()
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .collect();
+    !stems.is_empty() && stems.iter().all(|name| is_claude_code_session_name(name))
+}
+
+/// `<uuid>.jsonl`, the hyphenated UUID Claude Code names a session by.
+fn is_claude_code_session_name(name: &str) -> bool {
+    name.strip_suffix(JSONL_SUFFIX)
+        .is_some_and(|stem| stem.len() == 36 && uuid::Uuid::try_parse(stem).is_ok())
 }
 
 /// One layout walk's running count, and what is left of its entry budget.
@@ -352,13 +426,9 @@ impl Tally {
 /// Claude Code names every top-level session: a `.jsonl` file two levels
 /// down is otherwise too common a shape to call a Claude Code store.
 fn claude_code_layout(root: &Path) -> Tally {
-    let is_session = |name: &str| {
-        name.strip_suffix(JSONL_SUFFIX)
-            .is_some_and(|stem| stem.len() == 36 && uuid::Uuid::try_parse(stem).is_ok())
-    };
     let mut tally = Tally::new();
     for project in tally.subdirs(root) {
-        for file in tally.files(&project.path(), is_session) {
+        for file in tally.files(&project.path(), is_claude_code_session_name) {
             tally.note(file.metadata().ok());
         }
     }
@@ -427,9 +497,11 @@ fn trajectory_layout(root: &Path) -> Tally {
     })
 }
 
-/// Regular files directly in `root` whose name satisfies `named`.
+/// Regular files directly in `root` whose name satisfies `named`, a tool's
+/// config files ([`CONFIG_FILE_NAMES`]) aside.
 fn flat_layout(root: &Path, named: impl Fn(&str) -> bool) -> Tally {
     let mut tally = Tally::new();
+    let named = |name: &str| named(name) && !CONFIG_FILE_NAMES.contains(&name);
     for file in tally.files(root, named) {
         tally.note(file.metadata().ok());
     }
@@ -746,13 +818,33 @@ mod tests {
     }
 
     #[test]
-    fn opencode_is_never_in_the_blind_probe() {
-        // OpenCode has no conventional location to guess at, unlike every
-        // other row here -- see `describe_opencode` for the folder a
-        // contributor has actually named.
+    fn opencode_probe_offers_native_store_without_enabling_collection() {
         let home = Scratch::new("opencode-blind");
         let found = probe(home.path(), no_env);
-        assert!(!found.iter().any(|c| c.source == SOURCE_OPENCODE));
+        let row = found
+            .iter()
+            .find(|c| c.source == SOURCE_OPENCODE)
+            .expect("OpenCode candidate");
+        assert_eq!(
+            row.path,
+            home.path().join(".local/share/opencode/opencode.db")
+        );
+        assert!(!row.exists);
+        assert_eq!(row.session_count, 0);
+        assert!(!super::super::undeclared_scans_conventional(
+            SOURCE_OPENCODE
+        ));
+        let data = home.path().join("data");
+        assert!(data.is_absolute());
+        let relocated = probe(home.path(), |key| {
+            (key == "XDG_DATA_HOME").then(|| data.to_string_lossy().into_owned())
+        });
+        let row = relocated
+            .iter()
+            .find(|c| c.source == SOURCE_OPENCODE)
+            .unwrap();
+        assert_eq!(row.path, data.join("opencode/opencode.db"));
+        assert!(row.relocated_by_env);
     }
 
     #[test]
@@ -950,6 +1042,68 @@ mod tests {
         let found = describe_folder(picked.path());
         assert_eq!(sources_of(&found), vec![SOURCE_OPENCODE, SOURCE_TRAJECTORY]);
         assert!(found.iter().all(|c| c.session_count == over as u64));
+    }
+
+    /// Kristi b#7: a moved Claude Code home (`settings.json` beside
+    /// `projects/`) is Claude Code, read at its `projects` folder as
+    /// `probe` reads the conventional one -- never an OpenCode or trajectory
+    /// export because of the config file beside it.
+    #[test]
+    fn describe_folder_recognises_a_moved_claude_code_home_at_its_projects_folder() {
+        let picked = Scratch::new("folder-claude-home");
+        std::fs::write(picked.path().join("settings.json"), b"{}").unwrap();
+        std::fs::write(picked.path().join("history.jsonl"), b"{}").unwrap();
+        write_session(
+            &picked.path().join("projects/-Users-someone-code-app"),
+            &format!("{A_UUID}.jsonl"),
+        );
+
+        let row = only(&describe_folder(picked.path()), SOURCE_CLAUDE_CODE);
+        assert_eq!(row.path, picked.path().join("projects"));
+        assert_eq!(row.session_count, 1);
+    }
+
+    /// Kristi b#7: a moved Codex home (`auth.json` and `history.jsonl`
+    /// beside `sessions/`) is Codex, read at its `sessions` folder.
+    #[test]
+    fn describe_folder_recognises_a_moved_codex_home_at_its_sessions_folder() {
+        let picked = Scratch::new("folder-codex-home");
+        std::fs::write(picked.path().join("auth.json"), b"{}").unwrap();
+        std::fs::write(picked.path().join("history.jsonl"), b"{}").unwrap();
+        std::fs::write(picked.path().join("config.json"), b"{}").unwrap();
+        write_session(
+            &picked.path().join("sessions/2026/08/20"),
+            "rollout-2026-08-20T10-00-00-abc.jsonl",
+        );
+
+        let row = only(&describe_folder(picked.path()), SOURCE_CODEX);
+        assert_eq!(row.path, picked.path().join("sessions"));
+        assert_eq!(row.session_count, 1);
+    }
+
+    /// Kristi b#7: one Claude Code project folder (flat `<uuid>.jsonl`) is
+    /// not a trajectory export -- the strict reader would refuse every file
+    /// -- and the Claude Code adapter reads the `projects` folder above it,
+    /// not one project. So it matches nothing, and the shell refuses it,
+    /// rather than offering a reading that yields nothing.
+    #[test]
+    fn describe_folder_offers_nothing_for_a_single_claude_code_project_folder() {
+        let picked = Scratch::new("folder-claude-project");
+        write_session(picked.path(), &format!("{A_UUID}.jsonl"));
+        write_session(picked.path(), "0e1d2c3b-4a59-4687-9b0a-1b2c3d4e5f60.jsonl");
+
+        assert_eq!(describe_folder(picked.path()), Vec::new());
+    }
+
+    /// A tool's own config files are not exports: a folder holding only
+    /// them matches neither flat layout.
+    #[test]
+    fn describe_folder_does_not_count_config_files_as_exports() {
+        let picked = Scratch::new("folder-config-only");
+        for name in ["settings.json", "auth.json", "config.json", "history.jsonl"] {
+            std::fs::write(picked.path().join(name), b"{}").unwrap();
+        }
+        assert_eq!(describe_folder(picked.path()), Vec::new());
     }
 
     #[test]

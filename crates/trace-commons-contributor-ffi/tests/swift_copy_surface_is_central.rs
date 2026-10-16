@@ -359,6 +359,8 @@ fn placeholders() -> impl Iterator<Item = &'static &'static str> {
     trace_commons_contributor::first_run_copy::PLACEHOLDERS
         .iter()
         .chain(trace_commons_contributor::preview_copy::MONITOR_PLACEHOLDERS)
+        .chain(trace_commons_contributor::shell_words_copy::SHELL_WORDS_PLACEHOLDERS)
+        .chain(trace_commons_contributor::insights::analytics_copy::ANALYTICS_PLACEHOLDERS)
 }
 
 /// The core sentences no Swift literal may hold, by where they come from.
@@ -382,11 +384,17 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
             consent::AUTO_NO_REVIEW,
             consent::AUTO_PATTERNS_ONLY_SCOPE,
             consent::AUTO_PATTERNS_ONLY_LIMIT,
+            consent::AUTO_SUMMARY_PATTERNS_ONLY,
+            consent::AUTO_SUMMARY_MODEL,
             consent::AUTO_RAW_SEND_BOTH_ENCLAVES,
             consent::AUTO_PROJECT_DISCLOSURE_UNAVAILABLE,
             consent::AUTO_SCOPE_REQUIRED,
             consent::AUTO_PATH_AUTOMATIC,
             consent::AUTO_PATH_ASK_FIRST,
+            consent::AUTO_PATH_AUTOMATIC_TITLE,
+            consent::AUTO_PATH_AUTOMATIC_DETAIL,
+            consent::AUTO_PATH_ASK_FIRST_TITLE,
+            consent::AUTO_PATH_ASK_FIRST_DETAIL,
         ]
         .map(str::to_owned)
         .to_vec(),
@@ -474,7 +482,25 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
                 .map(holed)
                 .collect(),
         );
+        // Ron's #1146 Home and History structure words (glass parity).
+        add(
+            "preview_copy::monitor_screens_copy home_history",
+            table(screens["home_history"].clone())
+                .into_iter()
+                .map(holed)
+                .collect(),
+        );
     }
+    // The Insights token analytics words (spec section 8, approved in Ron's
+    // 2026-10-11 owner review): tabs, Overview, Patterns, Sessions, the
+    // glance, the weekly summary card.
+    add(
+        "insights::analytics_copy::ANALYTICS_COPY",
+        trace_commons_contributor::insights::analytics_copy::ANALYTICS_COPY
+            .iter()
+            .map(|(_, words)| holed((*words).to_owned()))
+            .collect(),
+    );
     // The menu-bar Contribution mode pill, its override confirmations and
     // their refusal lines (#1173).
     add(
@@ -595,9 +621,23 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
         .collect(),
     );
 
-    // The legacy invite migration, connecting inference, and where sessions
-    // go -- surfaces macOS has not built yet, pinned so that when it does
-    // they arrive with the core's words.
+    // The words the macOS shell wrote in Swift until #1146 parity
+    // (2026-10-07): withdrawal, the public profile, the queue's and
+    // History's legacy words, the scrubbing caveat and Settings.
+    add(
+        "shell_words_copy::shell_words_copy",
+        table(json!(
+            trace_commons_contributor::shell_words_copy::shell_words_copy()
+        ))
+        .into_iter()
+        .map(holed)
+        .collect(),
+    );
+
+    // The legacy invite migration (offer, notice and refusals), then
+    // connecting inference and where sessions go -- surfaces macOS has not
+    // built yet, pinned so that when it does they arrive with the core's
+    // words.
     let mut legacy = table(json!(consent::legacy_migration_offer()));
     legacy.extend(
         [
@@ -679,42 +719,14 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "Nothing has been lost, and nothing has gone out.",
         "health export-failure fallback",
     ),
-    // The per-tier withdrawal confirmations (`WithdrawalCopy.canonical*`)
-    // reproduce `docs/contributor-daemon-ipc-v1_1.md`'s "Canonical
-    // confirmation copy" table, and their credit note is the same two
-    // sentences that close the core's unknown-reach prompt. The core has no
-    // export for the per-tier confirmation or the credit note on its own
-    // yet, so this note stays Swift's until it does; the unknown-reach
-    // prompt itself is the core's (`tc_withdrawal_confirmation_prompt_text`).
-    (
-        "TraceCommonsApp/Views/WithdrawalCopy.swift",
-        "Credit that has already settled stays.",
-        "per-tier withdrawal credit note; no core export yet",
-    ),
-    (
-        "TraceCommonsApp/Views/WithdrawalCopy.swift",
-        "Credit still pending is forfeited.",
-        "per-tier withdrawal credit note; no core export yet",
-    ),
     // The legacy History rollup tallies and the queue's week figures, which
     // held the core's status words as headings, left the shell with the
     // legacy screens (R15); their allowances went with them.
     //
     // Ron's #1146 inspector words (#1241) that native screens already say
     // in Swift. Each goes when its screen reads the core's table instead.
-    //
-    // The legacy queue's no-longer-waiting group, held verbatim in
-    // QueueView.swift since R15 until the core exports it.
-    (
-        "TraceCommonsApp/Views/QueueView.swift",
-        "Sessions no longer waiting (",
-        "legacy queue window; #1241 moves only the monitor to the core's words",
-    ),
-    (
-        "TraceCommonsApp/Views/QueueView.swift",
-        "This covers sessions that reached the queue.",
-        "legacy queue window; #1241 moves only the monitor to the core's words",
-    ),
+    // The legacy queue's no-longer-waiting group left QueueView.swift for
+    // `shell_words_copy` at #1146 parity (2026-10-07).
     // Not a sentence of its own: Look inside reads the core's
     // `session_review.cannot_show_title`, and this verbatim copy of it is
     // the fallback for a table that did not decode, so the cannot-show
@@ -786,7 +798,7 @@ fn no_pinned_core_sentence_is_a_swift_literal() {
 
 /// A core sentence that carries a `{name}` placeholder is pinned with a
 /// [`HOLE`] in its place, the way the scanner reads a Swift interpolation.
-/// Pinned with the braces, `"Include every past session in \(folder)"`
+/// Pinned with the braces, `"Include every past trace in \(folder)"`
 /// would never match it.
 #[test]
 fn a_placeholder_sentence_is_pinned_the_way_swift_interpolates_it() {
@@ -800,7 +812,7 @@ fn a_placeholder_sentence_is_pinned_the_way_swift_interpolates_it() {
         braced.is_empty(),
         "pinned sentences still carry a brace placeholder: {braced:?}"
     );
-    let probe = swift_literals(r#"let t = "Include every past session in \(folder)""#);
+    let probe = swift_literals(r#"let t = "Include every past trace in \(folder)""#);
     assert!(
         pinned.iter().any(|(_, sentence)| fragments(sentence)
             .iter()
@@ -833,6 +845,13 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCCoreCopy.monitorScreensCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_monitor_screens_copy_json",
+    ),
+    (
+        "withdrawal, public profile, legacy queue/History, scrubbing and Settings words",
+        "TraceCommonsApp/Views/ShellWords.swift",
+        "TCCoreCopy.shellWordsCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_shell_words_copy_json",
     ),
     (
         "monitor Traces badge words",
@@ -885,6 +904,22 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCConsentCopy.legacyMigrationNoticeJSON",
         "TCBridge/TCConsentCopy.swift",
         "tc_legacy_migration_notice",
+    ),
+    // The offer to move, in Settings and as a card above the tabs, and a
+    // refused move's sentence, both worded by the model.
+    (
+        "legacy migration offer",
+        "TraceCommonsApp/AppModel.swift",
+        "TCCoreCopy.legacyMigrationOfferJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_legacy_migration_offer_json",
+    ),
+    (
+        "legacy migration refusal",
+        "TraceCommonsApp/AppModel.swift",
+        "TCCoreCopy.legacyMigrationRefusalLine",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_legacy_migration_refusal_text",
     ),
     (
         "witness capacity notice",
@@ -1028,24 +1063,124 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCCoreCopy.swift",
         "tc_automatic_contribution_copy_json",
     ),
+    // Insights: the tab container and the Analyze tab read the core's
+    // vocabulary; the Overview tab fills the core's analytics words with the
+    // core's figures (`InsightsOverviewWords`), read through the model's
+    // `tc_insights_call`.
+    (
+        "Insights tabs and the Analyze tab",
+        "TraceCommonsApp/Views/InsightsView.swift",
+        "TCInsights.copy()",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_copy_json",
+    ),
+    // The menu-bar glance fills the core's analytics words with the
+    // daemon's `insights_glance` figures.
+    (
+        "Insights glance card words",
+        "TraceCommonsApp/Views/Monitor/InsightsGlanceCard.swift",
+        "TCInsights.copy()",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_copy_json",
+    ),
+    // The Inference tab labels each call's ledger counters in the core's
+    // analytics words.
+    (
+        "Inference call token words",
+        "TraceCommonsApp/Views/Monitor/InferenceViews.swift",
+        "TCInsights.copy()",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_copy_json",
+    ),
+    // Settings' Private AI section labels the ledger feed's off switch (on
+    // by default) and its feed line in the core's analytics words.
+    (
+        "Insights ledger feed switch words",
+        "TraceCommonsApp/Views/Settings/PrivateAISection.swift",
+        "TCInsights.copy()",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_copy_json",
+    ),
+    // Settings' Tools section labels the watched-folder counting, weekly
+    // summary and higher-than-usual card switches in the same words.
+    (
+        "Insights settings switch words",
+        "TraceCommonsApp/Views/Settings/InsightsSettingsCard.swift",
+        "TCInsights.copy()",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_copy_json",
+    ),
+    (
+        "Insights week overview and drill-down reads",
+        "TraceCommonsApp/InsightsModel.swift",
+        "TCInsights.call(",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
+    (
+        "Insights Overview words",
+        "TraceCommonsApp/Views/InsightsOverviewTab.swift",
+        "InsightsOverviewWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
+    // Feed T's Sessions drill-down words where each counted session's calls
+    // went (`InsightsRouteWords`) with the daemon's route figures; the words
+    // are the core's analytics copy, read through the model's
+    // `tc_insights_call`.
+    (
+        "Insights session route words",
+        "TraceCommonsApp/Views/InsightsOverviewTab.swift",
+        "InsightsRouteWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
+    // The Patterns tab fills the core's analytics words with the core's
+    // pattern figures (`InsightsPatternsWords`), read through the model's
+    // `tc_insights_call`.
+    (
+        "Insights Patterns words",
+        "TraceCommonsApp/Views/InsightsPatternsTab.swift",
+        "InsightsPatternsWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
+    // The Sessions tab fills the core's analytics words with one saved
+    // session's figures (`InsightsSessionsWords`), read through the model's
+    // `tc_insights_call`.
+    (
+        "Insights Sessions words",
+        "TraceCommonsApp/Views/InsightsSessionsTab.swift",
+        "InsightsSessionsWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
+    // Feed T: the lever of the week and the weekly summary card on the
+    // Overview, and "Your goals" on Patterns, fill the core's words with the
+    // core's `comparisons` (`InsightsComparisonsWords`), read through the
+    // model's `tc_insights_call`.
+    (
+        "Insights lever and weekly summary words",
+        "TraceCommonsApp/Views/InsightsOverviewTab.swift",
+        "InsightsComparisonsWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
+    (
+        "Insights goals words",
+        "TraceCommonsApp/Views/InsightsPatternsTab.swift",
+        "InsightsComparisonsWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
 ];
 
 /// Bridge functions for surfaces macOS has not built yet. Each must still
 /// reach its export, so the screen that comes has the core's words to read.
-const BRIDGE_ONLY: &[(&str, &str)] = &[
-    (
-        "TCBridge/TCCoreCopy.swift",
-        "tc_legacy_migration_offer_json",
-    ),
-    (
-        "TCBridge/TCCoreCopy.swift",
-        "tc_legacy_migration_refusal_text",
-    ),
-    (
-        "TCBridge/TCCoreCopy.swift",
-        "tc_inference_connection_copy_json",
-    ),
-];
+const BRIDGE_ONLY: &[(&str, &str)] = &[(
+    "TCBridge/TCCoreCopy.swift",
+    "tc_inference_connection_copy_json",
+)];
 
 #[test]
 fn swift_screens_render_core_copy_at_every_safety_surface() {

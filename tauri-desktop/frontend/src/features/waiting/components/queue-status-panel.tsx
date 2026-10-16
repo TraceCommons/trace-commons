@@ -122,7 +122,7 @@ export function QueueStatusPanel({
         {capacity.kind === "unreadable" && (
           <div className="text-tc-outside">
             <span role="alert">
-              Some approved sessions may be waiting and have not been sent,
+              Some approved traces may be waiting and have not been sent,
               but this build could not read how many or why.
             </span>
           </div>
@@ -151,7 +151,7 @@ export function QueueStatusPanel({
             </span>
             {budget.blocked && (
               <small>
-                {budget.blocked_entries} queued session
+                {budget.blocked_entries} queued trace
                 {budget.blocked_entries === 1 ? "" : "s"} held by limit
               </small>
             )}

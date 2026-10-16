@@ -96,7 +96,7 @@ public enum TCContributionEligibility {
     ///
     /// The empty string for zero AND for a negative, which no honest caller
     /// produces; the caller renders nothing. There is no gap to explain, and
-    /// a line reading "0 sessions are not being sent" invents a caveat where
+    /// a line reading "0 traces are not being sent" invents a caveat where
     /// none exists. The sentence says how many and not why -- the reason a
     /// particular session cannot be sent is that row's own sentence, one
     /// level in.

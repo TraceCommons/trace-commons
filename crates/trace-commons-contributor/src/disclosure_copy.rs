@@ -86,6 +86,16 @@ pub fn contributor_disclosure_copy() -> Value {
             .iter()
             .map(|(mode, label)| ((*mode).to_owned(), Value::from(*label)))
             .collect::<serde_json::Map<String, Value>>(),
+        // Each consent scope's title, keyed by wire name, as
+        // `consent_options` carries it: for a surface that names a scope
+        // with no `consent_options` answer in hand (the Windows preview
+        // sheet's permission rows), so no shell keeps its own table.
+        "consent_scope_titles": crate::daemon::enroll::consent_options()["scopes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|scope| Some((scope["name"].as_str()?.to_owned(), scope["title"].clone())))
+            .collect::<serde_json::Map<String, Value>>(),
         "outcome": crate::outcome_copy::outcome_copy(),
         "private_inference": {
             "destination": inference.destination,
@@ -149,6 +159,7 @@ mod tests {
             "mission_drafts_ui",
             "history_ui",
             "folder_mode_labels",
+            "consent_scope_titles",
             "outcome",
             "private_inference",
             "project_automatic_unavailable",
@@ -174,6 +185,27 @@ mod tests {
         assert_eq!(
             copy["onboarding_shell"],
             serde_json::to_value(crate::onboarding_copy::onboarding_copy()).unwrap()
+        );
+    }
+
+    /// Every consent scope's title, as `consent_options` carries it, so the
+    /// Windows preview sheet names a scope with the core's words.
+    #[test]
+    fn the_bundle_carries_every_consent_scope_title() {
+        let titles = contributor_disclosure_copy()["consent_scope_titles"].clone();
+        let titles = titles.as_object().expect("an object of titles");
+        let scopes = crate::daemon::enroll::consent_options()["scopes"]
+            .as_array()
+            .expect("a scope list")
+            .clone();
+        assert_eq!(titles.len(), scopes.len());
+        for scope in scopes {
+            let name = scope["name"].as_str().expect("a name");
+            assert_eq!(titles[name], scope["title"], "{name}");
+        }
+        assert_eq!(
+            titles["debugging_evaluation"],
+            "Finding bugs and measuring agents"
         );
     }
 

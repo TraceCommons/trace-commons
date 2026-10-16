@@ -37,7 +37,7 @@ export function WaitingProjectGroup({
           </span>
           <h3>{label}</h3>
           <span>
-            {entries.length} waiting session{entries.length === 1 ? "" : "s"}
+            {entries.length} waiting trace{entries.length === 1 ? "" : "s"}
           </span>
           {eligibility.data && (
             <p className="m-0 mt-1 text-sm text-tc-secondary">
@@ -49,7 +49,7 @@ export function WaitingProjectGroup({
           )}
           {eligibility.isError && (
             <p className="m-0 mt-1 text-sm text-tc-outside">
-              Eligibility unavailable. Review sessions individually.
+              Eligibility unavailable. Review traces individually.
             </p>
           )}
         </div>

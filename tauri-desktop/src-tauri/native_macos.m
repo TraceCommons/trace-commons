@@ -132,7 +132,7 @@ int tc_macos_post_digest(const char *body) {
         NSString *body_string = [NSString stringWithUTF8String:body];
         if (body_string == nil || body_string.length == 0 || body_string.length > 4000) return -1;
         UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
-        content.title = @"Trace Commons";
+        content.title = @"Near.ai";
         content.body = body_string;
         content.categoryIdentifier = TC_DIGEST_CATEGORY;
         if (@available(macOS 12.0, *)) content.interruptionLevel = UNNotificationInterruptionLevelPassive;

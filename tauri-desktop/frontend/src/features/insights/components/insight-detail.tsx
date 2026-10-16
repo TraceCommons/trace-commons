@@ -216,7 +216,7 @@ export function InsightDetail({
 
 function formatSource(source: string) {
   return source === "claude_code"
-    ? "Claude Code session"
+    ? "Claude Code trace"
     : source === "trajectory"
       ? "Trajectory"
       : "Codex rollout";

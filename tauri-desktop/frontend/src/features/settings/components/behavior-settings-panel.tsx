@@ -53,8 +53,8 @@ export function BehaviorSettingsPanel({
       )}
       <div className="mt-3 grid gap-px">
         <BehaviorSettingRow
-          label="Finished-session quiet period"
-          detail="Time without new events before a session enters Waiting."
+          label="Finished-trace quiet period"
+          detail="Time without new events before a trace enters Waiting."
           setting="quiescence"
           value={Math.round(numberValue(settings, "quiescence_secs", 300) / 60)}
           min={1}

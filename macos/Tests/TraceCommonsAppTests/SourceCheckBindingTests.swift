@@ -64,6 +64,9 @@ final class SourceCheckBindingTests: XCTestCase {
             XCTAssertTrue(section.contains(
                 "sourceLine(TCSourceChecks.\(tool), settings.routingSourceModes.\(tool))"))
         }
+        // #1146 lists OpenCode as well, by its mode, unset when unread.
+        XCTAssertTrue(section.contains(
+            "sourceLine(TCSourceChecks.opencode, settings.opencodeSourceMode ?? \"unset\")"))
         for forbidden in [
             "claudeRootConfigured", "codexRootConfigured", "sessions folder set", "usual place",
         ] {

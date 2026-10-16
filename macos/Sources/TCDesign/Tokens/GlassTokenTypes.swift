@@ -284,6 +284,13 @@ public struct GlassTypeStyle: Sendable, Equatable {
             tracking: tracking, design: design, uppercase: uppercase, tabular: tabular)
     }
 
+    /// The same step at another letter spacing, in points at `size`.
+    public func tracking(_ tracking: CGFloat) -> GlassTypeStyle {
+        GlassTypeStyle(
+            textStyle: textStyle, size: size, weight: weight, lineHeight: lineHeight,
+            tracking: tracking, design: design, uppercase: uppercase, tabular: tabular)
+    }
+
     /// The same step in SF Mono, for a figure or path inside it.
     public var monospaced: GlassTypeStyle {
         GlassTypeStyle(

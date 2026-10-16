@@ -135,6 +135,109 @@ def color_expr(entry: dict, where: str) -> str:
     return f"GlassRGBA({rgb(entry['hex'], where)}, alpha: {alpha(entry, where)}{light_expr(entry, where)})"
 
 
+def gradient_expr(entry: dict, where: str) -> str:
+    stops = ", ".join(
+        f"GlassStop({rgb(stop['hex'], where)}, alpha: {alpha(stop, where)}, at: {number(stop['at'], where)}{light_expr(stop, where)})"
+        for stop in entry["stops"]
+    )
+    return f"GlassGradient(angle: {number(entry['angle'], where)}, stops: [{stops}])"
+
+
+def shadow_expr(layers: list, where: str) -> str:
+    parts = []
+    for layer in layers:
+        parts.append(
+            "GlassShadow("
+            f"x: {number(layer.get('x', 0), where)}, "
+            f"y: {number(layer.get('y', 0), where)}, "
+            f"blur: {number(layer.get('blur', 0), where)}, "
+            f"color: GlassRGBA({rgb(layer['hex'], where)}, alpha: {alpha(layer, where)}{light_expr(layer, where)}), "
+            f"inset: {'true' if layer.get('inset') else 'false'})"
+        )
+    return "[" + ", ".join(parts) + "]"
+
+
+# The flat theme (design exploration) names its values per appearance:
+# `flatLight` is its light appearance and `flatDark` its dark one, each
+# naming only what it changes. A colour one leaves alone keeps its classic
+# value for that appearance. Gradients and shadows are named by both or by
+# neither, with the same stops or layers, because each stop and layer is one
+# value with a light and a dark side. Only colours, gradients, shadows and
+# radii take overrides.
+THEME_APPEARANCES = ("flatLight", "flatDark")
+THEMED_SECTIONS = ("color", "gradient", "shadow", "radius")
+
+
+def check_themes(tokens: dict) -> None:
+    themes = {key: value for key, value in tokens.get("themes", {}).items() if not key.startswith("$")}
+    for name, theme in themes.items():
+        if name not in THEME_APPEARANCES:
+            raise TokenError(f"themes.{name}: not one of {', '.join(THEME_APPEARANCES)}")
+        for json_key, entries in theme.items():
+            if json_key not in THEMED_SECTIONS:
+                raise TokenError(f"themes.{name}.{json_key}: a theme overrides only {', '.join(THEMED_SECTIONS)}")
+            for key in entries:
+                if key not in tokens[json_key]:
+                    raise TokenError(f"themes.{name}.{json_key}.{key}: no such {json_key} token")
+    if not themes:
+        return
+    light, dark = (themes.get(name, {}) for name in THEME_APPEARANCES)
+    for json_key in THEMED_SECTIONS:
+        a, b = light.get(json_key, {}), dark.get(json_key, {})
+        if json_key != "color" and set(a) != set(b):
+            raise TokenError(f"themes.{json_key}: flatLight and flatDark override different tokens: {sorted(set(a) ^ set(b))}")
+        for key in a:
+            where = f"themes.*.{json_key}.{key}"
+            if json_key == "gradient" and [x["at"] for x in a[key]["stops"]] != [x["at"] for x in b[key]["stops"]]:
+                raise TokenError(f"{where}: the two appearances need the same stops")
+            if json_key == "shadow" and [bool(x.get("inset")) for x in a[key]] != [bool(x.get("inset")) for x in b[key]]:
+                raise TokenError(f"{where}: the two appearances need the same layers")
+            if json_key == "radius" and a[key] != b[key]:
+                raise TokenError(f"{where}: a radius is the same in both appearances")
+
+
+def dark_only(entry: dict) -> dict:
+    """An entry with its light value dropped: its dark value everywhere."""
+    return {k: v for k, v in entry.items() if k != "light"}
+
+
+def paired(light: dict, dark: dict) -> dict:
+    """A colour entry whose dark value is `dark` and light value `light`."""
+    out = dark_only(dark)
+    if (light["hex"].lower(), light.get("alpha", 1)) != (dark["hex"].lower(), dark.get("alpha", 1)):
+        out["light"] = dark_only(light)
+    return out
+
+
+def flat_entry(tokens: dict, json_key: str, key: str):
+    """The flat theme's entry for a token, or None where it is the classic one."""
+    themes = tokens.get("themes", {})
+    light = themes.get("flatLight", {}).get(json_key, {}).get(key)
+    dark = themes.get("flatDark", {}).get(json_key, {}).get(key)
+    base = tokens[json_key][key]
+    if json_key == "radius":
+        return light
+    if json_key == "color":
+        if light is None and dark is None:
+            return None
+        classic_light = base.get("light", dark_only(base))
+        entry = paired(light if light is not None else classic_light, dark if dark is not None else dark_only(base))
+        return None if entry == base else entry
+    if json_key == "gradient":
+        if light is None:
+            return None
+        else:
+            entry = {**dark, "stops": [{**paired(a, b), "at": b["at"]} for a, b in zip(light["stops"], dark["stops"])]}
+        return None if entry == base else entry
+    if json_key == "shadow":
+        if light is None:
+            return None
+        else:
+            entry = [{**paired(a, b), **{k: b[k] for k in ("x", "y", "blur", "inset") if k in b}} for a, b in zip(light, dark)]
+        return None if entry == base else entry
+    raise TokenError(f"{json_key}: not themed")
+
+
 def render(tokens: dict) -> str:
     if tokens.get("version") != 1:
         raise TokenError("version: expected 1")
@@ -152,17 +255,30 @@ def render(tokens: dict) -> str:
         "public enum GlassTokens {",
     ]
 
-    def section(name: str, kind: str, items: list[tuple[str, str, str | None]]) -> None:
+    check_themes(tokens)
+
+    def section(name: str, kind: str, items: list[tuple], json_key: str | None = None, expr=None) -> None:
         out.append(f"    public enum {name} {{")
-        for key, expr, note in items:
+        themed = False
+        for key, value, note in items:
             out.extend(doc(note, "        "))
-            out.append(f"        public static let {key}: {kind} = {expr}")
+            flat = flat_entry(tokens, json_key, key) if json_key else None
+            if flat is not None:
+                # Read each time, so it follows the theme the app launched in.
+                themed = True
+                flat_value = expr(flat, f"themes.{json_key}.{key}")
+                out.append(f"        public static var {key}: {kind} {{ GlassTheme.pick({value}, flat: {flat_value}) }}")
+            else:
+                out.append(f"        public static let {key}: {kind} = {value}")
         out.append("")
         out.append(f"        /// Every {name.lower()} token by its JSON name.")
-        out.append(f"        public static let all: [String: {kind}] = [")
+        if themed:
+            out.append(f"        public static var all: [String: {kind}] {{ [")
+        else:
+            out.append(f"        public static let all: [String: {kind}] = [")
         for key, _, _ in items:
             out.append(f'            "{key}": {key},')
-        out.append("        ]")
+        out.append("        ] }" if themed else "        ]")
         out.append("    }")
         out.append("")
 
@@ -170,35 +286,19 @@ def render(tokens: dict) -> str:
     for key, entry in tokens["color"].items():
         where = f"color.{key}"
         colors.append((identifier(key, where), color_expr(entry, where), entry.get("note")))
-    section("Color", "GlassRGBA", colors)
+    section("Color", "GlassRGBA", colors, "color", color_expr)
 
     gradients = []
     for key, entry in tokens["gradient"].items():
         where = f"gradient.{key}"
-        stops = ", ".join(
-            f"GlassStop({rgb(stop['hex'], where)}, alpha: {alpha(stop, where)}, at: {number(stop['at'], where)}{light_expr(stop, where)})"
-            for stop in entry["stops"]
-        )
-        gradients.append(
-            (identifier(key, where), f"GlassGradient(angle: {number(entry['angle'], where)}, stops: [{stops}])", entry.get("note"))
-        )
-    section("Gradient", "GlassGradient", gradients)
+        gradients.append((identifier(key, where), gradient_expr(entry, where), entry.get("note")))
+    section("Gradient", "GlassGradient", gradients, "gradient", gradient_expr)
 
     shadows = []
     for key, layers in tokens["shadow"].items():
         where = f"shadow.{key}"
-        parts = []
-        for layer in layers:
-            parts.append(
-                "GlassShadow("
-                f"x: {number(layer.get('x', 0), where)}, "
-                f"y: {number(layer.get('y', 0), where)}, "
-                f"blur: {number(layer.get('blur', 0), where)}, "
-                f"color: GlassRGBA({rgb(layer['hex'], where)}, alpha: {alpha(layer, where)}{light_expr(layer, where)}), "
-                f"inset: {'true' if layer.get('inset') else 'false'})"
-            )
-        shadows.append((identifier(key, where), "[" + ", ".join(parts) + "]", None))
-    section("Shadow", "[GlassShadow]", shadows)
+        shadows.append((identifier(key, where), shadow_expr(layers, where), None))
+    section("Shadow", "[GlassShadow]", shadows, "shadow", shadow_expr)
 
     for name, json_key in (("Radius", "radius"), ("Space", "space"), ("Size", "size"), ("Opacity", "opacity"), ("Motion", "motion")):
         kind = "Double" if name in ("Opacity", "Motion") else "CGFloat"
@@ -206,7 +306,10 @@ def render(tokens: dict) -> str:
             (identifier(key, f"{json_key}.{key}"), number(value, f"{json_key}.{key}"), None)
             for key, value in tokens[json_key].items()
         ]
-        section(name, kind, items)
+        if json_key == "radius":
+            section(name, kind, items, json_key, number)
+        else:
+            section(name, kind, items)
 
     types = []
     for key, entry in tokens["type"].items():

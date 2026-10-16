@@ -86,8 +86,8 @@ pub const PIPELINE_EXPORT_SOURCE_INVALIDATED: &str =
 /// (the Tauri app) cannot hold an integer above `2^53` exactly. `AtomicUnits`
 /// already serializes this way on its own; these two
 /// helpers give the same wire shape to the plain-`u64` amount fields in this
-/// module's product record types (`score_microcredits`, `scored_microcredits`,
-/// and `PipelineContributorCredit`'s totals) via `#[serde(with = "...")]`.
+/// module's product record types (`score_microcredits` and
+/// `scored_microcredits`) via `#[serde(with = "...")]`.
 mod decimal_amount {
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -249,7 +249,7 @@ pub struct PipelineScoreAttestationEntry {
     /// Score decided, not credit that was issued: Settle can still withhold
     /// the award (one of `main`'s credit checks refused it) or forfeit it (a
     /// withdrawal came first), and the contributor status says which
-    /// (Ruling F-M7). The same name as `PipelineContributorCredit`'s total.
+    /// (Ruling F-M7).
     #[serde(with = "decimal_amount")]
     pub scored_microcredits: u64,
     pub decision: serde_json::Value,
@@ -357,6 +357,11 @@ pub struct PipelineOperationalSummary {
     /// suspended by an operator, in any bundle and phase. A count only; the
     /// intervention records say which and why.
     pub suspended_policy_count: u64,
+    /// The tenant's runs held for an operator (`awaiting_operator`, #1313):
+    /// a paid Settle run whose commit was refused for good. Its reason label
+    /// is on the `work` row. `0` in a summary written before V128.
+    #[serde(default)]
+    pub operator_held_run_count: u64,
     pub tenant_isolation_control_passed: bool,
     pub audit_immutability_control_passed: bool,
 }
@@ -386,19 +391,6 @@ pub struct PipelineForensicTrace {
     pub payout_state: String,
     pub instruments: Vec<PipelineInstrumentStatus>,
     pub index_invalidation_state: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PipelineContributorCredit {
-    #[serde(with = "decimal_amount")]
-    pub scored_microcredits: u64,
-    #[serde(with = "decimal_amount")]
-    pub finalized_microcredits: u64,
-    #[serde(with = "decimal_amount")]
-    pub pending_microcredits: u64,
-    #[serde(with = "decimal_amount")]
-    pub held_microcredits: u64,
-    pub submission_count: usize,
 }
 
 /// Shared by `contributor_statuses_for_principals` and `forensic_trace`
@@ -633,104 +625,6 @@ impl PipelineProductStore {
             .await?;
         tx.commit().await?;
         rows.iter().map(status_from_row).collect()
-    }
-
-    pub async fn own_contributor_statuses(
-        &self,
-        tenant_id: &str,
-        principal_ref: &str,
-    ) -> Result<Vec<PipelineContributorStatus>, DatabaseError> {
-        self.own_contributor_statuses_page(
-            tenant_id,
-            principal_ref,
-            None,
-            PIPELINE_STATUS_BATCH_MAX,
-        )
-        .await
-    }
-
-    pub async fn own_contributor_statuses_page(
-        &self,
-        tenant_id: &str,
-        principal_ref: &str,
-        after: Option<(DateTime<Utc>, Uuid)>,
-        limit: usize,
-    ) -> Result<Vec<PipelineContributorStatus>, DatabaseError> {
-        if limit == 0 || limit > PIPELINE_STATUS_BATCH_MAX {
-            return Err(DatabaseError::Constraint(
-                "submission status page limit is invalid".to_string(),
-            ));
-        }
-        let mut client = self.backend.trace_pool().get().await?;
-        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
-        let (after_received_at, after_submission_id) = after
-            .map(|(received_at, submission_id)| (Some(received_at), Some(submission_id)))
-            .unwrap_or((None, None));
-        let limit = i64::try_from(limit).map_err(|_| {
-            DatabaseError::Constraint("submission status page limit is invalid".to_string())
-        })?;
-        let rows = tx
-            .query(
-                "SELECT submission_id
-                   FROM trace_submissions
-                  WHERE tenant_id = $1 AND auth_principal_ref = $2
-                    AND (
-                        $3::timestamptz IS NULL
-                        OR (received_at, submission_id) < ($3, $4)
-                    )
-                    AND EXISTS (
-                        SELECT 1 FROM pipeline_runs r
-                         WHERE r.tenant_id = trace_submissions.tenant_id
-                           AND r.submission_id = trace_submissions.submission_id
-                    )
-                  ORDER BY received_at DESC, submission_id DESC
-                  LIMIT $5",
-                &[
-                    &tenant_id,
-                    &principal_ref,
-                    &after_received_at,
-                    &after_submission_id,
-                    &limit,
-                ],
-            )
-            .await?;
-        tx.commit().await?;
-        let submission_ids = rows
-            .iter()
-            .map(|row| row.get::<_, Uuid>("submission_id"))
-            .collect::<Vec<_>>();
-        self.contributor_statuses(tenant_id, principal_ref, &submission_ids)
-            .await
-    }
-
-    pub async fn contributor_credit(
-        &self,
-        tenant_id: &str,
-        principal_ref: &str,
-    ) -> Result<PipelineContributorCredit, DatabaseError> {
-        let statuses = self
-            .own_contributor_statuses(tenant_id, principal_ref)
-            .await?;
-        let scored_microcredits = sum_trace_credit_atomic_units(&statuses, |_| true)?;
-        let finalized_microcredits = sum_trace_credit_atomic_units(&statuses, |instrument| {
-            instrument.internal_settlement_state == "finalized"
-        })?;
-        let pending_microcredits = sum_trace_credit_atomic_units(&statuses, |instrument| {
-            matches!(
-                instrument.internal_settlement_state.as_str(),
-                "pending" | "approved"
-            )
-        })?;
-        let held_microcredits = sum_trace_credit_atomic_units(&statuses, |instrument| {
-            instrument.operation_state == "held"
-        })?;
-        Ok(PipelineContributorCredit {
-            scored_microcredits,
-            finalized_microcredits,
-            pending_microcredits,
-            held_microcredits,
-            submission_count: statuses.len(),
-        })
     }
 
     pub async fn score_attestation_entries(
@@ -1197,7 +1091,8 @@ impl PipelineProductStore {
 
     /// The rows a tenant's pipeline runs wrote into `main`'s tables, each
     /// found through its run, never by its shape (Ruling F-M10): the runs'
-    /// submissions; the credit events whose `pipeline_run_id` is one of the
+    /// submissions, and among them those whose run has a recorded privacy
+    /// pass; the credit events whose `pipeline_run_id` is one of the
     /// runs; the settlement batches the runs' settlement legs carry; and the
     /// NEAR outbox lines of those batches. The pipeline writes these rows to
     /// the database only, so `main`'s DB/file reconciliation leaves them out
@@ -1216,6 +1111,13 @@ impl PipelineProductStore {
         let submission_ids = ids(tx
             .query(
                 "SELECT DISTINCT submission_id FROM pipeline_runs WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await?);
+        let privacy_pass_submission_ids = ids(tx
+            .query(
+                "SELECT DISTINCT submission_id FROM pipeline_runs
+                  WHERE tenant_id = $1 AND privacy_pass_recorded_at IS NOT NULL",
                 &[&tenant_id],
             )
             .await?);
@@ -1251,6 +1153,7 @@ impl PipelineProductStore {
         tx.commit().await?;
         Ok(PipelineReconciliationRows {
             submission_ids,
+            privacy_pass_submission_ids,
             credit_event_ids,
             settlement_batch_ids,
             near_outbox_ids,
@@ -1311,7 +1214,10 @@ impl PipelineProductStore {
                         AS incomplete_exports,
                     (SELECT COUNT(*) FROM pipeline_bundle_policy_status
                       WHERE tenant_id = $1 AND NOT runnable)
-                        AS suspended_policies",
+                        AS suspended_policies,
+                    (SELECT COUNT(*) FROM pipeline_runs
+                      WHERE tenant_id = $1 AND state = 'awaiting_operator')
+                        AS operator_held_runs",
                 &[&tenant_id],
             )
             .await?;
@@ -1321,6 +1227,7 @@ impl PipelineProductStore {
                 "SELECT status, COUNT(*) AS item_count
                    FROM trace_near_credit_outbox
                   WHERE tenant_id = $1
+                    AND instrument_id IS NOT NULL
                   GROUP BY status
                   ORDER BY status",
                 &[&tenant_id],
@@ -1367,6 +1274,7 @@ impl PipelineProductStore {
             failed_invalidation_count: count_from_row(&summary, "failed_invalidation")?,
             incomplete_export_count: count_from_row(&summary, "incomplete_exports")?,
             suspended_policy_count: count_from_row(&summary, "suspended_policies")?,
+            operator_held_run_count: count_from_row(&summary, "operator_held_runs")?,
             tenant_isolation_control_passed: controls.tenant_isolation_passed,
             audit_immutability_control_passed: controls.audit_immutability_passed,
         })
@@ -1476,42 +1384,16 @@ impl PipelineProductStore {
     }
 }
 
-/// Sums `trace_credit` amounts across `statuses`' instruments matching
-/// `predicate`. `PipelineContributorCredit`'s totals stay `u64` (they mirror
-/// the Trace Credit ledger's own signed 64-bit column, bounded by
-/// `pipeline_run_settlements_trace_credit_bound`), while
-/// `PipelineInstrumentStatus.atomic_units` is `AtomicUnits` (a `u128`, #971)
-/// -- this helper is the boundary between the two, and fails closed rather
-/// than truncating if a total somehow will not fit.
-fn sum_trace_credit_atomic_units(
-    statuses: &[PipelineContributorStatus],
-    predicate: impl Fn(&PipelineInstrumentStatus) -> bool,
-) -> Result<u64, DatabaseError> {
-    statuses
-        .iter()
-        .flat_map(|status| status.instruments.iter())
-        .filter(|instrument| instrument.instrument_id == "trace_credit")
-        .filter(|instrument| predicate(instrument))
-        .try_fold(0u64, |total, instrument| {
-            let units = u64::try_from(instrument.atomic_units.get()).map_err(|_| {
-                DatabaseError::Serialization(
-                    "trace credit settlement amount exceeds the ledger's range".to_string(),
-                )
-            })?;
-            total.checked_add(units).ok_or_else(|| {
-                DatabaseError::Serialization(
-                    "trace credit total overflowed the ledger's range".to_string(),
-                )
-            })
-        })
-}
-
 /// What `PipelineProductStore::reconciliation_rows` found: the identifiers
 /// of the rows a tenant's pipeline runs wrote into `main`'s tables. Empty
 /// for a tenant with no pipeline run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PipelineReconciliationRows {
     pub submission_ids: BTreeSet<Uuid>,
+    /// The submissions whose run has a recorded Review-start privacy pass
+    /// (`privacy_pass_recorded_at IS NOT NULL`): the only ones whose stored
+    /// risk the pipeline rewrote (V117). A subset of `submission_ids`.
+    pub privacy_pass_submission_ids: BTreeSet<Uuid>,
     pub credit_event_ids: BTreeSet<Uuid>,
     pub settlement_batch_ids: BTreeSet<Uuid>,
     pub near_outbox_ids: BTreeSet<Uuid>,
@@ -1534,6 +1416,12 @@ const PHASE_OUTCOME_IMMUTABILITY_TRIGGERS: [&str; 2] = [
     "phase_outcomes_reject_update",
     "phase_outcomes_reject_delete",
 ];
+
+/// The `pg_trigger.tgtype` each immutability trigger must have (V92), in
+/// the order of `PHASE_OUTCOME_IMMUTABILITY_TRIGGERS`: a row trigger (1)
+/// that fires before (2) the update (16) or the delete (8). An `AFTER` or a
+/// statement trigger would let the change through (Zaki review 3, Z3-L5).
+const PHASE_OUTCOME_IMMUTABILITY_TRIGGER_TYPES: [i16; 2] = [1 | 2 | 16, 1 | 2 | 8];
 
 /// The function both immutability triggers call (V92).
 const PHASE_OUTCOME_IMMUTABILITY_FUNCTION: &str = "reject_phase_outcome_mutation";
@@ -1558,10 +1446,23 @@ pub struct PipelineControlHealth {
 ///   role cannot bypass it. A name the catalog does not hold there, a
 ///   `USING (true)` policy, a superuser or `BYPASSRLS` role, and an empty
 ///   list each fail it.
+///   Zaki review 3, Z3-L5: it also fails when a table has a permissive
+///   policy besides the tenant policy that applies to the current role
+///   (to `PUBLIC` or a role whose privileges it has, `pg_has_role` with
+///   `USAGE`, the test PostgreSQL uses to apply a policy), which PostgreSQL
+///   would OR with the tenant policy. A policy for another role (V105's
+///   `trace_gate_driver_cross_tenant_read`) does not open the current
+///   role's reads, also when the current role is a member of that role and
+///   does not inherit its privileges.
 /// - Audit immutability passes only when both of `phase_outcomes`'
 ///   immutability triggers exist on that table in the current schema, fire
 ///   for ordinary sessions (`tgenabled` `O` or `A`: not disabled, not
-///   replica-only), and call `reject_phase_outcome_mutation`.
+///   replica-only), are row triggers that fire before the change
+///   (`tgtype`, Zaki review 3, Z3-L5), on every column and with no `WHEN`
+///   condition (`tgattr` empty, `tgqual` null: PR #1283 review, finding
+///   6), and call `reject_phase_outcome_mutation`. A function whose body was replaced is
+///   not checked: the database owner can replace any function, and the
+///   runbook says so.
 ///
 /// Public only so the runtime suite can check it against a catalog it
 /// changed in a transaction it rolls back; `operational_summary` is its one
@@ -1573,27 +1474,53 @@ pub async fn pipeline_control_health(
 ) -> Result<PipelineControlHealth, DatabaseError> {
     let isolation =
         crate::db::postgres::trace_corpus_rls_catalog_diagnostics(tx, rls_tables).await?;
+    let no_extra_permissive_policy: bool = tx
+        .query_one(
+            "SELECT NOT EXISTS (
+                SELECT 1 FROM pg_policy p
+                  JOIN pg_class c ON c.oid = p.polrelid
+                 WHERE c.relname = ANY($1)
+                   AND c.relnamespace = to_regnamespace(current_schema())
+                   AND p.polpermissive
+                   AND p.polname <> 'trace_corpus_tenant_isolation'
+                   AND (
+                       0::OID = ANY(p.polroles)
+                       OR EXISTS (
+                           SELECT 1 FROM unnest(p.polroles) AS r(role_oid)
+                            WHERE r.role_oid <> 0
+                              AND pg_has_role(current_user, r.role_oid, 'USAGE')
+                       )
+                   )
+             )",
+            &[&rls_tables],
+        )
+        .await?
+        .get(0);
     let row = tx
         .query_one(
             "SELECT COUNT(*) = 2 AS audit_immutability_passed
                FROM pg_trigger t
                JOIN pg_class c ON c.oid = t.tgrelid
                JOIN pg_proc f ON f.oid = t.tgfoid
+               JOIN unnest($1::TEXT[], $3::SMALLINT[]) AS expected(tgname, tgtype)
+                 ON expected.tgname = t.tgname AND expected.tgtype = t.tgtype
               WHERE c.relname = 'phase_outcomes'
                 AND c.relnamespace = to_regnamespace(current_schema())
                 AND NOT t.tgisinternal
                 AND t.tgenabled IN ('O', 'A')
-                AND t.tgname = ANY($1)
+                AND t.tgattr = ''::int2vector
+                AND t.tgqual IS NULL
                 AND f.proname = $2
                 AND f.pronamespace = to_regnamespace(current_schema())",
             &[
                 &PHASE_OUTCOME_IMMUTABILITY_TRIGGERS.as_slice(),
                 &PHASE_OUTCOME_IMMUTABILITY_FUNCTION,
+                &PHASE_OUTCOME_IMMUTABILITY_TRIGGER_TYPES.as_slice(),
             ],
         )
         .await?;
     Ok(PipelineControlHealth {
-        tenant_isolation_passed: isolation.tables_isolated(),
+        tenant_isolation_passed: isolation.tables_isolated() && no_extra_permissive_policy,
         audit_immutability_passed: row.get("audit_immutability_passed"),
     })
 }
@@ -1658,6 +1585,9 @@ fn status_from_row(row: &Row) -> Result<PipelineContributorStatus, DatabaseError
             }
             PipelineRunState::Retry => PipelineProcessingStatus::Retry,
             PipelineRunState::AwaitingReview => PipelineProcessingStatus::AwaitingReview,
+            // #1313: a paid run held for an operator has not finished
+            // processing; the contributor sees it as pending, not failed.
+            PipelineRunState::AwaitingOperator => PipelineProcessingStatus::Pending,
             PipelineRunState::Complete => PipelineProcessingStatus::Complete,
             PipelineRunState::Failed => PipelineProcessingStatus::Failed,
         }
@@ -2080,7 +2010,7 @@ mod tests {
     }
 
     /// The tenant-isolation control covers every versioned-pipeline table:
-    /// the list read from `TRACE_COMMONS_RLS_TABLES` is the twenty tables
+    /// the list read from `TRACE_COMMONS_RLS_TABLES` is the tables
     /// the migrations define.
     #[test]
     fn the_isolation_control_covers_every_pipeline_table() {
@@ -2108,6 +2038,7 @@ mod tests {
                 "pipeline_receipt_ownership",
                 "pipeline_policy_interventions",
                 "pipeline_index_rebuild_fences",
+                "pipeline_score_bases",
             ])
         );
     }
@@ -2230,27 +2161,5 @@ mod tests {
         let entry_round_tripped: PipelineScoreAttestationEntry =
             serde_json::from_value(entry_value).unwrap();
         assert_eq!(entry_round_tripped, entry);
-
-        let credit = PipelineContributorCredit {
-            scored_microcredits: UNSAFE_FOR_JS_NUMBER,
-            finalized_microcredits: UNSAFE_FOR_JS_NUMBER,
-            pending_microcredits: 0,
-            held_microcredits: 0,
-            submission_count: 1,
-        };
-        let credit_value = serde_json::to_value(&credit).unwrap();
-        assert_eq!(
-            credit_value["scored_microcredits"],
-            serde_json::json!(UNSAFE_FOR_JS_NUMBER.to_string())
-        );
-        assert_eq!(credit_value["pending_microcredits"], serde_json::json!("0"));
-        assert_eq!(
-            credit_value["submission_count"],
-            serde_json::json!(1),
-            "submission_count is a count, not an amount, and stays a JSON number"
-        );
-        let credit_round_tripped: PipelineContributorCredit =
-            serde_json::from_value(credit_value).unwrap();
-        assert_eq!(credit_round_tripped, credit);
     }
 }

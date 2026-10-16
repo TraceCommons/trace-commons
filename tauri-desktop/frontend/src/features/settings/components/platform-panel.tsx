@@ -78,7 +78,7 @@ export function PlatformPanel() {
               canToggleLogin ? (
                 <Toggle
                   settings
-                  label="Start Trace Commons at login"
+                  label="Start Near.ai at login"
                   checked={loginState === "enabled"}
                   disabled={platform.busy}
                   onChange={(checked) =>

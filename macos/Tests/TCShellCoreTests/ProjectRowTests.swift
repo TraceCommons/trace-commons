@@ -129,7 +129,7 @@ final class ProjectRowTests: XCTestCase {
             isUnresolvedBucket: true
         )
         XCTAssertEqual(bucket.displayLabel, ProjectCopy.unresolvedBucketLabel)
-        XCTAssertEqual(bucket.displayLabel, "Sessions with no project")
+        XCTAssertEqual(bucket.displayLabel, "Traces with no project")
         XCTAssertNotEqual(bucket.displayLabel, bucket.projectLabel)
     }
 
@@ -138,16 +138,6 @@ final class ProjectRowTests: XCTestCase {
     func testAnOrdinaryProjectKeepsItsLabel() {
         let row = ProjectRow(projectId: "p_a", projectLabel: "unknown-project", mode: .ask)
         XCTAssertEqual(row.displayLabel, "unknown-project")
-    }
-
-    /// The note states what the daemon does. Pinned against the spec's words
-    /// so a reword in one shell does not pass unnoticed.
-    func testTheNoteSaysWhatTheDaemonDoes() {
-        XCTAssertEqual(
-            ProjectCopy.unresolvedBucketNote,
-            "Trace Commons can't tell which folder these ran in, so they can never "
-                + "be contributed automatically. You'll always be asked."
-        )
     }
 
     /// A daemon predating the flag leaves rows plain rather than explained.

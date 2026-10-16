@@ -78,7 +78,7 @@ export function WitnessPanel({
         </TertiaryLink>
       </div>
       <p className="m-0 tc-caption tc-text-tertiary">
-        A witness receives raw sessions only after local consent and measurement
+        A witness receives raw traces only after local consent and measurement
         verification. A configured witness without a valid pin refuses
         submissions; no witness keeps local redaction.
       </p>

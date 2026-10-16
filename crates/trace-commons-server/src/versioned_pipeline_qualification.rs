@@ -34,6 +34,7 @@ use crate::versioned_pipeline_compat::{
     COMPATIBILITY_ADMISSION_IMPLEMENTATION, COMPATIBILITY_REVIEW_IMPLEMENTATION,
     COMPATIBILITY_SCORE_IMPLEMENTATION, COMPATIBILITY_SETTLE_IMPLEMENTATION,
 };
+use crate::versioned_pipeline_score_registry::ScorePolicyRegistry;
 
 pub const PIPELINE_CHECK_RESULT_SCHEMA: &str = "trace_commons.pipeline_check_result.v1";
 const PIPELINE_CHECK_RESULT_DIR_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR";
@@ -45,6 +46,11 @@ pub const PACKAGE_SIGNATURE_INVALID_LABEL: &str = "bundle_package_signature_inva
 pub const PACKAGE_SIGNER_UNTRUSTED_LABEL: &str = "bundle_package_signer_untrusted";
 pub const PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL: &str = "bundle_implementation_unknown";
 pub const PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL: &str = "bundle_development_dependency";
+/// A package's Score policy is one a registry supplies, but its factory does
+/// not declare itself qualified for production
+/// (`ScorePolicyFactory::production_qualified`).
+pub const PACKAGE_SCORE_POLICY_NOT_QUALIFIED_LABEL: &str =
+    "bundle_score_policy_not_production_qualified";
 pub const QUALIFICATION_EVIDENCE_STALE_LABEL: &str = "qualification_evidence_stale";
 pub const QUALIFICATION_EVIDENCE_MISSING_LABEL: &str = "qualification_evidence_missing";
 pub const QUALIFICATION_EVIDENCE_FAILED_LABEL: &str = "qualification_evidence_failed";
@@ -162,9 +168,9 @@ pub const PROMOTION_REQUIRED_CHECKS: &[&str] = &[
 
 /// The checks, among [`PROMOTION_REQUIRED_CHECKS`], that no local or CI run
 /// passes: they need the production assembly, so their results come from
-/// other runs than the `qualify` run. Every other required check is a check
-/// that one `pipeline.py qualify` run produces, and [`evaluate_promotion`]
-/// requires those results to share one run id.
+/// the production run, not the `qualify` run (spec 2026-10-08, R-1). They
+/// name the production package, so they are among
+/// [`PROMOTION_PACKAGE_CHECKS`] (the Q7 amendment, spec A-D12).
 /// `scripts/operator/test_pipeline_tooling.py` holds the same three as
 /// `_PROMOTION_ONLY` (a test there requires the two lists to agree).
 pub const PROMOTION_ONLY_CHECKS: &[&str] = &[
@@ -175,16 +181,37 @@ pub const PROMOTION_ONLY_CHECKS: &[&str] = &[
 
 /// The checks, among [`PROMOTION_REQUIRED_CHECKS`], that test the candidate
 /// package and so carry its three digests (P5-D15): the bundle qualification,
-/// the compatibility and HF-local corpus runs, and the restore drill. Every
+/// the compatibility and HF-local corpus runs, and the restore drill, and
+/// (spec 2026-10-08, A-D12) the three [`PROMOTION_ONLY_CHECKS`], which run
+/// against the production assembly and name the package it holds. Every
 /// other required check is a mechanics check whose result names no package.
-/// `scripts/operator/pipeline_tooling/checks.py` holds the same four as
-/// `digests_required` (a self-test requires the two lists to agree).
+/// `scripts/operator/pipeline_tooling/checks.py` holds the same seven as
+/// `PROMOTION_PACKAGE_CHECK_IDS` (the four `qualify` produces with
+/// `digests_required`, and the three promotion-only ones; a self-test
+/// requires the two lists to agree).
 pub const PROMOTION_PACKAGE_CHECKS: &[&str] = &[
     "pipeline_bundle_qualification",
     "pipeline_http_corpus_compatibility",
     "pipeline_http_corpus_hf_local",
     "pipeline_restore_drill",
+    "pipeline_production_adapters",
+    "pipeline_remote_restore",
+    "pipeline_hf_network_canary",
 ];
+
+/// The local restore drill's check id. Its result always carries
+/// [`LOCAL_RESTORE_BLOCKER_LABEL`]: the artifact restore it proves is a local
+/// directory copy.
+pub const RESTORE_DRILL_CHECK_ID: &str = "pipeline_restore_drill";
+/// The safe blocker a local restore drill carries
+/// (`scripts/operator/pipeline.py`'s `RESTORE_SAFE_BLOCKER`).
+pub const LOCAL_RESTORE_BLOCKER_LABEL: &str = "filesystem_restore_local_only";
+/// The operator-run remote restore drill (`pipeline.py promote
+/// remote-restore`). A passing result of it, with no blocker of its own, from
+/// the drill's code revision and naming the drill's package, discharges the
+/// drill's [`LOCAL_RESTORE_BLOCKER_LABEL`] in [`evaluate_promotion`] (spec
+/// 2026-10-08 B-D4), and nothing else.
+pub const REMOTE_RESTORE_CHECK_ID: &str = "pipeline_remote_restore";
 
 /// Whether `value` is a safe label, `^[a-z0-9_]{1,64}$`: the only text an
 /// operational answer, log line, or stored refusal may carry. Public so that
@@ -415,7 +442,12 @@ impl PipelineCheckEmitter {
             .write(true)
             .create_new(true)
             .open(&result_path)
-            .map_err(|_| "pipeline_check_already_emitted".to_string())?;
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::AlreadyExists => "pipeline_check_already_emitted".to_string(),
+                // A directory that is missing or not writable (a read-only
+                // path under the unit's sandbox) is not a repeat.
+                _ => "pipeline_check_write_failed".to_string(),
+            })?;
 
         let evidence_bytes = serde_json::to_vec(&observed)
             .map_err(|_| "pipeline_check_evidence_invalid".to_string())?;
@@ -537,29 +569,31 @@ pub struct PromotionDecision {
 /// and from more than one package `qualification_evidence_mixed_package`
 /// (a package is its three digests together).
 ///
-/// The results of one qualification are the output of one `qualify` run
-/// (review round 1 of #1240, point 5): every result of a check outside
-/// [`PROMOTION_ONLY_CHECKS`] must carry the same run id, else the decision is
-/// blocked with `qualification_evidence_mixed_run`. So a set cannot take a
-/// mechanics result from one run and a candidate result from another run of
-/// the same revision. The three promotion-only results come from the
-/// production assembly, not from `qualify`, and each may carry its own run
-/// id. The run id is a field of the signed result, so the rule needs no
-/// other field. It holds wherever this function runs: the qualification, the
+/// The results of one qualification are the output of two runs of one
+/// code revision (review round 1 of #1240, point 5; spec 2026-10-08, R-1):
+/// every mechanics result (a check outside [`PROMOTION_PACKAGE_CHECKS`])
+/// must carry one run id, the `qualify` run's, and every package-bearing
+/// result (one of [`PROMOTION_PACKAGE_CHECKS`]) one run id, the production
+/// run's, else the decision is blocked with
+/// `qualification_evidence_mixed_run`. So a set cannot take a mechanics
+/// result from one run and another mechanics result from a second run of
+/// the same revision, nor split the package-bearing results across runs.
+/// The run id is a field of the signed result, so the rule needs no other
+/// field. It holds wherever this function runs: the qualification, the
 /// activation, and the rollback.
 ///
 /// A qualification run names exactly one package (P5-D15), and this
 /// function enforces which results name it, in both directions, because the
 /// decision gates `qualify_bundle` and so activation, for evidence that did
 /// not pass through `pipeline.py`. Each check in [`PROMOTION_PACKAGE_CHECKS`]
-/// (the four that test the candidate) must carry all three package digests:
+/// (the seven that test the candidate) must carry all three package digests:
 /// one that carries fewer, none included, adds
 /// `qualification_evidence_package_missing:<check_id>`. Every other check
-/// (a mechanics check, or a promotion-only one) must carry none: one that
+/// (a mechanics check) must carry none: one that
 /// carries any digest adds `qualification_evidence_package_unexpected:<check_id>`.
 /// With either blocker the decision is not ready and `package` is `None`: no
 /// package is the one the candidate checks tested. A decision is therefore
-/// ready only when the four candidate checks name one package and no other
+/// ready only when the seven candidate checks name one package and no other
 /// result names any, and then `package` is that package.
 ///
 /// `evidence_hash` covers, for each check id, the result's run id, code
@@ -602,6 +636,7 @@ pub fn evaluate_promotion(
     }
     let mut blockers = Vec::new();
     let mut package_rule_broken = false;
+    let local_restore_discharged = remote_restore_discharges_local_restore(&by_id, now);
     for check_id in PROMOTION_REQUIRED_CHECKS {
         let Some(item) = by_id.get(check_id) else {
             blockers.push(format!("{QUALIFICATION_EVIDENCE_MISSING_LABEL}:{check_id}"));
@@ -614,10 +649,17 @@ pub fn evaluate_promotion(
         // a pass can carry one (the restore drill passes with
         // `filesystem_restore_local_only`), and it names what that pass does
         // not prove (final review I4, ruling FR-4).
+        // The one exception (spec 2026-10-08 B-D4): a matching remote
+        // restore discharges the restore drill's local-copy blocker.
         blockers.extend(
             item.check
                 .safe_blockers
                 .iter()
+                .filter(|label| {
+                    !(local_restore_discharged
+                        && *check_id == RESTORE_DRILL_CHECK_ID
+                        && label.as_str() == LOCAL_RESTORE_BLOCKER_LABEL)
+                })
                 .map(|label| format!("{label}:{check_id}")),
         );
         // Which results name the package (P5-D15): the candidate checks all
@@ -661,14 +703,19 @@ pub fn evaluate_promotion(
     if packages.len() > 1 {
         blockers.push(QUALIFICATION_EVIDENCE_MIXED_PACKAGE_LABEL.to_string());
     }
-    // One run for every result that `qualify` produces; a promotion-only
-    // result may come from another run.
-    let runs = evidence
-        .iter()
-        .filter(|item| !PROMOTION_ONLY_CHECKS.contains(&item.check.check_id.as_str()))
-        .map(|item| item.check.run_id.as_str())
-        .collect::<BTreeSet<_>>();
-    if runs.len() > 1 {
+    // Spec 2026-10-08, R-1: one run for the mechanics results (the `qualify`
+    // run) and one for the package-bearing results (the production run).
+    let package_bearing =
+        |item: &&DrillEvidence| PROMOTION_PACKAGE_CHECKS.contains(&item.check.check_id.as_str());
+    let run_count = |package: bool| {
+        evidence
+            .iter()
+            .filter(|item| package_bearing(item) == package)
+            .map(|item| item.check.run_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+    };
+    if run_count(false) > 1 || run_count(true) > 1 {
         blockers.push(QUALIFICATION_EVIDENCE_MIXED_RUN_LABEL.to_string());
     }
     blockers.sort();
@@ -707,6 +754,39 @@ pub fn evaluate_promotion(
             .then(|| packages.first().cloned())
             .flatten(),
     })
+}
+
+/// Whether the evidence holds a `pipeline_remote_restore` result that
+/// discharges the restore drill's [`LOCAL_RESTORE_BLOCKER_LABEL`]: it passed,
+/// carries no safe blocker of its own, is current at `now`, comes from the
+/// drill's code revision, and names exactly the drill's package (all three
+/// digests present and equal). Anything less, or either result missing, is
+/// `false`, and the blocker stays.
+fn remote_restore_discharges_local_restore(
+    by_id: &BTreeMap<&str, &DrillEvidence>,
+    now: DateTime<Utc>,
+) -> bool {
+    let (Some(remote), Some(drill)) = (
+        by_id.get(REMOTE_RESTORE_CHECK_ID),
+        by_id.get(RESTORE_DRILL_CHECK_ID),
+    ) else {
+        return false;
+    };
+    let current = maximum_age(remote).is_some_and(|maximum_age| {
+        remote.check.observed_at <= now && now - remote.check.observed_at <= maximum_age
+    });
+    let names_every_digest = |check: &PipelineCheckResult| {
+        check.package_hash.is_some()
+            && check.configuration_digest.is_some()
+            && check.dependency_digest.is_some()
+    };
+    remote.check.status == PipelineCheckStatus::Pass
+        && remote.check.safe_blockers.is_empty()
+        && current
+        && remote.check.code_revision_hash == drill.check.code_revision_hash
+        && names_every_digest(&remote.check)
+        && names_every_digest(&drill.check)
+        && PromotionPackage::of(&remote.check) == PromotionPackage::of(&drill.check)
 }
 
 /// `item`'s maximum age as a duration; `None` when it does not fit one
@@ -1257,15 +1337,52 @@ impl ProductionDependencyProfile {
 /// compatibility family, or which carries any development or synthetic
 /// dependency marker: a Score or Settle projection id containing `test` or
 /// `reference`, or an artifact whose bytes contain `local_reference`,
-/// `reference_`, `pipeline-test`, `mock_`, or `synthetic`.
+/// `reference_`, `pipeline-test`, `mock_`, or `synthetic`. The open build's
+/// rule: no Score policy is registered
+/// ([`validate_production_package_with_score_policies`] with an empty
+/// registry).
 pub fn validate_production_package(package: &BundlePackage) -> Result<(), String> {
-    let known = package.manifest.admission.implementation_id
+    validate_production_package_with_score_policies(package, &ScorePolicyRegistry::new())
+}
+
+/// [`validate_production_package`], where the Score policy may also be one
+/// `score_policies` supplies. The Admission, Review and Settle policies must
+/// still be the compatibility family's. A registered Score policy is
+/// accepted only when its factory declares itself qualified for production
+/// (`ScorePolicyFactory::production_qualified`, else
+/// `bundle_score_policy_not_production_qualified`) and accepts the bytes the
+/// manifest's Score `configuration_hash` names
+/// (`ScorePolicyFactory::configuration_is_qualifiable`, else
+/// `bundle_configuration_not_qualifiable`; a missing configuration artifact
+/// is refused the same way). A Score implementation id that is neither the
+/// compatibility policy's nor registered is refused
+/// (`bundle_implementation_unknown`). The development-marker check applies
+/// to every package.
+pub fn validate_production_package_with_score_policies(
+    package: &BundlePackage,
+    score_policies: &ScorePolicyRegistry,
+) -> Result<(), String> {
+    let compatibility_triple = package.manifest.admission.implementation_id
         == COMPATIBILITY_ADMISSION_IMPLEMENTATION
         && package.manifest.review.implementation_id == COMPATIBILITY_REVIEW_IMPLEMENTATION
-        && package.manifest.score.implementation_id == COMPATIBILITY_SCORE_IMPLEMENTATION
         && package.manifest.settle.implementation_id == COMPATIBILITY_SETTLE_IMPLEMENTATION;
-    if !known {
+    if !compatibility_triple {
         return Err(PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string());
+    }
+    if package.manifest.score.implementation_id != COMPATIBILITY_SCORE_IMPLEMENTATION {
+        let factory =
+            crate::versioned_pipeline_bundle::registered_score_factory(package, score_policies)
+                .ok_or_else(|| PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string())?;
+        if !factory.production_qualified() {
+            return Err(PACKAGE_SCORE_POLICY_NOT_QUALIFIED_LABEL.to_string());
+        }
+        let configuration_qualifiable = package
+            .artifacts
+            .get(&package.manifest.score.configuration_hash)
+            .is_some_and(|configuration| factory.configuration_is_qualifiable(configuration));
+        if !configuration_qualifiable {
+            return Err(PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL.to_string());
+        }
     }
     let has_development_dependency = package
         .manifest
@@ -1357,21 +1474,36 @@ pub struct BundleQualificationRecord {
 pub struct PipelineQualificationStore {
     backend: Arc<PgBackend>,
     packages: PgPipelineStore,
+    score_policies: ScorePolicyRegistry,
 }
 
 impl PipelineQualificationStore {
+    /// A store that qualifies the compatibility family only: no Score policy
+    /// is registered.
     pub fn new(backend: Arc<PgBackend>) -> Self {
         Self {
             packages: PgPipelineStore::new(backend.clone()),
             backend,
+            score_policies: ScorePolicyRegistry::new(),
         }
+    }
+
+    /// Qualifies, besides the compatibility family, a package whose Score
+    /// policy `score_policies` supplies, on the terms of
+    /// [`validate_production_package_with_score_policies`]. Pass the
+    /// registry the pipeline service runs with, so the store qualifies
+    /// exactly what the service can bind.
+    pub fn with_score_policies(mut self, score_policies: ScorePolicyRegistry) -> Self {
+        self.score_policies = score_policies;
+        self
     }
 
     /// Verifies `signed`'s trust and production shape, checks `metadata` and
     /// `dependencies` against `signed.package` and each other, and records
     /// the qualification. Fails closed on: an untrusted or tampered package
     /// (`trust.verify`), a non-production or development package
-    /// (`validate_production_package`), malformed metadata
+    /// (`validate_production_package_with_score_policies` over this store's
+    /// registry, `Self::with_score_policies`), malformed metadata
     /// (`bundle_qualification_metadata_invalid`), a `dependencies` profile
     /// built for a different bundle -- a different `bundle_id` or a
     /// `dependency_digest` that does not match `signed.package`'s own
@@ -1462,7 +1594,8 @@ impl PipelineQualificationStore {
         verified: Option<(&str, &str)>,
     ) -> Result<BundleQualificationRecord, DatabaseError> {
         trust.verify(signed).map_err(DatabaseError::Constraint)?;
-        validate_production_package(&signed.package).map_err(DatabaseError::Constraint)?;
+        validate_production_package_with_score_policies(&signed.package, &self.score_policies)
+            .map_err(DatabaseError::Constraint)?;
         if !package_configuration_is_qualifiable(&signed.package) {
             return Err(DatabaseError::Constraint(
                 PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL.to_string(),
@@ -2036,6 +2169,29 @@ mod tests {
         assert!(bad_blocker.validate().is_err());
     }
 
+    /// `scripts/operator/fixtures/pipeline-package-digests-vector.json` is
+    /// the cross-language vector for [`package_digests`]: `pipeline.py
+    /// promote` recomputes all three digests in Python from the same file
+    /// (`test_package_digests_match_the_rust_vector`). This test is what holds
+    /// that file to the Rust rule, so the Python side cannot pass against an
+    /// oracle of its own making. Two instruments pin the instrument order.
+    #[test]
+    fn the_cross_language_package_digest_vector_follows_the_rust_rule() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/operator/fixtures/pipeline-package-digests-vector.json");
+        let vector: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("vector file reads"))
+                .expect("vector file parses");
+        let package: BundlePackage =
+            serde_json::from_value(vector["package"].clone()).expect("vector package loads");
+        assert_eq!(package.manifest.instruments.len(), 2);
+        assert_eq!(package.manifest.bundle_id().unwrap(), package.bundle_id);
+        let digests = package_digests(&package).expect("vector digests compute");
+        assert_eq!(digests.package_hash, vector["package_hash"]);
+        assert_eq!(digests.configuration_digest, vector["configuration_digest"]);
+        assert_eq!(digests.dependency_digest, vector["dependency_digest"]);
+    }
+
     #[test]
     fn package_digests_follow_the_manifest() {
         let package = minimal_test_package();
@@ -2088,6 +2244,30 @@ mod tests {
             evidence_hash(&float_value),
             Err("evidence_value_invalid".to_string())
         );
+    }
+
+    /// A result path that cannot be created is a write failure, not a repeat.
+    /// On the pilot a `ProtectSystem=strict` unit made the result directory
+    /// read-only, and the start was refused as `pipeline_check_already_emitted`
+    /// with no result file anywhere (2026-10-09).
+    #[test]
+    fn emitter_reports_an_unwritable_directory_as_a_write_failure() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let missing = dir.path().join("not-created");
+        let code_hash = sha256_prefixed(b"code-revision");
+        let emitter = PipelineCheckEmitter::new(missing.clone(), "q0123abcd", &code_hash)
+            .expect("emitter builds");
+
+        let emitted = emitter.emit(
+            "pipeline_crash_matrix",
+            PipelineCheckStatus::Pass,
+            Some(&minimal_test_package()),
+            &[],
+            serde_json::json!({"runs": 3}),
+        );
+
+        assert_eq!(emitted, Err("pipeline_check_write_failed".to_string()));
+        assert!(!missing.exists());
     }
 
     #[test]
@@ -2381,19 +2561,21 @@ mod tests {
         );
 
         // Final review I4 (ruling FR-4): a passing result's safe blockers
-        // are promotion blockers, each as `<label>:<check_id>`. The restore
-        // drill passes carrying `filesystem_restore_local_only`.
+        // are promotion blockers, each as `<label>:<check_id>`. The label is
+        // not `filesystem_restore_local_only`: this set's remote restore
+        // names the drill's package, so it discharges that one label (spec
+        // 2026-10-08 B-D4, tested below) and no other.
         let mut restore_blocked = evidence.clone();
         let restore = restore_blocked
             .iter_mut()
             .find(|item| item.check.check_id == "pipeline_restore_drill")
             .expect("the restore drill is a promotion check");
-        restore.check.safe_blockers = vec!["filesystem_restore_local_only".to_string()];
+        restore.check.safe_blockers = vec!["restore_tenant_count_low".to_string()];
         let restore_decision = evaluate_promotion(&restore_blocked, now).unwrap();
         assert!(!restore_decision.ready);
         assert_eq!(
             restore_decision.safe_blockers,
-            vec!["filesystem_restore_local_only:pipeline_restore_drill".to_string()]
+            vec!["restore_tenant_count_low:pipeline_restore_drill".to_string()]
         );
         assert_ne!(
             restore_decision.evidence_hash,
@@ -2511,7 +2693,7 @@ mod tests {
     }
 
     /// One passing result for each promotion check, in the shape a real
-    /// qualification run has: the four checks of [`PROMOTION_PACKAGE_CHECKS`]
+    /// qualification run has: the seven checks of [`PROMOTION_PACKAGE_CHECKS`]
     /// name the one candidate package, every other check names none.
     fn passing_evidence(now: DateTime<Utc>) -> Vec<DrillEvidence> {
         PROMOTION_REQUIRED_CHECKS
@@ -2577,42 +2759,56 @@ mod tests {
         assert_eq!(decision.code_revision_hash, None);
     }
 
-    /// Review round 1 of #1240, point 5: the results of the checks that one
-    /// `qualify` run produces (every check outside [`PROMOTION_ONLY_CHECKS`])
-    /// must share one run id. A set that takes one of them from another run
-    /// is not ready, under `qualification_evidence_mixed_run`, whichever
-    /// check it is; the three promotion-only results may each come from a
-    /// run of their own.
+    /// Spec 2026-10-08, A-D12 (the Q7 amendment): the three promotion-only
+    /// checks name the production package, so they join the checks that
+    /// test it, which grow from four to seven.
     #[test]
-    fn promotion_binds_one_run() {
+    fn promotion_package_checks_include_the_promotion_only_three() {
+        assert_eq!(PROMOTION_ONLY_CHECKS.len(), 3);
+        assert_eq!(PROMOTION_PACKAGE_CHECKS.len(), 7);
+        for check_id in PROMOTION_ONLY_CHECKS {
+            assert!(PROMOTION_REQUIRED_CHECKS.contains(check_id), "{check_id}");
+            assert!(PROMOTION_PACKAGE_CHECKS.contains(check_id), "{check_id}");
+        }
+        for check_id in [
+            "pipeline_bundle_qualification",
+            "pipeline_http_corpus_compatibility",
+            "pipeline_http_corpus_hf_local",
+            "pipeline_restore_drill",
+        ] {
+            assert!(PROMOTION_PACKAGE_CHECKS.contains(&check_id), "{check_id}");
+        }
+        assert_eq!(
+            PROMOTION_REQUIRED_CHECKS
+                .iter()
+                .filter(|check_id| !PROMOTION_PACKAGE_CHECKS.contains(check_id))
+                .count(),
+            15,
+            "the mechanics checks"
+        );
+    }
+
+    /// Spec 2026-10-08, R-1 and A-D12: qualification is two runs of one code
+    /// revision. The mechanics results (every check outside
+    /// [`PROMOTION_PACKAGE_CHECKS`]) share one run id, and the
+    /// package-bearing results (the seven of [`PROMOTION_PACKAGE_CHECKS`])
+    /// share another; a result from a third run in either group is
+    /// `qualification_evidence_mixed_run`, whichever check it is.
+    #[test]
+    fn promotion_run_rule_is_per_group() {
         let now = Utc::now();
         let evidence = passing_evidence(now);
         assert!(evaluate_promotion(&evidence, now).unwrap().ready);
 
-        // The constant names three of the required checks, and none of them
-        // tests the candidate package.
-        assert_eq!(PROMOTION_ONLY_CHECKS.len(), 3);
-        for check_id in PROMOTION_ONLY_CHECKS {
-            assert!(PROMOTION_REQUIRED_CHECKS.contains(check_id), "{check_id}");
-            assert!(!PROMOTION_PACKAGE_CHECKS.contains(check_id), "{check_id}");
+        let mut two_runs = evidence.clone();
+        for check_id in PROMOTION_PACKAGE_CHECKS {
+            check_mut(&mut two_runs, check_id).run_id = "qproduction".to_string();
         }
-
-        // One run for the other results, and each promotion-only result
-        // from a run of its own: ready.
-        let mut other_runs = evidence.clone();
-        for (index, check_id) in PROMOTION_ONLY_CHECKS.iter().enumerate() {
-            check_mut(&mut other_runs, check_id).run_id = format!("qpromotion{index}");
-        }
-        let decision = evaluate_promotion(&other_runs, now).unwrap();
+        let decision = evaluate_promotion(&two_runs, now).unwrap();
         assert!(decision.ready, "{:?}", decision.safe_blockers);
 
-        // Any one of the other results from a second run: blocked, with the
-        // one label, on the set above and on the one-run set.
-        for base in [&evidence, &other_runs] {
-            for check_id in PROMOTION_REQUIRED_CHECKS
-                .iter()
-                .filter(|check_id| !PROMOTION_ONLY_CHECKS.contains(check_id))
-            {
+        for base in [&evidence, &two_runs] {
+            for check_id in PROMOTION_REQUIRED_CHECKS {
                 let mut mixed = base.clone();
                 check_mut(&mut mixed, check_id).run_id = "q9999abcd".to_string();
                 let decision = evaluate_promotion(&mixed, now).unwrap();
@@ -2625,6 +2821,132 @@ mod tests {
             }
         }
         assert!(is_safe_label(QUALIFICATION_EVIDENCE_MIXED_RUN_LABEL));
+    }
+
+    /// Spec 2026-10-08 B-D4: a passing `pipeline_remote_restore` with no
+    /// safe blockers, from the same code revision and naming the same
+    /// package as the restore drill, discharges exactly the drill's
+    /// `filesystem_restore_local_only` blocker, and nothing else.
+    ///
+    /// The proof is the absence of that one label. Since A-D12 moved
+    /// `pipeline_remote_restore` into [`PROMOTION_PACKAGE_CHECKS`], a
+    /// matching remote result makes the set ready; before it, the result
+    /// also carried `qualification_evidence_package_unexpected`. Both arms
+    /// are asserted below.
+    #[test]
+    fn remote_restore_discharges_only_the_local_restore_blocker() {
+        let now = Utc::now();
+        let local = format!("{LOCAL_RESTORE_BLOCKER_LABEL}:{RESTORE_DRILL_CHECK_ID}");
+        assert_eq!(LOCAL_RESTORE_BLOCKER_LABEL, "filesystem_restore_local_only");
+        assert_eq!(REMOTE_RESTORE_CHECK_ID, "pipeline_remote_restore");
+        assert!(PROMOTION_REQUIRED_CHECKS.contains(&REMOTE_RESTORE_CHECK_ID));
+        assert!(PROMOTION_REQUIRED_CHECKS.contains(&RESTORE_DRILL_CHECK_ID));
+
+        // The drill carries the local blocker, as every local drill does.
+        // The remote result names no package: it is not the drill's
+        // package, so nothing is discharged.
+        let mut base = passing_evidence(now);
+        check_mut(&mut base, RESTORE_DRILL_CHECK_ID).safe_blockers =
+            vec![LOCAL_RESTORE_BLOCKER_LABEL.to_string()];
+        let remote = check_mut(&mut base, REMOTE_RESTORE_CHECK_ID);
+        remote.package_hash = None;
+        remote.configuration_digest = None;
+        remote.dependency_digest = None;
+        let decision = evaluate_promotion(&base, now).unwrap();
+        assert!(!decision.ready);
+        assert!(decision.safe_blockers.contains(&local), "{decision:?}");
+
+        // A matching remote result: the local blocker is gone.
+        let mut matching = base.clone();
+        name_package(
+            check_mut(&mut matching, REMOTE_RESTORE_CHECK_ID),
+            "candidate",
+        );
+        let decision = evaluate_promotion(&matching, now).unwrap();
+        assert!(!decision.safe_blockers.contains(&local), "{decision:?}");
+        if PROMOTION_PACKAGE_CHECKS.contains(&REMOTE_RESTORE_CHECK_ID) {
+            assert!(decision.ready, "{:?}", decision.safe_blockers);
+        } else {
+            assert_eq!(
+                decision.safe_blockers,
+                vec![format!(
+                    "{QUALIFICATION_EVIDENCE_PACKAGE_UNEXPECTED_LABEL}:{REMOTE_RESTORE_CHECK_ID}"
+                )]
+            );
+        }
+
+        // Each way the remote result can fail to match keeps the blocker.
+        let cases: Vec<(&str, Box<dyn Fn(&mut PipelineCheckResult)>)> = vec![
+            (
+                "failing",
+                Box::new(|check| check.status = PipelineCheckStatus::Fail),
+            ),
+            (
+                "blocked",
+                Box::new(|check| check.status = PipelineCheckStatus::Blocked),
+            ),
+            (
+                "own_blocker",
+                Box::new(|check| {
+                    check.safe_blockers = vec!["remote_versioning_unverified".to_string()]
+                }),
+            ),
+            (
+                "another_revision",
+                Box::new(|check| check.code_revision_hash = sha256_prefixed(b"another-revision")),
+            ),
+            (
+                "another_package",
+                Box::new(|check| name_package(check, "other")),
+            ),
+            (
+                "partial_package",
+                Box::new(|check| check.dependency_digest = None),
+            ),
+            (
+                "stale",
+                Box::new(|check| check.observed_at = Utc::now() - Duration::hours(3)),
+            ),
+        ];
+        for (name, change) in &cases {
+            let mut unmatched = matching.clone();
+            change(check_mut(&mut unmatched, REMOTE_RESTORE_CHECK_ID));
+            let decision = evaluate_promotion(&unmatched, now).unwrap();
+            assert!(!decision.ready, "{name}");
+            assert!(
+                decision.safe_blockers.contains(&local),
+                "{name}: {decision:?}"
+            );
+        }
+        // A missing remote result keeps it too.
+        let without_remote = matching
+            .iter()
+            .filter(|item| item.check.check_id != REMOTE_RESTORE_CHECK_ID)
+            .cloned()
+            .collect::<Vec<_>>();
+        let decision = evaluate_promotion(&without_remote, now).unwrap();
+        assert!(decision.safe_blockers.contains(&local));
+
+        // Any other blocker on the drill still blocks, beside a matching
+        // remote result.
+        let mut other = matching.clone();
+        check_mut(&mut other, RESTORE_DRILL_CHECK_ID)
+            .safe_blockers
+            .push("restore_tenant_count_low".to_string());
+        let decision = evaluate_promotion(&other, now).unwrap();
+        assert!(!decision.safe_blockers.contains(&local));
+        assert!(decision.safe_blockers.contains(&format!(
+            "restore_tenant_count_low:{RESTORE_DRILL_CHECK_ID}"
+        )));
+
+        // The local blocker on another check is not discharged.
+        let mut elsewhere = matching.clone();
+        check_mut(&mut elsewhere, "pipeline_bundle_qualification").safe_blockers =
+            vec![LOCAL_RESTORE_BLOCKER_LABEL.to_string()];
+        let decision = evaluate_promotion(&elsewhere, now).unwrap();
+        assert!(decision.safe_blockers.contains(&format!(
+            "{LOCAL_RESTORE_BLOCKER_LABEL}:pipeline_bundle_qualification"
+        )));
     }
 
     /// Wave 2: among the results that name a package, every one must name
@@ -2864,7 +3186,7 @@ mod tests {
     /// checks promotion requires, with no repeat.
     #[test]
     fn package_checks_are_required_promotion_checks() {
-        assert_eq!(PROMOTION_PACKAGE_CHECKS.len(), 4);
+        assert_eq!(PROMOTION_PACKAGE_CHECKS.len(), 7);
         assert_eq!(
             PROMOTION_PACKAGE_CHECKS
                 .iter()
@@ -2930,20 +3252,23 @@ mod tests {
         let evidence = passing_evidence(now);
         let base = evaluate_promotion(&evidence, now).unwrap().evidence_hash;
 
-        // Another run, for every result that one `qualify` run produces:
-        // still ready (review round 1 of #1240, point 5: one run), so the
-        // hash differs by the run id itself, not by a blocker. And another
-        // run for one promotion-only result alone, which may have its own.
+        // Another run, for every mechanics result (the `qualify` run), and
+        // another for every package-bearing result (the production run):
+        // each still ready (spec 2026-10-08, R-1: one run per group), so the
+        // hash differs by the run id itself, not by a blocker.
         let mut run = evidence.clone();
         for item in &mut run {
-            if !PROMOTION_ONLY_CHECKS.contains(&item.check.check_id.as_str()) {
+            if !PROMOTION_PACKAGE_CHECKS.contains(&item.check.check_id.as_str()) {
                 item.check.run_id = "q9999abcd".to_string();
             }
         }
-        let mut promotion_only_run = evidence.clone();
-        check_mut(&mut promotion_only_run, PROMOTION_ONLY_CHECKS[0]).run_id =
-            "q9999abcd".to_string();
-        for one_run in [&run, &promotion_only_run] {
+        let mut production_run = evidence.clone();
+        for item in &mut production_run {
+            if PROMOTION_PACKAGE_CHECKS.contains(&item.check.check_id.as_str()) {
+                item.check.run_id = "q9999abcd".to_string();
+            }
+        }
+        for one_run in [&run, &production_run] {
             assert!(evaluate_promotion(one_run, now).unwrap().ready);
         }
         let mut revision = evidence.clone();
@@ -2985,7 +3310,7 @@ mod tests {
         let mut hashes = vec![base];
         for changed in [
             run,
-            promotion_only_run,
+            production_run,
             revision,
             package,
             package_hash,
@@ -3806,6 +4131,135 @@ mod tests {
         );
     }
 
+    /// A registered Score policy's factory for the production-shape tests:
+    /// it declares its own production qualification and accepts only the
+    /// configuration bytes `b"qualifiable"`.
+    struct QualificationTestScoreFactory {
+        qualified: bool,
+    }
+
+    impl crate::versioned_pipeline_score_registry::ScorePolicyFactory
+        for QualificationTestScoreFactory
+    {
+        fn dependency_identity(&self) -> &str {
+            "substituted_score_policy_qualification_test_only"
+        }
+
+        fn trace_credit_event(&self) -> crate::versioned_pipeline_bundle::PipelineTraceCreditEvent {
+            crate::versioned_pipeline_bundle::PipelineTraceCreditEvent::PipelineScore
+        }
+
+        fn build(
+            &self,
+            _dependencies: crate::versioned_pipeline_score_registry::ScorePolicyDependencies<'_>,
+        ) -> Result<Arc<dyn trace_commons_gate_api::pipeline::ScorePolicy>, &'static str> {
+            Err("score_policy_not_built_in_this_test")
+        }
+
+        fn production_qualified(&self) -> bool {
+            self.qualified
+        }
+
+        fn configuration_is_qualifiable(&self, configuration: &[u8]) -> bool {
+            configuration == b"qualifiable"
+        }
+    }
+
+    const QUALIFICATION_TEST_SCORE_IMPLEMENTATION: &str =
+        "substituted.score.qualification_test_only.v1";
+
+    /// The compatibility triple with a registered Score policy, free of
+    /// development markers, whose Score configuration is `configuration`.
+    fn registered_score_production_package(configuration: &[u8]) -> BundlePackage {
+        let mut package = MinimalPolicyBundle::compatibility_package(
+            &CompatibilityBundleConfig::local_reference(),
+            &ReferencePerplexityScorer::new(),
+            &ReferenceEmbedder::new(),
+        )
+        .expect("compatibility package builds");
+        package.manifest.score.implementation_id =
+            QUALIFICATION_TEST_SCORE_IMPLEMENTATION.to_string();
+        package.manifest.score.projection_ids = vec!["projection_v1".to_string()];
+        package.manifest.settle.projection_ids = vec!["projection_v1".to_string()];
+        package.artifacts = BTreeMap::from([(
+            package.manifest.score.configuration_hash.clone(),
+            configuration.to_vec(),
+        )]);
+        package
+    }
+
+    fn score_registry(qualified: bool) -> ScorePolicyRegistry {
+        ScorePolicyRegistry::new()
+            .with_factory(
+                QUALIFICATION_TEST_SCORE_IMPLEMENTATION,
+                Arc::new(QualificationTestScoreFactory { qualified }),
+            )
+            .expect("register the test factory")
+    }
+
+    /// A registered Score policy is production-shaped only when its
+    /// factory declares itself qualified and accepts the package's Score
+    /// configuration; an unregistered id is refused as before, and the
+    /// development-marker check still applies.
+    #[test]
+    fn production_package_validation_accepts_only_a_qualified_registered_score_policy() {
+        let package = registered_score_production_package(b"qualifiable");
+        assert_eq!(
+            validate_production_package_with_score_policies(&package, &score_registry(true)),
+            Ok(())
+        );
+        // Unregistered: the open build's empty registry, and a registry
+        // that holds another id.
+        assert_eq!(
+            validate_production_package(&package),
+            Err(PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string())
+        );
+        let elsewhere = ScorePolicyRegistry::new()
+            .with_factory(
+                "substituted.score.other_test_only.v1",
+                Arc::new(QualificationTestScoreFactory { qualified: true }),
+            )
+            .unwrap();
+        assert_eq!(
+            validate_production_package_with_score_policies(&package, &elsewhere),
+            Err(PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string())
+        );
+        // Registered, but the factory does not declare itself qualified.
+        assert_eq!(
+            validate_production_package_with_score_policies(&package, &score_registry(false)),
+            Err(PACKAGE_SCORE_POLICY_NOT_QUALIFIED_LABEL.to_string())
+        );
+        // Registered and qualified, but its configuration is not.
+        assert_eq!(
+            validate_production_package_with_score_policies(
+                &registered_score_production_package(b"local"),
+                &score_registry(true)
+            ),
+            Err(PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL.to_string())
+        );
+        // So is a package whose configuration artifact is missing.
+        let mut missing = package.clone();
+        missing.artifacts.clear();
+        assert_eq!(
+            validate_production_package_with_score_policies(&missing, &score_registry(true)),
+            Err(PIPELINE_BUNDLE_CONFIGURATION_NOT_QUALIFIABLE_LABEL.to_string())
+        );
+        // A development marker still refuses.
+        let mut marked = package.clone();
+        marked.manifest.score.projection_ids = vec!["reference_projection".to_string()];
+        assert_eq!(
+            validate_production_package_with_score_policies(&marked, &score_registry(true)),
+            Err(PACKAGE_DEVELOPMENT_DEPENDENCY_LABEL.to_string())
+        );
+        // A registry never widens the other three phases.
+        let mut review = package;
+        review.manifest.review.implementation_id = "substituted.review.v1".to_string();
+        assert_eq!(
+            validate_production_package_with_score_policies(&review, &score_registry(true)),
+            Err(PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL.to_string())
+        );
+    }
+
     #[test]
     fn production_profile_blocks_on_bundle_and_infrastructure() {
         fn qualified(identity: &str) -> PipelineDependencyCheck {
@@ -3829,6 +4283,7 @@ mod tests {
             privacy: true,
             payout: None,
             configuration_qualifiable: true,
+            score_policy: None,
             dependency_digest: sha256_prefixed(b"dependency-digest"),
         };
         let profile = ProductionDependencyProfile::new(

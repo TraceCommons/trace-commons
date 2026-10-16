@@ -134,10 +134,42 @@ public enum TCCoreCopy {
         take(tc_monitor_traces_copy_json())
     }
 
+    /// `tc_nudge_copy_json`: every fixed re-engagement nudge string, key to
+    /// text. Decoded by `TCShellCore.NudgeCopy`. Sentences with counts in
+    /// them arrive composed on `status.nudge`, never from here.
+    public static func nudgeCopyJSON() -> String? {
+        take(tc_nudge_copy_json())
+    }
+
+    /// `tc_nudge_entry_tags_json`: a Traces row's tags, worded by the core
+    /// from the row's `mission_fit` and `credit_estimate`
+    /// (`NudgeEntryTags.input(for:)`). Decoded by
+    /// `TCShellCore.NudgeEntryTags`; `{}` for nil or unreadable input.
+    public static func nudgeEntryTagsJSON(entryJSON: String?) -> String? {
+        guard let entryJSON else { return take(tc_nudge_entry_tags_json(nil)) }
+        return take(entryJSON.withCString { tc_nudge_entry_tags_json($0) })
+    }
+
+    /// `tc_nudge_digest_help_json`: the digest switch's Settings help,
+    /// composed by the core from the schedule and interval
+    /// (`NudgeSettings.digestHelpInput(_:)`). Decoded by
+    /// `TCShellCore.NudgeSettings.digestHelp(fromJSON:)`; `{}` for nil or
+    /// unreadable input.
+    public static func nudgeDigestHelpJSON(settingsJSON: String?) -> String? {
+        guard let settingsJSON else { return take(tc_nudge_digest_help_json(nil)) }
+        return take(settingsJSON.withCString { tc_nudge_digest_help_json($0) })
+    }
+
     /// `tc_first_run_copy_json`: the #1030 first run's words, grouped by
     /// screen. Decoded by `TCShellCore.FirstRunCopy`.
     public static func firstRunCopyJSON() -> String? {
         take(tc_first_run_copy_json())
+    }
+
+    /// `tc_install_guides_json`: each coding tool's setup guide, keyed by
+    /// discovery slug. Decoded by `TCShellCore.InstallGuides`.
+    public static func installGuidesJSON() -> String? {
+        take(tc_install_guides_json())
     }
 
     /// `tc_contribution_mode_copy_json`: the menu-bar Contribution mode
@@ -177,6 +209,14 @@ public enum TCCoreCopy {
     /// Decoded by `TCShellCore.MonitorScreensCopy`.
     public static func monitorScreensCopyJSON() -> String? {
         take(tc_monitor_screens_copy_json())
+    }
+
+    /// `tc_shell_words_copy_json`: the words this shell used to write in
+    /// Swift (withdrawal, the public profile, the legacy queue and History
+    /// words, the scrubbing caveat, Settings). Decoded by
+    /// `TCShellCore.ShellWordsCopy`.
+    public static func shellWordsCopyJSON() -> String? {
+        take(tc_shell_words_copy_json())
     }
 
     /// `tc_automatic_grant_copy_json`: the words for the disclosure an armed

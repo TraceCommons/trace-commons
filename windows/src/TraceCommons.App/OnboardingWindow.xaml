@@ -6,7 +6,7 @@
     strings here are transcription rather than authorship, and the macOS app
     is the reference implementation.
 
-    Until this window existed the Windows app could not enrol anyone at all.
+    Until this window existed the Windows app could not enroll anyone at all.
 
     One screen per decision, switched by Visibility rather than a Frame: the
     flow is linear, the screens are small, and a Frame would add navigation
@@ -24,13 +24,13 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
-    Title="Trace Commons">
+    Title="Near.ai">
 
     <Grid Background="{ThemeResource TcWindowBackgroundBrush}" Padding="28">
 
         <!-- 1. What this is -->
         <StackPanel Spacing="16" Visibility="{x:Bind ViewModel.IsWelcome, Mode=OneWay}">
-            <TextBlock Style="{StaticResource TcTitleScreenTextStyle}" Text="Trace Commons" />
+            <TextBlock Style="{StaticResource TcTitleScreenTextStyle}" Text="Near.ai" />
             <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"
                        Text="Coding agents get better when there are real transcripts to learn from. Almost all of that data is locked inside companies. Trace Commons is a shared pool that isn't." />
             <TextBlock Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap"

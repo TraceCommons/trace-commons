@@ -324,7 +324,7 @@ public sealed class TrayIcon : IDisposable
         return CreateWindowEx(
             0,
             _className,
-            "Trace Commons",
+            "Near.ai",
             WS_POPUP,
             0, 0, 0, 0,
             IntPtr.Zero,
@@ -436,7 +436,7 @@ public sealed class TrayIcon : IDisposable
 
             if (_menu.DecisionsOwed > 0 || _menu.Waiting.Count > 0)
             {
-                AppendMenu(menu, MF_STRING, MenuIdReview, "Review waiting sessions…");
+                AppendMenu(menu, MF_STRING, MenuIdReview, "Review waiting traces…");
             }
 
             if (_menu.ArmedProjects.Count > 0)
@@ -467,21 +467,18 @@ public sealed class TrayIcon : IDisposable
 
             if (_menu.IsPaused)
             {
-                AppendMenu(menu, MF_STRING, MenuIdResume, "Resume watching");
+                AppendMenu(menu, MF_STRING, MenuIdResume, MonitorShellCopy.ResumeWatcher);
             }
             else
             {
                 IntPtr pauseMenu = CreatePopupMenu();
                 if (pauseMenu != IntPtr.Zero)
                 {
-                    AppendMenu(pauseMenu, MF_STRING, MenuIdPauseHour, "For 1 hour");
-                    AppendMenu(pauseMenu, MF_STRING, MenuIdPauseTomorrow, "Until tomorrow morning");
-                    AppendMenu(
-                        pauseMenu,
-                        MF_STRING,
-                        MenuIdPauseUntilResumed,
-                        "Until I turn it back on");
-                    AppendMenu(menu, MF_STRING | MF_POPUP, pauseMenu, "Pause");
+                    // The core's pause lengths (button rule, 2026-10-08).
+                    AppendMenu(pauseMenu, MF_STRING, MenuIdPauseHour, "1 hour");
+                    AppendMenu(pauseMenu, MF_STRING, MenuIdPauseTomorrow, "Until morning");
+                    AppendMenu(pauseMenu, MF_STRING, MenuIdPauseUntilResumed, "Until resumed");
+                    AppendMenu(menu, MF_STRING | MF_POPUP, pauseMenu, MonitorShellCopy.PauseWatcher);
                 }
             }
 
@@ -519,11 +516,11 @@ public sealed class TrayIcon : IDisposable
                 AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
             }
 
-            AppendMenu(menu, MF_STRING, MenuIdOpen, "Open Trace Commons");
+            AppendMenu(menu, MF_STRING, MenuIdOpen, "Open Near.ai");
             AppendMenu(menu, MF_STRING, MenuIdSettings, "Settings");
 
             AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
-            AppendMenu(menu, MF_STRING, MenuIdQuit, "Quit Trace Commons…");
+            AppendMenu(menu, MF_STRING, MenuIdQuit, "Quit…");
 
             // Required before TrackPopupMenu, and the reason this class owns a
             // real popup window rather than a message-only one: without the

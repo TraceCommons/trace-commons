@@ -77,6 +77,18 @@ pub struct KekWrapperStatus {
     pub is_production_trust_boundary: bool,
 }
 
+/// An unwrap failure caused by the bytes of the wrapped DEK itself (its
+/// encoding, its lengths, a ciphertext that does not authenticate): an
+/// integrity failure of the object that holds it
+/// (`crate::trace_artifact_store::is_trace_artifact_integrity_error`), which
+/// the pipeline charges. A failure outside the record (a KMS that cannot be
+/// reached, a record of another wrapper kind) is returned unmarked.
+fn unwrap_integrity_error(message: &str) -> anyhow::Error {
+    anyhow::Error::from(
+        crate::trace_artifact_store::TraceArtifactIntegrityError::new(message.to_string()),
+    )
+}
+
 /// Pluggable key encryption key wrapper.
 ///
 /// Implementations are responsible for wrapping a 256-bit DEK under a KMS-managed
@@ -228,40 +240,53 @@ impl KmsKeyWrapper for LocalMasterKeyWrapper {
         wrapped: &WrappedDek,
         context: &KekContext,
     ) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+        // A wrapper-kind mismatch is what a key-provider migration shows on
+        // every record, so it is left unmarked (transport). Every check
+        // after it reads bytes of the record itself, which no hash covers,
+        // so its failure is an integrity failure (PR #1283 review,
+        // finding 1).
         anyhow::ensure!(
             wrapped.wrapper_kind == "local_master_key",
             "KekUnwrapFailed: wrapper kind mismatch"
         );
         let expected_ctx = context.canonical_hash();
-        anyhow::ensure!(
-            wrapped.context_hash == expected_ctx,
-            "KekContextMismatch: outer context_hash mismatch"
-        );
+        if wrapped.context_hash != expected_ctx {
+            return Err(unwrap_integrity_error(
+                "KekContextMismatch: outer context_hash mismatch",
+            ));
+        }
         let packed = STANDARD
             .decode(&wrapped.ciphertext_base64)
-            .map_err(|_| anyhow::anyhow!("KekUnwrapFailed: base64 decode error"))?;
-        anyhow::ensure!(packed.len() > 1, "KekUnwrapFailed: ciphertext too short");
+            .map_err(|_| unwrap_integrity_error("KekUnwrapFailed: base64 decode error"))?;
+        if packed.len() <= 1 {
+            return Err(unwrap_integrity_error(
+                "KekUnwrapFailed: ciphertext too short",
+            ));
+        }
         let salt_len = packed[0] as usize;
-        anyhow::ensure!(
-            packed.len() > 1 + salt_len,
-            "KekUnwrapFailed: encoded salt length exceeds buffer"
-        );
+        if packed.len() <= 1 + salt_len {
+            return Err(unwrap_integrity_error(
+                "KekUnwrapFailed: encoded salt length exceeds buffer",
+            ));
+        }
         let salt = &packed[1..1 + salt_len];
         let encrypted = &packed[1 + salt_len..];
         let decrypted = self
             .crypto
             .decrypt_bytes(encrypted, salt)
-            .map_err(|e| anyhow::anyhow!("KekUnwrapFailed: {e}"))?;
+            .map_err(|e| unwrap_integrity_error(&format!("KekUnwrapFailed: {e}")))?;
         let bytes = decrypted.expose_bytes();
         let ctx_len = expected_ctx.len();
-        anyhow::ensure!(
-            bytes.len() == ctx_len + 32,
-            "KekUnwrapFailed: decrypted length mismatch"
-        );
-        anyhow::ensure!(
-            &bytes[..ctx_len] == expected_ctx.as_bytes(),
-            "KekContextMismatch: inner context tag mismatch"
-        );
+        if bytes.len() != ctx_len + 32 {
+            return Err(unwrap_integrity_error(
+                "KekUnwrapFailed: decrypted length mismatch",
+            ));
+        }
+        if &bytes[..ctx_len] != expected_ctx.as_bytes() {
+            return Err(unwrap_integrity_error(
+                "KekContextMismatch: inner context tag mismatch",
+            ));
+        }
         let mut dek = Zeroizing::new([0u8; 32]);
         dek.copy_from_slice(&bytes[ctx_len..]);
         Ok(dek)
@@ -426,26 +451,34 @@ impl<C: CloudKmsClient> KmsKeyWrapper for CloudKmsKeyWrapper<C> {
         wrapped: &WrappedDek,
         context: &KekContext,
     ) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+        // The wrapper-kind mismatch and the KMS call stay unmarked
+        // (transport): the first is what a key-provider migration shows on
+        // every record, and the second cannot tell a KMS that refused the
+        // ciphertext from one it could not reach. The record's own bytes
+        // (its context hash, its base64, the length of the key the KMS
+        // returned) are integrity failures (PR #1283 review, finding 1).
         anyhow::ensure!(
             wrapped.wrapper_kind == self.wrapper_kind,
             "KekUnwrapFailed: wrapper kind mismatch"
         );
         let expected_ctx = context.canonical_hash();
-        anyhow::ensure!(
-            wrapped.context_hash == expected_ctx,
-            "KekContextMismatch: outer context_hash mismatch"
-        );
+        if wrapped.context_hash != expected_ctx {
+            return Err(unwrap_integrity_error(
+                "KekContextMismatch: outer context_hash mismatch",
+            ));
+        }
         let ciphertext = STANDARD
             .decode(&wrapped.ciphertext_base64)
-            .map_err(|_| anyhow::anyhow!("KekUnwrapFailed: base64 decode error"))?;
+            .map_err(|_| unwrap_integrity_error("KekUnwrapFailed: base64 decode error"))?;
         let plaintext = self
             .client
             .decrypt(&ciphertext, expected_ctx.as_bytes())
             .map_err(|e| anyhow::anyhow!("KekUnwrapFailed: {e}"))?;
-        anyhow::ensure!(
-            plaintext.len() == 32,
-            "KekUnwrapFailed: dek length mismatch"
-        );
+        if plaintext.len() != 32 {
+            return Err(unwrap_integrity_error(
+                "KekUnwrapFailed: dek length mismatch",
+            ));
+        }
         let mut dek = Zeroizing::new([0u8; 32]);
         dek.copy_from_slice(plaintext.as_slice());
         Ok(dek)

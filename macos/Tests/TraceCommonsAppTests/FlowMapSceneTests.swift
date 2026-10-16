@@ -1,5 +1,6 @@
+import SwiftUI
 import TCDesign
-import TCShellCore
+@testable import TCShellCore
 import XCTest
 
 @testable import TraceCommonsApp
@@ -38,16 +39,88 @@ final class FlowMapSceneTests: XCTestCase {
         scene.arcs.filter { $0.style == .flowing }.count
     }
 
+    func test_managedOpenCodeAppearsInTraceCardWithoutClaimingContribution() async throws {
+        let client = SampleDaemonClient(.normalDay)
+        let original = try await client.toolDestinations()
+        var wire = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+        wire["managed_sessions"] = [["id": "managed-one", "tool": "opencode", "connection": "api_key",
+            "provider": "openai", "model": "gpt-4.1", "collection_state": "pending", "state": "running"]]
+        wire["managed_copy"] = ["title": "Managed sessions", "state_running": "Running", "collection_pending": "Trace collection pending", "provider_openai": "OpenAI"]
+        let destinations = try JSONDecoder().decode(DaemonData.ToolDestinations.self, from: JSONSerialization.data(withJSONObject: wire))
+        let scene = FlowMapScene.traces(try await tree(.normalDay), gate: .init(state: .ready, status: nil, destinations: destinations))
+        let node = try XCTUnwrap(scene.nodes.first { $0.id == "tool:opencode" })
+        XCTAssertTrue(node.detail.contains("gpt-4.1"))
+        XCTAssertTrue(node.detail.contains("OpenAI"))
+        XCTAssertTrue(node.detail.contains("Trace collection pending"))
+        XCTAssertFalse(scene.flows, "A managed running process is not evidence of contribution or model calls")
+    }
+
+    func test_managedRoutesAreSeparateAndNeverAnimateUnobservedCalls() throws {
+        let wire = #"{"tools":[],"managed_copy":{"opencode":"OpenCode","provider_openai":"OpenAI","provider_near_ai":"NEAR AI","state_running":"Running","collection_off":"Trace collection off","collection_pending":"Trace collection pending","title":"Managed sessions"},"managed_sessions":[{"id":"a","tool":"opencode","connection":"api_key","provider":"openai","model":"gpt-4.1","state":"running","collection_state":"off"},{"id":"b","tool":"opencode","connection":"near_ai","provider":"near_ai","model":"model-b","state":"running","collection_state":"pending"}]}"#
+        let destinations = try JSONDecoder().decode(DaemonData.ToolDestinations.self, from: Data(wire.utf8))
+        let scene = FlowMapScene.privateAI(.none, destinationLabel: "D", privateAI: nil, sentence: { _ in nil }, state: { _ in .unknown }).addingManagedRoutes(destinations)
+        XCTAssertEqual(scene.nodes.count, 4)
+        XCTAssertEqual(Set(scene.nodes.map(\.id)).count, 4)
+        XCTAssertEqual(scene.arcs.map(\.style), [.dashed, .dashed])
+        XCTAssertFalse(scene.flows)
+        XCTAssertNil(scene.nodes.first { $0.id == "destination" }, "Managed routes never imply a global harness connection")
+        XCTAssertTrue(scene.nodes.contains { $0.detail.contains("Trace collection off") })
+        XCTAssertTrue(scene.nodes.contains { $0.label == "OpenAI" })
+        XCTAssertTrue(scene.nodes.contains { $0.label == "NEAR AI" })
+        XCTAssertTrue(scene.nodes.allSatisfy { CGRect(origin: .zero, size: FlowMapScene.size).contains($0.at) })
+        XCTAssertTrue(FlowMapScene().addingManagedRoutes(nil).nodes.isEmpty)
+    }
+
+    /// Managed routes sit right of and below the Private AI destination in
+    /// any design space, so their names never cover its card.
+    func test_managedRoutesStayClearOfTheDestination() throws {
+        let wire = #"{"tools":[],"managed_copy":{"title":"Managed sessions"},"managed_sessions":[{"id":"a","tool":"opencode","connection":"api_key","provider":"openai","model":"m","state":"running","collection_state":"off"},{"id":"b","tool":"opencode","connection":"near_ai","provider":"near_ai","model":"m","state":"running","collection_state":"off"},{"id":"c","tool":"claude","connection":"api_key","provider":"anthropic","model":null,"state":"running","collection_state":"off"}]}"#
+        let destinations = try JSONDecoder().decode(DaemonData.ToolDestinations.self, from: Data(wire.utf8))
+        for space in [FlowMapScene.size, FlowMapScene.space(for: CGSize(width: 1200, height: 500)), FlowMapScene.space(for: CGSize(width: 400, height: 1000))] {
+            let scene = FlowMapScene.privateAI(.none, destinationLabel: "D", privateAI: nil, sentence: { _ in nil }, state: { _ in .unknown }, space: space)
+                .addingManagedRoutes(destinations)
+            let destination = FlowMapScene.destination(in: space)
+            XCTAssertEqual(scene.nodes.count, 6)
+            for node in scene.nodes {
+                XCTAssertTrue(CGRect(origin: .zero, size: space).contains(node.at), "\(node.id) outside \(space)")
+                XCTAssertGreaterThan(node.at.x, destination.x, node.id)
+                XCTAssertGreaterThan(node.at.y - destination.y, 60, "\(node.id) sits on the destination in \(space)")
+            }
+        }
+    }
+
+    func test_mapHidesAbsentToolsWithInstalledEvidenceButKeepsImportedSources() throws {
+        let wire = #"{"tools":[{"tool":"claude-code","installed":false},{"tool":"codex","installed":false},{"tool":"opencode","installed":true}]}"#
+        let destinations = try JSONDecoder().decode(DaemonData.ToolDestinations.self, from: Data(wire.utf8))
+        let empty = TracesTree(tools: [], unplaced: [])
+        let gate = FlowMapScene.CommonsGate(state: .ready, status: nil, destinations: destinations)
+        let scene = FlowMapScene.traces(empty, gate: gate)
+        XCTAssertNil(scene.nodes.first { $0.id == "tool:claude-code" })
+        XCTAssertNil(scene.nodes.first { $0.id == "tool:codex" })
+        XCTAssertNotNil(scene.nodes.first { $0.id == "tool:opencode" })
+        let imported = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: [])], unplaced: [])
+        XCTAssertNotNil(FlowMapScene.traces(imported, gate: gate).nodes.first { $0.id == "tool:claude-code" })
+        let unknown = FlowMapScene.traces(empty, gate: .init(state: .ready))
+        XCTAssertEqual(unknown.nodes.filter { $0.id.hasPrefix("tool:") }.count, SourceKind.allCases.count)
+    }
+
     // MARK: Traces
 
-    /// One node per tool and per drawn folder, plus this computer and the
-    /// commons; every node inside the design space.
+    /// One node per tool this build knows and per drawn folder, plus this
+    /// computer and the commons; every node inside the design space. The
+    /// tools the tree leaves out are drawn too, dashed as not watched
+    /// (#1146 draws every tool).
     func test_theTracesSceneDrawsEveryToolAndFolder() async throws {
         for set in SampleDaemonClient.SampleSet.allCases where set != .coreDown {
             let tree = try await tree(set)
             let scene = FlowMapScene.traces(tree, gate: try await gate(set))
             let folders = tree.tools.reduce(0) { $0 + min($1.folders.count, FlowMapScene.foldersShown) }
-            XCTAssertEqual(scene.nodes.count, tree.tools.count + folders + 2, "\(set)")
+            XCTAssertEqual(scene.nodes.count, SourceKind.allCases.count + folders + 2, "\(set)")
+            let tools = scene.nodes.filter { $0.id.hasPrefix("tool:") }
+            XCTAssertEqual(tools.filter(\.dashed).count, SourceKind.allCases.count - tree.tools.count, "\(set)")
+            for tool in tree.tools {
+                XCTAssertEqual(tools.first { $0.id == "tool:\(tool.id)" }?.dashed, false, "\(set): \(tool.id)")
+            }
             let space = CGRect(origin: .zero, size: FlowMapScene.size)
             for node in scene.nodes {
                 XCTAssertTrue(space.contains(node.at), "\(set): \(node.id) at \(node.at)")
@@ -83,9 +156,85 @@ final class FlowMapSceneTests: XCTestCase {
         XCTAssertEqual(flowing(scene), automatic.filter { open.sendsToCommons($0.kind) }.count)
         XCTAssertTrue(scene.flows)
         XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.kind, .library(active: true))
-        // The armed count is the core's.
-        XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.detail,
-                       FlowMapScene.pair(ProjectCopy.modeChoiceLabel(.autoUpload), open.destinations?.folders?.armed))
+        // #1146's library card: what was contributed, in the core's words;
+        // a dash while History is unread, never none.
+        let words = try XCTUnwrap(FlowMapScene.words)
+        XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.detail, words.library(contributed: nil))
+        XCTAssertTrue(words.library(contributed: nil).hasPrefix("\u{2014} "))
+    }
+
+    /// The node cards say #1146's sentences: this computer and the library
+    /// count what was contributed from History, a tool's title counts its
+    /// folders, and a folder says its path, rule and counts.
+    func test_theNodeCardsSayRonsSentences() async throws {
+        let words = try XCTUnwrap(FlowMapScene.words)
+        let tree = try await tree(.normalDay)
+        let history = try await SampleDaemonClient(.normalDay).listHistory(limit: 100)
+        let contributed = FlowMapScene.Contributions(history: history)
+        let scene = FlowMapScene.traces(tree, gate: try await gate(.normalDay), contributed: contributed)
+        let total = try XCTUnwrap(contributed.total)
+        let waiting = tree.tools.reduce(0) { $0 + $1.waiting } + tree.unplaced.reduce(0) { $0 + $1.sessions.count }
+        XCTAssertEqual(scene.nodes.first { $0.id == "hub" }?.detail, words.hub(waiting: waiting, contributed: total))
+        XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.detail, words.library(contributed: total))
+        for tool in tree.tools {
+            let node = try XCTUnwrap(scene.nodes.first { $0.id == "tool:\(tool.id)" })
+            XCTAssertEqual(node.label, tool.kind.displayName)
+            XCTAssertEqual(node.cardTitle, words.toolTitle(tool: tool.kind.displayName, folders: tool.folders.count))
+            XCTAssertFalse(node.detail.contains("{"), node.detail)
+        }
+        for node in scene.nodes where node.id.hasPrefix("folder:") {
+            XCTAssertTrue(node.detail.contains(" waiting, "), node.detail)
+            XCTAssertFalse(node.detail.contains("{"), node.detail)
+        }
+        // Unset is never said as off; unknown is said as neither.
+        XCTAssertEqual(words.tool(.unknown, waiting: 0), words.toolNothingWaiting)
+        XCTAssertNotEqual(words.tool(.unset, waiting: 0), words.toolOff)
+        XCTAssertEqual(words.folder(path: "/a", rule: "Ask", waiting: 1, contributed: 2),
+                       "/a. Rule: Ask. 1 trace waiting, 2 contributed.")
+        XCTAssertEqual(words.folder(path: nil, rule: nil, waiting: 3, contributed: nil),
+                       "Rule: not set. 3 traces waiting, \u{2014} contributed.")
+    }
+
+    /// The cards' contributed counts are a whole count or a dash: a page
+    /// the daemon capped (`HomeStore.historyLimit`) is not a total, and a
+    /// page kept after a failed `list_history` is not current, as the
+    /// Folder inspector's shared count (`SummaryFacts.wholeHistory`).
+    func test_aCappedOrFailedHistoryCountsNoContributed() async throws {
+        let words = try XCTUnwrap(FlowMapScene.words)
+        let reply = try XCTUnwrap(SampleDaemonData.reply("list_history", in: .normalDay))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any])
+        let first = try XCTUnwrap((object["history"] as? [[String: Any]])?.first)
+        func rows(_ count: Int) throws -> [DaemonData.HistoryRow] {
+            try (0..<count).map { index in
+                var row = first
+                row["status"] = "accepted"
+                row["source"] = "claude-code"
+                row["project_id"] = "p1"
+                row["submission_id"] = "row-\(index)"
+                row["session_hash"] = "sha256:row-\(index)"
+                return try DaemonDataDecoding.decoder().decode(
+                    DaemonData.HistoryRow.self, from: JSONSerialization.data(withJSONObject: row))
+            }
+        }
+        let whole = FlowMapScene.Contributions(history: try rows(HomeStore.historyLimit - 1))
+        XCTAssertEqual(whole.total, HomeStore.historyLimit - 1)
+        XCTAssertEqual(whole.tool(.claudeCode), HomeStore.historyLimit - 1)
+        XCTAssertEqual(whole.folder("p1"), HomeStore.historyLimit - 1)
+
+        let capped = FlowMapScene.Contributions(history: try rows(HomeStore.historyLimit))
+        XCTAssertNil(capped.total, "a capped page is counted as the whole")
+        XCTAssertNil(capped.tool(.claudeCode))
+        XCTAssertNil(capped.folder("p1"))
+        let scene = FlowMapScene.traces(try await tree(.normalDay), gate: try await gate(.normalDay), contributed: capped)
+        XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.detail, words.library(contributed: nil))
+
+        let stale = FlowMapScene.Contributions(history: try rows(3), failure: .unreachable)
+        XCTAssertNil(stale.total, "the last good page is drawn as current after a failed read")
+        XCTAssertEqual(FlowMapScene.Contributions(history: try rows(3), failure: nil).total, 3)
+
+        // The window hands the map the failure with the page.
+        let window = try TracesInspectorHostTests.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("historyFailure: home.failures[\"list_history\"]"))
     }
 
     /// Nothing moves to the commons while the core says something stops it:
@@ -132,7 +281,7 @@ final class FlowMapSceneTests: XCTestCase {
         XCTAssertFalse(FlowMapScene.traces(armed, gate: unread).flows, "no tool_destinations")
         let nothing = FlowMapScene.traces(armed, gate: .init(state: .coreDown, status: nil, destinations: nil))
         XCTAssertEqual(nothing.nodes.first { $0.id == "library" }?.detail,
-                       FlowMapScene.pair(ProjectCopy.modeChoiceLabel(.autoUpload), nil as Int?))
+                       FlowMapScene.words?.library(contributed: nil))
     }
 
     /// The menu's second-look row sets its count apart with a spaced dot,
@@ -163,15 +312,87 @@ final class FlowMapSceneTests: XCTestCase {
         }
     }
 
-    /// Folders past the first four are counted, not drawn.
+    /// Folders past the most a tool shows are counted, not drawn.
     func test_extraFoldersAreCounted() {
-        let folders = (0 ..< 6).map {
+        let folders = (0 ..< 9).map {
             TracesTree.FolderNode(id: "f\($0)", label: "f\($0)", mode: .ask, sessions: [])
         }
         let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: folders)], unplaced: [])
         let scene = FlowMapScene.traces(tree, gate: .init(state: .loading))
         XCTAssertEqual(scene.nodes.filter { if case .folder = $0.kind { true } else { false } }.count, FlowMapScene.foldersShown)
-        XCTAssertEqual(scene.overflows.map(\.count), [2])
+        XCTAssertEqual(scene.overflows.map(\.count), [3])
+    }
+
+    /// P13: a tool that has contributed is joined to the commons by a
+    /// quiet arc, and the library is lit once anything was contributed,
+    /// armed or not (#1146 `TracesMap`).
+    func test_contributedToolsReachTheLibrary() {
+        let folder = TracesTree.FolderNode(id: "f", label: "f", mode: .ask, sessions: [])
+        let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: [folder])], unplaced: [])
+        let none = FlowMapScene.traces(tree, gate: .init(state: .ready), contributed: .init(total: 0))
+        XCTAssertEqual(none.nodes.first { $0.id == "library" }?.kind, .library(active: false))
+        XCTAssertTrue(none.arcs.allSatisfy { $0.to != FlowMapScene.libraryPoint }, "nothing reaches the library")
+        let sent = FlowMapScene.traces(
+            tree, gate: .init(state: .ready), contributed: .init(total: 4, byTool: [.claudeCode: 4]))
+        XCTAssertEqual(sent.nodes.first { $0.id == "library" }?.kind, .library(active: true))
+        let toLibrary = sent.arcs.filter { $0.to == FlowMapScene.libraryPoint }
+        XCTAssertEqual(toLibrary.map(\.style), [.quiet])
+        XCTAssertFalse(sent.flows, "a past contribution never moves")
+        // Unread history is never read as contributed.
+        let unread = FlowMapScene.traces(tree, gate: .init(state: .ready), contributed: .unread)
+        XCTAssertEqual(unread.nodes.first { $0.id == "library" }?.kind, .library(active: false))
+    }
+
+    /// A selection's tool is ringed, the others faded to 0.3 and their
+    /// library arcs to 0.12 (#1146 `TracesMap`); nothing selected fades
+    /// nothing.
+    func test_theSelectionsToolIsRingedAndTheOthersFade() {
+        let folder = TracesTree.FolderNode(id: "f", label: "f", mode: .ask, sessions: [])
+        let tree = TracesTree(tools: [
+            .init(kind: .claudeCode, mode: .watch, folders: [folder]),
+            .init(kind: .codex, mode: .watch, folders: []),
+        ], unplaced: [])
+        let contributed = FlowMapScene.Contributions(total: 2, byTool: [.claudeCode: 1, .codex: 1])
+        let plain = FlowMapScene.traces(tree, gate: .init(state: .ready), contributed: contributed)
+        XCTAssertTrue(plain.nodes.allSatisfy { !$0.ringed })
+        XCTAssertTrue(plain.nodes.filter { $0.id.hasPrefix("tool:") && !$0.dashed }.allSatisfy { $0.dim == 1 })
+        let scene = FlowMapScene.traces(
+            tree, gate: .init(state: .ready), contributed: contributed, selectedTool: SourceKind.codex.rawValue)
+        let codex = try? XCTUnwrap(scene.nodes.first { $0.id == "tool:codex" })
+        let claude = try? XCTUnwrap(scene.nodes.first { $0.id == "tool:claude-code" })
+        XCTAssertEqual(codex?.ringed, true)
+        XCTAssertEqual(codex?.dim, 1)
+        XCTAssertEqual(claude?.ringed, false)
+        XCTAssertEqual(claude?.dim, 0.3)
+        let arcs = scene.arcs.filter { $0.to == FlowMapScene.libraryPoint }.map(\.dim).sorted()
+        XCTAssertEqual(arcs, [0.12, 1])
+        // Every tool stays drawn: the binoculars move the camera, they do
+        // not filter the map.
+        XCTAssertEqual(scene.focusPoint(tool: SourceKind.codex.rawValue), codex?.at)
+        XCTAssertNil(scene.focusPoint(tool: nil))
+    }
+
+    /// The binoculars' camera (#1146 `cameraFor`): the tool's point lands
+    /// at 1.6x on the same place #1146's transform puts it.
+    func test_theFocusCameraScalesAboutTheTool() {
+        let size = CGSize(width: 580, height: 760)
+        let focus = CGPoint(x: 150, y: 170)
+        let fit = FlowMapGeometry(size: size, zoom: 1, focus: focus)
+        XCTAssertEqual(fit.scale, 1.6, accuracy: 0.0001)
+        let drawn = fit.point(focus)
+        XCTAssertEqual(drawn.x, 290 + 1.6 * 50, accuracy: 0.001)
+        XCTAssertEqual(drawn.y, 380, accuracy: 0.001)
+        XCTAssertEqual(FlowMapGeometry(size: size, zoom: 1).scale, 1, accuracy: 0.0001)
+    }
+
+    func test_openCodeOnlyInstallHidesAbsentGlobalHarnessChoices() async throws {
+        let harnesses = try await SampleDaemonClient(.normalDay).harnessList()
+        let wire = #"{"tools":[{"tool":"claude-code","installed":false},{"tool":"codex","installed":false},{"tool":"opencode","installed":true}]}"#
+        let destinations = try JSONDecoder().decode(DaemonData.ToolDestinations.self, from: Data(wire.utf8))
+        let scene = FlowMapScene.privateAI(harnesses, destinationLabel: "D", privateAI: "off", sentence: { _ in nil }, state: { _ in .notConnected }, destinations: destinations)
+        XCTAssertNil(scene.nodes.first { $0.id == "harness:claude" })
+        XCTAssertNil(scene.nodes.first { $0.id == "harness:codex" })
+        XCTAssertFalse(scene.flows)
     }
 
     // MARK: Private AI
@@ -190,7 +411,11 @@ final class FlowMapSceneTests: XCTestCase {
             let scene = FlowMapScene.privateAI(
                 harnesses, destinationLabel: "D", privateAI: "running", sentence: { _ in nil }, state: { _ in state })
             XCTAssertEqual(scene.nodes.count, harnesses.harnesses.count + 1)
-            XCTAssertEqual(scene.nodes.first?.label, "D")
+            // #1146: the node is the credential, with its tools under it.
+            XCTAssertEqual(scene.nodes.first?.label, FlowMapScene.words?.credential ?? "D")
+            XCTAssertEqual(scene.nodes.first?.sublabel,
+                           FlowMapScene.words?.connected(tools: state == .notConnected || state == .unknown
+                               ? 0 : harnesses.harnesses.count, sentence: false))
             XCTAssertTrue(scene.arcs.allSatisfy { $0.style == expected[state] }, "\(state)")
             XCTAssertEqual(scene.flows, state == .answering, "\(state)")
             XCTAssertEqual(scene.nodes.first?.kind, .destination(state == .answering ? .answering : .running), "\(state)")
@@ -417,5 +642,23 @@ final class FlowMapSceneTests: XCTestCase {
         XCTAssertNil(InferenceTabView.windowHours(try page("null"), destinations: try destinations("null")))
         XCTAssertEqual(InferenceTabView.windowLine(try page("null"), destinations: nil), "\u{2014}")
         XCTAssertEqual(words.windowLine(hours: nil), "\u{2014}")
+    }
+
+    /// A node's label and sublabel never meet: #1146's 11 and 10 point type
+    /// 14 apart, scaled with the map, at every zoom, never below the floor.
+    func test_nodeLabelsNeverTouch() {
+        for scale: CGFloat in [0.3, 0.6, 0.85, 1, 1.4, 2] {
+            let type = FlowMapView.labelType(scale: scale)
+            XCTAssertLessThan(type.sublabelSize, type.labelSize, "the sublabel is the smaller caption")
+            // Half of each line's height, at a generous 1.2 line height.
+            let clearance = type.sublabelOffset - type.labelOffset
+            XCTAssertGreaterThan(clearance, 0.6 * type.labelSize + 0.6 * type.sublabelSize, "at \(scale)")
+            XCTAssertGreaterThanOrEqual(type.labelSize, 11 * FlowMapView.labelFloor)
+        }
+        XCTAssertEqual(FlowMapView.labelType(scale: 1).labelSize, 11)
+        XCTAssertEqual(FlowMapView.labelType(scale: 1).sublabelSize, 10)
+        // The credential's key is #1146's level outline, wider than tall.
+        let key = FlowMapView.keyGlyph(centre: .zero, scale: 1).boundingRect
+        XCTAssertGreaterThan(key.width, key.height)
     }
 }

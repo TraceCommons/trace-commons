@@ -9,6 +9,7 @@ final class FirstRunCopyExportTests: XCTestCase {
         let json = try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())
         let copy = try XCTUnwrap(FirstRunCopy.decode(json))
         XCTAssertEqual(copy.frame.quickSetup, "Quick setup")
+        XCTAssertEqual(copy.frame.back, "Back")
     }
 
     /// Folders' sign-in line is the core's existing one, read through the

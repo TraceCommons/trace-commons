@@ -31,7 +31,7 @@ pub const OFFER: &str = "You can additionally send the message text of each trac
 /// makes the screen dishonest in one direction, so they live in one string.
 pub const DISCLOSURE: &str = concat!(
     "This means your message text is transmitted to NEAR AI before it reaches ",
-    crate::app_name!(),
+    crate::commons_name!(),
     ". If that scanner is unreachable, nothing is sent at all — traces wait rather than \
      going out unscanned."
 );

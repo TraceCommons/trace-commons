@@ -1,8 +1,8 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use crate::tests::test_state;
-use crate::{AppState, app};
+use crate::ingest::app::tests::test_state;
+use crate::ingest::app::{AppState, app};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -65,15 +65,15 @@ async fn mission_publication_refuses_malformed_and_nil_paths_before_database_acc
 #[test]
 fn public_mission_error_hides_unavailable_publications_as_not_found() {
     assert_eq!(
-        crate::rewards::public_mission_error(RewardError::OfferSuspended),
+        crate::ingest::app::rewards::public_mission_error(RewardError::OfferSuspended),
         RewardError::NotFound
     );
     assert_eq!(
-        crate::rewards::public_mission_error(RewardError::ProgramClosed),
+        crate::ingest::app::rewards::public_mission_error(RewardError::ProgramClosed),
         RewardError::NotFound
     );
     assert_eq!(
-        crate::rewards::public_mission_error(RewardError::OfferChanged),
+        crate::ingest::app::rewards::public_mission_error(RewardError::OfferChanged),
         RewardError::OfferChanged
     );
 }

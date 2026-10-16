@@ -62,8 +62,13 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
     /// than repeating `projectPath`, so a row renders this line only when
     /// it says something.
     let sessionPath: String?
-    let sizeBytes: Int
-    let discoveredAt: Date
+    /// The transcript's size and when the daemon found it. Every entry the
+    /// legacy queue decodes carries both (the decoder requires them); nil
+    /// only on a session carried over from the data contract
+    /// (`QueueEntryBridge.previewEntry`) whose daemon did not report it,
+    /// which is never drawn as zero bytes or as found at the epoch.
+    let sizeBytes: Int?
+    let discoveredAt: Date?
     let state: QueueState
     let reasonLabel: String?
     let attempts: Int
@@ -697,6 +702,9 @@ struct DaemonSettingsView: Decodable, Equatable {
     let geminiSourceMode: String?
     let clineSourceMode: String?
     var opencodeSourceMode: String? = nil
+    /// The declared folder of exported traces: `watch`, `off`, or `unset`,
+    /// never its path. Watched folders draws its own row from it.
+    var trajectorySourceMode: String? = nil
     /// The local-proxy declaration this daemon is holding, or nil for none.
     /// Nil means off, with no fallback: connecting to a loopback port
     /// because nobody said otherwise would probe a service the contributor
@@ -728,6 +736,26 @@ struct DaemonSettingsView: Decodable, Equatable {
     var privateInferenceAnswered: Bool { privateInferenceOfferSeen == true }
     /// What the listener is actually doing.
     var privateInferenceState: PrivateInferenceStateView? = nil
+    /// Whether Insights may read the proxy ledger's token counters
+    /// (`insights_ledger_feed`). On by default; Settings' Private AI
+    /// section is the one place that turns it off. Absent from a daemon
+    /// that predates the key, which draws no switch rather than an "off"
+    /// nobody set.
+    var insightsLedgerFeed: Bool? = nil
+    /// Whether the daemon counts tokens in the watched folders for
+    /// Insights (`insights_counter_pass`; owner decision D4, off by
+    /// default). Absent from an older daemon: no switch, never an "off".
+    var insightsCounterPass: Bool? = nil
+    /// The weekly summary card's switch (`insights_recap_card_enabled`, on
+    /// by default); "Hide" on the card turns it off. Absent from an older
+    /// daemon: no switch, never an "off".
+    var insightsRecapCardEnabled: Bool? = nil
+    /// Whether the app shows missions at all (`missions_enabled`, owner
+    /// decision 2026-10-16: hidden for now, off by default, flipped only
+    /// through `set_settings`). Absent from an older daemon, which reads as
+    /// off: only an exact `true` shows them.
+    var missionsEnabled: Bool? = nil
+    var missionsShown: Bool { missionsEnabled == true }
 
     /// The four source modes as the routing surface takes them. Absent
     /// means `unset`, which watches the conventional location and is
@@ -756,6 +784,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case geminiSourceMode = "gemini_source_mode"
         case clineSourceMode = "cline_source_mode"
         case opencodeSourceMode = "opencode_source_mode"
+        case trajectorySourceMode = "trajectory_source_mode"
         case ironwire
         case admissionEvidenceRequired = "admission_evidence_required"
         case tokenDistributionsContribution = "token_distributions_contribution"
@@ -764,6 +793,10 @@ struct DaemonSettingsView: Decodable, Equatable {
         case privateInference = "private_inference"
         case privateInferenceOfferSeen = "private_inference_offer_seen"
         case privateInferenceState = "private_inference_state"
+        case insightsLedgerFeed = "insights_ledger_feed"
+        case missionsEnabled = "missions_enabled"
+        case insightsCounterPass = "insights_counter_pass"
+        case insightsRecapCardEnabled = "insights_recap_card_enabled"
     }
 }
 
@@ -837,6 +870,9 @@ enum DaemonEvent: Equatable {
         creditPending: Double,
         text: String
     )
+    /// One standalone re-engagement notification, in the daemon's words.
+    /// Delivered only because this app subscribes declaring it accepts it.
+    case reengageDue(DaemonData.ReengageDue)
     case resyncRequired
     /// The ABI's synthetic frame for a delivery gap. Treated exactly like
     /// `resync_required`: refetch rather than reason about what was missed.
@@ -1014,6 +1050,8 @@ struct TokenStorageView: Decodable, Equatable {
     let scopeNote: String
     let cleanupLabel: String
     let discardLabel: String
+    /// The discard confirmation's title: the full name the short button drops.
+    let discardTitle: String?
     let discardConfirmation: String
     let cancelLabel: String
     let confirmLabel: String
@@ -1021,7 +1059,7 @@ struct TokenStorageView: Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case captureEnabled = "capture_enabled", captureLabel = "capture_label", captureConfirmation = "capture_confirmation", captureNotice = "capture_notice"
         case stateLine = "state_line", scopeNote = "scope_note", cleanupLabel = "cleanup_label"
-        case discardLabel = "discard_label", discardConfirmation = "discard_confirmation"
+        case discardLabel = "discard_label", discardTitle = "discard_title", discardConfirmation = "discard_confirmation"
         case cancelLabel = "cancel_label", confirmLabel = "confirm_label", failureLine = "failure_line"
     }
 }

@@ -114,7 +114,7 @@ fn desktop_entry_text(exe: &Path) -> String {
         "[Desktop Entry]\n\
          Type=Application\n\
          Name={}\n\
-         Comment=Review and contribute Claude Code and Codex sessions in the background\n\
+         Comment=Review and contribute Claude Code and Codex traces in the background\n\
          Exec=\"{}\"\n\
          Terminal=false\n\
          NoDisplay=false\n\

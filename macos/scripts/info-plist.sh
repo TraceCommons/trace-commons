@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Print the Info.plist for TraceCommons.app.
+# Print the Info.plist for Near.ai.app.
 #
 # Extracted from make-app-bundle.sh so the version can be injected from a
 # release tag and asserted in a test without a Swift toolchain. The old
@@ -53,15 +53,15 @@ cat <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Trace Commons</string>
-    <key>CFBundleDisplayName</key><string>Trace Commons</string>
+    <key>CFBundleName</key><string>Near.ai</string>
+    <key>CFBundleDisplayName</key><string>Near.ai</string>
     <key>CFBundleIdentifier</key><string>ai.tracecommons.shell</string>
     <key>CFBundleExecutable</key><string>TraceCommonsApp</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${SHORT_VERSION}</string>
     <key>CFBundleVersion</key><string>${BUILD_VERSION}</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
-    <key>NSHumanReadableCopyright</key><string>Trace Commons</string>
+    <key>NSHumanReadableCopyright</key><string>K&amp;Z Partners LLC</string>
     <!-- There is no LSUIElement here, and its absence is the decision.
 
          This app was a menu-bar-only utility until a contributor could not
@@ -96,7 +96,7 @@ cat <<PLIST
         <key>CFBundleURLName</key><string>ai.tracecommons.shell.invite</string>
         <key>CFBundleURLSchemes</key><array><string>tracecommons</string></array>
         <!-- Viewer, not Editor: the app shows what the URL names and waits
-             for a person to press the button. A deep link never enrols. -->
+             for a person to press the button. A deep link never enrolls. -->
         <key>CFBundleTypeRole</key><string>Viewer</string>
       </dict>
     </array>

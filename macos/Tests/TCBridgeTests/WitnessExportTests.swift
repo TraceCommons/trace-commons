@@ -44,6 +44,27 @@ final class WitnessExportTests: XCTestCase {
         }
     }
 
+    /// Ron's #1146 witness and privacy-controls words (#1146 parity,
+    /// 2026-10-07), from the core.
+    func testTheWitnessWordsAreRons() throws {
+        let copy = try XCTUnwrap(WitnessCopy.decode(fromJSON: TCWitness.copyJSON() ?? ""))
+        XCTAssertEqual(copy.urlTitle, "Witness URL")
+        XCTAssertEqual(copy.signingAddressTitle, "Signing address")
+        XCTAssertEqual(copy.measurementsTitle, "Expected measurements")
+        XCTAssertEqual(copy.configure, "Save witness")
+        XCTAssertEqual(copy.clear, "Return")
+        XCTAssertEqual(copy.inferenceHeading, "Model-call evidence")
+        XCTAssertEqual(copy.tokenHeading, "Token distribution contribution")
+        XCTAssertEqual(copy.inferenceEnable, "Enable")
+        XCTAssertEqual(copy.inferenceCancel, "Cancel")
+        XCTAssertEqual(copy.privacyConfirmTitle, "Review privacy change")
+        XCTAssertEqual(copy.urlPlaceholder, "https://witness.example")
+        XCTAssertEqual(copy.operatorLabel, "Operator label: {label}")
+        XCTAssertEqual(copy.localStorage, "Local token-review storage")
+        // The disclosures themselves are unchanged: they say what is sent.
+        XCTAssertTrue(copy.inferenceDisclosure.contains("exact request and response"))
+    }
+
     /// A certificate covers redaction mechanics and a residual-risk verdict.
     /// No word on this surface may claim a session is genuine or attested.
     func testNoWordOnTheSurfaceClaimsATraceIsClean() throws {

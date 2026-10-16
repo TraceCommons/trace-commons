@@ -73,8 +73,10 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         let tasks = ComparisonTasksModel(service: service)
         let specifications = ComparisonSpecificationsModel(service: service)
         let size = CGSize(width: 1_180, height: 3_200)
+        // The Analyze tab holds the screen this test reads.
         let content = InsightsView(storeSelection: selection, storeCopy: copy, model: insights,
-                                   comparisonModel: tasks, specificationModel: specifications)
+                                   comparisonModel: tasks, specificationModel: specifications,
+                                   initialTab: .analyze)
             .frame(width: size.width, height: size.height, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor))
         let hosting = NSHostingView(rootView: content)
@@ -143,7 +145,15 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         XCTAssertTrue(topText.contains("selected-store"), topText)
         let text = try recognizedText(bitmap)
         let normalizedText = Self.normalizedOCR(text)
-        XCTAssertTrue(normalizedText.contains(Self.normalizedOCR("Whole saved snapshot members")), text)
+        // The episode chooser's member line is asserted on the view's own
+        // string, as the location line is. It is grey caption text, and on a
+        // macOS 27 host Vision in the test process drops that band's caption
+        // lines while reading its headings -- the same bytes read in full in a
+        // standalone process -- which says nothing about the view.
+        let entry = try XCTUnwrap(insights.episodes.first)
+        XCTAssertEqual(insights.episodes.count, 1)
+        XCTAssertEqual(ComparisonTasksView.episodeChoiceLine(entry, copy: copy),
+                       "1 Whole saved snapshot members · " + InsightsDate.label(entry.episode.updated_at))
         XCTAssertTrue(normalizedText.contains(Self.normalizedOCR("Outcome is unassessed")), text)
         XCTAssertTrue(text.contains("model-a") && text.contains("model-b"), text)
     }

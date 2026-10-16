@@ -19,7 +19,10 @@ struct CredentialSection: View {
     let copy: PrivateInferenceCopy
     var requiresSession = false
     var prominent = false
-    @State private var ownProvider = "github"
+    /// Whether the section draws its own title. Inside #1146's connection
+    /// panel it does not: the panel's title is the heading.
+    var titled = true
+    @State private var ownProvider = "near"
     /// Where the provider choice lives when the caller holds it. `nil` -- every
     /// production caller -- keeps it in this view's own state.
     ///
@@ -42,9 +45,9 @@ struct CredentialSection: View {
 
     static func providerOptions(_ copy: PrivateInferenceCopy) -> [ProviderOption] {
         [
+            ProviderOption(tag: "near", title: copy.credentialProviderNear),
             ProviderOption(tag: "github", title: copy.credentialProviderGithub),
             ProviderOption(tag: "google", title: copy.credentialProviderGoogle),
-            ProviderOption(tag: "near", title: copy.credentialProviderNear),
         ]
     }
 
@@ -66,7 +69,10 @@ struct CredentialSection: View {
             balance: BalanceSurface.action(model.balanceStatus, calls: model.balanceCalls),
             credential: action)
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            if prominent {
+            if !titled {
+                // Drawn inside the connection card, which is its heading.
+                EmptyView()
+            } else if prominent {
                 Text(copy.credentialTitle)
                     .glassType(GlassTokens.TypeScale.heading)
                     .foregroundStyle(GlassColor.textPrimary)
@@ -122,21 +128,12 @@ struct CredentialSection: View {
                 }
             }
             actionButton(action)
-            // What the key is worth, on the same card as the key. A balance
-            // is the one fact on this screen about an ACCOUNT rather than
-            // this computer, and it is here because it is the thing the
-            // sign-in above is for -- a contributor who has just signed in
-            // should not have to go looking for what they signed in to see.
-            //
-            // `credentialAction` is passed so the two rows cannot draw the
-            // same sign-in button twice; the decision is
-            // `BalanceSurface.actionToDraw`'s, not this view's.
-            if !requiresSession && action != .obtain {
-                Divider().overlay(GlassColor.hairline).padding(.vertical, GlassTokens.Space.s2)
-                BalanceRow(copy: copy, credentialAction: action, run: run)
-                Divider().overlay(GlassColor.hairline).padding(.vertical, GlassTokens.Space.s2)
-                FundingRow(copy: copy)
-            }
+            // The balance and funding are their own panels after this card,
+            // as #1146 draws them (`PrivateAIBalanceCard`, `FundingRow`). The
+            // sign-in the balance needs stays here, beside the provider
+            // chooser it uses, and never doubles this card's own button: the
+            // decision is `BalanceSurface.actionToDraw`'s, not this view's.
+            actionButton(balanceAction)
         }
         .task(id: action) {
             // A state nobody could read polls nothing. There is no outcome

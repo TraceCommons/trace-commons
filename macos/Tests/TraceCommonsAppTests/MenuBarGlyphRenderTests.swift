@@ -27,12 +27,13 @@ final class MenuBarGlyphRenderTests: XCTestCase {
 
     @MainActor
     private func render(
-        _ condition: GlassMenuBarStrip.Condition, badge: Int?, scheme: ColorScheme, scale: CGFloat
+        _ condition: GlassMenuBarStrip.Condition, badge: Int?, mark: GlassMenuBarStrip.Mark = .none,
+        scheme: ColorScheme, scale: CGFloat
     ) -> Rendered? {
         // Padded past the badge's offset, so the capture holds the whole
         // item at the menu bar's 22pt.
         let renderer = ImageRenderer(
-            content: GlassMenuBarStrip(columns: Self.columns, condition: condition, badge: badge)
+            content: GlassMenuBarStrip(columns: Self.columns, condition: condition, badge: badge, mark: mark)
                 .padding(.horizontal, GlassTokens.Space.s4)
                 .padding(.vertical, GlassTokens.Space.s1)
                 .background(scheme == .dark ? Color.black : Color.white)
@@ -67,6 +68,21 @@ final class MenuBarGlyphRenderTests: XCTestCase {
         let env = ProcessInfo.processInfo.environment["TRACE_COMMONS_MENUBAR_RENDER_DIR"]
         if let env, !env.isEmpty { return URL(fileURLWithPath: env) }
         return FileManager.default.temporaryDirectory
+    }
+
+    /// The news ring and the halo each change what is drawn, in both
+    /// appearances; a mark with no slot to draw in changes nothing.
+    @MainActor
+    func testTheNudgeMarkAddsInkOnlyWhereItIsDrawn() throws {
+        for scheme in [ColorScheme.light, .dark] {
+            func weight(_ condition: GlassMenuBarStrip.Condition, _ badge: Int?, _ mark: GlassMenuBarStrip.Mark) throws -> Int {
+                try XCTUnwrap(render(condition, badge: badge, mark: mark, scheme: scheme, scale: 2)).weight
+            }
+            XCTAssertNotEqual(try weight(.live, nil, .news), try weight(.live, nil, .none), "news ring")
+            XCTAssertNotEqual(try weight(.live, 3, .ready), try weight(.live, 3, .none), "halo")
+            XCTAssertEqual(try weight(.live, 3, .news), try weight(.live, 3, .none), "news under a badge")
+            XCTAssertEqual(try weight(.unavailable, nil, .news), try weight(.unavailable, nil, .none))
+        }
     }
 
     @MainActor

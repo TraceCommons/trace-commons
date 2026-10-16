@@ -7,13 +7,11 @@ import TCDesign
 struct GlassSettingsContent: View {
     var navigation: MainWindowNavigation?
     let section: SettingsSection
-    /// The Private AI pointer's way out of the Monitor's Settings modal;
-    /// nil elsewhere (`PrivateAISection.onPointer`).
-    var onPrivateAI: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             switch section {
+            case .general: GeneralSection()
             case .connection: ConnectionSection()
             case .startup: StartupSection()
             case .notifications: NotificationsSection()
@@ -22,16 +20,23 @@ struct GlassSettingsContent: View {
             case .publicProfile: PublicProfileSection()
             case .watching: WatchingSection()
             case .watchedFolders: WatchedFoldersSection()
-            case .tools: ToolsSection()
-            case .privateAI: PrivateAISection(onPointer: onPrivateAI)
+            case .tools:
+                ToolsSection()
+                // The Insights switches: in Tools because it waits for first
+                // run (R-43); the ledger feed's is in Private AI (Ron's #1287
+                // review).
+                InsightsSettingsCard()
+            case .privateAI: PrivateAISection()
             case .witness: WitnessSection()
             case .projects: ProjectsSection()
             case .changes: ChangesSection()
             case .compute: EmptyView()
             }
         }
-        .padding(GlassTokens.Space.panePadding)
-        .frame(maxWidth: 560, alignment: .leading)
+        // The modal body's insets (#1146 `px-5`), under the section's rule;
+        // the cards fill the body, as #1146's `.tc-page` has no max width.
+        .padding(.horizontal, GlassTokens.Space.s9)
+        .padding(.vertical, GlassTokens.Space.s6)
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }

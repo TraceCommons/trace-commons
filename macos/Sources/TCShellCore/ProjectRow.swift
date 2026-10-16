@@ -267,21 +267,13 @@ public struct ProjectTool: Decodable, Equatable, Sendable {
 /// beside either view so that neither becomes the owner and the other the
 /// copy -- a near-duplicate is how two surfaces start disagreeing.
 public enum ProjectCopy {
-    public static let unresolvedBucketLabel = "Sessions with no project"
+    public static let unresolvedBucketLabel = "Traces with no project"
 
     // A mode's name is not here. It is the core's
     // (`project_copy::FOLDER_MODE_LABELS`), read through the pill's table:
     // `ContributionModeCopy.label(for:)`, and `ProjectCopy.modeChoiceLabel(_:)`
     // in `TraceCommonsApp/ProjectModeWords.swift`, which reaches the dylib.
-
-
-    /// A statement of what the daemon does, not an apology. Nothing in it is
-    /// a contributor's to fix: the bucket exists so that a directory the
-    /// daemon cannot name never has its path written into the audit log,
-    /// notification text or history, and not being armable is the protective
-    /// half of that.
-    public static let unresolvedBucketNote = """
-        Trace Commons can't tell which folder these ran in, so they can never \
-        be contributed automatically. You'll always be asked.
-        """
+    // Nor is the line under the bucket: it is the core's
+    // (`MonitorTreeCopy.unresolved_bucket_note`), read as
+    // `ProjectCopy.unresolvedBucketNote` in that same file.
 }

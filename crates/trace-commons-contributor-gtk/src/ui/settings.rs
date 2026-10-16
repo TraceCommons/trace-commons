@@ -170,6 +170,11 @@ pub struct SettingsView {
     /// the daemon and nothing on it can be painted as working: the indicator
     /// belongs beside the control, on the screen that has both.
     private_inference_link: gtk::Button,
+    /// "Open sessions in": the terminal managed sessions open in, drawn by
+    /// `terminal_choice` only while the daemon offers one.
+    pub managed_terminal: gtk::Box,
+    /// The move to a NEAR AI account, drawn only while the daemon offers it.
+    pub legacy_move: super::legacy_move::Controls,
     /// The port a running IronWire published, or `None` for a machine that
     /// published nothing.
     ///
@@ -268,11 +273,19 @@ impl SettingsView {
         state_card.append(&connection);
         let connection_checks = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
         state_card.append(&connection_checks);
-        let pause_button = gtk::Button::with_label("Pause");
+        // #1146's "Pause watcher" / "Resume watcher", from the core's
+        // shell table (`preview_copy::MonitorShellCopy`).
+        let pause_button = gtk::Button::with_label(
+            trace_commons_contributor::preview_copy::monitor_screens_copy()
+                .shell
+                .pause_watcher,
+        );
         pause_button.add_css_class("tc-quiet");
         pause_button.set_halign(gtk::Align::Start);
         state_card.append(&pause_button);
         content.append(&state_card);
+        let legacy_move = super::legacy_move::Controls::new(false);
+        content.append(&legacy_move.root);
 
         content.append(&style::section(CONTRIBUTION_HEADING));
         let contribution_card = style::card(gtk::Orientation::Vertical, space::M);
@@ -412,6 +425,12 @@ impl SettingsView {
             .build();
         private_inference_card.append(&private_inference_link);
         content.append(&private_inference_card);
+
+        // Which terminal managed sessions open in (#1406), under Private AI
+        // as on macOS. Hidden until the daemon offers a terminal.
+        let managed_terminal = gtk::Box::new(gtk::Orientation::Vertical, space::M);
+        managed_terminal.set_visible(false);
+        content.append(&managed_terminal);
 
         // K11: where sessions go, above the witness it names. Its title and
         // card are both drawn by `render_disclosure` -- the title only when
@@ -667,7 +686,12 @@ impl SettingsView {
         let public = gtk::Box::new(gtk::Orientation::Vertical, space::M);
         content.append(&public);
 
-        content.append(&style::section("What has been changed on this machine"));
+        // The core's "Change log" (owner ruling, 2026-10-08), for every shell.
+        content.append(&style::section(
+            trace_commons_contributor::preview_copy::monitor_screens_copy()
+                .shell
+                .changes_heading,
+        ));
         let audit = style::card(gtk::Orientation::Vertical, space::XS);
         content.append(&audit);
 
@@ -724,6 +748,8 @@ impl SettingsView {
             routing_evidence_pending: std::cell::Cell::new(false),
             filling_routing: std::cell::Cell::new(false),
             private_inference_link,
+            managed_terminal,
+            legacy_move,
             routing_discovered_port: std::cell::Cell::new(None),
             witness_status,
             disclosure,
@@ -935,9 +961,11 @@ fn offer_pause(app: &Rc<App>) {
     );
     dialog.add_responses(&[
         ("cancel", "Cancel"),
-        ("hour", "For 1 hour"),
-        ("tomorrow", "Until tomorrow morning"),
-        ("forever", "Until I turn it back on"),
+        // The core's pause lengths (`pause_hour`, `pause_morning`,
+        // `pause_until_resumed`), button rule 2026-10-08.
+        ("hour", "1 hour"),
+        ("tomorrow", "Until morning"),
+        ("forever", "Until resumed"),
     ]);
     dialog.set_close_response("cancel");
     let app = Rc::clone(app);
@@ -1026,17 +1054,20 @@ pub fn render_status(app: &Rc<App>, status: &Status) {
         "A background watcher is running separately. It keeps going when this window closes."
     };
     let connected = if status.logged_in {
-        concat!("Connected to ", copy::app_name!(), ".")
+        concat!("Connected to ", copy::commons_name!(), ".")
     } else {
-        "Not connected. Sessions are still being queued; nothing can be sent yet, and nothing \
+        "Not connected. Traces are still being queued; nothing can be sent yet, and nothing \
          has been lost."
     };
     app.settings
         .connection
         .set_text(&format!("{connection}\n{connected}"));
-    app.settings
-        .pause_button
-        .set_label(if status.paused { "Resume" } else { "Pause" });
+    let shell = trace_commons_contributor::preview_copy::monitor_screens_copy().shell;
+    app.settings.pause_button.set_label(if status.paused {
+        shell.resume_watcher
+    } else {
+        shell.pause_watcher
+    });
 
     // §5.4 draws only the connected chip. The other half of the same fact
     // has to be visible too, and §7.3 will not let it be a colour on its
@@ -1836,6 +1867,7 @@ pub fn refresh(app: &Rc<App>) {
     if app.settings.routing_discovered_port.get().is_none() {
         discover_routing(app);
     }
+    super::terminal_choice::refresh(app);
     app.call("list_projects", serde_json::json!({}), |app, result| {
         let projects: Vec<Project> = result
             .ok()
@@ -1977,7 +2009,7 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
     });
     let armed_line = gtk::Label::builder()
         .label(if armed.is_empty() {
-            "Every session is offered to you first.".to_string()
+            "Every trace is offered to you first.".to_string()
         } else {
             armed
                 .iter()
@@ -3386,7 +3418,10 @@ fn wire_inference_consent(app: &Rc<App>) {
         .connect_clicked(move |_| save_inference_consent(&a, false));
     let a = Rc::clone(app);
     app.settings.inference_enable.connect_clicked(move |_| {
+        // Titled and introduced as macOS does (#1146
+        // `privacy-controls-panel.tsx`); the disclosure itself follows.
         let body = [
+            copy::WITNESS_PRIVACY_CONFIRM_DESCRIPTION,
             copy::WITNESS_INFERENCE_DISCLOSURE,
             copy::WITNESS_INFERENCE_CAPTURE_NOTE,
             copy::WITNESS_INFERENCE_SCOPE_NOTE,
@@ -3394,7 +3429,7 @@ fn wire_inference_consent(app: &Rc<App>) {
         .join("\n\n");
         let dialog = adw::MessageDialog::new(
             Some(&a.window),
-            Some(copy::WITNESS_INFERENCE_HEADING),
+            Some(copy::WITNESS_PRIVACY_CONFIRM_TITLE),
             Some(&body),
         );
         dialog.add_responses(&[
@@ -3504,7 +3539,10 @@ fn wire_token_consent(app: &Rc<App>) {
         .connect_clicked(move |_| save_token_consent(&a, false));
     let a = Rc::clone(app);
     app.settings.token_enable.connect_clicked(move |_| {
+        // Titled and introduced as macOS does (#1146
+        // `privacy-controls-panel.tsx`); the disclosure itself follows.
         let body = [
+            copy::WITNESS_PRIVACY_CONFIRM_DESCRIPTION,
             copy::WITNESS_TOKEN_DISCLOSURE,
             copy::WITNESS_TOKEN_CAPTURE_NOTE,
             copy::WITNESS_TOKEN_SCOPE_NOTE,
@@ -3512,7 +3550,7 @@ fn wire_token_consent(app: &Rc<App>) {
         .join("\n\n");
         let dialog = adw::MessageDialog::new(
             Some(&a.window),
-            Some(copy::WITNESS_TOKEN_HEADING),
+            Some(copy::WITNESS_PRIVACY_CONFIRM_TITLE),
             Some(&body),
         );
         dialog.add_responses(&[
@@ -3669,7 +3707,7 @@ mod witness_tests {
                 public_since: None,
                 witness,
                 inference_receipt_endpoint: None,
-                consent_scopes_chosen: false,
+                consent_scopes_chosen: Some(true),
                 witness_origin: None,
                 inference_receipt_check_attestation: false,
             })
@@ -4230,7 +4268,7 @@ mod tests {
     /// The three modes are three different rows, and the `off` row does not
     /// say what the `unset` row says.
     ///
-    /// `off` and `unset` shared a sentence -- "sessions read from the usual
+    /// `off` and `unset` shared a sentence -- "traces read from the usual
     /// place" -- because the row branched on `*_root_configured`, which is
     /// `mode == "watch"`. Nothing is read from an `off` source, so that was
     /// a false statement on the one screen a contributor checks to confirm
@@ -4242,15 +4280,15 @@ mod tests {
         let unset = source_check_rows(&settings_with_modes("unset", "unset"));
         let off = source_check_rows(&settings_with_modes("off", "off"));
 
-        assert_eq!(watch[0].0, "Claude Code sessions folder set");
-        assert_eq!(unset[0].0, "Claude Code sessions read from the usual place");
+        assert_eq!(watch[0].0, "Claude Code traces folder set");
+        assert_eq!(unset[0].0, "Claude Code traces read from the usual place");
         assert_eq!(
             off[0].0,
-            "Claude Code marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed"
         );
         assert_eq!(
             off[1].0,
-            "Codex marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "Codex marked not used, so nothing is opened for it. Previously queued traces are not removed"
         );
 
         for (a, b) in [(&watch, &unset), (&watch, &off), (&unset, &off)] {
@@ -4278,9 +4316,9 @@ mod tests {
         let rows = source_check_rows(&settings_with_modes("off", "unset"));
         assert_eq!(
             rows[0].0,
-            "Claude Code marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed"
         );
-        assert_eq!(rows[1].0, "Codex sessions read from the usual place");
+        assert_eq!(rows[1].0, "Codex traces read from the usual place");
         assert_eq!((rows[0].1, rows[1].1), (false, false));
     }
 
@@ -5327,9 +5365,15 @@ fn wire_token_storage(app: &Rc<App>) {
         let Some(storage) = a.settings.token_storage.borrow().clone() else {
             return;
         };
+        // The button is short; the confirmation keeps the full title.
+        let title = if storage.discard_title.is_empty() {
+            &storage.discard_label
+        } else {
+            &storage.discard_title
+        };
         let dialog = adw::MessageDialog::new(
             Some(&a.window),
-            Some(&storage.discard_label),
+            Some(title),
             Some(&storage.discard_confirmation),
         );
         dialog.add_responses(&[

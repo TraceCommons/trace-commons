@@ -11,8 +11,8 @@ import TCShellCore
 /// Every sentence is the core's (`summary_panel`, `counts`, `safeguards`,
 /// the screens table); every count is the core's, and one it did not give
 /// is a dash. Pending credit is shown only beside the commons' statement of
-/// what it waits on (D6). The health banners are not repeated here: the
-/// host draws them above every inspector, this one included.
+/// what it waits on (D6). The health banners are not repeated here: they
+/// are drawn above the Traces tree (owner, 2026-10-07).
 struct SummaryInspector: View {
     let traces: TracesStore
     let home: HomeStore
@@ -43,55 +43,45 @@ struct SummaryInspector: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                header
-                // The legend says its words or is not drawn, as Decisions.
-                if let table = MonitorWords.table {
-                    HStack(spacing: GlassTokens.Space.s3) {
-                        GlassLegendCell(
-                            table.shared, value: SummaryFacts.contributed(rollup), status: .shared)
-                        GlassLegendCell(
-                            table.kept, value: SummaryFacts.kept(loaded: loaded, sessions: sessions), status: .kept)
-                    }
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            header
+            // The legend says its words or is not drawn, as Decisions.
+            if let table = MonitorWords.table {
+                HStack(spacing: GlassTokens.Space.s3) {
+                    GlassLegendCell(
+                        table.shared, value: SummaryFacts.contributed(rollup), status: .shared)
+                    GlassLegendCell(
+                        table.kept, value: SummaryFacts.kept(loaded: loaded, sessions: sessions), status: .kept)
                 }
-                if let failure = home.failures["history_rollup"], let table = MonitorWords.table {
-                    GlassNotice(tone: .outside, title: table.line(for: failure)) { EmptyView() }
-                }
-                if let words {
-                    SummarySection(words.inspector.decisions) { decisions(words) }
-                    statistics(words)
-                }
-                safeguards
-                // An unread queue is not an empty one: before the daemon has
-                // answered, nothing (`CertificateSection` says when there
-                // are none).
-                if queueAnswered {
-                    CertificateSection(entries: awaitingDecision)
-                }
-                NotOfferedGlassDisclosure(counts: outcomeCounts, words: words?.summaryPanel)
             }
+            if let failure = home.failures["history_rollup"], let table = MonitorWords.table {
+                GlassNotice(tone: .outside, title: table.line(for: failure)) { EmptyView() }
+            }
+            if let words {
+                InspectorSection(words.inspector.decisions, collapsible: true) { decisions(words) }
+                statistics(words)
+            }
+            safeguards
+            // An unread queue is not an empty one: before the daemon has
+            // answered, nothing (`CertificateSection` says when there
+            // are none).
+            if queueAnswered {
+                CertificateSection(entries: awaitingDecision)
+            }
+            NotOfferedGlassDisclosure(counts: outcomeCounts, words: words?.summaryPanel)
         }
-        .scrollIndicators(.never)
     }
 
+    /// Ron's `InspectorHeader`: "Summary" over the tools watched, projects
+    /// and sessions waiting, each only once the core has said it.
     private var header: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-            Text(MonitorWords.summary)
-                .glassType(GlassTokens.TypeScale.title)
-                .foregroundStyle(GlassColor.textPrimary)
-            if let words {
-                let sub = SummaryFacts.subline(
-                    words: words, destinations: traces.destinations, loaded: loaded,
+        InspectorHeader(
+            title: MonitorWords.summary,
+            sub: words.map {
+                SummaryFacts.subline(
+                    words: $0, destinations: traces.destinations, loaded: loaded,
                     folders: traces.tree.allFolders.count, sessions: sessions.count)
-                if !sub.isEmpty {
-                    Text(sub)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
+            })
     }
 
     /// Waiting, worth a second look, contributed with its pending credit,
@@ -99,8 +89,9 @@ struct SummaryInspector: View {
     @ViewBuilder
     private func decisions(_ words: MonitorTracesCopy) -> some View {
         let fill = { (template: String, count: String) in FirstRunCopy.fill(template, ["count": count]) }
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-            SummaryDecisionLine(glyph: "tray", tone: .ask, text: fill(
+        // Ron's list: 8 between lines (`gap-2`).
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            SummaryDecisionLine(glyph: "rectangle.split.2x1", tone: .ask, text: fill(
                 words.summaryPanel.waitingForYou, SummaryFacts.waiting(traces.status)))
             SummaryDecisionLine(glyph: "exclamationmark.triangle", tone: .ask, text: fill(
                 words.summaryPanel.worthASecondLook, SummaryFacts.secondLook(loaded: loaded, sessions: sessions)))
@@ -114,25 +105,17 @@ struct SummaryInspector: View {
         }
     }
 
-    /// Pending credit, as a figure only beside the commons' condition for
-    /// it (D6); a dash otherwise.
+    /// Pending credit, as a figure only when the commons has stated its
+    /// condition (D6); a dash otherwise. The statement is not drawn.
     private var pending: some View {
         let pending = SummaryFacts.pending(rollup: rollup, credit: credit)
-        return VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-            GlassKeyValueList([.init(MonitorWords.pending, pending.value)])
-            if let condition = pending.condition {
-                Group {
-                    Text(condition)
-                    // Credit is a record, not currency: the core's
-                    // sentence, beside every figure.
-                    Text(MonitorWords.creditNotCurrency)
-                }
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-        }
+        // Its own glyph (owner, 2026-10-12), on the decision lines' text
+        // column; the condition is not drawn (#1401).
+        return SummaryDecisionLine(glyph: Self.pendingGlyph, tone: nil, text: MonitorWords.pending + " " + pending.value)
     }
+
+    /// The pending line's glyph: credit on its way.
+    static let pendingGlyph = "hourglass"
 
     /// Top projects and top tools, by sessions waiting plus contributed.
     /// Tools are counted from each session's own tool, not a tree level.
@@ -143,8 +126,9 @@ struct SummaryInspector: View {
                 folders: traces.tree.allFolders, history: history, counts: words.counts)
             let tools = SummaryFacts.topTools(sessions: sessions, history: history, counts: words.counts)
             if !projects.isEmpty || !tools.isEmpty {
-                SummarySection(words.summaryPanel.statistics) {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                InspectorSection(words.summaryPanel.statistics, collapsible: true) {
+                    // A full step between the two groups.
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s8) {
                         if !projects.isEmpty { SummaryStat(label: words.summaryPanel.topProjects, lines: projects) }
                         if !tools.isEmpty { SummaryStat(label: words.summaryPanel.topTools, lines: tools) }
                     }
@@ -165,7 +149,7 @@ struct SummaryInspector: View {
                     Text(copy.heading)
                         .glassType(GlassTokens.TypeScale.bodyStrong)
                         .foregroundStyle(GlassColor.textPrimary)
-                    GlassKeyValueList(SummaryFacts.safeguardRows(status, copy: copy))
+                    SafeguardGrid(rows: SummaryFacts.safeguardRows(status, copy: copy))
                     if let held = SummaryFacts.heldByLimit(status.dailyBudget, copy: copy) {
                         Text(held)
                             .glassType(GlassTokens.TypeScale.caption)
@@ -182,44 +166,58 @@ struct SummaryInspector: View {
     }
 }
 
-/// A collapsible section of the Summary (Ron's `Section`).
-private struct SummarySection<Content: View>: View {
-    let title: String
-    let content: Content
-    @State private var open = true
-
-    init(_ title: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-            GlassExpander(title, isOpen: $open)
-            if open {
-                content.padding(.horizontal, GlassTokens.Space.s1)
-            }
-        }
-    }
-}
-
 /// One decision line: a glyph in its status colour, and the core's line.
+/// No glyph keeps the 20 column empty, so the line stays on the text edge.
 private struct SummaryDecisionLine: View {
-    let glyph: String
+    let glyph: String?
     let tone: GlassStatus?
     let text: String
 
     var body: some View {
-        HStack(spacing: GlassTokens.Space.s3) {
-            Image(systemName: glyph)
-                .glassGlyph(12, weight: .semibold)
-                .foregroundStyle(tone?.textColor ?? GlassColor.textTertiary)
-                .frame(width: 20)
-                .accessibilityHidden(true)
+        // Ron's `DecisionLine`: the glyph in a 20 column, 10 before the line.
+        HStack(spacing: GlassTokens.Space.s5) {
+            Group {
+                if let glyph {
+                    Image(systemName: glyph)
+                        .glassGlyph(12, weight: .semibold)
+                        .foregroundStyle(tone?.textColor ?? GlassColor.textTertiary)
+                } else {
+                    Color.clear.frame(height: 1)
+                }
+            }
+            .frame(width: 20)
+            .accessibilityHidden(true)
             Text(text)
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// Ron's `QueueStatusPanel` grid: a cell per row, its label bold over its
+/// value, side by side. No rules above or below it (owner, 2026-10-11).
+struct SafeguardGrid: View {
+    let rows: [GlassKeyValueList.Item]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
+                ForEach(rows, id: \.label) { row in
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                        Text(row.label)
+                            .glassType(GlassTokens.TypeScale.bodyStrong)
+                            .foregroundStyle(GlassColor.textPrimary)
+                        Text(row.value)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            .padding(.vertical, GlassTokens.Space.s2)
         }
     }
 }
@@ -229,19 +227,29 @@ private struct SummaryStat: View {
     let label: String
     let lines: [SummaryFacts.Stat]
 
+    /// Three weights, so the eye reads group, then item, then its counts
+    /// (owner, 2026-10-12): the group's label as an eyebrow, each item in
+    /// the title face, its counts quieter under it, and room between.
     var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             Text(label)
-                .glassType(GlassTokens.TypeScale.caption)
+                .glassType(GlassTokens.TypeScale.eyebrow)
                 .foregroundStyle(GlassColor.textTertiary)
-            ForEach(lines) { line in
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(line.title)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                    Text(line.sub)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textTertiary)
+                .accessibilityAddTraits(.isHeader)
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
+                ForEach(lines) { line in
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                        Text(line.title)
+                            .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(line.sub)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .accessibilityElement(children: .combine)
                 }
             }
         }
@@ -418,7 +426,7 @@ enum SummaryFacts {
             ])))
         }
         if let routing = status.routing {
-            let state = TCRoutingCopy.stateLine(state: routing.state) ?? "—"
+            let state = copy.routingLabel(routing.state)
             rows.append(.init(copy.inferenceRouting, routing.derived == true ? "\(state) · \(copy.daemonOwned)" : state))
         }
         return rows

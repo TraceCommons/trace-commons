@@ -1,6 +1,6 @@
 //! Onboarding: the six screens from the shared design spec.
 //!
-//! Until this existed the Linux app could not enrol anyone. It detected the
+//! Until this existed the Linux app could not enroll anyone. It detected the
 //! unenrolled state and said so -- [`copy::UNENROLLED_PREVIEW`] -- and then
 //! offered no way to leave it, so an app-only contributor was stuck and had
 //! to be sent to the CLI. macOS is the reference implementation
@@ -209,7 +209,7 @@ pub use trace_commons_contributor::commands::invite_from_deep_link;
 
 /// Hold an invite from the command line until onboarding is built.
 ///
-/// Note what this does *not* do: it does not enrol. A link someone clicked
+/// Note what this does *not* do: it does not enroll. A link someone clicked
 /// in mail still lands on the Connect screen with the instance shown and
 /// the button un-pressed, because the decision this screen exists to ask
 /// for is which commons to join -- and a URL handler is not a person

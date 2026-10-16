@@ -24,9 +24,12 @@ public sealed partial class SettingsView : UserControl
     private bool _tokenContributionDialogOpen;
     private bool _inferenceEvidenceDialogOpen;
 
-    public SettingsView(DaemonHost host)
+    public SettingsView(DaemonHost host, LegacyMigrationOfferViewModel legacyOffer)
     {
+        LegacyOffer = legacyOffer ?? throw new ArgumentNullException(nameof(legacyOffer));
         InitializeComponent();
+        LegacyOfferView.Offer = LegacyOffer;
+        ManagedTerminalHost.Content = new ManagedTerminalPicker(host);
 
         ViewModel = new PublicProfileViewModel(host);
         Settings = new ContributorSettingsViewModel(host);
@@ -34,6 +37,9 @@ public sealed partial class SettingsView : UserControl
     }
 
     public PublicProfileViewModel ViewModel { get; }
+
+    /// <summary>The offer to move a legacy invite identity, shared with the notices card.</summary>
+    public LegacyMigrationOfferViewModel LegacyOffer { get; }
 
     public ContributorSettingsViewModel Settings { get; }
 
@@ -81,12 +87,12 @@ public sealed partial class SettingsView : UserControl
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
-            Title = Settings.InferenceEvidenceHeading,
+            Title = Settings.PrivacyConfirmTitle,
             Content = new ScrollViewer
             {
                 Content = new TextBlock
                 {
-                    Text = string.Join("\n\n", Settings.InferenceEvidenceDisclosure,
+                    Text = string.Join("\n\n", Settings.PrivacyConfirmDescription, Settings.InferenceEvidenceDisclosure,
                         Settings.InferenceEvidenceCaptureNote, Settings.InferenceEvidenceScopeNote),
                     TextWrapping = TextWrapping.Wrap,
                 },
@@ -122,7 +128,8 @@ public sealed partial class SettingsView : UserControl
     }
     private async void OnDiscardProbabilityStorage(object sender, RoutedEventArgs e) {
         if (Settings.ProbabilityStorage is not { } storage) return;
-        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = storage.DiscardLabel,
+        var title = string.IsNullOrEmpty(storage.DiscardTitle) ? storage.DiscardLabel : storage.DiscardTitle;
+        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = title,
             Content = storage.DiscardConfirmation, PrimaryButtonText = storage.ConfirmLabel,
             CloseButtonText = storage.CancelLabel, DefaultButton = ContentDialogButton.Close };
         if (await dialog.ShowAsync() == ContentDialogResult.Primary) await Settings.CleanProbabilityStorageAsync(true);
@@ -142,12 +149,12 @@ public sealed partial class SettingsView : UserControl
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
-            Title = Settings.TokenContributionHeading,
+            Title = Settings.PrivacyConfirmTitle,
             Content = new ScrollViewer
             {
                 Content = new TextBlock
                 {
-                    Text = string.Join("\n\n", Settings.TokenContributionDisclosure,
+                    Text = string.Join("\n\n", Settings.PrivacyConfirmDescription, Settings.TokenContributionDisclosure,
                         Settings.TokenContributionCaptureNote, Settings.TokenContributionScopeNote),
                     TextWrapping = TextWrapping.Wrap,
                 },

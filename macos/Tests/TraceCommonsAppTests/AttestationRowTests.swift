@@ -92,8 +92,16 @@ final class AttestationRowTests: XCTestCase {
         let end = try XCTUnwrap(store.range(of: "\n    }\n", range: start.upperBound ..< store.endIndex))
         let body = store[start.lowerBound ..< end.upperBound]
         for call in ["AttestationSurface.markLine(", "AttestationSurface.reasonLine(", "Self.attestationCalls",
-                     "mark: entry.attestation ?? \"\"", "entry.attestationReason"] {
+                     "Self.attestationMark(entry)"] {
             XCTAssertTrue(body.contains(call), "attestationValue never reads \(call)")
+        }
+        // The mark is read off the entry in one place, which the session
+        // row's sentence and tone share.
+        let markStart = try XCTUnwrap(store.range(of: "static func attestationMark(_ entry: DaemonData.QueueEntry) -> AttestationMark {"))
+        let markEnd = try XCTUnwrap(store.range(of: "\n    }\n", range: markStart.upperBound ..< store.endIndex))
+        let mark = store[markStart.lowerBound ..< markEnd.upperBound]
+        for read in ["mark: entry.attestation ?? \"\"", "entry.attestationReason"] {
+            XCTAssertTrue(mark.contains(read), "attestationMark never reads \(read)")
         }
         // Ron's session review card (#1241) is the session inspector.
         let inspector = try Self.source("TraceCommonsApp/Views/Monitor/SessionReviewCard.swift")

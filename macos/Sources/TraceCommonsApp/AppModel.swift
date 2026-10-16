@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
     /// The copy key of the last failed managed action (`ManagedSurface.errorKey`),
     /// never the daemon's code.
     @Published var managedErrorKey: String?
+    @Published var managedErrorTool: String?
     /// The last copy table the daemon sent, kept when a later read fails so
     /// the connecting and failure states still have their words.
     private var managedCopy: [String: String] = [:]
@@ -31,10 +32,20 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The terminal app managed sessions open in, by the id the daemon
+    /// offered in `capabilities.terminal_choices`. The daemon refuses any
+    /// other value; the snapshot is re-read after the write.
+    func setManagedTerminal(_ id: String) {
+        managedAction("set_managed_terminal", params: ["terminal": id])
+    }
+
     func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil) {
         guard let client, !managedBusy else { return }
         managedBusy = true
         managedErrorKey = nil
+        managedErrorTool = nil
+        let attemptedTool = params["tool"] as? String
+            ?? managedSnapshot?.accounts.first(where: { $0.id == (params["account_id"] as? String) })?.tool
         Task.detached(priority: .userInitiated) {
             let result = Result {
                 var response = try client.managedAction(method, params: params)
@@ -58,6 +69,7 @@ final class AppModel: ObservableObject {
                 if case .failure(let error) = result {
                     let failure = error as? DaemonClient.Failure
                     self.managedErrorKey = ManagedSurface.errorKey(code: failure?.code, message: failure?.message)
+                    self.managedErrorTool = attemptedTool
                 }
                 self.refreshManagedSessions()
             }
@@ -163,9 +175,16 @@ final class AppModel: ObservableObject {
     @Published private(set) var startup: Startup = .starting
     @Published private(set) var isStartingDaemon = false
     private let daemonStartup: DaemonStartup
+    /// The opt-in events to declare now (`Notifier.acceptedEvents`).
+    /// Replaced only by tests.
+    private let reengageAccepts: () async -> [String]
 
-    init(daemonStartup: DaemonStartup? = nil) {
+    init(
+        daemonStartup: DaemonStartup? = nil,
+        reengageAccepts: @escaping () async -> [String] = { await Notifier.shared.acceptedEvents() }
+    ) {
         self.daemonStartup = daemonStartup ?? DaemonStartup()
+        self.reengageAccepts = reengageAccepts
         // `@Published` emits in `willSet`, so the emitted value is read,
         // not `PendingInvite.shared.value`. Delivered on the main actor:
         // `PendingInvite` is main-actor isolated.
@@ -231,6 +250,10 @@ final class AppModel: ObservableObject {
     /// is also a reason this answer might have.
     @Published private(set) var armingOffer: ArmingOffer?
     @Published private(set) var consentScopes: [ConsentScope] = []
+    /// Whether missions are shown anywhere (`missions_enabled`); off until
+    /// the daemon says so, and off before its settings have arrived.
+    var missionsShown: Bool { daemonSettings?.missionsShown ?? false }
+
     @Published private(set) var daemonSettings: DaemonSettingsView? {
         // A settings write can change what leaves this machine -- inference
         // evidence adds or removes the prompt-and-reply line, a filter change
@@ -443,13 +466,18 @@ final class AppModel: ObservableObject {
     /// only then works out the change -- which is still shown before it is
     /// made.
     func answerHarnessExposure(accepted: Bool) {
-        guard let request = harnessExposureRequest else { return }
-        harnessExposureRequest = nil
+        guard let request = harnessExposureRequest, !harnessBusy else { return }
         guard accepted else {
+            harnessExposureRequest = nil
             answerPrivateInferenceOffer(accepted: false)
             return
         }
-        guard let client, !harnessBusy else { return }
+        guard let client else {
+            harnessExposureRequest = nil
+            return
+        }
+        // The sheet stays up, busy, until the write answers: a scrim click
+        // or Escape meanwhile cannot abandon it (#1280 review).
         harnessBusy = true
         Task.detached(priority: .userInitiated) {
             let outcome = Result { () -> (DaemonSettingsView, HarnessPlan?) in
@@ -458,6 +486,7 @@ final class AppModel: ObservableObject {
             }
             await MainActor.run {
                 self.harnessBusy = false
+                self.harnessExposureRequest = nil
                 switch outcome {
                 case .success(let (settings, plan)):
                     self.publishIfChanged(\.daemonSettings, settings)
@@ -504,6 +533,7 @@ final class AppModel: ObservableObject {
     /// The contributor said no to the change. The file keeps every value it
     /// has, and the plan is simply dropped -- it expires on the far side.
     func cancelHarnessPreview() {
+        guard !harnessBusy else { return }
         harnessPreview = nil
     }
 
@@ -521,12 +551,13 @@ final class AppModel: ObservableObject {
             let planID = plan.planID,
             let client, !harnessBusy
         else { return }
-        harnessPreview = nil
+        // The preview stays up, busy, until the commit answers (#1280 review).
         harnessBusy = true
         Task.detached(priority: .userInitiated) {
             let outcome = Result { try client.harnessCommit(planID: planID) }
             await MainActor.run {
                 self.harnessBusy = false
+                self.harnessPreview = nil
                 if case .failure = outcome { self.reportHarnessFailure() }
                 self.refreshHarnesses()
             }
@@ -607,10 +638,15 @@ final class AppModel: ObservableObject {
     /// The ceremony this shell started, while it is still going.
     ///
     /// Kept because `browser_url` is served ONCE, by start, and no poll
-    /// re-serves it -- and because cancel requires the attempt id, which is
-    /// also only ever handed over here. Dropped when the ceremony leaves the
-    /// state that has something to cancel.
+    /// re-serves it -- and so a cancel can name the attempt this shell
+    /// started. Not required for one: the daemon accepts an unnamed cancel
+    /// and stops whatever sign-in it is running. Dropped when the ceremony
+    /// leaves the state that has something to cancel.
     @Published private(set) var credentialAttempt: CredentialAttempt?
+
+    /// The attempt the first run's near.ai login is waiting on, kept apart
+    /// from Settings' `credentialAttempt` so its Cancel names its own.
+    private var firstRunLoginAttemptID: String?
 
     @Published private(set) var credentialBusy = false
 
@@ -891,7 +927,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var certificateDetails: [String: CertificateDetail] = [:]
 
     /// Re-read what leaves this machine. Called wherever a fact it states
-    /// can change: the witness, enrolment, and any settings write (through
+    /// can change: the witness, enrollment, and any settings write (through
     /// `daemonSettings`), as well as when a disclosure surface appears.
     func refreshRouteDisclosure() {
         routeDisclosureGeneration &+= 1
@@ -943,7 +979,7 @@ final class AppModel: ObservableObject {
     /// out of it, which is why it has one.
     @Published var lastActionNotice: String?
     /// What a finished first run must still say -- Automatic was refused, so
-    /// sharing is on Ask me -- shown above every section once the first-run
+    /// sharing is on Ask -- shown above every section once the first-run
     /// host has gone (`FirstRunDaemon.firstRunFinished`). The core's
     /// sentence; dismissed by the person.
     @Published var firstRunNotice: String?
@@ -954,7 +990,12 @@ final class AppModel: ObservableObject {
     /// The client the first run's passkey sheets complete their ceremony
     /// with (`LivePasskeyAccount`). Nil while no daemon is running.
     var passkeyClient: DaemonClient? { client }
-    private var subscription: TCSubscription?
+    /// The one subscription and what it declares (`ReengageDeclaration`):
+    /// `reengage_due` only while a notification can be posted.
+    private var reengage: ReengageDeclaration<TCSubscription>?
+    private var subscription: TCSubscription? { reengage?.token }
+    /// Whether the daemon currently counts this app as a renderer.
+    var declaresReengagement: Bool { reengage?.isDeclared ?? false }
     /// The C1 data contract's live client (K1 of #1173), for screens that
     /// read through `DaemonDataClient`. Created with the daemon and fed by
     /// the same `tc_subscribe` callback as `handle(event:)`, so there is
@@ -1039,7 +1080,10 @@ final class AppModel: ObservableObject {
                 waiting,
                 projectID: \.projectID,
                 projectLabel: \.projectLabel,
-                sizeBytes: \.sizeBytes
+                // Every decoded queue entry carries its size; only a
+                // carried-over preview entry can lack one, and none is
+                // ever in `pending`.
+                sizeBytes: { $0.sizeBytes ?? 0 }
             )
         )
         recomputeNothingMatched()
@@ -1217,7 +1261,10 @@ final class AppModel: ObservableObject {
         // Captured, not read through `self`: the callback runs on a Rust
         // thread, and `deliver` is lock-guarded and never calls back in.
         let liveData = self.liveData
-        subscription = daemon.subscribe { [weak self] json in
+        // Declares nothing yet: `reengage_due` is declared on this same
+        // subscription once the system's answer is known, and only while a
+        // notification can be posted (`refreshReengageDeclaration`).
+        let subscription = daemon.subscribe { [weak self] json in
             liveData?.deliver(eventJSON: json)
             // Rust background thread. Nothing observable may be touched
             // here; hop first, always.
@@ -1226,12 +1273,30 @@ final class AppModel: ObservableObject {
                 self?.handle(event: event)
             }
         }
+        // This app renders the re-engagement notifications itself
+        // (`Notifier.postReengage`), so the daemon may send them and count
+        // it as a renderer -- but only while the system lets it post.
+        reengage = subscription.map { token in
+            ReengageDeclaration(token: token) { [weak daemon] token, accepts in
+                daemon?.redeclare(token, accepts: accepts)
+            }
+        }
+        Task { await refreshReengageDeclaration() }
         // No `subscribe` call follows: the contract's `snapshot`-on-subscribe
         // is a property of the SOCKET connection loop, which sends it to the
         // client that just connected. `tc_subscribe` attaches to the event
         // bus directly and gets no such courtesy frame, so the first paint
         // comes from the explicit `list_pending` + `status` in refreshAll()
         // rather than from waiting on a snapshot that will never arrive.
+    }
+
+    /// Declares `reengage_due` when a notification can be posted now, and
+    /// withdraws it when one cannot. Called at start, when the permission
+    /// prompt is answered, and when the app comes forward (the contributor
+    /// may have changed it in System Settings).
+    func refreshReengageDeclaration() async {
+        let accepts = await reengageAccepts()
+        reengage?.update(accepts: accepts)
     }
 
     private func handle(event: DaemonEvent) {
@@ -1274,7 +1339,9 @@ final class AppModel: ObservableObject {
             // The listener's own state moves under this, and with it whether
             // any tool has answered yet. Re-read rather than left to age.
             refreshHarnesses()
-        case .digestDue(let count, let contributed, let contributedProjects, let credit, _):
+        case .reengageDue(let due):
+            Notifier.shared.postReengage(due)
+        case .digestDue(let count, let contributed, let contributedProjects, let credit, let text):
             refreshQueue()
             // A digest can now be about what went out unasked, with nothing
             // waiting at all -- so this also refreshes history, which is the
@@ -1284,6 +1351,7 @@ final class AppModel: ObservableObject {
                 refreshHistory()
             }
             Notifier.shared.postDigest(
+                text: text,
                 pendingCount: count,
                 projects: waitingByProject.map(\.label),
                 contributedCount: contributed,
@@ -1326,7 +1394,7 @@ final class AppModel: ObservableObject {
         // Dropped first so no new work can be started from this side while
         // teardown runs; `perform`, `enroll` and the rest all guard on
         // `client`.
-        self.subscription = nil
+        reengage = nil
         self.daemon = nil
         self.client = nil
         // Screens' `for await` loops end here rather than waiting on a
@@ -1562,7 +1630,15 @@ final class AppModel: ObservableObject {
     /// answer, which `set_settings` returns in full, and an undecided
     /// choice is never sent. A failed confirmation requests fresh settings.
     func setSourceRoot(_ kind: SourceKind, _ choice: SourceChoice) async -> Bool {
-        guard let params = choice.settingsParams(for: kind), let client else { return false }
+        guard let params = choice.settingsParams(for: kind) else { return false }
+        return await setSettingsDeclaration(params)
+    }
+
+    /// Write `params` through `set_settings` and keep what the daemon
+    /// answers. A lost response does not prove the write failed, so the
+    /// modes are read back; a requested path is never retained.
+    func setSettingsDeclaration(_ params: [String: Any]) async -> Bool {
+        guard let client else { return false }
         let result = await Task.detached(priority: .userInitiated) {
             Result { try client.setSettings(params) }
         }.value
@@ -1731,7 +1807,7 @@ final class AppModel: ObservableObject {
             do {
                 return .joined(try client.nearAiAccountEnroll(commons: commons))
             } catch let failure as DaemonClient.Failure {
-                // `message` is the daemon's control name -- the enrolment
+                // `message` is the daemon's control name -- the enrollment
                 // handler answers a label and nothing else, because the
                 // errors underneath can quote a remote body or a URL. Empty
                 // falls back to the generic label rather than to a blank.
@@ -1793,11 +1869,44 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Projects whose "Ask me" the daemon refused, by project id, so
+    /// "Dismiss all": records every notice above the tabs that has its own
+    /// acknowledgement as shown -- grant voids, arming rewordings and the
+    /// legacy-migration notice -- in one round trip each, then re-reads
+    /// status so the daemon's own lists decide what stays. It re-arms and
+    /// changes nothing else, exactly as each card's own acknowledgement.
+    /// The offer to move is put away as its own Dismiss does, and moves
+    /// nothing.
+    func acknowledgeAllNotices() {
+        let voids = status.grantVoids.map(\.id)
+        let rewordings = status.armingRewordings.map(\.id)
+        let legacy = legacyMigrationNotice != nil
+        firstRunNotice = nil
+        if showsLegacyMigrationOfferCard { dismissLegacyMigrationOffer() }
+        perform(
+            "acknowledge_all_notices",
+            work: { client in
+                if !voids.isEmpty { try client.acknowledgeGrantVoids(ids: voids) }
+                if !rewordings.isEmpty { try client.acknowledgeArmingRewordings(ids: rewordings) }
+                if legacy { try client.acknowledgeLegacyInviteMigration() }
+            }
+        ) { _ in
+            self.refreshStatus()
+            self.refreshAudit()
+        }
+    }
+
+    /// How many notices "Dismiss all" would acknowledge.
+    var acknowledgeableNoticeCount: Int {
+        status.grantVoids.count + status.armingRewordings.count
+            + (legacyMigrationNotice != nil ? 1 : 0) + (firstRunNotice != nil ? 1 : 0)
+            + (showsLegacyMigrationOfferCard ? 1 : 0)
+    }
+
+    /// Projects whose "Ask" the daemon refused, by project id, so
     /// the notice can show the Rust's refusal line. Cleared on a retry.
     @Published private(set) var askFirstRefused: Set<String> = []
 
-    /// "Ask me" on a rewording or held-folder notice. The same call as
+    /// "Ask" on a rewording or held-folder notice. The same call as
     /// Settings -- `set_project_mode` with the project's id and
     /// `notify_only` -- which also answers a rewording notice. A refusal
     /// changes nothing; the notice stays and says so.
@@ -1826,6 +1935,184 @@ final class AppModel: ObservableObject {
         ) { _ in
             self.refreshStatus()
         }
+    }
+
+    // MARK: - The offer to move a legacy invite identity
+
+    /// The offer's words, read across the ABI once
+    /// (`TCCoreCopy.legacyMigrationOfferJSON`). Nil when the export cannot
+    /// be read, and then no offer is drawn anywhere.
+    static let coreLegacyMigrationOffer: LegacyMigrationOffer? =
+        TCCoreCopy.legacyMigrationOfferJSON().flatMap(LegacyMigrationOffer.decode(fromJSON:))
+    var legacyMigrationOffer: LegacyMigrationOffer? { Self.coreLegacyMigrationOffer }
+    /// Words a refusal label (`TCCoreCopy.legacyMigrationRefusalLine`). The
+    /// ABI in the app; replaced only by tests.
+    var legacyMigrationRefusalWording: (String) -> String? = { TCCoreCopy.legacyMigrationRefusalLine(label: $0) }
+
+    /// Whether the daemon offers the move: a legacy invite identity, not yet
+    /// moved (`status.legacy_invite_migration.offered`). Settings draws the
+    /// offer while this holds; the card above the tabs also needs it not
+    /// dismissed (`showsLegacyMigrationOfferCard`).
+    var isLegacyMigrationOffered: Bool {
+        statusRead == .answered && status.legacyInviteMigration.offered && legacyMigrationOffer != nil
+    }
+
+    /// Whether the offer is drawn: while the daemon offers the move, and
+    /// after it stops because it refused this identity for good (a pooled
+    /// invite), for as long as that refusal is held, so the refusal is read
+    /// rather than vanishing with the offer. Only for the identity that was
+    /// refused.
+    var isLegacyMigrationOfferDrawn: Bool {
+        if isLegacyMigrationOffered { return true }
+        guard statusRead == .answered, legacyMigrationOffer != nil, legacyMigrationRefusal != nil,
+            let refused = legacyMigrationRefusalTenantID
+        else { return false }
+        return status.tenantID == refused
+    }
+
+    /// Move is drawn only while the daemon offers the move.
+    var offersLegacyMigrationMove: Bool { isLegacyMigrationOffered }
+
+    var showsLegacyMigrationOfferCard: Bool {
+        isLegacyMigrationOfferDrawn && !isLegacyMigrationOfferDismissed
+    }
+
+    /// Whether the card was dismissed on this Mac for this identity. A local
+    /// marker: no daemon record fits (`acknowledge_legacy_invite_migration`
+    /// is the notice after a move), and the card is this shell's alone.
+    /// Keyed by a digest of the tenant, so a different invite identity
+    /// enrolled later is offered the move afresh.
+    var isLegacyMigrationOfferDismissed: Bool {
+        guard let key = Self.legacyMigrationOfferDismissedKey(status.tenantID) else { return false }
+        return UserDefaults.standard.bool(forKey: key)
+    }
+
+    /// Puts the card away for good on this Mac. The offer stays in Settings.
+    /// Computed from `UserDefaults`, so the write is announced, as
+    /// `markOnboardingComplete` does.
+    func dismissLegacyMigrationOffer() {
+        guard let key = Self.legacyMigrationOfferDismissedKey(status.tenantID) else {
+            refreshStatus()
+            return
+        }
+        objectWillChange.send()
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
+    static func legacyMigrationOfferDismissedKey(_ tenantID: String?) -> String? {
+        guard let tenantID, !tenantID.isEmpty else { return nil }
+        let digest = SHA256.hash(data: Data(tenantID.utf8))
+        return "trace_commons.legacy_migration_offer_dismissed."
+            + digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The move is running. The offer shows its working line in place of
+    /// the button meanwhile.
+    @Published private(set) var legacyMigrationBusy = false
+    /// The core's sentence for the last refused move, or nil.
+    @Published private(set) var legacyMigrationRefusal: String?
+    /// The identity the held refusal was for, so another identity enrolled
+    /// on this Mac does not inherit it.
+    private var legacyMigrationRefusalTenantID: String?
+    /// The daemon could not tell which invite this device joined with
+    /// (`legacy_migration_invite_needed`): the offer asks for it, and the
+    /// next Move sends it. Stays until a move succeeds.
+    @Published private(set) var legacyMigrationInviteNeeded = false
+    /// The move could not be started at all (no daemon answer).
+    @Published private(set) var legacyMigrationStartFailed = false
+    /// The move is waiting on the passkey step in the browser.
+    @Published private(set) var legacyMigrationAwaitingPasskey = false
+    /// The passkey step ended without finishing; nothing was moved.
+    @Published private(set) var legacyMigrationPasskeyFailed = false
+    /// The passkey step: the first run's browser step (`nearAILogin`), where
+    /// the person creates or uses their passkey and the daemon keeps the
+    /// session the move provisions the account with. True once it finished.
+    /// Replaced only by tests.
+    var legacyMigrationPasskeyStep: (() async -> Bool)?
+    /// Ends the browser step the passkey step began (`cancelNearAILogin`).
+    /// Replaced only by tests.
+    var legacyMigrationPasskeyCancel: (() async -> Void)?
+    /// The running passkey step, so Cancel can stop it.
+    private var legacyMigrationPasskeyTask: Task<Bool, Never>?
+
+    /// Cancel while waiting on the passkey: stop waiting and end the
+    /// browser step. Nothing is moved, and the offer stays.
+    func cancelLegacyMigrationPasskey() {
+        guard let task = legacyMigrationPasskeyTask else { return }
+        task.cancel()
+        let cancel = legacyMigrationPasskeyCancel ?? { [weak self] in _ = await self?.cancelNearAILogin() }
+        Task { await cancel() }
+    }
+
+    /// Runs the passkey step once, as its own task so Cancel can stop it.
+    /// True when it finished; false when it failed, ran out of time or was
+    /// cancelled (then `legacyMigrationPasskeyFailed` stays false).
+    private func runLegacyMigrationPasskeyStep() async -> Bool {
+        let step = legacyMigrationPasskeyStep ?? { [weak self] in await self?.nearAILogin() ?? false }
+        legacyMigrationAwaitingPasskey = true
+        let task = Task { await step() }
+        legacyMigrationPasskeyTask = task
+        let finished = await task.value
+        legacyMigrationPasskeyTask = nil
+        legacyMigrationAwaitingPasskey = false
+        if !finished && !task.isCancelled { legacyMigrationPasskeyFailed = true }
+        return finished && !task.isCancelled
+    }
+
+    /// Move: `legacy_invite_migrate`, which the contributor chose. A refusal
+    /// changes nothing and is said in the core's words; on success status is
+    /// re-read, the daemon stops offering the move and its notice takes
+    /// over. `invite` is sent only once the daemon asked for it.
+    ///
+    /// The move leads with the passkey step (owner, 2026-10-11): when the
+    /// daemon has no session to provision the account with
+    /// (`legacy_migration_no_near_ai_session`), this runs the passkey step
+    /// and then the move again, once, without a second press. A step that
+    /// does not finish moves nothing.
+    func migrateLegacyInvite(invite: String? = nil) async {
+        guard let client, !legacyMigrationBusy else { return }
+        let pasted = invite?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sent = legacyMigrationInviteNeeded && !(pasted ?? "").isEmpty ? pasted : nil
+        legacyMigrationBusy = true
+        legacyMigrationRefusal = nil
+        legacyMigrationStartFailed = false
+        legacyMigrationPasskeyFailed = false
+        let move = {
+            await Task.detached(priority: .userInitiated) {
+                Result { try client.migrateLegacyInvite(invite: sent) }
+            }.value
+        }
+        var outcome = await move()
+        if case .failure(let failure as DaemonClient.Failure) = outcome,
+            failure.message == LegacyMigrationOffer.passkeyNeededLabel, self.client === client
+        {
+            guard await runLegacyMigrationPasskeyStep(), self.client === client else {
+                legacyMigrationBusy = false
+                refreshStatus()
+                return
+            }
+            outcome = await move()
+        }
+        legacyMigrationBusy = false
+        guard self.client === client else { return }
+        switch outcome {
+        case .success:
+            recordRead("legacy_invite_migrate", answered: true)
+            legacyMigrationInviteNeeded = false
+        case .failure(let failure as DaemonClient.Failure):
+            recordRead("legacy_invite_migrate", answered: false)
+            // `message` is a fixed `legacy_migration_*` label by contract.
+            if failure.message == LegacyMigrationOffer.inviteNeededLabel {
+                legacyMigrationInviteNeeded = true
+            }
+            legacyMigrationRefusal = legacyMigrationRefusalWording(failure.message)
+            legacyMigrationRefusalTenantID = status.tenantID
+            if legacyMigrationRefusal == nil { legacyMigrationStartFailed = true }
+        case .failure:
+            recordRead("legacy_invite_migrate", answered: false)
+            legacyMigrationStartFailed = true
+        }
+        refreshStatus()
     }
 
     /// Void notices whose "Turn back on" the daemon refused, by notice id,
@@ -1945,10 +2232,22 @@ final class AppModel: ObservableObject {
     @Published private(set) var sourceRootSaveFailed = false
 
     func saveSourceRoot(_ kind: SourceKind, _ choice: SourceChoice) async {
+        guard let params = choice.settingsParams(for: kind) else {
+            // Nothing to write is a refusal, as it always was.
+            if !sourceRootBusy { sourceRootSaveFailed = true }
+            return
+        }
+        await saveSettings(params)
+    }
+
+    /// One Watched folders declaration, written through `set_settings` with
+    /// the section's in-flight flag and refusal: a source row's, or the
+    /// exported-traces row's off switch.
+    func saveSettings(_ params: [String: Any]) async {
         guard !sourceRootBusy else { return }
         sourceRootBusy = true
         sourceRootSaveFailed = false
-        sourceRootSaveFailed = !(await setSourceRoot(kind, choice))
+        sourceRootSaveFailed = !(await setSettingsDeclaration(params))
         sourceRootBusy = false
     }
 
@@ -2025,6 +2324,76 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The Insights switches that are daemon settings, by their key.
+    enum InsightsDaemonSwitch: String, CaseIterable, Hashable, Sendable {
+        /// Count Private AI tokens (`insights_ledger_feed`, on by default).
+        case ledgerFeed = "insights_ledger_feed"
+        /// Count tokens in watched folders (`insights_counter_pass`, off
+        /// by default; owner decision D4).
+        case counterPass = "insights_counter_pass"
+        /// The weekly summary card (`insights_recap_card_enabled`).
+        case recapCard = "insights_recap_card_enabled"
+
+        /// The daemon's value; `nil` from a daemon that does not report it.
+        func value(_ settings: DaemonSettingsView) -> Bool? {
+            switch self {
+            case .ledgerFeed: settings.insightsLedgerFeed
+            case .counterPass: settings.insightsCounterPass
+            case .recapCard: settings.insightsRecapCardEnabled
+            }
+        }
+    }
+
+    /// The Insights switches with a write in flight; each takes no other.
+    @Published private(set) var insightsSwitchBusy: Set<InsightsDaemonSwitch> = []
+    /// The core's words for a write the daemon refused or did not confirm
+    /// (`MonitorScreensCopy.requestFailed`), by switch; cleared by that
+    /// switch's next confirmed write.
+    @Published private(set) var insightsSwitchRefusal: [InsightsDaemonSwitch: String] = [:]
+
+    /// A ledger-feed write is in flight; the switch takes no other.
+    var insightsLedgerFeedBusy: Bool { insightsSwitchBusy.contains(.ledgerFeed) }
+    /// The refusal said under the ledger-feed switch.
+    var insightsLedgerFeedRefusal: String? { insightsSwitchRefusal[.ledgerFeed] }
+
+    /// Turns the Insights ledger feed on or off (`insights_ledger_feed`).
+    func setInsightsLedgerFeed(_ on: Bool) async {
+        await setInsightsSwitch(.ledgerFeed, on)
+    }
+
+    /// Turns one Insights daemon switch on or off, sending only its key.
+    /// Nothing is applied optimistically: the switch reads
+    /// `daemonSettings`, and only a reply that echoes what was asked counts
+    /// as confirmed. A reply carrying another value is where the daemon
+    /// stands, kept and refused; a failed write reads the settings back and
+    /// never claims the asked value.
+    func setInsightsSwitch(_ which: InsightsDaemonSwitch, _ on: Bool) async {
+        guard !insightsSwitchBusy.contains(which) else { return }
+        guard let client else {
+            insightsSwitchRefusal[which] = MonitorWords.table?.requestFailed
+            return
+        }
+        insightsSwitchBusy.insert(which)
+        defer { insightsSwitchBusy.remove(which) }
+        let key = which.rawValue
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try client.setSettings([key: on]) }
+        }.value
+        switch result {
+        case .success(let settings) where which.value(settings) == on:
+            daemonSettings = settings
+            insightsSwitchRefusal[which] = nil
+        case .success(let settings):
+            if which.value(settings) != nil { daemonSettings = settings }
+            insightsSwitchRefusal[which] = MonitorWords.table?.requestFailed
+        case .failure:
+            if let confirmed = await Task.detached(operation: { try? client.settings() }).value {
+                daemonSettings = confirmed
+            }
+            insightsSwitchRefusal[which] = MonitorWords.table?.requestFailed
+        }
+    }
+
     @Published private(set) var tokenContributionBusy = false
     @Published private(set) var tokenContributionSaveFailed = false
 
@@ -2079,16 +2448,28 @@ final class AppModel: ObservableObject {
     /// `enroll`'s floor-only default happened to leave in place -- see the
     /// coordinator's atomicity note.
     ///
-    /// Watching only finishes too (Review Focus 5 of #1030's port): with no
-    /// enrolment there is no tenant, so its marker is
-    /// `isWatchOnlyComplete`. It counts only while the daemon holds no
-    /// enrolment; an enrolled person confirms on Start whatever an earlier
-    /// watch-only run wrote. Before the first status arrives `loggedIn`
-    /// reads false, so that marker alone decides until then: the main
-    /// window may show its content, then switch back into the first run.
+    /// The app needs a NEAR AI login (owner, 2026-10-12: sign-in
+    /// required): while the daemon holds no enrollment the first run is
+    /// required, whatever an earlier watch-only run wrote
+    /// (`isWatchOnlyComplete` no longer opens the app), so a sign-out sends
+    /// the person back to sign in. Before the first status arrives
+    /// `loggedIn` reads false, so onboarding reads required until then;
+    /// the hosts wait on `onboardingKnown` before acting on it.
     var requiresOnboarding: Bool {
         if startup == .needsRoots { return true }
-        return status.loggedIn ? !isOnboardingComplete : !isWatchOnlyComplete
+        if Self.reviewSkipsSignIn { return false }
+        return !status.loggedIn || !isOnboardingComplete
+    }
+
+    /// Debug builds only: `TC_REVIEW_SKIP_SIGN_IN=1` opens the main window
+    /// without the NEAR AI sign-in, so a design review can reach the screens
+    /// behind it (owner, 2026-10-12). A release build never reads it.
+    static var reviewSkipsSignIn: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["TC_REVIEW_SKIP_SIGN_IN"] == "1"
+        #else
+        false
+        #endif
     }
 
     /// Whether a watch-only first run was finished against this config
@@ -2126,7 +2507,7 @@ final class AppModel: ObservableObject {
     /// Test seam: `status` is `private(set)` and otherwise only ever set
     /// from a live daemon reply, so there is no other way to exercise the
     /// tenant-keyed onboarding marker without a running daemon and a real
-    /// enrolment. Debug-only, and deliberately routed through
+    /// enrollment. Debug-only, and deliberately routed through
     /// `publishIfChanged` so a test observes exactly what the app does.
     func setClientForTesting(_ client: DaemonClient) {
         self.client = client
@@ -3319,12 +3700,24 @@ extension AppModel: FirstRunDaemon {
         guard let client else { return false }
         let first = await Task.detached { try? client.nearAiCredentialStatus(attemptID: nil) }.value
         if NearAILoginPoll.verdict(first) == .signedIn { return true }
+        // A Cancel before the browser opens: no attempt is begun, and none
+        // that began meanwhile opens the browser.
+        if Task.isCancelled { return false }
         let started = await Task.detached { try? client.nearAiCredentialStart() }.value
         guard let attempt = started, let url = URL(string: attempt.browserURL) else { return false }
+        if Task.isCancelled {
+            _ = await Task.detached { try? client.nearAiCredentialCancel(attemptID: attempt.attemptID) }.value
+            return false
+        }
+        firstRunLoginAttemptID = attempt.attemptID
+        defer { if firstRunLoginAttemptID == attempt.attemptID { firstRunLoginAttemptID = nil } }
         NSWorkspace.shared.open(url)
         let deadline = Date().addingTimeInterval(NearAILoginPoll.limit)
         while Date() < deadline, !Task.isCancelled {
             try? await Task.sleep(for: .seconds(1))
+            // Cancelled (the first run's Cancel): stop at once, without
+            // another poll that could report a sign-in.
+            if Task.isCancelled { return false }
             guard self.client === client else { return false }
             let status = await Task.detached { try? client.nearAiCredentialStatus(attemptID: attempt.attemptID) }.value
             switch NearAILoginPoll.verdict(status) {
@@ -3339,6 +3732,19 @@ extension AppModel: FirstRunDaemon {
             }
         }
         return false
+    }
+
+    /// Cancel on Folders or Tools: end the browser sign-in `nearAILogin`
+    /// started, named by its attempt when one began, else whatever sign-in
+    /// the daemon runs. Called directly rather than through
+    /// `cancelNearAiCredential`, which writes the Settings notice and shares
+    /// its busy flag; the first run says its own line.
+    func cancelNearAILogin() async -> Bool {
+        let attemptID = firstRunLoginAttemptID
+        guard case .success = await firstRunCall({ try $0.nearAiCredentialCancel(attemptID: attemptID) })
+        else { return false }
+        refreshNearAiCredential()
+        return true
     }
 
     /// Enroll through the near.ai login with no invite. The daemon's label
@@ -3429,7 +3835,7 @@ extension AppModel: FirstRunDaemon {
     }
 
     /// An invite link (`PendingInvite`) takes back a finished watch-only
-    /// run while the daemon holds no enrolment: the marker is cleared, so
+    /// run while the daemon holds no enrollment: the marker is cleared, so
     /// `requiresOnboarding` turns true, a window hosts the first run again,
     /// and the coordinator applies the parked link to Join. Without this a
     /// finished watcher could never join, since the first run is the only
@@ -3472,6 +3878,16 @@ extension AppModel: FirstRunDaemon {
         objectWillChange.send()
         UserDefaults.standard.set(true, forKey: key)
         return isWatchOnlyComplete
+    }
+
+    /// The daemon drops this Mac's enrollment (`unenroll`). Status is read
+    /// again, so `status.loggedIn` is false before watch only is marked.
+    func unenroll() async -> Bool {
+        guard case .success = await firstRunCall({ try $0.unenroll() }) else { return false }
+        if case .success(let fresh) = await firstRunCall({ try $0.status() }) {
+            publishIfChanged(\.status, fresh)
+        }
+        return true
     }
 
     /// One blocking client call off the main actor. Nil without a daemon.

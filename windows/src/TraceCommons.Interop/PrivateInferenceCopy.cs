@@ -54,6 +54,17 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("offer_exposure")]
     public string OfferExposure { get; init; } = string.Empty;
 
+    /// <summary>
+    /// <see cref="OfferExposure"/> in one line, for an offer that shows its
+    /// longer paragraphs behind <see cref="OfferLearnMore"/>.
+    /// </summary>
+    [JsonPropertyName("offer_exposure_short")]
+    public string OfferExposureShort { get; init; } = string.Empty;
+
+    /// <summary>The offer's link to its longer paragraphs.</summary>
+    [JsonPropertyName("offer_learn_more")]
+    public string OfferLearnMore { get; init; } = string.Empty;
+
     [JsonPropertyName("offer_no_repoint")]
     public string OfferNoRepoint { get; init; } = string.Empty;
 
@@ -670,6 +681,66 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("balance_no_remaining")]
     public string BalanceNoRemaining { get; init; } = string.Empty;
 
+    /// <summary>The Private AI page's panel chrome and the Inference inspector's labels (#1146).</summary>
+    [JsonPropertyName("panel_refresh")]
+    public string PanelRefresh { get; init; } = string.Empty;
+    [JsonPropertyName("panel_tools_eyebrow")]
+    public string PanelToolsEyebrow { get; init; } = string.Empty;
+    [JsonPropertyName("panel_connection_eyebrow")]
+    public string PanelConnectionEyebrow { get; init; } = string.Empty;
+    [JsonPropertyName("panel_balance_eyebrow")]
+    public string PanelBalanceEyebrow { get; init; } = string.Empty;
+    [JsonPropertyName("panel_balance_refresh")]
+    public string PanelBalanceRefresh { get; init; } = string.Empty;
+    [JsonPropertyName("panel_settings_title")]
+    public string PanelSettingsTitle { get; init; } = string.Empty;
+    [JsonPropertyName("panel_settings_body")]
+    public string PanelSettingsBody { get; init; } = string.Empty;
+    [JsonPropertyName("panel_settings_open")]
+    public string PanelSettingsOpen { get; init; } = string.Empty;
+    [JsonPropertyName("panel_settings_open_accessibility")]
+    public string PanelSettingsOpenAccessibility { get; init; } = string.Empty;
+    [JsonPropertyName("panel_tools_refresh_accessibility")]
+    public string PanelToolsRefreshAccessibility { get; init; } = string.Empty;
+    [JsonPropertyName("panel_connection_refresh_accessibility")]
+    public string PanelConnectionRefreshAccessibility { get; init; } = string.Empty;
+    [JsonPropertyName("panel_balance_refresh_accessibility")]
+    public string PanelBalanceRefreshAccessibility { get; init; } = string.Empty;
+    [JsonPropertyName("stat_inference_access")]
+    public string StatInferenceAccess { get; init; } = string.Empty;
+    [JsonPropertyName("stat_runtime")]
+    public string StatRuntime { get; init; } = string.Empty;
+    [JsonPropertyName("runtime_on")]
+    public string RuntimeOn { get; init; } = string.Empty;
+    [JsonPropertyName("runtime_off")]
+    public string RuntimeOff { get; init; } = string.Empty;
+    [JsonPropertyName("runtime_stopping")]
+    public string RuntimeStopping { get; init; } = string.Empty;
+    [JsonPropertyName("runtime_elsewhere")]
+    public string RuntimeElsewhere { get; init; } = string.Empty;
+    [JsonPropertyName("runtime_not_running")]
+    public string RuntimeNotRunning { get; init; } = string.Empty;
+    [JsonPropertyName("runtime_unknown")]
+    public string RuntimeUnknown { get; init; } = string.Empty;
+    [JsonPropertyName("inspector_tools_connected")]
+    public string InspectorToolsConnected { get; init; } = string.Empty;
+    [JsonPropertyName("inspector_connected")]
+    public string InspectorConnected { get; init; } = string.Empty;
+    [JsonPropertyName("inspector_not_connected")]
+    public string InspectorNotConnected { get; init; } = string.Empty;
+    [JsonPropertyName("inspector_status")]
+    public string InspectorStatus { get; init; } = string.Empty;
+    [JsonPropertyName("inspector_credential")]
+    public string InspectorCredential { get; init; } = string.Empty;
+    [JsonPropertyName("inspector_connected_tools")]
+    public string InspectorConnectedTools { get; init; } = string.Empty;
+    [JsonPropertyName("inspector_none")]
+    public string InspectorNone { get; init; } = string.Empty;
+    [JsonPropertyName("harness_caption_connected")]
+    public string HarnessCaptionConnected { get; init; } = string.Empty;
+    [JsonPropertyName("harness_caption_not_connected")]
+    public string HarnessCaptionNotConnected { get; init; } = string.Empty;
+
     /// <summary>Every sentence for the complete-payload check, not a rendering order.</summary>
     public string[] Sentences =>
         new[]
@@ -685,6 +756,8 @@ public sealed record PrivateInferenceCopy
             OfferTitle,
             OfferWhat,
             OfferExposure,
+            OfferExposureShort,
+            OfferLearnMore,
             OfferNoRepoint,
             OfferAccept,
             OfferDecline,
@@ -823,5 +896,34 @@ public sealed record PrivateInferenceCopy
             BalanceUnknown,
             BalanceUnreported,
             BalanceNoRemaining,
+            PanelRefresh,
+            PanelToolsEyebrow,
+            PanelConnectionEyebrow,
+            PanelBalanceEyebrow,
+            PanelBalanceRefresh,
+            PanelSettingsTitle,
+            PanelSettingsBody,
+            PanelSettingsOpen,
+            PanelSettingsOpenAccessibility,
+            PanelToolsRefreshAccessibility,
+            PanelConnectionRefreshAccessibility,
+            PanelBalanceRefreshAccessibility,
+            StatInferenceAccess,
+            StatRuntime,
+            RuntimeOn,
+            RuntimeOff,
+            RuntimeStopping,
+            RuntimeElsewhere,
+            RuntimeNotRunning,
+            RuntimeUnknown,
+            InspectorToolsConnected,
+            InspectorConnected,
+            InspectorNotConnected,
+            InspectorStatus,
+            InspectorCredential,
+            InspectorConnectedTools,
+            InspectorNone,
+            HarnessCaptionConnected,
+            HarnessCaptionNotConnected,
         };
 }

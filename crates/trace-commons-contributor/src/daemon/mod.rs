@@ -27,6 +27,7 @@ pub mod admission_setup;
 pub mod approved_envelope;
 pub mod arming_wording;
 pub mod attached;
+pub mod attention;
 pub mod attestation_mark;
 pub mod audit;
 pub mod automatic_gate;
@@ -48,6 +49,9 @@ pub mod health;
 pub mod history;
 pub mod inference_connection;
 pub mod inference_map;
+pub mod insights_glance;
+pub(crate) mod insights_route_tally;
+pub mod insights_week;
 pub mod install;
 pub mod ipc;
 pub mod ironwire_pointer;
@@ -61,6 +65,8 @@ pub mod nearai_credential;
 pub mod nearai_onboarding;
 mod network_data;
 pub mod notify;
+pub mod nudge;
+pub(crate) mod reengage;
 #[cfg(feature = "test-credential-store")]
 pub(crate) mod test_credential_store;
 // Under `test-credential-store` (test builds only) nothing outside the manual
@@ -79,6 +85,8 @@ pub mod queue;
 pub mod remembered_passkeys;
 pub mod second_look;
 pub mod settings;
+pub mod settlement_estimate;
+pub mod settlement_scan;
 pub mod skill_loop;
 pub mod state;
 pub mod stored_cloud_credentials;
@@ -88,6 +96,7 @@ pub(crate) mod test_paths;
 pub(crate) mod test_support;
 pub(crate) mod token_capture;
 mod token_cleanup;
+pub mod unenroll;
 pub mod unsure_spans;
 pub mod uploader;
 pub mod watcher;
@@ -306,7 +315,7 @@ pub fn dev_dry_run_store(real: ConfigStore) -> Result<ConfigStore> {
 }
 
 /// Open `dir` as the dry-run store. The first time, seed it with a copy of
-/// the real store's enrolment terms (`contributor.json`) and settings (the
+/// the real store's enrollment terms (`contributor.json`) and settings (the
 /// declared session roots among them), so the dry run reads the same
 /// sessions and builds the same envelopes. Nothing else is copied: no
 /// device key, account session, queue, policy or history.
@@ -547,7 +556,19 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
     proxy_cleanup_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut token_cleanup_tick = tokio::time::interval(std::time::Duration::from_secs(300));
     token_cleanup_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Lapsed managed sessions on the NEAR AI sign-in lose their proxy within
+    // the lease plus one of these ticks.
+    let mut managed_lease_tick = tokio::time::interval(std::time::Duration::from_secs(15));
+    managed_lease_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut token_cleanup_tasks = tokio::task::JoinSet::new();
+    // The published estimate table's fetch schedule (OWNER DECISION E11).
+    // A local of this loop, so nothing that answers a request can reach it.
+    let mut table_schedule =
+        crate::credit_estimate_table::EstimateTableSchedule::starting(Utc::now());
+    // The contribution-mission slot's fetch schedule: due on the first tick
+    // with a config, then every `MISSION_SLOT_REFRESH`. A local of this loop
+    // too.
+    let mut mission_slot_schedule = activity_missions::MissionSlotSchedule::default();
     let mut sigterm = signal_stream();
     let shutdown_signal = Arc::clone(&shared.shutdown_signal);
 
@@ -579,6 +600,9 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 });
             }
             _ = token_cleanup_tasks.join_next(), if !token_cleanup_tasks.is_empty() => {}
+            _ = managed_lease_tick.tick() => {
+                managed::sweep(shared, Utc::now()).await;
+            }
             _ = ticker.tick() => {
                 let tick_started = std::time::Instant::now();
                 let now = Utc::now();
@@ -615,6 +639,11 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 if watcher::tick(shared, now).await.is_err() {
                     tracing::warn!(pass = "watch", "daemon pass failed");
                 }
+                // The settlement estimate's scan, when one is due. Started
+                // off the workers and not awaited, so a large machine never
+                // holds up this tick; it reads and sends nothing but local
+                // files, so pause and dry-run do not hold it back.
+                let _ = settlement_estimate::tick(shared, now);
                 expire_and_digest(shared, now);
                 // Everything above is read-only bookkeeping; uploading is
                 // what dry-run withholds.
@@ -636,7 +665,25 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                     if refresh_community(shared, now).await.is_err() {
                         tracing::warn!(pass = "community", "daemon pass failed");
                     }
+                    // On its own fixed schedule, not this tick's: most
+                    // ticks find it not due and return at once.
+                    refresh_estimate_table(shared, now, &mut table_schedule).await;
+                    // Likewise on its own schedule, and likewise a public,
+                    // anonymous read that sends nothing about this Mac.
+                    activity_missions::refresh_mission_slot(
+                        shared,
+                        now,
+                        &mut mission_slot_schedule,
+                    )
+                    .await;
                 }
+                // A fetched table ageing out is the clock alone: announced
+                // here, outside the `!dry_run` block, with no fetch.
+                shared.publish_estimate_in_force_change(now, None);
+                // Last, after every pass that announces its own changes: what
+                // the clock alone moved in `status` this tick. Outside the
+                // `!dry_run` block, since the clock moves in a dry run too.
+                shared.publish_time_driven_status(now);
             }
             _ = &mut sigterm => {
                 tracing::info!("daemon stopping on signal");
@@ -929,6 +976,16 @@ async fn drain_approved(
         health.fail(health::LABEL_NOT_LOGGED_IN, now);
         return Ok(());
     };
+    // An enrollment whose scopes nobody chose sends nothing. Every approved
+    // entry is held exactly as it is -- approved before this hold existed,
+    // by an older build, or by any path that reached it -- the way a Never
+    // override holds them: no state change, no attempt, no label. Choosing
+    // the scopes releases them to the checks below, which still re-ask an
+    // entry whose approved scopes or inputs have moved since.
+    // `status.consent_hold` says why.
+    if crate::config::consent_hold(Some(&cfg)).is_some() {
+        return Ok(());
+    }
     let near_ai = {
         let s = shared.settings.lock().expect("settings lock");
         s.near_ai.clone()
@@ -994,8 +1051,19 @@ async fn drain_approved(
     // is held until then instead of being sent, so a busy witness is asked
     // once per pass rather than once per waiting session.
     let mut witness_busy_until: Option<(chrono::DateTime<Utc>, u32)> = None;
+    // Entries this pass has claimed for upload, against
+    // `MAX_UPLOADS_PER_PASS`, and whether ingest's rate limit has refused
+    // one. Either ends the pass; what is left stays approved for the next.
+    let mut claimed_this_pass: usize = 0;
+    let mut rate_limited = false;
+    // Whether ingest or the issuer was unavailable for an entry this pass
+    // (#1358). Ends the pass the same way.
+    let mut outage = false;
 
     for entry in approved {
+        if claimed_this_pass >= MAX_UPLOADS_PER_PASS {
+            break;
+        }
         if let Some((until, retry_after_secs)) = witness_busy_until
             && !entry.holds_witness_certificate()
         {
@@ -1042,6 +1110,7 @@ async fn drain_approved(
             if !q.claim_for_upload(entry.entry_id, now) {
                 continue;
             }
+            claimed_this_pass += 1;
         }
 
         // Re-resolve the session through its own adapter, so the uploader can
@@ -1173,8 +1242,15 @@ async fn drain_approved(
                 uploaded_this_pass = true;
             }
             uploader::UploadDecision::Superseded { new_hash } => {
-                let size = std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(0);
-                if let Some(fresh) = q.supersede(entry.entry_id, &new_hash, size, now) {
+                // Use the adapter's grouped/database observation, not the virtual path's stat.
+                let size = session_ref.size_bytes;
+                let written = eligibility::last_write(
+                    session_ref.group_modified_at,
+                    std::fs::metadata(&entry.path)
+                        .ok()
+                        .and_then(|m| m.modified().ok()),
+                );
+                if let Some(fresh) = q.supersede(entry.entry_id, &new_hash, size, written, now) {
                     let max = shared
                         .settings
                         .lock()
@@ -1310,6 +1386,36 @@ async fn drain_approved(
                         queue::QueueState::Approved,
                         Some(reason_label),
                     );
+                } else if let Some(kind) = transient_upload_kind(&reason_label) {
+                    // Nothing was judged (#1358). The entry keeps its
+                    // approval, and with it every guard a retry re-runs,
+                    // until the budget is spent; then it ends `Failed`
+                    // under the same label, which reads as what it is.
+                    let failures = q.record_transient_upload_failure(entry.entry_id);
+                    if failures >= MAX_TRANSIENT_UPLOAD_FAILURES {
+                        q.record_attempt(entry.entry_id, None);
+                        q.set_state(
+                            entry.entry_id,
+                            queue::QueueState::Failed,
+                            Some(reason_label),
+                        );
+                    } else {
+                        let observed_at = now
+                            + chrono::Duration::from_std(tick_started.elapsed())
+                                .expect("daemon pass elapsed time fits chrono duration");
+                        q.record_attempt(
+                            entry.entry_id,
+                            Some(observed_at + transient_upload_retry_delay(failures)),
+                        );
+                        q.set_state(
+                            entry.entry_id,
+                            queue::QueueState::Approved,
+                            Some(reason_label),
+                        );
+                    }
+                    if kind == TransientUpload::Outage {
+                        outage = true;
+                    }
                 } else {
                     q.record_attempt(entry.entry_id, None);
                     q.set_state(
@@ -1344,12 +1450,39 @@ async fn drain_approved(
                 );
                 witness_busy_until = Some((until, retry_after_secs));
             }
+            uploader::UploadDecision::RateLimited { retry_after_secs } => {
+                // Sending too fast is not a verdict on the session: it keeps
+                // its approval, with the attempt recorded, and is not
+                // claimable again until the server's wait has passed. No
+                // per-session attempt limit, for the reason the witness
+                // capacity retry has none.
+                let observed_at = now
+                    + chrono::Duration::from_std(tick_started.elapsed())
+                        .expect("daemon pass elapsed time fits chrono duration");
+                let wait = retry_after_secs.clamp(1, crate::submit::RATE_LIMIT_MAX_RETRY_SECS);
+                q.record_attempt(
+                    entry.entry_id,
+                    Some(observed_at + chrono::Duration::seconds(i64::from(wait))),
+                );
+                q.set_state(
+                    entry.entry_id,
+                    queue::QueueState::Approved,
+                    Some(crate::submit::REASON_RATE_LIMITED.to_string()),
+                );
+                rate_limited = true;
+            }
             uploader::UploadDecision::CapReached => {
                 // Leave it approved: the cap lifts when the day rolls over.
                 break;
             }
         }
         changed = true;
+        if rate_limited || outage {
+            // The limit is per device, not per session, and an outage is
+            // server-wide: every entry after this one would be turned away
+            // the same way. They stay approved, untouched, for the next pass.
+            break;
+        }
     }
 
     // Nothing may be left claimed. Every entry that reached a decision above
@@ -1446,6 +1579,64 @@ fn witness_capacity_jitter(entry_id: uuid::Uuid, retry_after_secs: u32) -> chron
 /// refused: an outage longer than that still does not consume the trace, but
 /// a failure that only looks transient stops being re-sent to the classifier.
 const MAX_TRANSIENT_REDACTION_FAILURES: u32 = 24;
+
+/// Uploads in a row that may reach no verdict for a passing reason
+/// ([`transient_upload_kind`]) before the entry ends `Failed`. With
+/// [`transient_upload_retry_delay`] that is about six hours of retrying,
+/// well past a deploy's four or five minutes, and bounded so a server that
+/// never comes back does not re-run the privacy scan on the session for
+/// ever.
+const MAX_TRANSIENT_UPLOAD_FAILURES: u32 = 12;
+
+/// Why an upload reached no verdict for a reason that clears on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransientUpload {
+    /// Ingest or the issuer is down or failing. Server-wide, so the pass
+    /// stops at the first.
+    Outage,
+    /// `409 admission_in_progress`: another attempt at this one submission
+    /// holds the lease. About this entry only, so the pass goes on.
+    Lease,
+}
+
+/// Whether a `Failed` label is one the daemon retries rather than ends
+/// (#1358). Fail closed: anything not named here stays terminal, and
+/// that includes every other 409 -- a re-send of bytes ingest already holds
+/// is answered with the stored receipt, so a 409 never means "already
+/// received"; it means the id is bound to something else, or the session
+/// was withdrawn or revoked.
+fn transient_upload_kind(reason_label: &str) -> Option<TransientUpload> {
+    use trace_commons_protocol::admission::AdmissionRefusal;
+    match reason_label {
+        crate::submit::REASON_INGEST_UNREACHABLE | health::LABEL_CLAIM_MINT_FAILED => {
+            Some(TransientUpload::Outage)
+        }
+        other if AdmissionRefusal::from_label(other) == Some(AdmissionRefusal::InProgress) => {
+            Some(TransientUpload::Lease)
+        }
+        _ => None,
+    }
+}
+
+/// How long to wait after the `failures`-th upload in a row that reached no
+/// verdict: a minute, doubling, capped at an hour.
+fn transient_upload_retry_delay(failures: u32) -> chrono::Duration {
+    let exponent = failures.saturating_sub(1).min(6);
+    chrono::Duration::seconds((60_i64 * (1_i64 << exponent)).min(3_600))
+}
+
+/// Most sessions one upload pass puts on the wire.
+///
+/// Ingest limits each principal to 30 uploads per 60 s window by default
+/// (`TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN`), and a pass runs once
+/// per `poll_interval_secs` (60 by default). A first-run backfill approves
+/// every past session at once; without a cap one pass sent them all back to
+/// back. Twenty leaves headroom under 30 for a pass that runs late and
+/// shares a window with the one before it, and for the CLI. The cap alone
+/// cannot guarantee the server's window -- an operator can lower the limit
+/// -- so a rate-limit refusal also ends the pass
+/// ([`uploader::UploadDecision::RateLimited`]).
+const MAX_UPLOADS_PER_PASS: usize = 20;
 
 /// One minute, doubling per failed attempt and capped at one hour.
 fn transient_redaction_retry_delay(attempts: u32) -> chrono::Duration {
@@ -1572,6 +1763,59 @@ fn find_session<'a>(
         }
     }
     None
+}
+
+/// Fetch the published local-credit-estimate table when its schedule says
+/// so (nudge value addendum, 4.6; OWNER DECISION E11).
+///
+/// Its inputs are the clock, the schedule and the configured ingest origin,
+/// nothing about the queue, a preview or a request, so when it runs says
+/// nothing about local activity. The request is unauthenticated. Without a
+/// config there is no origin to ask, and the table in force stays. An
+/// attempt moves the schedule whatever its outcome, so a failure is not
+/// retried sooner than a success would be. Nothing is logged: a failure
+/// leaves the table in force, which is the whole of its effect.
+async fn refresh_estimate_table(
+    shared: &ipc::DaemonShared,
+    now: chrono::DateTime<Utc>,
+    schedule: &mut crate::credit_estimate_table::EstimateTableSchedule,
+) {
+    use crate::credit_estimate_table::{EstimateTableClient, random_draw};
+    if !schedule.due(now) {
+        return;
+    }
+    schedule.attempted(now, random_draw());
+    let Ok(Some(cfg)) = shared.store.load_config() else {
+        return;
+    };
+    let Ok(origin) = crate::config::ingest_origin_url(&cfg.ingest_url, "/") else {
+        return;
+    };
+    let client = EstimateTableClient::new(origin.as_str(), cfg.allowed_hosts.as_deref());
+    let outcome = match &client {
+        Ok(client) => client.fetch().await,
+        Err(refused) => Err(*refused),
+    };
+    let before = {
+        let mut slot = shared.estimate_table.lock().expect("estimate lock");
+        let before = ipc::EstimateInForce::of(slot.clone().in_force(now));
+        slot.apply_fetch(outcome, now);
+        before
+    };
+    // Compared as readers render it, at `now`: a refetch of a table still
+    // in force only renews its age and changes nothing they see, but a
+    // refetch of one that had expired brings it back.
+    shared.publish_estimate_in_force_change(now, Some(before));
+    // The settlement table rides this same fetch and schedule; it has none
+    // of its own. Fetched whatever the settlement switch says, so the
+    // request's timing never depends on it, and so turning the switch on
+    // finds a table in memory and scans at the next tick. The switch gates
+    // the scan and every surface, not this anonymous public read.
+    let settlement = match &client {
+        Ok(client) => client.fetch_settlement().await,
+        Err(refused) => Err(*refused),
+    };
+    settlement_estimate::apply_table_fetch(shared, settlement);
 }
 
 /// How long after an upload the server is asked for verdicts.
@@ -1711,10 +1955,85 @@ async fn refresh_history(
     let previous = run_blocking(|| history::HistoryCache::load(&shared.store).unwrap_or_default());
     let records = history::join(&receipts, &updates, &labels, &previous, now);
     history::HistoryCache::save(&shared.store, &records)?;
+    record_history_poll(shared, &records, now)
+}
+
+/// Stamp a successful history poll and advance the verdict news (nudge
+/// U2) from the cache it produced.
+///
+/// The diff is against `DaemonState::verdict_marks`, never against the cache
+/// this poll replaced: the CLI's `history` and `note_uploads` write that
+/// cache too, so a verdict can already be in it, and it must still be news
+/// once. The first poll after an upgrade or `unenroll` seeds the marks
+/// silently. What lands is added to `verdicts_pending` and published as
+/// `history_changed` (counts only), then `status_changed`. What was pending
+/// and has since been taken back, or whose folder is now Never, leaves
+/// `verdicts_pending`, which publishes `status_changed` too. So does a poll
+/// after a stale one, because `status.nudge` reads the poll's age; a routine
+/// poll publishes nothing.
+///
+/// Locks: policy then queue, for the Never set, released; then settings
+/// alone; then state alone. Logs nothing.
+fn record_history_poll(
+    shared: &ipc::DaemonShared,
+    records: &[history::HistoryRecord],
+    now: chrono::DateTime<Utc>,
+) -> Result<()> {
+    let never = {
+        let policy = shared.policy.lock().expect("policy lock");
+        let queue = shared.queue.lock().expect("queue lock");
+        let keys = policy::known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+        nudge::NeverProjects::from_policy(&policy, &keys)
+    };
+    let history_poll_secs = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .history_poll_secs;
     let mut state = shared.state.lock().expect("state lock");
+    // Whether `status.nudge` could read U2 before this poll; if not, this
+    // poll changes what it says even when nothing lands.
+    let was_fresh = nudge::history_is_fresh(state.last_history_poll_at, history_poll_secs, now);
+    let pending_before = state.verdicts_pending.clone();
+    let poll = nudge::after_history_poll(
+        state.verdict_marks_seeded,
+        &state.verdict_marks,
+        state.verdicts_pending.as_ref(),
+        records,
+        &never,
+        now,
+    );
+    state.verdict_marks = poll.marks;
+    state.verdict_marks_seeded = true;
+    // News that was taken back since (or whose folder is now Never) left
+    // `pending` here, which changes `status.nudge` as surely as news landing.
+    let pending_changed = poll.pending != pending_before;
+    state.verdicts_pending = poll.pending;
     state.last_history_poll_at = Some(now);
-    state.save(&shared.store)?;
-    Ok(())
+    // In memory first, which is what every reader consults; a failed save is
+    // reported to the caller after the news is published, and the next poll
+    // persists it.
+    let saved = state.save(&shared.store);
+    drop(state);
+    let landed_any = poll.landed.is_some();
+    if let Some(landed) = poll.landed {
+        shared.publish(
+            ipc::EVENT_HISTORY_CHANGED,
+            serde_json::json!({
+                "newly_accepted": landed.newly_accepted,
+                "newly_held": landed.newly_held,
+                "newly_final": landed.newly_final,
+            }),
+        );
+    }
+    // News changes `status.nudge`, whether it lands or is taken back, and so
+    // does a poll that turns a stale (`unknown`) one readable. A routine poll
+    // changes none of these, and stays silent, so a shell that predates this
+    // sees no new events from it.
+    if landed_any || pending_changed || !was_fresh {
+        shared.publish(ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
+    saved
 }
 
 /// Refresh this contributor's line on the public community roster, on its own
@@ -1850,7 +2169,7 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
         // the digest can fire.
         history::ContributedSince::default()
     };
-    if notify::digest_due_for_schedule(
+    let due_by_schedule = notify::digest_due_for_schedule(
         digest_schedule,
         last_digest_at,
         now,
@@ -1858,7 +2177,25 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
         &local_tz,
         pending_count,
         contributed.count,
-    ) {
+    );
+    // The attention arbiter (nudge A2) has its say on every tick, digest due
+    // or not: it decides whether the digest may post (the master and digest
+    // switches, the gap after a standalone), what folds into it, and whether
+    // one re-engagement notification posts on its own.
+    let attention = reengage::tick(
+        shared,
+        now,
+        &local_tz,
+        reengage::DigestInputs {
+            due_by_schedule,
+            pending: pending_count,
+            contributed: contributed.count,
+            last_digest_at,
+            schedule: digest_schedule,
+            interval_secs: digest_interval_secs,
+        },
+    );
+    if attention.digest_posts {
         // Two sentences, either of which may be absent: what is waiting for
         // you, and what went without you. Joined rather than merged because
         // they are about different things and a contributor acts on only one
@@ -1870,7 +2207,7 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
                 contributed.credit_pending,
             )
         });
-        let body = match (pending_count > 0, contribution.as_deref()) {
+        let mut body = match (pending_count > 0, contribution.as_deref()) {
             (true, Some(c)) => format!("{digest}\n{c}"),
             (true, None) => digest.clone(),
             (false, Some(c)) => c.to_string(),
@@ -1878,19 +2215,24 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
             // exhaustion cannot be wrong later if it can.
             (false, None) => digest.clone(),
         };
-        shared.publish(
-            ipc::EVENT_DIGEST_DUE,
-            serde_json::json!({
-                "pending": pending_count,
-                "contributed": contributed.count,
-                // Labels, never keys. A shell composes its own sentence from
-                // these (each platform's notification centre words things
-                // differently), so it needs the names and not just the count.
-                "contributed_projects": contributed.project_labels,
-                "credit_pending": contributed.credit_pending,
-                "text": body,
-            }),
-        );
+        // The arbiter's third sentence, when it folded one in.
+        if let Some((_, sentence)) = &attention.fold {
+            body = format!("{body}\n{sentence}");
+        }
+        let mut payload = serde_json::json!({
+            "pending": pending_count,
+            "contributed": contributed.count,
+            // Labels, never keys. A shell composes its own sentence from
+            // these (each platform's notification centre words things
+            // differently), so it needs the names and not just the count.
+            "contributed_projects": contributed.project_labels,
+            "credit_pending": contributed.credit_pending,
+            "text": body,
+        });
+        if let Some((kind, sentence)) = &attention.fold {
+            payload["fold"] = serde_json::json!({ "kind": kind.label(), "text": sentence });
+        }
+        shared.publish(ipc::EVENT_DIGEST_DUE, payload);
         if local_notifications {
             notify::emit_local(&body);
         }
@@ -1929,6 +2271,269 @@ fn signal_stream() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nudge S4: `record_history_poll` and the verdict high-water mark.
+    mod verdict_news {
+        use super::*;
+        use crate::daemon::history::{
+            HistoryRecord, STATUS_ACCEPTED, STATUS_QUARANTINED, STATUS_SUBMITTED,
+        };
+
+        const ASK: &str = "/tmp/verdict-ask";
+        const NEVER: &str = "/tmp/verdict-never";
+
+        fn at(minutes: i64) -> chrono::DateTime<Utc> {
+            chrono::DateTime::parse_from_rfc3339("2026-10-07T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+                + chrono::Duration::minutes(minutes)
+        }
+
+        fn rec(n: u8, key: &str, status: &str) -> HistoryRecord {
+            HistoryRecord {
+                submission_id: uuid::Uuid::from_bytes([n; 16]),
+                submitted_at: at(-60),
+                project_id: policy::project_id_for(key),
+                project_label: "label-must-not-leak".to_string(),
+                source: "claude".to_string(),
+                session_hash: format!("h{n}"),
+                status: status.to_string(),
+                consent_scopes: vec![],
+                credit_points_pending: 1.0,
+                credit_points_final: None,
+                explanations: vec![],
+                last_refreshed_at: Some(at(0)),
+                withdrawn_at: None,
+                revoked_at: None,
+                approved_unattended: Some(false),
+                approved_verdict: None,
+                uploaded_bytes: None,
+            }
+        }
+
+        fn fixture() -> (tempfile::TempDir, ipc::DaemonShared) {
+            let (dir, store) = crate::config::tests_support::temp_store();
+            let shared = ipc::DaemonShared::load(store).unwrap();
+            (dir, shared)
+        }
+
+        fn drain(
+            rx: &mut tokio::sync::broadcast::Receiver<ipc::Event>,
+        ) -> Vec<(String, serde_json::Value)> {
+            let mut out = Vec::new();
+            while let Ok(e) = rx.try_recv() {
+                out.push((e.event.clone(), e.data));
+            }
+            out
+        }
+
+        fn history_events(events: &[(String, serde_json::Value)]) -> Vec<serde_json::Value> {
+            events
+                .iter()
+                .filter(|(name, _)| name == ipc::EVENT_HISTORY_CHANGED)
+                .map(|(_, data)| data.clone())
+                .collect()
+        }
+
+        /// First run fires nothing; a verdict the CLI already saved into the
+        /// cache still fires once, with counts only, followed by
+        /// `status_changed`; the same cache again fires nothing.
+        #[test]
+        fn the_first_poll_is_silent_and_a_cached_verdict_fires_once() {
+            let (_d, s) = fixture();
+            let mut rx = s.events.subscribe();
+
+            record_history_poll(&s, &[rec(1, ASK, STATUS_ACCEPTED)], at(0)).unwrap();
+            assert!(
+                history_events(&drain(&mut rx)).is_empty(),
+                "seeding is silent"
+            );
+            {
+                let state = s.state.lock().unwrap();
+                assert!(state.verdict_marks_seeded);
+                assert_eq!(state.verdicts_pending, None);
+                assert_eq!(state.last_history_poll_at, Some(at(0)));
+            }
+
+            // The CLI joined a held verdict for a second submission into the
+            // shared cache; the daemon reads the same cache back.
+            let cache = [
+                rec(1, ASK, STATUS_ACCEPTED),
+                rec(2, ASK, STATUS_QUARANTINED),
+            ];
+            record_history_poll(&s, &cache, at(30)).unwrap();
+            let events = drain(&mut rx);
+            assert_eq!(
+                history_events(&events),
+                vec![serde_json::json!({
+                    "newly_accepted": 0,
+                    "newly_held": 1,
+                    "newly_final": 0,
+                })]
+            );
+            let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+            let h = names.iter().position(|n| *n == ipc::EVENT_HISTORY_CHANGED);
+            let st = names.iter().rposition(|n| *n == ipc::EVENT_STATUS_CHANGED);
+            assert!(h.is_some() && st > h, "status_changed follows: {names:?}");
+            for (_, data) in &events {
+                let text = data.to_string();
+                assert!(!text.contains("label-must-not-leak"), "{text}");
+                assert!(!text.contains(&uuid::Uuid::from_bytes([2; 16]).to_string()));
+            }
+
+            record_history_poll(&s, &cache, at(60)).unwrap();
+            assert!(history_events(&drain(&mut rx)).is_empty(), "never twice");
+
+            // Persisted: a restarted daemon has the marks and the news.
+            let reloaded = state::DaemonState::load(&s.store).unwrap();
+            assert!(reloaded.verdict_marks_seeded);
+            assert_eq!(reloaded.verdict_marks.len(), 2);
+            assert_eq!(
+                reloaded
+                    .verdicts_pending
+                    .map(|d| (d.newly_held, d.newest_at)),
+                Some((1, at(30)))
+            );
+        }
+
+        /// A Never folder's verdicts give 0 while an Ask-me folder's, in
+        /// the same poll, count; the Never record's mark still advances, so
+        /// setting the folder back later does not replay it.
+        #[test]
+        fn a_never_folders_verdicts_give_nothing() {
+            let (_d, s) = fixture();
+            s.policy
+                .lock()
+                .unwrap()
+                .set_mode(NEVER, policy::ProjectMode::Ignore, at(0))
+                .unwrap();
+            record_history_poll(
+                &s,
+                &[
+                    rec(1, NEVER, STATUS_SUBMITTED),
+                    rec(2, ASK, STATUS_SUBMITTED),
+                ],
+                at(0),
+            )
+            .unwrap();
+            let mut rx = s.events.subscribe();
+            record_history_poll(
+                &s,
+                &[rec(1, NEVER, STATUS_ACCEPTED), rec(2, ASK, STATUS_ACCEPTED)],
+                at(30),
+            )
+            .unwrap();
+            assert_eq!(
+                history_events(&drain(&mut rx)),
+                vec![serde_json::json!({
+                    "newly_accepted": 1,
+                    "newly_held": 0,
+                    "newly_final": 0,
+                })]
+            );
+            let state = s.state.lock().unwrap();
+            assert_eq!(
+                state.verdicts_pending.as_ref().map(|d| d.newly_accepted),
+                Some(1)
+            );
+            assert!(
+                state.verdict_marks[&uuid::Uuid::from_bytes([1; 16]).to_string()].accepted,
+                "the Never record's mark advanced silently"
+            );
+        }
+
+        /// Pending news shrinks when a poll finds a submission withdrawn or
+        /// its folder set to Never, and the poll that shrinks it publishes
+        /// `status_changed`, since `status.nudge` changed; when nothing is
+        /// left, nothing is pending.
+        #[test]
+        fn news_taken_back_leaves_pending_and_publishes_status_changed() {
+            let (_d, s) = fixture();
+            let submitted = [
+                rec(1, ASK, STATUS_SUBMITTED),
+                rec(2, NEVER, STATUS_SUBMITTED),
+            ];
+            record_history_poll(&s, &submitted, at(0)).unwrap();
+            let accepted = [rec(1, ASK, STATUS_ACCEPTED), rec(2, NEVER, STATUS_ACCEPTED)];
+            record_history_poll(&s, &accepted, at(30)).unwrap();
+            assert_eq!(
+                s.state
+                    .lock()
+                    .unwrap()
+                    .verdicts_pending
+                    .as_ref()
+                    .map(|d| d.total()),
+                Some(2)
+            );
+
+            s.policy
+                .lock()
+                .unwrap()
+                .set_mode(NEVER, policy::ProjectMode::Ignore, at(40))
+                .unwrap();
+            let mut rx = s.events.subscribe();
+            record_history_poll(&s, &accepted, at(60)).unwrap();
+            assert!(
+                drain(&mut rx)
+                    .iter()
+                    .any(|(n, _)| n == ipc::EVENT_STATUS_CHANGED),
+                "the Never folder's verdict left the news"
+            );
+            assert_eq!(
+                s.state
+                    .lock()
+                    .unwrap()
+                    .verdicts_pending
+                    .as_ref()
+                    .map(|d| d.total()),
+                Some(1)
+            );
+
+            let withdrawn = HistoryRecord {
+                withdrawn_at: Some(at(70)),
+                ..rec(1, ASK, STATUS_ACCEPTED)
+            };
+            record_history_poll(&s, &[withdrawn, rec(2, NEVER, STATUS_ACCEPTED)], at(90)).unwrap();
+            assert!(
+                drain(&mut rx)
+                    .iter()
+                    .any(|(n, _)| n == ipc::EVENT_STATUS_CHANGED)
+            );
+            assert_eq!(s.state.lock().unwrap().verdicts_pending, None);
+            assert_eq!(
+                state::DaemonState::load(&s.store).unwrap().verdicts_pending,
+                None,
+                "persisted"
+            );
+        }
+
+        /// `status_changed` goes out when news lands or when the poll turns
+        /// a stale `status.nudge` readable, not on every routine poll, so an
+        /// older shell sees no new chatter.
+        #[test]
+        fn a_routine_poll_publishes_nothing() {
+            let (_d, s) = fixture();
+            let poll_secs = s.settings.lock().unwrap().history_poll_secs as i64;
+            let mut rx = s.events.subscribe();
+            record_history_poll(&s, &[rec(1, ASK, STATUS_SUBMITTED)], at(0)).unwrap();
+            assert!(
+                drain(&mut rx)
+                    .iter()
+                    .any(|(n, _)| n == ipc::EVENT_STATUS_CHANGED),
+                "the first poll turns unknown into readable"
+            );
+            record_history_poll(&s, &[rec(1, ASK, STATUS_SUBMITTED)], at(30)).unwrap();
+            assert!(drain(&mut rx).is_empty(), "a routine poll is silent");
+            // After a gap long enough to go stale, the next poll speaks.
+            let later = at(30) + chrono::Duration::seconds(poll_secs * 3);
+            record_history_poll(&s, &[rec(1, ASK, STATUS_SUBMITTED)], later).unwrap();
+            assert!(
+                drain(&mut rx)
+                    .iter()
+                    .any(|(n, _)| n == ipc::EVENT_STATUS_CHANGED)
+            );
+        }
+    }
 
     /// Only rule 3's refusals cancel account admission: the account was
     /// refused, its allowance is spent, or it is not linked.
@@ -1978,7 +2583,6 @@ mod tests {
         session_path: std::path::PathBuf,
         project_cwd: String,
         classifier_status: Arc<AtomicU16>,
-        classifier_delay_ms: Arc<AtomicU64>,
         uploads: Arc<AtomicUsize>,
         /// What ingest answers an upload with instead of accepting it.
         ingest_reply: Arc<std::sync::Mutex<Option<(StatusCode, serde_json::Value)>>>,
@@ -1987,6 +2591,8 @@ mod tests {
         witness_saturated: Arc<std::sync::Mutex<Option<&'static str>>>,
         /// The workload header of every `/v1/witness` request, in order.
         witness_calls: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        /// Non-zero makes the claim issuer answer with that status.
+        issuer_status: Arc<AtomicU16>,
     }
 
     impl TransientRetryHarness {
@@ -2001,6 +2607,12 @@ mod tests {
             Self::build(false).await
         }
 
+        /// The harness with ingest at an address nothing listens on, so
+        /// every upload ends in a transport error.
+        async fn with_ingest_unreachable() -> Self {
+            Self::build_with(false, true).await
+        }
+
         /// The harness with the contributor pointed at its witness from the
         /// start, pinned to the fixture signer and measurement. From the
         /// start because the configuration is part of what an approval
@@ -2010,6 +2622,10 @@ mod tests {
         }
 
         async fn build(witness: bool) -> Self {
+            Self::build_with(witness, false).await
+        }
+
+        async fn build_with(witness: bool, ingest_unreachable: bool) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
             cloud_credential_test_support::install(&store);
@@ -2051,6 +2667,7 @@ mod tests {
                                         "start": start,
                                         "end": start + value.chars().count(),
                                         "score": 0.99,
+                                        "text": value,
                                     }));
                                 }
                             }
@@ -2060,17 +2677,28 @@ mod tests {
                 }),
             ))
             .await;
+            let issuer_status = Arc::new(AtomicU16::new(0));
             let issuer = Self::spawn(Router::new().route(
                 "/v1/trace-upload-claim",
-                post(|| async {
-                    Json(serde_json::json!({
-                        "access_token": "stub-claim-jwt",
-                        "token_type": "Bearer",
-                        "expires_at": Utc::now() + chrono::Duration::seconds(300),
-                        "expires_in": 300,
-                        "consent_scopes": ["debugging_evaluation"],
-                        "allowed_uses": ["debugging", "evaluation"],
-                    }))
+                post({
+                    let issuer_status = issuer_status.clone();
+                    move || {
+                        let status = issuer_status.load(Ordering::SeqCst);
+                        async move {
+                            if status != 0 {
+                                return StatusCode::from_u16(status).unwrap().into_response();
+                            }
+                            Json(serde_json::json!({
+                                "access_token": "stub-claim-jwt",
+                                "token_type": "Bearer",
+                                "expires_at": Utc::now() + chrono::Duration::seconds(300),
+                                "expires_in": 300,
+                                "consent_scopes": ["debugging_evaluation"],
+                                "allowed_uses": ["debugging", "evaluation"],
+                            }))
+                            .into_response()
+                        }
+                    }
                 }),
             ))
             .await;
@@ -2106,10 +2734,19 @@ mod tests {
                 }),
             ))
             .await;
+            let ingest = if ingest_unreachable {
+                // Bound and released, so nothing answers on it.
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                drop(listener);
+                format!("http://{addr}")
+            } else {
+                ingest
+            };
             store
                 .save_config(&crate::config::ContributorConfig {
                     inference_receipt_endpoint: None,
-                    consent_scopes_chosen: false,
+                    consent_scopes_chosen: Some(true),
                     witness_origin: None,
                     inference_receipt_check_attestation: false,
                     schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
@@ -2193,11 +2830,11 @@ mod tests {
                 session_path,
                 project_cwd,
                 classifier_status,
-                classifier_delay_ms,
                 uploads,
                 ingest_reply,
                 witness_saturated,
                 witness_calls,
+                issuer_status,
             }
         }
 
@@ -2605,7 +3242,8 @@ mod tests {
     /// session no source lists -- so a pass that reaches the send marks it
     /// `session-file-vanished`, which is how these tests see that it did.
     fn seed_contributor_approval(shared: &ipc::DaemonShared) -> uuid::Uuid {
-        let cfg = crate::commands::unenrolled_preview_config();
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.consent_scopes_chosen = Some(true);
         shared.store.save_config(&cfg).unwrap();
         let mut q = shared.queue.lock().expect("queue lock");
         let e = queue::QueueEntry {
@@ -2669,6 +3307,75 @@ mod tests {
         );
     }
 
+    /// An entry approved before its enrollment's scopes were chosen -- by an
+    /// older build, or before this hold existed -- is held exactly as it was,
+    /// `Approved` with nothing sent, and the hold names itself only in
+    /// `status.consent_hold`. Choosing the scopes releases it to the send
+    /// path, where the scope and input pins it was approved under are
+    /// checked as for any other approval.
+    #[tokio::test]
+    async fn an_unchosen_enrolment_holds_approved_entries_until_scopes_are_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+        let id = seed_contributor_approval(&shared);
+        let mut cfg = shared.store.load_config().unwrap().unwrap();
+        cfg.consent_scopes_chosen = Some(false);
+        shared.store.save_config(&cfg).unwrap();
+        let before = shared.queue.lock().expect("queue lock").get(id).cloned();
+
+        for _ in 0..2 {
+            drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+                .await
+                .unwrap();
+        }
+        let held = shared.queue.lock().expect("queue lock").get(id).cloned();
+        assert_eq!(held, before, "held exactly as it was, not sent");
+        assert_eq!(
+            shared.status_value()["consent_hold"],
+            crate::config::CONSENT_SCOPES_NOT_CHOSEN
+        );
+
+        cfg.consent_scopes_chosen = Some(true);
+        shared.store.save_config(&cfg).unwrap();
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+        let released = shared.queue.lock().expect("queue lock").get(id).cloned();
+        assert_eq!(
+            released.map(|e| (e.state, e.reason_label)),
+            Some((
+                queue::QueueState::Failed,
+                Some("session-file-vanished".to_string())
+            )),
+            "released: the pass reached the send"
+        );
+    }
+
+    /// The migration rule at the send path: a config that predates the
+    /// scope-choice record (no key) is a contributor who joined before it
+    /// existed, and their approvals go out as they always did.
+    #[tokio::test]
+    async fn a_config_that_predates_the_choice_record_still_sends() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+        let id = seed_contributor_approval(&shared);
+        let mut cfg = shared.store.load_config().unwrap().unwrap();
+        cfg.consent_scopes_chosen = None;
+        shared.store.save_config(&cfg).unwrap();
+
+        drain_approved_for_test(&shared, at("2026-08-08T13:00:00Z"))
+            .await
+            .unwrap();
+        let sent = shared.queue.lock().expect("queue lock").get(id).cloned();
+        assert_eq!(
+            sent.map(|e| e.reason_label),
+            Some(Some("session-file-vanished".to_string())),
+            "the pass reached the send"
+        );
+    }
+
     /// K2 (#1173): a dev dry run leaves an approved entry exactly as it was
     /// -- still `Approved`, not `Refused`, with no attempt recorded -- so it
     /// uploads as approved once the daemon runs without the dry run. The
@@ -2718,7 +3425,7 @@ mod tests {
     }
 
     /// K2 (#1173): a dev dry run runs against its own store. It is seeded
-    /// with the real enrolment terms and settings, and nothing else, and a
+    /// with the real enrollment terms and settings, and nothing else, and a
     /// session that approves, dismisses, pauses, changes settings and
     /// drains leaves every byte of the real store as it was -- including an
     /// entry the contributor had already approved there.
@@ -3235,42 +3942,230 @@ mod tests {
         );
     }
 
-    /// A witness that stays saturated is asked less and less often, never
-    /// more than hourly apart, and never gives up on the session.
+    /// A server without the labelled refusal answers a bare
+    /// `{"error":"rate limited"}` with no hint. Same handling, with the
+    /// server's whole window as the wait.
     #[tokio::test]
-    async fn a_witness_that_stays_saturated_is_backed_off_and_the_session_kept() {
-        let h = TransientRetryHarness::with_witness().await;
-        *h.witness_saturated.lock().unwrap() = Some("30");
-        let mut now = TransientRetryHarness::now();
-        let mut delays = Vec::new();
-        for _ in 0..8 {
-            // Measured, not guessed: the retry is scheduled from when the
-            // refusal arrived, which is up to one pass after `now`.
-            let started = std::time::Instant::now();
-            h.pass(now).await;
-            let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
-            let entry = h.entry();
-            assert_eq!(entry.state, queue::QueueState::Approved);
+    async fn a_legacy_bare_rate_limited_upload_waits_a_window_and_is_kept() {
+        let h = TransientRetryHarness::new().await;
+        *h.ingest_reply.lock().unwrap() = Some((
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({"error": "rate limited"}),
+        ));
+        let now = TransientRetryHarness::now();
+        let started = std::time::Instant::now();
+        h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
+
+        let held = h.entry();
+        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(crate::submit::REASON_RATE_LIMITED)
+        );
+        let due = held.retry_after.expect("a retry time");
+        let window = i64::from(crate::submit::RATE_LIMIT_DEFAULT_RETRY_SECS);
+        assert!(
+            due >= now + chrono::Duration::seconds(window)
+                && due <= now + pass_took + chrono::Duration::seconds(window),
+            "{due}"
+        );
+    }
+
+    /// A hint past the cap is clamped rather than parking the session.
+    #[tokio::test]
+    async fn a_rate_limit_hint_is_capped() {
+        let h = TransientRetryHarness::new().await;
+        *h.ingest_reply.lock().unwrap() = Some((
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({"error": "submit_rate_limited", "retry_after_seconds": 86_400}),
+        ));
+        let now = TransientRetryHarness::now();
+        let started = std::time::Instant::now();
+        h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
+        let due = h.entry().retry_after.expect("a retry time");
+        let cap = i64::from(crate::submit::RATE_LIMIT_MAX_RETRY_SECS);
+        assert!(
+            due <= now + pass_took + chrono::Duration::seconds(cap),
+            "{due}"
+        );
+        assert_eq!(h.entry().state, queue::QueueState::Approved);
+    }
+
+    /// A first-run backfill approves every past session at once. One pass
+    /// sends no more than `MAX_UPLOADS_PER_PASS`, below the server's default
+    /// of 30 a minute, and the rest go on the next pass.
+    #[tokio::test]
+    async fn a_pass_sends_no_more_than_the_per_pass_cap() {
+        let h = TransientRetryHarness::new().await;
+        let extra = MAX_UPLOADS_PER_PASS + 1;
+        for index in 0..extra {
+            h.add_session(
+                &format!("{index:08x}-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                // Something to remove, so the Scrub check lets it go.
+                &format!("backfill session {index}, then mail alice.smith@example.org"),
+            )
+            .await;
+        }
+        let total = h.entries().len();
+        assert_eq!(total, extra + 1);
+        assert!(
+            h.entries()
+                .iter()
+                .all(|e| e.state == queue::QueueState::Approved)
+        );
+        // Below the server's default of 30 a minute.
+        const { assert!(MAX_UPLOADS_PER_PASS < 30) };
+
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), MAX_UPLOADS_PER_PASS);
+        h.pass(now + chrono::Duration::seconds(60)).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), total);
+        assert!(
+            h.entries()
+                .iter()
+                .all(|e| e.state == queue::QueueState::Uploaded)
+        );
+    }
+
+    /// Ingest down altogether: the in-call retries run out on transport
+    /// errors, and the session is kept rather than lost.
+    #[tokio::test]
+    async fn a_transport_failure_keeps_the_session_approved() {
+        let h = TransientRetryHarness::with_ingest_unreachable().await;
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        let held = h.entry();
+        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(health::LABEL_INGEST_UNREACHABLE)
+        );
+        assert!(held.retry_after.expect("a retry time") >= now + chrono::Duration::seconds(60));
+    }
+
+    /// The issuer briefly unreachable is the same kind of pause.
+    #[tokio::test]
+    async fn an_issuer_outage_keeps_the_session_and_sends_it_when_due() {
+        let h = TransientRetryHarness::new().await;
+        h.issuer_status.store(503, Ordering::SeqCst);
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        assert_eq!(
+            h.uploads.load(Ordering::SeqCst),
+            0,
+            "nothing reached ingest"
+        );
+        let held = h.entry();
+        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(health::LABEL_CLAIM_MINT_FAILED)
+        );
+        let due = held.retry_after.expect("a retry time");
+
+        h.issuer_status.store(0, Ordering::SeqCst);
+        h.pass(due).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(h.entry().state, queue::QueueState::Uploaded);
+    }
+
+    /// `409 admission_in_progress` is a lease another attempt at the same
+    /// submission holds -- typically the one a dropped connection cut off.
+    /// The next try resolves it, so the session is kept. It is about one
+    /// submission, not the server, so the pass goes on to the next.
+    #[tokio::test]
+    async fn admission_in_progress_is_retried_without_stopping_the_pass() {
+        let h = TransientRetryHarness::new().await;
+        h.add_session(
+            "9e9e9e9e-9e9e-9e9e-9e9e-9e9e9e9e9e9e",
+            "tidy the lexer too, then mail alice.smith@example.org",
+        )
+        .await;
+        *h.ingest_reply.lock().unwrap() = Some((
+            StatusCode::CONFLICT,
+            serde_json::json!({"error": "admission_in_progress"}),
+        ));
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 2, "the pass went on");
+        let entries = h.entries();
+        for entry in &entries {
+            assert_eq!(entry.state, queue::QueueState::Approved, "{entry:?}");
+            assert_eq!(entry.reason_label.as_deref(), Some("admission_in_progress"));
+            assert!(entry.retry_after.is_some());
+        }
+        let due = entries.iter().filter_map(|e| e.retry_after).max().unwrap();
+        *h.ingest_reply.lock().unwrap() = None;
+        h.pass(due).await;
+        assert!(
+            h.entries()
+                .iter()
+                .all(|e| e.state == queue::QueueState::Uploaded)
+        );
+    }
+
+    /// The control for the 409s that are not a pause. A re-send of bytes
+    /// ingest already holds is answered with the stored receipt, never a
+    /// 409; a 409 says the id is bound to something else, or the session
+    /// was withdrawn or revoked. Retrying cannot change that.
+    #[tokio::test]
+    async fn a_conflicting_409_stays_terminal() {
+        for label in [
+            "admission_identity_conflict",
+            "witness evidence conflict",
+            "submission id already belongs to another principal",
+            "source_session_withdrawn",
+        ] {
+            let h = TransientRetryHarness::new().await;
+            *h.ingest_reply.lock().unwrap() =
+                Some((StatusCode::CONFLICT, serde_json::json!({ "error": label })));
+            h.pass(TransientRetryHarness::now()).await;
+            let failed = h.entry();
             assert_eq!(
-                entry.reason_label.as_deref(),
-                Some(crate::submit::REASON_WITNESS_SATURATED)
+                failed.state,
+                queue::QueueState::Failed,
+                "{label}: {failed:?}"
             );
-            let due = entry.retry_after.unwrap();
-            delays.push((due - now - pass_took, due - now));
-            now = due;
+            assert_eq!(failed.retry_after, None, "{label}");
         }
-        assert_eq!(h.witness_calls.lock().unwrap().len(), 8);
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
-        // The witness's 30 seconds doubling per refusal (jitter from this
-        // entry id is at most 15 seconds, so each floor is the bare delay).
-        let floors = [30, 60, 120, 240, 480, 960, 1_920, 3_600];
-        for ((lower, upper), floor) in delays.iter().zip(floors) {
-            assert!(
-                *upper >= chrono::Duration::seconds(floor)
-                    && *lower <= chrono::Duration::seconds(floor + 15),
-                "expected {floor}s plus at most 15s of jitter: {delays:?}"
-            );
-        }
+    }
+
+    /// A 4xx policy refusal is a verdict, not a pause.
+    #[tokio::test]
+    async fn a_policy_refusal_stays_terminal() {
+        let h = TransientRetryHarness::new().await;
+        *h.ingest_reply.lock().unwrap() = Some((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::json!({"error": "trace contribution policy refused"}),
+        ));
+        h.pass(TransientRetryHarness::now()).await;
+        let failed = h.entry();
+        assert_eq!(failed.state, queue::QueueState::Failed, "{failed:?}");
+        assert_eq!(failed.retry_after, None);
+    }
+
+    /// The past-sessions picker drops failed entries; a rate-limited one
+    /// is still listed, as approved.
+    #[tokio::test]
+    async fn a_rate_limited_session_stays_in_the_past_sessions_picker() {
+        let h = TransientRetryHarness::new().await;
+        *h.ingest_reply.lock().unwrap() = Some((
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({"error": "rate limited"}),
+        ));
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        let project_key = policy::project_key_for(Some(&h.project_cwd));
+        let rows = past_sessions::list_past_sessions(&h.shared, &project_key, now);
+        let entry_id = h.entry().entry_id;
+        let row = rows
+            .iter()
+            .find(|row| row.entry_id == Some(entry_id))
+            .unwrap_or_else(|| panic!("the session is still listed: {rows:?}"));
+        assert_eq!(row.state, past_sessions::PastSessionState::Approved);
     }
 
     /// Nothing a contributor can do moves a busy witness, so like an outage
@@ -3286,93 +4181,6 @@ mod tests {
             h.last_error_label.as_deref(),
             Some(health::LABEL_INGEST_UNREACHABLE)
         );
-    }
-
-    /// Rule 3 through the upload pass itself: ingest turns the upload away
-    /// for a reason about account admission, and the yes it gave before no
-    /// longer lifts R3.
-    async fn an_upload_refusal_cancels_account_admission(status: StatusCode, label: &str) {
-        let h = TransientRetryHarness::new().await;
-        let cfg = h.shared.store.load_config().unwrap().unwrap();
-        h.shared
-            .account_admission
-            .record_for_test(&cfg, "bounded", true);
-        assert_eq!(
-            h.shared.account_admission.current(Some(&cfg)),
-            automatic_gate::AccountAdmission::Advertised
-        );
-        *h.ingest_reply.lock().unwrap() = Some((status, serde_json::json!({ "error": label })));
-
-        h.pass(TransientRetryHarness::now()).await;
-
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "ingest was asked");
-        assert_eq!(h.entry().reason_label.as_deref(), Some(label));
-        assert_eq!(
-            h.shared.account_admission.current(Some(&cfg)),
-            automatic_gate::AccountAdmission::NotAdvertised,
-            "{label} left R3 lifted"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_upload_refused_as_account_limit_reached_cancels_account_admission() {
-        an_upload_refusal_cancels_account_admission(
-            StatusCode::TOO_MANY_REQUESTS,
-            "account_limit_reached",
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn an_upload_refused_as_admission_refused_cancels_account_admission() {
-        an_upload_refusal_cancels_account_admission(StatusCode::FORBIDDEN, "admission_refused")
-            .await;
-    }
-
-    /// The control: a lease another attempt holds is not about the account,
-    /// and leaves the yes standing.
-    #[tokio::test]
-    async fn an_upload_held_by_another_attempt_leaves_account_admission() {
-        let h = TransientRetryHarness::new().await;
-        let cfg = h.shared.store.load_config().unwrap().unwrap();
-        h.shared
-            .account_admission
-            .record_for_test(&cfg, "bounded", true);
-        *h.ingest_reply.lock().unwrap() = Some((
-            StatusCode::CONFLICT,
-            serde_json::json!({ "error": "admission_in_progress" }),
-        ));
-        h.pass(TransientRetryHarness::now()).await;
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            h.shared.account_admission.current(Some(&cfg)),
-            automatic_gate::AccountAdmission::Advertised
-        );
-    }
-
-    #[tokio::test]
-    async fn transient_retry_delay_starts_after_slow_classifier_failure() {
-        let h = TransientRetryHarness::new().await;
-        h.classifier_status.store(500, Ordering::SeqCst);
-        h.classifier_delay_ms.store(250, Ordering::SeqCst);
-
-        h.pass(TransientRetryHarness::now()).await;
-        let failed = h.entry();
-        assert_eq!(failed.state, queue::QueueState::Approved);
-        assert!(
-            failed.retry_after.unwrap()
-                >= TransientRetryHarness::now()
-                    + chrono::Duration::seconds(60)
-                    + chrono::Duration::milliseconds(200),
-            "slow classification must not consume the retry backoff"
-        );
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
-
-        h.classifier_status.store(0, Ordering::SeqCst);
-        h.pass(TransientRetryHarness::now() + chrono::Duration::seconds(60))
-            .await;
-        assert_eq!(h.entry().state, queue::QueueState::Approved);
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -3550,7 +4358,7 @@ mod tests {
         store
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
-                consent_scopes_chosen: false,
+                consent_scopes_chosen: Some(true),
                 witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
@@ -3743,6 +4551,304 @@ mod tests {
             .await
             .expect("a start after a failed start must not see stale lock contention");
         embedded.close();
+    }
+
+    /// A daemon whose config points ingest at `ingest`.
+    fn shared_with_ingest(dir: &std::path::Path, ingest: &str) -> Arc<ipc::DaemonShared> {
+        let store = crate::config::ConfigStore::open(dir.join("state")).unwrap();
+        cloud_credential_test_support::install(&store);
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        store
+            .save_config(&crate::config::ContributorConfig {
+                inference_receipt_endpoint: None,
+                consent_scopes_chosen: Some(true),
+                witness_origin: None,
+                inference_receipt_check_attestation: false,
+                schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+                issuer_url: ingest.to_string(),
+                ingest_url: ingest.to_string(),
+                audience: "trace-commons-upload".into(),
+                tenant_id: "tenant-abc".into(),
+                instance_id: "instance-1".into(),
+                user_subject: "alice".into(),
+                device_key_id: device.device_key_id,
+                consent_scopes: vec!["debugging_evaluation".into()],
+                pii_filter: None,
+                allowed_hosts: Some("127.0.0.1".into()),
+                display_handle: None,
+                public_bio: None,
+                public_since: None,
+                witness: None,
+            })
+            .unwrap();
+        Arc::new(ipc::DaemonShared::load(store).unwrap())
+    }
+
+    /// The scheduled fetch replaces the table when due and not before; a
+    /// server without the route keeps the table in force (OWNER DECISION
+    /// E11). Nothing about the queue is an input.
+    #[tokio::test]
+    async fn the_table_is_fetched_on_its_schedule_and_a_404_keeps_it() {
+        use crate::credit_estimate_table::{
+            ESTIMATE_TABLE_PATH, ESTIMATE_TABLE_REFRESH, EstimateTableSchedule,
+        };
+        use axum::routing::get;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let serving = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let router = Router::new().route(
+            ESTIMATE_TABLE_PATH,
+            get({
+                let hits = Arc::clone(&hits);
+                let serving = Arc::clone(&serving);
+                move || {
+                    let hits = Arc::clone(&hits);
+                    let serving = Arc::clone(&serving);
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        if !serving.load(Ordering::SeqCst) {
+                            return StatusCode::NOT_FOUND.into_response();
+                        }
+                        let mut table =
+                            trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in();
+                        table.version = "t9".to_string();
+                        Json(table).into_response()
+                    }
+                }
+            }),
+        );
+        let ingest = TransientRetryHarness::spawn(router).await;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_with_ingest(dir.path(), &ingest);
+        let start = at("2026-10-08T12:00:00Z");
+        let mut schedule = EstimateTableSchedule::starting(start);
+
+        refresh_estimate_table(&shared, start, &mut schedule).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let published = shared.estimate_table.lock().unwrap().clone();
+        assert_eq!(published.basis, ipc::ESTIMATE_BASIS_PUBLISHED);
+        assert_eq!(published.table.calibration_label(), "lef1.t9/cq3");
+
+        // Queue churn and many ticks in between do not bring it forward.
+        for minutes in [1, 30, 60 * 12, 60 * 23] {
+            refresh_estimate_table(
+                &shared,
+                start + chrono::Duration::minutes(minutes),
+                &mut schedule,
+            )
+            .await;
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        serving.store(false, Ordering::SeqCst);
+        let next = schedule.next_at();
+        assert!(next >= start + ESTIMATE_TABLE_REFRESH);
+        refresh_estimate_table(&shared, next, &mut schedule).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(*shared.estimate_table.lock().unwrap(), published);
+    }
+
+    /// An ingest that always serves the built-in table relabelled `t9`.
+    async fn serving_a_table() -> String {
+        use crate::credit_estimate_table::ESTIMATE_TABLE_PATH;
+        use axum::routing::get;
+        let router = Router::new().route(
+            ESTIMATE_TABLE_PATH,
+            get(|| async {
+                let mut table =
+                    trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in();
+                table.version = "t9".to_string();
+                Json(table).into_response()
+            }),
+        );
+        TransientRetryHarness::spawn(router).await
+    }
+
+    /// The events published since `rx` subscribed, by name.
+    fn published(
+        rx: &mut tokio::sync::broadcast::Receiver<ipc::Event>,
+    ) -> std::collections::BTreeSet<String> {
+        let mut seen = std::collections::BTreeSet::new();
+        while let Ok(event) = rx.try_recv() {
+            seen.insert(event.event);
+        }
+        seen
+    }
+
+    /// Kristi's #1285 review, finding 5: a fetched table ageing past
+    /// `ESTIMATE_TABLE_MAX_AGE` switches readers to the built-in table with
+    /// no fetch at all, and the tick says so: `queue_changed` and
+    /// `status_changed`, once, and nothing on the next tick.
+    #[tokio::test]
+    async fn an_expiring_table_publishes_on_the_tick_with_no_fetch() {
+        use crate::credit_estimate_table::{ESTIMATE_TABLE_MAX_AGE, EstimateTableSchedule};
+        let ingest = serving_a_table().await;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_with_ingest(dir.path(), &ingest);
+        let start = at("2026-10-08T12:00:00Z");
+        let mut schedule = EstimateTableSchedule::starting(start);
+        refresh_estimate_table(&shared, start, &mut schedule).await;
+        assert_eq!(
+            shared.estimate_table.lock().unwrap().basis,
+            ipc::ESTIMATE_BASIS_PUBLISHED
+        );
+
+        let mut rx = shared.events.subscribe();
+        shared.publish_estimate_in_force_change(start + chrono::Duration::hours(1), None);
+        assert!(published(&mut rx).is_empty(), "nothing lapsed yet");
+
+        let lapsed = start + ESTIMATE_TABLE_MAX_AGE + chrono::Duration::minutes(1);
+        shared.publish_estimate_in_force_change(lapsed, None);
+        let seen = published(&mut rx);
+        assert!(seen.contains(ipc::EVENT_QUEUE_CHANGED), "{seen:?}");
+        assert!(seen.contains(ipc::EVENT_STATUS_CHANGED), "{seen:?}");
+
+        shared.publish_estimate_in_force_change(lapsed + chrono::Duration::minutes(1), None);
+        assert!(published(&mut rx).is_empty(), "announced once");
+    }
+
+    /// Re-fetching the same table after it expired brings it back into
+    /// force. The raw slot does not change, but what readers render does,
+    /// so the fetch publishes.
+    #[tokio::test]
+    async fn refetching_the_same_table_after_expiry_publishes() {
+        use crate::credit_estimate_table::{ESTIMATE_TABLE_MAX_AGE, EstimateTableSchedule};
+        let ingest = serving_a_table().await;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_with_ingest(dir.path(), &ingest);
+        let start = at("2026-10-08T12:00:00Z");
+        let mut schedule = EstimateTableSchedule::starting(start);
+        refresh_estimate_table(&shared, start, &mut schedule).await;
+
+        let lapsed = start + ESTIMATE_TABLE_MAX_AGE + chrono::Duration::minutes(1);
+        let mut rx = shared.events.subscribe();
+        let mut schedule = EstimateTableSchedule::starting(lapsed);
+        refresh_estimate_table(&shared, lapsed, &mut schedule).await;
+        let seen = published(&mut rx);
+        assert!(seen.contains(ipc::EVENT_QUEUE_CHANGED), "{seen:?}");
+        assert!(seen.contains(ipc::EVENT_STATUS_CHANGED), "{seen:?}");
+        assert_eq!(
+            shared
+                .estimate_table
+                .lock()
+                .unwrap()
+                .clone()
+                .in_force(lapsed)
+                .basis,
+            ipc::ESTIMATE_BASIS_PUBLISHED
+        );
+    }
+
+    /// The tick loop itself fetches the published activity catalogue on its
+    /// first tick with a config, and fills the contribution-mission slot
+    /// with the missions that carry a supported predicate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_supervisor_fills_the_mission_slot_on_its_first_tick() {
+        use axum::routing::get;
+        let today = Utc::now().date_naive();
+        let policy: trace_commons_protocol::activity_missions::ActivityPolicy =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "policy_id": "wiring",
+                "starts_on": today - chrono::Duration::days(1),
+                "ends_before": today + chrono::Duration::days(30),
+                "qualification": "accepted",
+                "missions": [
+                    {"id": "claude", "title": "Claude Code sessions", "required_contributions": 1,
+                     "predicate": {"version": 1, "tools": ["claude-code"], "min_sessions": 1}},
+                    {"id": "count", "title": "Any contribution", "required_contributions": 1},
+                ],
+                "daily": null, "levels": null, "badges": null,
+            }))
+            .unwrap();
+        let catalogue =
+            trace_commons_protocol::activity_missions::ActivityCatalogue::new(Some(policy))
+                .unwrap();
+        let router = Router::new().route(
+            "/v1/activity-missions",
+            get(move || {
+                let catalogue = catalogue.clone();
+                async move { Json(catalogue) }
+            }),
+        );
+        let ingest = TransientRetryHarness::spawn(router).await;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_with_ingest(dir.path(), &ingest);
+        shared.settings.lock().unwrap().missions_enabled = true;
+        let supervisor = tokio::spawn(run_supervisor(Arc::clone(&shared), false));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let filled = loop {
+            let slot = mission_matching::live_catalogue(&shared.mission_catalogue, Utc::now());
+            if slot.is_some() || std::time::Instant::now() > deadline {
+                break slot;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        shared.shutdown.store(true, Ordering::Relaxed);
+        shared.shutdown_signal.notify_one();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), supervisor).await;
+        let ids: Vec<String> = filled
+            .expect("the first tick fills the slot")
+            .missions
+            .into_iter()
+            .map(|m| m.mission_id)
+            .collect();
+        assert_eq!(ids, vec!["claude"]);
+    }
+
+    /// Missions hidden (the default): the tick loop never asks for the
+    /// activity catalogue, and empties a slot that already holds one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_supervisor_neither_fetches_nor_keeps_the_mission_slot_while_hidden() {
+        use axum::routing::get;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let router = Router::new().route(
+            "/v1/activity-missions",
+            get(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                async move { StatusCode::SERVICE_UNAVAILABLE }
+            }),
+        );
+        let ingest = TransientRetryHarness::spawn(router).await;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_with_ingest(dir.path(), &ingest);
+        assert!(!shared.settings.lock().unwrap().missions_enabled);
+        mission_matching::receive_catalogue(
+            &shared.mission_catalogue,
+            &serde_json::json!({"schema_version": 1, "missions": [{"mission_id": "any"}]}),
+            Utc::now(),
+        )
+        .unwrap();
+        let supervisor = tokio::spawn(run_supervisor(Arc::clone(&shared), false));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let emptied = loop {
+            let empty = shared.mission_catalogue.lock().unwrap().is_none();
+            if empty || std::time::Instant::now() > deadline {
+                break empty;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        shared.shutdown.store(true, Ordering::Relaxed);
+        shared.shutdown_signal.notify_one();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), supervisor).await;
+        assert!(emptied, "the first tick empties the slot");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "nothing is fetched");
+    }
+
+    /// Without a config there is no origin to ask: nothing is sent and the
+    /// built-in table stays.
+    #[tokio::test]
+    async fn without_a_config_the_table_is_not_fetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = ipc::DaemonShared::load(store).unwrap();
+        let start = at("2026-10-08T12:00:00Z");
+        let mut schedule = crate::credit_estimate_table::EstimateTableSchedule::starting(start);
+        refresh_estimate_table(&shared, start, &mut schedule).await;
+        assert_eq!(
+            *shared.estimate_table.lock().unwrap(),
+            ipc::EstimateTableSlot::built_in()
+        );
+        assert!(!schedule.due(start));
     }
 }
 

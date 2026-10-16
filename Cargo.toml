@@ -37,3 +37,12 @@ edition = "2024"
 rust-version = "1.96"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/TraceCommons/trace-commons"
+
+# Third-party crates only: no debug info. The workspace's own crates keep the
+# default dev profile, so their backtraces and debugger symbols are
+# unchanged; a third-party frame still names its function but loses its
+# file and line. Measured on 2026-10-15, a clean
+# `cargo test -p trace-commons-contributor --lib --no-run` target/ went from
+# 6.7-6.8 GB to 5.9 GB, which every worktree and CI cache carries.
+[profile.dev.package."*"]
+debug = false

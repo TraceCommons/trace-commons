@@ -54,9 +54,9 @@ public class RedactionSummaryTests
     /// </summary>
     /// <remarks>
     /// No distinct counts here, and that is not an omission. They come from
-    /// the placeholder map, which is filled by <c>apply_placeholder_regex</c>,
-    /// which is called for exactly two labels: <c>local_path</c> and
-    /// <c>private_email</c>. A secret will never carry a distinct figure, so a
+    /// the placeholder map, which is filled only for <c>local_path</c>,
+    /// <c>private_email</c> and the #1362 tool-output labels. A secret will
+    /// never carry a distinct figure, so a
     /// fixture asserting one would be testing a daemon that does not exist.
     /// </remarks>
     [Fact]

@@ -31,10 +31,34 @@ use crate::config::{ConfigStore, DAEMON_PROJECTS_FILE};
 /// recorded working directories, which no longer match anything
 /// `project_key_for` produces, so `load` re-keys it. The version is what
 /// makes that happen exactly once.
-pub const DAEMON_PROJECTS_SCHEMA: &str = "trace_commons.daemon_projects.v2";
+///
+/// Bumped to v3 when `set_project_mode` began normalizing a caller's key
+/// (#992). Until then a key `daemon project <path>` sent was stored in the
+/// on-disk spelling, which the watcher -- folding case on macOS and Windows
+/// -- never looked up, so a v2 file can hold keys that no session reaches.
+/// `load` re-keys a v2 file once, with [`MovedArming::AsksAgain`].
+pub const DAEMON_PROJECTS_SCHEMA: &str = "trace_commons.daemon_projects.v3";
 
 /// The pre-normalization schema. Recognized only so `load` can migrate it.
 pub const DAEMON_PROJECTS_SCHEMA_V1: &str = "trace_commons.daemon_projects.v1";
+
+/// The schema whose keys the watcher wrote normalized and `set_project_mode`
+/// did not. Recognized only so `load` can migrate it.
+pub const DAEMON_PROJECTS_SCHEMA_V2: &str = "trace_commons.daemon_projects.v2";
+
+/// What a re-key does with an `AutoUpload` entry whose key it changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovedArming {
+    /// Carry the mode across. Right for a v1 file, whose raw keys were the
+    /// ones the watcher of the day looked up, so its arming was in effect.
+    Carries,
+    /// Return it to `NotifyOnly`. Right for a v2 file: a v2 key that
+    /// normalization changes is one the watcher never matched, so the
+    /// arming was never in effect, and its arm-from-now hold and claim are
+    /// stored under the old spelling. Carrying the mode without them would
+    /// send a backlog the contributor held back; asking again loses nothing.
+    AsksAgain,
+}
 
 /// The bucket for sessions with no resolvable working directory. Permanently
 /// notify-only.
@@ -312,6 +336,10 @@ pub struct ProjectPolicy {
     pub arming_claims: BTreeMap<String, super::arming_wording::ArmingClaim>,
     /// Rewordings not yet shown to the contributor. See
     /// [`ArmingRewordNotice`].
+    ///
+    /// Owner decision 2026-10-16: no switch-on notice is raised; the list
+    /// stays on the wire and is always empty. A file written by an older
+    /// build is cleared on load.
     #[serde(default)]
     pub arming_rewordings: Vec<ArmingRewordNotice>,
     /// The id the next [`ArmingRewordNotice`] gets. Never reused.
@@ -341,6 +369,18 @@ pub struct ProjectPolicy {
     /// `#[serde(default)]` so an older policy file loads with none.
     #[serde(default)]
     pub contribution_override: Option<ContributionOverride>,
+    /// Whether this file was first written by a build that has the per-kind
+    /// notification switches (`DaemonSettings::notify`). Set by
+    /// [`ProjectPolicy::new`] and never changed, so a file an older build
+    /// wrote keeps reading `false` -- that build has no such key -- however
+    /// often this build saves it.
+    ///
+    /// `DaemonSettings::load` reads it when there is no settings file: a
+    /// policy an older build wrote is an existing install, and gets the
+    /// upgrade values and the one-time offers (constraint 12), even when
+    /// that build already marked `scrub_check_upgrade_recorded`.
+    #[serde(default)]
+    pub notify_kinds_known: bool,
 }
 
 /// The key the contribution override's arming record is listed under in
@@ -365,7 +405,7 @@ pub const OVERRIDE_ARMING_KEY: &str = "contribution-override";
 ///   contributor already approved are held, not sent, and `approve` is
 ///   refused ([`ProjectPolicy::holds_every_send`]); clearing the override
 ///   releases them as they were.
-/// - `NotifyOnly` ("Ask me"): every folder resolves to `NotifyOnly`, except
+/// - `NotifyOnly` ("Ask"): every folder resolves to `NotifyOnly`, except
 ///   a folder set to `Ignore`, which stays `Ignore`. Nothing goes unattended.
 /// - `AutoUpload` ("Automatic"): every folder resolves to
 ///   `AutoUpload`, **except a folder set to `Ignore`, which stays `Ignore`**
@@ -507,6 +547,7 @@ impl ProjectPolicy {
             sessions_on_disk_at_arming: BTreeMap::new(),
             next_arming_record: 0,
             contribution_override: None,
+            notify_kinds_known: true,
         }
     }
 
@@ -1073,7 +1114,7 @@ impl ProjectPolicy {
                     && key.as_str() != UNKNOWN_PROJECT_KEY
                     // The folder's own mode, not an override's: the offer
                     // is to set that, and an override must neither hide an
-                    // Ask me folder nor offer to arm an armed one.
+                    // Ask folder nor offer to arm an armed one.
                     && self.folder_mode(key) == ProjectMode::NotifyOnly
                     && match self.arming_declined_at.get(*key) {
                         // A clock that went backwards lands here as "still
@@ -1104,16 +1145,25 @@ impl ProjectPolicy {
     /// hand-edited file, say -- is dropped rather than kept under its old
     /// spelling, because nothing will ever look it up again.
     pub fn rekey(&mut self) {
-        let renamed = |key: &str| -> Option<String> {
-            if key == UNKNOWN_PROJECT_KEY {
-                return Some(UNKNOWN_PROJECT_KEY.to_string());
-            }
-            crate::daemon::project_key::normalize_project_key(key)
-        };
+        self.rekey_with(MovedArming::Carries);
+    }
+
+    /// [`Self::rekey`], choosing what happens to an armed entry whose key
+    /// moves. See [`MovedArming`].
+    pub fn rekey_with(&mut self, moved_arming: MovedArming) {
+        let renamed = normalize_policy_key;
 
         let mut projects: BTreeMap<String, ProjectEntry> = BTreeMap::new();
-        for (key, entry) in std::mem::take(&mut self.projects) {
+        for (key, mut entry) in std::mem::take(&mut self.projects) {
             let Some(fresh) = renamed(&key) else { continue };
+            if moved_arming == MovedArming::AsksAgain
+                && fresh != key
+                && entry.mode == ProjectMode::AutoUpload
+            {
+                entry.mode = ProjectMode::NotifyOnly;
+                entry.armed_under = None;
+                entry.automatic_redaction = AutomaticRedactionTally::default();
+            }
             // Re-derived rather than carried across from `entry`: a v2 file
             // has no display path at all, and one written on another host
             // may name a directory this one spells differently.
@@ -1184,6 +1234,22 @@ impl ProjectPolicy {
         }
         self.arming_declined_at = declined;
 
+        if moved_arming == MovedArming::AsksAgain {
+            // What only an armed folder carries, left under a spelling no
+            // folder is armed under any more: the old key of a moved arming,
+            // or a key a merge made stricter. Nothing would look it up again,
+            // and a re-arm starts each of these fresh.
+            let armed: BTreeSet<String> = self
+                .projects
+                .iter()
+                .filter(|(_, e)| e.mode == ProjectMode::AutoUpload)
+                .map(|(k, _)| k.clone())
+                .collect();
+            self.armed_from_now.retain(|k, _| armed.contains(k));
+            self.arming_claims.retain(|k, _| armed.contains(k));
+            self.armed_by_grant.retain(|k| armed.contains(k));
+        }
+
         self.schema_version = DAEMON_PROJECTS_SCHEMA.to_string();
     }
 
@@ -1193,12 +1259,18 @@ impl ProjectPolicy {
         };
         let mut policy: Self =
             serde_json::from_slice(&body).context("parsing daemon project policy")?;
+        // Owner decision 2026-10-16: no switch-on notice is raised, so one
+        // an older build persisted is never reported. The next save writes
+        // the empty list.
+        policy.arming_rewordings.clear();
         // Migrate in memory on every load rather than rewriting the file
         // here: `load` has no business writing, and the next `save` -- which
         // every mutation already performs -- persists the v2 form. A file
         // that is never mutated again is migrated identically on every read,
         // which costs one normalization pass and is always correct.
-        if policy.schema_version != DAEMON_PROJECTS_SCHEMA {
+        if policy.schema_version == DAEMON_PROJECTS_SCHEMA_V2 {
+            policy.rekey_with(MovedArming::AsksAgain);
+        } else if policy.schema_version != DAEMON_PROJECTS_SCHEMA {
             policy.rekey();
         }
         Ok(policy)
@@ -1341,16 +1413,14 @@ impl ProjectPolicy {
         sweep
     }
 
-    /// K5 for the "Automatic" contribution override: leave a notice
+    /// K5 for the "Automatic" contribution override: move its recorded claim
     /// when the words in force (`in_force`, what the arming offer would say
-    /// now) no longer claim what the override was set under. It stays on;
-    /// the recorded claim moves to the one in force in the same save, so a
-    /// rewording is announced once. The notice is keyed by
-    /// [`OVERRIDE_ARMING_KEY`]. Returns whether one was left.
+    /// now) no longer claim what the override was set under. It stays on and
+    /// no notice is raised. Returns whether the claim moved.
     pub fn sweep_override_claim(
         &mut self,
         in_force: super::arming_wording::ArmingClaim,
-        now: DateTime<Utc>,
+        _now: DateTime<Utc>,
     ) -> bool {
         let Some(o) = self.contribution_override.as_mut() else {
             return false;
@@ -1367,19 +1437,9 @@ impl ProjectPolicy {
         if !was.narrowed_to(in_force) {
             return false;
         }
+        // Owner decision 2026-10-16: no switch-on notice is raised; the list
+        // stays on the wire and is always empty. Only the claim moves.
         o.claim = Some(in_force);
-        self.arming_rewordings
-            .retain(|n| n.project_key != OVERRIDE_ARMING_KEY || n.scrub_check_defaulted);
-        let id = self.next_arming_reword_id;
-        self.next_arming_reword_id = id.saturating_add(1);
-        self.arming_rewordings.push(ArmingRewordNotice {
-            id,
-            reworded_at: now,
-            project_key: OVERRIDE_ARMING_KEY.to_string(),
-            was,
-            now: in_force,
-            scrub_check_defaulted: false,
-        });
         true
     }
 
@@ -1411,19 +1471,18 @@ impl ProjectPolicy {
             })
     }
 
-    /// K5: leave a notice for every armed project whose words in force
-    /// (`current`, per project key) no longer claim what it was armed under.
+    /// K5: move the recorded claim of every armed project whose words in
+    /// force (`current`, per project key) no longer claim what it was armed
+    /// under. No notice is raised.
     ///
-    /// The project stays armed. Its recorded claim moves to the one in force
-    /// in the same save as the notice, so a rewording is announced exactly
-    /// once and a later narrowing is announced again. Only a narrowing is
-    /// announced (`ArmingClaim::narrowed_to`); a widening is not recorded,
-    /// so what the contributor was told stays the baseline. Returns the
-    /// labels of the projects reworded, for the audit.
+    /// The project stays armed. Only a narrowing is recorded
+    /// (`ArmingClaim::narrowed_to`); a widening is not, so what the
+    /// contributor was told stays the baseline. Returns the labels of the
+    /// projects reworded, for the audit.
     pub fn sweep_arming_claims(
         &mut self,
         current: impl Fn(&str) -> super::arming_wording::ArmingClaim,
-        now: DateTime<Utc>,
+        _now: DateTime<Utc>,
     ) -> Vec<String> {
         let mut reworded: Vec<(
             String,
@@ -1442,20 +1501,11 @@ impl ProjectPolicy {
             }
         }
         let mut labels = Vec::with_capacity(reworded.len());
-        for (key, label, was, in_force) in reworded {
-            self.arming_claims.insert(key.clone(), in_force);
-            self.arming_rewordings
-                .retain(|n| n.project_key != key || n.scrub_check_defaulted);
-            let id = self.next_arming_reword_id;
-            self.next_arming_reword_id = id.saturating_add(1);
-            self.arming_rewordings.push(ArmingRewordNotice {
-                id,
-                reworded_at: now,
-                project_key: key,
-                was,
-                now: in_force,
-                scrub_check_defaulted: false,
-            });
+        for (key, label, _was, in_force) in reworded {
+            // Owner decision 2026-10-16: no switch-on notice is raised; the
+            // list stays on the wire and is always empty. Only the claim
+            // moves.
+            self.arming_claims.insert(key, in_force);
             labels.push(label);
         }
         labels
@@ -1469,30 +1519,14 @@ impl ProjectPolicy {
         before - self.arming_rewordings.len()
     }
 
-    /// Announce changed hold behavior only for folders armed at upgrade.
-    /// The marker and notices are saved together by startup, before work.
-    pub fn record_scrub_check_upgrade(&mut self, automatic: bool, now: DateTime<Utc>) -> bool {
+    /// Record that the Scrub-check upgrade has been seen. No notice is
+    /// raised. The marker is saved by startup, before work.
+    pub fn record_scrub_check_upgrade(&mut self, _automatic: bool, _now: DateTime<Utc>) -> bool {
         if self.scrub_check_upgrade_recorded {
             return false;
         }
-        if automatic {
-            for (key, entry) in &self.projects {
-                if entry.mode != ProjectMode::AutoUpload || key == UNKNOWN_PROJECT_KEY {
-                    continue;
-                }
-                let claim = self.arming_claim(key);
-                let id = self.next_arming_reword_id;
-                self.next_arming_reword_id = id.saturating_add(1);
-                self.arming_rewordings.push(ArmingRewordNotice {
-                    id,
-                    reworded_at: now,
-                    project_key: key.clone(),
-                    was: claim,
-                    now: claim,
-                    scrub_check_defaulted: true,
-                });
-            }
-        }
+        // Owner decision 2026-10-16: no switch-on notice is raised; the list
+        // stays on the wire and is always empty. Only the marker is kept.
         self.scrub_check_upgrade_recorded = true;
         true
     }
@@ -1655,6 +1689,14 @@ pub const ERR_PROJECT_KEY_UNRECOGNIZED: &str = "project-key-unrecognized";
 /// writing a session file with an arbitrary `cwd`. `MAX_PROJECT_LABEL_CHARS`
 /// bounds the length independently at the render sinks, since a filesystem
 /// limit is not a promise this crate makes.
+///
+/// "Canonicalizes to itself" is now read as: the key's normalized form
+/// ([`normalize_policy_key`]) names an existing directory. The key itself
+/// need not already be in that form -- a mixed-case spelling, a path through
+/// a symlink, a Windows 8.3 short name or `\\?\` prefix all name a real
+/// directory -- and `set_project_mode` stores the normalized form, which is
+/// the spelling sessions are looked up by (#992). A path naming no
+/// directory is refused, however it is spelled.
 pub fn project_key_is_admissible(project_key: &str, known_keys: &[String]) -> bool {
     if project_key == UNKNOWN_PROJECT_KEY {
         return true;
@@ -1666,10 +1708,30 @@ pub fn project_key_is_admissible(project_key: &str, known_keys: &[String]) -> bo
     if !path.is_absolute() {
         return false;
     }
-    match std::fs::canonicalize(path) {
-        Ok(resolved) => resolved.is_dir() && resolved.as_os_str() == path.as_os_str(),
-        Err(_) => false,
+    // Both: the key as given must be a real directory, or a missing path
+    // inside a repository would pass on the strength of its root, which is
+    // what normalization walks it to.
+    path.is_dir()
+        && normalize_policy_key(project_key)
+            .is_some_and(|normalized| std::path::Path::new(&normalized).is_dir())
+}
+
+/// The policy key for a caller-supplied project key: the unknown bucket's
+/// sentinel as itself, anything else through
+/// `project_key::normalize_project_key` -- the one normalization the watcher
+/// keys sessions by and [`ProjectPolicy::rekey`] keys stored entries by.
+///
+/// That includes folding case where the filesystem is case-insensitive
+/// (macOS, Windows; never Linux) and walking up to the repository root, so
+/// `daemon project <repo>/sub` names `<repo>`, which is the key every
+/// session in `sub` already resolves to.
+///
+/// `None` for anything that cannot be a key (relative, empty).
+pub fn normalize_policy_key(project_key: &str) -> Option<String> {
+    if project_key == UNKNOWN_PROJECT_KEY {
+        return Some(UNKNOWN_PROJECT_KEY.to_string());
     }
+    crate::daemon::project_key::normalize_project_key(project_key)
 }
 
 /// The prefix every opaque project id carries.
@@ -2695,22 +2757,14 @@ mod tests {
     }
 
     #[test]
-    fn scrub_check_upgrade_is_once_only_and_keeps_other_notices() {
+    fn scrub_check_upgrade_is_once_only_and_raises_no_notice() {
         let now = t("2026-09-30T00:00:00Z");
         let mut p = armed_by_hand(&["/w/api"]);
         p.scrub_check_upgrade_recorded = false;
         assert!(p.record_scrub_check_upgrade(true, now));
-        assert_eq!(p.arming_rewordings.len(), 1);
-        let upgrade_id = p.arming_rewordings[0].id;
+        assert!(p.arming_rewordings.is_empty());
         p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
-        assert_eq!(p.arming_rewordings.len(), 2);
-        assert!(
-            p.arming_rewordings
-                .iter()
-                .any(|n| n.id == upgrade_id && n.scrub_check_defaulted)
-        );
-        p.acknowledge_arming_rewordings(&[upgrade_id]);
-        assert_eq!(p.arming_rewordings.len(), 1);
+        assert!(p.arming_rewordings.is_empty());
         assert!(!p.record_scrub_check_upgrade(true, now));
         p.set_mode("/w/api", ProjectMode::NotifyOnly, now).unwrap();
         assert!(p.arming_rewordings.is_empty());
@@ -2734,45 +2788,34 @@ mod tests {
     }
 
     /// K5: a folder armed under the old "will be scrubbed" wording, whose
-    /// wording in force is patterns-only, gets a notice and stays armed.
+    /// wording in force is patterns-only, has its claim moved and stays
+    /// armed. No notice is raised.
     #[test]
-    fn a_folder_armed_under_the_scrub_wording_is_told_when_it_is_reworded() {
+    fn a_folder_armed_under_the_scrub_wording_has_its_claim_moved_when_reworded() {
         let mut p = armed_by_hand(&["/w/api"]);
         let at = t("2026-09-27T01:00:00Z");
 
         let unchanged = p.sweep_arming_claims(|_| ArmingClaim::ModelScrubbed, at);
         assert!(unchanged.is_empty());
-        assert!(
-            p.arming_rewordings.is_empty(),
-            "nothing reworded, nothing to say"
-        );
+        assert!(p.arming_rewordings.is_empty());
 
         let reworded = p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, at);
         assert_eq!(reworded, vec!["api".to_string()]);
-        assert_eq!(p.arming_rewordings.len(), 1, "{:?}", p.arming_rewordings);
-        let n = &p.arming_rewordings[0];
-        assert_eq!(n.project_key, "/w/api");
-        assert_eq!(n.was, ArmingClaim::ModelScrubbed);
-        assert_eq!(n.now, ArmingClaim::PatternsOnly);
-        assert_eq!(n.reworded_at, at);
+        assert!(p.arming_rewordings.is_empty(), "{:?}", p.arming_rewordings);
+        assert_eq!(p.arming_claim("/w/api"), ArmingClaim::PatternsOnly);
         assert_eq!(p.resolve("/w/api"), ProjectMode::AutoUpload, "still armed");
     }
 
-    /// Announced once: the next pass under the same wording adds nothing,
-    /// and an acknowledged notice does not come back.
+    /// Reworded once: the next pass under the same wording finds nothing.
     #[test]
-    fn a_rewording_is_announced_once() {
+    fn a_rewording_is_recorded_once() {
         let mut p = armed_by_hand(&["/w/api"]);
         let at = t("2026-09-27T01:00:00Z");
-        p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, at);
-        assert_eq!(p.arming_rewordings.len(), 1);
-        let id = p.arming_rewordings[0].id;
-        assert!(
+        assert_eq!(
             p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, at)
-                .is_empty()
+                .len(),
+            1
         );
-        assert_eq!(p.arming_rewordings.len(), 1);
-        assert_eq!(p.acknowledge_arming_rewordings(&[id, 42]), 1);
         assert!(
             p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, at)
                 .is_empty()
@@ -2818,48 +2861,33 @@ mod tests {
         assert!(!p.record_arming_claim("/w/ask", ArmingClaim::ModelScrubbed));
     }
 
-    /// Setting the project's mode answers its notice, whether it is armed
-    /// again (under words recorded afresh) or switched to ask-first.
+    /// Setting the project's mode drops its recorded claim, whether it is
+    /// armed again (under words recorded afresh) or switched to ask-first.
     #[test]
-    fn setting_the_mode_answers_a_rewording() {
+    fn setting_the_mode_clears_the_recorded_claim() {
         let mut p = armed_by_hand(&["/w/api", "/w/web"]);
         let now = t("2026-09-27T01:00:00Z");
         p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
-        assert_eq!(p.arming_rewordings.len(), 2);
+        assert!(p.arming_rewordings.is_empty());
+        assert!(p.arming_claims.contains_key("/w/api"));
         p.set_mode("/w/api", ProjectMode::NotifyOnly, now).unwrap();
-        assert_eq!(p.arming_rewordings.len(), 1);
-        assert_eq!(p.arming_rewordings[0].project_key, "/w/web");
+        assert!(!p.arming_claims.contains_key("/w/api"));
+        assert!(p.arming_claims.contains_key("/w/web"));
         p.set_mode("/w/web", ProjectMode::AutoUpload, now).unwrap();
         assert!(p.arming_rewordings.is_empty());
     }
 
-    /// A void returns the folder to ask-first and says so; a rewording
-    /// notice saying it is still armed would then be false.
+    /// A void returns the folder to ask-first and takes its recorded claim.
     #[test]
-    fn a_void_takes_the_rewording_notice_with_it() {
+    fn a_void_takes_the_recorded_claim_with_it() {
         let mut p = armed_and_granted("https://ingest.invalid");
         let now = t("2026-09-27T01:00:00Z");
         p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
-        assert_eq!(p.arming_rewordings.len(), 1);
+        assert!(p.arming_rewordings.is_empty());
+        assert!(p.arming_claims.contains_key("/w/api"));
         p.sweep_grants(&grant_terms_with("https://elsewhere.invalid"), now);
         assert!(p.arming_rewordings.is_empty());
         assert!(!p.arming_claims.contains_key("/w/api"));
-    }
-
-    /// Ids are never reused across notices.
-    #[test]
-    fn a_later_rewording_never_reuses_an_acknowledged_id() {
-        let mut p = armed_by_hand(&["/w/api"]);
-        let now = t("2026-09-27T01:00:00Z");
-        p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
-        assert_eq!(p.arming_rewordings.len(), 1);
-        let first = p.arming_rewordings[0].id;
-        p.acknowledge_arming_rewordings(&[first]);
-        p.set_mode("/w/api", ProjectMode::AutoUpload, now).unwrap();
-        p.record_arming_claim("/w/api", ArmingClaim::ModelScrubbed);
-        p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
-        assert_eq!(p.arming_rewordings.len(), 1);
-        assert_ne!(p.arming_rewordings[0].id, first);
     }
 
     /// A policy file written before rewordings existed loads with none,
@@ -3136,6 +3164,99 @@ mod tests {
         assert_eq!(loaded.resolve(&key), ProjectMode::Ignore);
     }
 
+    /// #992: a v2 file can hold a key `daemon project <path>` stored in the
+    /// on-disk spelling, which the watcher (folding case on macOS and
+    /// Windows) never looked up. Loading it must put an `Ignore` where the
+    /// watcher looks.
+    ///
+    /// An `AutoUpload` under such a key was never in effect, and its
+    /// arm-from-now hold sits under the old spelling too. Carrying the mode
+    /// across without the hold would start sending the backlog the
+    /// contributor held back, so it asks again instead.
+    #[test]
+    fn loading_a_v2_file_rekeys_keys_the_cli_stored_unfolded() {
+        let (_d, store) = temp_store();
+        let dir = tempfile::tempdir().unwrap();
+        let never = dir.path().join("NeverRepo");
+        let armed = dir.path().join("ArmedRepo");
+        std::fs::create_dir(&never).unwrap();
+        std::fs::create_dir(&armed).unwrap();
+        // The CLI's spelling: canonical, with the case on disk.
+        let never_cli = std::fs::canonicalize(&never)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let armed_cli = std::fs::canonicalize(&armed)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let mut p = ProjectPolicy::new();
+        p.set_mode(&never_cli, ProjectMode::Ignore, now()).unwrap();
+        p.set_mode(&armed_cli, ProjectMode::AutoUpload, now())
+            .unwrap();
+        p.arm_from_now(&armed_cli, now());
+        p.schema_version = "trace_commons.daemon_projects.v2".to_string();
+        p.save(&store).unwrap();
+
+        let loaded = ProjectPolicy::load(&store).unwrap();
+        let never_key = project_key_for(Some(&never_cli));
+        let armed_key = project_key_for(Some(&armed_cli));
+        assert_eq!(loaded.resolve(&never_key), ProjectMode::Ignore);
+        assert_eq!(loaded.schema_version, DAEMON_PROJECTS_SCHEMA);
+        if armed_key == armed_cli {
+            // Linux: the CLI's key already was the watcher's.
+            assert_eq!(loaded.resolve(&armed_key), ProjectMode::AutoUpload);
+            assert!(loaded.armed_from_now.contains_key(&armed_key));
+        } else {
+            assert_eq!(loaded.resolve(&armed_key), ProjectMode::NotifyOnly);
+            assert!(
+                loaded.armed_from_now.is_empty(),
+                "no hold left behind under a key nothing looks up"
+            );
+        }
+        for key in loaded.projects.keys() {
+            assert_eq!(
+                crate::daemon::project_key::normalize_project_key(key).as_deref(),
+                Some(key.as_str()),
+                "every stored key is the watcher's"
+            );
+        }
+    }
+
+    /// The same file under an "Automatic" override: a miss there reads as
+    /// `AutoUpload`, so the migration is what stands between a Never set
+    /// from the CLI and an unattended upload.
+    #[test]
+    fn a_v2_never_set_from_the_cli_holds_under_an_automatic_override() {
+        let (_d, store) = temp_store();
+        let dir = tempfile::tempdir().unwrap();
+        let never = dir.path().join("NeverRepo");
+        std::fs::create_dir(&never).unwrap();
+        let never_cli = std::fs::canonicalize(&never)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let mut p = ProjectPolicy::new();
+        p.set_mode(&never_cli, ProjectMode::Ignore, now()).unwrap();
+        p.contribution_override = Some(ContributionOverride {
+            mode: ProjectMode::AutoUpload,
+            since: now(),
+            arming: None,
+            granted_under: None,
+            claim: None,
+        });
+        p.schema_version = "trace_commons.daemon_projects.v2".to_string();
+        p.save(&store).unwrap();
+
+        let loaded = ProjectPolicy::load(&store).unwrap();
+        assert_eq!(
+            loaded.resolve(&project_key_for(Some(&never_cli))),
+            ProjectMode::Ignore
+        );
+    }
+
     #[test]
     fn the_unknown_bucket_is_never_rekeyed() {
         let mut p = ProjectPolicy::new();
@@ -3209,7 +3330,7 @@ mod tests {
         assert!(!p.clear_contribution_override(), "nothing left to clear");
     }
 
-    /// "Ask me" and "Never" leave nothing to go unattended, in any folder,
+    /// "Ask" and "Never" leave nothing to go unattended, in any folder,
     /// including one armed by its own mode.
     #[test]
     fn ask_and_never_overrides_stop_every_unattended_send() {
@@ -3520,30 +3641,94 @@ mod tests {
     }
 
     /// K5 reaches the override too: armed under words that claimed a model
-    /// scrubs, it is told once when the words in force narrow, and stays on.
+    /// scrubs, its recorded claim moves once when the words in force narrow,
+    /// and it stays on. No notice is raised.
     #[test]
-    fn an_auto_override_is_told_when_its_words_narrow() {
+    fn an_auto_override_has_its_claim_moved_when_its_words_narrow() {
         use super::super::arming_wording::ArmingClaim;
         let mut p = ProjectPolicy::new();
         let at = t("2026-10-02T00:00:00Z");
         override_to(&mut p, ProjectMode::AutoUpload, at);
         assert!(!p.sweep_override_claim(ArmingClaim::ModelScrubbed, at));
-        assert!(p.arming_rewordings.is_empty());
         assert!(p.sweep_override_claim(ArmingClaim::PatternsOnly, at));
-        assert_eq!(p.arming_rewordings.len(), 1);
-        assert_eq!(p.arming_rewordings[0].project_key, OVERRIDE_ARMING_KEY);
-        assert_eq!(p.arming_rewordings[0].was, ArmingClaim::ModelScrubbed);
+        assert!(p.arming_rewordings.is_empty());
         assert!(
             !p.sweep_override_claim(ArmingClaim::PatternsOnly, at),
-            "told once"
+            "moved once"
         );
         assert_eq!(
             p.contribution_override.as_ref().map(|o| o.mode),
             Some(ProjectMode::AutoUpload),
             "a rewording leaves it on"
         );
-        // Clearing it answers the notice.
         p.clear_contribution_override();
         assert!(p.arming_rewordings.is_empty());
+    }
+
+    /// Owner decision 2026-10-16: narrowing a folder's claim raises no
+    /// notice, but the recorded claim still moves to the one in force.
+    #[test]
+    fn narrowing_a_folder_claim_raises_no_notice_but_records_it() {
+        let mut p = armed_by_hand(&["/w/api"]);
+        let at = t("2026-10-16T00:00:00Z");
+        assert_eq!(p.arming_claim("/w/api"), ArmingClaim::ModelScrubbed);
+        let reworded = p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, at);
+        assert_eq!(reworded, vec!["api".to_string()]);
+        assert!(p.arming_rewordings.is_empty(), "{:?}", p.arming_rewordings);
+        assert_eq!(p.arming_claim("/w/api"), ArmingClaim::PatternsOnly);
+        assert_eq!(p.resolve("/w/api"), ProjectMode::AutoUpload, "still armed");
+    }
+
+    /// The same for the contribution override.
+    #[test]
+    fn narrowing_the_override_claim_raises_no_notice_but_records_it() {
+        let mut p = ProjectPolicy::new();
+        let at = t("2026-10-16T00:00:00Z");
+        override_to(&mut p, ProjectMode::AutoUpload, at);
+        assert!(p.sweep_override_claim(ArmingClaim::PatternsOnly, at));
+        assert!(p.arming_rewordings.is_empty(), "{:?}", p.arming_rewordings);
+        assert_eq!(
+            p.contribution_override.as_ref().and_then(|o| o.claim),
+            Some(ArmingClaim::PatternsOnly)
+        );
+        assert!(!p.sweep_override_claim(ArmingClaim::PatternsOnly, at));
+    }
+
+    /// The Scrub-check upgrade is still recorded once, with no notice.
+    #[test]
+    fn the_scrub_check_upgrade_raises_no_notice_but_is_recorded() {
+        let mut p = armed_by_hand(&["/w/api"]);
+        p.scrub_check_upgrade_recorded = false;
+        assert!(p.record_scrub_check_upgrade(true, t("2026-10-16T00:00:00Z")));
+        assert!(p.arming_rewordings.is_empty(), "{:?}", p.arming_rewordings);
+        assert!(p.scrub_check_upgrade_recorded);
+        assert!(!p.record_scrub_check_upgrade(true, t("2026-10-16T00:00:00Z")));
+    }
+
+    /// A notice persisted by an older build is dropped on load, so a stale
+    /// one is never reported.
+    #[test]
+    fn a_persisted_rewording_notice_is_cleared_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let mut p = armed_by_hand(&["/w/api"]);
+        p.arming_rewordings.push(ArmingRewordNotice {
+            id: 7,
+            reworded_at: t("2026-10-01T00:00:00Z"),
+            project_key: "/w/api".to_string(),
+            was: ArmingClaim::ModelScrubbed,
+            now: ArmingClaim::PatternsOnly,
+            scrub_check_defaulted: false,
+        });
+        p.save(&store).unwrap();
+        let loaded = ProjectPolicy::load(&store).unwrap();
+        assert!(loaded.arming_rewordings.is_empty());
+        loaded.save(&store).unwrap();
+        let body = store
+            .read_daemon_file(DAEMON_PROJECTS_FILE)
+            .unwrap()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["arming_rewordings"], serde_json::json!([]));
     }
 }

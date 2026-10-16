@@ -65,17 +65,28 @@ enum FoldersScreenLayout {
         case .lookupUnavailable?: return copy.folders.lookupUnavailable
         case .signInFailed?: return copy.folders.signInFailed
         // The core's line for the daemon's label, as the near.ai join view
-        // words it; a label it has no line for reads the enrol refusal.
+        // words it; a label it has no line for reads the enroll refusal.
         case .nearAIEnrollFailed(let label)?: return TCNearAiEnroll.line(label: label) ?? copy.folders.enrollRefused
         default: return nil
         }
     }
+
+    /// Cancel beside the spinning Continue, only while the near.ai browser
+    /// sign-in runs (`FirstRunRunner.signInWaiting`), in the core's
+    /// first-run Cancel. Tools offers the same.
+    static func signInCancel(
+        waiting: Bool, copy: FirstRunCopy, action: @escaping () -> Void
+    ) -> FirstRunFooter.Cancel? {
+        waiting ? FirstRunFooter.Cancel(title: copy.passkey.cancel, action: action) : nil
+    }
 }
 
 /// Ron's Folders screen (#1030 `tool-screens.tsx` W-2), Quick setup's tool
-/// list: one `ToolAnswerRow` per discovered store, and Continue once every
-/// row is answered, missing tools included. Continue commits `.leaveRoots`,
-/// which starts the daemon.
+/// list: the same tool cards and pinned "add your tool" tile as Custom's
+/// Tools (owner, 2026-10-08), under Quick's title and body. Continue once
+/// every row is answered (a missing tool is not asked) and no added folder
+/// waits on a question. Continue commits `.leaveRoots`, which starts the
+/// daemon.
 struct FoldersScreen: View {
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner
@@ -85,6 +96,7 @@ struct FoldersScreen: View {
 
     @State private var discovery: DiscoveredRows = .loading
     @State private var onboarding = TCOnboardingCopy.load()
+    @StateObject private var adding = AddToolModel()
 
     var body: some View {
         FirstRunFrame(
@@ -96,6 +108,9 @@ struct FoldersScreen: View {
                 title: copy.frame.continueButton,
                 isEnabled: canContinue,
                 busy: runner.isCommitting,
+                cancel: FoldersScreenLayout.signInCancel(waiting: runner.signInWaiting, copy: copy) {
+                    Task { await runner.cancelSignIn() }
+                },
                 action: { Task { await runner.commit(.leaveRoots) } }
             )
         ) {
@@ -107,48 +122,19 @@ struct FoldersScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         } content: {
-            Group {
-                switch discovery {
-                case .found(let candidates):
-                    Group {
-                        VStack(spacing: GlassTokens.Space.s4) {
-                            ForEach(candidates, id: \.source) { candidate in
-                                ToolAnswerRow(
-                                    copy: copy.folders,
-                                    choose: copy.frame.choose,
-                                    candidate: candidate,
-                                    meta: candidate.evidence(now: Date()),
-                                    state: $runner.state,
-                                    installURL: installURL(candidate.source)
-                                )
-                            }
-                        }
-                    }
-                    .disabled(!FoldersScreenLayout.rowsEnabled(isCommitting: runner.isCommitting))
-                case .failed:
-                    HStack(spacing: GlassTokens.Space.s4) {
-                        Text(discovery.failureLine(copy.folders) ?? "")
-                            .glassType(GlassTokens.TypeScale.body)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Button(copy.folders.retry) { refreshDiscovery() }
-                            .buttonStyle(GlassButtonStyle(.secondary))
-                    }
-                case .loading:
-                    HStack(spacing: GlassTokens.Space.s4) {
-                        GlassSpinner()
-                        Text(copy.folders.loading)
-                            .glassType(GlassTokens.TypeScale.body)
-                            .foregroundStyle(GlassColor.textSecondary)
-                    }
-                }
+            ToolList(
+                copy: copy, runner: runner, adding: adding, discovery: discovery, installURL: installURL,
+                retry: refreshDiscovery)
+        } pinned: {
+            if discovery.rows != nil {
+                AddToolTile(copy: copy, runner: runner, adding: adding)
             }
         }
         .task {
             if discovery == .loading { refreshDiscovery() }
         }
-        // A tool installed while the app was in the background shows when the
-        // person comes back, as the missing row's line promises.
+        // A tool installed while the app was in the background is asked
+        // about when the person comes back.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshDiscovery()
         }
@@ -162,9 +148,12 @@ struct FoldersScreen: View {
         if let rows = discovery.rows, !runner.isCommitting { runner.state.recordDiscovery(rows) }
     }
 
+    /// The Tools rule: every row answered, added folders included, and no
+    /// question open.
     private var canContinue: Bool {
-        guard let candidates = discovery.rows, !runner.isCommitting else { return false }
-        return FirstRunNavigation.canContinue(runner.state, candidates: candidates, requiredScope: nil)
+        ToolsScreenLayout.canContinue(
+            discovered: discovery.rows, state: runner.state, pending: adding.pending != nil,
+            isCommitting: runner.isCommitting)
     }
 
     private var title: some View {

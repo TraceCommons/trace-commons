@@ -6,6 +6,7 @@
 //! environment. Settings read from env would leave every upload refusing with
 //! `pii-filter-unavailable` under systemd while working perfectly by hand.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -88,6 +89,51 @@ const DEFAULT_CANARY_INTERVAL_SECS: u64 = 3600;
 /// it; a client is expected to stop offering an undo when
 /// `approve` reports no `hold_until`.
 const DEFAULT_APPROVAL_HOLD_SECS: u64 = 10;
+
+/// Whether in-app suggestions (suggestion cards and the panel row) are on for a
+/// settings file that never chose. DRAFT, owner decision 14 in the nudge
+/// decisions list.
+pub const DEFAULT_SUGGESTIONS_ENABLED: bool = true;
+
+/// Whether the settlement estimate ("Estimate what traces on this Mac are
+/// worth") is on for a settings file that never chose. On by default, per
+/// the settlement estimate design.
+pub const DEFAULT_SETTLEMENT_ESTIMATE_ENABLED: bool = true;
+
+/// "Notifications from Trace Commons", the master switch, for a settings
+/// file that never chose. DRAFT. Not an owner decision: on is today's
+/// behaviour, since the digest posts today with no switch at all.
+pub const DEFAULT_NOTIFICATIONS_ENABLED: bool = true;
+/// The menu-bar news mark (and the halo) for a settings file that never
+/// chose. DRAFT, owner decision 19 in the nudge decisions list ("the
+/// default (spec: on, with its own Settings switch)").
+pub const DEFAULT_MENU_BAR_MARK_ENABLED: bool = true;
+/// `notify.digest`. DRAFT. Not an owner decision: on is today's behaviour.
+pub const DEFAULT_NOTIFY_DIGEST: bool = true;
+/// `notify.idle_sessions` (N1) on a NEW install. DRAFT, owner decision 7.
+/// An existing install gets [`UPGRADE_NOTIFY_IDLE_SESSIONS`] instead.
+pub const DEFAULT_NOTIFY_IDLE_SESSIONS: bool = true;
+/// `notify.idle_sessions` on an install that existed before the kind did.
+/// DRAFT, owner decision 7 and constraint 12 (a new kind is never switched
+/// on silently for an existing install; it is offered, via
+/// `idle_offer_pending`).
+pub const UPGRADE_NOTIFY_IDLE_SESSIONS: bool = false;
+/// `notify.verdicts_landed` (N2) on a NEW install. DRAFT, owner decision 3.
+/// An existing install gets [`UPGRADE_NOTIFY_VERDICTS_LANDED`] instead.
+pub const DEFAULT_NOTIFY_VERDICTS_LANDED: bool = true;
+/// `notify.verdicts_landed` on an install that existed before the kind did.
+/// DRAFT, owner decision 3 and constraint 12 (offered via
+/// `verdicts_offer_pending`).
+pub const UPGRADE_NOTIFY_VERDICTS_LANDED: bool = false;
+/// `notify.weekly_recap` (N3). DRAFT, owner decision 1: U3 is held for the
+/// gamification ruling, and once ruled it is offered from the recap card.
+pub const DEFAULT_NOTIFY_WEEKLY_RECAP: bool = false;
+/// `notify.settlement_estimate` (N5). DRAFT, NEEDS APPROVAL: on by default,
+/// like the estimate switch it sits under.
+pub const DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE: bool = true;
+/// `notify.insights_tip` (N4). DRAFT, owner decision 25: Insights decides;
+/// the recommendation is off as a notification.
+pub const DEFAULT_NOTIFY_INSIGHTS_TIP: bool = false;
 
 /// How patient the watcher may be told to be, in seconds. Above the ceiling
 /// "done" never arrives in any practical session -- an unbounded value would
@@ -595,6 +641,126 @@ pub struct DaemonSettings {
     #[serde(default)]
     pub scrub_check_defaulted_on_upgrade: bool,
 
+    /// Whether Insights may read the proxy ledger's token counters (feed L):
+    /// `insights_glance`, the `tokens` on `inference_calls`, and the
+    /// `usage_changed` event. Off, nothing reads the ledger for Insights.
+    /// Starts as `insights::analytics_constants::LEDGER_FEED_DEFAULT_ON`:
+    /// on (owner decision D3, settled 2026-10-09). A settings file without
+    /// the key loads it on; a saved `false` stays off.
+    #[serde(default = "default_insights_ledger_feed")]
+    pub insights_ledger_feed: bool,
+
+    /// The context, in tokens, the user chose for the context tip. **No
+    /// default**: unset until the user sets it, so the tip reports a counter
+    /// against the user's own limit and never one this daemon picked. The tip
+    /// itself is held by owner decision D2, open. Serialized as `null` when
+    /// unset, so a shell can tell "unset" from an older daemon.
+    #[serde(default)]
+    pub insights_context_threshold: Option<u32>,
+
+    /// Whether the watcher runs the Insights counter pass (feed T) over the
+    /// sessions it finds, after quiescence, and `insights_week` answers from
+    /// its store. Off, the pass never runs and nothing is read for Insights.
+    /// Starts as `insights::analytics_constants::COUNTER_PASS_DEFAULT_ON`,
+    /// owner decision D4, open.
+    #[serde(default = "default_insights_counter_pass")]
+    pub insights_counter_pass: bool,
+
+    /// Whether the Insights window shows the weekly summary card on the first
+    /// open after a week closes. The card's only on/off: there is no switch
+    /// for it in the Insights store. It needs feed T, so it shows nothing
+    /// while `insights_counter_pass` is off. Starts as
+    /// `insights::analytics_constants::RECAP_CARD_DEFAULT_ON`, owner
+    /// decisions D1 and D4, open.
+    #[serde(default = "default_insights_recap_card_enabled")]
+    pub insights_recap_card_enabled: bool,
+
+    /// Nudge: whether the app may show in-app suggestions -- the cards on
+    /// Traces and History and the menu-bar panel row (`status.nudge`).
+    /// Defaults to [`DEFAULT_SUGGESTIONS_ENABLED`]; a settings file written
+    /// before this key existed loads with that default. It governs no
+    /// notification and no menu-bar mark: those have switches of their own.
+    #[serde(default = "default_suggestions_enabled")]
+    pub suggestions_enabled: bool,
+
+    /// The settlement estimate's switch: whether the daemon scans this
+    /// Mac's traces for an estimate and shows it anywhere. Defaults to
+    /// [`DEFAULT_SETTLEMENT_ESTIMATE_ENABLED`]; a settings file written
+    /// before this key existed loads with that default. Off stops any scan
+    /// in progress, hides every surface, and deletes the feature cache.
+    #[serde(default = "default_settlement_estimate_enabled")]
+    pub settlement_estimate_enabled: bool,
+
+    /// Whether missions are shown anywhere (owner decision 2026-10-16:
+    /// hidden for now). Off, the daemon does not fetch the activity-mission
+    /// catalogue, empties the one it holds, draws no `mission_fit` on
+    /// `status.nudge`, `list_pending` rows or the idle notification, and
+    /// refuses the mission IPC methods with `missions-disabled`. On restores
+    /// the behaviour that shipped before the switch existed, exactly.
+    ///
+    /// No shell offers a row for it: it is flipped only through
+    /// `set_settings`. `#[serde(default)]` so a settings file written before
+    /// this key existed loads with missions hidden.
+    #[serde(default)]
+    pub missions_enabled: bool,
+
+    /// Nudge: "Notifications from Trace Commons", the master switch over
+    /// the digest and every re-engagement kind. Defaults to
+    /// [`DEFAULT_NOTIFICATIONS_ENABLED`]. The OS permission stays a separate,
+    /// outer switch. Not [`Self::local_notifications`], which only says
+    /// whether the daemon itself renders.
+    ///
+    /// Stored and reported here; the digest and the arbiter consult it
+    /// (through [`Self::notify_snapshot`]) from their own slices.
+    #[serde(default = "default_notifications_enabled")]
+    pub notifications_enabled: bool,
+
+    /// Nudge: the menu-bar news mark and the idle halo. Defaults to
+    /// [`DEFAULT_MENU_BAR_MARK_ENABLED`]. Separate from every notification
+    /// switch: a person can keep the calm mark and silence notifications, or
+    /// the reverse.
+    #[serde(default = "default_menu_bar_mark_enabled")]
+    pub menu_bar_mark_enabled: bool,
+
+    /// The terminal app managed sessions open in, one of this platform's
+    /// (`managed::terminal::TerminalApp::offered`). A file written before
+    /// this key existed loads as the platform's default, the shipped
+    /// behaviour on macOS and Windows. A value this build does not know
+    /// loads as `Unrecognized`, which refuses a launch rather than becoming
+    /// the default (see `managed::terminal::TerminalSetting`).
+    #[serde(default)]
+    pub managed_terminal: crate::managed::terminal::TerminalSetting,
+
+    /// Nudge: one switch per notification kind. Each governs both the
+    /// sentence folded into a due digest and the standalone notification.
+    /// Revision 2's `digest_enabled` is `notify.digest`, and no
+    /// `digest_extras_enabled` exists.
+    ///
+    /// A file written before this existed is an existing install:
+    /// [`DaemonSettings::load`] gives it the upgrade values for the new kinds
+    /// and sets their one-time offers, per kind (see
+    /// [`DaemonSettings::apply_notify_upgrade`]). With no file at all the
+    /// install is new and gets `NotifyKinds::default()`, unless a project
+    /// policy or daemon state file an older build wrote says otherwise
+    /// (its `notify_kinds_known` unset); then it gets the upgrade too.
+    #[serde(
+        default = "NotifyKinds::upgraded",
+        deserialize_with = "notify_or_upgraded"
+    )]
+    pub notify: NotifyKinds,
+
+    /// Nudge: the one-time History-card offer for `notify.verdicts_landed`,
+    /// shown to an install that existed before the kind (constraint 12).
+    /// Cleared when the person answers the kind either way. Not written
+    /// while false, so a new install's file does not grow the key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub verdicts_offer_pending: bool,
+
+    /// Nudge: the one-time Traces-card offer for `notify.idle_sessions`,
+    /// as `verdicts_offer_pending` is for verdicts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub idle_offer_pending: bool,
+
     /// Legacy spellings, read on load and never written.
     ///
     /// Settings files written before source declarations existed carry
@@ -612,11 +778,142 @@ pub struct DaemonSettings {
     pub legacy_codex_root: Option<PathBuf>,
 }
 
+/// The per-kind notification switches (`notify` in the settings file).
+///
+/// Every named kind has its own serde default, so a `notify` object that
+/// lacks one still loads. Those defaults are the conservative ones (the
+/// digest on, every newer kind off); [`DaemonSettings::load`] then decides
+/// the upgrade per kind from the raw file, which is what sets the one-time
+/// offers. `NotifyKinds::default()` is the new-install answer.
+///
+/// `other` keeps every key this build does not know -- a later Insights
+/// kind written by a newer build -- so an older daemon loading and saving
+/// the file does not drop that setting. Unknown keys survive reads; a
+/// write naming one is refused (`apply_settings_object`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NotifyKinds {
+    /// N0, the digest.
+    #[serde(default = "default_notify_digest")]
+    pub digest: bool,
+    /// N1, idle sessions (U4).
+    #[serde(default)]
+    pub idle_sessions: bool,
+    /// N2, verdicts landed (U2).
+    #[serde(default)]
+    pub verdicts_landed: bool,
+    /// N3, the weekly recap (U3), held for the gamification ruling.
+    #[serde(default)]
+    pub weekly_recap: bool,
+    /// N4, Insights tips.
+    #[serde(default)]
+    pub insights_tip: bool,
+    /// N5, the settlement estimate.
+    #[serde(default = "default_notify_settlement_estimate")]
+    pub settlement_estimate: bool,
+    /// Kind keys this build does not know, kept verbatim.
+    #[serde(flatten)]
+    pub other: BTreeMap<String, serde_json::Value>,
+}
+
+impl Default for NotifyKinds {
+    /// A new install: owner decisions 3, 7, 1 and 25.
+    fn default() -> Self {
+        Self {
+            digest: DEFAULT_NOTIFY_DIGEST,
+            idle_sessions: DEFAULT_NOTIFY_IDLE_SESSIONS,
+            verdicts_landed: DEFAULT_NOTIFY_VERDICTS_LANDED,
+            weekly_recap: DEFAULT_NOTIFY_WEEKLY_RECAP,
+            insights_tip: DEFAULT_NOTIFY_INSIGHTS_TIP,
+            settlement_estimate: DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE,
+            other: BTreeMap::new(),
+        }
+    }
+}
+
+impl NotifyKinds {
+    /// An install that existed before these switches: the digest as today,
+    /// and no new kind on (constraint 12).
+    #[must_use]
+    pub fn upgraded() -> Self {
+        Self {
+            idle_sessions: UPGRADE_NOTIFY_IDLE_SESSIONS,
+            verdicts_landed: UPGRADE_NOTIFY_VERDICTS_LANDED,
+            ..Self::default()
+        }
+    }
+
+    /// The switch for a kind label (`digest` or an arbiter kind label), or
+    /// `None` for a label this build does not know.
+    #[must_use]
+    pub fn get(&self, label: &str) -> Option<bool> {
+        Some(*self.slot(label)?)
+    }
+
+    fn get_mut(&mut self, label: &str) -> Option<&mut bool> {
+        match label {
+            "digest" => Some(&mut self.digest),
+            "idle_sessions" => Some(&mut self.idle_sessions),
+            "verdicts_landed" => Some(&mut self.verdicts_landed),
+            "weekly_recap" => Some(&mut self.weekly_recap),
+            "insights_tip" => Some(&mut self.insights_tip),
+            "settlement_estimate" => Some(&mut self.settlement_estimate),
+            _ => None,
+        }
+    }
+
+    fn slot(&self, label: &str) -> Option<&bool> {
+        match label {
+            "digest" => Some(&self.digest),
+            "idle_sessions" => Some(&self.idle_sessions),
+            "verdicts_landed" => Some(&self.verdicts_landed),
+            "weekly_recap" => Some(&self.weekly_recap),
+            "insights_tip" => Some(&self.insights_tip),
+            "settlement_estimate" => Some(&self.settlement_estimate),
+            _ => None,
+        }
+    }
+}
+
+/// Every kind label `notify` and `set_notify_kind` accept: the digest, then
+/// each arbiter kind as `attention::Kind::label` spells it. One list, so the
+/// request, the settings key and the arbiter cannot disagree on a name.
+#[must_use]
+pub fn notify_kind_labels() -> Vec<&'static str> {
+    let mut labels = vec!["digest"];
+    labels.extend(super::attention::Kind::ALL.iter().map(|k| k.label()));
+    labels
+}
+
+/// `notify: null` reads as an absent `notify`: an upgrade, never an error
+/// that would refuse the whole settings file.
+fn notify_or_upgraded<'de, D>(deserializer: D) -> std::result::Result<NotifyKinds, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<NotifyKinds>::deserialize(deserializer)?.unwrap_or_else(NotifyKinds::upgraded))
+}
+
+fn default_notify_settlement_estimate() -> bool {
+    DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE
+}
+
+fn default_notify_digest() -> bool {
+    DEFAULT_NOTIFY_DIGEST
+}
+
+fn default_notifications_enabled() -> bool {
+    DEFAULT_NOTIFICATIONS_ENABLED
+}
+
+fn default_menu_bar_mark_enabled() -> bool {
+    DEFAULT_MENU_BAR_MARK_ENABLED
+}
+
 /// When the digest fires: the interval behaviour that shipped first, or once
 /// a day at a fixed local hour.
 ///
 /// K9 (#1118): the WYSIWYG design's Flow 2/3 alerts show a single evening
-/// digest ("1 session contributed from orchard-api. 6.0 credit pending."),
+/// digest ("1 trace contributed from orchard-api. 6.0 credit pending."),
 /// and the issue's open decision #5 asks whether that is a fixed evening
 /// time or the interval this daemon already had. Both stay supported --
 /// `Interval` is the default and unchanged, so no existing install's
@@ -985,6 +1282,31 @@ pub fn attested_bodies_dir_for(
     Some(token.parent()?.join(IRONWIRE_BODIES_SUBDIR))
 }
 
+fn default_insights_ledger_feed() -> bool {
+    crate::insights::analytics_constants::LEDGER_FEED_DEFAULT_ON
+}
+
+fn default_insights_counter_pass() -> bool {
+    crate::insights::analytics_constants::COUNTER_PASS_DEFAULT_ON
+}
+
+fn default_insights_recap_card_enabled() -> bool {
+    crate::insights::analytics_constants::RECAP_CARD_DEFAULT_ON
+}
+
+/// The smallest context threshold the tip accepts.
+pub const INSIGHTS_CONTEXT_THRESHOLD_MIN: u32 = 1_000;
+/// The largest context threshold the tip accepts.
+pub const INSIGHTS_CONTEXT_THRESHOLD_MAX: u32 = 10_000_000;
+
+fn default_suggestions_enabled() -> bool {
+    DEFAULT_SUGGESTIONS_ENABLED
+}
+
+fn default_settlement_estimate_enabled() -> bool {
+    DEFAULT_SETTLEMENT_ESTIMATE_ENABLED
+}
+
 fn default_approval_hold_secs() -> u64 {
     DEFAULT_APPROVAL_HOLD_SECS
 }
@@ -1031,8 +1353,21 @@ impl Default for DaemonSettings {
             token_capture_enabled: None,
             private_inference: false,
             private_inference_offer_seen: false,
+            insights_ledger_feed: default_insights_ledger_feed(),
+            insights_context_threshold: None,
+            insights_counter_pass: default_insights_counter_pass(),
+            insights_recap_card_enabled: default_insights_recap_card_enabled(),
             scrub_check: ScrubCheck::Automatic,
             scrub_check_defaulted_on_upgrade: false,
+            suggestions_enabled: DEFAULT_SUGGESTIONS_ENABLED,
+            settlement_estimate_enabled: DEFAULT_SETTLEMENT_ESTIMATE_ENABLED,
+            missions_enabled: false,
+            notifications_enabled: DEFAULT_NOTIFICATIONS_ENABLED,
+            menu_bar_mark_enabled: DEFAULT_MENU_BAR_MARK_ENABLED,
+            managed_terminal: Default::default(),
+            notify: NotifyKinds::default(),
+            verdicts_offer_pending: false,
+            idle_offer_pending: false,
             legacy_claude_root: None,
             legacy_codex_root: None,
         }
@@ -1065,14 +1400,47 @@ impl DaemonSettings {
             // Preserve that evidence even if a preferences writer runs before
             // daemon startup. New-format policies already know this default.
             let policy = super::policy::ProjectPolicy::load(store)?;
-            return Ok(Self {
+            let mut settings = Self {
                 scrub_check_defaulted_on_upgrade: !policy.scrub_check_upgrade_recorded
                     && policy.projects.iter().any(|(key, entry)| {
                         key != super::policy::UNKNOWN_PROJECT_KEY
                             && entry.mode == super::policy::ProjectMode::AutoUpload
                     }),
                 ..Self::default()
-            });
+            };
+            // A policy an older build wrote says the install predates the
+            // notification kinds, so they get the upgrade a file without
+            // them gets. Whatever its folders' modes, and whether or not
+            // that build already marked the Scrub check migration: an Ask
+            // me install that ran a build after #1162 has
+            // `scrub_check_upgrade_recorded` set and no settings file, and
+            // constraint 12 protects it as much as an armed one. An
+            // old-format policy holding a folder counts as well, as it did
+            // before the marker existed.
+            let old_format_with_a_folder = !policy.scrub_check_upgrade_recorded
+                && policy
+                    .projects
+                    .keys()
+                    .any(|key| key != super::policy::UNKNOWN_PROJECT_KEY);
+            // An install whose daemon only ever watched -- no folder
+            // answered, nothing contributed -- has no policy file, but its
+            // daemon wrote a state file while watching. One an older build
+            // wrote, or one this build cannot read, is the same evidence.
+            let state_from_an_older_build = store
+                .read_daemon_file(crate::config::DAEMON_STATE_FILE)?
+                .is_some_and(|body| {
+                    #[derive(serde::Deserialize)]
+                    struct Marker {
+                        #[serde(default)]
+                        notify_kinds_known: bool,
+                    }
+                    serde_json::from_slice::<Marker>(&body)
+                        .map_or(true, |marker| !marker.notify_kinds_known)
+                });
+            if !policy.notify_kinds_known || old_format_with_a_folder || state_from_an_older_build {
+                settings.apply_notify_upgrade(&serde_json::Value::Null);
+            }
+            return Ok(settings);
         };
         // The serde context stays for local stderr and journals, where the
         // parser's own "missing field `schema_version` at line 1 column 65"
@@ -1087,6 +1455,7 @@ impl DaemonSettings {
         settings.scrub_check_defaulted_on_upgrade |= stored
             .get("scrub_check")
             .is_none_or(serde_json::Value::is_null);
+        settings.apply_notify_upgrade(&stored);
         settings.absorb_legacy_roots();
         settings.validate_digest_schedule();
         for field in settings.clamp_numeric_ranges() {
@@ -1144,6 +1513,62 @@ impl DaemonSettings {
             &mut self.digest_interval_secs,
         );
         moved
+    }
+
+    /// Nudge A2, constraint 12: decide, per kind, whether this file
+    /// predates the `verdicts_landed` and `idle_sessions` switches, from the
+    /// raw file (serde has already filled defaults, so the struct cannot
+    /// tell). A kind the file does not hold is an upgrade: it is written
+    /// off and its one-time offer is set. A kind the file holds is a choice
+    /// and is kept, with no offer.
+    ///
+    /// Like `scrub_check_defaulted_on_upgrade`, this sets memory and the
+    /// next save persists it. Until then every load decides the same way, so
+    /// a restart in between changes nothing.
+    ///
+    /// A missing file reaches here, with a `Null` stored value, only when
+    /// the daemon's own files say the install is old: a policy file an
+    /// older build wrote (`ProjectPolicy::notify_kinds_known` unset),
+    /// whatever its folders and its Scrub check marker; an old-format
+    /// policy (`scrub_check_upgrade_recorded` unset) holding a folder; or,
+    /// for an install that only ever watched and so has no policy file, a
+    /// state file an older build wrote (`DaemonState::notify_kinds_known`
+    /// unset) or one this build cannot read. A missing file with no such
+    /// evidence is a new install and keeps `NotifyKinds::default()`. Daemon
+    /// startup saves the file whenever an offer is pending and no file
+    /// exists, so the decision is on disk from the first start.
+    fn apply_notify_upgrade(&mut self, stored: &serde_json::Value) {
+        let held = |kind: &str| {
+            stored
+                .get("notify")
+                .and_then(|n| n.get(kind))
+                .is_some_and(|v| !v.is_null())
+        };
+        if !held("verdicts_landed") {
+            self.notify.verdicts_landed = UPGRADE_NOTIFY_VERDICTS_LANDED;
+            self.verdicts_offer_pending = true;
+        }
+        if !held("idle_sessions") {
+            self.notify.idle_sessions = UPGRADE_NOTIFY_IDLE_SESSIONS;
+            self.idle_offer_pending = true;
+        }
+    }
+
+    /// The notification settings the arbiter (`attention::arbitrate`) reads,
+    /// built from this file in one place. `renderer` is whether a live
+    /// subscriber declared it can draw `reengage_due`, which is not a setting.
+    #[must_use]
+    pub fn notify_snapshot(&self, renderer: bool) -> super::attention::NotifySettings {
+        super::attention::NotifySettings {
+            master: self.notifications_enabled,
+            digest: self.notify.digest,
+            idle_sessions: self.notify.idle_sessions,
+            insights_tip: self.notify.insights_tip,
+            verdicts_landed: self.notify.verdicts_landed,
+            weekly_recap: self.notify.weekly_recap,
+            settlement_estimate: self.notify.settlement_estimate,
+            renderer,
+        }
     }
 
     /// Refuse an evening `hour` outside 0..=23 read from the file (a hand
@@ -1216,6 +1641,7 @@ impl DaemonSettings {
     /// work; see [`crate::source::SourceRoots::with_routing`].
     pub fn source_roots(&self, store: &ConfigStore) -> crate::source::SourceRoots {
         crate::source::SourceRoots::new()
+            .with_managed_opencode(store.dir().join(crate::managed::opencode::STAGING))
             .declare(
                 crate::source::SOURCE_CLAUDE_CODE,
                 self.claude_source.clone(),
@@ -1338,6 +1764,9 @@ pub const ERR_SETTINGS_UNKNOWN_FIELD: &str = "settings-unknown-field";
 /// the caller's value, and "wrong type" vs. "right type, wrong range" is
 /// not a distinction a fail-closed caller needs to branch on.
 pub const ERR_SETTINGS_INVALID_VALUE: &str = "settings-invalid-value";
+/// A `notify` object named a kind this build does not know. A fixed label:
+/// the caller's key never enters it.
+pub const ERR_SETTINGS_UNKNOWN_NOTIFY_KIND: &str = "settings-unknown-notify-kind";
 
 /// The `daemon-settings.json` key carrying one adapter's declaration.
 ///
@@ -1525,7 +1954,13 @@ pub fn apply_settings_object(
                 settings.opencode_source = parse_source_declaration(value)?;
             }
             "trajectory_source" => {
-                settings.trajectory_source = parse_source_declaration(value)?;
+                let declaration = parse_source_declaration(value)?;
+                if let Some(path) = declaration.as_ref().and_then(SourceDeclaration::path)
+                    && !names_a_trajectory_folder(path)
+                {
+                    return Err(ERR_SETTINGS_INVALID_VALUE);
+                }
+                settings.trajectory_source = declaration;
             }
             // Unlike the source roots above, `null` here means **off**, not
             // "never asked" -- see `IronWireDeclaration`'s doc comment for
@@ -1575,11 +2010,99 @@ pub fn apply_settings_object(
             // `null` is refused too: it is not a mode, and a caller meaning
             // "the default" says `automatic`. Accepting it would let a shell
             // that dropped the field clear a Manual choice by accident.
+            // Nudge: in-app suggestions on or off. Also reachable as the
+            // dedicated `set_suggestions_enabled` request, which writes
+            // through here. Either way the daemon publishes `status_changed`,
+            // because `status.nudge` reads it.
+            "suggestions_enabled" => {
+                settings.suggestions_enabled = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // The settlement estimate's switch. `set_settings` turns the
+            // scan and every surface off (deleting the feature cache) or
+            // back on (a full scan); see `daemon::settlement_estimate`.
+            "settlement_estimate_enabled" => {
+                settings.settlement_estimate_enabled =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // Missions on or off. No shell has a row for it; `set_settings`
+            // publishes `status_changed` on a change because `status.nudge`
+            // and `list_pending` carry `mission_fit` only while it is on.
+            "missions_enabled" => {
+                settings.missions_enabled = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // Nudge A2: the master notification switch and the news mark.
+            // Also reachable as `set_notifications_enabled` and
+            // `set_menu_bar_mark_enabled`, which write through here.
+            "notifications_enabled" => {
+                settings.notifications_enabled =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            "menu_bar_mark_enabled" => {
+                settings.menu_bar_mark_enabled =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // The terminal app managed sessions open in. One of this
+            // platform's fixed ids; anything else, `null` included, is refused,
+            // never read as an app name or a command. Also reachable as
+            // `set_managed_terminal`, which writes through here.
+            "managed_terminal" => {
+                settings.managed_terminal = value
+                    .as_str()
+                    .and_then(crate::managed::terminal::TerminalApp::parse)
+                    .ok_or(ERR_SETTINGS_INVALID_VALUE)?
+                    .into();
+            }
+            // A partial object of kind switches; see `apply_notify_object`.
+            // Also reachable as `set_notify_kind`.
+            "notify" => {
+                apply_notify_object(settings, value)?;
+            }
+            // The one-time offers. Answering a kind through `notify` clears
+            // its offer; these clear one without answering it (the macOS
+            // permission was denied, say).
+            "verdicts_offer_pending" => {
+                settings.verdicts_offer_pending =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            "idle_offer_pending" => {
+                settings.idle_offer_pending = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
             "scrub_check" => {
                 settings.scrub_check = value
                     .as_str()
                     .and_then(ScrubCheck::parse)
                     .ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // Insights feed L (owner decision D3, settled 2026-10-09). On by
+            // default; this is how a contributor turns it off.
+            "insights_ledger_feed" => {
+                settings.insights_ledger_feed =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // Insights feed T (owner decision D4, open). Off by default.
+            "insights_counter_pass" => {
+                settings.insights_counter_pass =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // The weekly summary card's only switch (owner decisions D1
+            // and D4, open). On by default; it needs feed T to show anything.
+            "insights_recap_card_enabled" => {
+                settings.insights_recap_card_enabled =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // The context tip's threshold: a number in range, or `null` to
+            // unset it. There is no default to fall back to.
+            "insights_context_threshold" => {
+                settings.insights_context_threshold = match value {
+                    serde_json::Value::Null => None,
+                    _ => Some(parse_ranged_u64(
+                        value,
+                        SettingRange::new(
+                            u64::from(INSIGHTS_CONTEXT_THRESHOLD_MIN),
+                            u64::from(INSIGHTS_CONTEXT_THRESHOLD_MAX),
+                        ),
+                    )? as u32),
+                };
             }
             _ => return Err(ERR_SETTINGS_UNKNOWN_FIELD),
         }
@@ -1587,6 +2110,43 @@ pub fn apply_settings_object(
         changed = true;
     }
     Ok(changed)
+}
+
+/// A partial `notify` object: `{kind: bool, ...}`. Every key must be one of
+/// [`notify_kind_labels`] (`ERR_SETTINGS_UNKNOWN_NOTIFY_KIND` otherwise) and
+/// every value a boolean (`ERR_SETTINGS_INVALID_VALUE`). The whole object is
+/// checked before anything is applied. Answering `verdicts_landed` or
+/// `idle_sessions`, either way, ends that kind's one-time offer: the person
+/// has said.
+///
+/// Kept outside the `SET-SETTINGS-KEYS` region on purpose: the doc sweep
+/// reads every quoted match arm there as a top-level key.
+fn apply_notify_object(
+    settings: &mut DaemonSettings,
+    value: &serde_json::Value,
+) -> std::result::Result<(), &'static str> {
+    let obj = value.as_object().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+    let mut answers = Vec::with_capacity(obj.len());
+    for (kind, on) in obj {
+        if settings.notify.get(kind).is_none() {
+            return Err(ERR_SETTINGS_UNKNOWN_NOTIFY_KIND);
+        }
+        answers.push((
+            kind.as_str(),
+            on.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?,
+        ));
+    }
+    for (kind, on) in answers {
+        if let Some(slot) = settings.notify.get_mut(kind) {
+            *slot = on;
+        }
+        match kind {
+            "verdicts_landed" => settings.verdicts_offer_pending = false,
+            "idle_sessions" => settings.idle_offer_pending = false,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// A `u64` field restricted to `range` (inclusive both ends). Every numeric
@@ -1735,6 +2295,17 @@ fn parse_source_declaration(
             .map_err(|_| ERR_SETTINGS_INVALID_VALUE),
         _ => Err(ERR_SETTINGS_INVALID_VALUE),
     }
+}
+
+/// Whether `path` names one particular folder a trajectory declaration may
+/// read. Only the trajectory arm is checked: the five tool declarations are
+/// read by adapters with their own layout, whereas a declared trajectory
+/// folder's every `.json`/`.jsonl` child is offered. So a relative path
+/// (resolved against `/` under launchd), the root, and the home directory
+/// itself are refused -- the trajectory adapter deliberately has no scope
+/// that means `$HOME`. An empty path is not absolute.
+fn names_a_trajectory_folder(path: &std::path::Path) -> bool {
+    path.is_absolute() && path.parent().is_some() && path != crate::source::home_dir()
 }
 
 /// `{"mode":"interval"}` or `{"mode":"evening","hour":0..=23}`. An `hour`
@@ -2333,6 +2904,388 @@ mod tests {
         );
     }
 
+    /// Nudge S3, owner decision 14: in-app suggestions are on unless the
+    /// person turns them off, including for a settings file written before
+    /// the switch existed. `set_settings` takes a boolean and nothing else.
+    #[test]
+    fn suggestions_default_on_and_take_only_a_boolean() {
+        assert!(DaemonSettings::default().suggestions_enabled);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(v["suggestions_enabled"], true);
+        v.as_object_mut().unwrap().remove("suggestions_enabled");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(settings.suggestions_enabled, "an absent switch is on");
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"suggestions_enabled": false})),
+            Ok(true)
+        );
+        assert!(!s.suggestions_enabled);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"suggestions_enabled": "on"})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(!s.suggestions_enabled, "a refused value changes nothing");
+    }
+
+    /// Missions are hidden unless turned on through `set_settings`, including
+    /// for a settings file written before the switch existed. The switch
+    /// takes a boolean and nothing else.
+    #[test]
+    fn missions_default_off_and_take_only_a_boolean() {
+        assert!(!DaemonSettings::default().missions_enabled);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(v["missions_enabled"], false);
+        v.as_object_mut().unwrap().remove("missions_enabled");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(!settings.missions_enabled, "an absent switch is off");
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"missions_enabled": true})),
+            Ok(true)
+        );
+        assert!(s.missions_enabled);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"missions_enabled": "off"})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(s.missions_enabled, "a refused value changes nothing");
+        let round: DaemonSettings =
+            serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+        assert!(
+            round.missions_enabled,
+            "the switch survives a save and load"
+        );
+    }
+
+    /// The settlement estimate is on unless the person turns it off,
+    /// including for a settings file written before the switch existed, and
+    /// `set_settings` takes a boolean and nothing else. The change persists.
+    #[test]
+    fn settings_round_trip_the_estimate_switch() {
+        assert!(DaemonSettings::default().settlement_estimate_enabled);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(v["settlement_estimate_enabled"], true);
+        v.as_object_mut()
+            .unwrap()
+            .remove("settlement_estimate_enabled");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(
+            settings.settlement_estimate_enabled,
+            "an absent switch is on"
+        );
+
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"settlement_estimate_enabled": false})
+            ),
+            Ok(true)
+        );
+        assert!(!s.settlement_estimate_enabled);
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"settlement_estimate_enabled": "off"})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(
+            !s.settlement_estimate_enabled,
+            "a refused value changes nothing"
+        );
+        s.save(&store).unwrap();
+        assert!(
+            !DaemonSettings::load(&store)
+                .unwrap()
+                .settlement_estimate_enabled,
+            "off persists"
+        );
+    }
+
+    /// Nudge A2: a new install (no settings file) gets the decision-3 and
+    /// decision-7 defaults, the master and mark on, and no one-time offer.
+    #[test]
+    fn a_new_install_gets_the_new_install_notification_defaults() {
+        let (_d, store) = temp_store();
+        let s = DaemonSettings::load(&store).expect("no file loads defaults");
+        assert_eq!(s.notifications_enabled, DEFAULT_NOTIFICATIONS_ENABLED);
+        assert_eq!(s.menu_bar_mark_enabled, DEFAULT_MENU_BAR_MARK_ENABLED);
+        assert!(s.notifications_enabled && s.menu_bar_mark_enabled);
+        assert!(s.notify.digest);
+        assert_eq!(s.notify.idle_sessions, DEFAULT_NOTIFY_IDLE_SESSIONS);
+        assert_eq!(s.notify.verdicts_landed, DEFAULT_NOTIFY_VERDICTS_LANDED);
+        assert_eq!(s.notify.weekly_recap, DEFAULT_NOTIFY_WEEKLY_RECAP);
+        assert_eq!(s.notify.insights_tip, DEFAULT_NOTIFY_INSIGHTS_TIP);
+        assert!(!s.verdicts_offer_pending && !s.idle_offer_pending);
+        assert_eq!(s, DaemonSettings::default());
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(
+            v.get("verdicts_offer_pending").is_none() && v.get("idle_offer_pending").is_none(),
+            "an install with no offer writes no offer keys: {v}"
+        );
+    }
+
+    /// Nudge A2, constraint 12: an existing settings file written before
+    /// the notification kinds existed loads with the two new kinds off and
+    /// their one-time offers pending -- and the answer survives a save, so
+    /// a restart neither re-derives it differently nor turns a kind on.
+    #[test]
+    fn an_upgraded_settings_file_gets_the_new_kinds_off_and_both_offers() {
+        for written in [
+            serde_json::json!({}),
+            {
+                let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+                let o = v.as_object_mut().unwrap();
+                for key in [
+                    "notify",
+                    "notifications_enabled",
+                    "menu_bar_mark_enabled",
+                    "verdicts_offer_pending",
+                    "idle_offer_pending",
+                ] {
+                    o.remove(key);
+                }
+                v
+            },
+            serde_json::json!({"notify": null}),
+        ] {
+            let (_d, store) = temp_store();
+            let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+            for (k, val) in written.as_object().unwrap() {
+                v[k] = val.clone();
+            }
+            for key in ["notify", "verdicts_offer_pending", "idle_offer_pending"] {
+                if written.get(key).is_none() {
+                    v.as_object_mut().unwrap().remove(key);
+                }
+            }
+            store
+                .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+                .unwrap();
+            let loaded = DaemonSettings::load(&store).expect("an older file loads");
+            assert!(loaded.notify.digest, "the digest is today's behaviour");
+            assert_eq!(loaded.notify.idle_sessions, UPGRADE_NOTIFY_IDLE_SESSIONS);
+            assert_eq!(
+                loaded.notify.verdicts_landed,
+                UPGRADE_NOTIFY_VERDICTS_LANDED
+            );
+            assert!(!loaded.notify.idle_sessions && !loaded.notify.verdicts_landed);
+            assert!(loaded.verdicts_offer_pending && loaded.idle_offer_pending);
+            assert!(loaded.notifications_enabled && loaded.menu_bar_mark_enabled);
+
+            loaded.save(&store).unwrap();
+            let reloaded = DaemonSettings::load(&store).unwrap();
+            assert_eq!(reloaded, loaded, "a save keeps the upgrade answer");
+        }
+    }
+
+    /// Per kind, not per object: a file whose `notify` already holds one of
+    /// the two kinds upgrades only the other, and keeps what was chosen.
+    #[test]
+    fn an_upgrade_is_decided_per_kind() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v["notify"] = serde_json::json!({"digest": false, "verdicts_landed": true});
+        v.as_object_mut().unwrap().remove("verdicts_offer_pending");
+        v.as_object_mut().unwrap().remove("idle_offer_pending");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert!(!loaded.notify.digest, "a stored choice is kept");
+        assert!(loaded.notify.verdicts_landed, "a stored choice is kept");
+        assert!(!loaded.verdicts_offer_pending, "nothing to offer");
+        assert!(!loaded.notify.idle_sessions);
+        assert!(loaded.idle_offer_pending);
+    }
+
+    /// Unknown kind keys -- Insights' later kinds, written by a newer build --
+    /// survive a load and a save by this one.
+    #[test]
+    fn unknown_notify_kind_keys_survive_a_round_trip() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v["notify"]["future_kind"] = serde_json::json!(true);
+        v["notify"]["future_shape"] = serde_json::json!({"cadence": "weekly"});
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        loaded.save(&store).unwrap();
+        let body = store
+            .read_daemon_file(DAEMON_SETTINGS_FILE)
+            .unwrap()
+            .unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(saved["notify"]["future_kind"], true);
+        assert_eq!(saved["notify"]["future_shape"]["cadence"], "weekly");
+        // And through `set_settings`, which edits a clone of the same struct.
+        let mut s = loaded.clone();
+        apply_settings_object(&mut s, &serde_json::json!({"notify": {"digest": false}})).unwrap();
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["notify"]["future_kind"],
+            true
+        );
+    }
+
+    /// The managed-session terminal takes one of this platform's ids and
+    /// nothing else; a stored value this build does not know loads as
+    /// unrecognized and stays so across a save, never becoming the default.
+    #[test]
+    fn the_managed_terminal_takes_only_this_platforms_ids() {
+        use crate::managed::terminal::{TerminalApp, TerminalSetting};
+        let mut s = DaemonSettings::default();
+        assert_eq!(s.managed_terminal, TerminalSetting::default());
+        for app in TerminalApp::offered().iter().rev() {
+            assert_eq!(
+                apply_settings_object(&mut s, &serde_json::json!({"managed_terminal": app.id()})),
+                Ok(true)
+            );
+            assert_eq!(s.managed_terminal, TerminalSetting::from(*app));
+        }
+        let mut bad = vec![
+            serde_json::json!({"managed_terminal": "Ghostty"}),
+            serde_json::json!({"managed_terminal": "unrecognized"}),
+            serde_json::json!({"managed_terminal": "/Applications/Warp.app"}),
+            serde_json::json!({"managed_terminal": "open -a Calculator"}),
+            serde_json::json!({"managed_terminal": null}),
+            serde_json::json!({"managed_terminal": 1}),
+        ];
+        // Another platform's app is refused here too.
+        bad.extend(
+            TerminalApp::ALL
+                .into_iter()
+                .filter(|app| !TerminalApp::offered().contains(app))
+                .map(|app| serde_json::json!({"managed_terminal": app.id()})),
+        );
+        for bad in bad {
+            assert_eq!(
+                apply_settings_object(&mut s.clone(), &bad),
+                Err(ERR_SETTINGS_INVALID_VALUE),
+                "{bad}"
+            );
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut stored = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(
+            stored["managed_terminal"],
+            TerminalSetting::default().app().unwrap().id()
+        );
+        stored["managed_terminal"] = serde_json::json!("wezterm");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&stored).unwrap())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.managed_terminal, TerminalSetting::Unrecognized);
+        loaded.save(&store).unwrap();
+        assert_eq!(
+            DaemonSettings::load(&store).unwrap().managed_terminal,
+            TerminalSetting::Unrecognized
+        );
+    }
+
+    /// `set_settings` takes the master, the mark, partial `notify` objects
+    /// and the two offer markers, booleans only. An unknown kind is refused
+    /// on write (it survives reads, not writes), and a refused object changes
+    /// nothing. Answering a kind clears its one-time offer.
+    #[test]
+    fn notification_settings_take_only_booleans_and_known_kinds() {
+        let mut s = DaemonSettings {
+            verdicts_offer_pending: true,
+            idle_offer_pending: true,
+            ..DaemonSettings::default()
+        };
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"notifications_enabled": false, "menu_bar_mark_enabled": false})
+            ),
+            Ok(true)
+        );
+        assert!(!s.notifications_enabled && !s.menu_bar_mark_enabled);
+
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"notify": {"verdicts_landed": false, "weekly_recap": true}})
+            ),
+            Ok(true)
+        );
+        assert!(!s.notify.verdicts_landed && s.notify.weekly_recap);
+        assert!(
+            !s.verdicts_offer_pending,
+            "answering the kind ends its offer"
+        );
+        assert!(s.idle_offer_pending, "the other offer stays");
+
+        let before = s.clone();
+        for bad in [
+            serde_json::json!({"notifications_enabled": "yes"}),
+            serde_json::json!({"menu_bar_mark_enabled": 1}),
+            serde_json::json!({"notify": true}),
+            serde_json::json!({"notify": {"digest": "off"}}),
+            serde_json::json!({"notify": {"idle_sessions": true, "digest": null}}),
+            serde_json::json!({"idle_offer_pending": "no"}),
+        ] {
+            assert_eq!(
+                apply_settings_object(&mut s.clone(), &bad),
+                Err(ERR_SETTINGS_INVALID_VALUE),
+                "{bad}"
+            );
+        }
+        let mut probe = s.clone();
+        assert_eq!(
+            apply_settings_object(
+                &mut probe,
+                &serde_json::json!({"notify": {"future_kind": true}})
+            ),
+            Err(ERR_SETTINGS_UNKNOWN_NOTIFY_KIND)
+        );
+        assert_eq!(probe, before, "a refused kind changes nothing");
+
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"idle_offer_pending": false})),
+            Ok(true)
+        );
+        assert!(!s.idle_offer_pending, "a declined offer can be cleared");
+    }
+
+    /// The arbiter's input is built here, from these settings, rather than
+    /// by hand at each caller.
+    #[test]
+    fn the_notify_snapshot_mirrors_the_settings() {
+        let mut s = DaemonSettings::default();
+        s.notify.weekly_recap = true;
+        s.notify.idle_sessions = false;
+        s.notifications_enabled = false;
+        let snap = s.notify_snapshot(true);
+        assert!(!snap.master && snap.digest && snap.renderer);
+        assert!(!snap.idle_sessions && snap.weekly_recap);
+        assert_eq!(snap.verdicts_landed, s.notify.verdicts_landed);
+        assert_eq!(snap.insights_tip, s.notify.insights_tip);
+        assert!(!s.notify_snapshot(false).renderer);
+    }
+
+    /// Every kind label `set_notify_kind` accepts: the digest plus each
+    /// arbiter kind, spelled as the arbiter spells it.
+    #[test]
+    fn notify_kind_labels_are_the_digest_plus_every_arbiter_kind() {
+        let mut expected = vec!["digest"];
+        expected.extend(super::super::attention::Kind::ALL.iter().map(|k| k.label()));
+        assert_eq!(notify_kind_labels(), expected);
+        for label in notify_kind_labels() {
+            assert!(NotifyKinds::default().get(label).is_some(), "{label}");
+        }
+        assert!(NotifyKinds::default().get("future_kind").is_none());
+    }
+
     /// The offer marker is written by *either* answer, and a settings file
     /// written before it existed loads unanswered.
     ///
@@ -2365,6 +3318,172 @@ mod tests {
             !s.private_inference,
             "recording that the offer was answered must never start anything"
         );
+    }
+
+    /// The Insights ledger feed (owner decision D3, settled 2026-10-09)
+    /// starts on, a settings file without the key (one written by any build
+    /// before this one) loads it on, an explicit `false` stays off, and it
+    /// takes a boolean only.
+    #[test]
+    fn the_insights_ledger_feed_starts_on_and_takes_a_boolean() {
+        assert!(DaemonSettings::default().insights_ledger_feed);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("insights_ledger_feed");
+        let settings: DaemonSettings = serde_json::from_value(v.clone()).expect("settings load");
+        assert!(settings.insights_ledger_feed, "absent reads as the default");
+        v.as_object_mut()
+            .unwrap()
+            .insert("insights_ledger_feed".into(), serde_json::json!(false));
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(!settings.insights_ledger_feed, "a saved off stays off");
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"insights_ledger_feed": false})),
+            Ok(true)
+        );
+        assert!(!s.insights_ledger_feed);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"insights_ledger_feed": "on"})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(!s.insights_ledger_feed);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"insights_ledger_feed": true})),
+            Ok(true)
+        );
+        assert!(s.insights_ledger_feed);
+    }
+
+    /// The Insights counter pass (feed T, owner decision D4, open) starts
+    /// off, an older settings file loads it off, and it takes a boolean only.
+    #[test]
+    fn the_insights_counter_pass_starts_off_and_takes_a_boolean() {
+        assert!(!DaemonSettings::default().insights_counter_pass);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(
+            v.get("insights_counter_pass"),
+            Some(&serde_json::json!(false))
+        );
+        v.as_object_mut().unwrap().remove("insights_counter_pass");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(!settings.insights_counter_pass);
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"insights_counter_pass": true})),
+            Ok(true)
+        );
+        assert!(s.insights_counter_pass);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"insights_counter_pass": 1})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(s.insights_counter_pass);
+    }
+
+    /// The weekly summary card starts as its constant says (owner decisions
+    /// D1 and D4, open), an older settings file loads it the same way, and it
+    /// takes a boolean only.
+    #[test]
+    fn the_insights_recap_card_follows_its_default_and_takes_a_boolean() {
+        use crate::insights::analytics_constants::RECAP_CARD_DEFAULT_ON;
+        assert_eq!(
+            DaemonSettings::default().insights_recap_card_enabled,
+            RECAP_CARD_DEFAULT_ON
+        );
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(
+            v.get("insights_recap_card_enabled"),
+            Some(&serde_json::json!(RECAP_CARD_DEFAULT_ON))
+        );
+        v.as_object_mut()
+            .unwrap()
+            .remove("insights_recap_card_enabled");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert_eq!(settings.insights_recap_card_enabled, RECAP_CARD_DEFAULT_ON);
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"insights_recap_card_enabled": false})
+            ),
+            Ok(true)
+        );
+        assert!(!s.insights_recap_card_enabled);
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"insights_recap_card_enabled": "on"})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(!s.insights_recap_card_enabled);
+        // "Hide" is undone by the Settings switch.
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"insights_recap_card_enabled": true})
+            ),
+            Ok(true)
+        );
+        assert!(s.insights_recap_card_enabled);
+    }
+
+    /// The context threshold has no default; it is a number in range or
+    /// `null`, and `get_settings` reports it either way.
+    #[test]
+    fn the_insights_context_threshold_has_no_default() {
+        let defaults = DaemonSettings::default();
+        assert_eq!(defaults.insights_context_threshold, None);
+        let v = serde_json::to_value(&defaults).unwrap();
+        assert_eq!(
+            v.get("insights_context_threshold"),
+            Some(&serde_json::Value::Null),
+            "unset is reported as null, not left out"
+        );
+        let mut older = v.clone();
+        older
+            .as_object_mut()
+            .unwrap()
+            .remove("insights_context_threshold");
+        let settings: DaemonSettings = serde_json::from_value(older).expect("settings load");
+        assert_eq!(settings.insights_context_threshold, None);
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"insights_context_threshold": 200_000})
+            ),
+            Ok(true)
+        );
+        assert_eq!(s.insights_context_threshold, Some(200_000));
+        for bad in [
+            serde_json::json!(0),
+            serde_json::json!(INSIGHTS_CONTEXT_THRESHOLD_MIN - 1),
+            serde_json::json!(u64::from(INSIGHTS_CONTEXT_THRESHOLD_MAX) + 1),
+            serde_json::json!("200000"),
+            serde_json::json!(-5),
+        ] {
+            assert_eq!(
+                apply_settings_object(
+                    &mut s,
+                    &serde_json::json!({"insights_context_threshold": bad})
+                ),
+                Err(ERR_SETTINGS_INVALID_VALUE)
+            );
+            assert_eq!(s.insights_context_threshold, Some(200_000));
+        }
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"insights_context_threshold": null})
+            ),
+            Ok(true)
+        );
+        assert_eq!(s.insights_context_threshold, None);
     }
 
     /// The marker is a boolean and nothing else, refused by the same label
@@ -2497,6 +3616,181 @@ mod tests {
                 .unwrap()
                 .scrub_check_defaulted_on_upgrade
         );
+    }
+
+    /// Constraint 12 for an install old enough to have armed (or answered)
+    /// folders without ever writing settings: the new kinds load off with
+    /// their offers pending, as a file without them does, whatever mode the
+    /// folders are in.
+    #[test]
+    fn an_old_policy_without_settings_gets_the_notify_upgrade() {
+        use crate::daemon::policy::{ProjectMode, ProjectPolicy};
+        for mode in [
+            ProjectMode::AutoUpload,
+            ProjectMode::NotifyOnly,
+            ProjectMode::Ignore,
+        ] {
+            let (_d, store) = temp_store();
+            let mut policy = ProjectPolicy::new();
+            policy
+                .set_mode("/tmp/legacy", mode, chrono::Utc::now())
+                .unwrap();
+            policy.scrub_check_upgrade_recorded = false;
+            policy.save(&store).unwrap();
+            let loaded = DaemonSettings::load(&store).unwrap();
+            assert_eq!(loaded.notify, NotifyKinds::upgraded(), "{mode:?}");
+            assert!(
+                loaded.verdicts_offer_pending && loaded.idle_offer_pending,
+                "{mode:?}"
+            );
+            loaded.save(&store).unwrap();
+            let reloaded = DaemonSettings::load(&store).unwrap();
+            assert_eq!(reloaded.notify, NotifyKinds::upgraded(), "{mode:?}");
+            assert!(
+                reloaded.verdicts_offer_pending && reloaded.idle_offer_pending,
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// A policy file as a build from before the notification kinds wrote
+    /// it: the same JSON, without the key that says this build created it.
+    fn save_as_an_older_build(
+        policy: &crate::daemon::policy::ProjectPolicy,
+        store: &crate::config::ConfigStore,
+    ) {
+        let mut value = serde_json::to_value(policy).unwrap();
+        value.as_object_mut().unwrap().remove("notify_kinds_known");
+        store
+            .write_daemon_file(
+                crate::config::DAEMON_PROJECTS_FILE,
+                value.to_string().as_bytes(),
+            )
+            .unwrap();
+    }
+
+    /// Kristi's #1300 review, finding 2: an install that ran a build after
+    /// #1162 without ever writing settings has its policy marked migrated
+    /// (`scrub_check_upgrade_recorded` set) by that build's startup. It is
+    /// still an existing install, whatever its folders' modes, and gets the
+    /// upgrade and both offers rather than the new kinds switched on.
+    #[test]
+    fn a_migrated_policy_from_an_older_build_without_settings_gets_the_notify_upgrade() {
+        use crate::daemon::policy::{ProjectMode, ProjectPolicy};
+        for mode in [ProjectMode::NotifyOnly, ProjectMode::Ignore] {
+            let (_d, store) = temp_store();
+            let mut policy = ProjectPolicy::new();
+            policy
+                .set_mode("/tmp/legacy-ask", mode, chrono::Utc::now())
+                .unwrap();
+            assert!(policy.scrub_check_upgrade_recorded);
+            save_as_an_older_build(&policy, &store);
+            let loaded = DaemonSettings::load(&store).unwrap();
+            assert_eq!(loaded.notify, NotifyKinds::upgraded(), "{mode:?}");
+            assert!(
+                loaded.verdicts_offer_pending && loaded.idle_offer_pending,
+                "{mode:?}"
+            );
+            assert!(!loaded.scrub_check_defaulted_on_upgrade, "{mode:?}");
+        }
+    }
+
+    /// An older build's policy file with no folder in it still says the
+    /// install predates the kinds.
+    #[test]
+    fn an_older_builds_policy_without_folders_gets_the_notify_upgrade() {
+        use crate::daemon::policy::ProjectPolicy;
+        let (_d, store) = temp_store();
+        save_as_an_older_build(&ProjectPolicy::new(), &store);
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.notify, NotifyKinds::upgraded());
+        assert!(loaded.verdicts_offer_pending && loaded.idle_offer_pending);
+    }
+
+    /// A daemon state file as a build from before the notification kinds
+    /// wrote it: the same JSON, without the key that says this build
+    /// created it.
+    fn save_state_as_an_older_build(store: &crate::config::ConfigStore) {
+        let mut value = serde_json::to_value(crate::daemon::state::DaemonState::new()).unwrap();
+        value.as_object_mut().unwrap().remove("notify_kinds_known");
+        store
+            .write_daemon_file(
+                crate::config::DAEMON_STATE_FILE,
+                value.to_string().as_bytes(),
+            )
+            .unwrap();
+    }
+
+    /// Kristi's #1300 review, finding 2 ("policy/queue evidence"): an older
+    /// install that only ever watched -- no folder answered, nothing
+    /// contributed -- has no policy file, so the policy marker cannot speak
+    /// for it. Unlisted folders resolve to Ask, so its queue still holds
+    /// idle candidates. The state file its daemon wrote while watching is
+    /// the evidence: it gets the upgrade and both offers.
+    #[test]
+    fn a_watch_only_install_from_an_older_build_gets_the_notify_upgrade() {
+        let (_d, store) = temp_store();
+        save_state_as_an_older_build(&store);
+        assert!(
+            store
+                .read_daemon_file(crate::config::DAEMON_PROJECTS_FILE)
+                .unwrap()
+                .is_none()
+        );
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.notify, NotifyKinds::upgraded());
+        assert!(loaded.verdicts_offer_pending && loaded.idle_offer_pending);
+        assert!(!loaded.scrub_check_defaulted_on_upgrade);
+    }
+
+    /// A state file this build cannot read says nothing about its writer,
+    /// so it is read as an older build's: offers, never kinds switched on
+    /// unasked.
+    #[test]
+    fn an_unreadable_state_file_without_settings_gets_the_notify_upgrade() {
+        let (_d, store) = temp_store();
+        store
+            .write_daemon_file(crate::config::DAEMON_STATE_FILE, b"{not json")
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.notify, NotifyKinds::upgraded());
+        assert!(loaded.verdicts_offer_pending && loaded.idle_offer_pending);
+    }
+
+    /// The state file a new install's own daemon writes is not evidence of
+    /// an older install.
+    #[test]
+    fn a_new_installs_own_state_file_keeps_the_notify_defaults() {
+        let (_d, store) = temp_store();
+        crate::daemon::state::DaemonState::new()
+            .save(&store)
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.notify, NotifyKinds::default());
+        assert!(!loaded.verdicts_offer_pending && !loaded.idle_offer_pending);
+    }
+
+    /// A new install -- no settings file, and no policy or only one this
+    /// build's own first run wrote -- keeps the new-install defaults.
+    #[test]
+    fn a_new_install_without_settings_keeps_the_notify_defaults() {
+        use crate::daemon::policy::{ProjectMode, ProjectPolicy};
+        let (_d, store) = temp_store();
+        let fresh = DaemonSettings::load(&store).unwrap();
+        assert_eq!(fresh.notify, NotifyKinds::default());
+        assert!(!fresh.verdicts_offer_pending && !fresh.idle_offer_pending);
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/tmp/new-armed",
+                ProjectMode::AutoUpload,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        policy.save(&store).unwrap();
+        let armed = DaemonSettings::load(&store).unwrap();
+        assert_eq!(armed.notify, NotifyKinds::default());
+        assert!(!armed.verdicts_offer_pending && !armed.idle_offer_pending);
     }
 
     #[test]
@@ -3032,6 +4326,43 @@ mod tests {
             Ok(true)
         );
         assert!(!reads_the_folder(&settings));
+    }
+
+    /// A declared trajectory folder is read whole on every poll, so a path
+    /// that names no particular folder is refused: a relative one (resolved
+    /// against `/` under launchd), an empty one, the root, and the home
+    /// directory itself -- the trajectory adapter has deliberately no scope
+    /// that means `$HOME`. An absolute folder below them is accepted.
+    #[test]
+    fn a_trajectory_folder_that_names_no_particular_folder_is_refused() {
+        let mut settings = DaemonSettings::default();
+        let home = crate::source::home_dir();
+        for path in [
+            serde_json::json!(""),
+            serde_json::json!("exports"),
+            serde_json::json!("./exports"),
+            serde_json::json!("/"),
+            serde_json::json!(home),
+            serde_json::json!(format!("{}/", home.display())),
+        ] {
+            assert_eq!(
+                apply_settings_object(
+                    &mut settings,
+                    &serde_json::json!({"trajectory_source": {"mode": "watch", "path": path}})
+                ),
+                Err(ERR_SETTINGS_INVALID_VALUE),
+                "{path}"
+            );
+            assert_eq!(settings.trajectory_source, None, "{path}");
+        }
+        let exports = tempfile::tempdir().unwrap();
+        assert_eq!(
+            apply_settings_object(
+                &mut settings,
+                &serde_json::json!({"trajectory_source": {"mode": "watch", "path": exports.path()}})
+            ),
+            Ok(true)
+        );
     }
 
     /// The trajectory folder is offered, never required: an absent one reads

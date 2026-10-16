@@ -97,3 +97,26 @@ test("a submission held on the privacy backstop can be withdrawn", () => {
     assert.equal(canWithdrawStatus(status), false, status);
   }
 });
+
+test("a processing receipt reads and withdraws as waiting to be scored", () => {
+  // `processing` is the versioned pipeline's receipt status: uploaded, no
+  // verdict reported. It is `submitted` in every respect a row shows.
+  assert.equal(historyStatusLabel("processing"), null);
+  assert.equal(
+    historyStatusLabel("processing", sharedHistoryCopy),
+    "Waiting to be scored",
+  );
+  assert.equal(canWithdrawStatus("processing"), true);
+});
+
+test("processing uses the submitted bucket's shared label", () => {
+  const renamed = {
+    ...sharedHistoryCopy,
+    status_labels: {
+      ...sharedHistoryCopy.status_labels,
+      submitted: "Awaiting scoring",
+      processing: "Receipt only",
+    },
+  };
+  assert.equal(historyStatusLabel("processing", renamed), "Awaiting scoring");
+});

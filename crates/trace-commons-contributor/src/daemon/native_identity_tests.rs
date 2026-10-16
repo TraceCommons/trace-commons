@@ -751,7 +751,7 @@ async fn unconfigured_logout_never_sends_retained_token_to_untrusted_origin() {
     );
 }
 
-/// An enrolment the commons refused because this Mac's near.ai login is not
+/// An enrollment the commons refused because this Mac's near.ai login is not
 /// the passkey account's reaches the shell under its own label, so the shell
 /// can word it; an unknown error never reaches it at all.
 #[test]
@@ -836,8 +836,9 @@ async fn a_created_passkey_is_remembered_across_sign_out() {
     assert!(!state.to_string().contains(&account_id));
 }
 
-/// A sign-in carries no name: it refreshes the record this Mac already has
-/// for the account, keeping its name, or adds one without a name.
+/// A sign-in whose answer carries no label (an older server): it refreshes
+/// the record this Mac already has for the account, keeping its name, or
+/// adds one without a name.
 #[tokio::test]
 async fn a_sign_in_refreshes_the_remembered_passkey_and_keeps_its_name() {
     let (_dir, shared) = shared();
@@ -1052,4 +1053,259 @@ async fn an_added_passkey_is_remembered_by_its_name() {
     let remembered = super::super::remembered_passkeys::summary(&shared.store).unwrap();
     assert_eq!(remembered.count, 1);
     assert_eq!(remembered.latest_name.as_deref(), Some("Studio"));
+}
+
+fn labeled_session_reply(account_id: &str, label: Value) -> Value {
+    let mut reply = session_reply(account_id);
+    reply["passkey_label"] = label;
+    reply
+}
+
+async fn login_with_reply(shared: &DaemonShared, reply: Value) -> Response {
+    let (origin, worker) = server_once("200 OK", reply, None).await;
+    put_pending(
+        shared,
+        &origin,
+        Action::Login,
+        Instant::now() + Duration::from_secs(30),
+    );
+    let response = handle(shared, &request("passkey_login_complete", login_params())).await;
+    worker.await.unwrap();
+    response
+}
+
+/// A passkey first used here by signing in is named by the label the
+/// server's login answer returns for it (`passkey_label`), which replaces
+/// the name this Mac held: it is the account's own current label.
+#[tokio::test]
+async fn a_sign_in_records_the_servers_label_for_its_passkey() {
+    let (_dir, shared) = shared();
+    let account_id = uuid::Uuid::new_v4().to_string();
+    let response =
+        login_with_reply(&shared, labeled_session_reply(&account_id, json!("Studio"))).await;
+    assert_eq!(response.result.unwrap(), json!({"binding_state":"unbound"}));
+    let state = passkey_state(&shared).await;
+    assert_eq!(state["passkey_count"], 1);
+    assert_eq!(state["remembered_name"], "Studio");
+    assert_eq!(state["signed_in_name"], "Studio");
+    assert!(!state.to_string().contains(&account_id));
+
+    // Signed in again later after a rename elsewhere: the new label wins.
+    let response =
+        login_with_reply(&shared, labeled_session_reply(&account_id, json!("Desk"))).await;
+    assert!(response.error.is_none());
+    assert_eq!(passkey_state(&shared).await["signed_in_name"], "Desk");
+}
+
+/// No label in the answer (an older server, or a passkey without one), or
+/// one that fails this Mac's own name rules: the name this Mac already held
+/// is kept, and the sign-in itself is never refused over it.
+#[tokio::test]
+async fn a_sign_in_without_a_usable_label_keeps_the_known_name() {
+    for label in [
+        None,
+        Some(Value::Null),
+        Some(json!("   ")),
+        Some(json!("x".repeat(65))),
+        Some(json!("bad\u{7}name")),
+        Some(json!(7)),
+    ] {
+        let (_dir, shared) = shared();
+        let account_id = uuid::Uuid::new_v4().to_string();
+        super::super::remembered_passkeys::remember_at(
+            &shared.store,
+            &account_id,
+            Some("Home"),
+            Utc::now() - chrono::Duration::days(1),
+        )
+        .unwrap();
+        let reply = match &label {
+            Some(label) => labeled_session_reply(&account_id, label.clone()),
+            None => session_reply(&account_id),
+        };
+        let response = login_with_reply(&shared, reply).await;
+        assert_eq!(
+            response.result.unwrap(),
+            json!({"binding_state":"unbound"}),
+            "{label:?}"
+        );
+        let state = passkey_state(&shared).await;
+        assert_eq!(state["passkey_count"], 1, "{label:?}");
+        assert_eq!(state["signed_in_name"], "Home", "{label:?}");
+    }
+}
+
+/// Late enrollment, part one (P-7 open, the daemon's first status reports an
+/// enrollment, then P-7's Sign in): the person picks a passkey for an account
+/// in ANOTHER tenant than the one this Mac is enrolled under. The login
+/// answer is refused before anything is kept: no session, no remembered
+/// record, and the other account's label is not learned. The only request
+/// sent is the unauthenticated login finish, carrying the ceremony and the
+/// assertion and nothing of the enrolled account.
+#[tokio::test]
+async fn a_late_enrolment_refuses_a_sign_in_to_another_tenant_and_keeps_nothing() {
+    let (_dir, shared) = shared();
+    let other_account = uuid::Uuid::new_v4().to_string();
+    let mut reply = labeled_session_reply(&other_account, json!("Their laptop"));
+    reply["access_token"] = json!(format!(
+        "tcn1_{}.secret",
+        URL_SAFE_NO_PAD.encode("tenant-b")
+    ));
+    let (origin, worker) = server_once("200 OK", reply, None).await;
+    configure_test_origin(&shared, &origin);
+    put_pending(
+        &shared,
+        &origin,
+        Action::Login,
+        Instant::now() + Duration::from_secs(30),
+    );
+    let response = handle(&shared, &request("passkey_login_complete", login_params())).await;
+    assert_eq!(
+        response.error.unwrap().message,
+        "account-enrollment-mismatch"
+    );
+    let sent = worker.await.unwrap();
+    assert!(sent.starts_with("POST /v1/account/native/passkey/login/finish "));
+    assert!(
+        !sent.contains("tenant-a"),
+        "nothing of the enrolment is sent"
+    );
+    assert!(!sent.contains("tcn1_"), "no account token is sent");
+    assert!(
+        account_auth::try_load_session_with_snapshot(&shared.store)
+            .unwrap()
+            .is_none()
+    );
+    let state = passkey_state(&shared).await;
+    assert_eq!(state["passkey_count"], 0);
+    assert_eq!(state["remembered_name"], Value::Null);
+    assert_eq!(
+        shared.store.load_config().unwrap().unwrap().tenant_id,
+        "tenant-a"
+    );
+}
+
+/// A P-7 sign-in after a late enrollment: config saved for `tenant-a`, then a
+/// login whose answer is `reply_tenant`'s with `binding_state`. Returns the
+/// requests the server saw and the account id signed in.
+async fn late_enrolment_sign_in(
+    shared: &DaemonShared,
+    reply_tenant: &str,
+    binding_state: &str,
+) -> (Response, Vec<String>, String) {
+    let account_id = uuid::Uuid::new_v4().to_string();
+    let mut reply = labeled_session_reply(&account_id, json!("Home"));
+    reply["access_token"] = json!(format!(
+        "tcn1_{}.secret",
+        URL_SAFE_NO_PAD.encode(reply_tenant)
+    ));
+    reply["binding_state"] = json!(binding_state);
+    let (origin, worker) = server_sequence(vec![reply]).await;
+    configure_test_origin(shared, &origin);
+    put_pending(
+        shared,
+        &origin,
+        Action::Login,
+        Instant::now() + Duration::from_secs(30),
+    );
+    let response = handle(shared, &request("passkey_login_complete", login_params())).await;
+    let seen = worker.await.unwrap();
+    (response, seen, account_id)
+}
+
+/// Late enrollment, part two: the passkey is the enrolled account's own (its
+/// session is for the enrollment's tenant, and the account is `bound`). The
+/// sign-in is kept and named, and P-7's next step, Verify's `account_bind`,
+/// answers `already_enrolled` from local state alone: the enrollment this
+/// Mac already holds is this account's, so Verify can finish. No request is
+/// sent, and the enrollment is not written again.
+#[tokio::test]
+async fn a_late_enrolment_answers_already_enrolled_for_the_enrolled_accounts_sign_in() {
+    let (_dir, shared) = shared();
+    let (response, seen, account_id) = late_enrolment_sign_in(&shared, "tenant-a", "bound").await;
+    assert_eq!(response.result.unwrap(), json!({"binding_state":"bound"}));
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        account_auth::try_load_session_with_snapshot(&shared.store)
+            .unwrap()
+            .unwrap()
+            .session
+            .account_id,
+        account_id
+    );
+    let config_before = serde_json::to_value(shared.store.load_config().unwrap()).unwrap();
+    let bind = handle(&shared, &request("account_bind", json!({}))).await;
+    assert_eq!(
+        bind.result.unwrap(),
+        json!({"outcome":"already_enrolled","binding_state":"bound"})
+    );
+    assert_eq!(
+        serde_json::to_value(shared.store.load_config().unwrap()).unwrap(),
+        config_before
+    );
+    assert_eq!(passkey_state(&shared).await["signed_in_name"], "Home");
+}
+
+/// Late enrollment, the enrollment's tenant but an account no Mac has bound
+/// (`unbound`): this Mac's enrollment cannot be its, so the bind is refused
+/// as before, with no request.
+#[tokio::test]
+async fn a_late_enrolment_refuses_to_bind_an_unbound_same_tenant_account() {
+    let (_dir, shared) = shared();
+    let (response, seen, _) = late_enrolment_sign_in(&shared, "tenant-a", "unbound").await;
+    assert_eq!(response.result.unwrap(), json!({"binding_state":"unbound"}));
+    assert_eq!(seen.len(), 1);
+    let bind = handle(&shared, &request("account_bind", json!({}))).await;
+    assert_eq!(bind.error.unwrap().message, "account-already-enrolled");
+}
+
+/// A session for another tenant than the enrollment's (held from before the
+/// enrollment, so `persist_session` never compared them) is refused as
+/// before, with no request; so is no session at all.
+#[tokio::test]
+async fn an_enrolled_mac_refuses_to_bind_another_tenants_session_or_none() {
+    let (_dir, shared) = shared();
+    let bind = handle(&shared, &request("account_bind", json!({}))).await;
+    assert_eq!(bind.error.unwrap().message, "account-session-required");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let snapshot = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
+    persist_session(
+        &shared.store,
+        &snapshot,
+        &origin,
+        &json!({"access_token":format!("tcn1_{}.secret", URL_SAFE_NO_PAD.encode("tenant-b")),"token_type":"Bearer","expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"bound"}),
+    )
+    .unwrap();
+    configure_test_origin(&shared, &origin);
+    let bind = handle(&shared, &request("account_bind", json!({}))).await;
+    assert_eq!(bind.error.unwrap().message, "account-already-enrolled");
+    commons_credentials::clear(&shared.store, &[Kind::Account]).unwrap();
+    let bind = handle(&shared, &request("account_bind", json!({}))).await;
+    assert_eq!(bind.error.unwrap().message, "account-already-enrolled");
+    let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+    assert!(accepted.is_err(), "no request reached the server");
+}
+
+/// Late enrollment, part three: the enrollment lands while the system sheet
+/// is up, after the ceremony began. The ceremony was pinned to the
+/// unenrolled lifecycle, so the completion is refused before any request.
+#[tokio::test]
+async fn an_enrolment_landing_mid_ceremony_refuses_the_completion_before_sending() {
+    let (_dir, shared) = shared();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    put_pending(
+        &shared,
+        &origin,
+        Action::Login,
+        Instant::now() + Duration::from_secs(30),
+    );
+    configure_test_origin(&shared, &origin);
+    let response = handle(&shared, &request("passkey_login_complete", login_params())).await;
+    assert_eq!(response.error.unwrap().message, "account-session-changed");
+    let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+    assert!(accepted.is_err(), "no request reached the server");
+    assert_eq!(passkey_state(&shared).await["passkey_count"], 0);
 }

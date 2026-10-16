@@ -41,7 +41,7 @@ export function ConnectionPanel({ status, settings }: ConnectionPanelProps) {
       </div>
       {!connected && (
         <p className="m-0 tc-caption tc-text-tertiary">
-          Sessions may stay queued locally, but nothing can be sent until this
+          Traces may stay queued locally, but nothing can be sent until this
           device is enrolled.
         </p>
       )}
@@ -59,7 +59,7 @@ export function ConnectionPanel({ status, settings }: ConnectionPanelProps) {
           >
             <CheckMark checked={settings?.[key] === "watch"} />
             <span>
-              <strong>{label} sessions folder</strong>
+              <strong>{label} traces folder</strong>
               <small>{modeLabel(settings?.[key])}</small>
             </span>
           </div>

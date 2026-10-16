@@ -20,7 +20,7 @@ export function SkillLearningStage({ skill }: { skill: SkillLearning }) {
             onClick={() => void skill.learn()}
             disabled={busy}
           >
-            Learn from session
+            Learn from trace
           </ButtonPrimary>
         </div>
       );

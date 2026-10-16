@@ -162,7 +162,7 @@ public struct SubmitToast: Equatable, Sendable {
         ("not-pending", "already decided"),
         ("not-pinned", "could not be prepared"),
         ("envelope-too-large", "too large to send"),
-        ("session-file-vanished", "the session file is gone"),
+        ("session-file-vanished", "the trace file is gone"),
         ("preview-failed", "could not be read"),
     ]
 

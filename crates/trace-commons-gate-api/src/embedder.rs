@@ -18,3 +18,36 @@ pub const MOCK_EMBEDDING_DIM: usize = 256;
 pub trait Embedder: Send + Sync {
     fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>>;
 }
+
+/// Shares one embedder between holders (the legacy gate and the versioned
+/// pipeline hold the same embedder, so the model is loaded once).
+impl<T: Embedder + ?Sized> Embedder for std::sync::Arc<T> {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        (**self).embed(plaintext)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FixedEmbedder;
+
+    impl Embedder for FixedEmbedder {
+        fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![plaintext.len() as f32, 1.0])
+        }
+    }
+
+    /// An `Arc` (sized or `dyn`) forwards `embed` to the embedder it holds.
+    #[test]
+    fn arc_forwarding_keeps_embed() {
+        fn embed_with<E: Embedder + ?Sized>(embedder: &E) -> Vec<f32> {
+            embedder.embed(b"abc").unwrap()
+        }
+        let sized = std::sync::Arc::new(FixedEmbedder);
+        let shared: std::sync::Arc<dyn Embedder> = sized.clone();
+        assert_eq!(embed_with(&sized), vec![3.0, 1.0]);
+        assert_eq!(embed_with(&shared), vec![3.0, 1.0]);
+    }
+}

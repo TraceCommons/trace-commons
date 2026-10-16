@@ -1,22 +1,27 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Earned account trust (Flow 3) worker routes, shadow only. See
+//! Earned account trust (Flow 3) worker routes and their scheduler. See
 //! `docs/superpowers/specs/2026-09-26-earned-account-trust-design.md`.
 //!
-//! Decision 7 of that spec: during shadow these run under `require_admin`, as
-//! the contributor-cap and dedup passes do. A scoped worker bearer is required
-//! before any of them runs unattended in production. Nothing here changes an
-//! allowance: the evaluator writes `shadow` rows only (the V86 write function
-//! refuses anything else), and admission reads none of them.
+//! Decision 7 of that spec: fact recording and evaluation accept an admin
+//! token or the scoped `account_trust_worker` token, which is what the
+//! in-process scheduler presents; explain and the drill stay admin-only.
+//!
+//! Two policies can be evaluated. The shadow candidate
+//! (`TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_*`) writes `shadow` rows that
+//! admission never reads. When the admission policy itself names
+//! `"growth_rule":"tiered-v1"`, the evaluator also writes `applied` rows under
+//! it, and admission reads the latest fresh one (V114, V126).
 
 use super::*;
+use trace_commons_server::account_trust::GrowthSource;
 use trace_commons_server::account_trust_growth::{
-    EvaluateSummary, ExplainReport, RecordFactsSummary, ReproductionDrillSummary,
+    EvaluateSummary, EvaluationMode, ExplainReport, RecordFactsSummary, ReproductionDrillSummary,
     account_trust_reproduction_drill, database_error_label, evaluate_account_trust,
     explain_account_trust, find_account_by_ref, record_account_trust_facts,
 };
-use trace_commons_server::account_trust_rule::{GrowthPolicy, parse_shadow_growth_policy};
+use trace_commons_server::account_trust_rule::{GrowthPolicy, parse_growth_policy};
 
 const SHADOW_POLICY_JSON: &str = "TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_JSON";
 const SHADOW_POLICY_VERSION: &str = "TRACE_COMMONS_ACCOUNT_TRUST_SHADOW_POLICY_VERSION";
@@ -38,12 +43,40 @@ pub(super) fn shadow_policy_from_values(
     let version = read(SHADOW_POLICY_VERSION).ok();
     match (json, version) {
         (None, None) => Ok(None),
-        (Some(json), Some(version)) => parse_shadow_growth_policy(&json, &[version.as_str()])
+        (Some(json), Some(version)) => parse_growth_policy(&json, &[version.as_str()])
             .map(Some)
             .map_err(|_| anyhow::anyhow!("account_trust_shadow_policy_invalid")),
         (Some(_), None) => anyhow::bail!("account_trust_shadow_policy_version_missing"),
         (None, Some(_)) => anyhow::bail!("account_trust_shadow_policy_missing"),
     }
+}
+
+/// The admission policy's own growth rule, when it names `tiered-v1`: the
+/// policy the evaluator's `applied` mode runs. Parsed from the same JSON and
+/// version admission accepted, so the two cannot disagree. `None` for
+/// `"none"` and `"external"`.
+pub(super) fn applied_policy_from_env(
+    admission: Option<&admission::AccountAdmissionConfig>,
+) -> anyhow::Result<Option<GrowthPolicy>> {
+    applied_policy_from_values(admission, |key| std::env::var(key))
+}
+
+pub(super) fn applied_policy_from_values(
+    admission: Option<&admission::AccountAdmissionConfig>,
+    read: impl Fn(&str) -> Result<String, std::env::VarError>,
+) -> anyhow::Result<Option<GrowthPolicy>> {
+    let tiered = admission
+        .and_then(|config| config.policy.external_growth())
+        .is_some_and(|growth| growth.source == GrowthSource::TieredV1);
+    if !tiered {
+        return Ok(None);
+    }
+    let invalid = || anyhow::anyhow!("account_admission_policy_invalid");
+    let json = read("TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_JSON").map_err(|_| invalid())?;
+    let version = read("TRACE_COMMONS_ACCOUNT_ADMISSION_POLICY_VERSION").map_err(|_| invalid())?;
+    parse_growth_policy(&json, &[version.as_str()])
+        .map(Some)
+        .map_err(|_| invalid())
 }
 
 /// Refusals since process start that the candidate policy would have
@@ -127,13 +160,37 @@ fn require_db(state: &AppState) -> ApiResult<&Arc<dyn Database>> {
     })
 }
 
-fn require_shadow_policy(state: &AppState) -> ApiResult<&GrowthPolicy> {
-    state.account_trust_shadow_policy.as_deref().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "account_trust_shadow_policy_missing",
-        )
-    })
+fn require_policy(state: &AppState, mode: EvaluationMode) -> ApiResult<&GrowthPolicy> {
+    match mode {
+        EvaluationMode::Shadow => state.account_trust_shadow_policy.as_deref().ok_or_else(|| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "account_trust_shadow_policy_missing",
+            )
+        }),
+        EvaluationMode::Applied => state
+            .account_trust_applied_policy
+            .as_deref()
+            .ok_or_else(|| {
+                api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "account_trust_applied_policy_missing",
+                )
+            }),
+    }
+}
+
+/// `shadow` (the default) or `applied`. `production` is accepted as another
+/// name for `applied`; the stored mode is always `applied`.
+fn parse_mode(raw: Option<&str>) -> ApiResult<EvaluationMode> {
+    match raw {
+        None | Some("shadow") => Ok(EvaluationMode::Shadow),
+        Some("applied") | Some("production") => Ok(EvaluationMode::Applied),
+        Some(_) => Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "account_trust_evaluation_mode_invalid",
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,17 +204,18 @@ pub(super) struct RecordAccountTrustFactsQuery {
 /// `POST /v1/admin/record-account-trust-facts?limit=N&dry_run=true|false`
 ///
 /// Walks open accounts in anchored tenants and records each missing fact
-/// through the V85 definer function. Synchronous and bounded by `limit`
+/// through the V85/V126 definer function. Synchronous and bounded by `limit`
 /// (default 1000 sources, at most 10000), so the acknowledgement carries the
 /// counts. Idempotent: a re-run records nothing new. The response is
 /// label-only counts; no account, tenant, submission or source identifier.
+/// Admin or `account_trust_worker` token.
 pub(super) async fn record_account_trust_facts_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<RecordAccountTrustFactsQuery>,
 ) -> ApiResult<Json<RecordFactsSummary>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_admin(&tenant)?;
+    require_account_trust_operator(&tenant)?;
     let db = require_db(state.as_ref())?;
     let summary =
         record_account_trust_facts(db.as_ref(), query.limit, query.dry_run.unwrap_or(false))
@@ -184,25 +242,34 @@ pub(super) struct EvaluateAccountTrustQuery {
     as_of: Option<String>,
 }
 
-/// `POST /v1/admin/evaluate-account-trust?limit=N&mode=shadow&as_of=RFC3339`
+/// `POST /v1/admin/evaluate-account-trust?limit=N&mode=shadow|applied&as_of=RFC3339`
 ///
-/// Evaluates each open account with facts against the configured shadow
-/// policy and stores a `shadow` evaluation row, appending a hash-only
-/// `account_trust_tier_changed` audit row when the tier moves. `mode` may be
-/// omitted or `shadow`; anything else is refused. `as_of` defaults to now and
-/// may not be in the future. Run it on a schedule so that decay takes effect
-/// without new facts.
+/// Evaluates each open account with facts and stores an evaluation row,
+/// appending a hash-only `account_trust_tier_changed` audit row when the tier
+/// moves. Admin or `account_trust_worker` token.
+///
+/// - `shadow` (the default) runs the shadow candidate. `as_of` defaults to
+///   now and may not be in the future.
+/// - `applied` (also spelled `production`) runs the admission policy's own
+///   `tiered-v1` rule, and is refused unless the admission policy names one.
+///   Each account is evaluated at the database's transaction time, bound to
+///   the inputs it read, so `as_of` is refused.
+///
+/// Run it on a schedule so that decay takes effect without new facts; an
+/// applied row older than the policy's `evaluation_max_age_seconds` is read
+/// as tier 0.
 pub(super) async fn evaluate_account_trust_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<EvaluateAccountTrustQuery>,
 ) -> ApiResult<Json<EvaluateSummary>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
-    require_admin(&tenant)?;
-    if query.mode.as_deref().is_some_and(|mode| mode != "shadow") {
+    require_account_trust_operator(&tenant)?;
+    let mode = parse_mode(query.mode.as_deref())?;
+    if mode == EvaluationMode::Applied && query.as_of.is_some() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            "account_trust_evaluation_shadow_only",
+            "account_trust_as_of_not_allowed_when_applied",
         ));
     }
     let now = Utc::now();
@@ -214,17 +281,18 @@ pub(super) async fn evaluate_account_trust_handler(
             .filter(|at| *at <= now)
             .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "account_trust_as_of_invalid"))?,
     };
+    let policy = require_policy(state.as_ref(), mode)?;
     let db = require_db(state.as_ref())?;
-    let policy = require_shadow_policy(state.as_ref())?;
-    let summary = evaluate_account_trust(db.as_ref(), policy, as_of, query.limit)
+    let summary = evaluate_account_trust(db.as_ref(), policy, mode, as_of, query.limit)
         .await
         .map_err(|error| worker_unavailable(&error, "earned-trust evaluation refused"))?;
     tracing::info!(
+        mode = summary.mode,
         accounts_scanned = summary.accounts_scanned,
         accounts_evaluated = summary.accounts_evaluated,
         tier_changed = summary.tier_changed,
         failed = summary.failed,
-        "earned-trust shadow evaluation pass completed"
+        "earned-trust evaluation pass completed"
     );
     Ok(Json(summary))
 }
@@ -232,6 +300,8 @@ pub(super) async fn evaluate_account_trust_handler(
 #[derive(Debug, Deserialize)]
 pub(super) struct ExplainAccountTrustQuery {
     account_ref: String,
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 fn is_account_ref(value: &str) -> bool {
@@ -240,10 +310,11 @@ fn is_account_ref(value: &str) -> bool {
     })
 }
 
-/// `GET /v1/admin/account-trust/explain?account_ref=sha256:<hex>`
+/// `GET /v1/admin/account-trust/explain?account_ref=sha256:<hex>&mode=shadow|applied`
 ///
-/// Recomputes the account's latest stored shadow evaluation at its stored
-/// `as_of` and returns both, side by side, with `reproduced`. Counts, tier,
+/// Recomputes the account's latest stored evaluation in `mode` (default
+/// `shadow`) at its stored `as_of` and returns both, side by side, with
+/// `reproduced`. Counts, tier,
 /// digest and policy version only. `account_ref` is
 /// `account_trust_growth::account_trust_ref`, never a tenant or account ID.
 pub(super) async fn explain_account_trust_handler(
@@ -259,13 +330,14 @@ pub(super) async fn explain_account_trust_handler(
             "account_trust_account_ref_invalid",
         ));
     }
+    let mode = parse_mode(query.mode.as_deref())?;
     let db = require_db(state.as_ref())?;
-    let policy = require_shadow_policy(state.as_ref())?;
+    let policy = require_policy(state.as_ref(), mode)?;
     let account = find_account_by_ref(db.as_ref(), &query.account_ref)
         .await
         .map_err(|error| worker_unavailable(&error, "earned-trust explain refused"))?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "account_trust_account_not_found"))?;
-    let report = explain_account_trust(db.as_ref(), policy, &account)
+    let report = explain_account_trust(db.as_ref(), policy, mode, &account)
         .await
         .map_err(|error| worker_unavailable(&error, "earned-trust explain refused"))?;
     Ok(Json(report))
@@ -281,6 +353,9 @@ pub(super) struct AccountTrustDrillRequest {
     /// population, which is the default; a bounded run never passes.
     #[serde(default)]
     limit: Option<i64>,
+    /// `shadow` (the default) or `applied`.
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -295,7 +370,8 @@ pub(super) struct AccountTrustDrillResponse {
 
 /// `POST /v1/admin/account-trust-drill`
 ///
-/// Reproduces every stored shadow evaluation from hash-only facts and reports
+/// Reproduces every stored evaluation in `mode` (default `shadow`) from
+/// hash-only facts and reports
 /// the reproduced count as hash-only evidence. With `record_evidence`, it
 /// appends an `account_trust_explain` rollout-smoke evidence row, `passed`
 /// only when at least one evaluation was checked and every one reproduced.
@@ -313,9 +389,10 @@ pub(super) async fn account_trust_drill_handler(
         .filter(|purpose| !purpose.is_empty())
         .unwrap_or("trace_commons_account_trust_drill")
         .to_string();
+    let mode = parse_mode(request.mode.as_deref())?;
     let db = require_db(state.as_ref())?;
-    let policy = require_shadow_policy(state.as_ref())?;
-    let summary = account_trust_reproduction_drill(db.as_ref(), policy, request.limit)
+    let policy = require_policy(state.as_ref(), mode)?;
+    let summary = account_trust_reproduction_drill(db.as_ref(), policy, mode, request.limit)
         .await
         .map_err(|error| worker_unavailable(&error, "earned-trust drill refused"))?;
     let passed = summary.passed();
@@ -354,4 +431,219 @@ pub(super) async fn account_trust_drill_handler(
         response.recorded_evidence = Some(evidence);
     }
     Ok(Json(response))
+}
+
+// ---------------------------------------------------------------------------
+// The scheduler: unattended recording and evaluation under the scoped token.
+// ---------------------------------------------------------------------------
+
+const SCHEDULER_ENABLED: &str = "TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_ENABLED";
+const SCHEDULER_TOKEN: &str = "TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_TOKEN";
+const SCHEDULER_INTERVAL_SECONDS: &str = "TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_INTERVAL_SECONDS";
+const SCHEDULER_LIMIT: &str = "TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_LIMIT";
+const SCHEDULER_DEFAULT_INTERVAL_SECONDS: u64 = 6 * 3600;
+/// Recorder passes one tick makes before evaluating, each bounded by the
+/// limit; a backlog larger than this is finished by the next tick.
+const SCHEDULER_MAX_RECORD_PASSES: usize = 10;
+
+#[derive(Clone)]
+pub(super) struct AccountTrustSchedulerConfig {
+    worker_token: SecretString,
+    interval: StdDuration,
+    limit: i64,
+}
+
+/// Each tick records missing facts, then evaluates every configured policy:
+/// `applied` under a `tiered-v1` admission policy, and `shadow` under a
+/// shadow candidate. Absent or off is no scheduler; enabled without a token
+/// refuses startup.
+pub(super) fn scheduler_config_from_env() -> anyhow::Result<Option<AccountTrustSchedulerConfig>> {
+    let enabled = env_truthy(SCHEDULER_ENABLED);
+    let worker_token = optional_trimmed_env(SCHEDULER_TOKEN)?;
+    if !enabled && worker_token.is_none() {
+        return Ok(None);
+    }
+    let Some(worker_token) = worker_token else {
+        anyhow::bail!("{SCHEDULER_ENABLED}=true requires {SCHEDULER_TOKEN}");
+    };
+    let interval_seconds = parse_optional_scheduler_u64_env(
+        SCHEDULER_INTERVAL_SECONDS,
+        SCHEDULER_DEFAULT_INTERVAL_SECONDS,
+        60,
+        86_400,
+    )?;
+    let limit = parse_optional_scheduler_u64_env(
+        SCHEDULER_LIMIT,
+        trace_commons_server::account_trust_growth::RECORD_FACTS_MAX_LIMIT as u64,
+        1,
+        trace_commons_server::account_trust_growth::RECORD_FACTS_MAX_LIMIT as u64,
+    )?;
+    Ok(Some(AccountTrustSchedulerConfig::new(
+        worker_token,
+        interval_seconds,
+        limit as i64,
+    )))
+}
+
+impl AccountTrustSchedulerConfig {
+    pub(super) fn new(worker_token: String, interval_seconds: u64, limit: i64) -> Self {
+        Self {
+            worker_token: SecretString::from(worker_token),
+            interval: StdDuration::from_secs(interval_seconds),
+            limit,
+        }
+    }
+}
+
+/// Fails closed at startup: the token must authenticate as an admin or
+/// `account_trust_worker`, a DB mirror and at least one policy must be
+/// configured, and the interval must leave every evaluation fresh until the
+/// next tick (shorter than each policy's `evaluation_max_age_seconds`).
+pub(super) async fn validate_scheduler_config(
+    state: &AppState,
+    config: Option<&AccountTrustSchedulerConfig>,
+) -> anyhow::Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let refused = |error: (StatusCode, Json<ApiError>)| {
+        anyhow::anyhow!(
+            "invalid Trace Commons account trust scheduler configuration: status={}, error={}",
+            error.0,
+            error.1.0.error
+        )
+    };
+    let headers =
+        bearer_auth_headers_from_token(config.worker_token.expose_secret()).map_err(refused)?;
+    let auth = authenticate(state, &headers).map_err(refused)?;
+    require_account_trust_operator(&auth).map_err(refused)?;
+    anyhow::ensure!(
+        state.db_mirror.is_some(),
+        "invalid Trace Commons account trust scheduler configuration: TRACE_COMMONS_DB_DUAL_WRITE is required"
+    );
+    let policies: Vec<&GrowthPolicy> = [
+        state.account_trust_applied_policy.as_deref(),
+        state.account_trust_shadow_policy.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    anyhow::ensure!(
+        !policies.is_empty(),
+        "invalid Trace Commons account trust scheduler configuration: no tiered-v1 admission policy or shadow policy to evaluate"
+    );
+    for policy in policies {
+        anyhow::ensure!(
+            config.interval.as_secs() < policy.evaluation_max_age_seconds() as u64,
+            "invalid Trace Commons account trust scheduler configuration: {SCHEDULER_INTERVAL_SECONDS} must be shorter than evaluation_max_age_seconds"
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn spawn_scheduler_task(
+    state: &Arc<AppState>,
+    config: Option<AccountTrustSchedulerConfig>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    tracing::info!(
+        interval_seconds = config.interval.as_secs(),
+        limit = config.limit,
+        applied = state.account_trust_applied_policy.is_some(),
+        shadow = state.account_trust_shadow_policy.is_some(),
+        "Trace Commons account trust scheduler enabled"
+    );
+    let tick_config = config.clone();
+    spawn_driver_loop(
+        state,
+        ACCOUNT_TRUST_SCHEDULER_DRIVER_NAME,
+        config.interval,
+        move |state| {
+            let config = tick_config.clone();
+            async move {
+                let summary = run_scheduler_tick(state, &config).await.map_err(|error| {
+                    worker_route_error(ACCOUNT_TRUST_SCHEDULER_DRIVER_NAME, error)
+                })?;
+                tracing::info!(
+                    record_passes = summary.record_passes,
+                    facts_recorded = summary.facts_recorded,
+                    facts_failed = summary.facts_failed,
+                    record_limit_reached = summary.record_limit_reached,
+                    evaluated = summary.evaluated,
+                    evaluation_failed = summary.evaluation_failed,
+                    "Trace Commons account trust scheduler tick completed"
+                );
+                all_attempts_failed_outcome(
+                    ACCOUNT_TRUST_SCHEDULER_DRIVER_NAME,
+                    "evaluate",
+                    summary.evaluated as usize,
+                    summary.evaluation_failed as usize,
+                    DriverFailureClass::DependencyUnavailable,
+                )
+            }
+        },
+    );
+}
+
+/// Label-only counts from one scheduler tick.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct AccountTrustSchedulerTickSummary {
+    pub record_passes: u64,
+    pub facts_recorded: u64,
+    pub facts_failed: u64,
+    pub record_limit_reached: bool,
+    pub evaluated: u64,
+    pub evaluation_failed: u64,
+}
+
+/// One tick, through the same handlers and the same token check an operator
+/// call gets: record until the backlog is drained (or the pass bound), then
+/// evaluate `applied` and `shadow`, whichever are configured.
+pub(super) async fn run_scheduler_tick(
+    state: Arc<AppState>,
+    config: &AccountTrustSchedulerConfig,
+) -> ApiResult<AccountTrustSchedulerTickSummary> {
+    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
+    let mut summary = AccountTrustSchedulerTickSummary::default();
+    for _ in 0..SCHEDULER_MAX_RECORD_PASSES {
+        let Json(pass) = record_account_trust_facts_handler(
+            State(state.clone()),
+            headers.clone(),
+            Query(RecordAccountTrustFactsQuery {
+                limit: Some(config.limit),
+                dry_run: Some(false),
+            }),
+        )
+        .await?;
+        summary.record_passes += 1;
+        summary.facts_recorded += pass.recorded_by_outcome.values().sum::<u64>();
+        summary.facts_failed += pass.failed;
+        summary.record_limit_reached = pass.limit_reached;
+        if !pass.limit_reached {
+            break;
+        }
+    }
+    for (configured, mode) in [
+        (state.account_trust_applied_policy.is_some(), "applied"),
+        (state.account_trust_shadow_policy.is_some(), "shadow"),
+    ] {
+        if !configured {
+            continue;
+        }
+        let Json(run) = evaluate_account_trust_handler(
+            State(state.clone()),
+            headers.clone(),
+            Query(EvaluateAccountTrustQuery {
+                limit: Some(trace_commons_server::account_trust_growth::RECORD_FACTS_MAX_LIMIT),
+                mode: Some(mode.to_string()),
+                as_of: None,
+            }),
+        )
+        .await?;
+        summary.evaluated += run.accounts_evaluated;
+        summary.evaluation_failed += run.failed;
+    }
+    Ok(summary)
 }

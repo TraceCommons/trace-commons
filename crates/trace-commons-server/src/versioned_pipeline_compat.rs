@@ -213,6 +213,25 @@ impl CompatibilityBundleConfig {
         Ok(config)
     }
 
+    /// The `main` gate configuration this configuration holds: the inverse
+    /// of [`Self::production_compatible`], every floor present. The
+    /// qualification harness reads a production package's gate settings
+    /// back through it (spec 2026-10-08, B-D1).
+    pub fn main_gate(&self) -> MainGateConfig {
+        MainGateConfig {
+            perplexity_floor_micros: Some(self.perplexity_floor_micros),
+            tail_fraction_floor_micros: Some(self.tail_fraction_floor_micros),
+            novelty_floor_micros: Some(self.novelty_floor_micros),
+            embed_insert_novelty_micros: self.embed_insert_novelty_micros,
+            top_k: self.top_k,
+            chunk_target_tokens: self.chunk_target_tokens,
+            chunk_max_tokens: self.chunk_max_tokens,
+            chunk_cap: self.chunk_cap,
+            chunk_min_tokens: self.chunk_min_tokens,
+            novelty_utility_microcredits: self.novelty_utility_microcredits,
+        }
+    }
+
     /// Whether this configuration holds every value of `main`'s gate
     /// configuration `gate`. A floor `main` has no value for matches nothing.
     pub fn matches_main_gate(&self, gate: &MainGateConfig) -> bool {
@@ -245,7 +264,8 @@ impl CompatibilityBundleConfig {
         );
         // Zaki review 1, round 2, finding 11: `main`'s gate refuses to start
         // only when every floor is zero (every trace would pass), and runs
-        // with a zero tail-fraction floor, its documented pilot value; a
+        // with any one floor positive -- the pilot template
+        // (`deploy/pilot-gcp/ingest.env.template`) sets 0, 0 and 500000; a
         // production-compatible configuration is validated the same way.
         if self.qualification == CompatibilityQualification::ProductionCompatible {
             anyhow::ensure!(
@@ -349,12 +369,13 @@ impl ScorePolicy for CompatibilityScorePolicy {
     /// production scorer makes network calls (the NEAR AI scorer uses a
     /// blocking HTTP client), so the whole evaluation runs on the blocking
     /// pool, never on a runtime worker, as `main` runs the same scorer class
-    /// (Zaki review 1, round 2, N-6). A task that panicked or was cancelled
-    /// is `score_task_failed`.
+    /// (Zaki review 1, round 2, N-6), under the pipeline's bound on Score
+    /// evaluations (#1140, `run_score_evaluation`). A task that panicked or
+    /// was cancelled is `score_task_failed`.
     async fn execute(&self, input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
         let policy = self.clone();
         let input = input.clone();
-        tokio::task::spawn_blocking(move || policy.evaluate(&input))
+        crate::versioned_pipeline_blocking::run_score_evaluation(move || policy.evaluate(&input))
             .await
             .map_err(|_| permanent("score_task_failed"))?
     }
@@ -1178,6 +1199,7 @@ mod tests {
             registry_revision_id: Uuid::from_u128(3),
             source_content_hash: dependency_content_hash(bytes),
             reviewed_artifact: bytes.to_vec(),
+            operator_review: None,
         }
     }
 
@@ -1659,6 +1681,96 @@ mod tests {
         assert_eq!(result.evidence.quality_passed, Some(true));
     }
 
+    /// The reference scorer, sleeping on every call as a production scorer
+    /// holds its thread through a blocking network call, and recording how
+    /// many calls ran at once.
+    struct SleepingScorer {
+        inner: ReferencePerplexityScorer,
+        sleep: std::time::Duration,
+        calls: std::sync::atomic::AtomicUsize,
+        in_flight: std::sync::atomic::AtomicUsize,
+        max_in_flight: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SleepingScorer {
+        fn new(sleep: std::time::Duration) -> Self {
+            Self {
+                inner: ReferencePerplexityScorer::new(),
+                sleep,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                in_flight: std::sync::atomic::AtomicUsize::new(0),
+                max_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn hold<T>(&self, call: impl FnOnce() -> T) -> T {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(self.sleep);
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            call()
+        }
+    }
+
+    impl PerplexityScorer for SleepingScorer {
+        fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+            self.hold(|| self.inner.score(plaintext))
+        }
+
+        fn score_chunk(&self, chunk: &[u8]) -> anyhow::Result<ChunkPerplexity> {
+            self.hold(|| self.inner.score_chunk(chunk))
+        }
+    }
+
+    impl IdentifiedPerplexityScorer for SleepingScorer {
+        fn dependency_identity(&self) -> &str {
+            "sleeping_scorer_test_only"
+        }
+        fn content_descriptor(&self) -> Vec<u8> {
+            b"sleeping-scorer-test-only.v1".to_vec()
+        }
+    }
+
+    /// #1140: the compatibility Score -- the Score policy production runs --
+    /// takes at most `PIPELINE_SCORE_EVALUATION_CONCURRENCY` blocking
+    /// threads at once under a burst; the rest wait for a permit on the
+    /// runtime. Every evaluation still completes. The bundle's test covers
+    /// `FixedScorePolicy`; this one pins the compatibility wiring.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_burst_of_compatibility_scores_is_bounded_on_the_blocking_pool() {
+        use crate::versioned_pipeline_blocking::PIPELINE_SCORE_EVALUATION_CONCURRENCY;
+        let config = CompatibilityBundleConfig::local_reference();
+        let scorer = Arc::new(SleepingScorer::new(std::time::Duration::from_millis(50)));
+        let policy = CompatibilityScorePolicy::new(
+            manifest_pinning_trace_credit(&config),
+            config.clone(),
+            scorer.clone(),
+            Arc::new(ReferenceEmbedder::new()),
+            IsolatedPipelineIndex::new(),
+        )
+        .unwrap();
+        let burst = PIPELINE_SCORE_EVALUATION_CONCURRENCY * 3;
+        let mut scores = tokio::task::JoinSet::new();
+        for _ in 0..burst {
+            let policy = policy.clone();
+            scores.spawn(async move {
+                policy
+                    .execute(&score_input(b"hello world, this is a compatibility trace"))
+                    .await
+            });
+        }
+        while let Some(joined) = scores.join_next().await {
+            joined.unwrap().unwrap();
+        }
+        assert!(scorer.calls.load(Ordering::SeqCst) >= burst);
+        let max = scorer.max_in_flight.load(Ordering::SeqCst);
+        assert!(
+            (1..=PIPELINE_SCORE_EVALUATION_CONCURRENCY).contains(&max),
+            "{max} compatibility Score evaluations held blocking threads at once"
+        );
+    }
+
     /// Finding 12: the reader a compatibility Score uses counts an
     /// unapplied command's entries as neighbours with the live index, under
     /// the entry ids Settle will write, by cosine similarity. It never
@@ -1767,9 +1879,10 @@ mod tests {
 
     /// Finding 11: a production-compatible configuration is validated as
     /// `main` validates its gate configuration at startup. All-zero floors
-    /// are refused; a zero tail-fraction floor with the other floors
-    /// positive -- `main`'s documented pilot value -- is accepted, and so is
-    /// any single positive floor.
+    /// are refused; any single positive floor is accepted, so the pilot
+    /// template's floors (perplexity 0, tail fraction 0, novelty 500000;
+    /// poldsam P-4) are, and so is a zero tail-fraction floor with the other
+    /// two positive.
     #[test]
     fn production_compatibility_is_validated_as_mains_gate_configuration() {
         let config = |perplexity, tail, novelty| {
@@ -1790,7 +1903,8 @@ mod tests {
             COMPATIBILITY_ZERO_FLOOR_LABEL,
             "all-zero floors are refused, as main refuses them"
         );
-        config(2_000_000, 0, 500_000).expect("the pilot's zero tail floor is accepted");
+        config(0, 0, 500_000).expect("the pilot template's floors are accepted");
+        config(2_000_000, 0, 500_000).expect("a zero tail floor alone is accepted");
         config(1, 0, 0).expect("one positive floor is enough, as on main");
         config(0, 0, 1).expect("one positive floor is enough, as on main");
     }
@@ -2040,10 +2154,10 @@ mod tests {
                 },
             ),
             (
-                "privacy_risk_rejected".to_string(),
+                "privacy_high_risk_review_rejected".to_string(),
                 CompatibilityFixtureDecision {
-                    admission: "reject".to_string(),
-                    review: "skipped".to_string(),
+                    admission: "quarantine".to_string(),
+                    review: "rejected".to_string(),
                     score: "skipped".to_string(),
                     settle: "skipped".to_string(),
                 },

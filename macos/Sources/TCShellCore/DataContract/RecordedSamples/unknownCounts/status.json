@@ -6,9 +6,12 @@
   "consent_scopes": [
     "debugging_evaluation"
   ],
+  "consent_hold": null,
   "paused": false,
   "queue_depth": 3,
   "dev_dry_run": false,
+  "contribution_mode": "notify_only",
+  "contribution_mode_partial": false,
   "next_digest_at": null,
   "health": {
     "last_error_label": null,
@@ -52,7 +55,5 @@
     "projects": []
   },
   "contribution_override": null,
-  "contribution_mode": "notify_only",
-  "contribution_mode_partial": false,
   "_sample": "absent on purpose: older daemon"
 }

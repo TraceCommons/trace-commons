@@ -1,0 +1,18 @@
+{
+  "schema": "trace_commons.pipeline_hf_corpus_pin.v1",
+  "repository": "jedisct1/security-audits",
+  "revision": "6d527ff0081eec6704c2a4f00e1ef8d308ae7366",
+  "split": "train",
+  "translator": "swival",
+  "bootstrap_count": 1000,
+  "holdout_count": 9000,
+  "min_words": 200,
+  "max_words": 20000,
+  "expected_instrument_count": 1,
+  "with_events": true,
+  "source_digest": "sha256:ebd5a801387ff010376c97b9aadccb2a4802a4e31de4a17fc4d3400d21d859ca",
+  "configuration_digest": "sha256:6950d05feb899f7a50388680686a67e222ee54cdd39f9fd515898034ff1218c6",
+  "order_digest": "sha256:a9d891cee558d7278252fe34fc6016fecbfeeced62f5d27d387617139b8d0476",
+  "bootstrap_corpus_digest": "sha256:55fb790021cbc88f7b6a5e037ec803ab8333597e3734ea0bce83f59fde1b30cd",
+  "holdout_corpus_digest": "sha256:dceb006220fea3b736e901a6999755dabdc65afb3ee056000d2f41f668f994fd"
+}

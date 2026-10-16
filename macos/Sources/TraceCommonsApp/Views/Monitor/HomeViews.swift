@@ -11,6 +11,11 @@ import TCShellCore
 /// core did not say), contributed is the rollup's accepted count. Pending
 /// credit is shown only beside the commons' own statement of what it waits
 /// on (D6), and never as earned.
+///
+/// Missions is #1146's: the local mission drafts, and its card opens them.
+/// The two screens #1146 has no place for stay reachable from quiet cards
+/// under History: Insights, and the commons mission catalogue once the
+/// daemon answers it.
 struct HomeTabView: View {
     /// Declared top-level (`MonitorNavigation.swift`) so a destination can
     /// name a page in a release build.
@@ -21,15 +26,24 @@ struct HomeTabView: View {
     /// The core's label for a history status, when its copy has loaded.
     let statusLabel: (String?) -> String?
     @Binding var page: Page
-    /// The opened History row's submission id; empty for none. History
-    /// draws its details below the list, in this pane.
+    /// The opened History row's submission id; empty for none. Opening a
+    /// row shows its details in the inspector (Ron's inspector auto-open).
     @Binding var selection: String
     /// The status card's "Open Traces" link: switches the window's tab.
     var openTraces: () -> Void = {}
+    /// The pending-credit tile: switches the window to the Private AI tab.
+    var openPrivateAI: () -> Void = {}
+    /// The Contributed tile: History, which lives on the Traces tab (owner,
+    /// 2026-10-12).
+    var openHistory: () -> Void = {}
     /// The hosted Insights and Mission drafts screens' inputs, from
     /// `TraceCommonsAppMain`.
     let insightsStoreSelection: InsightsStoreSelection
     let missionDrafts: MissionDraftsModel
+    /// Whether missions are shown (the daemon's `missions_enabled`). Off:
+    /// no Missions card, no catalogue card, no mission page, and the
+    /// drafts inbox is not read.
+    var missionsEnabled: Bool = false
 
     /// The core's Insights copy, read once: it is fixed for the life of the
     /// process, and reading it is a C ABI call and a JSON decode, which
@@ -37,11 +51,13 @@ struct HomeTabView: View {
     private static let insightsCopy = TCInsights.copy()
 
     /// The breadcrumb word for a hosted page: the core's heading, or nil
-    /// before its copy has arrived.
+    /// before its copy has arrived. Mission drafts is #1146's Missions, and
+    /// its crumb says so; the drafts screen's own title is the core's
+    /// (`missionDrafts.copy["title"]`), read by the screen.
     static func hostedHeading(_ page: Page, missionDrafts: MissionDraftsModel) -> String? {
         switch page {
         case .insights: HomeFormat.cardHeading(Self.insightsCopy?["title"])
-        case .missionDrafts: HomeFormat.cardHeading(missionDrafts.copy["title"])
+        case .missionDrafts: HomeFormat.cardHeading(MonitorWords.missions)
         case .overview, .history, .missions: nil
         }
     }
@@ -50,14 +66,15 @@ struct HomeTabView: View {
         // History and Missions are reached from here and lead back here; the
         // breadcrumb that says so is the shell's, under the tabs
         // (`MonitorWindowView.breadcrumb`), as #1146 draws it.
-        switch page {
+        switch page.shown(missions: missionsEnabled) {
         case .overview:
             HomeOverview(
                 store: store, traces: traces, statusLabel: statusLabel, openTraces: openTraces,
+                openPrivateAI: openPrivateAI,
                 insightsHeading: Self.hostedHeading(.insights, missionDrafts: missionDrafts),
-                missionDraftsHeading: Self.hostedHeading(.missionDrafts, missionDrafts: missionDrafts),
-                openHistory: { page = .history }, openMissions: { page = .missions },
-                openInsights: { page = .insights }, openMissionDrafts: { page = .missionDrafts })
+                missionDrafts: missionDrafts, missionsEnabled: missionsEnabled,
+                openHistory: openHistory, openMissionDrafts: { page = .missionDrafts },
+                openInsights: { page = .insights }, openMissions: { page = .missions })
         case .history:
             HistoryPage(store: store, statusLabel: statusLabel, selection: $selection, back: { page = .overview })
         case .missions:
@@ -66,10 +83,23 @@ struct HomeTabView: View {
         // that held them is gone), hosted as Home pages under the shell's
         // breadcrumb.
         case .insights:
-            InsightsView(storeSelection: insightsStoreSelection)
+            InsightsView(storeSelection: insightsStoreSelection, daemon: store.client)
         case .missionDrafts:
             MissionDraftsView(model: missionDrafts)
         }
+    }
+}
+
+/// History on the Traces tab (owner, 2026-10-12): the same page Home
+/// hosted, with its breadcrumb back to the tree.
+struct TracesHistoryPage: View {
+    let store: HomeStore
+    let statusLabel: (String?) -> String?
+    @Binding var selection: String
+    let back: () -> Void
+
+    var body: some View {
+        HistoryPage(store: store, statusLabel: statusLabel, selection: $selection, back: back)
     }
 }
 
@@ -78,14 +108,16 @@ private struct HomeOverview: View {
     let traces: TracesStore
     let statusLabel: (String?) -> String?
     let openTraces: () -> Void
-    /// The core's headings for the two hosted screens; nil until the
-    /// core's copy has arrived, and then the card is not drawn.
+    let openPrivateAI: () -> Void
+    /// The core's Insights heading; nil until the core's copy has arrived,
+    /// and then its card is not drawn.
     let insightsHeading: String?
-    let missionDraftsHeading: String?
+    let missionDrafts: MissionDraftsModel
+    let missionsEnabled: Bool
     let openHistory: () -> Void
-    let openMissions: () -> Void
-    let openInsights: () -> Void
     let openMissionDrafts: () -> Void
+    let openInsights: () -> Void
+    let openMissions: () -> Void
 
     /// The rollup, or nil after a failed `history_rollup` read
     /// (`SummaryFacts.fresh`): a stale one is not shown as current.
@@ -99,69 +131,128 @@ private struct HomeOverview: View {
         SummaryFacts.fresh(store.credit, unless: store.failures["commons_credit_summary"])
     }
 
+    private var words: MonitorHomeHistoryCopy? { MonitorWords.table?.homeHistory }
+
+    /// The glance, unless its last read failed: a stale day is not drawn
+    /// as today's.
+    private var freshGlance: DaemonData.InsightsGlance? {
+        SummaryFacts.fresh(store.glance, unless: store.failures["insights_glance"])
+    }
+
+    /// Home's NEAR AI campaign card (owner, 2026-10-12): drawn as a
+    /// promotion, opening Private AI. PLACEHOLDER words from the core until
+    /// a campaign source exists.
+    @ViewBuilder
+    private var campaign: some View {
+        if let words {
+            // A hero promotion (owner, 2026-10-12).
+            GlassHeroCard(
+                gradient: GlassTokens.Gradient.heroCampaign,
+                title: words.campaignTitle, subtitle: words.campaignBody,
+                actionTitle: words.campaignAction, action: openPrivateAI
+            ) {
+                GlassHeroSymbol(Self.campaignHeroSymbol)
+            } content: {
+                EmptyView()
+            }
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                watching
+                // The inspector stays closed on Home (owner, 2026-10-08), so
+                // the core's health, the undos, the offers and the
+                // first-contribution note head the page, as they head the
+                // Traces tree.
+                InspectorPromptsHeader(traces: traces)
+                // No Watching card (owner, 2026-10-12): the tiles lead.
                 stats
-                GlassEyebrowCard(MonitorWords.missions, action: openMissions) {
-                    Image(systemName: "chevron.right")
-                        .glassGlyph(10, weight: .semibold)
-                        .foregroundStyle(GlassColor.textTertiary)
-                } content: {
-                    // The catalogue's size only: nothing here says a mission
-                    // was matched or chosen for this person (#1174 M1).
-                    Text(MissionFormat.count(store.missions))
-                        .glassType(GlassTokens.TypeScale.title)
-                        .foregroundStyle(GlassColor.textPrimary)
-                }
-                if let insightsHeading {
-                    hostedCard(insightsHeading, action: openInsights)
-                }
-                if let missionDraftsHeading {
-                    hostedCard(missionDraftsHeading, action: openMissionDrafts)
-                }
-                GlassEyebrowCard(MonitorWords.history, action: openHistory) {
-                    HStack(spacing: GlassTokens.Space.s2) {
-                        // Ron's "X credit pending", under D6: only beside
-                        // the commons' statement of what it waits on.
-                        if let pending = HomeFormat.creditPendingAccessory(
-                            freshRollup?.creditPending, condition: HomeFormat.pendingCondition(freshCredit)) {
-                            Text(pending)
-                                .glassType(GlassTokens.TypeScale.caption)
-                                .foregroundStyle(GlassColor.textSecondary)
-                        }
-                        Image(systemName: "chevron.right")
-                            .glassGlyph(10, weight: .semibold)
-                            .foregroundStyle(GlassColor.textTertiary)
+                // The NEAR AI campaign, under the tiles (owner, 2026-10-12).
+                campaign
+                // Ron's Missions card, as a hero promotion (owner,
+                // 2026-10-12): the drafts' line under the subtitle, and
+                // Review drafts; no pill.
+                if missionsEnabled {
+                    GlassHeroCard(
+                        gradient: GlassTokens.Gradient.heroMissions,
+                        title: MonitorWords.missions, subtitle: words?.missionsSubtitle,
+                        actionTitle: words?.missionsAction, action: openMissionDrafts
+                    ) {
+                        GlassHeroSymbol(Self.missionsHeroSymbol)
+                    } content: {
+                        drafts
                     }
-                } content: {
-                    recent
+                }
+                // What #1146 has no place for, after its cards: Insights,
+                // and the commons catalogue once the daemon answers it.
+                // Insights as a hero promotion, today's figures in its words
+                // and its graphic (owner, 2026-10-12: an upsell, not a bare
+                // way in).
+                if let insightsHeading {
+                    GlassHeroCard(
+                        gradient: GlassTokens.Gradient.heroInsights, title: insightsHeading,
+                        subtitle: words?.insightsSubtitle, actionTitle: words?.insightsAction, action: openInsights
+                    ) {
+                        HomeInsightsGraphic(glance: freshGlance)
+                    } content: {
+                        HomeInsightsVisual(glance: freshGlance, words: words)
+                    }
+                }
+                if missionsEnabled, store.missions != nil, let catalogue = words?.missionCatalogue {
+                    hostedCard(
+                        systemImage: Self.catalogueIcon, title: catalogue,
+                        subtitle: words?.catalogueSubtitle, action: openMissions)
                 }
             }
         }
         .scrollIndicators(.never)
-    }
-
-    /// A way into a hosted screen: the core's heading and a chevron, and
-    /// nothing else (the screen holds its own words).
-    private func hostedCard(_ heading: String, action: @escaping () -> Void) -> some View {
-        GlassEyebrowCard(heading, action: action) {
-            Image(systemName: "chevron.right")
-                .glassGlyph(10, weight: .semibold)
-                .foregroundStyle(GlassColor.textTertiary)
-        } content: {
-            EmptyView()
+        .task(id: missionsEnabled) {
+            // Hidden missions read nothing: the drafts inbox stays on disk.
+            if missionsEnabled { missionDrafts.preview() }
         }
     }
 
-    /// Paused, or watching N tools, from the core's status and the tree.
-    /// The stack-wide state (ScreenState) for the watching row: the core's
-    /// line when it does not answer, a dash before the first read or when
-    /// the core did not say whether watching is paused, Paused, or
-    /// watching N tools. A missing signal is never drawn as watching.
-    private var state: ScreenState {
-        HomeFormat.watchingState(store)
+    /// The Home cards' icons, in the Private AI cards' place for them.
+    static let missionsIcon = HomeOverviewIcons.missions
+    static let historyIcon = HomeOverviewIcons.history
+    static let insightsIcon = HomeOverviewIcons.insights
+    static let catalogueIcon = HomeOverviewIcons.catalogue
+    /// The hero promotions' graphics.
+    static let campaignHeroSymbol = "cpu"
+    static let missionsHeroSymbol = "scope"
+
+    /// A Home card that is a way into a screen, laid out as the Private AI
+    /// cards are (owner, 2026-10-11): the icon, the title over the core's
+    /// subtitle, the card's accessory on the right, the card's rows under
+    /// the head, and a chevron centred on the whole card. The whole card
+    /// opens the screen.
+    private func homeCard<Accessory: View, Content: View>(
+        systemImage: String, title: String, subtitle: String?, promo: GlassPromoTreatment? = nil,
+        action: @escaping () -> Void,
+        @ViewBuilder accessory: () -> Accessory, @ViewBuilder content: () -> Content
+    ) -> some View {
+        Button(action: action) {
+            GlassIconCard(
+                systemImage: systemImage, title: title, subtitle: subtitle.map { [$0] } ?? [],
+                interactive: true, promo: promo, chevron: true,
+                accessory: accessory,
+                content: content)
+        }
+        .buttonStyle(GlassPressStyle())
+    }
+
+    /// A way into a screen #1146 has no place for: its icon, heading,
+    /// subtitle and a chevron, and nothing else (the screen holds its own
+    /// words).
+    private func hostedCard(
+        systemImage: String, title: String, subtitle: String?, action: @escaping () -> Void
+    ) -> some View {
+        homeCard(systemImage: systemImage, title: title, subtitle: subtitle, action: action) {
+            EmptyView()
+        } content: {
+            EmptyView()
+        }
     }
 
     /// Waiting, contributed and pending credit (#1146 `home-view.tsx`), each
@@ -173,109 +264,163 @@ private struct HomeOverview: View {
     /// Waiting is the Traces store's count, the one the Traces badge reads:
     /// one waiting number. A failed rollup or credit read is a dash, never
     /// the store's earlier value (`freshRollup`, `freshCredit`).
+    ///
+    /// Each tile is a way to where its number lives (owner, 2026-10-12):
+    /// waiting opens Traces, contributed opens History, and pending credit
+    /// opens Private AI.
     private var stats: some View {
         let condition = HomeFormat.pendingCondition(freshCredit)
+        // A failed status read draws no dollar line rather than an old one.
+        let settlement = SummaryFacts.fresh(store.status, unless: store.failures["status"])?.settlementEstimate
+        let uncontributed = HomeUncontributed(traces.tree.allSessions, settlement: settlement)
+        let delta = HomeFormat.creditDelta(store.creditTotals.delta(on: .now), words: words)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            HStack(spacing: GlassTokens.Space.s3) {
-                HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed))
-                HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted))
-                HomeStatTile(label: HomeFormat.creditPendingWord,
-                             value: HomeFormat.pendingFigure(freshRollup?.creditPending, condition: condition))
+            // Two by two (owner, 2026-10-12): Waiting and Contributed, then
+            // Credit and Uncontributed.
+            Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
+                GridRow {
+                    HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
+                                 systemImage: HomeStatIcons.waiting, action: openTraces)
+                    HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted),
+                                 systemImage: HomeStatIcons.contributed, action: openHistory)
+                }
+                GridRow {
+                    HomeStatTile(label: HomeFormat.creditPendingWord,
+                                 value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)),
+                                 detail: delta?.text, detailInk: delta?.ink,
+                                 systemImage: HomeStatIcons.credit, action: openPrivateAI)
+                    HomeStatTile(label: words?.uncontributed ?? "", value: String(uncontributed.count),
+                                 detail: uncontributed.detail(words), systemImage: HomeStatIcons.uncontributed,
+                                 valueAccessory: uncontributed.size(words),
+                                 action: openTraces)
+                }
             }
-            if let condition {
-                Text(condition)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private var watching: some View {
-        let state = state
-        return GlassCard {
-            HStack(spacing: GlassTokens.Space.s4) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                    status(state)
-                    // Ron's #1146 second line: sessions waiting and how many
-                    // are worth a second look. Only from the core's count:
-                    // an unknown count draws no line, never "nothing".
-                    if let line = HomeFormat.waitingLine(traces.decisionsOwed, sessions: traces.tree.allSessions) {
-                        Text(line)
-                            .glassType(GlassTokens.TypeScale.label)
-                            .foregroundStyle(GlassColor.textSecondary)
-                    }
-                }
-                .accessibilityElement(children: .combine)
-                Spacer(minLength: 0)
-                // The way into the tree, as #1146's status card has it.
-                Button(action: openTraces) {
-                    HStack(spacing: GlassTokens.Space.s1) {
-                        Text(HomeFormat.openTracesWord)
-                        Image(systemName: "chevron.right").glassGlyph(9, weight: .semibold).accessibilityHidden(true)
-                    }
-                }
-                .buttonStyle(GlassButtonStyle(.link))
-            }
-            .glassType(GlassTokens.TypeScale.bodyStrong)
-            .foregroundStyle(GlassColor.textPrimary)
-        }
-    }
 
+    /// The Missions hero's line: the newest draft and how many there are,
+    /// or Ron's empty line; a dash before the inbox has answered, never an
+    /// empty inbox. In the hero's ink.
     @ViewBuilder
-    private func status(_ state: ScreenState) -> some View {
-        HStack(spacing: GlassTokens.Space.s4) {
+    private var drafts: some View {
+        Group {
+            if let summary = missionDrafts.summary, let words {
+                if let first = summary.first {
+                    Text(summary.count > 1 ? "\(first.id) · +\(summary.count - 1)" : first.id)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } else {
+                    Text(words.noMissionDrafts)
+                }
+            } else {
+                Text("—").accessibilityLabel(MonitorWords.unknown)
+            }
+        }
+        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+        .foregroundStyle(GlassTokens.Color.heroInk.color.opacity(0.92))
+    }
+
+}
+
+/// Home's stat tile icons (owner, 2026-10-12).
+enum HomeStatIcons {
+    static let waiting = "hourglass"
+    static let contributed = "checkmark.seal"
+    static let credit = "dollarsign.circle"
+    /// Held on this Mac, not yet shared: local and private.
+    static let uncontributed = "lock.laptopcomputer"
+}
+
+/// The Home cards' icons, shared with the edge rail's Home peek.
+enum HomeOverviewIcons {
+    static let missions = "sparkles"
+    static let history = "clock.arrow.circlepath"
+    static let insights = "chart.xyaxis.line"
+    static let catalogue = "list.bullet.rectangle"
+}
+
+/// Home's status line (Ron's status card): the dot and the watching line,
+/// in the stack-wide states. Shared with the edge rail's Home peek, so the
+/// two never say different things.
+struct HomeStatusLine: View {
+    let store: HomeStore
+
+    var body: some View {
+        let state = HomeFormat.watchingState(store)
+        return HStack(spacing: GlassTokens.Space.s6) {
                 switch state {
                 case .ready:
                     switch HomeFormat.watching(store.status, destinations: store.destinations) {
                     case .signedOut:
                         GlassStatusDot(.ask, ring: true)
                         Text(MonitorWords.signedOut)
+                            .alignmentGuide(.homeStatusText) { $0[.leading] }
                     case .unhealthy(let label):
                         GlassStatusDot(.outside, ring: true)
                         Text(HealthCopy.core(label: label, maxQueueEntries: nil).title)
+                            .alignmentGuide(.homeStatusText) { $0[.leading] }
                     case .watching(let tools):
                         GlassStatusDot(.on, ring: true)
                         Text(MonitorWords.table?.shell.watching(tools: tools) ?? FlowMapScene.pair(MonitorWords.watching, tools))
+                            .alignmentGuide(.homeStatusText) { $0[.leading] }
                     }
                 case .paused:
                     GlassStatusDot(.ask, ring: true)
                     Text(MonitorWords.paused)
+                        .alignmentGuide(.homeStatusText) { $0[.leading] }
                 case .coreDown:
                     GlassStatusDot(.outside, ring: true)
                     Text(store.failures["status"].flatMap { MonitorWords.table?.line(for: $0) } ?? "—")
+                        .alignmentGuide(.homeStatusText) { $0[.leading] }
                 case .loading, .unknown:
                     // No dot: unknown is never drawn as on, or as off.
                     Text("—").accessibilityLabel(MonitorWords.unknown)
+                        .alignmentGuide(.homeStatusText) { $0[.leading] }
                 }
         }
     }
+}
 
-    @ViewBuilder
-    private var recent: some View {
-        let rows = Array((store.history ?? []).prefix(2))
-        if store.history == nil {
-            Text("—").glassType(GlassTokens.TypeScale.label).foregroundStyle(GlassColor.textTertiary)
-        } else if rows.isEmpty {
-            Text(MonitorWords.table?.shell.nothingContributed ?? "0")
-                .glassType(GlassTokens.TypeScale.label)
-                .foregroundStyle(GlassColor.textSecondary)
-        } else {
-            VStack(spacing: 0) {
-                ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                    GlassTableRow(first: index == 0) { HistoryRowView(row: row, statusLabel: statusLabel, compact: true) }
+/// Rows inside a Home card (Ron's `home-view.tsx`): text on the left, a tag
+/// on the right, and a hairline with 6pt above every row after the first.
+private struct HomeCardRows<Item: Identifiable, Words: View, Tag: View>: View {
+    let items: [Item]
+    let words: (Item) -> Words
+    let tag: (Item) -> Tag
+
+    init(_ items: [Item], @ViewBuilder text: @escaping (Item) -> Words, @ViewBuilder tag: @escaping (Item) -> Tag) {
+        self.items = items
+        self.words = text
+        self.tag = tag
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                HStack(spacing: GlassTokens.Space.s5) {
+                    words(item)
+                    Spacer(minLength: 0)
+                    tag(item)
                 }
+                .padding(.top, index == 0 ? 0 : GlassTokens.Space.s3)
+                .overlay(alignment: .top) {
+                    if index > 0 { GlassHairline(GlassColor.hairline) }
+                }
+                .accessibilityElement(children: .combine)
             }
         }
     }
 }
 
-/// History, in Ron's #1146 order and all in the left pane: the stat cards,
-/// community standing, every contribution from this machine grouped by
-/// project with Open and Withdraw on its row, the credit record, what is
-/// held for review (apart, never as rejected), and then the opened row's
-/// details (`HistoryDetailInspector`: the session detail, the public-run
-/// editor and Skills). The inspector beside it keeps the Traces selection.
+/// History, in Ron's #1146 order, in the left pane: his page description,
+/// the three stat cards, community standing, every contribution from this
+/// machine under SUBMISSIONS, grouped by PROJECT, with Open and Withdraw on
+/// its row, the credit record, and what is held for privacy review (apart,
+/// never as rejected). The record by period, which #1146 has no place for,
+/// closes the page. Opening a row shows its details in the inspector
+/// (`HistoryDetailInspector`, Ron's inspector auto-open).
 private struct HistoryPage: View {
     let store: HomeStore
     let statusLabel: (String?) -> String?
@@ -284,42 +429,50 @@ private struct HistoryPage: View {
     @EnvironmentObject private var model: AppModel
     @State private var filter: HistoryList.Filter = .all
 
+    private var words: MonitorHomeHistoryCopy? { MonitorWords.table?.homeHistory }
+
     // The app's own records, which each row's Withdraw and the opened
     // row's detail resolve against, are read again on every visit: the
     // daemon's view, not the one it had at launch (the legacy screen's rule).
     var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                        // A failed rollup read says so; the cells it feeds
-                        // read a dash, never the store's earlier counts.
-                        if let failure = store.failures["history_rollup"] {
-                            GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
-                        }
-                        HistoryStats(store: store)
-                        HistoryCommunityCard(store: store)
-                        // `accessory:` by name: a first trailing closure
-                        // would bind to `action` and make the card a button.
-                        GlassEyebrowCard(MonitorWords.history, accessory: { refresh }) {
-                            refreshOutcome
-                            list
-                        }
-                        HistoryCreditCard(store: store)
-                        held
-                        if let opened = openedRow {
-                            HistoryDetailInspector(row: opened)
-                                .id(HistoryList.detailAnchor)
-                        }
+        ScrollView {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                if let words {
+                    Text(words.historyDescription)
+                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                // A failed rollup read says so; the cells it feeds
+                // read a dash, never the store's earlier counts.
+                if let failure = store.failures["history_rollup"] {
+                    GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
+                }
+                // Verdict news, in the daemon's words. See history
+                // acknowledges it; this page is already the history.
+                if let card = store.verdictsCard {
+                    NudgeGlassCard(
+                        card: card, busy: store.nudgeBusy,
+                        refusal: store.nudgeError.flatMap { MonitorWords.table?.line(for: $0) }
+                    ) { intent in Task { await store.perform(intent) } }
+                }
+                // The one-time offer to turn verdict notifications on.
+                NudgeOfferCards(place: .history)
+                HistoryStats(store: store)
+                HistoryCommunityCard(store: store)
+                GlassCard {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+                        submissionsHeader
+                        refreshOutcome
+                        list
                     }
                 }
-                // Opening a row brings its details, below the list, into view.
-                .onChange(of: selection) { _, opened in
-                    if !opened.isEmpty { proxy.scrollTo(HistoryList.detailAnchor, anchor: .top) }
-                }
+                HistoryCreditCard(store: store)
+                held
+                HistoryPeriodCard(store: store)
             }
-            .scrollIndicators(.never)
         }
+        .scrollIndicators(.never)
         .onAppear {
             model.clearHistoryRefresh()
             model.refreshHistory()
@@ -335,14 +488,29 @@ private struct HistoryPage: View {
         SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])
     }
 
-    /// The opened row, while it is still in the list.
-    private var openedRow: DaemonData.HistoryRow? {
-        guard !selection.isEmpty else { return nil }
-        return store.history?.first { $0.submissionId == selection }
+    /// Ron's SUBMISSIONS eyebrow over "Contribution history", with the
+    /// refresh control beside them. Without the core's words, History's own
+    /// word alone.
+    private var submissionsHeader: some View {
+        HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                Text(words?.submissions ?? MonitorWords.history)
+                    .glassType(GlassTokens.TypeScale.eyebrow)
+                    .foregroundStyle(GlassColor.textTertiary)
+                if let words {
+                    Text(words.contributionHistory)
+                        .glassType(GlassTokens.TypeScale.title)
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .accessibilityAddTraits(.isHeader)
+                }
+            }
+            Spacer(minLength: 0)
+            refresh
+        }
     }
 
-    /// The refresh control (Ron's #1146 HistoryRefreshControl): asks the daemon to check the server
-    /// sooner (`refresh_history`), then reads History again, the app's
+    /// The refresh control (Ron's #1146 HistoryRefreshControl): asks the daemon to check the
+    /// server sooner (`refresh_history`), then reads History again, the app's
     /// records and this screen's. Only with the core's words.
     @ViewBuilder
     private var refresh: some View {
@@ -351,7 +519,7 @@ private struct HistoryPage: View {
                 Task { if await model.requestHistoryRefresh() { await store.load() } }
             }
             .buttonStyle(GlassButtonStyle(.link))
-            .frame(minHeight: 44)
+            .fixedSize()
             .disabled(model.historyRefresh == .requesting)
         }
     }
@@ -366,8 +534,7 @@ private struct HistoryPage: View {
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            case .failed: GlassStatusLabel(words.refreshFailed, status: .outside)
-                .fixedSize(horizontal: false, vertical: true)
+            case .failed: GlassAlert(words.refreshFailed)
             case .idle, .requesting: EmptyView()
             }
         }
@@ -396,8 +563,8 @@ private struct HistoryPage: View {
             }
             if rows.isEmpty {
                 Text(MonitorWords.table?.shell.historyEmpty ?? "0")
-                    .glassType(GlassTokens.TypeScale.label)
-                    .foregroundStyle(GlassColor.textSecondary)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textTertiary)
             } else {
                 filterBar(rows)
                 let groups = HistoryFolders.folders(
@@ -405,70 +572,115 @@ private struct HistoryPage: View {
                     projectID: { $0.projectId ?? "" }, projectLabel: { $0.projectLabel ?? "—" })
                 if groups.isEmpty {
                     Text(MonitorWords.table?.shell.historyFilterEmpty ?? "0")
-                        .glassType(GlassTokens.TypeScale.label)
-                        .foregroundStyle(GlassColor.textSecondary)
-                }
-                ForEach(groups) { group in
-                    VStack(alignment: .leading, spacing: 0) {
-                        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
-                            Text(group.label)
-                                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                                .foregroundStyle(GlassColor.textPrimary)
-                                .lineLimit(1)
-                            Spacer(minLength: GlassTokens.Space.s4)
-                            Text("\(group.count)")
-                                .glassType(GlassTokens.TypeScale.caption)
-                                .foregroundStyle(GlassColor.textTertiary)
-                                .monospacedDigit()
-                        }
-                        .accessibilityElement(children: .combine)
-                        ForEach(Array(group.entries.enumerated()), id: \.element.id) { index, row in
-                            HistoryListRow(
-                                row: row, statusLabel: statusLabel, first: index == 0,
-                                selected: selection == row.submissionId,
-                                open: { selection = row.submissionId })
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textTertiary)
+                } else {
+                    // Ron's groups: 24 apart, each after the first under a
+                    // hairline, a PROJECT eyebrow over the folder, its
+                    // record count, then its rows.
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s10) {
+                        ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+                            projectGroup(group, first: index == 0)
                         }
                     }
+                    .padding(.top, GlassTokens.Space.s8)
                 }
             }
         } else if store.failures["list_history"] == nil {
-            GlassSpinner(MonitorWords.history).frame(maxWidth: .infinity)
+            // Ron's reading line while History is first read.
+            if let words {
+                Text(words.readingHistory)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textTertiary)
+            } else {
+                GlassSpinner(MonitorWords.history).frame(maxWidth: .infinity)
+            }
         }
     }
 
-    /// Ron's filter: All, then each status, with its count.
+    private func projectGroup(_ group: QueueGroup<DaemonData.HistoryRow>, first: Bool) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+            HStack(alignment: .bottom, spacing: GlassTokens.Space.s9) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    if let words {
+                        Text(words.project)
+                            .glassType(GlassTokens.TypeScale.eyebrow)
+                            .foregroundStyle(GlassColor.textTertiary)
+                    }
+                    Text(group.label)
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Text(words?.records(group.count) ?? "\(group.count)")
+                    .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .monospacedDigit()
+                    .fixedSize()
+            }
+            .accessibilityElement(children: .combine)
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(group.entries) { row in
+                    HistoryListRow(
+                        row: row, statusLabel: statusLabel,
+                        selected: selection == row.submissionId,
+                        open: { selection = row.submissionId })
+                }
+            }
+        }
+        .padding(.top, first ? 0 : GlassTokens.Space.s9 - 2)
+        .overlay(alignment: .top) {
+            if !first { GlassHairline(GlassColor.hairline) }
+        }
+    }
+
+    /// Ron's filter: All, then each status, with its count, as pills that
+    /// wrap onto a second line rather than scroll out of sight.
     @ViewBuilder
     private func filterBar(_ rows: [DaemonData.HistoryRow]) -> some View {
         if let labels {
             let counts = HistoryList.counts(rows)
-            ScrollView(.horizontal) {
-                GlassSegmentedTabs(
-                    MonitorWords.history, selection: $filter,
-                    segments: HistoryList.Filter.allCases.map { item in
-                        GlassSegment(labels[item] ?? "", value: item, badge: counts[item] ?? 0)
-                    })
+            HistoryFilterFlow(spacing: GlassTokens.Space.s2) {
+                ForEach(HistoryList.Filter.allCases, id: \.self) { item in
+                    HistoryFilterPill(
+                        label: labels[item] ?? "", count: counts[item] ?? 0,
+                        selected: filter == item, select: { filter = item })
+                }
             }
-            .scrollIndicators(.never)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(words?.filterLabel ?? MonitorWords.history)
         }
     }
 
-    /// Held for review, never as rejected: the core's sentence, no promised
-    /// wait, the server's distinct reasons without digests, and why there is
-    /// no bulk action. Only when the rollup counts something held and the
-    /// core's words are there (never an empty title). The reasons span every
+    /// Held for review, never as rejected (Ron's PRIVACY REVIEW card): the
+    /// count as its heading, the core's sentence, no promised wait, the
+    /// server's distinct reasons without digests, and why there is no bulk
+    /// action. Only when the rollup counts something held and the core's
+    /// words are there (never an empty title). The reasons span every
     /// record the app holds, not the list's capped page.
     @ViewBuilder
     private var held: some View {
-        if (rollup?.quarantined ?? 0) > 0, let words = MonitorWords.table {
-            GlassNotice(tone: .ask, title: words.heldForReview) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+        if let quarantined = rollup?.quarantined, quarantined > 0, let words = MonitorWords.table {
+            GlassEyebrowCard(words.shell.filterQuarantined) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    Text(words.homeHistory.held(quarantined))
+                        .glassType(GlassTokens.TypeScale.title)
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .accessibilityAddTraits(.isHeader)
                     Text(words.heldExplanation)
-                    Text(HistoryLegacyWords.typicalWait)
-                    ForEach(HeldExplanations.lines(in: model.history.filter { $0.status == "quarantined" }.map(\.explanations)),
-                            id: \.self) { line in
-                        Text(line)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textSecondary)
+                    Group {
+                        Text(HistoryLegacyWords.typicalWait)
+                        ForEach(HeldExplanations.lines(in: model.history.filter { $0.status == "quarantined" }.map(\.explanations)),
+                                id: \.self) { line in
+                            Text(line)
+                        }
+                        Text(WithdrawalCopy.noBulkAction)
                     }
-                    Text(WithdrawalCopy.noBulkAction)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
                 }
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -476,18 +688,96 @@ private struct HistoryPage: View {
     }
 }
 
-/// One contribution in History's list (Ron's `HistoryRow`): what it is, the
-/// server's reasons, then Open and Withdraw on the row, the one Withdraw on
-/// History's page. Withdraw asks first, with the existing confirmation, and
-/// stands on the app's own record of the contribution, so a row that record
-/// does not hold yet offers none (fail closed). It decides from the status
-/// the opened detail decides from, offers Retry after a failed withdrawal,
-/// and gives way to the core's sign-in while no account session is active.
-/// Without the core's public-run copy the row offers nothing.
+/// One History filter (Ron's `history-filter.tsx`): an 11pt pill, its label
+/// and count; the chosen one on a lit fill in primary ink, the others
+/// tertiary, lifting to primary under the pointer.
+private struct HistoryFilterPill: View {
+    let label: String
+    let count: Int
+    let selected: Bool
+    let select: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: select) {
+            HStack(spacing: GlassTokens.Space.s2) {
+                Text(label)
+                Text("\(count)").monospacedDigit().opacity(0.7)
+            }
+            .glassType(GlassTokens.TypeScale.caption.weight(.semibold))
+            .foregroundStyle(
+                selected ? GlassTokens.Color.textOnSelected.color
+                    : hovering ? GlassColor.textPrimary : GlassColor.textTertiary)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, GlassTokens.Space.s5)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(selected ? GlassTokens.Color.controlSelected.color : Color.clear))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// Ron's `flex-wrap` for the filter: items left to right, onto the next
+/// line when the next one would not fit.
+struct HistoryFilterFlow: Layout {
+    let spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let lines = Self.lines(width: proposal.width ?? .infinity, sizes: subviews.map { $0.sizeThatFits(.unspecified) },
+                               spacing: spacing)
+        let width = lines.map(\.width).max() ?? 0
+        let height = lines.map(\.height).reduce(0, +) + spacing * CGFloat(max(lines.count - 1, 0))
+        return CGSize(width: proposal.width.map { min($0, width) } ?? width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        var y = bounds.minY
+        for line in Self.lines(width: bounds.width, sizes: sizes, spacing: spacing) {
+            var x = bounds.minX
+            for index in line.items {
+                subviews[index].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(sizes[index]))
+                x += sizes[index].width + spacing
+            }
+            y += line.height + spacing
+        }
+    }
+
+    /// The items on each line, and each line's width and height. Pure.
+    static func lines(width: CGFloat, sizes: [CGSize], spacing: CGFloat) -> [(items: [Int], width: CGFloat, height: CGFloat)] {
+        var lines: [(items: [Int], width: CGFloat, height: CGFloat)] = []
+        var current: (items: [Int], width: CGFloat, height: CGFloat) = ([], 0, 0)
+        for (index, size) in sizes.enumerated() {
+            let needed = current.items.isEmpty ? size.width : current.width + spacing + size.width
+            if !current.items.isEmpty, needed > width {
+                lines.append(current)
+                current = ([index], size.width, size.height)
+            } else {
+                current = (current.items + [index], needed, max(current.height, size.height))
+            }
+        }
+        if !current.items.isEmpty { lines.append(current) }
+        return lines
+    }
+}
+
+/// One contribution in History's list (Ron's `HistoryRow`): a folder tile,
+/// then what it is -- the folder, its tool and day, its status line, the
+/// server's reasons and its settled credit -- with Open and Withdraw on the
+/// right of the row, the one Withdraw on History's page. Withdraw asks
+/// first, with the existing confirmation, and stands on the app's own record
+/// of the contribution, so a row that record does not hold yet offers none
+/// (fail closed). It decides from the status the opened detail decides
+/// from, offers Retry after a failed withdrawal, and gives way to the core's
+/// sign-in while no account session is active. Without the core's
+/// public-run copy the row offers nothing.
 private struct HistoryListRow: View {
     let row: DaemonData.HistoryRow
     let statusLabel: (String?) -> String?
-    let first: Bool
     let selected: Bool
     let open: () -> Void
     @EnvironmentObject private var model: AppModel
@@ -498,21 +788,110 @@ private struct HistoryListRow: View {
     }
 
     var body: some View {
-        GlassTableRow(first: first) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                HistoryRowView(row: row, statusLabel: statusLabel, compact: false)
-                explanations
-                if let copy = model.publicRunCopy {
-                    actions(copy)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            // The actions beside the text while the text keeps a readable
+            // column; stacked at the row's right, then under the text, as
+            // the pane narrows. Never a label broken mid-word.
+            ViewThatFits(in: .horizontal) {
+                line(stacked: false)
+                line(stacked: true)
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                    HStack(alignment: .top, spacing: GlassTokens.Space.s7) {
+                        tile
+                        description
+                    }
+                    if let copy = model.publicRunCopy {
+                        HStack(spacing: GlassTokens.Space.s4) { actions(copy) }
+                    }
                 }
             }
+            if let copy = model.publicRunCopy {
+                below(copy)
+            }
         }
+        // #1146's confirmation: a glass modal over the window, not a well
+        // under the row (owner: glass modal for confirmations).
+        .glassModal(isPresented: Binding(
+            get: {
+                confirming && control == .withdraw && record.flatMap { model.withdrawals[$0.submissionID] } == nil
+            },
+            set: { if !$0 { confirming = false } }
+        )) {
+            if let record, let copy = model.publicRunCopy {
+                WithdrawalConfirmationModal(
+                    status: SessionDetailView.withdrawalStatus(record, detail: model.sessionDetails[record.submissionID]),
+                    keepLabel: copy.keepContribution,
+                    inFlight: model.withdrawing.contains(record.submissionID),
+                    onKeep: { confirming = false },
+                    onConfirm: { model.withdraw(record) }
+                )
+            }
+        }
+        .padding(.vertical, GlassTokens.Space.s7)
+        .padding(.horizontal, GlassTokens.Space.s2)
         .background(
             RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
                 .fill(selected ? GlassColor.ink(0.12) : Color.clear)
         )
+        .overlay(alignment: .bottom) {
+            GlassHairline(GlassColor.hairline)
+        }
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// #1146's tile: the folder's first letter.
+    private var tile: some View {
+        GlassToolTile(.folderInitial(row.projectLabel ?? ""), large: true)
+            .frame(width: 38, alignment: .leading)
+    }
+
+    private func line(stacked: Bool) -> some View {
+        HStack(alignment: .center, spacing: GlassTokens.Space.s7) {
+            tile
+            description
+                .frame(minWidth: 120, idealWidth: 120, maxWidth: .infinity, alignment: .leading)
+            if let copy = model.publicRunCopy {
+                let layout = stacked
+                    ? AnyLayout(VStackLayout(alignment: .trailing, spacing: GlassTokens.Space.s3))
+                    : AnyLayout(HStackLayout(spacing: GlassTokens.Space.s4))
+                layout { actions(copy) }
+                    .fixedSize()
+            }
+        }
+    }
+
+    /// The folder in 600, its tool and day, Ron's "Status:" line, the
+    /// server's reasons, and the settled credit.
+    private var description: some View {
+        let words = MonitorWords.table?.homeHistory
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            Text(row.projectLabel ?? "—")
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .foregroundStyle(GlassColor.textPrimary)
+                .lineLimit(1)
+            Text(HomeFormat.rowMeta(row))
+                .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let word = HomeFormat.statusWord(row.status, label: statusLabel) {
+                if let words {
+                    Text(words.status(word))
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    GlassTag(word, tone: HomeFormat.tone(row.status)).fixedSize()
+                }
+            }
+            explanations
+            if let figure = HomeFormat.credit(row), let words {
+                Text(words.credit(figure))
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 
     /// The server's own reasons for this row, without opaque digests; a held
@@ -532,34 +911,49 @@ private struct HistoryListRow: View {
         .foregroundStyle(GlassColor.textSecondary)
     }
 
-    @ViewBuilder
-    private func actions(_ copy: PublicRunCopy) -> some View {
+    private var control: HistoryList.RowWithdraw {
         let detail = record.flatMap { model.sessionDetails[$0.submissionID] }
         let result = record.flatMap { model.withdrawals[$0.submissionID] }
-        let control = HistoryList.rowWithdraw(record: record, detail: detail, result: result, account: model.accountSession)
-        HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
-            Button(MonitorWords.table?.shell.open ?? copy.viewSession, action: open)
-                .buttonStyle(GlassButtonStyle(.glass, small: true))
-                .frame(minHeight: 44)
-            if result == nil, !confirming || control != .withdraw {
-                withdrawControl(control, copy: copy)
-            }
+        return HistoryList.rowWithdraw(record: record, detail: detail, result: result, account: model.accountSession)
+    }
+
+    /// Open, and Withdraw (or what stands in its place) while no outcome is
+    /// drawn under the row.
+    @ViewBuilder
+    private func actions(_ copy: PublicRunCopy) -> some View {
+        let result = record.flatMap { model.withdrawals[$0.submissionID] }
+        let control = control
+        Button(MonitorWords.table?.shell.open ?? copy.viewSession, action: open)
+            .buttonStyle(GlassButtonStyle(.glass, small: true))
+            .frame(minHeight: 44)
+        if result == nil {
+            withdrawControl(control, copy: copy)
         }
-        if let record {
+    }
+
+    /// What runs the row's full width under it: the withdrawal outcome and
+    /// Retry, and sign-in's progress and failure lines. The confirmation is
+    /// a glass modal over the window (`WithdrawalConfirmationModal`).
+    @ViewBuilder
+    private func below(_ copy: PublicRunCopy) -> some View {
+        let result = record.flatMap { model.withdrawals[$0.submissionID] }
+        let control = control
+        if record != nil {
             if let result {
-                if HistoryList.showsOutcome(result) {
+                // A failure is said under the retry it is about; any other
+                // outcome above the control (Ron, 2026-10-09).
+                let failed = WithdrawalOutcomeView.isFailure(result)
+                if HistoryList.showsOutcome(result), !failed {
                     WithdrawalOutcomeView(result: result)
                 }
                 withdrawControl(control, copy: copy)
-            } else if confirming, control == .withdraw {
-                WithdrawalConfirmationView(
-                    status: SessionDetailView.withdrawalStatus(record, detail: detail),
-                    keepLabel: copy.keepContribution,
-                    inFlight: model.withdrawing.contains(record.submissionID),
-                    onKeep: { confirming = false },
-                    onConfirm: { model.withdraw(record) }
-                )
+                if HistoryList.showsOutcome(result), failed {
+                    WithdrawalOutcomeView(result: result)
+                }
             }
+        }
+        if control == .signIn, let words = MonitorWords.table?.historyActions {
+            HistorySignInStatus(words: words)
         }
     }
 
@@ -570,16 +964,18 @@ private struct HistoryListRow: View {
     private func withdrawControl(_ control: HistoryList.RowWithdraw, copy: PublicRunCopy) -> some View {
         let words = MonitorWords.table?.historyActions
         switch control {
+        // #1146: Withdraw reads in the outside ink.
         case .withdraw: Button(copy.withdraw) { confirming = true }
-            .buttonStyle(GlassButtonStyle(.glass, small: true))
+            .buttonStyle(GlassButtonStyle(.destructive, small: true))
             .frame(minHeight: 44)
             .disabled(record.map { model.withdrawing.contains($0.submissionID) } ?? true)
         // Retry withdraws without asking again, as the legacy
         // `SessionWithdrawalAction` does: the first attempt already asked.
-        // (Ron's "Try again" asks again; native's behaviour is kept.)
+        // (Ron's "Try again" asks again; native's behaviour is kept, under
+        // his word.)
         case .retry:
             if let record {
-                Button(copy.withdraw) { model.withdraw(record) }
+                Button(WithdrawalCopy.tryAgain) { model.withdraw(record) }
                     .buttonStyle(GlassButtonStyle(.glass, small: true))
                     .frame(minHeight: 44)
                     .disabled(model.withdrawing.contains(record.submissionID))
@@ -602,26 +998,36 @@ private struct HistoryListRow: View {
 }
 
 /// Ron's `AccountSignInControl`: sign in through the native identity path
-/// (the daemon opens the browser), say so while it waits, and say why when
-/// it did not leave an active session. All in the core's words.
+/// (the daemon opens the browser), and say so while it waits. The button
+/// sits on the row; what it says while waiting, and why a sign-in did not
+/// leave an active session, run under the row (`HistorySignInStatus`). All
+/// in the core's words.
 private struct HistorySignInControl: View {
     let words: MonitorHistoryActionsCopy
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
+        Button(model.accountSigningIn ? words.waitingForSignIn : words.signInToWithdraw) { Task { await model.signInToWithdraw() } }
+            .buttonStyle(GlassButtonStyle(.glass, small: true))
+            .frame(minHeight: 44)
+            .disabled(model.accountSigningIn)
+    }
+}
+
+/// Sign-in's progress line and its failure, under the row.
+private struct HistorySignInStatus: View {
+    let words: MonitorHistoryActionsCopy
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-            Button(model.accountSigningIn ? words.waitingForSignIn : words.signInToWithdraw) { Task { await model.signInToWithdraw() } }
-                .buttonStyle(GlassButtonStyle(.glass, small: true))
-                .frame(minHeight: 44)
-                .disabled(model.accountSigningIn)
             if model.accountSigningIn { Text(words.completeSignIn)
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             }
             if let failure = model.accountSignInFailure {
-                GlassStatusLabel(line(failure), status: .outside)
-                    .fixedSize(horizontal: false, vertical: true)
+                GlassAlert(line(failure))
             }
         }
     }
@@ -636,7 +1042,7 @@ private struct HistorySignInControl: View {
 }
 
 /// History's stat cards (Ron's `HistoryPage`): pending credit under D6,
-/// contributed, and held for review.
+/// contributed, and held for review, as Home's three are drawn.
 private struct HistoryStats: View {
     let store: HomeStore
 
@@ -645,24 +1051,13 @@ private struct HistoryStats: View {
         let rollup = SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])
         let credit = SummaryFacts.fresh(store.credit, unless: store.failures["commons_credit_summary"])
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            HStack(spacing: GlassTokens.Space.s3) {
-                GlassLegendCell(MonitorWords.pending, value: HomeFormat.pendingFigure(rollup?.creditPending, credit: credit), status: .ask)
-                GlassLegendCell(MonitorWords.contributed, value: HomeFormat.count(rollup?.allTime?.accepted), status: .shared)
-                GlassLegendCell(MonitorWords.held, value: HomeFormat.count(rollup?.quarantined), status: .ask)
+            HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
+                HomeStatTile(label: HomeFormat.creditPendingWord,
+                             value: HomeFormat.pendingFigure(rollup?.creditPending, credit: credit))
+                HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(rollup?.allTime?.accepted))
+                HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined))
             }
-            // The record by period and what was withdrawn, from the rollup
-            // (what Home's summary inspector drew before Ron's Summary).
-            GlassKeyValueList([
-                .init(MonitorWords.week, HomeFormat.count(rollup?.week?.accepted)),
-                .init(MonitorWords.month, HomeFormat.count(rollup?.month?.accepted)),
-                .init(MonitorWords.withdrawn, HomeFormat.count(rollup?.takenBack)),
-            ])
-            if let condition = HomeFormat.pendingCondition(credit) {
-                Text(condition)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -764,121 +1159,226 @@ enum HistoryList {
     }
 }
 
-/// One contribution: folder, day and tool, its status tag, and (in full)
-/// how it was approved and its credit.
-struct HistoryRowView: View {
-    let row: DaemonData.HistoryRow
-    let statusLabel: (String?) -> String?
-    let compact: Bool
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(row.projectLabel ?? "—")
-                    .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .lineLimit(1)
-                Text(HomeFormat.meta(row, compact: compact))
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .lineLimit(1)
-                if !compact {
-                    // Its own line: the core's label for contributing
-                    // automatically is long, and must not be cut short.
-                    Text(HomeFormat.provenance(row.provenance))
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            Spacer(minLength: GlassTokens.Space.s4)
-            if !compact, let figure = HomeFormat.credit(row) {
-                Text(figure)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-            }
-            if let tag = HomeFormat.statusWord(row.status, label: statusLabel) {
-                GlassTag(tag, tone: HomeFormat.tone(row.status))
-                    .fixedSize()
-            }
-        }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-/// Community standing, when the rollup carries one; nothing otherwise.
+/// Community standing (Ron's `CommunityPanel`), when the rollup carries
+/// one; nothing otherwise: its eyebrow and heading, then rank, novelty
+/// credit, accepted in the commons' window and the accept rate, and the
+/// commons' own word when aggregate analytics are withheld.
 struct HistoryCommunityCard: View {
     let store: HomeStore
 
     var body: some View {
         // Nothing after a failed read: not the earlier standing.
         if let community = SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])?.community {
-            GlassEyebrowCard(MonitorWords.community) {
-                GlassKeyValueList([
-                    .init(MonitorWords.rank, community.rank.map { "#\($0)" } ?? "—"),
-                    .init(MonitorWords.window, community.windowLabel ?? "—"),
-                ])
+            if let words = MonitorWords.table?.homeHistory {
+                GlassCard(quiet: true) {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                            Text(MonitorWords.community)
+                                .glassType(GlassTokens.TypeScale.eyebrow)
+                                .foregroundStyle(GlassColor.textTertiary)
+                            Text(words.publicStanding)
+                                .glassType(GlassTokens.TypeScale.title)
+                                .foregroundStyle(GlassColor.textPrimary)
+                                .accessibilityAddTraits(.isHeader)
+                        }
+                        HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
+                            cell(MonitorWords.rank, community.rank.map { "#\($0)" } ?? "—")
+                            cell(words.noveltyCredit, HomeFormat.points(community.noveltyCredit))
+                            cell(words.accepted(window: community.windowLabel ?? "—"),
+                                 HomeFormat.count(community.acceptedInWindow))
+                            cell(words.acceptRate, HomeFormat.rate(community.acceptRate))
+                        }
+                        .padding(.vertical, GlassTokens.Space.s4)
+                        .overlay(alignment: .top) { GlassHairline(GlassColor.hairline) }
+                        .overlay(alignment: .bottom) { GlassHairline(GlassColor.hairline) }
+                        if community.analyticsWithheld == true {
+                            Text(words.analyticsWithheld)
+                                .glassType(GlassTokens.TypeScale.bodyStrong)
+                                .foregroundStyle(GlassColor.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            } else {
+                GlassEyebrowCard(MonitorWords.community) {
+                    GlassKeyValueList([
+                        .init(MonitorWords.rank, community.rank.map { "#\($0)" } ?? "—"),
+                        .init(MonitorWords.window, community.windowLabel ?? "—"),
+                    ])
+                }
             }
         }
     }
+
+    private func cell(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+            Text(label)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(value)
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .foregroundStyle(GlassColor.textPrimary)
+                .monospacedDigit()
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
 }
 
-/// The credit record: final credit, and pending credit only with the
-/// commons' statement of its condition beside it (D6). Without that
-/// statement the pending figure is a dash: a bare number would read as owed.
+/// The credit record (Ron's `CreditRecordPanel`): what credit is, then the
+/// final figure and the one still being scored, or his chip before the
+/// first sync. Pending credit is a figure only when the commons has stated
+/// its condition (D6); without that statement it is a dash: a bare number
+/// would read as owed. The statement itself is not drawn (owner, 2026-10-13).
 struct HistoryCreditCard: View {
     let store: HomeStore
 
     var body: some View {
         // A failed read is a dash, never the earlier figures or sentence.
         let credit = SummaryFacts.fresh(store.credit, unless: store.failures["commons_credit_summary"])
-        let condition = HomeFormat.pendingCondition(credit)
         let rollup = SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])
-        GlassEyebrowCard(MonitorWords.credit) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                GlassKeyValueList([
-                    .init(MonitorWords.final, HomeFormat.points(rollup?.creditFinal)),
-                    .init(MonitorWords.pending, HomeFormat.pendingFigure(rollup?.creditPending, credit: credit)),
-                ])
-                if let condition {
-                    Text(condition)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textTertiary)
+        let words = MonitorWords.table?.homeHistory
+        GlassEyebrowCard(words?.creditRecord ?? MonitorWords.credit) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
+                if let words {
+                    Text(words.aboutCredit)
+                        .glassType(GlassTokens.TypeScale.title)
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .accessibilityAddTraits(.isHeader)
+                    Text(words.aboutCreditBody)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                // Credit is a record, not currency: the core's sentence,
-                // beside every figure.
-                Text(MonitorWords.creditNotCurrency)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+                if let words, let rollup, rollup.lastRefreshedAt == nil {
+                    GlassChip(words.notSynced)
+                } else {
+                    HStack(alignment: .top, spacing: GlassTokens.Space.s10) {
+                        figure(MonitorWords.final, HomeFormat.points(rollup?.creditFinal))
+                        figure(words?.stillBeingScored ?? MonitorWords.pending,
+                               HomeFormat.pendingFigure(rollup?.creditPending, credit: credit))
+                    }
+                    .padding(.top, GlassTokens.Space.s7)
+                    .overlay(alignment: .top) { GlassHairline(GlassColor.hairline) }
+                }
             }
+        }
+    }
+
+    private func figure(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+            Text(label)
+                .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                .foregroundStyle(GlassColor.textSecondary)
+            Text(value)
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .foregroundStyle(GlassColor.textPrimary)
+                .monospacedDigit()
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// The record by period: the week's and month's accepted counts and the
+/// withdrawn count, from the rollup. #1146's History has no place for it,
+/// so it closes the page, quietly, rather than sitting among Ron's stat
+/// cards.
+private struct HistoryPeriodCard: View {
+    let store: HomeStore
+
+    var body: some View {
+        // A failed read is a dash in every row, never the earlier counts.
+        let rollup = SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])
+        GlassEyebrowCard(MonitorWords.summary) {
+            GlassKeyValueList([
+                .init(MonitorWords.week, HomeFormat.count(rollup?.week?.accepted)),
+                .init(MonitorWords.month, HomeFormat.count(rollup?.month?.accepted)),
+                .init(MonitorWords.withdrawn, HomeFormat.count(rollup?.takenBack)),
+            ])
         }
     }
 }
 
-/// One of Home's three counts: its word over its figure.
+/// One of Home's and History's three counts (Ron's `StatCard`): a full
+/// card, 10 by 12 inside, its eyebrow word over an 18pt-class bold tabular
+/// figure. The word wraps at a space, never inside a word.
 private struct HomeStatTile: View {
     let label: String
     let value: String
+    /// A line under the value (the credit's change, the uncontributed
+    /// size and estimate), in `detailInk` when it carries a tone.
+    var detail: String? = nil
+    var detailInk: GlassRGBA? = nil
+    /// The tile's icon (`HomeStatIcons`); nil draws none.
+    var systemImage: String? = nil
+    /// A quieter figure beside the value; nil draws none.
+    var valueAccessory: String? = nil
+    /// Opens where the number lives, and the whole tile is the button;
+    /// nil for a tile on the page its number lives on (History's).
+    var action: (() -> Void)?
 
+    /// #1146's `StatCard`: a full card, the value bold and tabular.
     var body: some View {
-        GlassCard(quiet: true) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                Text(label)
-                    .glassType(GlassTokens.TypeScale.eyebrow)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                Text(value)
-                    .glassType(GlassTokens.TypeScale.title)
-                    .monospacedDigit()
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .lineLimit(1)
+        if let action {
+            Button(action: action) {
+                GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
+                              valueAccessory: valueAccessory, interactive: true)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .buttonStyle(GlassPressStyle())
+        } else {
+            GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
+                          valueAccessory: valueAccessory)
         }
-        .accessibilityElement(children: .combine)
+    }
+}
+
+/// What waits on this Mac, not yet contributed (owner, 2026-10-12): the
+/// sessions in the queue that have not gone, their size, and the credit the
+/// core estimates for them. Only estimates the core says to draw are added
+/// up; with none, no estimate is shown, never zero.
+///
+/// Dollars replace points (owner, 2026-10-16): when the daemon reports the
+/// machine-wide settlement estimate, its finished line is the detail, the
+/// same line the menu bar draws, and the points sum is not shown.
+struct HomeUncontributed: Equatable {
+    let count: Int
+    let bytes: Int64
+    let low: Double?
+    let high: Double?
+    /// The core's finished dollar line, or nil when there is none to draw.
+    let dollars: String?
+
+    /// States that have left, or are leaving, this Mac.
+    static let gone: Set<String> = ["uploading", "uploaded"]
+
+    init(_ sessions: [DaemonData.QueueEntry], settlement: DaemonData.SettlementEstimate? = nil) {
+        let text = settlement?.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        dollars = (text?.isEmpty ?? true) ? nil : settlement?.text
+        let waiting = sessions.filter { !Self.gone.contains($0.state) }
+        count = waiting.count
+        bytes = waiting.reduce(Int64(0)) { $0 + Int64($1.sizeBytes ?? 0) }
+        let drawn = waiting.compactMap(\.creditEstimate).filter { $0.drawn == true }
+        low = drawn.isEmpty ? nil : drawn.reduce(0) { $0 + $1.low }
+        high = drawn.isEmpty ? nil : drawn.reduce(0) { $0 + $1.high }
+    }
+
+    /// The size of what waits, drawn beside the count (owner, 2026-10-12).
+    func size(_ words: MonitorHomeHistoryCopy?) -> String? {
+        guard let words, count > 0 else { return nil }
+        return FirstRunCopy.fill(words.uncontributedSize,
+                                 ["size": ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)])
+    }
+
+    /// The estimate, under the count, when there is one: the dollar line,
+    /// which covers every trace on this Mac and so needs no queued count,
+    /// else the points sum.
+    func detail(_ words: MonitorHomeHistoryCopy?) -> String? {
+        if let dollars { return dollars }
+        guard let words, count > 0, let low, let high else { return nil }
+        return FirstRunCopy.fill(words.uncontributedEstimate,
+                                 ["min": HomeFormat.points(low), "max": HomeFormat.points(high)])
     }
 }
 
@@ -895,6 +1395,23 @@ enum HomeFormat {
     /// A count, or a dash when the core did not say. Zero is a number.
     static func count(_ value: Int?) -> String {
         value.map(String.init) ?? "—"
+    }
+
+    /// Home's Credit tile value: total credit, or a dash when unknown.
+    static func creditTotal(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return value.formatted(.number.precision(.fractionLength(0...1)))
+    }
+
+    /// The Credit tile's change since the last day this Mac saw: signed, in
+    /// the status green for a gain and red for a loss (owner, 2026-10-12);
+    /// nil while there is no earlier day to compare with.
+    static func creditDelta(_ delta: Double?, words: MonitorHomeHistoryCopy?) -> (text: String, ink: GlassRGBA?)? {
+        guard let delta, let words else { return nil }
+        if abs(delta) < 0.05 { return (words.creditDeltaNone, nil) }
+        let figure = delta.formatted(.number.precision(.fractionLength(0...1)).sign(strategy: .always()))
+        let ink = delta > 0 ? GlassTokens.Color.statusOnText : GlassTokens.Color.statusOutsideText
+        return (FirstRunCopy.fill(words.creditDelta, ["amount": figure]), ink)
     }
 
     static func points(_ value: Double?) -> String {
@@ -956,13 +1473,29 @@ enum HomeFormat {
         if let source = row.source { parts.append(InferenceTabView.toolName(source)) }
         if !compact {
             if let bytes = row.uploadedBytes {
-                parts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
+                parts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .memory))
             }
             if let withdrawn = row.revokedAt ?? row.withdrawnAt {
                 parts.append("\(MonitorWords.withdrawn) \(day(withdrawn))")
             }
         }
         return parts.isEmpty ? "—" : parts.joined(separator: " · ")
+    }
+
+    /// A History row's tool and day (Ron's `history-row.tsx`, source
+    /// first). How it was approved, its size and its withdrawal are the
+    /// opened row's (`HistoryDetailInspector`, `meta(_:compact: false)`).
+    static func rowMeta(_ row: DaemonData.HistoryRow) -> String {
+        var parts: [String] = []
+        if let source = row.source { parts.append(InferenceTabView.toolName(source)) }
+        if let date = row.submittedAt { parts.append(day(date)) }
+        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
+    }
+
+    /// The community's accept rate as a whole percentage, or a dash when
+    /// the commons did not say.
+    static func rate(_ value: Double?) -> String {
+        value.map { $0.formatted(.percent.precision(.fractionLength(0))) } ?? "—"
     }
 
     static func day(_ date: Date) -> String {
@@ -1071,7 +1604,6 @@ extension MonitorWords {
     static var held: String { table?.held ?? "" }
     static var heldForReview: String { table?.heldForReview ?? "" }
     static var heldExplanation: String { table?.heldExplanation ?? "" }
-    static var creditNotCurrency: String { table?.creditNotCurrency ?? "" }
     static var signedOut: String { table?.signedOut ?? "" }
     static var withdrawn: String { table?.withdrawn ?? "" }
     static var credit: String { table?.credit ?? "" }
@@ -1082,4 +1614,13 @@ extension MonitorWords {
     static var window: String { table?.window ?? "" }
     static var approved: String { table?.approved ?? "" }
     static var unrecorded: String { table?.unrecorded ?? "" }
+}
+
+extension HorizontalAlignment {
+    private enum HomeStatusText: AlignmentID {
+        static func defaultValue(in context: ViewDimensions) -> CGFloat { context[.leading] }
+    }
+
+    /// The left edge of the Home status card's words, after its dot.
+    static let homeStatusText = HorizontalAlignment(HomeStatusText.self)
 }

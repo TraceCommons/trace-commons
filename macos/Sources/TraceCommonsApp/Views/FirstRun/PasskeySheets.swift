@@ -21,7 +21,7 @@ enum PasskeySheetOutcome: Equatable {
     /// An existing passkey signed in, and Verify enrolled this Mac: either
     /// the account was unbound and Verify bound it (`bound`), or another Mac
     /// had bound it and Verify joined this one to it (`enrolled`). A sign-in
-    /// alone holds no enrolment and never ends the sheets with this. `name`
+    /// alone holds no enrollment and never ends the sheets with this. `name`
     /// is the one the daemon remembers for the signed-in account's own
     /// record (`signed_in_name`), read once Verify finished; nil when it has
     /// none.
@@ -70,7 +70,8 @@ enum PasskeyCallResult: Equatable {
 enum PasskeyBindResult: Equatable {
     case bound
     case existingAccount
-    /// A bound account's Verify joined this Mac to it (`enrolled`).
+    /// A bound account's Verify joined this Mac to it (`enrolled`), or found
+    /// this Mac already enrolled in it (`already_enrolled`).
     case enrolled
     /// The commons refused to join this Mac to the bound account: this Mac's
     /// near.ai sign-in is not the one the account uses
@@ -85,7 +86,11 @@ enum PasskeyBindResult: Equatable {
         switch (result.outcome, result.bindingState) {
         case ("bound", "bound"): self = .bound
         case ("existing_account", "bound"), ("existing_account", "legacy"): self = .existingAccount
-        case ("enrolled", "bound"): self = .enrolled
+        // `already_enrolled`: this Mac already holds the enrollment of the
+        // account the session signed in to (the daemon checked it locally,
+        // and sent nothing), so it is the join Verify would have made. Only
+        // a bound account's Verify accepts it (`verify()`).
+        case ("enrolled", "bound"), ("already_enrolled", "bound"): self = .enrolled
         default: self = .failed(.refused(label: "account-bind-invalid"))
         }
     }
@@ -124,7 +129,7 @@ enum PasskeyVerifyKind: Equatable {
 /// What "Use existing passkey" answered: the daemon's `binding_state` for
 /// the account it signed in to, or why it did not sign in.
 enum PasskeySignInResult: Equatable {
-    /// No Mac has bound the account yet: Verify binds it and enrols this one.
+    /// No Mac has bound the account yet: Verify binds it and enrolls this one.
     case unbound
     /// Another Mac bound it: Verify joins this Mac to it, which the commons
     /// allows only when this Mac's near.ai sign-in is the account's own.
@@ -299,8 +304,8 @@ final class PasskeySheetModel: ObservableObject {
     }
 
     /// P-1 Use existing and P-7 Sign in: the system sign-in sheet. A
-    /// sign-in holds no enrolment, so it never ends the sheets by itself:
-    /// an account no Mac has bound goes to Verify, whose bind enrols this
+    /// sign-in holds no enrollment, so it never ends the sheets by itself:
+    /// an account no Mac has bound goes to Verify, whose bind enrolls this
     /// Mac; one another Mac bound goes to Verify too, which joins this Mac to
     /// it; a legacy one is signed out again, fail closed, since adding a Mac
     /// to it with a passkey is not built.
@@ -330,7 +335,7 @@ final class PasskeySheetModel: ObservableObject {
         }
     }
 
-    /// The daemon holds a session this Mac cannot enrol under: sign it out
+    /// The daemon holds a session this Mac cannot enroll under: sign it out
     /// and stay on Choose. The notice is shown only once the sign-out is
     /// confirmed (it says "you were signed out"); otherwise the refusal is.
     /// No notice means a binding state this build does not know.
@@ -438,7 +443,7 @@ struct PasskeySheets: View {
 
     var body: some View {
         content
-            .frame(width: 360)
+            .frame(width: PasskeyPopupLayout.width)
             .onExitCommand { escape() }
             .onDisappear { model.disappeared() }
             .onChange(of: model.outcome) { _, outcome in
@@ -459,12 +464,8 @@ struct PasskeySheets: View {
     /// P-1.
     private var choose: some View {
         popup(.choose, title: copy.passkey.chooseTitle) {
-            Button(copy.passkey.useExisting) { Task { await model.useExisting() } }
-                .buttonStyle(GlassButtonStyle(.primary))
-                .frame(maxWidth: .infinity)
-            Button(copy.passkey.createNew) { model.createNew() }
-                .buttonStyle(GlassButtonStyle(.glass))
-                .frame(maxWidth: .infinity)
+            blockButton(copy.passkey.useExisting, .primary) { Task { await model.useExisting() } }
+            blockButton(copy.passkey.createNew, .glass) { model.createNew() }
             refusalNotice
             caption(copy.passkey.chooseNote)
         }
@@ -474,36 +475,32 @@ struct PasskeySheets: View {
     /// P-2.
     private var nameSheet: some View {
         popup(.name, title: copy.passkey.nameTitle) {
-            HStack(alignment: .bottom, spacing: GlassTokens.Space.s3) {
-                GlassTextField(
-                    copy.passkey.nameField,
-                    text: Binding(
-                        get: { model.name },
-                        set: {
-                            model.name = $0
-                            model.nameTouched = true
-                        }))
-                    .onSubmit { Task { await model.submitName() } }
-                if !model.name.isEmpty {
-                    Button {
-                        model.name = ""
+            PasskeyNameField(
+                label: copy.passkey.nameField, clearLabel: copy.passkey.clearName,
+                invalid: model.nameError != nil,
+                text: Binding(
+                    get: { model.name },
+                    set: {
+                        model.name = $0
                         model.nameTouched = true
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(copy.passkey.clearName)
-                }
-            }
+                    }),
+                onSubmit: { Task { await model.submitName() } })
             if let error = model.nameError {
                 GlassNotice(tone: .outside) { Text(error) }
             }
             refusalNotice
-            Button(copy.passkey.nameTitle) { Task { await model.submitName() } }
-                .buttonStyle(GlassButtonStyle(.primary))
-                .frame(maxWidth: .infinity)
+            blockButton(copy.passkey.nameSubmit, .primary) { Task { await model.submitName() } }
                 .disabled(model.nameError != nil)
-            GlassNotice(tone: .ask) { Text(copy.passkey.nameWarning) }
+            // #1030's StatusNote: the amber warning glyph before the words.
+            GlassNotice(tone: .ask) {
+                HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(GlassTokens.Color.statusAsk.color)
+                        .accessibilityHidden(true)
+                    Text(copy.passkey.nameWarning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
         .disabled(model.busy)
     }
@@ -519,13 +516,11 @@ struct PasskeySheets: View {
                     if model.busy { GlassSpinner() }
                     Text(copy.passkey.verify)
                 }
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity, minHeight: PasskeyPopupLayout.blockButtonHeight)
             }
             .buttonStyle(GlassButtonStyle(.glass))
             .passkeyOutlined()
-            Button(copy.passkey.cancel) { Task { await model.cancelVerify() } }
-                .buttonStyle(GlassButtonStyle(.glass))
-                .frame(maxWidth: .infinity)
+            blockButton(copy.passkey.cancel, .glass) { Task { await model.cancelVerify() } }
             caption(copy.passkey.verifyNote)
         }
         .disabled(model.busy)
@@ -543,9 +538,7 @@ struct PasskeySheets: View {
                             .glassType(GlassTokens.TypeScale.heading)
                             .foregroundStyle(GlassColor.textPrimary)
                     }
-                    Button(copy.passkey.welcomeSignIn) { Task { await model.useExisting() } }
-                        .buttonStyle(GlassButtonStyle(.primary))
-                        .frame(maxWidth: .infinity)
+                    blockButton(copy.passkey.welcomeSignIn, .primary) { Task { await model.useExisting() } }
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -566,7 +559,7 @@ struct PasskeySheets: View {
         let corners = PasskeyPopupLayout.corners(step)
         return PasskeyPopup(
             icon: PasskeyPopupLayout.icon(step), title: title, subtitle: subtitle, display: display,
-            backLabel: copy.passkey.back, onBack: corners.back ? { model.back() } : nil,
+            backLabel: copy.frame.back, onBack: corners.back ? { model.back() } : nil,
             closeLabel: copy.passkey.close, onClose: corners.close ? { model.close() } : nil,
             content: body)
     }
@@ -595,6 +588,18 @@ struct PasskeySheets: View {
         }
     }
 
+    /// Ron's `ftux-block-btn`: a full-width button, 40pt tall, its label
+    /// centred, stacked one under the other.
+    private func blockButton(
+        _ title: String, _ kind: GlassButtonKind, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .frame(maxWidth: .infinity, minHeight: PasskeyPopupLayout.blockButtonHeight)
+        }
+        .buttonStyle(GlassButtonStyle(kind))
+    }
+
     private func caption(_ text: String) -> some View {
         Text(text)
             .glassType(GlassTokens.TypeScale.caption)
@@ -615,15 +620,16 @@ struct PasskeySheets: View {
 }
 
 /// Presents the passkey sheets whenever the runner asks for them
-/// (`FirstRunRunner.passkeyDue`): after the commit that started the daemon
-/// for a passkey chosen on Join, or from Create passkey once it runs.
+/// (`FirstRunRunner.passkeyDue`): from Create passkey on Join, which starts
+/// the daemon first when it is not running, so they open over Join (#1030);
+/// at Welcome back for a returning person; or after the commit that started
+/// the daemon for a passkey an earlier build recorded as chosen.
 ///
 /// Mount it exactly once per runner: each mount holds its own model, so two
 /// mounts would present two sheets. It is mounted on the first-run host
-/// (`OnboardingCoordinatorView`), which is on screen at every step, so a
-/// request the Folders or Tools commit raises presents on the step that
-/// follows. Without an account path the request stays raised, never
-/// dropped.
+/// (`OnboardingCoordinatorView`), which is on screen at every step. Without
+/// an account path the request stays raised, never dropped, and opens once
+/// the account arrives.
 private struct FirstRunPasskeyPresenter: ViewModifier {
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner
@@ -645,6 +651,9 @@ private struct FirstRunPasskeyPresenter: ViewModifier {
             }
             .onAppear(perform: open)
             .onChange(of: runner.passkeyDue) { _, _ in open() }
+            // Create passkey on Join can ask before the daemon it started
+            // has handed the host its account; the sheets open once it has.
+            .onChange(of: account.map { ObjectIdentifier($0) }) { _, _ in open() }
     }
 
     /// A fresh model each time: a model's outcome is set once, so a reused
@@ -679,6 +688,26 @@ extension View {
 /// Ron's passkey popups' shape (#1030 `passkey-flow.tsx`, review of #1235
 /// item 14), apart from the view so it can be tested.
 enum PasskeyPopupLayout {
+    /// Ron's `.ftux-popup` `max-width: 380px`.
+    static let width: CGFloat = 380
+    /// `.ftux-popup` padding: 22 at the top and sides, 20 at the bottom.
+    static let padding: CGFloat = 22
+    static let bottomPadding: CGFloat = 20
+    /// `.ftux-corner`: the round Back and Close sit 14 in from the corner.
+    static let cornerInset: CGFloat = GlassTokens.Space.s7
+    /// `.ftux-block-btn` `height: 40px`.
+    static let blockButtonHeight: CGFloat = 40
+    /// `.ftux-name-field` `height: 44px`, `padding: 0 14px`.
+    static let nameFieldHeight: CGFloat = 44
+    static let nameFieldInset: CGFloat = GlassTokens.Space.s7
+    /// `.ftux-clear`: an 18pt circle holding a 9pt cross.
+    static let clearSize: CGFloat = 18
+    static let clearGlyph: CGFloat = 9
+    /// `.ftux-popup-icon`: the purple at 35%, on the card edge. #1030 has
+    /// no light mode; light keeps main's accent tint (owner ruling).
+    static let iconTint = GlassRGBA(
+        GlassTokens.Color.purple.rgb, alpha: 0.35, light: GlassTokens.Color.tintAccent.light)
+
     /// The round tinted icon at a popup's head.
     enum Icon: Equatable {
         /// P-1 and P-2.
@@ -737,7 +766,8 @@ struct PasskeyPopupIcon: View {
             .glassGlyph(24)
             .foregroundStyle((on ? GlassTokens.Color.statusOn : GlassTokens.Color.purpleText).color)
             .frame(width: 52, height: 52)
-            .background(Circle().fill((on ? GlassTokens.Color.tintOn : GlassTokens.Color.tintAccent).color))
+            .background(Circle().fill((on ? GlassTokens.Color.tintOn : PasskeyPopupLayout.iconTint).color))
+            .glassEdge(GlassTokens.Shadow.cardEdge, in: Circle())
             .accessibilityHidden(true)
     }
 }
@@ -792,20 +822,20 @@ struct PasskeyPopup<Content: View>: View {
             .frame(maxWidth: .infinity)
             content
         }
-        .padding(.horizontal, GlassTokens.Space.panePadding)
-        .padding(.top, GlassTokens.Space.panePadding + (onBack != nil || onClose != nil ? GlassTokens.Space.s4 : 0))
-        .padding(.bottom, GlassTokens.Space.panePadding)
+        .padding(.horizontal, PasskeyPopupLayout.padding)
+        .padding(.top, PasskeyPopupLayout.padding)
+        .padding(.bottom, PasskeyPopupLayout.bottomPadding)
         .frame(maxWidth: .infinity)
         .overlay(alignment: .topLeading) {
             if let onBack {
                 GlassRoundButton(backLabel, systemImage: "chevron.left", small: true, action: onBack)
-                    .padding(GlassTokens.Space.s7)
+                    .padding(PasskeyPopupLayout.cornerInset)
             }
         }
         .overlay(alignment: .topTrailing) {
             if let onClose {
                 GlassRoundButton(closeLabel, systemImage: "xmark", small: true, action: onClose)
-                    .padding(GlassTokens.Space.s7)
+                    .padding(PasskeyPopupLayout.cornerInset)
             }
         }
         .glassTier(.pane)
@@ -819,5 +849,51 @@ extension View {
         frame(maxWidth: .infinity)
             .overlay(Capsule().strokeBorder(GlassColor.ink(0.7), lineWidth: 1.5))
             .background(Capsule().inset(by: -3).strokeBorder(GlassColor.ink(0.12), lineWidth: 3))
+    }
+}
+
+/// Ron's P-2 name field (`.ftux-name-field`): one 44pt well with the name
+/// and, while there is one, the round clear button inside it at the right
+/// (V7). No eyebrow: the field is named for VoiceOver only, as #1030's
+/// `aria-label`. The well, its invalid ring and the system focus ring are
+/// the design system's (#1146 `.tc-input`, owner ruling).
+struct PasskeyNameField: View {
+    let label: String
+    let clearLabel: String
+    let invalid: Bool
+    @Binding var text: String
+    let onSubmit: () -> Void
+
+    var body: some View {
+        HStack(spacing: GlassTokens.Space.s4) {
+            TextField(label, text: $text)
+                .textFieldStyle(.plain)
+                .labelsHidden()
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textPrimary)
+                .onSubmit(onSubmit)
+            if PasskeyNameField.showsClear(text) {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark")
+                        .glassGlyph(PasskeyPopupLayout.clearGlyph, weight: .bold)
+                        .foregroundStyle(GlassTokens.Color.textOnStatus.color)
+                        .frame(width: PasskeyPopupLayout.clearSize, height: PasskeyPopupLayout.clearSize)
+                        .background(Circle().fill(GlassColor.ink(0.2)))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(clearLabel)
+            }
+        }
+        .padding(.horizontal, PasskeyPopupLayout.nameFieldInset)
+        .frame(height: PasskeyPopupLayout.nameFieldHeight)
+        .glassFieldWell(invalid: invalid)
+    }
+
+    /// The clear button shows while the field holds anything, as #1030's.
+    static func showsClear(_ text: String) -> Bool {
+        !text.isEmpty
     }
 }

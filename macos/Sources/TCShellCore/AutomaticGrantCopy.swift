@@ -20,6 +20,10 @@ public struct AutomaticGrantCopy: Decodable, Equatable, Sendable {
     public let disclosure: String
     public let patternsOnly: Scrub?
     public let modelScrubbed: Scrub?
+    /// The one sentence a card shows for this disclosure (owner,
+    /// 2026-10-12). The scrub wording and `noReview` are the long form, for an
+    /// info button and the arming dialog.
+    public let summary: String
     public let noReview: String
     /// The path question's two answers (`path_automatic`, `path_ask_first`),
     /// read by the first run's Sharing card. Optional because an armed
@@ -27,19 +31,32 @@ public struct AutomaticGrantCopy: Decodable, Equatable, Sendable {
     /// nil as the copy being unavailable.
     public let pathAutomatic: String?
     public let pathAskFirst: String?
+    /// Each answer split into the line shown and the rest, shown behind an
+    /// info button (owner, 2026-10-08). The Sharing card treats nil as the
+    /// copy being unavailable, as for the whole answers.
+    public let pathAutomaticTitle: String?
+    public let pathAutomaticDetail: String?
+    public let pathAskFirstTitle: String?
+    public let pathAskFirstDetail: String?
 
     enum CodingKeys: String, CodingKey {
         case disclosure
         case patternsOnly = "patterns_only"
         case modelScrubbed = "model_scrubbed"
+        case summary
         case noReview = "no_review"
         case pathAutomatic = "path_automatic"
         case pathAskFirst = "path_ask_first"
+        case pathAutomaticTitle = "path_automatic_title"
+        case pathAutomaticDetail = "path_automatic_detail"
+        case pathAskFirstTitle = "path_ask_first_title"
+        case pathAskFirstDetail = "path_ask_first_detail"
     }
 
     /// The payload fields this shell decodes, by wire name.
     public static let consumedFields = [
-        "disclosure", "patterns_only", "model_scrubbed", "no_review", "path_automatic", "path_ask_first",
+        "disclosure", "patterns_only", "model_scrubbed", "summary", "no_review", "path_automatic", "path_ask_first",
+        "path_automatic_title", "path_automatic_detail", "path_ask_first_title", "path_ask_first_detail",
     ]
 
     /// The scrub wording for the disclosure named, and only that one.
@@ -59,11 +76,11 @@ public struct AutomaticGrantCopy: Decodable, Equatable, Sendable {
     }
 
     /// Decode the payload, or nil if it will not parse, names no scrub
-    /// wording it carries, or a line is empty.
+    /// wording it carries, or a line or the summary is empty.
     public static func decode(fromJSON json: String?) -> AutomaticGrantCopy? {
         guard let data = json?.data(using: .utf8),
             let copy = try? JSONDecoder().decode(AutomaticGrantCopy.self, from: data),
-            !copy.lines.isEmpty, !copy.lines.contains(where: \.isEmpty)
+            !copy.lines.isEmpty, !copy.lines.contains(where: \.isEmpty), !copy.summary.isEmpty
         else {
             return nil
         }

@@ -3,6 +3,11 @@
 
 //! TraceCommons hosted server crate.
 
+// The ingest service (`ingest::app`) was the `trace-commons-ingest` binary
+// and names this crate by its external name throughout; this keeps those
+// `trace_commons_server::` paths resolving now that it is a library module.
+extern crate self as trace_commons_server;
+
 pub mod account_binding;
 pub mod account_native_auth;
 pub mod account_native_passkey;
@@ -23,6 +28,7 @@ pub(crate) mod claim_common;
 pub mod config;
 pub mod contributor_cap;
 pub mod correction_value;
+pub mod credit_estimate_fit;
 pub mod credit_numbers;
 pub mod credit_quality;
 pub mod db;
@@ -32,6 +38,7 @@ pub mod driver_liveness;
 pub mod error;
 pub mod inference_connection;
 pub mod inference_funding;
+pub mod ingest;
 pub mod instance_enroll_guard;
 pub mod invite_lookup;
 pub mod legacy_invite_link;
@@ -56,18 +63,25 @@ pub mod trace_invite_admin;
 pub mod trace_invite_registry;
 pub mod trace_score_attestation;
 pub mod trace_session_identity;
+pub mod trace_summary_similarity;
 pub mod trace_upload_claim_allowlist;
 pub mod trace_upload_claim_issuer;
 pub mod trace_upload_claim_issuer_admin;
 pub mod versioned_pipeline;
 pub mod versioned_pipeline_activation;
 pub mod versioned_pipeline_authority;
+pub mod versioned_pipeline_blocking;
 pub mod versioned_pipeline_bundle;
+pub mod versioned_pipeline_comparison;
 pub mod versioned_pipeline_compat;
 pub mod versioned_pipeline_credit;
+pub mod versioned_pipeline_harness;
 pub mod versioned_pipeline_index;
 pub mod versioned_pipeline_product;
+pub mod versioned_pipeline_production;
 pub mod versioned_pipeline_qualification;
+pub mod versioned_pipeline_remote_restore;
+pub mod versioned_pipeline_score_registry;
 pub mod witness_service;
 
 pub const TRACE_COMMONS_SERVER_EXTRACTION_STAGE: &str = "server-storage-owned";

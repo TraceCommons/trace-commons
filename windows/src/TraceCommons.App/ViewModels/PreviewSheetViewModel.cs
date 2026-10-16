@@ -63,7 +63,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     /// </summary>
     private const string LocalLoadingTitle = "Scrubbing it locally…";
 
-    private const string LocalLoadingDetail = "Reading the session and running the redaction pass.";
+    private const string LocalLoadingDetail = "Reading the trace and running the redaction pass.";
 
     /// <summary>
     /// A preview that could not be opened or could not be understood. The
@@ -1152,10 +1152,12 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
             StillPresentCategories.Add(row);
         }
 
+        // The core's title for each scope (the disclosure bundle's
+        // consent_scope_titles), or its wire name: every held scope is shown.
         Permissions.Clear();
-        foreach (string scope in summary.ConsentScopes)
+        foreach (string title in ConsentScopeTitles.PermissionTitles(summary.ConsentScopes))
         {
-            Permissions.Add(new PermissionRow(ConsentScopeViewModel.ScopeTitle(scope)));
+            Permissions.Add(new PermissionRow(title));
         }
 
         Raise(nameof(WouldSendText));

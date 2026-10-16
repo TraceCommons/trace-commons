@@ -4,7 +4,7 @@ Status: design, not yet implemented.
 
 ## The problem
 
-The Windows and Linux desktop apps cannot enrol a contributor. There is no
+The Windows and Linux desktop apps cannot enroll a contributor. There is no
 invite screen in either, so a contributor who installs only the app reaches a
 dead end: the GTK app detects the unenrolled state and says so — its
 `UNENROLLED_PREVIEW` copy reads "This device isn't connected yet, so this was
@@ -162,6 +162,6 @@ Both call the six methods above and nothing new.
 - The WinUI app builds; scheme registration is verified on a real Windows
   host, since it is not observable from a cross-compile — the same reasoning
   that makes the named-pipe ACL job the only `windows-latest` CI job.
-- An enrolment against the pilot issuer from each platform, end to end.
+- An enrollment against the pilot issuer from each platform, end to end.
 - Neither app writes the invite anywhere. Grep the new code for the invite
   variable reaching a log or a display string other than the field itself.

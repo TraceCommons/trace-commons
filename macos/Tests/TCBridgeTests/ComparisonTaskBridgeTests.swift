@@ -158,8 +158,19 @@ final class ComparisonTaskBridgeTests: XCTestCase {
                      "comparison_specification_evaluate", "comparison_specification_explain_result",
                      "comparison_specification_committed_reload_failed",
                      "comparison_cohort_declared_not_verified",
-                     "comparison_cohort_declaration_notice"]
+                     "comparison_cohort_declaration_notice",
+                     "comparison_specification_immutable_notice",
+                     "comparison_task_create_heading", "comparison_task_context_heading"]
         XCTAssertTrue(fixed.allSatisfy { copy[$0]?.isEmpty == false })
+        // Short labels that repeat on the Insights screen (button rule,
+        // 2026-10-08) each carry a distinct accessible name from the core.
+        let named = ["refresh_accessibility", "episode_refresh_accessibility",
+                     "comparison_task_list_accessibility", "comparison_specification_refresh_accessibility",
+                     "save_accessibility", "episode_save_assessment_accessibility",
+                     "comparison_specification_save_accessibility", "delete_accessibility"]
+        let names = named.compactMap { copy[$0] }
+        XCTAssertEqual(names.count, named.count)
+        XCTAssertEqual(Set(names).count, names.count, "\(names)")
         XCTAssertTrue(ComparisonReasoningEffort.allCases.allSatisfy {
             copy["comparison_task_reasoning_\($0.rawValue)"]?.isEmpty == false
         })

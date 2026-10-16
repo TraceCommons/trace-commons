@@ -26,7 +26,7 @@ import {
   type MonitorTab,
   type MonitorView,
   monitorTabFromView,
-  monitorViewFromPath,
+  visibleMonitorView,
   settingsSectionFromPath,
   viewPaths,
 } from "../routes";
@@ -52,10 +52,13 @@ const TAB_VIEW: Record<MonitorTab, MonitorView> = {
  * inspector. Settings opens as a modal over all three.
  */
 export function MonitorShell({
+  missionsEnabled,
   core,
   publicProfile,
   notices,
 }: {
+  /** The daemon's `missions_enabled`; off hides every way into Missions. */
+  missionsEnabled: boolean;
   core: ReturnType<typeof useCoreStatus>;
   publicProfile: ReturnType<typeof usePublicProfile>;
   /** Core notices every view must show (startup, grant voids, rewordings). */
@@ -63,7 +66,7 @@ export function MonitorShell({
 }) {
   const { pathname } = useLocation();
   const navigate = useNavigate();
-  const view = monitorViewFromPath(pathname);
+  const view = visibleMonitorView(pathname, missionsEnabled);
   const [mapOpen, setMapOpen] = useState(() => initialOpen(1100));
   const [inspectorOpen, setInspectorOpen] = useState(() => initialOpen(900));
   const [graphOpen, setGraphOpen] = useState(true);
@@ -143,7 +146,7 @@ export function MonitorShell({
           className={`min-h-0 flex-1 overflow-auto ${view === "traces" ? "px-2" : "px-3 pb-3"}`}
         >
           <div className="tc-page mb-2.5">{notices}</div>
-          <LeftPaneView view={view} core={core} onGo={go} />
+          <LeftPaneView view={view} missionsEnabled={missionsEnabled} core={core} onGo={go} />
         </div>
         {view === "traces" ? (
           <GraphFooter
@@ -248,10 +251,12 @@ function MonitorTabs({
 
 function LeftPaneView({
   view,
+  missionsEnabled,
   core,
   onGo,
 }: {
   view: MonitorView;
+  missionsEnabled: boolean;
   core: ReturnType<typeof useCoreStatus>;
   onGo: (view: MonitorView) => void;
 }) {
@@ -269,7 +274,7 @@ function LeftPaneView({
         <HomeView
           status={core.data}
           onOpenTraces={() => onGo("traces")}
-          onOpenMissions={() => onGo("missions")}
+          onOpenMissions={missionsEnabled ? () => onGo("missions") : undefined}
           onOpenHistory={() => onGo("history")}
         />
       );

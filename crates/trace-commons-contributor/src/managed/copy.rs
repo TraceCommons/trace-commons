@@ -1,66 +1,160 @@
 //! Shared wording for every managed-session shell.
+//!
+//! The buttons `launch`, `use_default`, `reconnect` and `save_login`:
+//! Approved 2026-10-08 (button rule). `launch_title` keeps the launch dialog's full title.
+//!
+//! Sessions on the NEAR AI sign-in. Approved 2026-10-12:
+//! - `start_claude` "Start Claude Code"
+//! - `start_codex` "Start Codex"
+//! - `start_opencode` "Start OpenCode" -- Approved 2026-10-16. Shown only
+//!   while the snapshot's `tools` row for `opencode` says it is installed.
+//! - `sign_in_scope` "Uses your NEAR AI sign-in. Runs in {destination}, in the
+//!   folder you choose." Shells fill `{destination}` from
+//!   `capabilities.terminal_destination`, as for `launch_scope`, so Windows
+//!   never reads "Terminal".
+//! - `sign_in_needed` "Sign in to NEAR AI to start a session." Also the line
+//!   a shell shows for the refusal `managed-near-ai-sign-in-required`.
+//! - `sign_in_near_ai` "Sign in" -- the button that starts the NEAR AI
+//!   sign-in.
+//! - `sign_in_near_ai_accessibility` "Sign in to NEAR AI" -- its accessible
+//!   name.
+//!
+//! The terminal choice, in Settings > Private AI on every shell. Approved by
+//! the design owner 2026-10-14 (#1406):
+//! - `terminal_choice` "Open sessions in" -- the Settings picker's label,
+//!   and its accessible name. Its options are the app names the snapshot
+//!   sends in `capabilities.terminal_choices`.
+//! - `terminal_not_found` "{terminal} wasn't found on this computer.
+//!   Choose another in Settings." The line a shell shows for the refusal
+//!   `managed-terminal-not-found` ("not found", never "not installed");
+//!   it fills `{terminal}` from `capabilities.terminal_destination`.
+//!
+//! A session row's actions (Ron, #1407, 2026-10-14):
+//! - `show` "Show" and `stop` "Stop" -- the row menu's items and the row's
+//!   accessibility actions. Clicking a running row also shows it.
+//! - `stop_question` "Stop this session?" and `stop_description` "{tool}
+//!   stops what it's doing in {folder}." -- the confirmation, with `cancel`
+//!   and `stop`. Shells fill `{tool}` with the tool's name and `{folder}`
+//!   with the row's folder name.
+//! - `start_again` "Start again" -- an ended row's glass button, before
+//!   `dismiss` as a link.
+//!
+//! Installing a coding tool. Approved 2026-10-15 (#1419 review):
+//! - `tools_title` "Coding tools", above the install block shown when no
+//!   coding tool is installed.
+//! - `tools_empty` "Install a coding tool to get started."
+//! - `install` "Install"; its accessible name appends the tool's name.
+//! - `tool_unavailable` "{tool} wasn't found on this computer." Shells fill
+//!   `{tool}` with the tool's display name (`claude`, `codex`, `opencode`).
+//! - `refresh` "Refresh": a bare glyph's tooltip and accessible name.
+//!
+//! The explanation before the folder picker (#1408). Approved 2026-10-14:
+//! - `folder_choice` "Choose a folder for {tool} to work in. It opens in
+//!   {destination}." Shells fill `{tool}` with the tool's name key and
+//!   `{destination}` from `capabilities.terminal_destination`, as for
+//!   `sign_in_scope`. Its title is the Start button's own label, and its
+//!   buttons are `cancel` and `choose_folder`.
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "Managed sessions",
-            "description": "Choose a saved account for each new session. Standard sessions can keep running alongside it.",
-            "launch": "Launch managed session",
+            "provider_openai": "OpenAI",
+            "provider_anthropic": "Anthropic",
+            "provider_near_ai": "NEAR AI",
+            "collection_off": "Trace collection off",
+            "map_scope": "Session routes; model calls are unverified.",
+            "collection_disabled": "Trace collection off",
+            "model_required": "Enter a model ID to launch OpenCode.",
+            "tools_title": "Coding tools",
+            "tools_empty": "Install a coding tool to get started.",
+            "install": "Install",
+            "tool_unavailable": "{tool} wasn't found on this computer.",
+            "unsupported_version": "This tool version is not supported. Install a supported version, then try again.",
+            "update": "Update",
+            "description": "Start a session with a saved account. Your other sessions keep running.",
+            "launch": "Launch",
+            "launch_title": "Launch managed session",
             "add": "Add account",
             "refresh": "Refresh",
-            "terminal_scope": "App launches open in {destination}. CLI launches stay in their current terminal.",
-            "terminal_unavailable": "Terminal launch is unavailable in this build. Use near-ai in your terminal.",
-            "empty": "No managed sessions yet.",
-            "sign_in": "Sign in",
-            "exit_code": "Exit code: {code}",
+            "terminal_scope": "Opens in {destination}. Launches from the CLI stay in their terminal.",
+            "terminal_unavailable": "Can't open a terminal from this build. Run near-ai in your terminal instead.",
+            "empty": "No sessions yet.",
+            "sign_in": "Sign-in",
+            "exit_code": "Exit code {code}",
             "dismiss": "Dismiss",
-            "connecting": "Connecting to managed sessions…",
+            "connecting": "Connecting…",
             "retry": "Retry",
             "rename": "Rename account",
-            "label": "Account label",
+            "label": "Name",
             "save": "Save",
             "cancel": "Cancel",
-            "remove_question": "Remove saved account?",
-            "remove": "Remove account",
-            "remove_description": "This removes the saved credentials and isolated profile from this computer.",
-            "manage": "Manage",
+            "remove_question": "Remove this account?",
+            "remove": "Remove",
+            "remove_description": "Its saved sign-in and profile are deleted from this computer.",
+            "manage": "More",
             "default": "Default",
-            "use_default": "Use as default",
+            "use_default": "Make default",
             "rename_short": "Rename",
-            "reconnect": "Sign in / reconnect",
-            "verify": "Verify account",
+            "reconnect": "Sign in",
+            "verify": "Check sign-in",
             "near_ai": "NEAR AI",
             "api_key": "API key",
+            "openai_api_key": "OpenAI API key",
             "subscription": "Subscription",
-            "save_title": "Save an account",
+            "save_title": "Add account",
             "tool": "Tool",
             "claude": "Claude Code",
             "codex": "Codex",
-            "connection": "Connection",
-            "label_placeholder": "Label, such as Personal or Work",
-            "login_description": "Sign in through the native tool in Terminal. Repeat Add account to save another subscription.",
-            "key_storage": "The key is stored in the operating system credential store.",
-            "save_login": "Save and sign in",
-            "save_account": "Save account",
-            "saved_account": "Saved account",
+            "opencode": "OpenCode",
+            "model": "Model ID",
+            "collect_traces": "Collect this session",
+            "opencode_scope": "Uses only the selected key and model in an isolated profile. Project OpenCode settings and plugins are disabled. API key means an OpenAI key; NEAR AI uses a NEAR AI key.",
+            "collection_scope": "Collects this session when OpenCode exits, under your existing review and contribution settings. Other sessions created inside OpenCode are not collected.",
+            "collection_pending": "Trace collection pending",
+            "collection_collected": "Trace collected",
+            "collection_failed": "Trace collection failed; local session preserved",
+            "connection": "Sign-in type",
+            "label_placeholder": "e.g. Personal or Work",
+            "login_description": "You'll sign in through the tool in Terminal.",
+            "key_storage": "Stored in this computer's credential store.",
+            "save_login": "Sign in",
+            "save_account": "Save",
+            "saved_account": "Account",
             "choose_account": "Choose account",
-            "project_placeholder": "Choose a project folder",
+            "project_placeholder": "No folder chosen",
             "choose_folder": "Choose folder",
-            "launch_scope": "Opens in {destination}. This selection applies to this launch.",
+            "folder_choice": "Choose a folder for {tool} to work in. It opens in {destination}.",
+            "launch_scope": "Opens in {destination}.",
             "launch_short": "Launch",
             "terminal": "your terminal",
-            "global_title": "Change global settings",
-            "global_scope": "Changes below affect standard sessions after restarting the tool.",
-            "launch_unknown": "Refresh sessions before retrying.",
-            "action_failed": "Managed action failed.",
+            "global_title": "Standard settings",
+            "global_scope": "These apply to standard sessions once you restart the tool.",
+            "launch_unknown": "Refresh, then try again.",
+            "action_failed": "That didn't work. Try again.",
             "accounts_title": "Saved accounts",
+            "accounts_refresh_accessibility": "Refresh saved accounts",
             "state_starting": "Starting",
             "state_running": "Running",
             "state_exited": "Exited",
             "state_failed": "Failed",
             "state_unknown": "Unknown",
-            "auth_sign_in_required": "Sign-in required",
+            "auth_sign_in_required": "Needs sign-in",
             "auth_checking": "Checking",
             "auth_ready": "Ready",
-            "auth_unavailable": "Unavailable"
+            "auth_unavailable": "Unavailable",
+            "start_claude": "Start Claude Code",
+            "start_codex": "Start Codex",
+            "start_opencode": "Start OpenCode",
+            "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
+            "sign_in_needed": "Sign in to NEAR AI to start a session.",
+            "sign_in_near_ai": "Sign in",
+            "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
+            "terminal_choice": "Open sessions in",
+            "terminal_not_found": "{terminal} wasn't found on this computer. Choose another in Settings.",
+            "show": "Show",
+            "stop": "Stop",
+            "stop_question": "Stop this session?",
+            "stop_description": "{tool} stops what it's doing in {folder}.",
+            "start_again": "Start again"
     }"#).expect("static managed copy is valid JSON")
 }
 
@@ -72,6 +166,73 @@ mod tests {
     fn key(prefix: &str, value: impl serde::Serialize) -> String {
         let value = serde_json::to_value(value).expect("enum serializes");
         format!("{prefix}_{}", value.as_str().expect("unit variant"))
+    }
+
+    /// The saved accounts' refresh icon says what it re-reads to assistive
+    /// tech, as the core's words rather than a shell's join.
+    #[test]
+    fn the_accounts_refresh_has_its_own_accessible_name() {
+        let copy = copy();
+        assert_eq!(
+            copy["accounts_refresh_accessibility"],
+            "Refresh saved accounts"
+        );
+    }
+
+    /// #1408: the line before the folder picker, as approved 2026-10-14.
+    #[test]
+    fn the_folder_choice_line_has_its_words() {
+        assert_eq!(
+            copy()["folder_choice"],
+            "Choose a folder for {tool} to work in. It opens in {destination}."
+        );
+    }
+
+    /// The NEAR AI sign-in launch reads these words, exactly as proposed.
+    #[test]
+    fn the_sign_in_launch_has_its_words() {
+        let copy = copy();
+        assert_eq!(copy["start_claude"], "Start Claude Code");
+        assert_eq!(copy["start_codex"], "Start Codex");
+        assert_eq!(copy["start_opencode"], "Start OpenCode");
+        assert_eq!(
+            copy["sign_in_scope"],
+            "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose."
+        );
+        assert_eq!(
+            copy["sign_in_needed"],
+            "Sign in to NEAR AI to start a session."
+        );
+        assert_eq!(copy["sign_in_near_ai"], "Sign in");
+        assert_eq!(copy["sign_in_near_ai_accessibility"], "Sign in to NEAR AI");
+    }
+
+    /// The terminal choice reads these words, exactly as proposed.
+    #[test]
+    fn the_terminal_choice_has_its_words() {
+        let copy = copy();
+        assert_eq!(copy["terminal_choice"], "Open sessions in");
+        assert_eq!(
+            copy["terminal_not_found"],
+            "{terminal} wasn't found on this computer. Choose another in Settings."
+        );
+    }
+
+    /// Show, Stop and Start again on a session row read these words
+    /// (Ron, #1407, 2026-10-14).
+    #[test]
+    fn the_session_row_actions_have_their_words() {
+        let copy = copy();
+        assert_eq!(copy["show"], "Show");
+        assert_eq!(copy["stop"], "Stop");
+        assert_eq!(copy["stop_question"], "Stop this session?");
+        assert_eq!(
+            copy["stop_description"],
+            "{tool} stops what it's doing in {folder}."
+        );
+        assert_eq!(copy["start_again"], "Start again");
+        assert_eq!(copy["cancel"], "Cancel");
+        assert_eq!(copy["dismiss"], "Dismiss");
     }
 
     /// Every lifecycle and sign-in state a shell can be sent has a label,
@@ -97,6 +258,24 @@ mod tests {
         ] {
             let key = key("auth", state);
             assert!(copy[&key].is_string(), "missing {key}");
+        }
+    }
+
+    /// Ron's 2026-10-15 review of #1419: the install words, with `{tool}`
+    /// filled with the tool's display name by every shell.
+    #[test]
+    fn the_install_words_are_the_approved_ones() {
+        let copy = copy();
+        assert_eq!(copy["tools_title"], "Coding tools");
+        assert_eq!(copy["tools_empty"], "Install a coding tool to get started.");
+        assert_eq!(
+            copy["tool_unavailable"],
+            "{tool} wasn't found on this computer."
+        );
+        assert_eq!(copy["install"], "Install");
+        assert_eq!(copy["refresh"], "Refresh");
+        for removed in ["opencode_export_scope", "not_installed", "check_again"] {
+            assert!(copy.get(removed).is_none(), "{removed} should be gone");
         }
     }
 }

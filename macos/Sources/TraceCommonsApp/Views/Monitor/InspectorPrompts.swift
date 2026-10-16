@@ -3,16 +3,18 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-/// What the contributor must be able to see whenever it is live, at the top
-/// of the inspector on Home, Traces and History (Ron's #1146
-/// `WaitingPrompts`): the action messages, the undos (the approval's, a
-/// session's Contribute and a folder's Submit all, in Ron's `UndoBar` shape,
-/// and Undo keep), the arming offer, the Private AI offer and the
-/// first-contribution note.
-///
-/// The inspector opens itself when one of these appears (`InspectorDemand`),
-/// so none runs out of sight in a window that started with it closed. Every
-/// sentence is the core's or `QueueLegacyWords`'.
+/// What the contributor must be able to see whenever it is live, above the
+/// Traces tree under its health banners: the action messages, the undos
+/// (the approval's, a session's Contribute and a folder's Submit all, in
+/// Ron's `UndoBar` shape, and Undo keep), the arming offer, the Private AI
+/// offer and the first-contribution note. Ron's #1146 mounts these as
+/// `WaitingPrompts` at the top of the inspector; offers, undo and health
+/// above the tree is an accepted difference (owner, 2026-10-07), so on
+/// Traces none of them depends on the inspector being shown. Off Traces the
+/// window draws them at the top of the inspector, as Ron's shell does
+/// (`MonitorWindowView.promptsInInspector`), and an undo or offer appearing
+/// there opens it (`InspectorDemand`). Every sentence is the core's or
+/// `QueueLegacyWords`'.
 struct InspectorPrompts: View {
     @EnvironmentObject private var model: AppModel
     let store: TracesStore
@@ -24,10 +26,14 @@ struct InspectorPrompts: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            // A failed action: the line, unboxed, and its Dismiss a link
+            // after it (Ron, 2026-10-09).
             if let error = model.lastActionError {
-                GlassNotice(tone: .outside, title: error) {
+                HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                    GlassAlert(error)
                     Button(dismissWord) { model.lastActionError = nil }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.link))
+                        .fixedSize()
                 }
             }
             if let notice = model.lastActionNotice {
@@ -83,11 +89,12 @@ struct InspectorPrompts: View {
                 // The app's one Return binding, on the safe action: a
                 // keystroke pulls a transcript back.
                 Button(store.words?.undoContribute ?? QueueLegacyWords.undo) { model.undoApproval() }
-                    .buttonStyle(GlassButtonStyle(.primary))
+                    .buttonStyle(GlassButtonStyle(.glass))
                     .keyboardShortcut(.defaultAction)
             }
+            // Ron's `TertiaryLink`: closing the card is the lesser action.
             Button(dismissWord) { model.dismissUndo() }
-                .buttonStyle(GlassButtonStyle(.glass))
+                .buttonStyle(GlassButtonStyle(.link))
                 .help(undo.offerUndo ? QueueLegacyWords.closeNoticeStillSends : QueueLegacyWords.closeNotice)
         }
     }
@@ -101,8 +108,8 @@ struct InspectorPrompts: View {
     private var storeUndo: some View {
         if let contributed = store.lastContributed, let words = store.words {
             let busy = store.acting.contains(contributed.entryId)
-            UndoBarCard(eyebrow: words.undo.approvalSaved, title: contributed.toast.line) {
-                EmptyView()
+            UndoBarCard(eyebrow: words.undo.approvalSaved, title: Self.title(contributed.label, toast: contributed.toast, words: words)) {
+                UndoDetail(toast: contributed.toast, label: contributed.label, at: contributed.at, words: words)
             } actions: {
                 if contributed.toast.offerUndo {
                     Button(busy ? words.undo.undoing : words.undoContribute) {
@@ -112,15 +119,17 @@ struct InspectorPrompts: View {
                     .disabled(busy)
                 }
                 Button(dismissWord) { store.dismissContributed() }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.link))
                     .disabled(busy)
+            } refusal: {
+                // A refused undo, in the card under its buttons.
+                TracesRefusal(store: store, entryId: contributed.entryId)
             }
-            TracesRefusal(store: store, entryId: contributed.entryId)
         }
         if let folder = store.lastContributedFolder, let words = store.words {
             let busy = store.writing.contains(folder.projectId)
-            UndoBarCard(eyebrow: words.undo.approvalSaved, title: folder.toast.line) {
-                EmptyView()
+            UndoBarCard(eyebrow: words.undo.approvalSaved, title: Self.title(folder.label, toast: folder.toast, words: words)) {
+                UndoDetail(toast: folder.toast, label: folder.label, at: folder.at, words: words)
             } actions: {
                 if folder.toast.offerUndo {
                     Button(busy ? words.undo.undoing : words.undoContribute) {
@@ -130,7 +139,7 @@ struct InspectorPrompts: View {
                     .disabled(busy)
                 }
                 Button(dismissWord) { store.dismissContributedFolder() }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.link))
                     .disabled(busy)
             }
             // A refused undo is said beside the folder (`folderNotes`).
@@ -143,19 +152,64 @@ struct InspectorPrompts: View {
             TracesRefusal(store: store, entryId: kept)
         }
     }
+
+    /// #1146's undo title, "{label} approved", for the folder the
+    /// contribution came from; the core's toast when no folder is named.
+    static func title(_ label: String?, toast: SubmitToast, words: MonitorTracesCopy) -> String {
+        guard let label, !label.isEmpty, toast.offerUndo else { return toast.line }
+        return words.undo.approved.replacingOccurrences(of: "{label}", with: label)
+    }
 }
 
-/// Ron's `UndoBar` card: an eyebrow, the line that says what was approved,
-/// the lines under it, and its buttons. Every word is the caller's, from
+/// The line under a store undo's title: while Undo is offered, how long
+/// ago it was approved (the accepted count-up), else #1146's "Upload may
+/// already have started."; then the core's toast, when the title did not
+/// already say it, so its redaction and flag counts are never lost.
+private struct UndoDetail: View {
+    let toast: SubmitToast
+    let label: String?
+    let at: Date
+    let words: MonitorTracesCopy
+
+    var body: some View {
+        if toast.offerUndo {
+            TimelineView(.periodic(from: at, by: 1)) { context in
+                Text(QueueLegacyWords.approvedAgo(max(0, Int(context.date.timeIntervalSince(at)))))
+                    .monospacedDigit()
+            }
+        } else {
+            Text(words.undo.mayHaveStarted)
+        }
+        if InspectorPrompts.title(label, toast: toast, words: words) != toast.line {
+            Text(toast.line).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// Ron's `UndoBar` card (`undo-bar.tsx`): the eyebrow, the line that says
+/// what was approved and the lines under it on the left, its buttons on the
+/// right, Undo then the Dismiss link. A refused undo is said in the card,
+/// under the row that holds its buttons. Every word is the caller's, from
 /// the core.
-private struct UndoBarCard<Detail: View, Actions: View>: View {
+private struct UndoBarCard<Detail: View, Actions: View, Refusal: View>: View {
     let eyebrow: String?
     let title: String
     @ViewBuilder let detail: () -> Detail
     @ViewBuilder let actions: () -> Actions
+    @ViewBuilder let refusal: () -> Refusal
 
     var body: some View {
         GlassCard {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                row
+                refusal()
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private var row: some View {
+        HStack(alignment: .center, spacing: GlassTokens.Space.s8) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 if let eyebrow {
                     Text(eyebrow)
@@ -169,10 +223,21 @@ private struct UndoBarCard<Detail: View, Actions: View>: View {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s1) { detail() }
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
-                HStack(spacing: GlassTokens.Space.s3) { actions() }
-                    .padding(.top, GlassTokens.Space.s2)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .layoutPriority(1)
+            HStack(spacing: GlassTokens.Space.s4) { actions() }
+                .lineLimit(1)
+                .fixedSize()
         }
-        .accessibilityElement(children: .contain)
+    }
+}
+
+extension UndoBarCard where Refusal == EmptyView {
+    init(
+        eyebrow: String?, title: String,
+        @ViewBuilder detail: @escaping () -> Detail, @ViewBuilder actions: @escaping () -> Actions
+    ) {
+        self.init(eyebrow: eyebrow, title: title, detail: detail, actions: actions, refusal: { EmptyView() })
     }
 }

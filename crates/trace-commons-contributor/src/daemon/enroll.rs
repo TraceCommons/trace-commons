@@ -5,7 +5,7 @@
 //! `commands::enroll_core`, the same non-interactive enrollment
 //! implementation the CLI's `login` command drives after resolving its own
 //! interactive consent prompt. Neither shell hand-rolls a second copy of the
-//! network calls: a socket caller and a terminal caller enrol identically.
+//! network calls: a socket caller and a terminal caller enroll identically.
 //!
 //! Nothing here ever puts an invite link, a grant, a URL, or key material
 //! into a response or an error: only scope names, counts, and the
@@ -38,7 +38,7 @@ const DESCRIPTIONS: [(&str, &str, &str, bool); 5] = [
     (
         "benchmark_only",
         "Turn my traces into test cases",
-        "Parts of your sessions may become benchmark problems that agents are scored against.",
+        "Parts of your traces may become benchmark problems that agents are scored against.",
         true,
     ),
     (
@@ -140,7 +140,9 @@ pub(super) async fn handle_enroll(shared: &DaemonShared, req: &Request) -> Respo
         Err(_) => return Response::err(req.id, ERR_BAD_PARAMS, "scopes-invalid"),
     };
 
-    match enroll_core(&shared.store, grant, invite, None, consent_scopes).await {
+    // Not a choice: scopes a shell passes with the enrollment are saved for
+    // the person, and the choice is `set_consent_scopes` (R7).
+    match enroll_core(&shared.store, grant, invite, None, consent_scopes, false).await {
         Ok(EnrollOutcome::AwaitingGrant { device_key_id }) => Response::ok(
             req.id,
             json!({ "enrolled": false, "device_key_id": device_key_id }),
@@ -206,8 +208,14 @@ pub(super) fn handle_set_consent_scopes(shared: &DaemonShared, req: &Request) ->
     // R7: this call is the contributor's choice, and the only writer of the
     // record the Flow 1 grant requires. An empty list names nothing -- it
     // saves the floor scope `validate_scopes` adds -- so it records no
-    // choice. Enrollment never sets it.
-    cfg.consent_scopes_chosen = !scope_names.is_empty();
+    // choice. Enrollment never sets it. A config that predates the record
+    // (`None`) keeps predating it on an empty list: naming nothing is not
+    // a reason to start holding a contributor who joined before it existed.
+    cfg.consent_scopes_chosen = if !scope_names.is_empty() {
+        Some(true)
+    } else {
+        cfg.consent_scopes_chosen.map(|_| false)
+    };
     if shared.store.save_config(&cfg).is_err() {
         return Response::err(req.id, ERR_UNAVAILABLE, "config-write-failed");
     }
@@ -512,7 +520,11 @@ mod tests {
         assert!(r.error.is_none(), "{:?}", r.error);
         let cfg = s.store.load_config().unwrap().unwrap();
         assert_eq!(cfg.consent_scopes, vec!["debugging_evaluation"]);
-        assert!(!cfg.consent_scopes_chosen, "enrollment is not a choice");
+        assert_eq!(
+            cfg.consent_scopes_chosen,
+            Some(false),
+            "enrollment is not a choice"
+        );
 
         let refused = grant(&s, serde_json::Value::Null);
         assert_eq!(error_message(&refused), "automatic-grant-scopes-not-chosen");
@@ -526,12 +538,13 @@ mod tests {
             ),
         );
         assert!(r.error.is_none(), "{:?}", r.error);
-        assert!(
+        assert_eq!(
             s.store
                 .load_config()
                 .unwrap()
                 .unwrap()
-                .consent_scopes_chosen
+                .consent_scopes_chosen,
+            Some(true)
         );
 
         let given = grant(&s, serde_json::Value::Null);
@@ -554,12 +567,13 @@ mod tests {
         );
         let r = handle_set_consent_scopes(&s, &req("set_consent_scopes", json!({"scopes": []})));
         assert!(r.error.is_none(), "{:?}", r.error);
-        assert!(
-            !s.store
+        assert_eq!(
+            s.store
                 .load_config()
                 .unwrap()
                 .unwrap()
-                .consent_scopes_chosen
+                .consent_scopes_chosen,
+            Some(false)
         );
     }
 
@@ -670,7 +684,7 @@ mod tests {
         let mut cfg = s.store.load_config().unwrap().unwrap();
         let chosen = cfg.consent_scopes.clone();
         cfg.consent_scopes = Vec::new();
-        assert!(cfg.consent_scopes_chosen);
+        assert_eq!(cfg.consent_scopes_chosen, Some(true));
         s.store.save_config(&cfg).unwrap();
         assert_eq!(
             error_message(&ask(
@@ -792,7 +806,7 @@ mod tests {
         s.store
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
-                consent_scopes_chosen: false,
+                consent_scopes_chosen: Some(false),
                 witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
@@ -813,6 +827,61 @@ mod tests {
             })
             .unwrap();
         s
+    }
+
+    /// The CLI's `login` asks its own consent question (an explicit
+    /// `--scopes`, or the interactive menu), and an answer to it is a choice:
+    /// the enrollment records it, so a CLI contributor is not held for want of
+    /// a `set_consent_scopes` the CLI has no command for. Default answers
+    /// taken for them (`--default`, or no terminal) record none, as the
+    /// daemon's own `enroll` records none.
+    #[tokio::test]
+    async fn a_cli_enrolment_records_the_choice_its_login_asked_for() {
+        for chosen in [true, false] {
+            let base = spawn_onboard_mock().await;
+            let s = shared();
+            crate::commands::enroll_core(
+                &s.store,
+                None,
+                Some(&format!("{base}/onboard#SOME-CODE")),
+                None,
+                vec!["debugging_evaluation".to_string()],
+                chosen,
+            )
+            .await
+            .unwrap();
+            let cfg = s.store.load_config().unwrap().unwrap();
+            assert_eq!(cfg.consent_scopes_chosen, Some(chosen));
+        }
+    }
+
+    /// An empty list names nothing, so it does not turn a config that
+    /// predates the scope-choice record into an unchosen enrollment: the
+    /// contributor who joined before the record keeps sending. On a config
+    /// that has the record it records no choice, as before.
+    #[test]
+    fn an_empty_scope_list_leaves_a_legacy_config_unrecorded() {
+        let s = enrolled_shared();
+        let mut cfg = s.store.load_config().unwrap().unwrap();
+        cfg.consent_scopes_chosen = None;
+        s.store.save_config(&cfg).unwrap();
+        let r = handle_set_consent_scopes(&s, &req("set_consent_scopes", json!({"scopes": []})));
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let after = s.store.load_config().unwrap().unwrap();
+        assert_eq!(after.consent_scopes_chosen, None);
+        assert_eq!(crate::config::consent_hold(Some(&after)), None);
+
+        cfg.consent_scopes_chosen = Some(true);
+        s.store.save_config(&cfg).unwrap();
+        handle_set_consent_scopes(&s, &req("set_consent_scopes", json!({"scopes": []})));
+        assert_eq!(
+            s.store
+                .load_config()
+                .unwrap()
+                .unwrap()
+                .consent_scopes_chosen,
+            Some(false)
+        );
     }
 
     #[test]

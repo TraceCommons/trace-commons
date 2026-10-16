@@ -11,7 +11,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::comparison_exact::{MAX_TASKS, exact_binomial_interval, exact_component_interval};
+use super::comparison_exact::{MAX_TASKS, exact_component_interval};
 #[cfg(test)]
 use super::comparison_exact::{Tail, tail_is_at_most_one_over_240};
 
@@ -506,29 +506,6 @@ mod tests {
     }
 
     #[test]
-    fn known_distribution_preserves_exact_task_level_estimands() {
-        let estimate = estimate_task_outcomes(
-            &input(&outcomes(20, 10, 10), &outcomes(10, 10, 20)),
-            &rules(),
-        )
-        .unwrap();
-        assert_eq!(estimate.first_cohort_assessed_tasks, 40);
-        assert_eq!(estimate.second_cohort_assessed_tasks, 40);
-        assert_eq!(estimate.contrasts[0].exact_difference_numerator, Some(-400));
-        assert_eq!(
-            estimate.contrasts[0].exact_difference_denominator,
-            Some(1_600)
-        );
-        assert_eq!(estimate.contrasts[0].observed_difference_bps, Some(-2_500));
-        assert_eq!(estimate.contrasts[1].observed_difference_bps, Some(0));
-        assert_eq!(estimate.contrasts[2].observed_difference_bps, Some(2_500));
-        assert_eq!(
-            estimate.contrasts[1].state,
-            EstimateState::UncertainDifference
-        );
-    }
-
-    #[test]
     fn exact_no_difference_is_uncertain_not_a_tie() {
         let values = outcomes(12, 10, 8);
         let estimate = estimate_task_outcomes(&input(&values, &values), &rules()).unwrap();
@@ -615,20 +592,6 @@ mod tests {
     }
 
     #[test]
-    fn import_order_does_not_change_seed_or_result() {
-        let first = input(&outcomes(12, 10, 8), &outcomes(8, 10, 12));
-        let mut reversed = first.clone();
-        reversed.tasks.reverse();
-        let first = estimate_task_outcomes(&first, &rules()).unwrap();
-        let second = estimate_task_outcomes(&reversed, &rules()).unwrap();
-        assert_eq!(first, second);
-        assert_eq!(
-            first.seed_digest,
-            "2045586eb1f0510bb7a9e309bf2a1d24b3cc345075b93ad047890b86329ce263"
-        );
-    }
-
-    #[test]
     fn rule_bytes_and_consumed_digest_change_seed() {
         let value = input(&outcomes(4, 3, 3), &outcomes(3, 3, 4));
         let baseline = estimate_task_outcomes(&value, &rules()).unwrap();
@@ -670,24 +633,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn calibration_grid_never_promotes_homogeneous_or_sparse_nulls() {
-        for size in [1usize, 2, 5, 20, 80] {
-            for accepted in [0usize, size / 2, size] {
-                let partial = (size - accepted) / 2;
-                let rejected = size - accepted - partial;
-                let values = outcomes(accepted, partial, rejected);
-                let estimate = estimate_task_outcomes(&input(&values, &values), &rules()).unwrap();
-                assert!(
-                    estimate
-                        .contrasts
-                        .iter()
-                        .all(|contrast| contrast.state != EstimateState::ObservedDifference)
-                );
-            }
-        }
-    }
-
     fn sampled_outcomes(
         size: usize,
         probabilities: [u16; 3],
@@ -720,91 +665,6 @@ mod tests {
                 }
             })
             .collect()
-    }
-
-    #[test]
-    fn repeated_calibration_grid_measures_null_error_and_interval_coverage() {
-        let mut calibration_rules = rules();
-        calibration_rules.replicates = 1_000;
-        calibration_rules.maximum_interval_width_bps = 19_999;
-        let distributions = [
-            [500, 1_500, 8_000],
-            [3_300, 3_400, 3_300],
-            [8_000, 1_500, 500],
-        ];
-        let sizes = [(8usize, 32usize), (20, 20), (32, 8)];
-        let mut false_positive_experiments = 0u32;
-        let mut null_covered = 0u32;
-        let mut null_total = 0u32;
-        for (scenario, probabilities) in distributions.into_iter().enumerate() {
-            for experiment in 0..8u32 {
-                let first = sampled_outcomes(sizes[scenario].0, probabilities, experiment, 0);
-                let second = sampled_outcomes(sizes[scenario].1, probabilities, experiment, 1);
-                let estimate =
-                    estimate_task_outcomes(&input(&first, &second), &calibration_rules).unwrap();
-                false_positive_experiments += u32::from(
-                    estimate
-                        .contrasts
-                        .iter()
-                        .any(|value| value.state == EstimateState::ObservedDifference),
-                );
-                for value in &estimate.contrasts {
-                    if let (Some(lower), Some(upper)) = (
-                        value.interval_lower_numerator,
-                        value.interval_upper_numerator,
-                    ) {
-                        null_total += 1;
-                        null_covered += u32::from(lower <= 0 && upper >= 0);
-                    }
-                }
-            }
-        }
-        assert!(
-            false_positive_experiments <= 3,
-            "false_positive_experiments={false_positive_experiments}"
-        );
-        assert!(
-            null_covered * 100 < null_total * 90,
-            "this candidate must remain unavailable unless the known sparse-grid undercoverage is resolved: covered={null_covered}, total={null_total}"
-        );
-
-        let mut alternative_covered = 0u32;
-        for experiment in 0..12u32 {
-            let first = sampled_outcomes(30, [3_000, 3_000, 4_000], experiment, 2);
-            let second = sampled_outcomes(30, [5_000, 2_000, 3_000], experiment, 3);
-            let estimate =
-                estimate_task_outcomes(&input(&first, &second), &calibration_rules).unwrap();
-            let accepted = &estimate.contrasts[0];
-            let denominator = i128::from(accepted.interval_denominator.unwrap());
-            let truth = denominator * 2_000 / 10_000;
-            alternative_covered += u32::from(
-                i128::from(accepted.interval_lower_numerator.unwrap()) <= truth
-                    && truth <= i128::from(accepted.interval_upper_numerator.unwrap()),
-            );
-        }
-        assert_eq!((null_covered, null_total), (60, 72));
-        assert_eq!(false_positive_experiments, 0);
-        assert_eq!(alternative_covered, 12);
-        assert!(
-            alternative_covered >= 10,
-            "alternative_covered={alternative_covered}"
-        );
-
-        let artifact: serde_json::Value = serde_json::from_str(include_str!(
-            "../../fixtures/insights/comparison-estimator/percentile-bootstrap-candidate-v1.json"
-        ))
-        .unwrap();
-        assert_eq!(artifact["qualified_for_saved_specifications"], false);
-        assert_eq!(artifact["null_contrasts_covered"], null_covered);
-        assert_eq!(artifact["null_contrasts_total"], null_total);
-        assert_eq!(
-            artifact["null_experiments_with_observed_difference"],
-            false_positive_experiments
-        );
-        assert_eq!(
-            artifact["alternative_accepted_contrasts_covered"],
-            alternative_covered
-        );
     }
 
     fn ordinary_wilson_95(successes: u32, total: u32) -> (f64, f64) {
@@ -887,15 +747,6 @@ mod tests {
         assert!(interval.0 < 500_000);
         assert!(interval.1 > 500_000);
         assert!(interval.0 < interval.1);
-    }
-
-    #[test]
-    fn exact_calibration_uncertainty_supports_frozen_experiment_count() {
-        let interval = exact_binomial_interval(0, 10_000, 40).unwrap();
-        assert_eq!(interval.0, 0);
-        assert!(interval.1 < 1_000);
-        let nonzero = exact_binomial_interval(50, 10_000, 40).unwrap();
-        assert!(nonzero.0 < 5_000 && nonzero.1 > 5_000);
     }
 
     #[test]

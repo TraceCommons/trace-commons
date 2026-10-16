@@ -108,6 +108,53 @@ final class DaemonClientFirstRunTests: XCTestCase {
         XCTAssertNil(list.sessions[2].startedAt)
     }
 
+    /// A held offer and a queued ineligible one are states the shell knows,
+    /// and neither can be ticked. A listing past the newest 500 says how
+    /// many it left out; one without the field left out none.
+    func test_heldAndIneligibleRowsAndTheNotListedCountDecode() throws {
+        let daemon = PickerDaemon()
+        daemon.answer("list_past_sessions", with: """
+        {"id":1,"result":{"total":2,"not_listed":7,"project_mode":"notify_only","sessions":[
+          {"session_id":"sess_00000000000000000000000000000004","entry_id":"8d3c1f9e-0000-4000-8000-000000000004",
+           "state":"held_for_review","selectable":false,"started_at":null,
+           "duration_secs":null,"title":null,"size_bytes":1,"source":"claude"},
+          {"session_id":"sess_00000000000000000000000000000005","entry_id":"8d3c1f9e-0000-4000-8000-000000000005",
+           "state":"ineligible","selectable":false,"started_at":null,
+           "duration_secs":null,"title":null,"size_bytes":1,"source":"claude"}
+        ]}}
+        """)
+        let list = try DaemonClient(daemon: daemon).listPastSessions(projectID: "proj_0123456789abcdef")
+        XCTAssertEqual(list.sessions.map(\.state), [.heldForReview, .ineligible])
+        XCTAssertEqual(list.sessions.map(\.selectable), [false, false])
+        XCTAssertFalse(list.sessions.contains(where: RulesScreenLayout.isTickable))
+        XCTAssertEqual(list.notListed, 7)
+
+        daemon.answer("list_past_sessions", with: Self.listFrame)
+        XCTAssertEqual(try DaemonClient(daemon: daemon).listPastSessions(projectID: "p").notListed, 0)
+    }
+
+    /// An include says which entries it approved and when their undo window
+    /// ends, as `approve` does; null when nothing was approved.
+    func test_includeOutcomeCarriesTheApprovedEntriesAndTheHold() throws {
+        let daemon = PickerDaemon()
+        daemon.answer("include_past_sessions", with: """
+        {"id":1,"result":{"approved":1,"skipped":[],
+          "approved_entry_ids":["8d3c1f9e-0000-4000-8000-000000000001"],
+          "hold_until":"2026-10-06T12:00:10.123456789Z"}}
+        """)
+        let outcome = try DaemonClient(daemon: daemon).includePastSessions(
+            projectID: "p", sessionIDs: ["sess_00000000000000000000000000000001"])
+        XCTAssertEqual(outcome.approvedEntryIDs, ["8d3c1f9e-0000-4000-8000-000000000001"])
+        XCTAssertEqual(outcome.holdUntil, "2026-10-06T12:00:10.123456789Z")
+
+        daemon.answer("include_past_sessions", with: """
+        {"id":1,"result":{"approved":0,"skipped":[],"approved_entry_ids":[],"hold_until":null}}
+        """)
+        let none = try DaemonClient(daemon: daemon).includePastSessions(projectID: "p", sessionIDs: ["s"])
+        XCTAssertEqual(none.approvedEntryIDs, [])
+        XCTAssertNil(none.holdUntil)
+    }
+
     /// A state this shell does not know is a row it cannot reason about:
     /// it reads as `never` and is unselectable whatever the wire claimed.
     func test_anUnknownStateIsUnselectable() throws {

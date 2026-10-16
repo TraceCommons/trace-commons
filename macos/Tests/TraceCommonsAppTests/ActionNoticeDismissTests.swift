@@ -1,5 +1,7 @@
 import Foundation
 import XCTest
+import TCBridge
+import TCShellCore
 @testable import TraceCommonsApp
 
 /// Both of the model's one-line action messages must be dismissible.
@@ -76,9 +78,13 @@ final class ActionNoticeDismissTests: XCTestCase {
                 }) else { continue }
                 sites[property, default: 0] += 1
                 // A glass notice draws the same message in a `GlassNotice`
-                // whose dismiss button sits a few lines below it; the
-                // clear-the-same-property half applies to it unchanged.
+                // whose dismiss button sits a few lines below it; a failed
+                // action's line is an unboxed `GlassAlert` with its dismiss
+                // link after it (Ron, 2026-10-09). The
+                // clear-the-same-property half applies to both unchanged.
+                let next = lines[(index + 1)...].prefix(3).joined(separator: " ")
                 let glass = (lines.dropFirst(index + 1).first ?? "").contains("GlassNotice(")
+                    || next.contains("GlassAlert(")
                 let rendered = lines[(index + 1)...].prefix(glass ? 12 : 3).joined(separator: " ")
                 let location = "\(path):\(index + 1) (\(property))"
                 if glass { glassSites += 1 }
@@ -86,7 +92,7 @@ final class ActionNoticeDismissTests: XCTestCase {
                 // render site is a glass notice.
                 if !glass {
                     failures.append(
-                        "\(location) renders outside a dismissible GlassNotice: \(rendered.trimmed)")
+                        "\(location) renders outside a dismissible GlassNotice or GlassAlert: \(rendered.trimmed)")
                 } else if !rendered.contains("model.\(property) = nil") {
                     failures.append(
                         "\(location) has a banner whose dismiss does not clear \(property): "
@@ -137,6 +143,21 @@ final class ActionNoticeDismissTests: XCTestCase {
         XCTAssertNotNil(model.lastActionNotice)
         model.lastActionNotice = nil
         XCTAssertNil(model.lastActionNotice)
+    }
+
+    /// The notices' dismiss control is the core's plain Dismiss
+    /// (`dismiss_action`), never the review's `dismiss` ("Not this one"),
+    /// which declines a session for good -- and no shell writes its own.
+    func testTheNoticeDismissWordIsTheCoresDismissNotTheSessionDecline() throws {
+        let copy = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
+        XCTAssertEqual(ActionNoticeWords.coreDismissWord, copy.dismissAction)
+        XCTAssertEqual(ActionNoticeWords.dismissWord, copy.dismissAction)
+        XCTAssertNotEqual(ActionNoticeWords.coreDismissWord, copy.dismiss)
+        XCTAssertNotEqual(ActionNoticeWords.dismissWord, copy.dismiss)
+        let words = try XCTUnwrap(Self.appSources()["Views/SettingsView.swift"])
+        XCTAssertFalse(words.contains("\"Dismiss"), "the dismiss word is written in this shell")
+        XCTAssertFalse(words.contains("TCCoreCopy.monitorTracesCopyJSON())?.dismiss\n"),
+                       "the notices read the session decline")
     }
 
     /// `.../macos/Tests/TraceCommonsAppTests/<this file>` ->

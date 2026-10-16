@@ -107,7 +107,7 @@ final class ContributionOverrideSampleTests: XCTestCase {
         XCTAssertNotNil(ContributionOverrideConfirmCopy.decode(fromJSON: ask))
         let bare = #"{"mode":"auto_upload","title":"T","body":"B","confirm":"C","cancel":"X","arming":null}"#
         XCTAssertNil(ContributionOverrideConfirmCopy.decode(fromJSON: bare))
-        let armed = #"{"mode":"auto_upload","title":"T","body":"One.\n\nTwo.","confirm":"C","cancel":"X","arming":{"disclosure":"patterns_only","patterns_only":{"scope":"S","limit":"L"},"model_scrubbed":null,"no_review":"N"}}"#
+        let armed = #"{"mode":"auto_upload","title":"T","body":"One.\n\nTwo.","confirm":"C","cancel":"X","arming":{"disclosure":"patterns_only","patterns_only":{"scope":"S","limit":"L"},"model_scrubbed":null,"summary":"M","no_review":"N"}}"#
         let copy = ContributionOverrideConfirmCopy.decode(fromJSON: armed)
         XCTAssertEqual(copy?.paragraphs, ["One.", "Two.", "S", "L", "N"])
         let empty = #"{"mode":"ignore","title":"","body":"B","confirm":"C","cancel":"X","arming":null}"#

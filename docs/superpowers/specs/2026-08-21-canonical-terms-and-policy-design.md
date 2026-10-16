@@ -23,7 +23,7 @@ One page at `https://tracecommons.ai/legal/`, in the `trace-commons-community`
 repo, in four parts:
 
 - **A. Terms of Service.** Iqlusion Inc as offering entity, eligibility,
-  enrolment and account, acceptable use, licence grant, credits, disclaimers
+  enrollment and account, acceptable use, licence grant, credits, disclaimers
   and limitation of liability, termination, California governing law, how
   changes take effect.
 - **B. Data Policy.** What a submission contains, the redaction pipeline,

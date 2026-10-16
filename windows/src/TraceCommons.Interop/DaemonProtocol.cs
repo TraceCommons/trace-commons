@@ -109,6 +109,13 @@ public static class DaemonProtocol
         public const string AcknowledgeLegacyInviteMigration = "acknowledge_legacy_invite_migration";
 
         /// <summary>
+        /// Moves this legacy invite identity to the contributor's NEAR AI
+        /// account, because they pressed Move. Blocks for the whole move; a
+        /// refusal is an error whose message is a <c>legacy_migration_*</c> label.
+        /// </summary>
+        public const string LegacyInviteMigrate = "legacy_invite_migrate";
+
+        /// <summary>
         /// Records that the rewording notices with these ids were shown (K5).
         /// Only the ids actually drawn, with no "all". Changes nothing about
         /// the folders.
@@ -655,12 +662,21 @@ public sealed class QueueEntry
 /// </summary>
 /// <remarks>
 /// Only the fields the tray needs are modelled. Note what is deliberately not
-/// read here even though the daemon sends it: <c>tenant_id</c> and
-/// <c>consent_scopes</c> are identity and policy, and neither belongs on a
-/// surface that renders a tooltip.
+/// read here even though the daemon sends it: <c>consent_scopes</c> is policy,
+/// and does not belong on a surface that renders a tooltip. <c>tenant_id</c>
+/// is read for one purpose only, <see cref="TenantId"/>: its digest keys the
+/// local marker for a dismissed legacy migration card. It is never rendered
+/// or logged.
 /// </remarks>
 public sealed class DaemonStatus
 {
+    /// <summary>
+    /// The enrolled tenant. Hashed to key a local marker
+    /// (<see cref="LegacyMigrationOffers.TenantDigest"/>); never shown.
+    /// </summary>
+    [JsonPropertyName("tenant_id")]
+    public string? TenantId { get; set; }
+
     [JsonPropertyName("logged_in")]
     public bool LoggedIn { get; set; }
 

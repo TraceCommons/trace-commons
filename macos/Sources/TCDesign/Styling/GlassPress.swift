@@ -31,22 +31,30 @@ public enum GlassPress {
 /// a menu row, a segment. It publishes the press so that tier's fill
 /// darkens; content with no tier darkens its own fill from `glassPressed`.
 public struct GlassPressStyle: ButtonStyle {
-    public init() {}
+    private let disabledOpacity: Double
+
+    /// `disabledOpacity` is how far a disabled control fades: the shared
+    /// `Opacity.disabled`, or `Opacity.disabledCheck` for a checkbox or a
+    /// radio (#1146 `.tc-checkbox:disabled`, `.tc-radio:disabled`).
+    public init(disabledOpacity: Double = GlassTokens.Opacity.disabled) {
+        self.disabledOpacity = disabledOpacity
+    }
 
     public func makeBody(configuration: Configuration) -> some View {
-        GlassPressBody(configuration: configuration)
+        GlassPressBody(configuration: configuration, disabledOpacity: disabledOpacity)
     }
 }
 
 private struct GlassPressBody: View {
     let configuration: ButtonStyleConfiguration
+    let disabledOpacity: Double
     @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
         configuration.label
             .environment(\.glassPressed, configuration.isPressed && isEnabled)
             // A control that cannot be used says so, as the glass buttons do.
-            .opacity(isEnabled ? 1 : GlassTokens.Opacity.disabled)
+            .opacity(isEnabled ? 1 : disabledOpacity)
     }
 }
 

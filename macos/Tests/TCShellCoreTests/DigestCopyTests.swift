@@ -17,18 +17,18 @@ final class DigestCopyTests: XCTestCase {
 
     func testSingularReadsAsOneSession() {
         let line = DigestCopy.contributionLine(count: 1, projects: ["api"], creditPending: 0)
-        XCTAssertEqual(line, "1 session contributed from api.")
+        XCTAssertEqual(line, "1 trace contributed from api.")
     }
 
     func testMoreThanOneProjectNamesNone() {
         let line = DigestCopy.contributionLine(
             count: 4, projects: ["api", "web"], creditPending: 0
         )
-        XCTAssertEqual(line, "4 sessions contributed.")
+        XCTAssertEqual(line, "4 traces contributed.")
         // Duplicates and blanks do not make a second project.
         XCTAssertEqual(
             DigestCopy.contributionLine(count: 2, projects: ["api", "api", ""], creditPending: 0),
-            "2 sessions contributed from api."
+            "2 traces contributed from api."
         )
     }
 
@@ -37,13 +37,13 @@ final class DigestCopyTests: XCTestCase {
     func testMatchesTheDesignExamples() {
         XCTAssertEqual(
             DigestCopy.contributionLine(count: 1, projects: ["orchard-api"], creditPending: 6.0),
-            "1 session contributed from orchard-api. 6.0 credit pending."
+            "1 trace contributed from orchard-api. 6.0 credit pending."
         )
         XCTAssertEqual(
             DigestCopy.contributionLine(
                 count: 2, projects: ["orchard-api", "portfolio"], creditPending: 10.5
             ),
-            "2 sessions contributed. 10.5 credit pending."
+            "2 traces contributed. 10.5 credit pending."
         )
     }
 
@@ -60,13 +60,13 @@ final class DigestCopyTests: XCTestCase {
         let line = DigestCopy.contributionLine(
             count: 9, projects: ["a", "b", "c", "d", "e"], creditPending: 0
         )
-        XCTAssertEqual(line, "9 sessions contributed.")
+        XCTAssertEqual(line, "9 traces contributed.")
     }
 
     func testBlankProjectListStillCounts() {
         XCTAssertEqual(
             DigestCopy.contributionLine(count: 2, projects: [], creditPending: 0),
-            "2 sessions contributed."
+            "2 traces contributed."
         )
     }
 
@@ -76,7 +76,7 @@ final class DigestCopyTests: XCTestCase {
     /// arming a project is exactly when that would show.
     func testCreditIsStatedOnlyWhenThereIsSome() {
         let with = DigestCopy.contributionLine(count: 2, projects: ["api"], creditPending: 4.25)
-        XCTAssertEqual(with, "2 sessions contributed from api. 4.3 credit pending.")
+        XCTAssertEqual(with, "2 traces contributed from api. 4.3 credit pending.")
         let without = DigestCopy.contributionLine(count: 2, projects: ["api"], creditPending: 0)
         XCTAssertFalse(without?.contains("credit") ?? true, without ?? "")
     }

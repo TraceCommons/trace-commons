@@ -21,7 +21,8 @@ final class ArmingOfferTests: XCTestCase {
     func testTheOffersWordsDecodeFromTheCoresTable() throws {
         let json = """
             {"evidence": "E", "question": "Q", "confirm": "C", "decline": "D", "body": "B",
-             "body_with_backlog": "BB", "customize": {}}
+             "body_with_backlog": "BB", "customize": {}, "settings_question": "SQ",
+             "settings_description": "SD", "settings_decline": "SN", "settings_confirm": "SC"}
             """
         let copy = try XCTUnwrap(ProjectArmingCopy.decode(fromJSON: json))
         XCTAssertEqual(copy.evidence, "E")
@@ -30,6 +31,10 @@ final class ArmingOfferTests: XCTestCase {
         XCTAssertEqual(copy.decline, "D")
         XCTAssertEqual(copy.body, "B")
         XCTAssertEqual(copy.bodyWithBacklog, "BB")
+        XCTAssertEqual(copy.settingsQuestion, "SQ")
+        XCTAssertEqual(copy.settingsDescription, "SD")
+        XCTAssertEqual(copy.settingsDecline, "SN")
+        XCTAssertEqual(copy.settingsConfirm, "SC")
         XCTAssertNil(ProjectArmingCopy.decode(fromJSON: json.replacingOccurrences(
             of: "\"Q\"", with: "\"\"")))
         XCTAssertNil(ProjectArmingCopy.decode(fromJSON: nil))

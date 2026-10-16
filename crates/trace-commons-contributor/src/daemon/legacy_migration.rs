@@ -61,6 +61,17 @@
 //! approval was bound to the old identity (`input_fingerprint`); the watcher
 //! re-approves them in armed folders on its next pass. That is expected.
 //!
+//! # A refusal that is final
+//!
+//! A pooled tenant never links (the server's rule 3), so once the server
+//! has said `legacy_link_tenant_pooled` to this identity the daemon stops
+//! offering the move to it (owner, 2026-10-11): `status.legacy_invite_migration.offered`
+//! turns false and stays false across restarts, until the enrollment goes
+//! (`unenroll`). Only the offer is withdrawn: an explicit
+//! `legacy_invite_migrate` still asks the server, which stays the authority.
+//! Every other refusal can come out differently next time and is not
+//! remembered; see [`is_terminal_refusal`].
+//!
 //! Every error is a fixed label. None carries a tenant id, account id, key
 //! id, token or URL.
 
@@ -82,7 +93,10 @@ use super::commons_credentials::{self, Kind, SwitchPhase};
 use super::grant_terms::IdentityTerm;
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use super::policy::{ProjectMode, ProjectPolicy};
-use crate::config::{ConfigStore, ContributorConfig, LEGACY_INVITE_LINK_FILE, allowlist_for};
+use crate::config::{
+    ConfigStore, ContributorConfig, LEGACY_INVITE_LINK_FILE, LEGACY_INVITE_REFUSAL_FILE,
+    allowlist_for,
+};
 use crate::identity::DeviceIdentity;
 
 pub const CHALLENGE_PATH: &str = "/v1/account/invites/legacy-link/challenge";
@@ -259,6 +273,75 @@ fn save_link(store: &ConfigStore, link: &StoredLink) -> Result<()> {
     )
 }
 
+/// Whether the server will refuse this identity's move every time it is
+/// asked, so the offer can be withdrawn for good. Decided from what the
+/// server checks for each label (V81/V104 `legacy_invite_link`):
+///
+/// - `tenant_pooled`: yes. Pooled is an operator's mark on the legacy
+///   tenant alone -- not the account signed in, not the invite named -- and
+///   the runbook keeps the mark for good (`legacy-invite-migration.md`).
+/// - `tenant_claimed`: no. The tenant is linked to another account; the
+///   contributor may hold that account, and an operator may revoke the link.
+/// - `invite_not_linked`: no. It turns on the invite named and the account
+///   signed in, both of which can change.
+/// - `invite_revoked`: no. One of its causes is a grant revoked for the
+///   account signed in only; another account may still link, and the label
+///   does not say which cause it was.
+/// - `device_not_eligible`: no. A wrong invite hash is one of its causes,
+///   which pasting the right invite fixes.
+/// - Everything else (not enabled, no session, admission not ready,
+///   unavailable, refused, verification failed, ...) is about the server or
+///   the session right now, and may pass next time.
+pub(crate) fn is_terminal_refusal(label: &str) -> bool {
+    matches!(label, "legacy_migration_tenant_pooled")
+}
+
+/// The identity a remembered refusal belongs to: a hash of the legacy
+/// tenant and device key, so the file names neither, and another identity
+/// enrolled on this store is not refused by it.
+fn refusal_identity(cfg: &ContributorConfig) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"legacy-invite-refusal:");
+    hasher.update(cfg.tenant_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(cfg.device_key_id.as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+/// A final refusal, kept so the move is not offered again.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RememberedRefusal {
+    identity: String,
+    label: String,
+    refused_at: DateTime<Utc>,
+}
+
+/// Keep a final refusal for `cfg`'s identity. Best effort: if it cannot be
+/// written, the move is offered again and refused again, as before.
+fn remember_refusal(store: &ConfigStore, cfg: &ContributorConfig, label: &str) {
+    let body = RememberedRefusal {
+        identity: refusal_identity(cfg),
+        label: label.to_string(),
+        refused_at: Utc::now(),
+    };
+    let saved = serde_json::to_vec(&body)
+        .map_err(anyhow::Error::from)
+        .and_then(|bytes| store.write_daemon_file(LEGACY_INVITE_REFUSAL_FILE, &bytes));
+    if saved.is_err() {
+        tracing::warn!("could not record a final legacy invite refusal");
+    }
+}
+
+/// Whether the server has refused `cfg`'s identity for good.
+fn refused_for_good(store: &ConfigStore, cfg: &ContributorConfig) -> bool {
+    let Ok(Some(bytes)) = store.read_daemon_file(LEGACY_INVITE_REFUSAL_FILE) else {
+        return false;
+    };
+    serde_json::from_slice::<RememberedRefusal>(&bytes)
+        .is_ok_and(|r| is_terminal_refusal(&r.label) && r.identity == refusal_identity(cfg))
+}
+
 /// `status.legacy_invite_migration`: whether the move can be offered, and
 /// the notice while it is unacknowledged. No identifiers.
 pub fn status_value(store: &ConfigStore, cfg: Option<&ContributorConfig>) -> serde_json::Value {
@@ -270,7 +353,8 @@ pub fn status_value(store: &ConfigStore, cfg: Option<&ContributorConfig>) -> ser
         })
     });
     serde_json::json!({
-        "offered": link.is_none() && cfg.is_some_and(offered_for),
+        "offered": link.is_none()
+            && cfg.is_some_and(|cfg| offered_for(cfg) && !refused_for_good(store, cfg)),
         "notice": notice,
     })
 }
@@ -726,7 +810,12 @@ pub(crate) async fn migrate<P: AccountProvisioner>(
         }
         Err(error) => Err(error),
     };
-    if result.is_err() {
+    if let Err(error) = &result {
+        let refused = label(error);
+        if is_terminal_refusal(refused) {
+            remember_refusal(store, &cfg, refused);
+            shared.publish(super::ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
+        }
         // A staged key that never became the identity is worth nothing.
         // Nothing else local has changed: `commit` put back its own writes.
         let store = store.clone();

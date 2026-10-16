@@ -1,5 +1,6 @@
 import type { HistoryFilter } from "./components/history-filter";
 import type { HistoryRecord } from "./types";
+import { historyStatusBucket } from "./withdrawal-eligibility.ts";
 
 export type HistoryProjectGroup = {
   id: string;
@@ -21,7 +22,7 @@ export function countHistory(
     (result, record) => {
       result.all = (result.all ?? 0) + 1;
       const status = historyStatuses.find(
-        (candidate) => candidate === record.status,
+        (candidate) => candidate === historyStatusBucket(record.status),
       );
       if (status) {
         result[status] = (result[status] ?? 0) + 1;
@@ -38,7 +39,7 @@ export function filterHistory(
 ): HistoryRecord[] {
   return filter === "all"
     ? records
-    : records.filter((record) => record.status === filter);
+    : records.filter((record) => historyStatusBucket(record.status) === filter);
 }
 
 export function groupHistory(records: HistoryRecord[]): HistoryProjectGroup[] {

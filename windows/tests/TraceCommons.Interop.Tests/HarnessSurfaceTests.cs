@@ -437,7 +437,7 @@ public class HarnessSurfaceTests
         Assert.Equal(1_230_000UL, measured.SpendMicros);
         Assert.Contains("$1.23", HarnessSurface.SpendSentence(measured), StringComparison.Ordinal);
         Assert.Contains(
-            "since midnight", HarnessSurface.SpendSentence(measured), StringComparison.Ordinal);
+            "Today", HarnessSurface.SpendSentence(measured), StringComparison.Ordinal);
 
         HarnessListing zero = HarnessSurface.ParseListing(
             """

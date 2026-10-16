@@ -1,0 +1,131 @@
+{
+  "type": "session_drill",
+  "session": {
+    "feed": "saved",
+    "session_ref": "f2f7dee53b071ed4bc01ed45e065eccd8f494c23ca6fe06852b2036071258d01",
+    "source": "claude_code",
+    "date": "2026-09-14",
+    "tz": 0,
+    "turns": 6,
+    "tokens": 49869,
+    "span_secs": 480,
+    "state": "partial",
+    "reasons": [
+      "some_turns_unknown"
+    ],
+    "long_context_threshold": 200000,
+    "series": [
+      {
+        "ordinal": 0,
+        "uncached": 3,
+        "cache_read": 0,
+        "cache_write": 12000,
+        "output": 40,
+        "context": 12003
+      },
+      {
+        "ordinal": 1,
+        "uncached": 5,
+        "cache_read": 12000,
+        "cache_write": 500,
+        "output": 60,
+        "context": 12505
+      },
+      {
+        "ordinal": 2,
+        "uncached": 7,
+        "cache_read": 12500,
+        "cache_write": 100,
+        "output": 20,
+        "context": 12607
+      },
+      {
+        "ordinal": 3,
+        "uncached": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "context": null
+      },
+      {
+        "ordinal": 4,
+        "uncached": null,
+        "cache_read": null,
+        "cache_write": null,
+        "output": null,
+        "context": null
+      },
+      {
+        "ordinal": 5,
+        "uncached": 4,
+        "cache_read": 12600,
+        "cache_write": 0,
+        "output": 30,
+        "context": 12604
+      }
+    ],
+    "series_unavailable": null,
+    "markers": [
+      {
+        "letter": "A",
+        "turn_ordinal": 2,
+        "kind": "cache_written_again",
+        "basis": "inferred_from_counters",
+        "pause_minutes": 6,
+        "cache_write": 12600,
+        "context_from": null,
+        "context": null,
+        "file_letter": null,
+        "file_ext": null
+      },
+      {
+        "letter": "B",
+        "turn_ordinal": 3,
+        "kind": "context_shrank",
+        "basis": "inferred_from_counters",
+        "pause_minutes": null,
+        "cache_write": null,
+        "context_from": 150000,
+        "context": 40000,
+        "file_letter": null,
+        "file_ext": null
+      },
+      {
+        "letter": "C",
+        "turn_ordinal": 4,
+        "kind": "crossed_long_context",
+        "basis": "from_counters",
+        "pause_minutes": null,
+        "cache_write": null,
+        "context_from": null,
+        "context": 210000,
+        "file_letter": null,
+        "file_ext": null
+      },
+      {
+        "letter": "D",
+        "turn_ordinal": 5,
+        "kind": "re_read",
+        "basis": "from_tool_calls",
+        "pause_minutes": null,
+        "cache_write": null,
+        "context_from": null,
+        "context": null,
+        "file_letter": "B",
+        "file_ext": ".rs"
+      },
+      {
+        "letter": "E",
+        "turn_ordinal": 5,
+        "kind": "re_read",
+        "basis": "from_tool_calls",
+        "pause_minutes": null,
+        "cache_write": null,
+        "context_from": null,
+        "context": null,
+        "file_letter": "C",
+        "file_ext": null
+      }
+    ]
+  }
+}

@@ -18,16 +18,13 @@ use anyhow::{Context, Result};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use tokio::time::Instant;
-use trace_commons_protocol::llm::recording::{
-    ExpectedToolResult, TraceFile, TraceResponse, TraceStep, TraceToolCall,
-};
 use trace_commons_protocol::trace_contribution::{
     DeterministicTraceRedactor, RawTraceContribution, RecordedTraceContributionOptions,
     TraceContributionEnvelope, TraceRedactor,
 };
 use uuid::Uuid;
 
-use super::translators::{SessionEvent, SessionEventRole, SessionEventTool, SubmissionDraft};
+use super::translators::{SubmissionDraft, trace_file_for};
 
 /// Outcome of a single submission attempt. Hash-only fields, no body content.
 #[derive(Debug, Clone)]
@@ -194,13 +191,7 @@ fn submission_uuid(draft_id: &str) -> Result<Uuid> {
 pub async fn build_envelope_from_draft(
     draft: &SubmissionDraft,
 ) -> Result<TraceContributionEnvelope> {
-    let steps: Vec<TraceStep> = draft.session_events.iter().flat_map(steps_for).collect();
-    let trace = TraceFile {
-        model_name: format!("pilot-bootstrap/{}", draft.source_dataset),
-        memory_snapshot: Vec::new(),
-        http_exchanges: Vec::new(),
-        steps,
-    };
+    let trace = trace_file_for(draft);
     let options = RecordedTraceContributionOptions {
         include_message_text: true,
         // Tool arguments and tool-result content are the point of mapping
@@ -227,97 +218,9 @@ pub async fn build_envelope_from_draft(
     Ok(envelope)
 }
 
-/// Turn one session event into the trace steps it needs.
-///
-/// Most records map to one step. A record that carried prose *and* tool
-/// calls -- the dominant assistant shape in pi-mono and DeepSeek -- maps to
-/// two, both stamped with that record's own real time, because a `TraceStep`
-/// holds exactly one response and neither half may be dropped.
-///
-/// A tool result rides a step whose response is an empty `ToolCalls`: the
-/// result itself lives in `expected_tool_results`, and an empty call list
-/// emits no event of its own, so the result keeps its own real timestamp
-/// instead of borrowing the timestamp of whichever step it was attached to.
-/// `from_recorded_trace` pairs it back to its call by `tool_call_id`, not by
-/// position, so the pairing survives the result being its own step.
-fn steps_for(event: &SessionEvent) -> Vec<TraceStep> {
-    let mut steps = Vec::new();
-
-    // A pi-mono/DeepSeek tool-result record's extracted text *is* its result
-    // content. Emitting it as prose too would put the same bytes in the
-    // envelope twice.
-    let text_is_the_result = matches!(
-        &event.tool,
-        Some(SessionEventTool::Results(results))
-            if results.iter().any(|r| r.content == event.text)
-    );
-
-    if !event.text.is_empty() && !text_is_the_result {
-        steps.push(TraceStep {
-            request_hint: None,
-            response: match event.role {
-                SessionEventRole::User | SessionEventRole::Other => TraceResponse::UserInput {
-                    content: event.text.clone(),
-                },
-                SessionEventRole::Assistant => TraceResponse::Text {
-                    content: event.text.clone(),
-                    // These corpus-building datasets do not carry real
-                    // per-event token counts. 0 is an explicit "not
-                    // measured", not a fabricated value -- unlike
-                    // `timestamp`, `TraceResponse::Text` has no absent-value
-                    // representation for this field.
-                    input_tokens: 0,
-                    output_tokens: 0,
-                },
-            },
-            expected_tool_results: Vec::new(),
-            timestamp: event.timestamp,
-        });
-    }
-
-    match &event.tool {
-        Some(SessionEventTool::Calls(calls)) => steps.push(TraceStep {
-            request_hint: None,
-            response: TraceResponse::ToolCalls {
-                tool_calls: calls
-                    .iter()
-                    .map(|call| TraceToolCall {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        arguments: call.arguments.clone(),
-                    })
-                    .collect(),
-                input_tokens: 0,
-                output_tokens: 0,
-            },
-            expected_tool_results: Vec::new(),
-            timestamp: event.timestamp,
-        }),
-        Some(SessionEventTool::Results(results)) => steps.push(TraceStep {
-            request_hint: None,
-            response: TraceResponse::ToolCalls {
-                tool_calls: Vec::new(),
-                input_tokens: 0,
-                output_tokens: 0,
-            },
-            expected_tool_results: results
-                .iter()
-                .map(|result| ExpectedToolResult {
-                    tool_call_id: result.tool_call_id.clone(),
-                    name: result.name.clone(),
-                    content: result.content.clone(),
-                })
-                .collect(),
-            timestamp: event.timestamp,
-        }),
-        None => {}
-    }
-
-    steps
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::translators::{SessionEvent, SessionEventRole, SessionEventTool};
     use super::*;
 
     #[tokio::test]

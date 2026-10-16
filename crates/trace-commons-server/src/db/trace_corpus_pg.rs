@@ -6957,7 +6957,7 @@ impl TraceCorpusStore for PgBackend {
         perplexity_micros: i64,
         peak_perplexity_micros: Option<i64>,
         perplexity_passed: bool,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<u64, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         // Update ONLY the three perplexity columns, and ONLY on the latest
@@ -6971,27 +6971,40 @@ impl TraceCorpusStore for PgBackend {
         // `gate_policy_version` / `gate_version_hash`. Novelty, tail-fraction,
         // vector-entry, gate status, credit, and all other columns are left
         // exactly as-is — the re-score maintenance path must never touch them.
-        tx.execute(
-            "UPDATE trace_gate_decisions
+        //
+        // A submission the pipeline's Settle wrote a row for is left alone
+        // entirely: that row's verdict is what its Score awarded credit on
+        // and what its attestation_chain_hash covers (spec 2026-10-08,
+        // Slice C, O-C3). The enumeration already leaves such submissions
+        // out; this guards a re-score enumerated before Settle committed, and
+        // the 0 rows it then touches are returned so the re-score counts a
+        // skip, not a re-score.
+        let updated = tx
+            .execute(
+                "UPDATE trace_gate_decisions
                 SET perplexity_micros = $3,
                     peak_perplexity_micros = $4,
                     perplexity_passed = $5
              WHERE tenant_id = $1 AND decision_id = (
                  SELECT decision_id FROM trace_gate_decisions
                   WHERE tenant_id = $1 AND submission_id = $2
-                  ORDER BY decided_at DESC LIMIT 1)",
-            &[
-                &tenant_id,
-                &submission_id,
-                &perplexity_micros,
-                &peak_perplexity_micros,
-                &perplexity_passed,
-            ],
-        )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+                  ORDER BY decided_at DESC LIMIT 1)
+               AND NOT EXISTS (
+                 SELECT 1 FROM trace_gate_decisions
+                  WHERE tenant_id = $1 AND submission_id = $2
+                    AND source = 'pipeline_settle')",
+                &[
+                    &tenant_id,
+                    &submission_id,
+                    &perplexity_micros,
+                    &peak_perplexity_micros,
+                    &perplexity_passed,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(())
+        Ok(updated)
     }
 
     async fn update_trace_gate_decision_author_perplexity(
@@ -6999,7 +7012,7 @@ impl TraceCorpusStore for PgBackend {
         tenant_id: &str,
         submission_id: Uuid,
         columns: [Option<i64>; 5],
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<u64, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         // The five V73 columns and nothing else, on the latest decision row
@@ -7009,8 +7022,12 @@ impl TraceCorpusStore for PgBackend {
         // gate version stamp. Leaving `perplexity_micros` /
         // `perplexity_passed` alone is the point: a backfill scored by a
         // different model must not rewrite what the row was gated on.
-        tx.execute(
-            "UPDATE trace_gate_decisions
+        // A pipeline submission is skipped, as there: its per-author columns
+        // stay NULL until the compatibility Score computes them (O-C2), and
+        // the 0 rows touched are returned.
+        let updated = tx
+            .execute(
+                "UPDATE trace_gate_decisions
                 SET agent_prose_perplexity_micros = $3,
                     agent_prose_tokens = $4,
                     tool_result_perplexity_micros = $5,
@@ -7019,21 +7036,25 @@ impl TraceCorpusStore for PgBackend {
              WHERE tenant_id = $1 AND decision_id = (
                  SELECT decision_id FROM trace_gate_decisions
                   WHERE tenant_id = $1 AND submission_id = $2
-                  ORDER BY decided_at DESC LIMIT 1)",
-            &[
-                &tenant_id,
-                &submission_id,
-                &columns[0],
-                &columns[1],
-                &columns[2],
-                &columns[3],
-                &columns[4],
-            ],
-        )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+                  ORDER BY decided_at DESC LIMIT 1)
+               AND NOT EXISTS (
+                 SELECT 1 FROM trace_gate_decisions
+                  WHERE tenant_id = $1 AND submission_id = $2
+                    AND source = 'pipeline_settle')",
+                &[
+                    &tenant_id,
+                    &submission_id,
+                    &columns[0],
+                    &columns[1],
+                    &columns[2],
+                    &columns[3],
+                    &columns[4],
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(())
+        Ok(updated)
     }
 
     async fn update_trace_gate_decision_credit_quality(
@@ -7293,6 +7314,45 @@ impl TraceCorpusStore for PgBackend {
             .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(rows.into_iter().map(|row| row.get(0)).collect())
+    }
+
+    async fn record_released_submission_privacy_summary(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        privacy_risk: &str,
+        redaction_counts: &BTreeMap<String, u32>,
+        canonical_summary_hash: &str,
+    ) -> Result<u64, DatabaseError> {
+        let redaction_counts = serde_json::to_value(redaction_counts).map_err(|e| {
+            DatabaseError::Serialization(format!("trace redaction counts encode failed: {e}"))
+        })?;
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let updated = tx
+            .execute(
+                "UPDATE trace_submissions
+                 SET privacy_risk = $3,
+                     redaction_counts = $4,
+                     canonical_summary_hash = $5,
+                     updated_at = NOW()
+                 WHERE tenant_id = $1
+                   AND submission_id = $2
+                   AND status IN ('accepted', 'quarantined')
+                   AND revoked_at IS NULL
+                   AND purged_at IS NULL",
+                &[
+                    &tenant_id,
+                    &submission_id,
+                    &privacy_risk,
+                    &redaction_counts,
+                    &canonical_summary_hash,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(updated)
     }
 
     async fn clear_pii_backstop_attempts(

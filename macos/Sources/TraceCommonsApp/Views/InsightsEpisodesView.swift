@@ -13,6 +13,7 @@ struct InsightsEpisodesView: View {
                 Text(model.text("episode_title")).insightsTitle()
                 Spacer()
                 Button(model.text("refresh")) { model.refreshEpisodes() }
+                    .accessibilityLabel(model.text("episode_refresh_accessibility"))
                 if model.episodeBusy { GlassSpinner() }
             }
             Text(model.text("episode_scope")).insightsNote()
@@ -146,6 +147,7 @@ struct InsightsEpisodesView: View {
                 }
                 HStack {
                     Button(model.text("episode_save_assessment")) { model.saveEpisodeAssessment() }
+                        .accessibilityLabel(model.text("episode_save_assessment_accessibility"))
                     if detail.episode.manual_assessment != nil {
                         Button(model.text("episode_clear_assessment")) {
                             clearConfirmation = model.episodeConfirmation()

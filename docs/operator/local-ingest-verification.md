@@ -67,6 +67,11 @@ RUST_LOG=info \
   ./target/debug/trace-commons-ingest
 ```
 
+The service logs under the target `trace_commons_server::ingest::app`
+(it was `trace_commons_ingest` before the service moved into the library),
+so a `RUST_LOG` directive or a log search keyed on the old target needs
+updating; a plain level such as `RUST_LOG=info` is unaffected.
+
 Token entries are comma-separated; each is `tenant:role:token` with an
 optional `;expires_at=<RFC3339>`. Roles parse per `TokenRole::parse` —
 `contributor`, `admin`, `reviewer`, and the worker variants.

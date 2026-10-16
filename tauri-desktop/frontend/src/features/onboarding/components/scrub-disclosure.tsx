@@ -64,7 +64,7 @@ export function ScrubDisclosure({
         )}
         <p className="text-sm text-tc-secondary">
           Scrubbing is good and it is not perfect. That is why you review each
-          session before contributing it.
+          trace before contributing it.
         </p>
       </div>
     </ResponsiveOverlay>

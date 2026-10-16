@@ -80,7 +80,7 @@ private enum ConsentSurfaceSource {
     }
 
     /// The session card's tooltip on Contribute: the one line that chooses it.
-    static let tooltip = #".help(consent == nil ? "" : TCConsentCopy.gateHelp(pinned: armed(entry)) ?? "")"#
+    static let tooltip = #"? (consent == nil ? "" : TCConsentCopy.gateHelp(pinned: armed(entry)) ?? "")"#
 
     /// The source between `signature` and the brace that closes it, with
     /// `//` comments stripped: a comment is not something a contributor

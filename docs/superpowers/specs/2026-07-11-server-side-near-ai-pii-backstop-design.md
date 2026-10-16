@@ -80,7 +80,7 @@ completes**, so every existing `status == Accepted` check holds it by constructi
 1. **Ingest (behavior mostly unchanged):** deterministic rescrub → compute status
    via `status_for_risk`. If the result is `Accepted`, the envelope has
    `consent.message_text_included = true`, and the backstop is enabled, store as
-   `AwaitingPiiBackstop` and enrol a `trace_pii_backstop` row as `pending`.
+   `AwaitingPiiBackstop` and enroll a `trace_pii_backstop` row as `pending`.
    Otherwise behave exactly as today (Low→Accepted, Medium/High→Quarantined).
 2. **Backstop tick (async):** claim a batch of `pending` submissions → for each,
    load the stored (post-deterministic-rescrub) envelope via

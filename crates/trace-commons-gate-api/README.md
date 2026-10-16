@@ -7,6 +7,49 @@ Any scoring backend — including proprietary ones outside this repository —
 implements these traits. Changes here are a compatibility commitment; treat the
 trait surface as versioned.
 
+The versioned pipeline's phase policies (`pipeline::AdmissionPolicy`,
+`ReviewPolicy`, `ScorePolicy`, and `SettlePolicy`) are contracts in this crate
+too. A substituted backend can supply its own `ScorePolicy` to the server
+through `trace_commons_server::versioned_pipeline_score_registry::ScorePolicyRegistry`.
+That registry is a factory keyed by the Score `implementation_id` that a bundle
+manifest names. The server holds the policy only as a trait object, and the
+factory is unqualified for production unless it declares otherwise. The
+factory and the registry are server wiring, and they stay out of this crate.
+
+Two parts of the Score contract are there for such a policy:
+
+- `ScoreEvidence::award_adjustments` is a list of `AwardAdjustment` entries.
+  Each one has a safe `label`, a `factor_micros` from 0 to 1,000,000, and an
+  optional `basis_micros`. The policy lists them in the order it applied them,
+  so an auditor can recompute the award. The list is optional and is not
+  serialized when it is empty, so existing evidence keeps its bytes.
+- `ScoreOutput::held_for_review` asks for the trace to be held for operator
+  review instead of priced. The output awards nothing and carries a safe
+  label (`ScoreOutput::hold_for_review`). An output built with
+  `ScoreOutput::new` never holds.
+- `ScoreInput::operator_review` tells the policy that an operator approved
+  its earlier hold of this trace: a `ScoreHoldReview` with the decision and
+  the hold label, and nothing that names the reviewer. It is `None` on every
+  other Score. A policy given an approval must price the trace; one that
+  holds again fails the run closed (`pipeline_score_hold_repeated`), so a
+  hold cannot loop. A rejected hold never reaches the policy: the server
+  commits `ScoreOutput::rejected_after_hold` itself, which awards nothing,
+  indexes nothing, and names the hold label in
+  `ScoreEvidence::operator_rejected_hold` (not serialized when absent, so
+  existing evidence keeps its bytes).
+
+The server runs a registered policy under the same Score lock, duplicate
+checks, and gate decision row as its compatibility policy. The gate decision
+row needs `perplexity_micros`, `tail_fraction_micros`,
+`novelty_score_micros`, `quality_passed`, `novelty_passed`, and
+`nearest_neighbor_hash` on the evidence; a run whose evidence lacks one fails
+at Settle before any leg pays. A rejected hold's outcome writes no row.
+
+A registered policy's bundle is qualified for production only when its
+factory declares `production_qualified()` and accepts the bundle's Score
+configuration (`configuration_is_qualifiable()`); both are `false` by
+default.
+
 ## Reference implementations
 
 `reference::ReferencePerplexityScorer` and `reference::ReferenceEmbedder` are

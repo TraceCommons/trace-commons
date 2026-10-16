@@ -112,7 +112,7 @@ export function SettingsPage({
           </div>
           <p className="m-0 tc-caption tc-text-tertiary">
             Pausing stops contribution processing. It does not delete queued
-            sessions or change consent.
+            traces or change consent.
           </p>
           {daemon.error && (
             <p className="tc-alert">
@@ -145,7 +145,7 @@ export function SettingsPage({
                 <span className="mb-1.5 block tc-eyebrow">
                   WATCHER
                 </span>
-                <h2>Session discovery</h2>
+                <h2>Trace discovery</h2>
               </div>
               <TertiaryLink
                 type="button"

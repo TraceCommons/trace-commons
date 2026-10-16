@@ -197,6 +197,58 @@ pub trait VectorIndex: Send + Sync {
     fn flush(&self) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Persist the pending writes of `tenant_storage_ref`'s shard only.
+    ///
+    /// A caller that persists after every write (the pipeline's index) uses
+    /// this so one tenant's write does not save every open shard. The
+    /// default persists everything, which is correct for any implementation
+    /// that cannot persist one shard alone; a per-shard implementation
+    /// (`UsearchVectorIndex`) overrides it.
+    fn flush_tenant(&self, tenant_storage_ref: &str) -> anyhow::Result<()> {
+        let _ = tenant_storage_ref;
+        self.flush()
+    }
+}
+
+/// Shares one index between holders. Forwards all six methods, the three
+/// defaulted ones (`snapshot`, `flush`, `flush_tenant`) included: without
+/// the overrides an `Arc` would report no shard, never persist its corpus,
+/// and turn a one-tenant flush into a flush of every tenant.
+impl<T: VectorIndex + ?Sized> VectorIndex for std::sync::Arc<T> {
+    fn snapshot(&self, tenant_storage_ref: &str) -> Option<VectorIndexSnapshot> {
+        (**self).snapshot(tenant_storage_ref)
+    }
+
+    fn insert(
+        &self,
+        entry_id: Uuid,
+        tenant_storage_ref: &str,
+        embedding: &[f32],
+    ) -> anyhow::Result<()> {
+        (**self).insert(entry_id, tenant_storage_ref, embedding)
+    }
+
+    fn nearest(
+        &self,
+        tenant_storage_ref: &str,
+        embedding: &[f32],
+        k: usize,
+    ) -> anyhow::Result<Vec<NearestNeighbor>> {
+        (**self).nearest(tenant_storage_ref, embedding, k)
+    }
+
+    fn delete(&self, tenant_storage_ref: &str, entry_id: Uuid) -> anyhow::Result<bool> {
+        (**self).delete(tenant_storage_ref, entry_id)
+    }
+
+    fn flush(&self) -> anyhow::Result<()> {
+        (**self).flush()
+    }
+
+    fn flush_tenant(&self, tenant_storage_ref: &str) -> anyhow::Result<()> {
+        (**self).flush_tenant(tenant_storage_ref)
+    }
 }
 
 #[cfg(test)]
@@ -252,5 +304,104 @@ mod pipeline_index_tests {
         value.chunk = 1;
         changes.push(value);
         assert!(changes.iter().all(|changed| changed.entry_id() != base));
+    }
+
+    /// Records which methods were called, and answers every defaulted method
+    /// with a value the default could not produce.
+    #[derive(Default)]
+    struct CountingIndex {
+        flushed: std::sync::atomic::AtomicUsize,
+        flushed_tenant: std::sync::atomic::AtomicUsize,
+        inserted: std::sync::atomic::AtomicUsize,
+        deleted: std::sync::atomic::AtomicUsize,
+    }
+
+    impl VectorIndex for CountingIndex {
+        fn snapshot(&self, _tenant_storage_ref: &str) -> Option<VectorIndexSnapshot> {
+            Some(VectorIndexSnapshot {
+                snapshot_id: Uuid::from_u128(7),
+                cardinality: 3,
+            })
+        }
+
+        fn insert(
+            &self,
+            _entry_id: Uuid,
+            _tenant_storage_ref: &str,
+            _embedding: &[f32],
+        ) -> anyhow::Result<()> {
+            self.inserted
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn nearest(
+            &self,
+            _tenant_storage_ref: &str,
+            _embedding: &[f32],
+            k: usize,
+        ) -> anyhow::Result<Vec<NearestNeighbor>> {
+            Ok(vec![
+                NearestNeighbor {
+                    entry_id: Uuid::from_u128(9),
+                    similarity: 0.5,
+                };
+                k
+            ])
+        }
+
+        fn delete(&self, _tenant_storage_ref: &str, _entry_id: Uuid) -> anyhow::Result<bool> {
+            self.deleted
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(true)
+        }
+
+        fn flush(&self) -> anyhow::Result<()> {
+            self.flushed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn flush_tenant(&self, _tenant_storage_ref: &str) -> anyhow::Result<()> {
+            self.flushed_tenant
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// An `Arc` (sized or `dyn`) forwards all six methods, including the
+    /// three the trait defaults (`snapshot`, `flush`, `flush_tenant`): a
+    /// shared index must neither stop describing its shard nor stop
+    /// persisting its corpus, and a one-tenant flush through an `Arc` must
+    /// not become a flush of every tenant.
+    #[test]
+    fn arc_forwarding_keeps_index_snapshot_and_flush() {
+        fn exercise<V: VectorIndex + ?Sized>(index: &V) -> Option<VectorIndexSnapshot> {
+            index.insert(Uuid::nil(), "t", &[1.0]).unwrap();
+            assert_eq!(index.nearest("t", &[1.0], 2).unwrap().len(), 2);
+            assert!(index.delete("t", Uuid::nil()).unwrap());
+            index.flush().unwrap();
+            index.flush_tenant("t").unwrap();
+            index.snapshot("t")
+        }
+        let sized = std::sync::Arc::new(CountingIndex::default());
+        let shared: std::sync::Arc<dyn VectorIndex> = sized.clone();
+        let expected = Some(VectorIndexSnapshot {
+            snapshot_id: Uuid::from_u128(7),
+            cardinality: 3,
+        });
+        assert_eq!(exercise(&sized), expected);
+        assert_eq!(exercise(&shared), expected);
+        let load = |counter: &std::sync::atomic::AtomicUsize| {
+            counter.load(std::sync::atomic::Ordering::SeqCst)
+        };
+        assert_eq!(load(&sized.flushed), 2, "flush is forwarded");
+        assert_eq!(
+            load(&sized.flushed_tenant),
+            2,
+            "flush_tenant is forwarded, not answered by flush"
+        );
+        assert_eq!(load(&sized.inserted), 2);
+        assert_eq!(load(&sized.deleted), 2);
     }
 }

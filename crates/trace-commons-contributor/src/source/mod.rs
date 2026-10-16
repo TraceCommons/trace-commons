@@ -17,6 +17,7 @@ pub mod codex;
 pub mod discovery;
 pub mod gemini_cli;
 pub mod opencode;
+pub(crate) mod opencode_db;
 pub mod trajectory;
 
 /// A load declined because of what the session *is*, not because of what
@@ -453,6 +454,20 @@ pub trait TraceSource: Send + Sync {
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>>;
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript>;
 
+    /// Discovery that opens no transcript, for the settlement estimate,
+    /// which must resolve a folder's Never mode before it reads any of that
+    /// folder's traces. A ref it returns carries a `cwd` only when the
+    /// source knows it without reading transcript bytes (a sidecar, a
+    /// directory name, a metadata row); otherwise `cwd` is `None` and the
+    /// caller treats the project as unknown.
+    ///
+    /// Fails closed: the default finds nothing, so a source whose
+    /// `discover` reads transcripts is never reached through here until it
+    /// says how to discover without doing so.
+    fn discover_unopened(&self) -> anyhow::Result<Vec<SessionRef>> {
+        Ok(Vec::new())
+    }
+
     /// Which session, if any, a changed filesystem path belongs to.
     ///
     /// Event-driven watching learns that *a path* moved and has to turn
@@ -672,8 +687,11 @@ struct SourceSpec {
 static NATIVE_SOURCES: &[SourceSpec] = &[
     SourceSpec {
         name: SOURCE_OPENCODE,
-        // Export-only: this path is never used without a declaration.
-        conventional_root: None,
+        // Discovery offers this location; old undeclared desktop settings stay off.
+        conventional_root: Some(|| {
+            opencode_db::conventional_root(&home_dir(), |key| std::env::var(key).ok())
+                .join("opencode.db")
+        }),
         build: |path| Box::new(opencode::OpenCodeSource::new(path)),
         undeclared: Undeclared::Nothing,
     },
@@ -766,6 +784,7 @@ pub enum TrajectorySelection {
 ///   [`Undeclared`] policy, not one rule for everybody.
 #[derive(Clone, Default)]
 pub struct SourceRoots {
+    managed_opencode: Option<PathBuf>,
     declared: BTreeMap<&'static str, SourceDeclaration>,
     trajectory: TrajectorySelection,
     /// A routing overlay to attach to every adapter these roots build.
@@ -798,6 +817,14 @@ impl std::fmt::Debug for SourceRoots {
 }
 
 impl SourceRoots {
+    /// Only exports explicitly requested at managed launch enter this folder.
+    pub fn with_managed_opencode(mut self, root: PathBuf) -> Self {
+        if root.is_dir() {
+            self.managed_opencode = Some(root);
+        }
+        self
+    }
+
     /// What each source these roots build reads from: its name and the root
     /// `all_sources` would give it. For the daemon's automatic grant, which
     /// records what is on disk per source, so a harness connected after the
@@ -817,6 +844,15 @@ impl SourceRoots {
             if let Some(root) = root {
                 out.insert(spec.name, root.to_string_lossy().to_string());
             }
+        }
+        if let Some(managed) = &self.managed_opencode
+            && !matches!(
+                self.declared.get(SOURCE_OPENCODE),
+                Some(SourceDeclaration::Off)
+            )
+        {
+            let identity = out.entry(SOURCE_OPENCODE).or_default();
+            identity.push_str(&format!(" managed:{}", managed.to_string_lossy()));
         }
         let trajectory = match &self.trajectory {
             TrajectorySelection::None => None,
@@ -909,6 +945,13 @@ impl SourceRoots {
         self.declared.contains_key(name)
     }
 
+    /// Whether the contributor declared this source `Off`: an explicit "do
+    /// not read", which every caller that widens the declared set (the
+    /// settlement estimate's conventional roots) must still honour.
+    pub fn is_off(&self, name: &str) -> bool {
+        matches!(self.declared.get(name), Some(SourceDeclaration::Off))
+    }
+
     /// The trajectory scope this root set carries.
     ///
     /// Read by callers that need to assert WHICH scope is in play, not
@@ -988,6 +1031,20 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
     let mut sources: Vec<Box<dyn TraceSource>> = Vec::new();
 
     for spec in NATIVE_SOURCES {
+        if spec.name == SOURCE_OPENCODE
+            && !matches!(roots.declared.get(spec.name), Some(SourceDeclaration::Off))
+        {
+            if let Some(managed) = &roots.managed_opencode {
+                let source = match roots.declared.get(spec.name) {
+                    Some(SourceDeclaration::Watch { path }) => {
+                        opencode::OpenCodeSource::new(path.clone()).also_managed(managed.clone())
+                    }
+                    _ => opencode::OpenCodeSource::managed(managed.clone()),
+                };
+                sources.push(Box::new(source));
+                continue;
+            }
+        }
         match roots.declared.get(spec.name) {
             Some(SourceDeclaration::Off) => {}
             Some(SourceDeclaration::Watch { path }) => sources.push((spec.build)(path.clone())),
@@ -1373,6 +1430,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                SOURCE_OPENCODE,
                 SOURCE_CLAUDE_CODE,
                 SOURCE_CODEX,
                 SOURCE_GEMINI_CLI,

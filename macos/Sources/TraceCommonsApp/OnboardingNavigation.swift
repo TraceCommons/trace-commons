@@ -23,20 +23,20 @@ enum OnboardingNavigation {
         return enrolled ? recordEnrolment(state) : state
     }
 
-    /// The daemon holds an enrolment this first run did not make: an
+    /// The daemon holds an enrollment this first run did not make: an
     /// earlier first run joined and was quit before Start. Its invite (whose
     /// last use may be spent) is recorded as enrolled, so it is neither
     /// looked up nor joined again and Join's field is read-only, and with no
-    /// account chosen here (or watch only) the account is the enrolment, so
+    /// account chosen here (or watch only) the account is the enrollment, so
     /// Join reads Continue and Automatic is offered. An account Join chose is
-    /// kept, as is an enrolment this first run made.
+    /// kept, as is an enrollment this first run made.
     ///
-    /// An invite Join holds when the enrolment is reported (a parked link
+    /// An invite Join holds when the enrollment is reported (a parked link
     /// applied before the daemon's first status) is dropped with its host:
     /// the daemon never joined it, so Join's line does not name it, and it
-    /// is not looked up or joined over the enrolment.
+    /// is not looked up or joined over the enrollment.
     static func recordEnrolment(_ state: FirstRunState) -> FirstRunState {
-        // An enrolment the person signed out of on Join is not their
+        // An enrollment the person signed out of on Join is not their
         // account again just because the daemon still reports it.
         guard state.enrolledInvite == nil, !state.signedOutOfEnrolment else { return state }
         var recorded = state

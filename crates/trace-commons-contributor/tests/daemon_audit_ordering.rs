@@ -43,7 +43,7 @@ struct Harness {
 fn cfg(device_key_id: String) -> ContributorConfig {
     ContributorConfig {
         inference_receipt_endpoint: None,
-        consent_scopes_chosen: false,
+        consent_scopes_chosen: Some(true),
         witness_origin: None,
         inference_receipt_check_attestation: false,
         schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
@@ -87,10 +87,10 @@ impl Harness {
     fn project_key(&self) -> String {
         let path = self.shared.store.dir().join("a-project");
         std::fs::create_dir_all(&path).unwrap();
-        std::fs::canonicalize(&path)
-            .unwrap()
-            .to_string_lossy()
-            .to_string()
+        // The watcher's key for it (#992): what a session there resolves to.
+        trace_commons_contributor::daemon::policy::project_key_for(Some(
+            &std::fs::canonicalize(&path).unwrap().to_string_lossy(),
+        ))
     }
 
     /// A pending entry over a session that really exists, with the source

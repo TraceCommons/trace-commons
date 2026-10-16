@@ -273,6 +273,10 @@ export TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING=5000   # the pilot's value;
 - Native passkey **sign-in** (`/v1/account/native/passkey/login/*`) is not
   capped and needs no new setting; like the browser sign-in it needs the
   login-resolver pool above.
+  Its `login/finish` answer adds an optional `passkey_label`, the
+  authenticating passkey's own label, read under the session's tenant by
+  account and credential id; it needs no grant beyond the `SELECT` on
+  `trace_webauthn_credentials` the login already uses, and is never logged.
 
 V98 grants `trace_ingest_runtime` `INSERT` on `trace_account_bindings`, and
 `EXECUTE` on `trace_unbound_passkey_account_count()`, a `SECURITY DEFINER`
@@ -318,7 +322,7 @@ that stage. Nothing else is written: the passkey account stays `unbound`, and
 no fresh device key is minted. The label names no tenant or account.
 
 For an account that is already `bound` (a second Mac signed in with the same
-passkey), the same two routes enrol that Mac's device key into the account
+passkey), the same two routes enroll that Mac's device key into the account
 instead of refusing. Finish attaches the device only when the NEAR AI login's
 anchor is the session's own account's, checked inside the one tenant-scoped
 transaction that writes the device (the share lock on the binding row uses
@@ -328,7 +332,7 @@ account's -- whether it owns another account or none -- is answered
 row (stage `near_ai_account_mismatch`) and nothing else written. A success
 writes `account_device_enrolled` (`{"identity":"near_ai_login"}`); start writes
 `account_device_enrol_started`. There is no cap on how many devices one
-account can enrol this way.
+account can enroll this way.
 
 ### Browser passkey step-up page (Z2 S7)
 
@@ -553,6 +557,51 @@ Two more things this incident showed:
   change."** It links the same library crate as ingest; its published sha256
   differed across a range in which its own `bin` file was untouched.
 
+### Then: re-arm the versioned pipeline (every new code revision)
+
+A deploy that changes the code revision (`python3 scripts/operator/pipeline.py
+revision` on the tree to ship differs from the running build's) is not done when
+`/health` shows the new `build_commit`. Every tenant whose routing row says
+`pipeline` -- every tenant default routing routed, and every tenant activated by
+hand -- is refused new uploads with `503` `pipeline_bundle_not_qualified` until
+its active bundle is qualified on the new revision. Default routing also
+disarms itself (`pipeline_default_routing_revision_mismatch` at start), so new
+tenants stop being routed. The refusal stores nothing on the server, but the
+contributor app marks each refused upload failed and reports the commons as
+unreachable, so intake for those tenants is closed and their contributors see
+an outage.
+
+The start log says so, as WARN lines:
+`pipeline_active_bundle_not_qualified` for each listed tenant, and
+`pipeline default routing is not armed`. Treat either as an unfinished deploy.
+
+The procedure is
+[`pipeline-activation.md`](pipeline-activation.md), "After a deploy: the
+qualification is read again for each new upload", and the "Default routing"
+re-arm. In order, on the deployed commit:
+
+1. the promote cycle's phase A on the host: `pipeline.py qualify`, then
+   `promote init`, `package-checks`, `hf-canary`, `remote-restore`;
+2. one ingest boot with the adapters-check variables, which writes
+   `pipeline_production_adapters` for the run (one restart);
+3. `promote adapters`, `promote sign`, `promote assemble`;
+4. replace the default-routing results directory's contents with the new
+   signed set (no restart), and qualify each hand-activated tenant's bundle
+   with `POST /v1/admin/pipeline/qualifications`.
+
+Then check that the start WARN lines are gone on the next pass and that `GET
+/v1/admin/pipeline/routing` answers `active_bundle_qualified_on_revision`
+`true`.
+
+A deploy that keeps the revision -- only documents, client shells, CI or
+`deploy/` changed -- needs none of this. To keep the closed window short, run
+phase A on the commit you are about to ship before installing it, as the
+procedure says.
+
+On 2026-10-12 four ingest deploys (17:02 to 22:09 UTC) skipped this, and every
+pipeline-routed tenant was refused new uploads from the first of them until
+the re-arm. Only a log of each error response's label (#1395) showed it.
+
 ### V74: the public-run functions move to a runtime role
 
 V64 meant to close its four public-run definer functions
@@ -675,7 +724,7 @@ the group does not exist; V90 creates it. The grants are these:
 
 | Table | Grant | Why |
 |---|---|---|
-| `pipeline_runs` | `SELECT, INSERT`; `UPDATE` on `next_phase`, `state`, `last_error_label`, `updated_at`, `lease_token`, `lease_expires_at`, `attempt_count`, `next_attempt_at`, `phase_started_at`, `index_membership`, `index_command_ref`, `index_command_hash`, `index_write_state`, `score_neighbor_ref`, `score_neighbor_hash`, `settle_selection`, `settle_selection_hash`, `approved_revision_id`, `approved_object_ref_id`, `approved_content_hash` | the receipt inserts the run; claims, phase commits, retries, failures and the lease sweep lock and update it. Nothing updates its identity, `created_at`, `max_attempts`, or its admission decision |
+| `pipeline_runs` | `SELECT, INSERT`; `UPDATE` on `next_phase`, `state`, `last_error_label`, `updated_at`, `lease_token`, `lease_expires_at`, `attempt_count`, `next_attempt_at`, `phase_started_at`, `index_membership`, `index_command_ref`, `index_command_hash`, `index_write_state`, `score_neighbor_ref`, `score_neighbor_hash`, `settle_selection`, `settle_selection_hash`, `approved_revision_id`, `approved_object_ref_id`, `approved_content_hash`; V117 adds the eight privacy-pass columns ([V117](#v117-the-privacy-pass-record)); V118 adds `review_audit_pending_at`; V123 adds `submission_rejected_at` | the receipt inserts the run; claims, phase commits, retries, failures and the lease sweep lock and update it. Nothing updates its identity, `created_at`, `max_attempts`, its admission decision, or `privacy_pass_required` |
 | `phase_outcomes` | `SELECT, INSERT` | each phase commit appends its outcome, and later phases read it |
 | `pipeline_bundle_packages` | `SELECT, INSERT` | registering a bundle appends its package, and every phase reads it |
 | `pipeline_active_bundles` | `SELECT, INSERT` here; V112 adds `UPDATE (bundle_id, selected_at)` | startup selects the default bundle for a tenant that has none; the receipt reads it. The activation gate switches a tenant to a qualified bundle with the V112 `UPDATE` ([V110 to V113](#v110-to-v113-activation-policy-interventions-the-activation-gate-and-the-rebuild-fence)); no other statement of the runtime updates the row, and the runtime holds no `DELETE` |
@@ -694,7 +743,7 @@ The pipeline also uses tables older than V62:
 | Table | What the pipeline needs |
 |---|---|
 | `trace_tenants` | `INSERT` |
-| `trace_submissions` | `SELECT, INSERT`; `UPDATE` on `status`, `reviewed_at`, `updated_at`; row locks (`FOR UPDATE`, `FOR SHARE`) |
+| `trace_submissions` | `SELECT, INSERT`; `UPDATE` on `status`, `reviewed_at`, `updated_at`, and (a failed run's rejection, #1346) `last_status_reason`, `credit_points_pending`; row locks (`FOR UPDATE`, `FOR SHARE`) |
 | `trace_object_refs` | `SELECT, INSERT`; a row lock (`FOR SHARE`) |
 | `trace_derived_records` | `INSERT` |
 | `trace_tombstones` | `SELECT` |
@@ -793,6 +842,10 @@ also grants `main`'s gate driver role, `trace_gate_driver`, two columns of
 | `pipeline_review_assessments` | `SELECT, INSERT` | an assessment inserts its row; the claim, the review queue, and each Review attempt read it |
 | `pipeline_index_invalidations` | `SELECT, INSERT`; `UPDATE` on `state`, `completed_at`, `attempt_count`, `next_attempt_at`, `last_error_label` | a withdrawal or a cancelled index write queues the revision's removal; the worker claims, completes, retries, or fails it; the summaries count it |
 | `pipeline_run_settlements` | `UPDATE (credit_audited_at)`, the column V105 adds | the worker marks a leg's credit event audited once it appended the `CreditMutate` audit event |
+| `pipeline_runs` | `UPDATE (review_audit_pending_at)`, the column V118 adds | a Review commit, a review assessment, an escalated privacy pass and a failed privacy classification set the marker; the worker clears it once it appended the review audit events |
+| `pipeline_runs` | `UPDATE (submission_rejected_at)`, the column V123 adds | a run that fails before Review decided it records that it moved its `received` submission to `rejected` (#1346) |
+| `pipeline_runs` | `UPDATE (settle_finish_granted_at)` and `UPDATE (operator_held_at)`, the columns V128 adds | a finishable Settle run gets one extra attempt, and a paid run whose Settle commit is refused for good is held for an operator (#1313) |
+| `pipeline_score_bases` | `SELECT, INSERT`, the table V128 creates | a Score that runs under the runtime controls records the unapplied runs it counted (#1313) |
 | `pipeline_runs` (to `trace_gate_driver`) | `SELECT (tenant_id, submission_id)`, and a cross-tenant `SELECT` policy for that role only, as V36 gives it on `main`'s tables | `main`'s gate driver leaves every submission with a pipeline run out of its work list and backlog count; the pipeline's own Score scores it |
 | `pipeline_export_snapshots` | `SELECT, INSERT`; `UPDATE` on `state`, `export_manifest_id`, `completed_at`, `invalidated_at` | export creation and delivery, a withdrawal's invalidation, and the summaries |
 | `pipeline_export_snapshot_items` | `SELECT, INSERT`; `UPDATE` on `invalidated_at`, `invalidation_reason` | export creation, and a withdrawal's invalidation |
@@ -800,6 +853,11 @@ also grants `main`'s gate driver role, `trace_gate_driver`, two columns of
 No grant allows `DELETE` on assessments, snapshots, or items. A trigger
 refuses a direct `DELETE` and an `UPDATE` of their identity; they go only with
 their submission or tenant, through foreign-key cascades.
+
+V118 adds the `review_audit_pending_at` row above: see
+[V118](#v118-the-review-audit-marker). V123 adds the
+`submission_rejected_at` row: see
+[V123](#v123-the-rejection-of-a-failed-runs-submission).
 
 These routes also write tables older than V62, which no pipeline migration
 grants anything on. The pilot's V62-era table-wide grants cover them:
@@ -835,7 +893,11 @@ activation gate reads to decide whether a signed package is production
 qualified. V108 adds `pipeline_attempt_artifacts`, which stages the object
 each phase attempt writes -- Review's approved revision, and Score's index
 command and neighbour set -- before its phase commit, so the attempt sweep
-can delete the ones that never commit. Like V92 to V95, each grants
+can delete the ones that never commit. Since V117 the Review-start privacy
+pass's output is staged there too (`privacy-pass`), and V117 replaces two of
+V108's checks: the artifact check (`pipeline_attempt_artifacts_artifact_check`)
+and `pipeline_attempt_artifacts_approved_hash`, which now requires a hash on
+a `privacy-pass` row as on an `approved` one. Like V92 to V95, each grants
 `trace_ingest_runtime` what the pipeline code reads and writes there, and
 nothing broader, and each refuses to apply if the group does not exist:
 
@@ -859,6 +921,73 @@ Check before deploying:
 SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_bundle_qualifications', 'INSERT');
 SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_attempt_artifacts', 'INSERT');
 SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_attempt_artifacts', 'ciphertext_sha256', 'UPDATE');
+```
+
+### V109: pipeline follow-ups
+
+V109 adds no table and changes no grant. It marks the payout of each leg
+that V94-era code seeded `pending` as `disabled`, adds four
+checks on the export and assessment tables, and indexes two foreign keys on
+their referencing side ([pipeline-activation.md](pipeline-activation.md)
+describes each). For the first of these it lifts forced row security on
+`pipeline_run_settlements` for one statement and forces it again, inside the
+migration's transaction.
+
+The ingest migration runner applies each migration in one transaction. To
+apply V109 by hand (the second route above), use one transaction too:
+
+```sh
+psql --single-transaction -v ON_ERROR_STOP=1 -f migrations/V109__versioned_pipeline_followups.sql
+```
+
+This command applies the file and records nothing. Then record version 109,
+with the name `versioned_pipeline_followups`, in `_trace_commons_migrations`,
+as that route says; if it is not recorded, the next boot with the migrator
+URL applies V109 again and stops at the `ADD CONSTRAINT` on
+`pipeline_review_assessments`.
+
+Without `--single-transaction`, a failure after the first statement leaves
+`pipeline_run_settlements` without forced row security, and a second run of
+the file stops at a check or an index that the first run added.
+
+V109 does not need V110 to V114, and they do not need V109. A database that
+already has them (it ran a build of `main` from before V109) gets V109 after
+them, at the next boot with the migrator URL or by hand; the result is the
+same in both orders.
+
+Each statement locks its table until the commit. That costs nothing while
+the pipeline tables are empty, which they are until a tenant's uploads go to
+the pipeline. An activation sends them there. So does a process started with
+`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` (the test-only rule of
+[pipeline-activation.md](pipeline-activation.md)), and so did a build with a
+pipeline runtime from before the routing row, which routed by its receipts
+list alone. On a database that has pipeline rows, the build that still runs
+waits for these locks in its Settle, payout, review assessment, export and
+invalidation statements until V109 commits: the time of one read of each of
+the five tables (`pipeline_run_settlements`, `pipeline_export_snapshots`,
+`pipeline_export_snapshot_items`, `pipeline_review_assessments`,
+`pipeline_index_invalidations`). A row that fails one of the four checks
+makes V109 roll back; the routes write no such row.
+
+A wait is not the only result. V109 locks `pipeline_export_snapshots` before
+`pipeline_export_snapshot_items`. A withdrawal, and a revocation or
+withdrawal follow-up (a route, retention maintenance, or the pipeline
+worker), locks the items before the snapshots. One of these that runs at the
+same time can deadlock with V109, and PostgreSQL then stops one of the two.
+If it stops V109, nothing was applied: start that boot, or the `psql`
+command, again. If it stops the other one, that request or pass fails and
+is tried again. To prevent the deadlock, stop the ingest processes of the
+running build before you apply V109.
+
+A test or lab database that kept the rows of the #1143 runtime suite fails
+the new requester check (those fixtures hold a requester such as
+`exporter_sha256:exporttest`), and V109 rolls back. Drop that database and
+create it again.
+
+Check afterwards:
+
+```sql
+SELECT relforcerowsecurity FROM pg_class WHERE relname = 'pipeline_run_settlements';
 ```
 
 ### V110 to V113: activation, policy interventions, the activation gate, and the rebuild fence
@@ -1053,7 +1182,9 @@ these migrations' code, do these steps:
    tenants whose row says `pipeline`. Move every other tenant (contained,
    `legacy`, or with no row) to the drain list, or off both lists. A `contain`
    or a `deactivate` does not protect a tenant on that build: only the lists
-   do.
+   do. A tenant with a pipeline run that is off both lists gets no index
+   invalidation processed. Put the tenant back on the drain list when a build
+   with the guards runs.
 
    On that build, a tenant that is off the receipts list uploads on the legacy
    path. This includes a contained tenant. That build does not read the row, so
@@ -1062,13 +1193,18 @@ these migrations' code, do these steps:
    tenant's uploads must stay stopped, do not install that build.
 3. Do not rely on a suspension: on that build it does not hold for a phase
    that already runs or for a payout. For a tenant with a suspended Settle
-   policy, keep the tenant off both lists (its pipeline work then waits), or
+   policy, keep the tenant off both lists (its pipeline work then waits, and
+   no index invalidation is processed for it), or
    set the NEAR settlement mode of the older build to `disabled`
    (`TRACE_COMMONS_NEAR_SETTLEMENT_MODE`; this stops every NEAR payout of the
    process, `main`'s too). Keep that until a build with the guards runs again.
+   If you took the tenant off both lists, put it back on the drain list then.
 
 See also "Run one build and one configuration" in "Scope lists and the routing
 row" of [pipeline-activation.md](pipeline-activation.md).
+
+A build from before V117 needs its own steps before you install it on a V117
+database, whatever its routing code: see [V117](#v117-the-privacy-pass-record).
 
 The drain report (`GET /v1/admin/pipeline/legacy-drain`) reads 16 tables through
 the ingest login. Two are pipeline tables that V92 and V110 grant
@@ -1113,16 +1249,138 @@ SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_bundle_po
 SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_index_rebuild_fences', 'DELETE');
 ```
 
+### V117: the privacy pass record
+
+V117 adds the Review-start privacy pass's record to `pipeline_runs`
+([pipeline-activation.md](pipeline-activation.md), "The privacy pass at the
+start of Review"). It adds no table, and changes no RLS policy: a column of
+an already forced table inherits its tenant policy.
+
+- Eight nullable columns: `privacy_pass_object_ref_id` (a deferred foreign
+  key to `trace_object_refs`), `privacy_pass_content_hash`,
+  `privacy_pass_source_hash`, `privacy_pass_residual_risk_basis`,
+  `privacy_pass_outcome` (`cleared` or `escalated`),
+  `privacy_pass_recorded_at`, and the two that link a human approval of an
+  escalated run to the pass, `privacy_pass_approval_assessment_hash` and
+  `privacy_pass_approval_resolved_reasons`. Checks keep the first six all
+  NULL or all set, and the two approval columns set together and only on an
+  escalated pass.
+- `privacy_pass_required BOOLEAN NOT NULL`: FALSE on every row that exists
+  when V117 applies, and TRUE by default for every run inserted after it, by
+  any binary. The check `pipeline_runs_privacy_pass_before_approval` refuses
+  an approved revision on a `privacy_pass_required` run that has no pass.
+- `pipeline_attempt_artifacts` accepts the `privacy-pass` artifact, with a
+  required hash (see "V107 and V108" above).
+
+| Table | Grant | Why |
+|---|---|---|
+| `pipeline_runs` | `UPDATE` on `privacy_pass_object_ref_id`, `privacy_pass_content_hash`, `privacy_pass_source_hash`, `privacy_pass_residual_risk_basis`, `privacy_pass_outcome`, `privacy_pass_recorded_at`, `privacy_pass_approval_assessment_hash`, `privacy_pass_approval_resolved_reasons` | the privacy pass records its result, and Review's approving commit links an escalated run's approval to it. No grant on `privacy_pass_required`: only the receipt's `INSERT` sets it, through the default |
+
+The pass also writes `privacy_risk`, `residual_risk_basis`, `redaction_counts`
+and `redaction_pipeline_version` on `trace_submissions`, which the runtime
+already updates through the table-wide grants it has held since V62 (the
+receipt and the phase commits write that row); V117 grants nothing there. Like V92 to V95, it refuses
+to apply if `trace_ingest_runtime` does not exist.
+
+A rollback to a binary from before V117 needs containment first:
+[pipeline-activation.md](pipeline-activation.md), "Rolling back below the
+privacy pass", gives the counts and the steps, and the count to take before
+deploying.
+
+Check before deploying:
+
+```sql
+SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_runs', 'privacy_pass_object_ref_id', 'UPDATE');
+SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_runs', 'privacy_pass_approval_resolved_reasons', 'UPDATE');
+```
+
+### V118: the review audit marker
+
+V118 adds `pipeline_runs.review_audit_pending_at`, the marker of a review
+audit event that the worker must still append, a partial index on it, and
+`UPDATE (review_audit_pending_at)` for `trace_ingest_runtime`. Apply V118 as
+the migrator before you install the binary, after V117. V118 locks
+`pipeline_runs` until it commits. During that time, the uploads of routed
+tenants, the pipeline worker and `main`'s gate driver wait.
+
+A build from before V118 runs on a V118 database. A Review decision that it
+commits and a failed privacy classification get no audit event. A hold of
+the privacy pass that it records gets its event late, when a newer build
+next sets the run's marker (an assessment or a Review commit). An assessment
+that it records gets a second `review_decision` event when a newer build
+commits its Review.
+
+Check before deploying:
+
+```sql
+SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_runs', 'review_audit_pending_at', 'UPDATE');
+```
+
+### V123: the rejection of a failed run's submission
+
+V123 adds `pipeline_runs.submission_rejected_at`, a CHECK that only a
+`failed` run carries it, and `UPDATE (submission_rejected_at)` for
+`trace_ingest_runtime`. Apply V123 as the migrator before you install the
+binary, after V118. V123 locks `pipeline_runs` until it commits, as V118
+does.
+
+From this build on, a run that ends `failed` while its submission is still
+`received` (Review never decided it: a store fault or an exhausted attempt
+budget at Review) moves the submission to `rejected`, status reason
+`pipeline_processing_failed`, with no pending credit, in the transaction
+that fails the run. It records the move in `submission_rejected_at` and sets
+the review audit marker, so the worker appends one `lifecycle_status_change`
+event (`rejected`). A revoked, purged, withdrawn or expired submission is
+never moved, and a run failed under `privacy_classification_failed` keeps
+its submission as it is. A `quarantined` submission is not moved either:
+Admission stores a quarantined submission as `quarantined` at receipt, and
+the Review-start privacy pass stores an escalated one the same way, so when
+such a run fails its submission stays `quarantined` with no audit event.
+Runs that failed before this build keep their
+`received` submissions; nothing backfills them.
+
+A build from before V123 runs on a V123 database, and fails runs as before,
+leaving their submissions `received`.
+
+Check before deploying:
+
+```sql
+SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_runs', 'submission_rejected_at', 'UPDATE');
+```
+
 ### Build and install
 
 The pilot host has no Rust toolchain; binaries are built by Cloud Build and
 pulled from GCS. From a clean checkout at the commit you intend to ship:
 
 ```sh
+REV=$(python3 scripts/operator/pipeline.py revision) && \
 gcloud builds submit --config cloudbuild.yaml \
   --project tracecommons-pilot-2026 \
-  --substitutions _TAG=$(git rev-parse --short HEAD)
+  --substitutions _TAG=$(git rev-parse --short HEAD),_CODE_REVISION_HASH="$REV"
 ```
+
+`_CODE_REVISION_HASH` becomes `TRACE_COMMONS_BUILD_CODE_REVISION_HASH` in the
+build. Compute it in the same clean checkout you upload: `pipeline.py revision`
+takes its file list from git and covers a few files under `docs/`, and
+`.gcloudignore` keeps `.git/`, the `.gitignore` files, and `docs/` out of the
+upload, so the build cannot compute it itself. The revision covers only what
+the server's binaries are built from and what a qualification reads
+([pipeline-qualification.md](pipeline-qualification.md), "Signed check
+results"), so a deploy of a change to anything else builds the same revision
+and keeps every pipeline qualification. Computing it before `gcloud builds submit`, as above,
+means a failed `pipeline.py revision` stops the command before anything is
+uploaded.
+
+Only a `sha256:` digest or the literal `none` builds. Any other value fails the
+build, and so does an empty or missing one, so an empty command substitution
+cannot be mistaken for a choice. `none` builds a binary with no revision. On a
+binary with no pipeline runtime that changes little: the pipeline's
+qualification, activation and rollback routes answer `404` `pipeline runtime
+not configured` before they read the revision. Once a pipeline runtime is
+configured, those routes refuse with `bundle_runtime_revision_unknown`, and a
+start that emits the production adapters check refuses with
+`pipeline_check_revision_mismatch`.
 
 Roughly 6 minutes on `E2_HIGHCPU_32`. **Wait for `SUCCESS` before installing:**
 

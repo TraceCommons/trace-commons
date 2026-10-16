@@ -62,7 +62,7 @@ pub fn grant_precondition(
     let Some(config) = config else {
         return Err(GRANT_NOT_ENROLLED);
     };
-    if !config.consent_scopes_chosen || config.consent_scopes.is_empty() {
+    if config.consent_scopes_chosen != Some(true) || config.consent_scopes.is_empty() {
         return Err(GRANT_SCOPE_REQUIRED);
     }
     Ok(())

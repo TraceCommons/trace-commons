@@ -40,7 +40,7 @@ fn seed_config_dir() -> (tempfile::TempDir, uuid::Uuid) {
 }
 
 /// `enrolled: false` writes no `contributor.json` at all, which is the state
-/// a contributor is in before they have decided whether to enrol -- and the
+/// a contributor is in before they have decided whether to enroll -- and the
 /// state in which "what would you actually send?" is the most useful
 /// question they can ask.
 fn seed_config_dir_with(enrolled: bool) -> (tempfile::TempDir, uuid::Uuid) {
@@ -68,7 +68,7 @@ fn seed_config_dir_with(enrolled: bool) -> (tempfile::TempDir, uuid::Uuid) {
 
     let cfg = ContributorConfig {
         inference_receipt_endpoint: None,
-        consent_scopes_chosen: false,
+        consent_scopes_chosen: Some(true),
         witness_origin: None,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),

@@ -10,18 +10,50 @@ use uuid::Uuid;
 pub struct ManagedRoute {
     proxy: EmbeddedProxy,
     home: PathBuf,
+    /// The NEAR AI model this route pinned: the requested one, or the
+    /// first NEAR AI lists when none was requested.
+    model: String,
 }
+
+/// A test build's NEAR AI endpoint, so a daemon-level test can start a
+/// route against a local fixture. Absent from every other build.
+#[cfg(test)]
+pub(crate) static TEST_BASE_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 impl ManagedRoute {
     pub async fn start(store: &ConfigStore, id: Uuid, key: ApiKey) -> Result<Self, ManagedError> {
-        Self::start_at(store, id, key, "https://cloud-api.near.ai/v1").await
+        Self::start_selected(store, id, key, None).await
     }
 
+    pub async fn start_selected(
+        store: &ConfigStore,
+        id: Uuid,
+        key: ApiKey,
+        model: Option<&str>,
+    ) -> Result<Self, ManagedError> {
+        #[cfg(test)]
+        if let Some(base_url) = TEST_BASE_URL.get() {
+            return Self::start_at_selected(store, id, key, base_url, model).await;
+        }
+        Self::start_at_selected(store, id, key, "https://cloud-api.near.ai/v1", model).await
+    }
+
+    #[cfg(test)]
     async fn start_at(
         store: &ConfigStore,
         id: Uuid,
         key: ApiKey,
         base_url: &str,
+    ) -> Result<Self, ManagedError> {
+        Self::start_at_selected(store, id, key, base_url, None).await
+    }
+
+    async fn start_at_selected(
+        store: &ConfigStore,
+        id: Uuid,
+        key: ApiKey,
+        base_url: &str,
+        requested: Option<&str>,
     ) -> Result<Self, ManagedError> {
         let root = store.dir().join("managed-routes");
         super::profiles::private_directory(&root)?;
@@ -76,7 +108,12 @@ base_url = {base_url}
                 if let Ok(value) = response.json::<serde_json::Value>().await {
                     if let Some(model) = value["data"]
                         .as_array()
-                        .and_then(|models| models.first())
+                        .and_then(|models| match requested {
+                            Some(id) => {
+                                models.iter().find(|model| model["id"].as_str() == Some(id))
+                            }
+                            None => models.first(),
+                        })
                         .and_then(|model| model["id"].as_str())
                     {
                         break model.to_owned();
@@ -102,11 +139,21 @@ base_url = {base_url}
         if !pinned.status().is_success() {
             return Err(ManagedError::LaunchUnknown);
         }
-        Ok(Self { proxy, home })
+        Ok(Self {
+            proxy,
+            home,
+            model: selected_model,
+        })
     }
 
     pub fn port(&self) -> u16 {
         self.proxy.port()
+    }
+
+    /// The model this route pinned, so a tool that must name one asks for
+    /// the model the proxy already serves.
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     pub async fn shutdown(self) {
@@ -147,7 +194,7 @@ mod tests {
         let app = Router::new()
             .route(
                 "/v1/models",
-                get(|| async { Json(json!({"data":[{"id":"deepseek-ai/DeepSeek-V3.1"}]})) }),
+                get(|| async { Json(json!({"data":[{"id":"deepseek-ai/DeepSeek-V3.1"},{"id":"selected-model"}]})) }),
             )
             .route("/v1/chat/completions", post(completion))
             .with_state(seen.clone());
@@ -166,15 +213,20 @@ mod tests {
         )
         .await
         .unwrap();
-        let b = ManagedRoute::start_at(
+        let b = ManagedRoute::start_at_selected(
             &store,
             Uuid::new_v4(),
             ApiKey::new("fixture-b".into()).unwrap(),
             &endpoint,
+            Some("selected-model"),
         )
         .await
         .unwrap();
         assert_ne!(a.port(), b.port());
+        // The model each route pinned: the first listed when none is
+        // requested, the requested one otherwise.
+        assert_eq!(a.model(), "deepseek-ai/DeepSeek-V3.1");
+        assert_eq!(b.model(), "selected-model");
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         for route in [&a, &b] {
             let result = client.post(format!("http://127.0.0.1:{}/anthropic/v1/messages", route.port()))
@@ -196,10 +248,7 @@ mod tests {
                     "Bearer fixture-a".into(),
                     "deepseek-ai/DeepSeek-V3.1".into()
                 ),
-                (
-                    "Bearer fixture-b".into(),
-                    "deepseek-ai/DeepSeek-V3.1".into()
-                )
+                ("Bearer fixture-b".into(), "selected-model".into())
             ]
         );
         a.shutdown().await;

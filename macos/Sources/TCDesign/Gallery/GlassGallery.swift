@@ -65,6 +65,7 @@ public struct GlassGallery: View {
             section("Navigation") { navigation }
             section("Indicators") { indicators }
             section("Patterns") { patterns }
+            section("Promo") { promo }
             section("Floating") { floatingLayer }
         }
         .padding(28)
@@ -120,7 +121,7 @@ public struct GlassGallery: View {
                 }
             }
             .frame(width: 320, height: 200)
-            GlassNodeCard("nodeCard", detail: "detail", hint: "hint")
+            GlassNodeCard("nodeCard", detail: "detail")
             GlassMenu {
                 GlassMenuItem("checked", checked: true) {}
                 GlassMenuSeparator()
@@ -153,6 +154,30 @@ public struct GlassGallery: View {
                 Button("Sent") {}.buttonStyle(GlassButtonStyle(.submit(done: true)))
                 Button("Link") {}.buttonStyle(GlassButtonStyle(.link))
                 Button("Delete") {}.buttonStyle(GlassButtonStyle(.destructive))
+            }
+            // The two sizes side by side (owner ruling, 2026-10-08): a
+            // window's action bar, where every button is the CTA's size,
+            // then the same kinds inline.
+            Text("bar")
+                .glassType(GlassTokens.TypeScale.eyebrow)
+                .foregroundStyle(GlassColor.textTertiary)
+            GlassActionBar(notes: ["note"]) {
+                HStack(spacing: 10) {
+                    Button("Back") {}.buttonStyle(GlassButtonStyle(.glass, size: .bar))
+                    Spacer(minLength: 0)
+                    Button("Delete") {}.buttonStyle(GlassButtonStyle(.destructive, size: .bar))
+                    Button("Cancel") {}.buttonStyle(GlassButtonStyle(.secondary, size: .bar))
+                    Button("Customize") {}.buttonStyle(GlassButtonStyle(.glass, size: .bar))
+                    Button("Continue") {}.buttonStyle(GlassButtonStyle(.primary))
+                }
+            }
+            Text("inline")
+                .glassType(GlassTokens.TypeScale.eyebrow)
+                .foregroundStyle(GlassColor.textTertiary)
+            HStack(spacing: 10) {
+                Button("Check") {}.buttonStyle(GlassButtonStyle(.glass))
+                Button("Remove") {}.buttonStyle(GlassButtonStyle(.destructive))
+                Button("Details") {}.buttonStyle(GlassButtonStyle(.link))
             }
             // A set of glass buttons, one chosen (selected), as #1146's
             // aria-pressed.
@@ -388,14 +413,35 @@ public struct GlassGallery: View {
         }
     }
 
+    /// The promotion treatments side by side (owner, 2026-10-11), each on
+    /// an icon card like Home's Missions card, with an ordinary icon card
+    /// beside them for comparison.
+    private var promo: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: GlassTokens.Space.cardGap)],
+                  alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            GlassIconCard(systemImage: "clock.arrow.circlepath", title: "card", subtitle: ["textSecondary"],
+                          interactive: true, trailing: { GlassChevron() })
+            ForEach(GlassPromoTreatment.allCases) { treatment in
+                GlassIconCard(systemImage: "sparkles", title: treatment.rawValue, subtitle: ["textSecondary"],
+                              interactive: true, promo: treatment, trailing: {
+                                  HStack(spacing: GlassTokens.Space.s5) {
+                                      GlassTag("tag", tone: .ask)
+                                      GlassChevron()
+                                  }
+                              })
+            }
+        }
+        .frame(maxWidth: 820, alignment: .leading)
+    }
+
     private var patterns: some View {
         HStack(alignment: .top, spacing: 20) {
             GlassPane(padding: 8) {
                 VStack(spacing: 2) {
                     GlassListRow(depth: .tool, tile: .tool(.claudeCode), title: "tool", sub: "sub", expanded: true, submitTitle: "Submit·3", watched: $watched, onToggleExpand: {}, onSubmit: {})
                     GlassListRow(depth: .folder, tile: .folder, title: "folder", sub: "sub", expanded: true, submitTitle: "Submit·3", watched: $watched, menuLabel: "menu", onToggleExpand: {}, onSubmit: {}, onMenu: {})
-                    GlassListRow(depth: .session, tile: .session, title: "session", sub: "flagged", flag: .ask, selected: true, submitTitle: "Review", menuLabel: "menu", onSubmit: {}, onMenu: {})
-                    GlassListRow(depth: .session, tile: .session, title: "session", sub: "paused", off: true, submitTitle: "Submit", menuLabel: "menu", onMenu: {})
+                    GlassListRow(depth: .session, tile: .session, title: "trace", sub: "flagged", flag: .ask, selected: true, submitTitle: "Review", menuLabel: "menu", onSubmit: {}, onMenu: {})
+                    GlassListRow(depth: .session, tile: .session, title: "trace", sub: "paused", off: true, submitTitle: "Submit", menuLabel: "menu", onMenu: {})
                 }
             }
             .frame(width: 420, height: 190)
@@ -406,7 +452,7 @@ public struct GlassGallery: View {
                     Text("content").glassType(GlassTokens.TypeScale.bodyStrong).foregroundStyle(GlassColor.textPrimary)
                 }
                 GlassConsentBlock("consent")
-                GlassKeyValueList([.init("Path", "~/code/orchard-api", mono: true), .init("Sessions", "18")])
+                GlassKeyValueList([.init("Path", "~/code/orchard-api", mono: true), .init("Traces", "18")])
                 GlassNotice(tone: .ask, title: "notice") {
                     Text("body")
                 }
@@ -455,7 +501,7 @@ public struct GlassGallery: View {
                         GlassRoundButton("Settings", systemImage: "gearshape") {}
                     }
                     Spacer()
-                    GlassNodeCard("nodeCard", detail: "detail", hint: "hint")
+                    GlassNodeCard("nodeCard", detail: "detail")
                         .frame(width: GlassTokens.Size.nodeCardWidth)
                 }
                 .padding(14)

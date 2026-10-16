@@ -80,7 +80,7 @@ public static class StartupRegistration
             new StartupRegistrationState(
                 true,
                 false,
-                "Startup was disabled in Windows. Turn Trace Commons on in Settings > Apps > Startup."),
+                "Startup was disabled in Windows. Turn Near.ai on in Settings > Apps > Startup."),
         StartupTaskState.DisabledByPolicy =>
             new StartupRegistrationState(
                 true,

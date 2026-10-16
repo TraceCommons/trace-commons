@@ -410,34 +410,86 @@ public final class TCDaemon {
     ///
     /// Returns nil if the ABI refused (NULL handle or a stopped daemon --
     /// token 0 is never valid).
-    public func subscribe(_ handler: @escaping (String) -> Void) -> TCSubscription? {
+    ///
+    /// `accepts` names the opt-in events this subscriber can render, such as
+    /// `reengage_due` (`tc_subscribe_with_accepts`, which forwards them on
+    /// an attached handle's socket too). Empty declares none and is exactly
+    /// `tc_subscribe`: a subscriber that cannot draw an opt-in event never
+    /// receives one, and the daemon never counts it as a renderer.
+    public func subscribe(accepts: [String] = [], _ handler: @escaping (String) -> Void) -> TCSubscription? {
         // ctx must stay alive until tc_unsubscribe RETURNS, per the header's
         // SUBSCRIPTION LIFETIME rule -- retained here, released only by a
         // tc_unsubscribe that we confirmed was not refused.
         let box = TCCallbackBox(handler)
         let ctx = Unmanaged.passRetained(box).toOpaque()
-        let registered: UInt64? = withHandle { h in
-            tc_subscribe(
-                h,
-                { eventJSON, ctx in
-                    guard let eventJSON, let ctx else { return }
-                    let box = Unmanaged<TCCallbackBox>.fromOpaque(ctx).takeUnretainedValue()
-                    // The event_json pointer is borrowed for this call only,
-                    // so it is copied into a Swift String before anything
-                    // else.
-                    box.handler(String(cString: eventJSON))
-                },
-                ctx
-            )
-        }
+        let token = register(ctx, accepts: accepts)
         // Refused by teardown: no subscription was ever registered, so no
         // callback can fire and the ctx retain is ours to drop.
-        let token = registered ?? 0
         if token == 0 {
             Unmanaged<TCCallbackBox>.fromOpaque(ctx).release()
             return nil
         }
         return TCSubscription(token: token, ctx: ctx)
+    }
+
+    /// Changes what `subscription` declares to `accepts`, keeping its
+    /// handler, and answers the subscription that now stands -- or nil if
+    /// the ABI refused, when `subscription` still stands unchanged.
+    ///
+    /// The two paths differ, and only this type knows which it is on:
+    ///
+    /// - Attached: there is one event sink per connection, a repeat
+    ///   `subscribe` replaces it and its declaration (the IPC contract's
+    ///   rule), and any `tc_unsubscribe` clears the sink whatever the token.
+    ///   So the same handler is subscribed again and the old token is NOT
+    ///   unsubscribed; a second subscription beside it would take its
+    ///   frames instead.
+    /// - In process: the handler is registered anew with the new
+    ///   declaration first, then the old registration is ended, so there is
+    ///   never a moment with none. A frame published inside that window can
+    ///   reach the handler twice.
+    public func redeclare(_ subscription: TCSubscription, accepts: [String]) -> TCSubscription? {
+        let ctx = subscription.ctx
+        if isAttached {
+            let token = register(ctx, accepts: accepts)
+            return token == 0 ? nil : TCSubscription(token: token, ctx: ctx)
+        }
+        // The new registration holds its own retain on the same ctx; ending
+        // the old one releases the old retain.
+        Unmanaged<TCCallbackBox>.fromOpaque(ctx).retain()
+        let token = register(ctx, accepts: accepts)
+        if token == 0 {
+            Unmanaged<TCCallbackBox>.fromOpaque(ctx).release()
+            return nil
+        }
+        unsubscribe(subscription)
+        return TCSubscription(token: token, ctx: ctx)
+    }
+
+    /// The C trampoline every subscription registers: `ctx` is a retained
+    /// `TCCallbackBox`.
+    private static let callback: @convention(c) (UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void = {
+        eventJSON, ctx in
+        guard let eventJSON, let ctx else { return }
+        let box = Unmanaged<TCCallbackBox>.fromOpaque(ctx).takeUnretainedValue()
+        // The event_json pointer is borrowed for this call only, so it is
+        // copied into a Swift String before anything else.
+        box.handler(String(cString: eventJSON))
+    }
+
+    /// Registers `ctx` with `accepts` declared; 0 when refused.
+    private func register(_ ctx: UnsafeMutableRawPointer, accepts: [String]) -> UInt64 {
+        let callback = Self.callback
+        let acceptsJSON = accepts.isEmpty
+            ? nil
+            : (try? JSONEncoder().encode(accepts)).map { String(decoding: $0, as: UTF8.self) }
+        let registered: UInt64? = withHandle { h in
+            if let acceptsJSON {
+                return acceptsJSON.withCString { tc_subscribe_with_accepts(h, $0, callback, ctx) }
+            }
+            return tc_subscribe(h, callback, ctx)
+        }
+        return registered ?? 0
     }
 
     /// Cancels `subscription` and releases its ctx.

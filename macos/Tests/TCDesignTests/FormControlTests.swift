@@ -16,9 +16,40 @@ final class FormControlTests: XCTestCase {
         XCTAssertNil(GlassTextField.ring(invalid: false))
     }
 
-    /// The prompt is tertiary text, which clears 4.5:1 on the pane.
-    func test_thePromptClearsTextContrast() {
-        XCTAssertEqual(GlassTextField.promptInk, GlassTokens.Color.textTertiary)
+    /// The prompt is the placeholder ink, in the text field and the text
+    /// area alike.
+    func test_thePromptIsThePlaceholderInk() {
+        XCTAssertEqual(GlassTextField.promptInk, GlassTokens.Color.placeholder)
+    }
+
+    /// A prompt is text, so it clears 4.5:1 on the field fill over every
+    /// ground a field can sit on, in both appearances (owner ruling,
+    /// 2026-10-07: hold the WCAG floors). #1146's 30% was 2.60 in dark and
+    /// 2.03 in light.
+    func test_thePromptClearsTextContrastOnTheFieldOverEveryGround() {
+        typealias L = LightContrastGroundsTests
+        let c = GlassTokens.Color.self
+        let scene = L.solid(c.sceneBase.dark)
+        let pane = L.solid(c.paneOpaque.dark)
+        let darkGrounds: [(String, L.RGB)] = [
+            ("sceneBase", scene),
+            ("paneOpaque", pane),
+            ("paneBase", L.over(c.paneBase.dark, scene)),
+            ("well on pane", L.over(c.wellFill.dark, pane)),
+            ("well on scene", L.over(c.wellFill.dark, scene)),
+            ("popover", L.over(c.popoverFill.dark, scene)),
+            ("menu", L.over(c.menuFill.dark, scene)),
+            ("node card", L.over(c.nodeCardFill.dark, L.solid(c.mapFieldOuter.dark))),
+        ]
+        let ink = GlassTextField.promptInk
+        for (dark, grounds) in [(true, darkGrounds), (false, L.lightGrounds)] {
+            for (name, ground) in grounds {
+                let field = L.over(dark ? c.fieldFill.dark : c.fieldFill.light, ground)
+                let prompt = L.over(dark ? ink.dark : ink.light, field)
+                let ratio = L.contrast(prompt, field)
+                XCTAssertGreaterThanOrEqual(ratio, 4.5, "\(dark ? "dark" : "light") prompt on \(name): \(ratio)")
+            }
+        }
     }
 
     /// A secure field and a plain one lay out alike.
@@ -57,6 +88,68 @@ final class FormControlTests: XCTestCase {
         XCTAssertEqual(GlassRadioGroup<String>.moved("x", by: -1, in: options), "c")
         let none = [GlassRadioOption("B", value: "b", isEnabled: false)]
         XCTAssertEqual(GlassRadioGroup<String>.moved("b", by: 1, in: none), "b")
+    }
+
+    /// The radio row's answer is optional, and the keyboard and assistive
+    /// tech can take it back as the pointer can: Space or Return on the
+    /// row presses the chosen radio again, and the picker it reads as
+    /// passes a "none" choice through as that same press.
+    func test_aRadioRowsAnswerCanBeTakenBackWithoutAPointer() {
+        typealias Row = GlassRadioRow<String>
+        // Space or Return: the chosen answer again, which the caller takes
+        // back; with nothing chosen there is nothing to take back.
+        XCTAssertEqual(Row.keyPressed("b"), "b")
+        XCTAssertNil(Row.keyPressed(nil))
+        // The picker: none sends the chosen answer again, another answer
+        // is sent as it is, and the chosen one again is no change.
+        XCTAssertEqual(Row.picked(nil, selection: "b"), "b")
+        XCTAssertEqual(Row.picked("c", selection: "b"), "c")
+        XCTAssertEqual(Row.picked("c", selection: nil), "c")
+        XCTAssertNil(Row.picked("b", selection: "b"))
+        XCTAssertNil(Row.picked(nil, selection: nil))
+    }
+
+    /// The arrow keys move the row's answer through the enabled radios;
+    /// with nothing chosen, the first one is chosen.
+    func test_theArrowKeysMoveARadioRowsAnswer() {
+        typealias Row = GlassRadioRow<String>
+        let options = [
+            GlassRadioOption("A", value: "a"),
+            GlassRadioOption("B", value: "b", isEnabled: false),
+            GlassRadioOption("C", value: "c"),
+        ]
+        XCTAssertEqual(Row.moved(nil, by: 1, in: options), "a")
+        XCTAssertEqual(Row.moved(nil, by: -1, in: options), "a")
+        XCTAssertEqual(Row.moved("a", by: 1, in: options), "c")
+        XCTAssertEqual(Row.moved("a", by: -1, in: options), "c")
+        XCTAssertNil(Row.moved(nil, by: 1, in: [GlassRadioOption("B", value: "b", isEnabled: false)]))
+    }
+
+    /// To assistive tech the row is a radio-group picker that offers
+    /// "none" first, under the caller's word, then each answer.
+    func test_aRadioRowsPickerOffersNone() {
+        let choices = GlassRadioRow<String>.choices(
+            none: "Nothing", options: [GlassRadioOption("A", value: "a"), GlassRadioOption("C", value: "c")])
+        XCTAssertEqual(choices.map(\.title), ["Nothing", "A", "C"])
+        XCTAssertEqual(choices.map(\.value), [nil, "a", "c"])
+    }
+
+    /// The pure functions above are what the row's body runs: Space and
+    /// Return go through `keyPressed`, the arrow keys through `moved`, and
+    /// the picker for assistive tech lists `choices` and passes its change
+    /// through `picked`. Read from the source, as there is no UI driver,
+    /// so a body that stops calling them fails here rather than passing.
+    func test_theRadioRowsBodyRunsItsChooseLogic() throws {
+        let sources = Dictionary(uniqueKeysWithValues: try DesignSources.components())
+        let forms = try XCTUnwrap(sources["Forms.swift"])
+        let start = try XCTUnwrap(forms.range(of: "public struct GlassRadioRow"))
+        let end = try XCTUnwrap(forms.range(of: "// MARK: - Check row", range: start.upperBound..<forms.endIndex))
+        let row = String(forms[start.lowerBound..<end.lowerBound])
+        XCTAssertTrue(row.contains(".onKeyPress(keys: [.space, .return])"), "Space or Return no longer reaches the row")
+        XCTAssertTrue(row.contains("Self.keyPressed(selection)"), "the key press does not take the answer back")
+        XCTAssertTrue(row.contains("Self.moved(selection, by: step, in: options)"), "the arrow keys bypass `moved`")
+        XCTAssertTrue(row.contains("Self.picked($0, selection: selection)"), "the picker ignores a clear")
+        XCTAssertTrue(row.contains("Self.choices(none: none, options: options)"), "the picker offers no none choice")
     }
 
     func test_theRadioIsTheCheckboxSize() {

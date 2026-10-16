@@ -9,6 +9,7 @@ import { MonitorShell } from "./monitor/monitor-shell";
 import { flowPaths, routePaths } from "./routes";
 
 export function AppRoutes({
+  missionsEnabled,
   requiresOnboarding,
   core,
   publicProfile,
@@ -16,6 +17,7 @@ export function AppRoutes({
   onOnboardingComplete,
   notices,
 }: {
+  missionsEnabled: boolean;
   requiresOnboarding: boolean;
   core: ReturnType<typeof useCoreStatus>;
   publicProfile: ReturnType<typeof usePublicProfile>;
@@ -50,6 +52,7 @@ export function AppRoutes({
         path="*"
         element={
           <MonitorShell
+            missionsEnabled={missionsEnabled}
             core={core}
             publicProfile={publicProfile}
             notices={notices}
