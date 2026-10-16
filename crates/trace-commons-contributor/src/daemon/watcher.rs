@@ -3469,10 +3469,11 @@ mod tests {
 
     /// K5 through the watcher: today's arming offer says "will be scrubbed"
     /// for every folder, so nothing is reworded. When the arming copy for a
-    /// patterns-only folder changes, a folder armed under the old words gets
-    /// one notice, audited and saved, stays armed, and is not told twice.
+    /// patterns-only folder changes, a folder armed under the old words is
+    /// audited once, has its claim moved and saved, and stays armed. No
+    /// notice is raised (owner decision 2026-10-16).
     #[tokio::test]
-    async fn a_folder_armed_under_the_old_wording_is_told_once_when_it_changes() {
+    async fn a_folder_armed_under_the_old_wording_is_audited_once_when_it_changes() {
         use super::super::arming_wording::{ArmingClaim, reword_patterns_only_for_test};
         let f = WatcherFixture::new();
         f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
@@ -3491,13 +3492,24 @@ mod tests {
         reword_patterns_only_for_test(None);
 
         let status = f.shared.status_value();
-        let list = status["arming_rewordings"].as_array().unwrap().clone();
-        assert_eq!(list.len(), 1, "told once: {list:?}");
-        assert_eq!(list[0]["project_label"], "proj");
-        assert_eq!(list[0]["was"], "model_scrubbed");
-        assert_eq!(list[0]["now"], "patterns_only");
+        assert_eq!(
+            status["arming_rewordings"],
+            serde_json::json!([]),
+            "no notice is raised"
+        );
         let persisted = crate::daemon::policy::ProjectPolicy::load(&f.shared.store).unwrap();
-        assert_eq!(persisted.arming_rewordings.len(), 1, "survives a restart");
+        assert!(persisted.arming_rewordings.is_empty());
+        let proj_key = persisted
+            .projects
+            .iter()
+            .find(|(_, e)| e.label == "proj")
+            .map(|(k, _)| k.clone())
+            .unwrap();
+        assert_eq!(
+            persisted.arming_claim(&proj_key),
+            ArmingClaim::PatternsOnly,
+            "the recorded claim moved and survives a restart"
+        );
         let audit = super::super::audit::load(&f.shared.store).unwrap();
         assert_eq!(
             audit
@@ -3507,22 +3519,18 @@ mod tests {
             1
         );
         assert_eq!(
-            f.shared
-                .policy
-                .lock()
-                .unwrap()
-                .resolve(&persisted.arming_rewordings[0].project_key),
+            f.shared.policy.lock().unwrap().resolve(&proj_key),
             ProjectMode::AutoUpload,
             "the folder stays armed"
         );
     }
 
     /// K5 on the folder's own disclosure, through a pass: an uncertified
-    /// automatic send recorded under "will be scrubbed" is told exactly
-    /// once, audited and on `status`; a folder whose sends were all
-    /// certified is told nothing.
+    /// automatic send recorded under "will be scrubbed" is audited exactly
+    /// once and raises no notice on `status`; a folder whose sends were all
+    /// certified is not audited.
     #[tokio::test]
-    async fn an_uncertified_automatic_send_is_told_once_through_the_watcher() {
+    async fn an_uncertified_automatic_send_is_audited_once_through_the_watcher() {
         use super::super::automatic_gate::SessionRedaction;
         let f = WatcherFixture::new();
         f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
@@ -3550,12 +3558,10 @@ mod tests {
         f.settle(Utc::now() + chrono::Duration::hours(31)).await;
         f.settle(Utc::now() + chrono::Duration::hours(32)).await;
 
-        let list = f.shared.status_value()["arming_rewordings"]
-            .as_array()
-            .unwrap()
-            .clone();
-        assert_eq!(list.len(), 1, "{list:?}");
-        assert_eq!(list[0]["project_label"], "proj");
+        assert_eq!(
+            f.shared.status_value()["arming_rewordings"],
+            serde_json::json!([])
+        );
         let audit = super::super::audit::load(&f.shared.store).unwrap();
         assert_eq!(
             audit

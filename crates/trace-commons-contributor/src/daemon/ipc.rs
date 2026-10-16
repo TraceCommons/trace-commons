@@ -11487,7 +11487,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_default_upgrade_notice_survives_save_restart_and_acknowledgement() {
+    fn automatic_default_upgrade_raises_no_notice_and_is_recorded_once() {
         let s = enrolled_shared();
         {
             let mut policy = s.policy.lock().unwrap();
@@ -11511,23 +11511,25 @@ mod tests {
             .save(&s.store)
             .unwrap();
         let upgraded = DaemonShared::load(s.store.clone()).unwrap();
-        let notices = upgraded.status_value()["arming_rewordings"].clone();
-        assert_eq!(notices.as_array().unwrap().len(), 1);
-        assert_eq!(notices[0]["scrub_check_defaulted"], true);
-        assert!(!notices.to_string().contains("/tmp/upgrade"));
-        let restarted = DaemonShared::load(s.store.clone()).unwrap();
-        assert_eq!(restarted.status_value()["arming_rewordings"], notices);
-        let response = handle_request(
-            &restarted,
-            &req(
-                "acknowledge_arming_rewordings",
-                serde_json::json!({"ids": [notices[0]["id"]]}),
-            ),
-        );
-        assert!(response.error.is_none());
-        let acknowledged = DaemonShared::load(s.store.clone()).unwrap();
         assert_eq!(
-            acknowledged.status_value()["arming_rewordings"],
+            upgraded.status_value()["arming_rewordings"],
+            serde_json::json!([]),
+            "owner decision 2026-10-16: no switch-on notice"
+        );
+        assert!(
+            DaemonSettings::load(&s.store)
+                .unwrap()
+                .scrub_check_defaulted_on_upgrade,
+            "the provenance is still recorded"
+        );
+        assert!(
+            ProjectPolicy::load(&s.store)
+                .unwrap()
+                .scrub_check_upgrade_recorded
+        );
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        assert_eq!(
+            restarted.status_value()["arming_rewordings"],
             serde_json::json!([])
         );
     }
@@ -11643,7 +11645,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_announces_an_old_armed_install_without_a_settings_file() {
+    fn startup_records_an_old_armed_install_without_a_settings_file_and_raises_no_notice() {
         let s = shared();
         assert!(
             s.store
@@ -11661,11 +11663,8 @@ mod tests {
         }
         let upgraded = DaemonShared::load(s.store.clone()).unwrap();
         assert_eq!(
-            upgraded.status_value()["arming_rewordings"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
+            upgraded.status_value()["arming_rewordings"],
+            serde_json::json!([])
         );
         assert!(
             DaemonSettings::load(&s.store)
@@ -11709,76 +11708,47 @@ mod tests {
         s
     }
 
-    /// The rewording crosses as `list_projects` names the folder, with the
-    /// two claims, and never the key, which is a local path.
+    /// Owner decision 2026-10-16: a narrowed claim raises no notice. The
+    /// list stays on the wire, empty, and the recorded claim still moved.
     #[test]
-    fn status_carries_a_rewording_without_its_path() {
+    fn status_carries_no_rewording_after_a_narrowing() {
         let key = "/tmp/rewordedproj";
         let s = armed_then_reworded(key);
         let status = handle_request(&s, &req("status", serde_json::json!({})))
             .result
             .unwrap();
-        let list = status["arming_rewordings"].as_array().expect("a list");
-        assert_eq!(list.len(), 1, "{list:?}");
-        let n = &list[0];
-        assert_eq!(n["project_id"], project_id_for(key));
-        assert_eq!(n["project_label"], "rewordedproj");
-        assert_eq!(n["was"], "model_scrubbed");
-        assert_eq!(n["now"], "patterns_only");
-        assert!(n["id"].is_u64());
-        let wire = serde_json::to_string(&status["arming_rewordings"]).unwrap();
-        assert!(!wire.contains("/tmp"), "no path crosses: {wire}");
-        // And it survives a restart: it is in the policy file.
+        assert_eq!(status["arming_rewordings"], serde_json::json!([]));
         let persisted = ProjectPolicy::load(&s.store).unwrap();
-        assert_eq!(persisted.arming_rewordings.len(), 1);
+        assert!(persisted.arming_rewordings.is_empty());
+        assert_eq!(
+            persisted.arming_claim(key),
+            crate::daemon::arming_wording::ArmingClaim::PatternsOnly
+        );
     }
 
-    /// Acknowledging clears exactly the notices named, audits it first, and
-    /// tells every other shell. The folder stays armed.
+    /// Acknowledging stays a method but finds nothing: it reports zero,
+    /// writes no audit row, and changes nothing about the folder.
     #[test]
-    fn acknowledging_arming_rewordings_clears_audits_and_publishes() {
+    fn acknowledging_arming_rewordings_finds_nothing() {
         let key = "/tmp/ackreword";
         let s = armed_then_reworded(key);
-        let id = s.policy.lock().unwrap().arming_rewordings[0].id;
-        let mut rx = s.events.subscribe();
         let r = handle_request(
             &s,
             &req(
                 "acknowledge_arming_rewordings",
-                serde_json::json!({ "ids": [id + 1000] }),
-            ),
-        );
-        assert_eq!(r.result.unwrap()["acknowledged"], 0, "an id not shown");
-        assert_eq!(s.policy.lock().unwrap().arming_rewordings.len(), 1);
-
-        let r = handle_request(
-            &s,
-            &req(
-                "acknowledge_arming_rewordings",
-                serde_json::json!({ "ids": [id] }),
+                serde_json::json!({ "ids": [0, 1, 1000] }),
             ),
         );
         assert!(r.error.is_none(), "{:?}", r.error);
-        assert_eq!(r.result.unwrap()["acknowledged"], 1);
-        assert!(s.policy.lock().unwrap().arming_rewordings.is_empty());
+        assert_eq!(r.result.unwrap()["acknowledged"], 0);
         let persisted = ProjectPolicy::load(&s.store).unwrap();
-        assert!(persisted.arming_rewordings.is_empty(), "the clear is saved");
-        assert_eq!(
-            persisted.resolve(key),
-            ProjectMode::AutoUpload,
-            "acknowledging changes nothing about the folder"
-        );
+        assert_eq!(persisted.resolve(key), ProjectMode::AutoUpload);
         let audit = audit::load(&s.store).unwrap();
-        let entry = audit
-            .iter()
-            .find(|e| e.action == "arming-rewordings-acknowledged")
-            .expect("the acknowledgement is audited");
-        assert_eq!(entry.detail.as_deref(), Some("1"));
-        let mut saw_status = false;
-        while let Ok(event) = rx.try_recv() {
-            saw_status |= event.event == EVENT_STATUS_CHANGED;
-        }
-        assert!(saw_status, "other shells are told");
+        assert!(
+            !audit
+                .iter()
+                .any(|e| e.action == "arming-rewordings-acknowledged")
+        );
     }
 
     #[test]
@@ -11794,13 +11764,13 @@ mod tests {
             let err = r.error.unwrap_or_else(|| panic!("{params} accepted"));
             assert_eq!(err.code, ERR_BAD_PARAMS, "{params}");
         }
-        assert_eq!(s.policy.lock().unwrap().arming_rewordings.len(), 1);
+        assert!(s.policy.lock().unwrap().arming_rewordings.is_empty());
         assert!(METHODS.contains(&"acknowledge_arming_rewordings"));
     }
 
-    /// Switching the folder to ask-first from the notice answers it.
+    /// Switching a reworded folder to ask-first leaves no notice behind.
     #[test]
-    fn switching_a_reworded_folder_to_ask_first_answers_its_notice() {
+    fn switching_a_reworded_folder_to_ask_first_leaves_no_notice() {
         let key = "/tmp/rewordask";
         let s = armed_then_reworded(key);
         let r = handle_set_project_mode(
