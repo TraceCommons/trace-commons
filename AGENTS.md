@@ -159,6 +159,13 @@ run at most a plain `cargo check` on the touched crates, so the next task
 builds on code that compiles. `CLAUDE.md` ("Executing a multi-task plan")
 has the details and the final run's command list.
 
+## Shared compile cache
+
+Install sccache and set `rustc-wrapper = "sccache"` under `[build]` in your
+user-level `~/.cargo/config.toml`, never the repository's, so worktrees
+share compiled third-party crates instead of each rebuilding them into its
+own `target/`. `CLAUDE.md` ("Shared compile cache") has the details.
+
 ## Everything else
 
 See `CLAUDE.md`: build and verification commands (note CI applies
