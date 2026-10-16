@@ -28,36 +28,48 @@ near-ai launch codex --account Work --cwd /path/to/another-project
 near-ai sessions list
 ```
 
-`near-ai accounts list` shows every saved account, its tool, backend, readiness,
+`near-ai accounts list` shows every saved account and, while you are signed in
+to NEAR AI, each tool's NEAR AI sign-in entry: its tool, backend, readiness,
 and whether it is the NEAR AI launch default. Each row has a launch command using
 its unique account ID, so duplicate names are unambiguous. Use `--json` for the
-machine-readable account list, including the `launch_default` flag.
+machine-readable account list, including the `launch_default` flag; sign-in rows
+have the connection `near_ai_signin`.
 
-With NEAR AI accounts configured, the usual commands are:
+The usual commands are:
 
 ```sh
 near-ai launch claude
 near-ai launch codex
 ```
 
-Each tool uses its sole NEAR AI account automatically, or its selected NEAR AI
-default when several exist. Choose among several accounts with `--account`, or
-save a NEAR AI default with `near-ai accounts select "NEAR AI Work" --tool claude`.
-An explicit account selects that account's backend; names must match exactly,
-and an account ID can be used instead. `--connection` can explicitly filter the
-backend. Missing or unavailable NEAR AI credentials never trigger a fallback to
-a subscription, API-key account, or another NEAR AI account.
+Without `--account` or `--connection`, a launch runs on NEAR AI, in this order:
 
-If NEAR AI is not configured, add a saved account using the GUI's **Add account**
-or a key from stdin:
+1. the tool's saved NEAR AI default, set with
+   `near-ai accounts select "NEAR AI Work" --tool claude`;
+2. otherwise the tool's sole saved NEAR AI key (several keys with no default
+   is an error that asks you to choose);
+3. otherwise the tool's NEAR AI sign-in (Claude Code and Codex only).
+
+A subscription or API-key default never wins an implicit launch, and only a
+saved NEAR AI key can be selected as the default. `--account` takes an exact
+name or an ID, including a sign-in entry's ID, and uses that account's backend.
+`--connection subscription` or `--connection api-key` filters to that backend and
+still honours a legacy default saved for it; `--connection near-ai` means saved
+NEAR AI keys only. Missing or unavailable NEAR AI credentials never trigger a
+fallback to a subscription, an API-key account, another NEAR AI account, or the
+sign-in.
+
+If NEAR AI is not set up, sign in to NEAR AI in the app. Signed out, a NEAR AI
+key can also be added with the GUI's **Add account** or from stdin:
 
 ```sh
 secret-manager-command | near-ai accounts add --tool claude --connection near-ai --label "NEAR AI" --key-stdin
 ```
 
-Repeat with `--tool codex` for Codex. The native macOS launch dialog chooses the
-effective NEAR AI default for the selected tool and lists all other saved
-accounts as explicit choices. If no default can be resolved, choose an account.
+Repeat with `--tool codex` for Codex. The native macOS launch dialog preselects
+the tool's implicit launch account by the same order and lists every other
+saved account, and the sign-in entry, as explicit choices. If none resolves,
+choose an account.
 
 CLI launches use the current terminal or multiplexer pane. All managed launches,
 including those initiated from the CLI, appear in the app's managed-session list.
@@ -144,12 +156,19 @@ smoke-tested on each release platform.
 ## Shared launch defaults
 
 The daemon's `managed_snapshot` includes `launch_defaults`, a map from tool
-(`claude` or `codex`) to the effective NEAR AI account ID. A missing entry means
-no unambiguous NEAR AI default exists. The CLI and daemon use the same resolver;
-readiness never changes which account is selected. Native macOS consumes this
-map and treats an older daemon without the field as requiring an explicit choice.
-The existing `defaults` field is retained for compatibility, including legacy
-non-NEAR selections, but those selections cannot override implicit NEAR AI launches.
+(`claude`, `codex` or `opencode`) to the account ID an implicit launch uses, by
+the order above: a saved NEAR AI key or the tool's sign-in entry. A missing
+entry means no unambiguous NEAR AI choice exists. The CLI, `accounts list` and
+the daemon use the same resolver; readiness never changes which account is
+selected. Native macOS consumes this map and treats an older daemon without the
+field as requiring an explicit choice.
+
+`defaults` lists every saved selection, including legacy subscription and
+API-key ones that only an explicit `--connection` honours, plus a derived
+`near_ai_signin` selection for each tool whose implicit launch is the sign-in.
+It agrees with `launch_defaults`: a tool with a saved NEAR AI default or a
+saved NEAR AI key has no sign-in selection. `managed_select` refuses any
+connection other than `near_ai`.
 
 ## Terminal choice
 
