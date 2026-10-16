@@ -1105,18 +1105,6 @@ jobs:
       # the CUDA toolkit and a GPU runtime, and is operator-tested on GPU
       # hosts only.
       - run: cargo check -p trace-commons-server --bins --features local-gpu-models
-      # `cargo check` never runs the error-label test for the production
-      # local-GPU scorer wiring. It loads no model (it points the helper at a
-      # bogus path and asserts the stable `local_perplexity_scorer_init_failed`
-      # label the gate-rollout drills match on), and local-gpu-models does not
-      # enable CUDA. A filter that matches nothing passes with "0 passed", so
-      # the step requires at least one.
-      - name: local-gpu-models init failure label test
-        timeout-minutes: 20
-        run: |
-          set -euo pipefail
-          cargo test -p trace-commons-server --features local-gpu-models --lib ingest::app::tests::enclave_local_gpu_init_returns_local_perplexity_scorer_init_failed 2>&1 | tee local-gpu-init-test.log
-          grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' local-gpu-init-test.log
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.
       - uses: ./.github/actions/trim-cargo-cache

@@ -80002,8 +80002,13 @@ fn compute_gate_version_hash_changes_on_any_dimension() {
 /// `TRACE_COMMONS_PERPLEXITY_MODEL_PATH` and asserts construction fails
 /// with the expected error class label. The test proves the production
 /// scorer wiring compiles and dispatches correctly under the
-/// `local-gpu-models` feature; we deliberately do not load a real model
-/// in CI.
+/// `local-gpu-models` feature; it deliberately loads no real model.
+///
+/// No CI job runs it: CI only `cargo check`s `local-gpu-models`, and
+/// compiling the tests under that feature costs about nine minutes for one
+/// operator-facing label (decided 2026-10-15). Run it locally with
+/// `cargo test -p trace-commons-server --features local-gpu-models --lib
+/// enclave_local_gpu_init` when touching the local-GPU scorer wiring.
 ///
 /// The test does NOT cover the success path — that requires a staged
 /// model on a GPU host and is the responsibility of the operator's
