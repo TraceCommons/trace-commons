@@ -73,8 +73,9 @@ struct ManagedSessionsSection: View {
     // MARK: NEAR AI sign-in
 
     /// Sessions on the NEAR AI sign-in, first (owner, 2026-10-12): with a
-    /// sign-in, Start Claude Code and Start Codex, each a folder choice and
-    /// a launch, with no saved account; without one, the line that asks for
+    /// sign-in, Start Claude Code, Start Codex and, once OpenCode is
+    /// installed, Start OpenCode (owner, 2026-10-16), each a folder choice
+    /// and a launch, with no saved account; without one, the line that asks for
     /// it and the button that begins it. Nothing here is saved: the entries
     /// come and go with the sign-in.
     @ViewBuilder
@@ -99,7 +100,7 @@ struct ManagedSessionsSection: View {
     private func signInActions(_ snapshot: ManagedSnapshot) -> some View {
         if snapshot.nearAiSignedIn {
             if snapshot.capabilities.terminalLaunch {
-                let buttons = ForEach(ManagedSurface.signInTools.filter { snapshot.signInEntry($0) != nil && snapshot.canLaunch(tool: $0) }, id: \.self) { tool in
+                let buttons = ForEach(snapshot.signInStartTools, id: \.self) { tool in
                     Button { start(tool) } label: {
                         Text(ManagedSurface.startKey(tool).map(model.managedText) ?? "").lineLimit(1)
                     }

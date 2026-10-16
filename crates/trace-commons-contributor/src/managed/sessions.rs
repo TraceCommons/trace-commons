@@ -136,6 +136,12 @@ pub struct LaunchContext {
     /// leaves the daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_port: Option<u16>,
+    /// The model that proxy pinned: the one NEAR AI lists first, as for
+    /// any session that requests none. Set with `route_port`; a launcher
+    /// that must name a model (OpenCode) names this one. Additive: an
+    /// older launcher ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -496,16 +502,18 @@ impl SessionRegistry {
         account: &AccountView,
     ) -> Result<PreparedLaunch, ManagedError> {
         if request.tool == ToolId::Opencode {
-            if request.purpose != LaunchPurpose::Coding
-                || matches!(
-                    request.connection,
-                    ConnectionKind::Subscription | ConnectionKind::NearAiSignIn
-                )
-                || request
+            // On the NEAR AI sign-in the session's proxy pins the model, as
+            // it does for Claude Code and Codex, so the request names none.
+            // A saved key needs a model OpenCode can be told.
+            let model_ok = match request.connection {
+                ConnectionKind::Subscription => false,
+                ConnectionKind::NearAiSignIn => request.model.is_none(),
+                ConnectionKind::ApiKey | ConnectionKind::NearAi => request
                     .model
                     .as_deref()
-                    .is_none_or(|model| !super::opencode::valid_model(model))
-            {
+                    .is_some_and(super::opencode::valid_model),
+            };
+            if request.purpose != LaunchPurpose::Coding || !model_ok {
                 return Err(ManagedError::InvalidRequest);
             }
         } else if request.model.is_some() || request.collect_traces {
@@ -679,6 +687,7 @@ impl SessionRegistry {
             session,
             proof,
             route_port: None,
+            route_model: None,
         })
     }
 
@@ -842,6 +851,83 @@ pub fn clear_exit(store: &ConfigStore, id: Uuid) {
 mod tests {
     use super::*;
     use crate::managed::accounts::AccountStore;
+
+    /// OpenCode on the NEAR AI sign-in runs on the model the session's
+    /// proxy pins, so its request names none; one that names a model is
+    /// refused. A saved key still needs a valid model, and a subscription
+    /// is still refused.
+    #[test]
+    fn opencode_on_the_sign_in_carries_no_model_and_a_key_still_needs_one() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let request = |connection, account_id, model: Option<&str>| LaunchRequest {
+            model: model.map(str::to_owned),
+            collect_traces: false,
+            purpose: LaunchPurpose::Coding,
+            request_id: Uuid::new_v4(),
+            tool: ToolId::Opencode,
+            connection,
+            account_id,
+            cwd: home.path().to_path_buf(),
+            expected_generation: Generation(0),
+            save_default: false,
+        };
+        let sign_in = crate::managed::signin::entry(ToolId::Opencode).unwrap();
+        assert_eq!(
+            registry
+                .prepare(
+                    request(ConnectionKind::NearAiSignIn, sign_in.id, Some("gpt-5")),
+                    &sign_in
+                )
+                .err(),
+            Some(ManagedError::InvalidRequest)
+        );
+        let prepared = registry
+            .prepare(
+                request(ConnectionKind::NearAiSignIn, sign_in.id, None),
+                &sign_in,
+            )
+            .unwrap();
+        assert!(prepared.ticket.is_some());
+
+        let mut accounts = AccountStore::open(&store).unwrap();
+        let key = accounts
+            .add(ToolId::Opencode, ConnectionKind::NearAi, "Work")
+            .unwrap();
+        for model in [None, Some(""), Some("bad model")] {
+            assert_eq!(
+                registry
+                    .prepare(request(ConnectionKind::NearAi, key.id, model), &key)
+                    .err(),
+                Some(ManagedError::InvalidRequest),
+                "{model:?}"
+            );
+        }
+        assert!(
+            registry
+                .prepare(
+                    request(
+                        ConnectionKind::NearAi,
+                        key.id,
+                        Some("deepseek-ai/DeepSeek-V3.1")
+                    ),
+                    &key
+                )
+                .is_ok()
+        );
+        let mut subscription = key.clone();
+        subscription.connection = ConnectionKind::Subscription;
+        assert_eq!(
+            registry
+                .prepare(
+                    request(ConnectionKind::Subscription, key.id, Some("gpt-5")),
+                    &subscription
+                )
+                .err(),
+            Some(ManagedError::InvalidRequest)
+        );
+    }
 
     #[test]
     fn a_registry_holding_a_terminal_handle_this_build_does_not_know_still_opens() {

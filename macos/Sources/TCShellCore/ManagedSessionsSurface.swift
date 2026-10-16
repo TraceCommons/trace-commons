@@ -180,7 +180,9 @@ public enum ManagedSurface {
     }
 
     /// The tools a NEAR AI sign-in session can start, in the order shown.
-    public static let signInTools = ["claude", "codex"]
+    /// OpenCode's button also needs the daemon to report it installed
+    /// (`ManagedSnapshot.signInStartTools`).
+    public static let signInTools = ["claude", "codex", "opencode"]
 
     /// The Start button's key for a tool, or nil for a tool this shell
     /// does not know.
@@ -192,8 +194,9 @@ public enum ManagedSurface {
     /// sign-in entries already run on it, with no key. Signed out, a pasted
     /// key stays the fallback.
     public static func connectionOptions(signedIn: Bool, tool: String = "claude") -> [String] {
-        // OpenCode has no sign-in entry or subscription flow. Its NEAR AI
-        // connection always uses a pasted key, even while signed in.
+        // OpenCode has no subscription flow. A saved NEAR AI connection for
+        // it uses a pasted key and names its own model, even while signed
+        // in; the sign-in entry runs on the model its proxy pins.
         if tool == "opencode" { return ["api_key", "near_ai"] }
         return signedIn ? ["subscription", "api_key"] : ["subscription", "api_key", "near_ai"]
     }
@@ -341,10 +344,24 @@ public extension ManagedSnapshot {
         return signInAccounts?.first { $0.tool == tool && $0.connection == "near_ai_signin" }
     }
 
+    /// The tools the sign-in card offers a Start button for, in order: each
+    /// with a sign-in entry that can launch. OpenCode only while the
+    /// daemon's `tools` row says it is installed; an older daemon that
+    /// sends no `tools` offers no OpenCode button (fail closed), while
+    /// Claude Code and Codex keep `canLaunch`'s older-daemon reading.
+    var signInStartTools: [String] {
+        ManagedSurface.signInTools.filter { tool in
+            guard signInEntry(tool) != nil, canLaunch(tool: tool) else { return false }
+            guard tool == "opencode" else { return true }
+            return tools?.first { $0.tool == tool }?.installed == true
+        }
+    }
+
     /// The `managed_launch_prepare` request that starts `tool` on the NEAR
-    /// AI sign-in in `cwd`; nil without a sign-in entry for it.
+    /// AI sign-in in `cwd`; nil unless the card offers that tool's Start
+    /// button. It names no model: the session's proxy pins one.
     func signInLaunchParams(tool: String, cwd: String, requestID: String) -> [String: Any]? {
-        guard canLaunch(tool: tool), let entry = signInEntry(tool) else { return nil }
+        guard signInStartTools.contains(tool), let entry = signInEntry(tool) else { return nil }
         return [
             "request_id": requestID, "purpose": "coding", "tool": entry.tool,
             "connection": entry.connection, "account_id": entry.id, "cwd": cwd,
