@@ -14,7 +14,7 @@
 
 Repo and process rules (every task):
 
-- Work only in `/Users/zakimanian/code/trace-commons-server/.claude/worktrees/settlement-estimate-spec` on branch `settlement-estimate-spec`, with absolute paths. Never `cd` elsewhere, never `git stash`, never run anything in the background, never push, merge, open a PR, or touch the pilot / GCP. Never run `cargo +1.99.0 clippy`.
+- Work on branch `settlement-estimate-spec`. Commands below run from the repository root.
 - Commit locally after each task: short imperative subject, no prefix, no emoji, last line `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Run `cargo fmt --all` before each commit.
 - Verification uses the CI forms: `RUSTFLAGS="-D warnings"` on check and test; clippy as `cargo clippy -p <crate> --all-targets -- -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching`. Quote the real `test result:` lines; never claim green from truncated or filtered output.
 - Task 1 step 1 captures the test baseline once; every later task runs its targeted tests right after each change and its crate's full suite before committing, and compares failures against the baseline.
@@ -24,7 +24,7 @@ Repo and process rules (every task):
 - S9: positive consent before any trace data goes to the server or a TEE. Nothing in this feature queues, previews, redacts remotely, or sends. The only network request added is the unauthenticated table fetch.
 - New user-facing strings live in `crates/trace-commons-contributor/src/nudge_copy.rs`, each doc-commented `DRAFT, NEEDS APPROVAL`, following `docs/ui-copy-guide.md` (short action labels; titles and actions have separate keys).
 - The C ABI header exists twice (`crates/trace-commons-contributor-ffi/include/trace_commons.h`, `macos/Sources/CTraceCommons/include/trace_commons.h`); edit both and `diff` them to identical.
-- Before any `swift test`, run `cargo build -p trace-commons-contributor-ffi` (the Swift package links that dylib; a stale one fakes results). Run Swift as `swift test --package-path /Users/zakimanian/code/trace-commons-server/.claude/worktrees/settlement-estimate-spec/macos --filter <Name>`.
+- Before any `swift test`, run `cargo build -p trace-commons-contributor-ffi` (the Swift package links that dylib; a stale one fakes results). Run Swift as `swift test --package-path macos --filter <Name>`.
 
 Spec values, copied verbatim:
 
@@ -95,7 +95,7 @@ Decisions where the spec names something that does not exist or conflicts with t
 - [ ] **Step 1: Capture the baseline (once for the whole plan)**
 
 ```bash
-W=/Users/zakimanian/code/trace-commons-server/.claude/worktrees/settlement-estimate-spec
+W=.
 cargo test --manifest-path $W/Cargo.toml -p trace-commons-protocol 2>&1 | grep 'test result:'
 cargo test --manifest-path $W/Cargo.toml -p trace-commons-contributor 2>&1 | grep 'test result:'
 cargo test --manifest-path $W/Cargo.toml -p trace-commons-contributor-ffi 2>&1 | grep 'test result:'
