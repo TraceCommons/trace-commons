@@ -232,3 +232,23 @@ pub(crate) mod claim_test_support {
         body["error"].as_str().unwrap_or("<no error field>")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_denylist;
+
+    /// The one test of the denylist parser both claim surfaces share; the
+    /// inputs are a NEAR and a Cosmos list.
+    #[test]
+    fn denylist_parsing_trims_and_drops_empties() {
+        assert_eq!(
+            parse_denylist("a.near, b.near ,,  c.near  "),
+            vec!["a.near", "b.near", "c.near"]
+        );
+        assert_eq!(
+            parse_denylist("cosmos1a, cosmos1b ,,  cosmos1c  "),
+            vec!["cosmos1a", "cosmos1b", "cosmos1c"]
+        );
+        assert!(parse_denylist("  ,, ").is_empty());
+    }
+}

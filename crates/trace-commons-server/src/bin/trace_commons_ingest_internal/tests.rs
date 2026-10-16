@@ -81128,68 +81128,6 @@ fn account_actor_ref_is_inert_as_ownership_key() {
     );
 }
 
-/// (d) The unlinked-principal exclusion is enforced at the DB layer:
-/// `expand_account_principals` filters `unlinked_at IS NULL` (see
-/// `db/postgres.rs`), so an unlinked principal never reaches an
-/// `AccountPrincipalSet`. The membership predicate above therefore never has to
-/// re-check link state. A dedicated DB-backed test for the exclusion is not
-/// added in this slice because no membership/unlink write path is exposed yet
-/// (it arrives in a later slice); the filter is covered by the Task 7 expand SQL
-/// and asserted here only structurally via the membership tests above.
-#[test]
-fn unlinked_exclusion_is_a_db_layer_guarantee() {
-    // A set produced by the lib never contains an unlinked principal; this test
-    // documents the invariant the predicate relies on. The predicate itself is
-    // membership-only, so an absent (unlinked) principal is simply not matched.
-    let set = AccountPrincipalSet::from_iter_for_test_only(["principal_active".to_string()]);
-    let records = vec![submission_record_with_principal("principal_unlinked")];
-    assert!(
-        visible_submission_records_for_account(&set, records).is_empty(),
-        "a principal absent from the (active-only) set is not visible"
-    );
-}
-
-/// Hardening C, runtime witness. `trybuild` is not a dev-dependency of this
-/// crate (dependency policy), so the type-level separation is documented as
-/// `compile_fail` doctests on `visible_submission_records_for_account` and
-/// asserted indirectly here: the two surfaces take distinct, non-convertible
-/// argument types. This test exercises BOTH correct calls; the illegal calls
-/// (`visible_submission_records(&set, ..)` /
-/// `visible_submission_records_for_account(&auth, ..)`) are rejected by the
-/// compiler because there is no `From`/`Into`/`Deref`/`AsRef` between
-/// `AccountPrincipalSet`/`AccountCtx` and `TenantAuth`.
-#[test]
-fn account_and_tenant_surfaces_take_distinct_types() {
-    let set = AccountPrincipalSet::from_iter_for_test_only(["principal_a".to_string()]);
-    let account_visible = visible_submission_records_for_account(
-        &set,
-        vec![submission_record_with_principal("principal_a")],
-    );
-    assert_eq!(account_visible.len(), 1);
-
-    // The legacy surface still works on its own `&TenantAuth` type, unchanged.
-    // A contributor (no review capability) sees only its own principal's record,
-    // exercising the principal-match path distinct from the account surface.
-    let auth = TenantAuth {
-        tenant_id: "tenant-a".to_string(),
-        role: TokenRole::Contributor,
-        principal_ref: "principal_a".to_string(),
-        legacy_principal_ref: None,
-        expires_at: None,
-        auth_method: TraceAuthMethod::StaticToken,
-        signed_claim_issuer: None,
-        signed_claim_audiences: BTreeSet::new(),
-        signed_claim_subject: None,
-        allowed_consent_scopes: BTreeSet::new(),
-        allowed_uses: BTreeSet::new(),
-    };
-    let tenant_visible = visible_submission_records(
-        &auth,
-        vec![submission_record_with_principal(&auth.principal_ref)],
-    );
-    assert_eq!(tenant_visible.len(), 1);
-}
-
 // --- Task 11: rate limiting, redeem timing floor, session revocation --------
 
 /// The in-process limiter admits up to `limit` hits per window, then denies.

@@ -849,6 +849,11 @@ mod tests {
             serde_json::json!({"type":"system","content":"third system text"}),
         ]);
         let draft = t.translate("session-1.jsonl", &bytes).unwrap();
+        let again = t.translate("session-1.jsonl", &bytes).unwrap();
+        assert_eq!(
+            draft, again,
+            "same session bytes must yield identical draft"
+        );
         let expected = "first user text\n\nsecond assistant text\n\nthird system text";
         assert_eq!(draft.trace_body, expected);
         assert_eq!(draft.source_dataset, "jedisct1/agent-traces-swival");
@@ -1056,6 +1061,13 @@ mod tests {
         assert!(passes_word_filter("a b c", 1, 3));
         assert!(!passes_word_filter("a b c d", 1, 3));
         assert!(!passes_word_filter("", 1, 3));
+        let body_ok = (0..50)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!passes_word_filter("one two three", 10, 100));
+        assert!(passes_word_filter(&body_ok, 10, 100));
+        assert!(!passes_word_filter(&body_ok, 10, 49));
     }
 }
 

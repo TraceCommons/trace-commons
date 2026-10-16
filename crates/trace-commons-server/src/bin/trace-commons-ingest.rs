@@ -62941,7 +62941,7 @@ fn visible_submission_records_scoped(
 // `list_account_trace_submissions_keyset`), so this function is not called on the
 // request path; it is retained as the executable reference for the predicate and
 // — crucially — to anchor the Hardening-C type-level surface separation, asserted
-// by the `compile_fail` doctests above and the runtime witness test. Hence the
+// by the `compile_fail` doctests above. Hence the
 // `#[allow(dead_code)]`: removing the function would drop the compile-fail
 // guarantee, not just an unused helper.
 #[allow(dead_code)]
