@@ -17,6 +17,19 @@ final class ManagedToolAvailabilityTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.visibleHarnesses(rows, tools: availability.tools).map(\.id), ["codex"])
         XCTAssertEqual(ManagedSurface.visibleHarnesses(rows, tools: nil).map(\.id), ["claude", "codex"])
     }
+    func testUpdateRecoveryUsesAttemptedToolAndInstalledFallback() throws {
+        let value = try snapshot(tools(["claude", "codex", "opencode"]))
+        XCTAssertEqual(value.updateRecoveryTools(attemptedTool: "claude").map(\.tool), ["claude"])
+        XCTAssertEqual(value.updateRecoveryTools(attemptedTool: "codex").map(\.tool), ["codex"])
+        XCTAssertEqual(value.updateRecoveryTools(attemptedTool: "opencode").map(\.tool), ["opencode"])
+        XCTAssertEqual(try snapshot(tools(["codex"])).updateRecoveryTools(attemptedTool: nil).map(\.tool), ["codex"])
+        XCTAssertEqual(value.updateRecoveryTools(attemptedTool: "future"), [])
+        XCTAssertEqual(try snapshot().updateRecoveryTools(attemptedTool: "codex"), [])
+    }
+    func testUnsupportedVersionHasUpdateRecoveryCopy() {
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-unsupported-version", message: nil), "unsupported_version")
+        XCTAssertEqual(ManagedSurface.errorKey(code: nil, message: "managed-unsupported-version"), "unsupported_version")
+    }
     func testOlderPayloadPreservesUnknownAvailability() throws {
         let value = try snapshot()
         XCTAssertNil(value.tools)

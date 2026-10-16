@@ -25,7 +25,8 @@
       "counts": {
         "sessions": 0,
         "inference_calls": null
-      }
+      },
+      "installed": true
     },
     {
       "tool": "codex",
@@ -43,7 +44,8 @@
       "counts": {
         "sessions": 0,
         "inference_calls": null
-      }
+      },
+      "installed": true
     },
     {
       "tool": "gemini-cli",
@@ -59,7 +61,8 @@
       "counts": {
         "sessions": 0,
         "inference_calls": null
-      }
+      },
+      "installed": null
     },
     {
       "tool": "cline",
@@ -75,7 +78,8 @@
       "counts": {
         "sessions": 0,
         "inference_calls": null
-      }
+      },
+      "installed": null
     },
     {
       "tool": "opencode",
@@ -91,9 +95,109 @@
       "counts": {
         "sessions": 0,
         "inference_calls": null
-      }
+      },
+      "installed": true
     }
   ],
+  "managed_sessions": [],
+  "managed_copy": {
+    "title": "Managed sessions",
+    "provider_openai": "OpenAI",
+    "provider_anthropic": "Anthropic",
+    "provider_near_ai": "NEAR AI",
+    "collection_off": "Trace collection off",
+    "map_scope": "Session routes; model calls are unverified.",
+    "collection_disabled": "Trace collection off",
+    "model_required": "Enter a model ID to launch OpenCode.",
+    "tools_title": "Coding tools",
+    "tools_empty": "Install a coding tool to get started.",
+    "install": "Install",
+    "tool_unavailable": "{tool} wasn't found on this computer.",
+    "unsupported_version": "This tool version is not supported. Install a supported version, then try again.",
+    "update": "Update",
+    "description": "Start a session with a saved account. Your other sessions keep running.",
+    "launch": "Launch",
+    "launch_title": "Launch managed session",
+    "add": "Add account",
+    "refresh": "Refresh",
+    "terminal_scope": "Opens in {destination}. Launches from the CLI stay in their terminal.",
+    "terminal_unavailable": "Can't open a terminal from this build. Run near-ai in your terminal instead.",
+    "empty": "No sessions yet.",
+    "sign_in": "Sign-in",
+    "exit_code": "Exit code {code}",
+    "dismiss": "Dismiss",
+    "connecting": "Connecting…",
+    "retry": "Retry",
+    "rename": "Rename account",
+    "label": "Name",
+    "save": "Save",
+    "cancel": "Cancel",
+    "remove_question": "Remove this account?",
+    "remove": "Remove",
+    "remove_description": "Its saved sign-in and profile are deleted from this computer.",
+    "manage": "More",
+    "default": "Default",
+    "use_default": "Make default",
+    "rename_short": "Rename",
+    "reconnect": "Sign in",
+    "verify": "Check sign-in",
+    "near_ai": "NEAR AI",
+    "api_key": "API key",
+    "openai_api_key": "OpenAI API key",
+    "subscription": "Subscription",
+    "save_title": "Add account",
+    "tool": "Tool",
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "opencode": "OpenCode",
+    "model": "Model ID",
+    "collect_traces": "Collect this session",
+    "opencode_scope": "Uses only the selected key and model in an isolated profile. Project OpenCode settings and plugins are disabled. API key means an OpenAI key; NEAR AI uses a NEAR AI key.",
+    "collection_scope": "Collects this session when OpenCode exits, under your existing review and contribution settings. Other sessions created inside OpenCode are not collected.",
+    "collection_pending": "Trace collection pending",
+    "collection_collected": "Trace collected",
+    "collection_failed": "Trace collection failed; local session preserved",
+    "connection": "Sign-in type",
+    "label_placeholder": "e.g. Personal or Work",
+    "login_description": "You'll sign in through the tool in Terminal.",
+    "key_storage": "Stored in this computer's credential store.",
+    "save_login": "Sign in",
+    "save_account": "Save",
+    "saved_account": "Account",
+    "choose_account": "Choose account",
+    "project_placeholder": "No folder chosen",
+    "choose_folder": "Choose folder",
+    "folder_choice": "Choose a folder for {tool} to work in. It opens in {destination}.",
+    "launch_scope": "Opens in {destination}.",
+    "launch_short": "Launch",
+    "terminal": "your terminal",
+    "global_title": "Standard settings",
+    "global_scope": "These apply to standard sessions once you restart the tool.",
+    "launch_unknown": "Refresh, then try again.",
+    "action_failed": "That didn't work. Try again.",
+    "accounts_title": "Saved accounts",
+    "accounts_refresh_accessibility": "Refresh saved accounts",
+    "state_starting": "Starting",
+    "state_running": "Running",
+    "state_exited": "Exited",
+    "state_failed": "Failed",
+    "state_unknown": "Unknown",
+    "auth_sign_in_required": "Needs sign-in",
+    "auth_checking": "Checking",
+    "auth_ready": "Ready",
+    "auth_unavailable": "Unavailable",
+    "start_claude": "Start Claude Code",
+    "start_codex": "Start Codex",
+    "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
+    "sign_in_needed": "Sign in to NEAR AI to start a session.",
+    "sign_in_near_ai": "Sign in",
+    "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
+    "show": "Show",
+    "stop": "Stop",
+    "stop_question": "Stop this session?",
+    "stop_description": "{tool} stops what it's doing in {folder}.",
+    "start_again": "Start again"
+  },
   "ledger_readable": false,
   "observed_destinations": [],
   "hub": {

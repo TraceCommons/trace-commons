@@ -250,6 +250,11 @@ struct ManagedSessionsSection: View {
                 if key != "action_failed" {
                     GlassAlert(model.managedText(key)).textSelection(.enabled)
                 }
+                if key == "unsupported_version" {
+                    ForEach(model.managedSnapshot?.updateRecoveryTools(attemptedTool: model.managedErrorTool) ?? []) { availability in
+                        ManagedInstallLink(tool: availability, copy: model.managedText, labelKey: "update", includeToolName: true)
+                    }
+                }
             }
         }
     }
@@ -387,7 +392,7 @@ struct ManagedSessionsSection: View {
             model.managedText(session.connection),
         ].compactMap { $0 }.filter { !$0.isEmpty }
         if let selectedModel = session.model { meta.append(selectedModel) }
-        if let collection = session.collection, ["pending", "collected", "failed"].contains(collection) {
+        if let collection = session.collection, ["off", "pending", "collected", "failed"].contains(collection) {
             meta.append(model.managedText("collection_" + collection))
         }
         if let code = session.exitCode {
@@ -415,8 +420,8 @@ struct ManagedSessionsSection: View {
 
 /// The "Change global settings" heading above the standard tool settings.
 extension ManagedSessionsSection {
-    /// Whether Launch is offered: a saved account to launch with and a
-    /// terminal to launch in.
+    /// Whether Launch is offered: a saved account whose tool is installed
+    /// to launch with, and a terminal to launch in.
     static func offersLaunch(_ snapshot: ManagedSnapshot) -> Bool {
         snapshot.accounts.contains { snapshot.canLaunch(tool: $0.tool) } && snapshot.capabilities.terminalLaunch
     }
@@ -550,6 +555,7 @@ struct ManagedAccountSheet: View {
 
     private func reconcileTool() {
         if !availableTools.contains(tool), let first = availableTools.first { tool = first }
+        if tool == "opencode" && connection == "subscription" { connection = "api_key" }
     }
 
     private func save() {
@@ -608,6 +614,13 @@ struct ManagedLaunchSheet: View {
                             ManagedInstallLink(tool: availability, copy: model.managedText)
                         }
                         GlassRefreshButton(model.managedText("refresh")) { model.refreshManagedSessions() }
+                    }
+                }
+                if let account = selectedAccount, model.managedErrorKey == "unsupported_version",
+                   model.managedErrorTool == nil || model.managedErrorTool == account.tool {
+                    ManagedNote(text: model.managedText("unsupported_version"))
+                    if let availability = model.managedSnapshot?.tools?.first(where: { $0.tool == account.tool }) {
+                        ManagedInstallLink(tool: availability, copy: model.managedText, labelKey: "update", includeToolName: true)
                     }
                 }
                 if isOpenCode {
@@ -835,10 +848,16 @@ struct ManagedStopSheet: View {
 struct ManagedInstallLink: View {
     let tool: ManagedToolAvailability
     let copy: (String) -> String
+    /// The link's copy key: `install`, or `update` after an unsupported-version
+    /// refusal, with the tool's name appended when `includeToolName` is set.
+    var labelKey: String = "install"
+    var includeToolName = false
+    private var actionLabel: String { copy(labelKey).isEmpty ? copy("install") : copy(labelKey) }
+    private var label: String { includeToolName ? actionLabel + " " + copy(tool.tool) : actionLabel }
     var body: some View {
         if let url = tool.url {
-            Link(copy("install"), destination: url)
-                .accessibilityLabel(copy("install") + " " + copy(tool.tool))
+            Link(label, destination: url)
+                .accessibilityLabel(actionLabel + " " + copy(tool.tool))
                 .buttonStyle(GlassButtonStyle(.glass, small: true))
         }
     }

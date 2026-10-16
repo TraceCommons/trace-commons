@@ -212,6 +212,7 @@ public enum ManagedSurface {
     /// else is the general failure. A missing tool is said on its account
     /// row after the refresh that follows, where the tool can be named.
     public static func errorKey(code: String?, message: String?) -> String {
+        if code == "managed-unsupported-version" || message == "managed-unsupported-version" { return "unsupported_version" }
         let launchUnknown = ["launch-unknown", "managed-launch-unknown"]
         if launchUnknown.contains(code ?? "") || launchUnknown.contains(message ?? "") { return "launch_unknown" }
         // No NEAR AI sign-in: the line that asks for one.
@@ -263,6 +264,16 @@ public extension ManagedSurface {
 }
 
 public extension ManagedSnapshot {
+    /// A failed operation identifies its tool; old error payloads fall back
+    /// to installed tools, never an unrelated hardcoded provider.
+    func updateRecoveryTools(attemptedTool: String?) -> [ManagedToolAvailability] {
+        (tools ?? []).filter { availability in
+            guard ManagedSurface.toolKey(availability.tool) != nil else { return false }
+            if let attemptedTool { return availability.tool == attemptedTool }
+            return availability.installed
+        }
+    }
+
     var setupTools: [String] { ManagedSurface.setupTools(tools) }
     var needsToolInstallation: Bool {
         guard let tools else { return false }
