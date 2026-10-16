@@ -252,6 +252,13 @@ impl ManagedService {
                     expected_generation: Generation,
                 }
                 let p: Params = parse(request)?;
+                // Only a saved NEAR AI key can be the launch default. A
+                // subscription or API-key default would never win an
+                // implicit launch, and storing one would overwrite the
+                // tool's NEAR AI default. A sign-in entry is never saved.
+                if p.selection.connection != ConnectionKind::NearAi {
+                    return Err(ManagedError::InvalidRequest);
+                }
                 let selection = self.accounts.select(p.selection, p.expected_generation)?;
                 self.sessions.changed()?;
                 Ok(json!(selection))
@@ -920,6 +927,32 @@ mod tests {
     }
 
     #[test]
+    fn only_a_near_ai_key_can_be_selected_as_the_default() {
+        let (_home, _store, mut service) = service();
+        let near = service
+            .accounts
+            .add(ToolId::Claude, ConnectionKind::NearAi, "Work")
+            .unwrap();
+        let select = |account: &AccountView, generation: u64| json!({"selection":{"tool":account.tool,"connection":account.connection,"account_id":account.id,"generation":generation},"expected_generation":generation});
+        call(&mut service, "managed_select", select(&near, 0), false).unwrap();
+        for connection in [ConnectionKind::Subscription, ConnectionKind::ApiKey] {
+            let other = service
+                .accounts
+                .add(ToolId::Claude, connection, "Other")
+                .unwrap();
+            assert_eq!(
+                call(&mut service, "managed_select", select(&other, 1), false),
+                Err(ManagedError::InvalidRequest),
+                "{connection:?}"
+            );
+        }
+        // The NEAR AI default is untouched.
+        let selection = service.accounts.selection(ToolId::Claude).unwrap();
+        assert_eq!(selection.account_id, near.id);
+        assert_eq!(service.accounts.generation(ToolId::Claude), Generation(1));
+    }
+
+    #[test]
     fn a_sign_in_entry_can_be_neither_saved_nor_chosen_as_a_default() {
         let (home, store, mut service) = service();
         assert_eq!(
@@ -934,7 +967,7 @@ mod tests {
         let selection = json!({"selection":{"tool":"claude","connection":"near_ai_signin","account_id":signin::account_id(ToolId::Claude),"generation":0},"expected_generation":0});
         assert_eq!(
             call(&mut service, "managed_select", selection, true),
-            Err(ManagedError::Conflict)
+            Err(ManagedError::InvalidRequest)
         );
         for method in [
             "managed_account_remove",

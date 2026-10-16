@@ -179,10 +179,14 @@ public sealed class ManagedSessionsView : UserControl
                 row.Children.Add(recovery);
             }
             var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-            controls.Children.Add(Button("use_default", async () => {
-                ulong generation = _snapshot.Generations.GetValueOrDefault(account.Tool);
-                await CallAsync("managed_select", new { selection = new { tool = account.Tool, connection = account.Connection, account_id = account.Id, generation }, expected_generation = generation });
-            }));
+            // Only a NEAR AI key can be the launch default, as on macOS.
+            if (account.Connection == "near_ai")
+            {
+                controls.Children.Add(Button("use_default", async () => {
+                    ulong generation = _snapshot.Generations.GetValueOrDefault(account.Tool);
+                    await CallAsync("managed_select", new { selection = new { tool = account.Tool, connection = account.Connection, account_id = account.Id, generation }, expected_generation = generation });
+                }));
+            }
             controls.Children.Add(Button("rename_short", () => RenameAsync(account)));
             // Hidden, not disabled, while the tool is missing.
             if (_snapshot.OffersReconnect(account)) controls.Children.Add(Button("reconnect", async () => {

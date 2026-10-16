@@ -237,7 +237,10 @@ pub fn refresh(app: &Rc<App>) {
             let controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             let a = Rc::clone(app); let account_copy = account.clone();
             let generation = snapshot["generations"][account["tool"].as_str().unwrap_or_default()].clone();
-            controls.append(&button("use_default", move || action(&a, "managed_select", json!({"selection":{"tool":account_copy["tool"],"connection":account_copy["connection"],"account_id":account_copy["id"],"generation":generation},"expected_generation":generation}), false)));
+            // Only a NEAR AI key can be the launch default, as on macOS.
+            if account["connection"] == "near_ai" {
+                controls.append(&button("use_default", move || action(&a, "managed_select", json!({"selection":{"tool":account_copy["tool"],"connection":account_copy["connection"],"account_id":account_copy["id"],"generation":generation},"expected_generation":generation}), false)));
+            }
             let a = Rc::clone(app); let account_copy = account.clone();
             controls.append(&button("rename_short", move || rename_dialog(&a, &account_copy)));
             if offers_reconnect(&snapshot, account) {
