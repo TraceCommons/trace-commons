@@ -32,16 +32,16 @@ struct Cli {
 enum Command {
     /// Launch a coding tool in this terminal using NEAR AI by default.
     ///
-    /// Without --account or --connection, use the tool's saved NEAR AI account
-    /// and backend. A sole NEAR AI account is chosen automatically. With several,
-    /// use the selected NEAR AI default or choose one explicitly; no account is guessed.
+    /// Without --account or --connection, use NEAR AI: the tool's NEAR AI default,
+    /// else its sole saved NEAR AI key, else your NEAR AI sign-in. With several
+    /// keys and no default, choose one explicitly; no account is guessed.
     ///
     /// --account accepts an exact saved name or ID and uses that account's backend.
     /// --connection explicitly filters the backend, including when resolving a default.
     /// Missing credentials or an unavailable backend never cause a fallback to another account or provider.
     ///
     /// Run near-ai accounts list to see every saved choice and its launch command.
-    /// If NEAR AI is not configured, use Add account in the app or near-ai accounts add --help.
+    /// If NEAR AI is not set up, sign in to NEAR AI in the app, or see near-ai accounts add --help.
     #[command(
         after_help = "Examples:\n  near-ai launch claude\n  near-ai launch codex\n  near-ai launch claude --account Personal\n  near-ai accounts list\n  near-ai accounts select 'NEAR AI Work' --tool claude"
     )]

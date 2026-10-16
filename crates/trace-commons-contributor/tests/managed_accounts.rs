@@ -335,3 +335,151 @@ fn no_near_ai_account_never_uses_a_saved_subscription_default() {
         Err(ManagedError::NotFound)
     );
 }
+
+const CLAUDE_SIGN_IN: &str = "6e656172-2d61-4900-8000-000000000001";
+const CODEX_SIGN_IN: &str = "6e656172-2d61-4900-8000-000000000002";
+
+fn signed_in(
+    accounts: serde_json::Value,
+    defaults: serde_json::Value,
+) -> trace_commons_contributor::managed::cli::Snapshot {
+    serde_json::from_value(serde_json::json!({
+        "accounts": accounts,
+        "sign_in_accounts": [
+            {"id":CLAUDE_SIGN_IN,"tool":"claude","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready","verified_at":null},
+            {"id":CODEX_SIGN_IN,"tool":"codex","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready","verified_at":null}
+        ],
+        "defaults": defaults,
+        "generations": {}
+    }))
+    .unwrap()
+}
+
+#[test]
+fn signed_in_with_no_saved_accounts_launches_on_the_sign_in() {
+    use trace_commons_contributor::managed::cli::resolve;
+    // The daemon lists the derived sign-in selections in `defaults`.
+    let snapshot = signed_in(
+        serde_json::json!([]),
+        serde_json::json!([
+            {"tool":"claude","connection":"near_ai_signin","account_id":CLAUDE_SIGN_IN,"generation":0},
+            {"tool":"codex","connection":"near_ai_signin","account_id":CODEX_SIGN_IN,"generation":0}
+        ]),
+    );
+    for (tool, id) in [
+        (ToolId::Claude, CLAUDE_SIGN_IN),
+        (ToolId::Codex, CODEX_SIGN_IN),
+    ] {
+        let account = resolve(&snapshot, tool, None, None).unwrap();
+        assert_eq!(account.id.to_string(), id);
+        assert_eq!(account.connection, ConnectionKind::NearAiSignIn);
+        // --account reaches the sign-in entry by its ID.
+        assert_eq!(
+            resolve(&snapshot, tool, Some(id), None)
+                .unwrap()
+                .id
+                .to_string(),
+            id
+        );
+    }
+    // Naming the key backend does not fall back to the sign-in.
+    assert_eq!(
+        resolve(
+            &snapshot,
+            ToolId::Claude,
+            None,
+            Some(ConnectionKind::NearAi)
+        ),
+        Err(ManagedError::NotFound)
+    );
+    // OpenCode has no sign-in entry.
+    assert_eq!(
+        resolve(&snapshot, ToolId::Opencode, None, None),
+        Err(ManagedError::NotFound)
+    );
+}
+
+#[test]
+fn signed_in_with_a_legacy_subscription_default_launches_on_the_sign_in() {
+    use trace_commons_contributor::managed::cli::resolve;
+    let personal = uuid::Uuid::new_v4();
+    let snapshot = signed_in(
+        serde_json::json!([
+            {"id":personal,"tool":"claude","connection":"subscription","label":"Personal","auth_state":"ready","verified_at":null}
+        ]),
+        serde_json::json!([
+            {"tool":"claude","connection":"subscription","account_id":personal,"generation":1},
+            {"tool":"claude","connection":"near_ai_signin","account_id":CLAUDE_SIGN_IN,"generation":1},
+            {"tool":"codex","connection":"near_ai_signin","account_id":CODEX_SIGN_IN,"generation":0}
+        ]),
+    );
+    let implicit = resolve(&snapshot, ToolId::Claude, None, None).unwrap();
+    assert_eq!(implicit.id.to_string(), CLAUDE_SIGN_IN);
+    // An explicit --connection subscription still honours the legacy default.
+    assert_eq!(
+        resolve(
+            &snapshot,
+            ToolId::Claude,
+            None,
+            Some(ConnectionKind::Subscription)
+        )
+        .unwrap()
+        .id
+        .0,
+        personal
+    );
+}
+
+#[test]
+fn a_saved_near_ai_key_wins_over_the_sign_in_and_several_need_a_choice() {
+    use trace_commons_contributor::managed::cli::{format_accounts, resolve};
+    let one = uuid::Uuid::new_v4();
+    let two = uuid::Uuid::new_v4();
+    let key = |id: uuid::Uuid, label: &str| serde_json::json!({"id":id,"tool":"claude","connection":"near_ai","label":label,"auth_state":"ready","verified_at":null});
+    // A sole key wins, even though the sign-in is present.
+    let sole = signed_in(serde_json::json!([key(one, "One")]), serde_json::json!([]));
+    assert_eq!(
+        resolve(&sole, ToolId::Claude, None, None).unwrap().id.0,
+        one
+    );
+    // Several keys with no default are ambiguous, never the sign-in.
+    let mut several = signed_in(
+        serde_json::json!([key(one, "One"), key(two, "Two")]),
+        serde_json::json!([]),
+    );
+    assert_eq!(
+        resolve(&several, ToolId::Claude, None, None),
+        Err(ManagedError::AmbiguousAccount)
+    );
+    several.defaults.push(Selection {
+        tool: ToolId::Claude,
+        connection: ConnectionKind::NearAi,
+        account_id: several.accounts[1].id,
+        generation: Generation(1),
+    });
+    assert_eq!(
+        resolve(&several, ToolId::Claude, None, None).unwrap().id.0,
+        two
+    );
+    // The listing shows the sign-in rows and marks one default per tool.
+    let text = format_accounts(&several, false).unwrap();
+    assert!(
+        text.contains("NEAR AI | claude | NEAR AI sign-in | Ready | —"),
+        "{text}"
+    );
+    assert!(
+        text.contains("NEAR AI | codex | NEAR AI sign-in | Ready | yes"),
+        "{text}"
+    );
+    assert!(text.contains(&format!("  near-ai launch codex --account {CODEX_SIGN_IN}")));
+    let rows: serde_json::Value =
+        serde_json::from_str(&format_accounts(&several, true).unwrap()).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 4);
+    let defaults: Vec<_> = rows
+        .iter()
+        .filter(|r| r["launch_default"] == true)
+        .map(|r| r["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(defaults, vec![two.to_string(), CODEX_SIGN_IN.to_owned()]);
+}

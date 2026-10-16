@@ -38,7 +38,8 @@ pub enum AccountCommand {
     ///
     /// Use an exact name or the displayed ID with launch --account. Example commands
     /// use IDs so duplicate names remain unambiguous. NEAR AI DEFAULT marks the
-    /// account used when launch omits --account and --connection.
+    /// account used when launch omits --account and --connection. NEAR AI
+    /// sign-in rows are listed while you are signed in.
     ///
     /// --json emits the account array with a launch_default boolean on each row.
     List,
@@ -73,7 +74,7 @@ pub enum AccountCommand {
     },
     /// Choose the NEAR AI default for future launches of a tool.
     ///
-    /// Accepts an exact saved name or ID. Only NEAR AI accounts can be selected;
+    /// Accepts an exact saved name or ID. Only saved NEAR AI keys can be selected;
     /// use launch --account for subscription or direct API-key accounts.
     /// This does not change any running session. Run near-ai accounts list to see all choices.
     Select {
@@ -142,7 +143,12 @@ pub async fn launch(store: &ConfigStore, args: LaunchArgs) -> anyhow::Result<i32
         launch_selection_error(
             error,
             args.tool,
-            args.account.is_none() && args.connection.is_none_or(|c| c == ConnectionKind::NearAi),
+            args.account.is_some(),
+            args.connection,
+            snapshot
+                .sign_in_accounts
+                .iter()
+                .any(|a| a.tool == args.tool),
         )
     })?;
     if !std::io::stdin().is_terminal() {
@@ -228,7 +234,21 @@ pub async fn accounts(
         | AccountCommand::Select { account, tool } => (account, *tool),
         _ => return Err(ManagedError::InvalidRequest.into()),
     };
-    let account = resolve(&snapshot, tool, Some(name), None)?;
+    // Only a NEAR AI key can be the launch default, so select looks among
+    // those alone: a same-named subscription or API-key account is no
+    // ambiguity. Sign-in entries were cleared above; they are never saved.
+    let filter = matches!(command, AccountCommand::Select { .. }).then_some(ConnectionKind::NearAi);
+    let account = resolve(&snapshot, tool, Some(name), filter).map_err(|error| match error {
+        ManagedError::NotFound if filter.is_some() => anyhow::anyhow!(
+            "No saved NEAR AI key for {} has that name or ID. Only NEAR AI keys can be the launch default. Run near-ai accounts list to see all choices.",
+            tool_name(tool)
+        ),
+        ManagedError::AmbiguousAccount => anyhow::anyhow!(
+            "More than one {} account has that name. Pass its ID from near-ai accounts list instead.",
+            tool_name(tool)
+        ),
+        error => error.into(),
+    })?;
     let result: Value = match command {
         AccountCommand::Rename { label, .. } => call(
             store,
@@ -242,11 +262,6 @@ pub async fn accounts(
         )?,
         AccountCommand::Reconnect { .. } => return login(store, &account, json_output).await,
         AccountCommand::Select { .. } => {
-            if account.connection != ConnectionKind::NearAi {
-                anyhow::bail!(
-                    "Only NEAR AI accounts can be the launch default. Use --account for another backend. Run near-ai accounts list to see all choices."
-                );
-            }
             let generation = snapshot.generations.get(&tool).copied().unwrap_or_default();
             call(
                 store,
@@ -303,32 +318,61 @@ fn tool_name(tool: ToolId) -> &'static str {
     }
 }
 
-fn launch_selection_error(error: ManagedError, tool: ToolId, implicit_near: bool) -> anyhow::Error {
+/// `signed_in`: whether the tool has a NEAR AI sign-in entry.
+fn launch_selection_error(
+    error: ManagedError,
+    tool: ToolId,
+    account_given: bool,
+    connection: Option<ConnectionKind>,
+    signed_in: bool,
+) -> anyhow::Error {
     let tool = tool_name(tool);
-    match error {
-        ManagedError::NotFound if implicit_near => anyhow::anyhow!(
-            "No NEAR AI account is saved for {tool}. Add one in the app, or pipe your key to: near-ai accounts add --tool {tool} --connection near-ai --label 'NEAR AI' --key-stdin. Run near-ai accounts list to see saved choices; use --account to choose another backend."
+    match (error, account_given, connection) {
+        // A name matched several accounts: only an ID tells them apart.
+        (ManagedError::AmbiguousAccount, true, _) => anyhow::anyhow!(
+            "More than one {tool} account has that name. Pass its ID from near-ai accounts list to --account."
         ),
-        ManagedError::AmbiguousAccount => anyhow::anyhow!(
-            "Choose an account with --account <name-or-id>. Run near-ai accounts list to see all choices. To save a NEAR AI default: near-ai accounts select <name-or-id> --tool {tool}."
+        (ManagedError::AmbiguousAccount, false, None) => anyhow::anyhow!(
+            "More than one NEAR AI key is saved for {tool}. Choose one with --account <name-or-id>, or save a default: near-ai accounts select <name-or-id> --tool {tool}. Run near-ai accounts list to see all choices."
         ),
-        ManagedError::NotFound => anyhow::anyhow!(
+        (ManagedError::AmbiguousAccount, false, Some(_)) => anyhow::anyhow!(
+            "More than one {tool} account uses that backend. Pass --account with an ID from near-ai accounts list."
+        ),
+        // Signed in, the tool's sign-in is the implicit launch; only a
+        // launch that names the key backend can miss it.
+        (ManagedError::NotFound, false, Some(ConnectionKind::NearAi)) if signed_in => {
+            anyhow::anyhow!(
+                "No NEAR AI key is saved for {tool}. Leave out --connection to use your NEAR AI sign-in."
+            )
+        }
+        // OpenCode has no sign-in: a saved key is its only NEAR AI account.
+        (ManagedError::NotFound, false, None | Some(ConnectionKind::NearAi))
+            if tool == "opencode" =>
+        {
+            anyhow::anyhow!(
+                "No NEAR AI key is saved for opencode. Add one in the app, or pipe your key to: near-ai accounts add --tool opencode --connection near-ai --label 'NEAR AI' --key-stdin. Use --account to choose another account."
+            )
+        }
+        (ManagedError::NotFound, false, None | Some(ConnectionKind::NearAi)) => anyhow::anyhow!(
+            "No NEAR AI account is saved for {tool}. Sign in to NEAR AI in the app, or pipe your key to: near-ai accounts add --tool {tool} --connection near-ai --label 'NEAR AI' --key-stdin. Run near-ai accounts list to see saved choices; use --account to choose another backend."
+        ),
+        (ManagedError::NotFound, _, _) => anyhow::anyhow!(
             "No matching account for {tool}. Run near-ai accounts list to see all choices, then pass --account <name-or-id>."
         ),
-        _ => error.into(),
+        (error, _, _) => error.into(),
     }
 }
 
 /// Local account metadata only. Example commands use IDs, avoiding ambiguous
 /// labels and preventing shell metacharacters in a label from becoming code.
+/// The NEAR AI sign-in entries are listed after the saved accounts.
 pub fn format_accounts(snapshot: &Snapshot, json_output: bool) -> anyhow::Result<String> {
     let is_default = |account: &AccountView| {
         resolve(snapshot, account.tool, None, None).is_ok_and(|a| a.id == account.id)
     };
+    let all = || snapshot.accounts.iter().chain(&snapshot.sign_in_accounts);
     if json_output {
-        let rows: Vec<_> = snapshot
-            .accounts
-            .iter()
+        let rows: Vec<_> = all()
             .map(|account| {
                 let mut row = json!(account);
                 row["launch_default"] = json!(is_default(account));
@@ -338,11 +382,11 @@ pub fn format_accounts(snapshot: &Snapshot, json_output: bool) -> anyhow::Result
         return Ok(serde_json::to_string_pretty(&rows)?);
     }
     let mut out = String::from("ACCOUNT | TOOL | BACKEND | READINESS | NEAR AI DEFAULT\n");
-    if snapshot.accounts.is_empty() {
+    if all().next().is_none() {
         out.push_str("No saved accounts. Add one in the app or use near-ai accounts add --help.\n");
     }
     let copy = super::copy::copy();
-    for account in &snapshot.accounts {
+    for account in all() {
         let connection = serde_json::to_value(account.connection)?;
         let auth = serde_json::to_value(account.auth_state)?;
         // Legacy metadata may predate the label validation. Do not emit terminal controls.
@@ -363,10 +407,10 @@ pub fn format_accounts(snapshot: &Snapshot, json_output: bool) -> anyhow::Result
         ));
     }
     out.push_str(
-        "\nWithout --account, launches use NEAR AI. Names or IDs can select another account.\n",
+        "\nWithout --account, launches use NEAR AI: the NEAR AI default or sole NEAR AI key, then the NEAR AI sign-in.\n",
     );
     out.push_str(
-        "Set a NEAR AI default: near-ai accounts select <name-or-id> --tool <claude|codex>\n",
+        "Set a NEAR AI default: near-ai accounts select <name-or-id> --tool <claude|codex|opencode>\n",
     );
     Ok(out)
 }
