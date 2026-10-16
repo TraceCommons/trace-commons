@@ -36,6 +36,11 @@ pub const DAEMON_HISTORY_FILE: &str = "daemon-history.jsonl";
 /// auto-upload, bulk-approving). This is user-facing visibility, not a
 /// security control -- see `daemon::audit`.
 pub const DAEMON_AUDIT_FILE: &str = "daemon-audit.jsonl";
+/// The settlement estimate's feature cache (`daemon::settlement_scan`):
+/// per-trace `lef1` counts keyed by a hash of the source and path, so an
+/// unchanged trace is never read twice. Holds no path and no content.
+/// Deleted when the estimate switch is turned off; swept by `wipe()`.
+pub const DAEMON_SETTLEMENT_FEATURES_FILE: &str = "daemon-settlement-features.json";
 /// The account session token from the loopback browser sign-in
 /// (`crate::account_auth`). A SECRET, written at 0600 inside the 0700 state
 /// directory exactly like the device key, and swept by `wipe()` -- a logout

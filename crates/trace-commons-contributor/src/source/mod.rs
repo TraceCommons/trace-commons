@@ -931,6 +931,13 @@ impl SourceRoots {
         self.declared.contains_key(name)
     }
 
+    /// Whether the contributor declared this source `Off`: an explicit "do
+    /// not read", which every caller that widens the declared set (the
+    /// settlement estimate's conventional roots) must still honour.
+    pub fn is_off(&self, name: &str) -> bool {
+        matches!(self.declared.get(name), Some(SourceDeclaration::Off))
+    }
+
     /// The trajectory scope this root set carries.
     ///
     /// Read by callers that need to assert WHICH scope is in play, not

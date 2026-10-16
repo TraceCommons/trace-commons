@@ -85,6 +85,7 @@ pub mod queue;
 pub mod remembered_passkeys;
 pub mod second_look;
 pub mod settings;
+pub mod settlement_scan;
 pub mod skill_loop;
 pub mod state;
 pub mod stored_cloud_credentials;
