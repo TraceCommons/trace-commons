@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.17.0" date="2026-10-16">
+      <description>
+        <p>Linux gains OpenCode trace discovery, managed sessions you can open in the terminal you choose, and a retry for uploads that could not be answered. The native macOS app gains the matching screens and a redesigned look.</p>
+      </description>
+    </release>
     <release version="0.16.2" date="2026-10-14">
       <description>
         <p>Maintenance release for Linux: the version number follows the macOS app, which fixes two more window-resizing paths that could crash it.</p>
