@@ -10,6 +10,13 @@
 //! operator installed, validated at boot with the same parser the client
 //! uses, or the protocol's built-in table. It never serves an empty table.
 //!
+//! `GET /v1/credit-estimate/settlement-table` is unauthenticated and outside
+//! tenant context for the same reason. It serves the v2 settlement table the
+//! operator installed through `TRACE_COMMONS_CREDIT_SETTLEMENT_TABLE_PATH`,
+//! validated at boot with the client's parser. There is no built-in
+//! settlement table: with none installed the route answers 404 and clients
+//! draw nothing.
+//!
 //! `POST /v1/admin/credit-estimate-eval` returns one label-only row per
 //! labelled decision: the `lef1` features of the stored envelope, the
 //! displayed credit (2 decimals), its calibration version, the withheld
@@ -27,6 +34,7 @@ use std::path::Path;
 
 use rand::seq::SliceRandom as _;
 use trace_commons_protocol::local_credit_estimate::LocalEstimateTable;
+use trace_commons_protocol::settlement_estimate::SettlementEstimateTable;
 use trace_commons_server::credit_estimate_fit::{
     EstimateEvalRow, EstimateFitInput, EstimateFitReport, displayed_credit, eval_label,
     fit_estimate_table,
@@ -68,6 +76,56 @@ pub(super) fn table_from_path(path: Option<&Path>) -> anyhow::Result<LocalEstima
 /// Answers `GET /v1/credit-estimate/table`. See the module docs.
 pub(super) async fn table_handler(State(state): State<Arc<AppState>>) -> axum::response::Response {
     let mut response = Json(state.credit_estimate_table.as_ref().clone()).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=3600"),
+    );
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+/// Path of an operator-installed settlement table document. Unset serves
+/// no settlement table at all.
+pub(super) const CREDIT_SETTLEMENT_TABLE_PATH_ENV: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_TABLE_PATH";
+
+/// Refusal label for an installed settlement table that cannot be read,
+/// exceeds the size limit, or that the client's parser would refuse. Boot
+/// fails with it.
+const SETTLEMENT_TABLE_INVALID: &str = "credit_settlement_table_invalid";
+
+pub(super) fn settlement_table_from_env() -> anyhow::Result<Option<Arc<SettlementEstimateTable>>> {
+    let path = std::env::var_os(CREDIT_SETTLEMENT_TABLE_PATH_ENV).map(std::path::PathBuf::from);
+    Ok(settlement_table_from_path(path.as_deref())?.map(Arc::new))
+}
+
+/// `None` path is no table. Otherwise the file is read and parsed with
+/// [`SettlementEstimateTable::from_slice`], which refuses a document past
+/// the size limit before parsing it; any failure is the one label.
+pub(super) fn settlement_table_from_path(
+    path: Option<&Path>,
+) -> anyhow::Result<Option<SettlementEstimateTable>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let raw = std::fs::read(path).map_err(|_| anyhow::anyhow!(SETTLEMENT_TABLE_INVALID))?;
+    SettlementEstimateTable::from_slice(&raw)
+        .map(Some)
+        .map_err(|_| anyhow::anyhow!(SETTLEMENT_TABLE_INVALID))
+}
+
+/// Answers `GET /v1/credit-estimate/settlement-table`. See the module docs.
+pub(super) async fn settlement_table_handler(
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    let Some(table) = state.credit_settlement_table.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut response = Json(table.as_ref().clone()).into_response();
     let headers = response.headers_mut();
     headers.insert(
         axum::http::header::CACHE_CONTROL,

@@ -6204,6 +6204,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         credit_estimate_table: Arc::new(
             trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
         ),
+        credit_settlement_table: None,
         root,
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -30233,6 +30234,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         credit_estimate_table: Arc::new(
             trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
         ),
+        credit_settlement_table: None,
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -102441,6 +102443,9 @@ mod credit_estimate_tests {
     use trace_commons_protocol::local_credit_estimate::{
         LocalEstimateFeatures, LocalEstimateTable,
     };
+    use trace_commons_protocol::settlement_estimate::{
+        SETTLEMENT_TABLE_MAX_BYTES, SETTLEMENT_TABLE_PATH, SettlementEstimateTable,
+    };
     use trace_commons_server::credit_estimate_fit::EstimateWithheldLabel;
     use trace_commons_server::trace_gate_service::LegacyDeterministicGateService;
 
@@ -102896,6 +102901,118 @@ mod credit_estimate_tests {
         for path in [bad, temp.path().join("missing.json")] {
             let err = credit_estimate::table_from_path(Some(&path)).unwrap_err();
             assert_eq!(err.to_string(), "credit_estimate_table_invalid");
+        }
+    }
+
+    /// A synthetic v2 settlement table. Every figure is made up.
+    fn settlement_table_value() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 2,
+            "features_version": "lef1",
+            "version": "s1",
+            "pricing_version": "p1",
+            "instrument_id": "trace_credit",
+            "atomic_units_per_credit": 1_000_000,
+            "usd_micros_per_credit": 1_000_000,
+            "published_at": "2026-10-20T00:00:00Z",
+            "bytes_per_token": 4,
+            "chunk_target_tokens": 2048,
+            "chunk_cap": 16,
+            "weights": [{"term": "ln_content_bytes", "weight": 1.0}],
+            "cut_offs": [5.0],
+            "tiers": [
+                {"mean_atomic_units": 1_000_000, "withheld_share_micros": 300_000},
+                {"mean_atomic_units": 4_000_000, "withheld_share_micros": 100_000}
+            ],
+            "aggregate_band": {"low_ratio_micros": 600_000, "high_ratio_micros": 1_500_000},
+            "fit_rows": 40
+        })
+    }
+
+    async fn get_settlement_table(state: Arc<AppState>) -> axum::response::Response {
+        app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(SETTLEMENT_TABLE_PATH)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response")
+    }
+
+    /// No installed table: the route answers 404 and clients draw nothing.
+    /// There is no built-in settlement table.
+    #[tokio::test]
+    async fn settlement_route_is_404_without_an_installed_table() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let response = get_settlement_table(test_state(temp.path().to_path_buf())).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Unauthenticated and outside tenant context, like the v1 table: no
+    /// credential is sent and the installed table comes back as the client
+    /// parser reads it, with the same cache and nosniff headers.
+    #[tokio::test]
+    async fn settlement_route_serves_the_installed_table_unauthenticated() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let installed = SettlementEstimateTable::from_value(&settlement_table_value()).unwrap();
+        Arc::make_mut(&mut state).credit_settlement_table = Some(Arc::new(installed.clone()));
+        let response = get_settlement_table(state).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("public, max-age=3600")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            SettlementEstimateTable::from_value(&body).expect("client accepts it"),
+            installed
+        );
+    }
+
+    /// No path is no table; a valid file is that table; a file the client
+    /// would refuse, one that cannot be read, or one past the size limit is
+    /// a boot error with a label.
+    #[test]
+    fn settlement_table_from_path_loads_validates_or_refuses() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        assert!(
+            credit_estimate::settlement_table_from_path(None)
+                .unwrap()
+                .is_none()
+        );
+        let good = temp.path().join("good.json");
+        std::fs::write(&good, settlement_table_value().to_string()).unwrap();
+        assert_eq!(
+            credit_estimate::settlement_table_from_path(Some(&good)).unwrap(),
+            Some(SettlementEstimateTable::from_value(&settlement_table_value()).unwrap())
+        );
+        let mut refused = settlement_table_value();
+        refused["schema_version"] = serde_json::json!(1);
+        let bad = temp.path().join("bad.json");
+        std::fs::write(&bad, refused.to_string()).unwrap();
+        // Valid JSON padded with whitespace past the 16 KiB limit.
+        let mut padded = settlement_table_value().to_string();
+        padded.push_str(&" ".repeat(SETTLEMENT_TABLE_MAX_BYTES));
+        let large = temp.path().join("large.json");
+        std::fs::write(&large, padded).unwrap();
+        for path in [bad, large, temp.path().join("missing.json")] {
+            let err = credit_estimate::settlement_table_from_path(Some(&path)).unwrap_err();
+            assert_eq!(err.to_string(), "credit_settlement_table_invalid");
         }
     }
 }
