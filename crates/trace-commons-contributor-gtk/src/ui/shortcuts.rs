@@ -31,7 +31,7 @@ use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
 
-use super::{App, SCREENS};
+use super::{App, screens};
 
 /// The window action the screen accelerators drive, with the stack name as
 /// its target. One action rather than one per screen, so the set of
@@ -75,7 +75,7 @@ fn screen_action(name: &str) -> String {
 /// that array renumbers everything after it here, in the switcher, and in
 /// the tray menu together, because all three read the one array.
 pub(crate) fn screen_accels() -> Vec<(&'static str, String)> {
-    SCREENS
+    screens()
         .iter()
         .enumerate()
         .filter_map(|(index, (name, _, _))| Some((*name, screen_accel(index)?)))
@@ -123,7 +123,7 @@ pub(crate) fn wire(app: &Rc<App>, application: &adw::Application) {
         let Some(wanted) = parameter.and_then(glib::Variant::str) else {
             return;
         };
-        let Some((name, _, _)) = SCREENS.iter().find(|(name, _, _)| *name == wanted) else {
+        let Some((name, _, _)) = screens().into_iter().find(|(name, _, _)| *name == wanted) else {
             return;
         };
         target.stack.set_visible_child_name(name);
@@ -175,8 +175,8 @@ mod tests {
             "this shell attaches no accelerators at all"
         );
         assert!(
-            code.contains("SCREENS"),
-            "the accelerators must come from ui::SCREENS"
+            code.contains("screens()"),
+            "the accelerators must come from ui::screens()"
         );
         // The numbering is computed. A digit written out is the drift.
         for digit in '1'..='9' {
@@ -198,11 +198,11 @@ mod tests {
         let accels = screen_accels();
         assert_eq!(
             accels.len(),
-            SCREENS.len(),
+            screens().len(),
             "a screen without an accelerator, or one too many"
         );
         for (index, ((name, accel), (screen, _, _))) in
-            accels.iter().zip(SCREENS.iter()).enumerate()
+            accels.iter().zip(screens().iter()).enumerate()
         {
             assert_eq!(name, screen, "the accelerators are out of switcher order");
             assert_eq!(*accel, format!("<Control>{}", index + 1));
