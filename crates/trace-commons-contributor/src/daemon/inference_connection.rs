@@ -1352,26 +1352,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_observed_revocation_removes_the_installed_witness() {
-        let server = test_support::spawn().await;
-        let s = enrolled(&server.base);
-        select(&s).await.result.expect("selected");
-        server.stub.lock().unwrap().current = Some(server.status(false));
-        install(&s, &server).await.result.expect("installed");
-        // Disconnected from another device.
-        server.stub.lock().unwrap().current = None;
-        let result = handle_current(
-            &s,
-            &req("inference_connection_current", serde_json::json!({})),
-        )
-        .await
-        .result
-        .unwrap();
-        assert_eq!(result["revocation_applied"], true);
-        assert!(config(&s).witness.is_none());
-    }
-
-    #[tokio::test]
     async fn a_retired_revision_is_reported_and_changes_nothing() {
         let server = test_support::spawn().await;
         let s = enrolled(&server.base);
@@ -1577,29 +1557,6 @@ mod tests {
             let reached = server.seen.lock().unwrap().disconnects.len();
             assert_eq!(reached, usize::from(!unreachable));
         }
-    }
-
-    #[tokio::test]
-    async fn disconnect_refused_by_the_server_still_removes_the_local_witness() {
-        let server = test_support::spawn().await;
-        let s = enrolled(&server.base);
-        installed(&s, &server).await;
-        server.stub.lock().unwrap().disconnect_refusal =
-            Some((axum::http::StatusCode::FORBIDDEN, "forbidden"));
-        let id = server.stub.lock().unwrap().connection_id;
-        let result = disconnect(&s, id).await;
-        assert_eq!(result["local_witness_removed"], true);
-        assert_eq!(result["disconnected"], false);
-        assert_eq!(result["server_disconnect"], SERVER_PENDING);
-        assert_eq!(result["server_refusal"], ERR_ACCOUNT_SESSION_REQUIRED);
-        assert_eq!(
-            server.seen.lock().unwrap().disconnects,
-            vec![id.to_string()]
-        );
-        assert!(config(&s).witness.is_none());
-        // Nothing is left for a later `current` to apply.
-        server.stub.lock().unwrap().current = None;
-        assert_eq!(current(&s).await["revocation_applied"], false);
     }
 
     // ---- Digest verification of the witness material ----

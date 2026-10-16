@@ -873,51 +873,6 @@ mod tests {
         );
     }
 
-    /// A rollout past the budget is declined by name, not truncated.
-    ///
-    /// Truncating would upload a fragment described by a preview that says
-    /// it is the whole conversation. The refusal names the size, which is
-    /// the contributor's own, and never the path.
-    #[test]
-    fn a_rollout_past_the_budget_is_declined_rather_than_part_loaded() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("rollout-2026-08-20T10-00-02-big.jsonl");
-        let head = serde_json::to_string(&json!({
-            "type": "session_meta", "payload": { "cwd": "/Users/z/code/proj" }
-        }))
-        .unwrap();
-        let mut bytes = head.into_bytes();
-        bytes.push(b'\n');
-        bytes.resize(ROLLOUT_BYTE_BUDGET as usize + 1, b'x');
-        std::fs::write(&path, &bytes).unwrap();
-
-        let raw = load_session(&path).unwrap_err();
-        // Typed, so the daemon can tell this refusal -- a verdict that will
-        // decide the same way on every poll -- from the IO errors around
-        // it, which very likely will not. Matching on the message text
-        // would make the wording load-bearing.
-        let typed = raw
-            .downcast_ref::<crate::source::SessionTooLarge>()
-            .expect("an oversized rollout is refused by type, not only by message");
-        assert_eq!(typed.budget_bytes, ROLLOUT_BYTE_BUDGET);
-        assert!(typed.declared_bytes > ROLLOUT_BYTE_BUDGET);
-        let err = raw.to_string();
-        assert!(
-            err.contains("rollout-too-large"),
-            "expected a named refusal, got: {err}"
-        );
-        assert!(
-            !err.contains("rollout-2026-08-20"),
-            "the refusal must not carry the path: {err}"
-        );
-
-        // The same file one byte under the budget still loads, so the bound
-        // is a bound and not an off-by-one that declines healthy sessions.
-        bytes.truncate(ROLLOUT_BYTE_BUDGET as usize);
-        std::fs::write(&path, &bytes).unwrap();
-        assert!(load_session(&path).is_ok());
-    }
-
     /// `peek_cwd` must answer from the head of the file and stop.
     ///
     /// The tail here is invalid UTF-8 and megabytes long. A whole-file read

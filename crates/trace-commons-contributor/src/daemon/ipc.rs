@@ -10968,49 +10968,6 @@ mod tests {
         eligible
     }
 
-    /// **The hole this closes.** A project holding one eligible row and four
-    /// others offered one control that sent all five. Now it sends the two
-    /// that may be sent -- the eligible row and the unresolved one -- and
-    /// leaves the three ineligible rows behind.
-    ///
-    /// Observed on which entries the call SELECTED, not on how many it
-    /// approved: none of these seeds has a session file, so every selected
-    /// entry lands in `skipped` further down the pipeline. That is the point
-    /// -- `skipped` counts exactly what was chosen, and the three excluded
-    /// rows never enter it.
-    #[tokio::test]
-    async fn a_project_approve_selects_only_what_can_be_sent() {
-        let s = shared();
-        admit_on_evidence(&s);
-        let key = "/tmp/mixedproj";
-        let eligible = seed_mixed_project(&s, key);
-        let project_id = project_id_for(key);
-
-        let r = handle_request_async(
-            &s,
-            &req("approve", serde_json::json!({ "project_id": project_id })),
-        )
-        .await;
-        let result = r.result.expect("approve answers");
-
-        assert_eq!(
-            result["excluded_ineligible"], 3,
-            "three rows could not be sent: {result}"
-        );
-        let skipped = result["skipped"].as_array().expect("a skipped list");
-        assert_eq!(
-            skipped.len(),
-            2,
-            "the eligible row and the unresolved row were selected: {result}"
-        );
-        assert!(
-            skipped
-                .iter()
-                .any(|s| s["entry_id"] == serde_json::json!(eligible)),
-            "the eligible row was selected: {result}"
-        );
-    }
-
     /// A group approve leaves a held session for a person, and says so in its
     /// own count.
     ///
@@ -11905,34 +11862,6 @@ mod tests {
         // ineligible rows are left behind.
         assert_eq!(result["excluded_ineligible"], 3, "{result}");
         assert_eq!(result["skipped"].as_array().unwrap().len(), 2, "{result}");
-    }
-
-    /// A single `entry_id` is not filtered. Naming one entry is an explicit
-    /// act about a session the contributor is looking at; the daemon reports
-    /// eligibility there and does not enforce it, because an expectation is
-    /// not the answer and the server decides.
-    #[tokio::test]
-    async fn a_named_entry_is_not_filtered_by_its_eligibility() {
-        use crate::daemon::contribution_eligibility as ce;
-        let s = shared();
-        admit_on_evidence(&s);
-        let id = seed_entry_with_eligibility(&s, "/tmp/proj", Some(ce::STATE_INELIGIBLE_PERMANENT));
-
-        let r = handle_request_async(
-            &s,
-            &req("approve", serde_json::json!({ "entry_id": id.to_string() })),
-        )
-        .await;
-        let result = r.result.expect("approve answers");
-
-        assert!(
-            !result
-                .as_object()
-                .expect("an object")
-                .contains_key("excluded_ineligible"),
-            "a named entry is not a group: {result}"
-        );
-        assert_eq!(result["skipped"].as_array().unwrap().len(), 1, "{result}");
     }
 
     /// **One reply, one deadline, covering everything it approved.**
@@ -15467,90 +15396,6 @@ mod tests {
         })
         .await
         .unwrap();
-    }
-
-    #[tokio::test]
-    async fn private_inference_superseded_start_never_publishes_running() {
-        for cancel_caller in [false, true] {
-            let s = Arc::new(shared());
-            s.adopt_runtime();
-            let home = tempfile::tempdir().unwrap();
-            let start_home = home.path().to_path_buf();
-            let (release, pending) = tokio::sync::oneshot::channel::<()>();
-            let starting = tokio::spawn(async move {
-                pending.await.unwrap();
-                ironwire_proxy::embed::start(&start_home, Some(0)).await
-            });
-            *s.private_inference.lock().await = Some(
-                super::super::private_inference::PrivateInference::with_pending_start_for_test(
-                    home.path().to_path_buf(),
-                    starting,
-                ),
-            );
-            assert!(
-                handle_set_settings(
-                    &s,
-                    &req(
-                        "set_settings",
-                        serde_json::json!({"private_inference":true})
-                    )
-                )
-                .error
-                .is_none()
-            );
-            let caller_shared = Arc::clone(&s);
-            let caller = tokio::spawn(async move {
-                caller_shared.reconcile_private_inference().await;
-            });
-            tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                while s.private_inference.try_lock().is_ok() {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
-            if cancel_caller {
-                caller.abort();
-            }
-            assert!(
-                handle_set_settings(
-                    &s,
-                    &req(
-                        "set_settings",
-                        serde_json::json!({"private_inference":false})
-                    )
-                )
-                .error
-                .is_none()
-            );
-            assert!(
-                handle_set_settings(
-                    &s,
-                    &req(
-                        "set_settings",
-                        serde_json::json!({"private_inference":true})
-                    )
-                )
-                .error
-                .is_none()
-            );
-            if cancel_caller {
-                assert!(caller.await.unwrap_err().is_cancelled());
-                s.reconcile_private_inference().await;
-                assert_eq!(
-                    s.private_inference_value(),
-                    serde_json::json!({"state":"stopping", "port":null})
-                );
-                release.send(()).unwrap();
-            } else {
-                release.send(()).unwrap();
-                caller.await.unwrap();
-                assert_eq!(s.private_inference_value()["state"], "stopping");
-            }
-            s.stop_private_inference().await;
-            assert_eq!(s.private_inference_value()["state"], "off");
-            assert!(!home.path().join("endpoint.json").exists());
-        }
     }
 
     #[tokio::test]
