@@ -983,6 +983,10 @@ where
         };
         let dek = self.decryptor.unwrap_dek(wrapped_dek, &ctx)?;
         let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
+        // A pipeline run stores its envelope inside the pipeline artifact
+        // wrapper; a gate-path submission stores it bare.
+        let plaintext = crate::versioned_pipeline::pipeline_artifact_inner_bytes(&plaintext)?
+            .unwrap_or(plaintext);
         // A parser error can quote the input, so it is replaced by a label
         // built only from the schema side of the error.
         let envelope: TraceContributionEnvelope = serde_json::from_slice(&plaintext)
@@ -2033,6 +2037,51 @@ mod enclave_gate_service_tests {
                 "got: {err}"
             );
         }
+    }
+
+    /// A pipeline run stores the envelope inside the pipeline artifact
+    /// wrapper. The features are the inner envelope's, the same as for the
+    /// bare envelope; a wrapper that does not decode is refused by label.
+    #[test]
+    fn enclave_derive_estimate_features_reads_through_the_pipeline_wrapper() {
+        use base64::Engine as _;
+        use trace_commons_protocol::trace_contribution::TraceContributionEventType as T;
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
+        let tenant = TenantCtx::new("tenant-a");
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let plaintext = estimate_fixture_envelope(&[
+            (T::UserMessage, "make the estimate test pass", None),
+            (T::ToolCall, "cat src/lib.rs", Some("bash")),
+        ]);
+        let derive = |bytes: &[u8]| {
+            let ciphertext = aead_encrypt_with_dek(&dek, bytes).expect("encrypt fixture");
+            svc.derive_estimate_features(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+        };
+        let bare = derive(&plaintext).expect("bare envelope");
+        let wrapper = serde_json::to_vec(&serde_json::json!({
+            "schema": "trace_commons.pipeline_artifact_bytes.v1",
+            "bytes_base64": base64::engine::general_purpose::STANDARD.encode(&plaintext),
+        }))
+        .unwrap();
+        assert_eq!(derive(&wrapper).expect("wrapped envelope"), bare);
+
+        let broken = serde_json::to_vec(&serde_json::json!({
+            "schema": "trace_commons.pipeline_artifact_bytes.v1",
+            "bytes_base64": "not base64 SECRET",
+        }))
+        .unwrap();
+        let message = format!("{:#}", derive(&broken).expect_err("broken wrapper"));
+        assert!(
+            message.contains("pipeline_artifact_wrapper_invalid"),
+            "{message}"
+        );
+        assert!(!message.contains("SECRET"), "{message}");
     }
 
     /// The enclave path decrypts inside the service and returns exactly the
