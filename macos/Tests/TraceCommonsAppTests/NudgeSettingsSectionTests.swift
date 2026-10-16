@@ -13,7 +13,7 @@ final class NudgeSettingsSectionTests: XCTestCase {
         let store = NudgeSettingsStore(client: SampleDaemonClient(.normalDay))
         await store.load()
         XCTAssertEqual(store.rows.map(\.id), [
-            .suggestions, .menuBarMark, .notifications,
+            .suggestions, .menuBarMark, .settlementEstimate, .notifications,
             .notify("digest"), .notify("verdicts_landed"), .notify("idle_sessions"),
         ])
         XCTAssertTrue(store.rows.allSatisfy(\.isOn))
@@ -114,7 +114,6 @@ final class NudgeSettingsSectionTests: XCTestCase {
         await store.set(.suggestions, on: false)
         XCTAssertEqual(store.writeError, .unreachable)
     }
-
 
     func testSettingsShowTheEstimateSwitch() throws {
         let copy = NudgeCopy(table: [

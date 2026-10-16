@@ -56,20 +56,34 @@ final class NudgeCopyExportTests: XCTestCase {
         XCTAssertNil(NudgeSettings.digestHelp(fromJSON: TCCoreCopy.nudgeDigestHelpJSON(settingsJSON: nil)))
     }
 
+    /// A row's tags come from its `mission_fit` and `settlement_estimate`;
+    /// the points band in `credit_estimate` is never drawn (S8), even when
+    /// it says `drawn`.
     func testARowsTagsAreTheCoresWords() throws {
         let json = #"""
             {"pending":[{"entry_id":"e1","source":"codex","project_id":"p","project_label":"P","state":"pending",
               "mission_fit":1,
-              "credit_estimate":{"low":2.0,"high":4.5,"tier":"higher","calibration":"c","basis":"published","drawn":true}}]}
+              "credit_estimate":{"low":2.0,"high":4.5,"tier":"higher","calibration":"c","basis":"published","drawn":true},
+              "settlement_estimate":{"low_usd_micros":2000000,"high_usd_micros":6000000,"tier":"higher","drawn":true}}]}
             """#
         struct List: Decodable { let pending: [DaemonData.QueueEntry] }
         let entry = try JSONDecoder().decode(List.self, from: Data(json.utf8)).pending[0]
         let tags = try XCTUnwrap(NudgeEntryTags.decode(
             fromJSON: TCCoreCopy.nudgeEntryTagsJSON(entryJSON: NudgeEntryTags.input(for: entry))))
         XCTAssertEqual(tags.missionFit, "Fits a mission")
-        XCTAssertEqual(tags.estimateBand, "Estimate: about 2 to 4.5 of inference")
+        XCTAssertEqual(tags.estimateBand, "Estimate: about $2 to $6 of inference")
         XCTAssertEqual(tags.estimateTier, "Higher estimate")
         XCTAssertNotNil(tags.estimateExplainer)
+    }
+
+    /// A row carrying only the points band draws no estimate tag.
+    func testARowsPointsBandAloneDrawsNoEstimate() throws {
+        let json = #"{"mission_fit":1,"credit_estimate":{"low":2.0,"high":4.5,"tier":"higher","calibration":"c","basis":"published","drawn":true}}"#
+        let tags = try XCTUnwrap(NudgeEntryTags.decode(fromJSON: TCCoreCopy.nudgeEntryTagsJSON(entryJSON: json)))
+        XCTAssertEqual(tags.missionFit, "Fits a mission")
+        XCTAssertNil(tags.estimateBand)
+        XCTAssertNil(tags.estimateTier)
+        XCTAssertNil(tags.estimateExplainer)
     }
 
     /// An estimate the daemon does not draw, and no input at all, answer
@@ -79,7 +93,6 @@ final class NudgeCopyExportTests: XCTestCase {
         XCTAssertEqual(NudgeEntryTags.decode(fromJSON: TCCoreCopy.nudgeEntryTagsJSON(entryJSON: undrawn)), NudgeEntryTags())
         XCTAssertEqual(NudgeEntryTags.decode(fromJSON: TCCoreCopy.nudgeEntryTagsJSON(entryJSON: nil)), NudgeEntryTags())
     }
-
 
     /// The settlement estimate's keys all decode from the real table, and
     /// the line keeps its placeholders for the core to fill: a shell never
