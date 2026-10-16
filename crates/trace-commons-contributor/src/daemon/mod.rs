@@ -563,10 +563,8 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
     let mut token_cleanup_tasks = tokio::task::JoinSet::new();
     // The published estimate table's fetch schedule (OWNER DECISION E11).
     // A local of this loop, so nothing that answers a request can reach it.
-    let mut table_schedule = crate::credit_estimate_table::EstimateTableSchedule::starting(
-        Utc::now(),
-        crate::credit_estimate_table::random_draw(),
-    );
+    let mut table_schedule =
+        crate::credit_estimate_table::EstimateTableSchedule::starting(Utc::now());
     // The contribution-mission slot's fetch schedule: due on the first tick
     // with a config, then every `MISSION_SLOT_REFRESH`. A local of this loop
     // too.
@@ -4622,7 +4620,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shared = shared_with_ingest(dir.path(), &ingest);
         let start = at("2026-10-08T12:00:00Z");
-        let mut schedule = EstimateTableSchedule::starting(start, 0.0);
+        let mut schedule = EstimateTableSchedule::starting(start);
 
         refresh_estimate_table(&shared, start, &mut schedule).await;
         assert_eq!(hits.load(Ordering::SeqCst), 1);
@@ -4687,7 +4685,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shared = shared_with_ingest(dir.path(), &ingest);
         let start = at("2026-10-08T12:00:00Z");
-        let mut schedule = EstimateTableSchedule::starting(start, 0.0);
+        let mut schedule = EstimateTableSchedule::starting(start);
         refresh_estimate_table(&shared, start, &mut schedule).await;
         assert_eq!(
             shared.estimate_table.lock().unwrap().basis,
@@ -4718,12 +4716,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shared = shared_with_ingest(dir.path(), &ingest);
         let start = at("2026-10-08T12:00:00Z");
-        let mut schedule = EstimateTableSchedule::starting(start, 0.0);
+        let mut schedule = EstimateTableSchedule::starting(start);
         refresh_estimate_table(&shared, start, &mut schedule).await;
 
         let lapsed = start + ESTIMATE_TABLE_MAX_AGE + chrono::Duration::minutes(1);
         let mut rx = shared.events.subscribe();
-        let mut schedule = EstimateTableSchedule::starting(lapsed, 0.0);
+        let mut schedule = EstimateTableSchedule::starting(lapsed);
         refresh_estimate_table(&shared, lapsed, &mut schedule).await;
         let seen = published(&mut rx);
         assert!(seen.contains(ipc::EVENT_QUEUE_CHANGED), "{seen:?}");
@@ -4844,8 +4842,7 @@ mod tests {
         let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
         let shared = ipc::DaemonShared::load(store).unwrap();
         let start = at("2026-10-08T12:00:00Z");
-        let mut schedule =
-            crate::credit_estimate_table::EstimateTableSchedule::starting(start, 0.0);
+        let mut schedule = crate::credit_estimate_table::EstimateTableSchedule::starting(start);
         refresh_estimate_table(&shared, start, &mut schedule).await;
         assert_eq!(
             *shared.estimate_table.lock().unwrap(),

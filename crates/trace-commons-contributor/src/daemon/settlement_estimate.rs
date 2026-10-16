@@ -1143,7 +1143,7 @@ mod tests {
         assert!(r.error.is_none(), "{:?}", r.error);
         assert!(tick_with_sources(&s, now(), |_| Vec::new()).is_none());
 
-        let mut schedule = EstimateTableSchedule::starting(now(), 0.0);
+        let mut schedule = EstimateTableSchedule::starting(now());
         super::super::refresh_estimate_table(&s, now(), &mut schedule).await;
         assert!(
             s.settlement.lock().unwrap().table.is_some(),
@@ -1207,7 +1207,7 @@ mod tests {
         s.store.save_config(&cfg).unwrap();
         let queue_before = s.queue.lock().unwrap().all().to_vec();
 
-        let mut schedule = EstimateTableSchedule::starting(now(), 0.0);
+        let mut schedule = EstimateTableSchedule::starting(now());
         assert!(schedule.due(now()));
         super::super::refresh_estimate_table(&s, now(), &mut schedule).await;
         assert!(
