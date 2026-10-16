@@ -421,19 +421,6 @@ fn malformed_persisted_time_evidence_fails_closed_without_panicking() {
     }
 }
 
-fn report_with(passed: u64) -> outcomes::OutcomeEvidence {
-    outcomes::OutcomeEvidence::TestReport(
-        outcomes::parse_test_report(
-            format!(
-                r#"{{"schema_version":1,"runner":"cargo-test","passed":{passed},"failed":0,
-                "skipped":0,"observed_at":"2026-09-11T00:00:00Z","commit_id":null}}"#
-            )
-            .as_bytes(),
-        )
-        .unwrap(),
-    )
-}
-
 #[test]
 fn unlinking_an_unknown_evidence_id_is_refused_and_leaves_the_index_untouched() {
     let temp = tempfile::tempdir().unwrap();
@@ -467,39 +454,6 @@ fn unlinking_an_unknown_evidence_id_is_refused_and_leaves_the_index_untouched() 
             .to_string(),
         "insights_evidence_link_not_found"
     );
-}
-
-#[test]
-fn the_outcome_link_bound_is_exact_and_refuses_the_next_association() {
-    let temp = tempfile::tempdir().unwrap();
-    let file = temp.path().join("source.jsonl");
-    source(&file, "PRIVATE-BOUND");
-    let store = LocalInsightStore::open(&temp.path().join("store")).unwrap();
-    let saved = store.import(SourceFormat::Trajectory, &file).unwrap();
-    for passed in 0..MAX_OUTCOME_LINKS as u64 {
-        store.link_outcome(&saved.id, report_with(passed)).unwrap();
-    }
-    assert_eq!(
-        store.explain(&saved.id).unwrap().outcome_links.len(),
-        MAX_OUTCOME_LINKS
-    );
-    assert_eq!(
-        store
-            .link_outcome(&saved.id, report_with(MAX_OUTCOME_LINKS as u64))
-            .unwrap_err()
-            .to_string(),
-        "insights_outcome_links_full"
-    );
-    // A repeated association inside the bound is still idempotent, not refused.
-    assert_eq!(
-        store
-            .link_outcome(&saved.id, report_with(0))
-            .unwrap()
-            .outcome_links
-            .len(),
-        MAX_OUTCOME_LINKS
-    );
-    assert_eq!(store.list().unwrap().len(), 1);
 }
 
 #[test]

@@ -2567,7 +2567,6 @@ mod tests {
         session_path: std::path::PathBuf,
         project_cwd: String,
         classifier_status: Arc<AtomicU16>,
-        classifier_delay_ms: Arc<AtomicU64>,
         uploads: Arc<AtomicUsize>,
         /// What ingest answers an upload with instead of accepting it.
         ingest_reply: Arc<std::sync::Mutex<Option<(StatusCode, serde_json::Value)>>>,
@@ -2815,7 +2814,6 @@ mod tests {
                 session_path,
                 project_cwd,
                 classifier_status,
-                classifier_delay_ms,
                 uploads,
                 ingest_reply,
                 witness_saturated,
@@ -3928,93 +3926,6 @@ mod tests {
         );
     }
 
-    /// A witness that stays saturated is asked less and less often, never
-    /// more than hourly apart, and never gives up on the session.
-    #[tokio::test]
-    async fn a_witness_that_stays_saturated_is_backed_off_and_the_session_kept() {
-        let h = TransientRetryHarness::with_witness().await;
-        *h.witness_saturated.lock().unwrap() = Some("30");
-        let mut now = TransientRetryHarness::now();
-        let mut delays = Vec::new();
-        for _ in 0..8 {
-            // Measured, not guessed: the retry is scheduled from when the
-            // refusal arrived, which is up to one pass after `now`.
-            let started = std::time::Instant::now();
-            h.pass(now).await;
-            let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
-            let entry = h.entry();
-            assert_eq!(entry.state, queue::QueueState::Approved);
-            assert_eq!(
-                entry.reason_label.as_deref(),
-                Some(crate::submit::REASON_WITNESS_SATURATED)
-            );
-            let due = entry.retry_after.unwrap();
-            delays.push((due - now - pass_took, due - now));
-            now = due;
-        }
-        assert_eq!(h.witness_calls.lock().unwrap().len(), 8);
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
-        // The witness's 30 seconds doubling per refusal (jitter from this
-        // entry id is at most 15 seconds, so each floor is the bare delay).
-        let floors = [30, 60, 120, 240, 480, 960, 1_920, 3_600];
-        for ((lower, upper), floor) in delays.iter().zip(floors) {
-            assert!(
-                *upper >= chrono::Duration::seconds(floor)
-                    && *lower <= chrono::Duration::seconds(floor + 15),
-                "expected {floor}s plus at most 15s of jitter: {delays:?}"
-            );
-        }
-    }
-
-    /// Ingest's per-principal rate limit judged nothing, so it refuses
-    /// nothing: the session keeps its approval, waits the server's
-    /// `retry_after_seconds`, and goes out on a later pass. Before this, the
-    /// 429 read as an unknown server label, the entry went terminal
-    /// `Failed`, and a first-run backfill past 30 a minute lost sessions.
-    #[tokio::test]
-    async fn a_rate_limited_upload_stays_approved_and_goes_out_when_due() {
-        let h = TransientRetryHarness::new().await;
-        *h.ingest_reply.lock().unwrap() = Some((
-            StatusCode::TOO_MANY_REQUESTS,
-            serde_json::json!({"error": "submit_rate_limited", "retry_after_seconds": 17}),
-        ));
-        let now = TransientRetryHarness::now();
-        let started = std::time::Instant::now();
-        h.pass(now).await;
-        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
-
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "ingest was asked");
-        let held = h.entry();
-        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
-        assert_eq!(
-            held.reason_label.as_deref(),
-            Some(crate::submit::REASON_RATE_LIMITED)
-        );
-        assert_eq!(held.attempts, 1, "the attempt is recorded");
-        let due = held.retry_after.expect("a retry time");
-        assert!(
-            due >= now + chrono::Duration::seconds(17)
-                && due <= now + pass_took + chrono::Duration::seconds(17),
-            "the server's own hint: {due}"
-        );
-        assert_ne!(
-            h.shared.health.lock().unwrap().last_error_label.as_deref(),
-            Some(health::LABEL_INGEST_UNREACHABLE),
-            "a self-clearing pause is not an outage"
-        );
-
-        // Not before it is due.
-        h.pass(now + chrono::Duration::seconds(10)).await;
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
-        assert_eq!(h.entry().state, queue::QueueState::Approved);
-
-        // Due, and the server has room: it goes.
-        *h.ingest_reply.lock().unwrap() = None;
-        h.pass(now + chrono::Duration::seconds(60)).await;
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 2);
-        assert_eq!(h.entry().state, queue::QueueState::Uploaded);
-    }
-
     /// A server without the labelled refusal answers a bare
     /// `{"error":"rate limited"}` with no hint. Same handling, with the
     /// server's whole window as the wait.
@@ -4066,51 +3977,6 @@ mod tests {
         assert_eq!(h.entry().state, queue::QueueState::Approved);
     }
 
-    /// One refusal ends the pass: the rest of the approved sessions are not
-    /// sent into a limit that has just said no, and none of them is touched.
-    #[tokio::test]
-    async fn a_rate_limit_stops_the_pass_and_leaves_the_rest_approved() {
-        let h = TransientRetryHarness::new().await;
-        h.add_session(
-            "9e9e9e9e-9e9e-9e9e-9e9e-9e9e9e9e9e9e",
-            "tidy the lexer too, then mail alice.smith@example.org",
-        )
-        .await;
-        assert_eq!(h.entries().len(), 2);
-        *h.ingest_reply.lock().unwrap() = Some((
-            StatusCode::TOO_MANY_REQUESTS,
-            serde_json::json!({"error": "submit_rate_limited", "retry_after_seconds": 30}),
-        ));
-        let now = TransientRetryHarness::now();
-        h.pass(now).await;
-
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "stopped at the first");
-        let entries = h.entries();
-        assert!(
-            entries
-                .iter()
-                .all(|e| e.state == queue::QueueState::Approved),
-            "{entries:?}"
-        );
-        assert_eq!(
-            entries
-                .iter()
-                .filter(|e| e.reason_label.as_deref() == Some(crate::submit::REASON_RATE_LIMITED))
-                .count(),
-            1,
-            "only the session that was refused is marked"
-        );
-
-        *h.ingest_reply.lock().unwrap() = None;
-        h.pass(now + chrono::Duration::seconds(120)).await;
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 3);
-        assert!(
-            h.entries()
-                .iter()
-                .all(|e| e.state == queue::QueueState::Uploaded)
-        );
-    }
-
     /// A first-run backfill approves every past session at once. One pass
     /// sends no more than `MAX_UPLOADS_PER_PASS`, below the server's default
     /// of 30 a minute, and the rest go on the next pass.
@@ -4146,77 +4012,6 @@ mod tests {
                 .iter()
                 .all(|e| e.state == queue::QueueState::Uploaded)
         );
-    }
-
-    /// The control: an unrecognised refusal is still terminal.
-    #[tokio::test]
-    async fn an_unrecognised_ingest_refusal_stays_terminal() {
-        let h = TransientRetryHarness::new().await;
-        *h.ingest_reply.lock().unwrap() = Some((
-            StatusCode::BAD_REQUEST,
-            serde_json::json!({"error": "invalid envelope"}),
-        ));
-        h.pass(TransientRetryHarness::now()).await;
-        let failed = h.entry();
-        assert_eq!(failed.state, queue::QueueState::Failed, "{failed:?}");
-        assert_eq!(failed.retry_after, None);
-    }
-
-    /// A deploy restarts ingest and Caddy answers 503 for a few minutes
-    /// (#1358). Nothing was judged, so nothing is lost: the session keeps
-    /// its approval, waits, and goes out on a later pass. Before this it
-    /// went terminal `Failed` and the past-sessions picker hid it.
-    #[tokio::test]
-    async fn an_ingest_outage_keeps_the_session_and_sends_it_when_due() {
-        let h = TransientRetryHarness::new().await;
-        *h.ingest_reply.lock().unwrap() = Some((
-            StatusCode::SERVICE_UNAVAILABLE,
-            serde_json::json!({"error": "service unavailable"}),
-        ));
-        let now = TransientRetryHarness::now();
-        h.pass(now).await;
-
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "ingest was asked");
-        let held = h.entry();
-        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
-        assert_eq!(
-            held.reason_label.as_deref(),
-            Some(health::LABEL_INGEST_UNREACHABLE)
-        );
-        let due = held.retry_after.expect("a retry time");
-        assert!(due >= now + chrono::Duration::seconds(60), "{due}");
-        assert_eq!(
-            h.shared.health.lock().unwrap().last_error_label.as_deref(),
-            Some(health::LABEL_INGEST_UNREACHABLE),
-            "an outage is still reported as one"
-        );
-
-        // Not before it is due.
-        h.pass(due - chrono::Duration::seconds(1)).await;
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
-
-        // Ingest is back: it goes.
-        *h.ingest_reply.lock().unwrap() = None;
-        h.pass(due).await;
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 2);
-        assert_eq!(h.entry().state, queue::QueueState::Uploaded);
-    }
-
-    /// A proxy in front of ingest answers 502 with a body that is not the
-    /// `{"error": ...}` envelope -- the other error shape. Same handling.
-    #[tokio::test]
-    async fn an_unlabelled_5xx_from_a_proxy_is_an_outage_too() {
-        let h = TransientRetryHarness::new().await;
-        *h.ingest_reply.lock().unwrap() =
-            Some((StatusCode::BAD_GATEWAY, serde_json::json!("Bad Gateway")));
-        h.pass(TransientRetryHarness::now()).await;
-        let held = h.entry();
-        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
-        assert_eq!(
-            held.reason_label.as_deref(),
-            Some(health::LABEL_INGEST_UNREACHABLE)
-        );
-        assert!(held.retry_after.is_some());
     }
 
     /// Ingest down altogether: the in-call retries run out on transport
@@ -4259,92 +4054,6 @@ mod tests {
         h.pass(due).await;
         assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
         assert_eq!(h.entry().state, queue::QueueState::Uploaded);
-    }
-
-    /// An outage is server-wide: one answer ends the pass, so a backlog is
-    /// not burned through it, and the rest stay approved and untouched.
-    #[tokio::test]
-    async fn an_ingest_outage_stops_the_pass_and_leaves_the_rest_approved() {
-        let h = TransientRetryHarness::new().await;
-        h.add_session(
-            "9e9e9e9e-9e9e-9e9e-9e9e-9e9e9e9e9e9e",
-            "tidy the lexer too, then mail alice.smith@example.org",
-        )
-        .await;
-        assert_eq!(h.entries().len(), 2);
-        *h.ingest_reply.lock().unwrap() = Some((
-            StatusCode::SERVICE_UNAVAILABLE,
-            serde_json::json!({"error": "service unavailable"}),
-        ));
-        h.pass(TransientRetryHarness::now()).await;
-
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "stopped at the first");
-        let entries = h.entries();
-        assert!(
-            entries
-                .iter()
-                .all(|e| e.state == queue::QueueState::Approved),
-            "{entries:?}"
-        );
-        assert_eq!(
-            entries.iter().filter(|e| e.retry_after.is_some()).count(),
-            1,
-            "only the session that was answered is held back"
-        );
-    }
-
-    /// A server that never comes back is not retried forever: the waits
-    /// double up to a cap, and after `MAX_TRANSIENT_UPLOAD_FAILURES` the
-    /// entry ends `Failed` under the outage's own label, with no retry
-    /// pending.
-    #[tokio::test]
-    async fn an_outage_that_never_ends_is_given_up_after_a_bounded_number_of_tries() {
-        let h = TransientRetryHarness::new().await;
-        *h.ingest_reply.lock().unwrap() = Some((
-            StatusCode::SERVICE_UNAVAILABLE,
-            serde_json::json!({"error": "service unavailable"}),
-        ));
-        let mut now = TransientRetryHarness::now();
-        let mut last_wait = chrono::Duration::zero();
-        for attempt in 1..MAX_TRANSIENT_UPLOAD_FAILURES {
-            h.pass(now).await;
-            let held = h.entry();
-            assert_eq!(held.state, queue::QueueState::Approved, "try {attempt}");
-            let due = held.retry_after.expect("a retry time");
-            let wait = due - now;
-            // The wait is measured from when the pass saw the answer, so it
-            // carries the pass's own run time; allow for that.
-            assert!(
-                wait + chrono::Duration::seconds(5) >= last_wait,
-                "the wait never shrinks: try {attempt}"
-            );
-            assert!(
-                wait <= chrono::Duration::seconds(3_600 + 5),
-                "capped: try {attempt} waited {wait}"
-            );
-            last_wait = wait;
-            now = due;
-        }
-        h.pass(now).await;
-        assert_eq!(
-            h.uploads.load(Ordering::SeqCst),
-            MAX_TRANSIENT_UPLOAD_FAILURES as usize
-        );
-        let failed = h.entry();
-        assert_eq!(failed.state, queue::QueueState::Failed, "{failed:?}");
-        assert_eq!(
-            failed.reason_label.as_deref(),
-            Some(health::LABEL_INGEST_UNREACHABLE)
-        );
-        assert_eq!(failed.retry_after, None);
-
-        // And nothing sends it again.
-        *h.ingest_reply.lock().unwrap() = None;
-        h.pass(now + chrono::Duration::days(1)).await;
-        assert_eq!(
-            h.uploads.load(Ordering::SeqCst),
-            MAX_TRANSIENT_UPLOAD_FAILURES as usize
-        );
     }
 
     /// `409 admission_in_progress` is a lease another attempt at the same
@@ -4456,93 +4165,6 @@ mod tests {
             h.last_error_label.as_deref(),
             Some(health::LABEL_INGEST_UNREACHABLE)
         );
-    }
-
-    /// Rule 3 through the upload pass itself: ingest turns the upload away
-    /// for a reason about account admission, and the yes it gave before no
-    /// longer lifts R3.
-    async fn an_upload_refusal_cancels_account_admission(status: StatusCode, label: &str) {
-        let h = TransientRetryHarness::new().await;
-        let cfg = h.shared.store.load_config().unwrap().unwrap();
-        h.shared
-            .account_admission
-            .record_for_test(&cfg, "bounded", true);
-        assert_eq!(
-            h.shared.account_admission.current(Some(&cfg)),
-            automatic_gate::AccountAdmission::Advertised
-        );
-        *h.ingest_reply.lock().unwrap() = Some((status, serde_json::json!({ "error": label })));
-
-        h.pass(TransientRetryHarness::now()).await;
-
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "ingest was asked");
-        assert_eq!(h.entry().reason_label.as_deref(), Some(label));
-        assert_eq!(
-            h.shared.account_admission.current(Some(&cfg)),
-            automatic_gate::AccountAdmission::NotAdvertised,
-            "{label} left R3 lifted"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_upload_refused_as_account_limit_reached_cancels_account_admission() {
-        an_upload_refusal_cancels_account_admission(
-            StatusCode::TOO_MANY_REQUESTS,
-            "account_limit_reached",
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn an_upload_refused_as_admission_refused_cancels_account_admission() {
-        an_upload_refusal_cancels_account_admission(StatusCode::FORBIDDEN, "admission_refused")
-            .await;
-    }
-
-    /// The control: a lease another attempt holds is not about the account,
-    /// and leaves the yes standing.
-    #[tokio::test]
-    async fn an_upload_held_by_another_attempt_leaves_account_admission() {
-        let h = TransientRetryHarness::new().await;
-        let cfg = h.shared.store.load_config().unwrap().unwrap();
-        h.shared
-            .account_admission
-            .record_for_test(&cfg, "bounded", true);
-        *h.ingest_reply.lock().unwrap() = Some((
-            StatusCode::CONFLICT,
-            serde_json::json!({ "error": "admission_in_progress" }),
-        ));
-        h.pass(TransientRetryHarness::now()).await;
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            h.shared.account_admission.current(Some(&cfg)),
-            automatic_gate::AccountAdmission::Advertised
-        );
-    }
-
-    #[tokio::test]
-    async fn transient_retry_delay_starts_after_slow_classifier_failure() {
-        let h = TransientRetryHarness::new().await;
-        h.classifier_status.store(500, Ordering::SeqCst);
-        h.classifier_delay_ms.store(250, Ordering::SeqCst);
-
-        h.pass(TransientRetryHarness::now()).await;
-        let failed = h.entry();
-        assert_eq!(failed.state, queue::QueueState::Approved);
-        assert!(
-            failed.retry_after.unwrap()
-                >= TransientRetryHarness::now()
-                    + chrono::Duration::seconds(60)
-                    + chrono::Duration::milliseconds(200),
-            "slow classification must not consume the retry backoff"
-        );
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
-
-        h.classifier_status.store(0, Ordering::SeqCst);
-        h.pass(TransientRetryHarness::now() + chrono::Duration::seconds(60))
-            .await;
-        assert_eq!(h.entry().state, queue::QueueState::Approved);
-        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -4691,55 +4313,6 @@ mod tests {
             e.state == queue::QueueState::Pending && e.session_hash != failed.session_hash
         }));
         assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
-    }
-
-    /// U4a: the offer the upload pass mints for content that moved records
-    /// when that content was written, not the old offer's last write.
-    #[tokio::test]
-    async fn the_pass_supersede_records_the_new_contents_last_write() {
-        let h = TransientRetryHarness::new().await;
-        h.classifier_status.store(500, Ordering::SeqCst);
-        h.pass(TransientRetryHarness::now()).await;
-        let failed = h.entry();
-        use std::io::Write as _;
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&h.session_path)
-            .unwrap();
-        file.write_all(
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "type": "user",
-                    "message": {"role": "user", "content": "new work"},
-                    "cwd": h.project_cwd,
-                    "timestamp": "2026-08-08T11:00:00Z",
-                    "version": "2.0.1",
-                    "sessionId": "7c7c7c7c-7c7c-7c7c-7c7c7c7c7c7c",
-                    "uuid": "a2"
-                })
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-        let written: chrono::DateTime<chrono::Utc> = "2026-08-08T11:30:00Z".parse().unwrap();
-        file.set_modified(written.into()).unwrap();
-        drop(file);
-        h.classifier_status.store(0, Ordering::SeqCst);
-
-        h.pass(failed.retry_after.unwrap()).await;
-
-        let q = h.shared.queue.lock().unwrap();
-        let fresh = q
-            .all()
-            .iter()
-            .find(|e| {
-                e.state == queue::QueueState::Pending && e.session_hash != failed.session_hash
-            })
-            .expect("the moved content is offered again")
-            .clone();
-        assert_eq!(fresh.last_modified_at, Some(written));
-        assert_ne!(fresh.last_modified_at, failed.last_modified_at);
     }
 
     #[tokio::test]

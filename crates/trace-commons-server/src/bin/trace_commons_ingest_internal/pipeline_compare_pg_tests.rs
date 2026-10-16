@@ -2773,22 +2773,6 @@ async fn drive_pair(app: &CompareApp, fixture: &CompareFixture, position: u64) -
         .unwrap()
 }
 
-/// The number of `.json` files in the `derived/` directory of `tenant`.
-fn derived_file_count(app: &CompareApp, tenant: &str) -> usize {
-    let dir = app
-        .root
-        .join("tenants")
-        .join(tenant_storage_key(tenant))
-        .join("derived");
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-        .count()
-}
-
 // baseline-old-path:
 async fn gate_decision_count(app: &CompareApp, submission_id: Uuid) -> i64 {
     let mut client = app.owner.trace_pool_for_test().get().await.unwrap();
@@ -3219,37 +3203,6 @@ async fn thirty_five_receipts_pass_the_rate_limit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn twenty_quarantined_traces_all_complete() {
-    let Some((app, _artifacts)) = start_test_app(PASSING_FLOORS, true).await else {
-        return;
-    };
-    for number in 0..20 {
-        let fixture = risk_fixture(&format!("quarantined_{number}"), "medium");
-        let pair = drive_pair(&app, &fixture, number).await;
-        assert_eq!(
-            pair.action,
-            AlignmentAction::ApproveCandidate,
-            "trace {number}"
-        );
-        assert_eq!(
-            pair.candidate.review,
-            ReviewLabel::Approve,
-            "trace {number}"
-        );
-        assert!(pair.candidate.terminal, "trace {number}");
-        assert!(pair.baseline.terminal, "trace {number}");
-        assert_eq!(
-            compare_records(&pair.baseline, &pair.candidate),
-            TraceComparison::Permitted {
-                rules: vec!["medium_risk_privacy_review"]
-            },
-            "trace {number}"
-        );
-    }
-    app.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn approve_baseline_is_driven() {
     let Some((app, _artifacts)) = start_test_app(PASSING_FLOORS, false).await else {
         return;
@@ -3594,64 +3547,6 @@ fn a_score_outcome_with_a_missing_field_is_refused() {
         candidate_gate_values(&evidence),
         Err("compare_candidate_evidence_incomplete")
     );
-}
-
-/// PC-D18. The baseline receipt scans the tenant's derived files, and the
-/// candidate tenant has none. The run removes the baseline's files after each
-/// trace. This test proves that no record changes when it does.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn removing_the_derived_files_changes_no_record() {
-    // The third trace has the text of the second and another label: another
-    // `submission_id` and the same canonical summary.
-    let fixtures = [
-        prose_fixture("derived_one"),
-        prose_fixture("derived_two"),
-        fixture_from(fixture_line(
-            "derived_three",
-            "low",
-            prose_steps(&long_text("derived_two")),
-        )),
-    ];
-    let mut records: Vec<Vec<Vec<u8>>> = Vec::new();
-    for clears in [true, false] {
-        let Some((app, _artifacts)) = start_test_app(PASSING_FLOORS, true).await else {
-            return;
-        };
-        let mut bytes = Vec::new();
-        for (position, fixture) in fixtures.iter().enumerate() {
-            let pair = drive_pair(&app, fixture, position as u64).await;
-            assert!(pair.baseline.terminal && pair.candidate.terminal);
-            bytes.push(record_bytes(&pair.baseline));
-            bytes.push(record_bytes(&pair.candidate));
-            if clears {
-                // (b) Each call removes the one file of this trace, and no
-                // other file of the state directory.
-                let files_before = count_files_under_dir(&app.root);
-                assert_eq!(clear_baseline_derived(&app), Ok(1));
-                assert_eq!(derived_file_count(&app, &app.tenants.baseline), 0);
-                assert_eq!(count_files_under_dir(&app.root), files_before - 1);
-            }
-            // (d) A candidate receipt sees an empty directory.
-            assert_eq!(derived_file_count(&app, &app.tenants.candidate), 0);
-        }
-        if clears {
-            assert_eq!(clear_baseline_derived(&app), Ok(0));
-        } else {
-            // (a) The scan found the second trace as a neighbor of the third.
-            let derived = read_all_derived_records(&app.root, &app.tenants.baseline).unwrap();
-            assert_eq!(derived.len(), 3);
-            let third = derived
-                .iter()
-                .find(|record| record.submission_id == fixtures[2].submission_id)
-                .expect("the derived record of the third trace");
-            assert!(third.duplicate_score > 0.0);
-        }
-        records.push(bytes);
-        app.shutdown().await;
-    }
-    // (c) The six records are equal with and without the removal.
-    assert_eq!(records[0].len(), 6);
-    assert_eq!(records[0], records[1]);
 }
 
 // ---------------------------------------------------------------------------

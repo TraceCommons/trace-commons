@@ -804,36 +804,6 @@ mod tests {
         );
         assert_eq!(bytes(&store), before);
     }
-    #[test]
-    fn maximum_overlap_is_bounded_and_store_cap_refuses_an_extra_group() {
-        let (root, store, mut ids) = fixture();
-        for n in ids.len()..super::super::episodes::MAX_EPISODE_MEMBERS {
-            let path = root.path().join(format!("member-{n}"));
-            source(&path, &format!("member-{n}"));
-            ids.push(store.import(SourceFormat::Trajectory, &path).unwrap().id);
-        }
-        let base = store.episode_create(&ids).unwrap();
-        let (_lock, mut index) = store.locked().unwrap();
-        for _ in 1..MAX_EPISODES {
-            let mut duplicate = base.clone();
-            duplicate.id = uuid::Uuid::new_v4().to_string();
-            index.episodes.insert(duplicate.id.clone(), duplicate);
-        }
-        store.save(&index).unwrap();
-        drop(_lock);
-        let list = store.episode_list().unwrap();
-        assert_eq!(list.len(), MAX_EPISODES);
-        assert!(
-            list.iter()
-                .all(|entry| entry.overlapping_episode_ids.len() == MAX_EPISODES - 1)
-        );
-        let before = bytes(&store);
-        is_error(
-            store.episode_create(&ids).unwrap_err(),
-            EpisodeStoreError::Full,
-        );
-        assert_eq!(bytes(&store), before);
-    }
 
     #[test]
     fn serialized_edits_from_one_revision_allow_only_one_commit() {

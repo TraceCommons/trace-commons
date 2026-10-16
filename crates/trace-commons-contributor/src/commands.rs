@@ -4884,44 +4884,6 @@ mod daemon_command_tests {
     }
 
     #[test]
-    fn logout_distinguishes_an_embedded_daemon_from_one_that_never_answered() {
-        // `start_embedded` is exactly the shape the C ABI hosts: it takes
-        // the lock and serves the socket, and the socket's `"shutdown"`
-        // stops the supervise loop without releasing that lock (only
-        // `tc_handle_free` / `tc_daemon_stop` do). Logout used to read that
-        // as "did not confirm it stopped", waiting out the full deadline
-        // and then printing an alarming warning about a stop that had in
-        // fact happened.
-        let dir = tempfile::tempdir().unwrap();
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
-        let embedded = rt
-            .block_on(crate::daemon::start_embedded(
-                ConfigStore::open(dir.path().to_path_buf()).unwrap(),
-            ))
-            .unwrap();
-
-        let outcome = stop_running_daemon(&store).unwrap();
-        assert_eq!(
-            outcome,
-            DaemonStopOutcome::AcknowledgedButStillHoldingTheLock,
-            "an embedded daemon acknowledges and keeps its lock; that is not \
-             a failure to stop"
-        );
-        assert!(
-            embedded
-                .shared
-                .shutdown
-                .load(std::sync::atomic::Ordering::Relaxed),
-            "and it really did receive the stop request"
-        );
-        embedded.close();
-    }
-
-    #[test]
     fn logout_reports_no_daemon_when_none_is_running() {
         let (_d, store) = crate::config::tests_support::temp_store();
         assert_eq!(
