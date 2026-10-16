@@ -85,6 +85,7 @@ pub mod queue;
 pub mod remembered_passkeys;
 pub mod second_look;
 pub mod settings;
+pub mod settlement_estimate;
 pub mod settlement_scan;
 pub mod skill_loop;
 pub mod state;
@@ -640,6 +641,11 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 if watcher::tick(shared, now).await.is_err() {
                     tracing::warn!(pass = "watch", "daemon pass failed");
                 }
+                // The settlement estimate's scan, when one is due. Started
+                // off the workers and not awaited, so a large machine never
+                // holds up this tick; it reads and sends nothing but local
+                // files, so pause and dry-run do not hold it back.
+                let _ = settlement_estimate::tick(shared, now);
                 expire_and_digest(shared, now);
                 // Everything above is read-only bookkeeping; uploading is
                 // what dry-run withholds.
@@ -1787,9 +1793,10 @@ async fn refresh_estimate_table(
     let Ok(origin) = crate::config::ingest_origin_url(&cfg.ingest_url, "/") else {
         return;
     };
-    let outcome = match EstimateTableClient::new(origin.as_str(), cfg.allowed_hosts.as_deref()) {
+    let client = EstimateTableClient::new(origin.as_str(), cfg.allowed_hosts.as_deref());
+    let outcome = match &client {
         Ok(client) => client.fetch().await,
-        Err(refused) => Err(refused),
+        Err(refused) => Err(*refused),
     };
     let before = {
         let mut slot = shared.estimate_table.lock().expect("estimate lock");
@@ -1801,6 +1808,20 @@ async fn refresh_estimate_table(
     // in force only renews its age and changes nothing they see, but a
     // refetch of one that had expired brings it back.
     shared.publish_estimate_in_force_change(now, Some(before));
+    // The settlement table rides this same fetch and schedule; it has none
+    // of its own. Skipped while the settlement estimate is switched off.
+    let settlement_on = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .settlement_estimate_enabled;
+    if settlement_on {
+        let settlement = match &client {
+            Ok(client) => client.fetch_settlement().await,
+            Err(refused) => Err(*refused),
+        };
+        settlement_estimate::apply_table_fetch(shared, settlement);
+    }
 }
 
 /// How long after an upload the server is asked for verdicts.

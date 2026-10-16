@@ -629,6 +629,13 @@ pub const EVENT_USAGE_CHANGED: &str = "usage_changed";
 /// the daemon's own high-water mark. Counts only: `{newly_accepted,
 /// newly_held, newly_final}`. Always followed by `status_changed`.
 pub const EVENT_HISTORY_CHANGED: &str = "history_changed";
+/// The machine-wide settlement estimate on `status.settlement_estimate`
+/// changed as a reader draws it: the rounded band, its "up to" form, or the
+/// table or pricing it came from -- or it appeared or went away. A re-scan
+/// that moves the unrounded total without moving the rounded band publishes
+/// nothing. `{}`; always followed by `status_changed`. See
+/// `daemon::settlement_estimate`.
+pub const EVENT_SETTLEMENT_ESTIMATE_CHANGED: &str = "settlement_estimate_changed";
 
 /// A standalone re-engagement notification (nudge design section 5, "Knowing
 /// a standalone will render"). Opt-in: written only to a connection whose
@@ -1036,6 +1043,10 @@ pub struct DaemonShared {
     /// account-scoped, so `unenroll` leaves it. A leaf lock: read by cloning
     /// before any other lock here is taken.
     pub(crate) estimate_table: Mutex<EstimateTableSlot>,
+    /// The settlement estimate: its table, rescan schedule, and the band on
+    /// `status.settlement_estimate`. A leaf lock: nothing is locked while it
+    /// is held. See `daemon::settlement_estimate`.
+    pub(crate) settlement: Mutex<super::settlement_estimate::SettlementEstimateState>,
     /// Previews being built outside [`Self::previews`]: the preview sheet,
     /// a card and a witness review, each counted for as long as it builds
     /// (see [`Self::preview_build_started`]). With the scheduler's own
@@ -1431,6 +1442,7 @@ impl DaemonShared {
             insights_counter,
             mission_catalogue: Mutex::new(None),
             estimate_table: Mutex::new(EstimateTableSlot::built_in()),
+            settlement: Mutex::new(Default::default()),
             preview_builds: std::sync::atomic::AtomicUsize::new(0),
             backfill_tried: Mutex::new(std::collections::HashSet::new()),
         })
@@ -2304,6 +2316,18 @@ impl DaemonShared {
         let view = serde_json::json!({
             "nudge": status.get("nudge"),
             "idle_sessions": status.get("idle_sessions"),
+            // A settlement table ageing past its window hides the estimate
+            // by the clock alone. Only what a reader draws: the counts and
+            // `estimated_at` move with every scan and are not drawn.
+            "settlement_estimate": status.get("settlement_estimate").map(|e| {
+                serde_json::json!({
+                    "low_usd_micros": e.get("low_usd_micros"),
+                    "high_usd_micros": e.get("high_usd_micros"),
+                    "up_to": e.get("up_to"),
+                    "table_version": e.get("table_version"),
+                    "pricing_version": e.get("pricing_version"),
+                })
+            }),
         });
         let changed = {
             let mut last = self
@@ -2404,6 +2428,9 @@ impl DaemonShared {
         // the built-in one (OWNER DECISION E11).
         let slot = self.estimate_table.lock().expect("estimate lock").clone();
         let estimate_table = slot.in_force(now);
+        // The settlement estimate: the settings switch, then its own leaf
+        // lock, each released before the policy and queue section.
+        let settlement_estimate = super::settlement_estimate::status_value(self, now);
         // Policy, then queue: the order every method above follows. Both
         // counts below come from this one queue guard, so `decisions_owed`
         // and `queue_depth` can never describe two different queues. The
@@ -2683,6 +2710,14 @@ impl DaemonShared {
         // while the kind is off (a queue TTL below 4 days).
         if let Some(idle) = idle_sessions {
             status["idle_sessions"] = idle;
+        }
+        // Additive. The machine-wide settlement estimate: `{low_usd_micros,
+        // high_usd_micros, up_to, known, unknown, table_version,
+        // pricing_version, estimated_at, text}`. Absent, never `null`, while
+        // the switch is off, no settlement table is drawable, or no trace's
+        // tier is known. Counts and rounded figures only.
+        if let Some(estimate) = settlement_estimate {
+            status["settlement_estimate"] = estimate;
         }
         // K2 (#1173): debug builds only, so the app shows the dry-run notice
         // from what this daemon is doing rather than parsing the
@@ -3525,6 +3560,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     EVENT_SNAPSHOT, EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED,
                     EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED, EVENT_INFERENCE_CALL_ADDED,
                     "managed_changed", EVENT_USAGE_CHANGED, EVENT_HISTORY_CHANGED,
+                    EVENT_SETTLEMENT_ESTIMATE_CHANGED,
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
             }),
@@ -5017,11 +5053,19 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // start holding sessions that arrived since.
     let prior_arming = policy.armed_from_now.get(&key).cloned();
     let rearm_from_now = from_now && prior_arming.is_some();
+    let was_never = policy.resolve(&key) == ProjectMode::Ignore;
     // `set_mode` refuses only what `check_mode` refused above, and before
     // touching anything, so this return leaves memory as it was.
     if let Err(e) = policy.set_mode(&key, mode, now) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
     }
+    // A move to or from Never changes which traces the settlement estimate
+    // counts. Its lock is a leaf, so taking it under the policy lock is safe.
+    super::settlement_estimate::note_never_change(
+        shared,
+        was_never,
+        policy.resolve(&key) == ProjectMode::Ignore,
+    );
     // #1208: the folder's mode is saved either way -- it is what clearing a
     // contribution override returns the folder to -- but while one is in
     // force and still decides this folder, the reply names it, so a shell
@@ -5321,6 +5365,10 @@ fn handle_set_contribution_override(shared: &DaemonShared, req: &Request) -> Res
             return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
         }
         let previous = policy.clone();
+        let was_never = previous
+            .contribution_override
+            .as_ref()
+            .is_some_and(|o| o.mode == ProjectMode::Ignore);
         if let Err(e) = policy.set_contribution_override(mode, Utc::now(), grant) {
             // Unreachable while `grant` is filled above for `auto_upload`;
             // kept so the policy's own refusal is never swallowed.
@@ -5332,6 +5380,13 @@ fn handle_set_contribution_override(shared: &DaemonShared, req: &Request) -> Res
             *policy = previous;
             return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
         }
+        // A Never override, set or replaced, changes which traces the
+        // settlement estimate counts (a leaf lock, safe here).
+        super::settlement_estimate::note_never_change(
+            shared,
+            was_never,
+            mode == ProjectMode::Ignore,
+        );
         // A stopping override is never refused for want of an audit row, and
         // is recorded after it takes effect, still under the lock.
         if mode != ProjectMode::AutoUpload {
@@ -5392,6 +5447,15 @@ fn handle_clear_contribution_override(shared: &DaemonShared, req: &Request) -> R
             policy.sessions_on_disk_at_arming = previous_record;
             return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
         }
+        // Clearing a Never override changes which traces the settlement
+        // estimate counts (a leaf lock, safe here).
+        super::settlement_estimate::note_never_change(
+            shared,
+            previous
+                .as_ref()
+                .is_some_and(|o| o.mode == ProjectMode::Ignore),
+            false,
+        );
         // Clearing an "Automatic" override takes a folder that asks
         // back to asking: what the override approved unattended there and
         // has not sent goes back to waiting.
@@ -5873,6 +5937,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     let capture_before = settings.token_capture_enabled;
     let scrub_check_before = settings.scrub_check;
     let suggestions_before = settings.suggestions_enabled;
+    let settlement_before = settings.settlement_estimate_enabled;
     let attention_before = attention_settings(&settings);
     // `apply_settings_object` is the same validation
     // `tc_daemon_start_with_settings` (the C ABI's pre-start
@@ -5923,7 +5988,13 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             let switched_to_manual = settings.scrub_check == manual && scrub_check_before != manual;
             let mut value = redacted_settings(&settings);
             let attention_after = attention_settings(&settings);
+            let settlement_after = settings.settlement_estimate_enabled;
             drop(settings);
+            // Off stops a running scan's result, hides the estimate and
+            // deletes the feature cache; on asks for a full scan.
+            if settlement_after != settlement_before {
+                super::settlement_estimate::set_enabled(shared, settlement_after);
+            }
             // The switch to the Manual Scrub check (K4 of #1118) returns
             // every unsent approval made on the contributor's behalf to
             // waiting at once, rather than leaving it reading approved until

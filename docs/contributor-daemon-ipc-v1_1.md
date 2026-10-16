@@ -7514,6 +7514,7 @@ relaxation of origin/CORS/CSP controls.
 | `managed_changed` | a saved model account or managed session changed (see `docs/managed-sessions.md`) | `{revision}` |
 | `usage_changed` | additive: the poll tick's ledger read added at least one call while the `insights_ledger_feed` setting is on | `{}` -- see below |
 | `history_changed` | the daemon's history poll found verdicts that are new against its own high-water mark (nudge S4); never on the silent first poll; always followed by `status_changed` | `{newly_accepted, newly_held, newly_final}` -- counts from that poll alone; see below |
+| `settlement_estimate_changed` | additive: `status.settlement_estimate` changed as a reader draws it -- its rounded band, its "up to" form, or the table or pricing it came from -- or it appeared or went away (a fetch that cleared the table, the `settlement_estimate_enabled` switch turned off). A re-scan that moves only the unrounded total publishes nothing; always followed by `status_changed` | `{}` |
 | `reengage_due` | **opt-in**: the attention arbiter chose one standalone re-engagement notification this tick; sent only to a subscriber that named it in `subscribe`'s `accepts` | `{kind, title, body, actions: [{id, label}]}` -- see "Re-engagement notifications" below |
 
 `inference_call_added` is published where the daemon already reads IronWire's

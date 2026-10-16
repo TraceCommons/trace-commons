@@ -232,7 +232,7 @@ fn tick_over(
     backfill_estimate_features(shared, &discovered, &mut out);
 
     let held_by_project = std::mem::take(&mut out.gate_blocked_by_project);
-    let report = finish_pass(shared, out, true)?;
+    let report = finish_pass(shared, out, true, now)?;
     report_gate(shared, &ctx.gate, &report);
     record_gate_held(shared, &ctx, &report, held_by_project);
     Ok(report)
@@ -669,7 +669,7 @@ fn tick_over_paths(
         }
     }
 
-    let report = finish_pass(shared, out, false)?;
+    let report = finish_pass(shared, out, false, now)?;
     report_gate(shared, &ctx.gate, &report);
     Ok(report)
 }
@@ -1299,6 +1299,9 @@ struct PassOutcome {
     /// Whether anything the queue holds moved, and so whether the epilogue
     /// has a save and a publish to do.
     changed: bool,
+    /// Whether this pass queued or superseded at least one entry: the
+    /// settlement estimate's cue to scan again once things go quiet.
+    sessions_changed: bool,
     /// Whether this pass met a session its source declines to read at all.
     /// Separate from `report.too_large` only so the epilogue reads as the
     /// condition it is testing rather than as a count.
@@ -1730,9 +1733,11 @@ fn visit_session(
         Ok(outcome) => {
             if outcome.superseded > 0 {
                 out.changed = true;
+                out.sessions_changed = true;
             }
             if outcome.inserted {
                 out.changed = true;
+                out.sessions_changed = true;
                 if armed {
                     out.report.auto_ready += 1;
                     if ctx.gate.would_refuse() {
@@ -2082,10 +2087,16 @@ enum HeldLog {
 /// The single implementation of the epilogue, and it runs once per pass, not
 /// once per session -- `queue.save` and `state.save` each rewrite a whole
 /// file, and the publish is a wake-up for every subscribed shell.
-fn finish_pass(shared: &DaemonShared, out: PassOutcome, exhaustive: bool) -> Result<TickReport> {
+fn finish_pass(
+    shared: &DaemonShared,
+    out: PassOutcome,
+    exhaustive: bool,
+    now: DateTime<Utc>,
+) -> Result<TickReport> {
     let PassOutcome {
         mut report,
         mut changed,
+        sessions_changed,
         too_large,
         unsupported_export_version,
         gate_blocked,
@@ -2154,6 +2165,11 @@ fn finish_pass(shared: &DaemonShared, out: PassOutcome, exhaustive: bool) -> Res
                 crate::daemon::approved_envelope::sweep(&shared.store, &queue.pinned_entry_ids());
         }
         shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+    if sessions_changed {
+        // Only a note: the scan itself waits out its own debounce and runs
+        // from the supervisor, never from a watcher pass.
+        super::settlement_estimate::note_sessions_changed(shared, now);
     }
     {
         let mut state = shared.state.lock().expect("state lock");
