@@ -691,6 +691,19 @@ pub struct DaemonSettings {
     #[serde(default = "default_settlement_estimate_enabled")]
     pub settlement_estimate_enabled: bool,
 
+    /// Whether missions are shown anywhere (owner decision 2026-10-16:
+    /// hidden for now). Off, the daemon does not fetch the activity-mission
+    /// catalogue, empties the one it holds, draws no `mission_fit` on
+    /// `status.nudge`, `list_pending` rows or the idle notification, and
+    /// refuses the mission IPC methods with `missions-disabled`. On restores
+    /// the behaviour that shipped before the switch existed, exactly.
+    ///
+    /// No shell offers a row for it: it is flipped only through
+    /// `set_settings`. `#[serde(default)]` so a settings file written before
+    /// this key existed loads with missions hidden.
+    #[serde(default)]
+    pub missions_enabled: bool,
+
     /// Nudge: "Notifications from Trace Commons", the master switch over
     /// the digest and every re-engagement kind. Defaults to
     /// [`DEFAULT_NOTIFICATIONS_ENABLED`]. The OS permission stays a separate,
@@ -1348,6 +1361,7 @@ impl Default for DaemonSettings {
             scrub_check_defaulted_on_upgrade: false,
             suggestions_enabled: DEFAULT_SUGGESTIONS_ENABLED,
             settlement_estimate_enabled: DEFAULT_SETTLEMENT_ESTIMATE_ENABLED,
+            missions_enabled: false,
             notifications_enabled: DEFAULT_NOTIFICATIONS_ENABLED,
             menu_bar_mark_enabled: DEFAULT_MENU_BAR_MARK_ENABLED,
             managed_terminal: Default::default(),
@@ -2009,6 +2023,12 @@ pub fn apply_settings_object(
             "settlement_estimate_enabled" => {
                 settings.settlement_estimate_enabled =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // Missions on or off. No shell has a row for it; `set_settings`
+            // publishes `status_changed` on a change because `status.nudge`
+            // and `list_pending` carry `mission_fit` only while it is on.
+            "missions_enabled" => {
+                settings.missions_enabled = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
             // Nudge A2: the master notification switch and the news mark.
             // Also reachable as `set_notifications_enabled` and
@@ -2907,6 +2927,37 @@ mod tests {
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
         assert!(!s.suggestions_enabled, "a refused value changes nothing");
+    }
+
+    /// Missions are hidden unless turned on through `set_settings`, including
+    /// for a settings file written before the switch existed. The switch
+    /// takes a boolean and nothing else.
+    #[test]
+    fn missions_default_off_and_take_only_a_boolean() {
+        assert!(!DaemonSettings::default().missions_enabled);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(v["missions_enabled"], false);
+        v.as_object_mut().unwrap().remove("missions_enabled");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(!settings.missions_enabled, "an absent switch is off");
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"missions_enabled": true})),
+            Ok(true)
+        );
+        assert!(s.missions_enabled);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"missions_enabled": "off"})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(s.missions_enabled, "a refused value changes nothing");
+        let round: DaemonSettings =
+            serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+        assert!(
+            round.missions_enabled,
+            "the switch survives a save and load"
+        );
     }
 
     /// The settlement estimate is on unless the person turns it off,

@@ -15,6 +15,9 @@ const UNAVAILABLE: &str = "mission-catalogue-unavailable";
 const INVALID: &str = "mission-catalog-request-invalid";
 
 pub(super) async fn handle_catalogue(shared: &DaemonShared, req: &Request) -> Response {
+    if !super::mission_matching::missions_enabled(shared) {
+        return super::mission_matching::missions_disabled(req);
+    }
     let Ok(query) = serde_json::from_value::<MissionCatalogQuery>(req.params.clone()) else {
         return Response::err(req.id, ERR_BAD_PARAMS, INVALID);
     };

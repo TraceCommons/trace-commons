@@ -656,6 +656,63 @@ mod tests {
         assert_eq!(got.standalone, Some(Kind::IdleSessions));
     }
 
+    /// The digest's idle sentence carries the mission clause only while
+    /// missions are shown: hidden (the default), a live catalogue the
+    /// session fits adds no mission text, and the standalone idle
+    /// notification never names one either way.
+    #[test]
+    fn the_idle_digest_names_a_mission_only_while_missions_are_shown() {
+        fn texts(shown: bool, due: bool) -> String {
+            let s = live();
+            if !due {
+                digest_off(&s);
+            }
+            s.settings.lock().unwrap().missions_enabled = shown;
+            s.settings.lock().unwrap().claude_source =
+                Some(super::super::settings::SourceDeclaration::Watch {
+                    path: std::path::PathBuf::from("/tmp/reengage-claude-root"),
+                });
+            let id = seed_idle_from(&s, crate::source::SOURCE_CLAUDE_CODE, 5);
+            let path = format!("/tmp/re-{id}.jsonl");
+            s.state.lock().unwrap().cwd_cache.insert(
+                path,
+                super::super::state::CwdCacheEntry {
+                    size_bytes: 1,
+                    modified_at: noon(),
+                    cwd: Some(ASK.to_string()),
+                    project_key: Some(ASK.to_string()),
+                    tool: Some(crate::source::SOURCE_CLAUDE_CODE.to_string()),
+                    adapter: Some(crate::source::SOURCE_CLAUDE_CODE.to_string()),
+                },
+            );
+            super::super::mission_matching::receive_catalogue(
+                &s.mission_catalogue,
+                &serde_json::json!({"schema_version": 1, "missions": [{"mission_id": "any"}]}),
+                noon(),
+            )
+            .unwrap();
+            let _r = renderer(&s);
+            let mut rx = s.events.subscribe();
+            let got = tick(&s, noon(), &Utc, digest(due, 1));
+            if due {
+                let (kind, text) = got.fold.expect("folded into the digest");
+                assert_eq!(kind, Kind::IdleSessions);
+                text
+            } else {
+                assert_eq!(got.standalone, Some(Kind::IdleSessions));
+                let frames = reengage_frames(&mut rx);
+                assert_eq!(frames.len(), 1, "{frames:?}");
+                frames[0].to_string()
+            }
+        }
+        let hidden = texts(false, true);
+        assert!(!hidden.contains("mission"), "{hidden}");
+        let hidden = texts(false, false);
+        assert!(!hidden.contains("mission"), "{hidden}");
+        let shown = texts(true, true);
+        assert!(shown.contains("1 of them fits a mission."), "{shown}");
+    }
+
     /// A batch holding a source the tool table cannot name (trajectory)
     /// names no tool in the N1 notification or the digest fold: never
     /// "from 0 tools", and never Codex credited with the trajectory
