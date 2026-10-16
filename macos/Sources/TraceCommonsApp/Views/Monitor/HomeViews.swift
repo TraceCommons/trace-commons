@@ -270,7 +270,9 @@ private struct HomeOverview: View {
     /// opens Private AI.
     private var stats: some View {
         let condition = HomeFormat.pendingCondition(freshCredit)
-        let uncontributed = HomeUncontributed(traces.tree.allSessions)
+        // A failed status read draws no dollar line rather than an old one.
+        let settlement = SummaryFacts.fresh(store.status, unless: store.failures["status"])?.settlementEstimate
+        let uncontributed = HomeUncontributed(traces.tree.allSessions, settlement: settlement)
         let delta = HomeFormat.creditDelta(store.creditTotals.delta(on: .now), words: words)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             // Two by two (owner, 2026-10-12): Waiting and Contributed, then
@@ -1336,16 +1338,24 @@ private struct HomeStatTile: View {
 /// sessions in the queue that have not gone, their size, and the credit the
 /// core estimates for them. Only estimates the core says to draw are added
 /// up; with none, no estimate is shown, never zero.
+///
+/// Dollars replace points (owner, 2026-10-16): when the daemon reports the
+/// machine-wide settlement estimate, its finished line is the detail, the
+/// same line the menu bar draws, and the points sum is not shown.
 struct HomeUncontributed: Equatable {
     let count: Int
     let bytes: Int64
     let low: Double?
     let high: Double?
+    /// The core's finished dollar line, or nil when there is none to draw.
+    let dollars: String?
 
     /// States that have left, or are leaving, this Mac.
     static let gone: Set<String> = ["uploading", "uploaded"]
 
-    init(_ sessions: [DaemonData.QueueEntry]) {
+    init(_ sessions: [DaemonData.QueueEntry], settlement: DaemonData.SettlementEstimate? = nil) {
+        let text = settlement?.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        dollars = (text?.isEmpty ?? true) ? nil : settlement?.text
         let waiting = sessions.filter { !Self.gone.contains($0.state) }
         count = waiting.count
         bytes = waiting.reduce(Int64(0)) { $0 + Int64($1.sizeBytes ?? 0) }
@@ -1361,8 +1371,11 @@ struct HomeUncontributed: Equatable {
                                  ["size": ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)])
     }
 
-    /// The estimate, under the count, when there is one.
+    /// The estimate, under the count, when there is one: the dollar line,
+    /// which covers every trace on this Mac and so needs no queued count,
+    /// else the points sum.
     func detail(_ words: MonitorHomeHistoryCopy?) -> String? {
+        if let dollars { return dollars }
         guard let words, count > 0, let low, let high else { return nil }
         return FirstRunCopy.fill(words.uncontributedEstimate,
                                  ["min": HomeFormat.points(low), "max": HomeFormat.points(high)])
