@@ -206,16 +206,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - id: cargo-cache
-        uses: actions/cache/restore@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: pg-suites-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            pg-suites-${{ runner.os }}-
       # Several suites assert their database name begins `admission_test`
       # before running destructive fixtures, and every one of them requires the
       # host to be the literal 127.0.0.1 -- `localhost` fails the assertion. One
@@ -600,17 +590,6 @@ jobs:
             fi
           done
           exit $fail
-      # Last, so every step above still has its binaries; see the action for
-      # what is removed and why, and for why only a push to main saves.
-      - uses: ./.github/actions/trim-cargo-cache
-      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   ingest-bin-postgres:
     name: trace-commons-ingest tests, whole bin, against PostgreSQL
@@ -656,16 +635,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - id: cargo-cache
-        uses: actions/cache/restore@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: pg-ingest-bin-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            pg-ingest-bin-${{ runner.os }}-
       # One database, named `admission_test_*` on the literal host 127.0.0.1,
       # because fixtures assert both before running destructive cleanup.
       #
@@ -730,17 +699,6 @@ jobs:
             fi
           done
           exit $fail
-      # Last, so every step above still has its binaries; see the action for
-      # what is removed and why, and for why only a push to main saves.
-      - uses: ./.github/actions/trim-cargo-cache
-      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   ingest-bin-postgres-near-ai-scorer:
     name: trace-commons-ingest tests, whole bin, near-ai-scorer, against PostgreSQL

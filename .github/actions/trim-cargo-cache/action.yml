@@ -38,7 +38,13 @@ description: >-
 #   ref can be restored by that ref alone, so saving one did nothing but
 #   evict main's.
 # - The jobs in clients.yml, none of them required, and five short Linux
-#   jobs keep no cache.
+#   jobs keep no cache. Nor, since a later pass the same day, do the two
+#   PostgreSQL test jobs (`postgres-suites` and `ingest-bin-postgres`):
+#   averaged over eight main runs, a restored cache saved them 1.7 and 0.8
+#   minutes for about 2.5 GB, while `cargo check (near-ai-scorer)` saved
+#   9 minutes for its 1.7 GB, and the remaining caches still overran 10 GB.
+#   Cold, both jobs finish well inside `cargo test (default features)`, so
+#   no pull request waits longer.
 # - This action also removes the workspace's own crates (every path package
 #   is named trace-commons-*). A fresh checkout gives each source file a
 #   new mtime, so cargo rebuilds every workspace crate on every run whatever
