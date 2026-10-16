@@ -11,10 +11,10 @@ import { SkillInstallPreview } from "./skill-install-preview";
 import { SkillReviewPreview } from "./skill-review-preview";
 
 const copy: SkillCopy = {
-  heading: "Learn from session",
+  heading: "Learn from trace",
   promise: "Turn this correction into an Agent Skill.",
   supported_family: "Generated source repair",
-  learn_action: "Learn from session",
+  learn_action: "Learn from trace",
   learning: "Learning…",
   candidate_heading: "Candidate skill",
   generated_source: "Generated source",

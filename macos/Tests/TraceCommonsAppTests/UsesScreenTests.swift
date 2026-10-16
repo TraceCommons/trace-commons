@@ -179,7 +179,7 @@ final class UsesScreenTests: XCTestCase {
         state.sharing = .automatic
         XCTAssertFalse(UsesScreenLayout.canStart(
             state, uses: uses, requiredScope: required, grant: noAutomatic, isCommitting: false))
-        // Watching only reads Ask me's line, so Automatic's absence does
+        // Watching only reads Ask's line, so Automatic's absence does
         // not hold it. (Watching only with nothing enrolled: beside an
         // enrollment the daemon holds, Start is not offered at all.)
         state.account = .watchOnly
@@ -189,16 +189,16 @@ final class UsesScreenTests: XCTestCase {
     }
 
     /// The Sharing card's line is the core's first line for the path, the
-    /// rest behind an info button (owner, 2026-10-08): Ask me reads
+    /// rest behind an info button (owner, 2026-10-08): Ask reads
     /// `path_ask_first_title`, then `path_ask_first_detail` behind the
     /// button; Automatic reads `path_automatic_title`, then its detail and
     /// the scrub's scope and limit behind the button. No copy reads the
-    /// fallbacks. Watching only offers Ask me alone.
+    /// fallbacks. Watching only offers Ask alone.
     func test_theSharingLineIsTheCores() throws {
         let uses = try copy().uses
         let grant = try grant()
         let scrub = try XCTUnwrap(grant.scrub)
-        XCTAssertEqual(grant.pathAskFirstTitle, "Review each session yourself.")
+        XCTAssertEqual(grant.pathAskFirstTitle, "Review each trace yourself.")
         XCTAssertEqual(grant.pathAskFirstDetail, "Nothing is contributed until you approve it.")
         XCTAssertEqual(grant.pathAutomaticTitle, "Contribute automatically from projects that first appear.")
         XCTAssertFalse(try XCTUnwrap(grant.pathAskFirst).contains("later"))
@@ -217,7 +217,7 @@ final class UsesScreenTests: XCTestCase {
         let modes = try modes()
         let joined = FirstRunState(tier: .quick, step: .uses, account: .nearAI, enrolledInvite: "INVITE-1")
         let full = UsesScreenLayout.sharingOptions(for: joined, modes: modes)
-        // Ron's #1030 order: Automatic first, then Ask me.
+        // Ron's #1030 order: Automatic first, then Ask.
         XCTAssertEqual(full.map(\.value), [.automatic, .askMe])
         XCTAssertEqual(full.map(\.title), [modes.label(for: .autoUpload), modes.label(for: .ask)])
         XCTAssertEqual(UsesScreenLayout.sharingOptions(for: FirstRunState(account: .watchOnly), modes: modes).map(\.value), [.askMe])
@@ -243,7 +243,7 @@ final class UsesScreenTests: XCTestCase {
 
     /// Review Focus 3, on the screen: a refused grant comes after setup
     /// finished, so whatever the label, the notice is the first run's own
-    /// line saying Automatic was not turned on and sharing is on Ask me. It
+    /// line saying Automatic was not turned on and sharing is on Ask. It
     /// is never the folder-override refusal, which says nothing changed or
     /// points at a pill this screen does not have.
     @MainActor
@@ -252,7 +252,7 @@ final class UsesScreenTests: XCTestCase {
         let privateAI = try privateAI()
 
         // Driven through Start's own path: both disclosures seen, the core
-        // refuses (not connected), Start runs on Ask me, grants nothing,
+        // refuses (not connected), Start runs on Ask, grants nothing,
         // and the screen's notice is the refusal line.
         let daemon = StartDaemon()
         let runner = FirstRunRunner(state: onUses(.automatic), daemon: daemon)
@@ -301,7 +301,7 @@ final class UsesScreenTests: XCTestCase {
 
     /// A refusal the core decided before Start is kept while a later call
     /// fails, and shown once a Start finally succeeds, so the retry that
-    /// goes through on Ask me still says why.
+    /// goes through on Ask still says why.
     func test_aRefusalOutlivesAFailedStart() {
         let refused = FirstRunFailure.grantRefused(label: "connect")
         let failed = UsesScreenLayout.afterStart(failure: .rulesFailed, pending: refused)
@@ -321,7 +321,7 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertNil(UsesScreenLayout.refusalToCarry(decidedNow: true, refused: nil, pending: refused))
         XCTAssertEqual(
             UsesScreenLayout.refusalToCarry(decidedNow: true, refused: refused, pending: nil), refused)
-        // A plain Start (Ask me) carries the earlier one.
+        // A plain Start (Ask) carries the earlier one.
         XCTAssertEqual(UsesScreenLayout.refusalToCarry(decidedNow: false, refused: nil, pending: refused), refused)
         let regranted = UsesScreenLayout.afterStart(
             failure: nil, pending: UsesScreenLayout.refusalToCarry(decidedNow: true, refused: nil, pending: refused))
@@ -336,7 +336,7 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertFalse(source?.contains("?? pendingRefusal") ?? true)
     }
 
-    /// An account that cannot choose Automatic reads Ask me's line and
+    /// An account that cannot choose Automatic reads Ask's line and
     /// selection, whatever `sharing` holds.
     func test_watchingOnlyNeverReadsAutomatic() throws {
         let uses = try copy().uses
@@ -424,7 +424,7 @@ final class UsesScreenTests: XCTestCase {
             flow.progress(connected: connected, scopes: ["debugging_evaluation"])))
     }
 
-    /// Start on Automatic goes through the disclosures; Ask me, and
+    /// Start on Automatic goes through the disclosures; Ask, and
     /// watching only whatever `sharing` holds, commit directly.
     func test_startSendsAutomaticThroughTheDisclosures() throws {
         XCTAssertEqual(UsesScreenLayout.startRoute(onUses(.automatic)), .disclose)
@@ -457,7 +457,7 @@ final class UsesScreenTests: XCTestCase {
 
     /// Review Focus 3 when the daemon refuses the grant and the completion
     /// marker is then not written: `completeFailed` is shown first, and the
-    /// daemon's refusal is kept for the retry that finishes on Ask me, so
+    /// daemon's refusal is kept for the retry that finishes on Ask, so
     /// setup never ends without saying Automatic was not turned on.
     @MainActor
     func test_aDaemonRefusalOutlivesAnUnfinishedStart() async throws {

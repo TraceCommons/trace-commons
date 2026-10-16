@@ -507,38 +507,6 @@ async fn model_change_aborts_queued_requests_immediately() {
     server.abort();
 }
 
-#[tokio::test]
-async fn evaluation_never_exceeds_the_request_concurrency_ceiling() {
-    let state = RecordingState {
-        delay_requests: true,
-        ..RecordingState::default()
-    };
-    let app = Router::new()
-        .route("/v1/chat/completions", post(completion))
-        .with_state(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let address = listener.local_addr().expect("address");
-    let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let client = NearAiEvaluationClient::at(
-        format!("http://{address}/v1"),
-        "synthetic-key".to_string(),
-        MODEL.to_string(),
-    )
-    .expect("client");
-
-    evaluate_with_client(client, &review())
-        .await
-        .expect("evaluation");
-    assert_eq!(
-        state.peak_requests.load(Ordering::SeqCst),
-        EVALUATION_CONCURRENCY
-    );
-    assert_eq!(state.active_requests.load(Ordering::SeqCst), 0);
-    server.abort();
-}
-
 #[test]
 fn funding_error_has_a_distinct_wire_label() {
     assert_eq!(

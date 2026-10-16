@@ -105,7 +105,7 @@ export function AdmissionPreparationOverlay({
             disabled={mutation.isPending || mutation.isSuccess}
             aria-label="Confirm admission preparation"
           />
-          <span>I understand and want to prepare this session.</span>
+          <span>I understand and want to prepare this trace.</span>
         </label>
       )}
       {disclosure && (

@@ -105,27 +105,17 @@ struct SummaryInspector: View {
         }
     }
 
-    /// Pending credit, as a figure only beside the commons' condition for
-    /// it (D6); a dash otherwise.
+    /// Pending credit, as a figure only when the commons has stated its
+    /// condition (D6); a dash otherwise. The statement is not drawn.
     private var pending: some View {
         let pending = SummaryFacts.pending(rollup: rollup, credit: credit)
-        return VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-            // On the decision lines' text column, not a right-aligned
-            // label column of its own.
-            SummaryDecisionLine(glyph: nil, tone: nil, text: MonitorWords.pending + " " + pending.value)
-            if let condition = pending.condition {
-                Group {
-                    Text(condition)
-                    // Credit is a record, not currency: the core's
-                    // sentence, beside every figure.
-                    Text(MonitorWords.creditNotCurrency)
-                }
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-        }
+        // Its own glyph (owner, 2026-10-12), on the decision lines' text
+        // column; the condition is not drawn (#1401).
+        return SummaryDecisionLine(glyph: Self.pendingGlyph, tone: nil, text: MonitorWords.pending + " " + pending.value)
     }
+
+    /// The pending line's glyph: credit on its way.
+    static let pendingGlyph = "hourglass"
 
     /// Top projects and top tools, by sessions waiting plus contributed.
     /// Tools are counted from each session's own tool, not a tree level.
@@ -137,7 +127,8 @@ struct SummaryInspector: View {
             let tools = SummaryFacts.topTools(sessions: sessions, history: history, counts: words.counts)
             if !projects.isEmpty || !tools.isEmpty {
                 InspectorSection(words.summaryPanel.statistics, collapsible: true) {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
+                    // A full step between the two groups.
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s8) {
                         if !projects.isEmpty { SummaryStat(label: words.summaryPanel.topProjects, lines: projects) }
                         if !tools.isEmpty { SummaryStat(label: words.summaryPanel.topTools, lines: tools) }
                     }
@@ -205,13 +196,12 @@ private struct SummaryDecisionLine: View {
 }
 
 /// Ron's `QueueStatusPanel` grid: a cell per row, its label bold over its
-/// value, side by side between a top and a bottom hairline.
+/// value, side by side. No rules above or below it (owner, 2026-10-11).
 struct SafeguardGrid: View {
     let rows: [GlassKeyValueList.Item]
 
     var body: some View {
         VStack(spacing: 0) {
-            Rectangle().fill(GlassColor.hairline).frame(height: 1)
             HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
                 ForEach(rows, id: \.label) { row in
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
@@ -227,8 +217,7 @@ struct SafeguardGrid: View {
                     .accessibilityElement(children: .combine)
                 }
             }
-            .padding(.vertical, GlassTokens.Space.s4)
-            Rectangle().fill(GlassColor.hairline).frame(height: 1)
+            .padding(.vertical, GlassTokens.Space.s2)
         }
     }
 }
@@ -238,22 +227,29 @@ private struct SummaryStat: View {
     let label: String
     let lines: [SummaryFacts.Stat]
 
+    /// Three weights, so the eye reads group, then item, then its counts
+    /// (owner, 2026-10-12): the group's label as an eyebrow, each item in
+    /// the title face, its counts quieter under it, and room between.
     var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             Text(label)
-                .glassType(GlassTokens.TypeScale.caption)
+                .glassType(GlassTokens.TypeScale.eyebrow)
                 .foregroundStyle(GlassColor.textTertiary)
-            // Ron's `Stat`: 2 under the label, 6 between its lines.
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                .accessibilityAddTraits(.isHeader)
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
                 ForEach(lines) { line in
-                    VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                         Text(line.title)
-                            .glassType(GlassTokens.TypeScale.bodyStrong)
+                            .glassType(GlassTokens.TypeScale.label.weight(.semibold))
                             .foregroundStyle(GlassColor.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                         Text(line.sub)
                             .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textTertiary)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
+                    .accessibilityElement(children: .combine)
                 }
             }
         }

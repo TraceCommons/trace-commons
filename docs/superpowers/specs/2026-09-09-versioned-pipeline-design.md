@@ -257,6 +257,40 @@ contain it. Qualification binds a package to the code revision that it tested,
 and activation checks that revision. See
 [package qualification](2026-09-14-versioned-pipeline-package-qualification.md).
 
+An embedding binary can add Score policies to the ones built in. It passes a
+`ScorePolicyRegistry` (`versioned_pipeline_score_registry`) to
+`PipelineServiceBuilder::with_score_policies`: factories keyed by the Score
+`implementation_id`. A package binds a registered factory only when its
+Admission, Review, and Settle policies are the compatibility bundle's. The
+factory receives the manifest, the configuration artifact that the Score
+`configuration_hash` names, and the scorer, embedder, and index reader that
+the compatibility Score policy receives. It returns the policy as a trait
+object and declares the Trace Credit event that the bundle settles under. The
+two built-in Score ids (`trace_commons.score.minimal.v1` and
+`trace_commons.score.compatibility.v1`) are reserved. The ingest binary passes
+an empty registry. A Score id that is neither built in nor registered is
+refused with `bundle_policy_not_runnable` and never falls back to a built-in
+policy. The registry supplies only code for an id. The manifest, which the
+package signature covers, still pins the id, the configuration, and the
+dependencies.
+
+A registered Score policy runs under the compatibility policy's Score runtime
+controls: the tenant's Score lock, the `trace_gate_decisions` row that Settle
+writes from the Score evidence, and `main`'s duplicate short-circuits, which
+withhold a duplicate's Trace Credit leg whichever event the bundle settles
+under. Only the minimal reference runs without them. The gate decision row
+needs six fields of the Score evidence (`perplexity_micros`,
+`tail_fraction_micros`, `novelty_score_micros`, `quality_passed`,
+`novelty_passed`, `nearest_neighbor_hash`); a registered policy that leaves
+one out fails its run closed at Settle before any leg pays. A Score policy may
+record `award_adjustments` on its evidence (a safe label, a factor in micros
+no larger than one whole, an optional basis in micros), which is not
+serialized when empty. It may also return a hold for operator review instead
+of an award (`ScoreOutput::held_for_review`). The run then parks in
+`awaiting_review` at Score under the policy's label with no Score outcome
+committed, and the review queue lists it. Claiming and assessing a Score hold
+is not built yet.
+
 The bundle package contains the manifest and deployable artifacts. The ingest
 service makes sure that the package matches its bundle identifier before use.
 
@@ -396,6 +430,18 @@ address the Admission reason before approval.
 
 Review runs asynchronously. It transforms the stored trace before the server
 commits the approved revision to the registry.
+
+Before the bound Review policy runs, the server runs its own privacy pass
+(spec 2026-10-09, pipeline async privacy rescrub). It calls the prose-PII
+classifier on the stored trace, stores the output as an encrypted object,
+and records the pass on the run once. The Review policy gets that output as
+its source artifact, never the stored trace itself. A bundle cannot opt
+out. A pass that raises the trace's privacy risk above its receipt-time
+risk holds the run for a human review, and the server commits a reviewer's
+rejection of such a run that Admission admitted. A classifier failure
+retries within Review's attempt budget and then fails the run; it never
+falls back to the deterministic output. A run received after the pass
+existed cannot be approved without a recorded pass.
 
 A static Review policy can pass the trace through during tests. A production
 policy can scrub PII or apply another required transformation.
@@ -677,6 +723,14 @@ pipeline_runs
   index_membership: undecided | excluded | included
   index_command_ref, index_command_hash nullable
   index_write_state: none | pending | complete | failed
+  privacy_pass_required (TRUE for every run received since V117)
+  privacy_pass_object_ref_id, privacy_pass_content_hash,
+    privacy_pass_source_hash, privacy_pass_residual_risk_basis,
+    privacy_pass_outcome: cleared | escalated,
+    privacy_pass_recorded_at nullable (all six set together)
+  privacy_pass_approval_assessment_hash,
+    privacy_pass_approval_resolved_reasons nullable (an escalated run's
+    approval)
   created_at, updated_at
   unique (tenant_id, request_idempotency_key)
 
@@ -746,7 +800,9 @@ The receipt path performs these operations:
    here, before any limit is counted.
 3. Refuse a tombstoned request-content hash, and enforce rate and quota
    limits. A refusal returns a safe label and stores nothing.
-4. Store the encrypted trace body.
+4. Store the encrypted trace body, after the bounded, local deterministic
+   rescrub. The receipt never calls the prose-PII classifier; Review's
+   privacy pass does.
 5. Resolve and validate the active bundle.
 6. Execute Admission.
 7. Commit the run, Admission outcome, and next phase in one transaction.

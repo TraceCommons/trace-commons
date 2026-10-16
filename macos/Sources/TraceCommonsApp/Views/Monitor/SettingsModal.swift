@@ -21,8 +21,6 @@ struct SettingsModal: View {
     let paused: Bool?
     /// Closes the window.
     let onClose: () -> Void
-    /// The Private AI pointer: opens Inference in the Monitor.
-    let onPrivateAI: () -> Void
 
     @EnvironmentObject private var model: AppModel
     @Environment(ComputeModel.self) private var compute
@@ -149,7 +147,7 @@ struct SettingsModal: View {
         // General is the app's own (the appearance): it never waits on the
         // core or on first run.
         if item == .general {
-            GlassSettingsContent(navigation: navigation, section: item, onPrivateAI: onPrivateAI)
+            GlassSettingsContent(navigation: navigation, section: item)
         } else {
             gatedSection(item)
         }
@@ -186,7 +184,7 @@ struct SettingsModal: View {
                     .padding(.vertical, GlassTokens.Space.s6)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
             default:
-                GlassSettingsContent(navigation: navigation, section: item, onPrivateAI: onPrivateAI)
+                GlassSettingsContent(navigation: navigation, section: item)
             }
         }
     }

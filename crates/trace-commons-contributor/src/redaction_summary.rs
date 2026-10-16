@@ -166,9 +166,10 @@ mod tests {
     /// Nine secret patterns are one `secret` row, not nine rows.
     ///
     /// The distinct map is EMPTY here, and that is the real shape: distinct
-    /// counts come from the placeholder map, and only `local_path` and
-    /// `private_email` mint a placeholder (`apply_placeholder_regex` in
-    /// `trace-commons-protocol`). A fixture feeding `distinct: {"secret": 3}`
+    /// counts come from the placeholder map, and secrets never mint a
+    /// placeholder -- only `local_path`, `private_email` and the #1362
+    /// tool-output labels do (`trace-commons-protocol`'s
+    /// `trace_contribution.rs`). A fixture feeding `distinct: {"secret": 3}`
     /// would assert correct behaviour on input that cannot occur.
     #[test]
     fn sub_labels_collapse_into_their_family() {

@@ -26,9 +26,6 @@ struct WatchedFoldersSection: View {
                             .glassType(GlassTokens.TypeScale.caption)
                             .foregroundStyle(GlassColor.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        if model.sourceRootSaveFailed {
-                            GlassNotice(tone: .outside) { Text(copy.saveFailed) }
-                        }
                         if model.daemonSettings == nil {
                             Text(copy.unavailable)
                                 .glassType(GlassTokens.TypeScale.body)
@@ -41,7 +38,10 @@ struct WatchedFoldersSection: View {
                                     choice: choice(for: kind),
                                     reportedMode: mode(for: kind),
                                     onWatchCandidate: { save(kind, .watch(path: $0.path)) },
-                                    onChoose: { save(kind, .watch(path: $0)) },
+                                    onChoose: { path in
+                                        save(kind, .watch(path: SourceFolderSelection.path(
+                                            for: kind, chosenFolder: path)))
+                                    },
                                     onDecline: { save(kind, .off) })
                             }
                             if let trajectory = copy.trajectory,
@@ -56,6 +56,11 @@ struct WatchedFoldersSection: View {
                         if model.sourceRootSaveFailed || model.daemonSettings == nil {
                             Button(copy.retry) { model.refreshSettings() }
                                 .buttonStyle(GlassButtonStyle(.glass))
+                        }
+                        // A refused save, unboxed, under the rows and Retry
+                        // it is about (Ron, 2026-10-09).
+                        if model.sourceRootSaveFailed {
+                            GlassAlert(copy.saveFailed)
                         }
                     }
                 }

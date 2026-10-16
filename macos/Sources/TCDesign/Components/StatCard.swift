@@ -7,10 +7,34 @@ import SwiftUI
 public struct GlassStatCard: View {
     private let label: String
     private let value: String
+    /// A card that acts (it sits in a button): it lifts under the pointer,
+    /// as an interactive `GlassCard` does.
+    private let interactive: Bool
+    /// A caption under the value, in `detailInk` when it carries a tone
+    /// (a gain in green, a loss in red); nil draws none.
+    private let detail: String?
+    private let detailInk: GlassRGBA?
+    /// A symbol on the card's trailing side, in the accent, with no
+    /// container (owner, 2026-10-12); nil draws none.
+    private let systemImage: String?
+    /// A figure beside the value, quieter than it (the size of what waits);
+    /// nil draws none.
+    private let valueAccessory: String?
 
-    public init(_ label: String, value: String) {
+    /// The icon's size.
+    static let iconGlyph: CGFloat = 18
+
+    public init(
+        _ label: String, value: String, detail: String? = nil, detailInk: GlassRGBA? = nil,
+        systemImage: String? = nil, valueAccessory: String? = nil, interactive: Bool = false
+    ) {
+        self.systemImage = systemImage
+        self.valueAccessory = valueAccessory
         self.label = label
         self.value = value
+        self.detail = detail
+        self.detailInk = detailInk
+        self.interactive = interactive
     }
 
     /// The value's type: #1146's 18px/700 tabular figure, on the nearest
@@ -18,6 +42,23 @@ public struct GlassStatCard: View {
     static let valueType = GlassTokens.TypeScale.heading.weight(.bold)
 
     public var body: some View {
+        HStack(alignment: .center, spacing: GlassTokens.Space.s3) {
+            figures
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .glassGlyph(Self.iconGlyph, weight: .regular)
+                    .foregroundStyle(GlassTokens.Color.purpleSoft.color)
+                    .accessibilityHidden(true)
+            }
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .glassTier(.card, hover: GlassCard<EmptyView>.hoverFill(interactive: interactive))
+        .accessibilityElement(children: .combine)
+    }
+
+    private var figures: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(label)
                 .glassType(GlassTokens.TypeScale.eyebrow)
@@ -25,23 +66,37 @@ public struct GlassStatCard: View {
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Text(value)
-                .glassType(Self.valueType)
-                .monospacedDigit()
-                .foregroundStyle(GlassColor.textPrimary)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                Text(value)
+                    .glassType(Self.valueType)
+                    .monospacedDigit()
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let valueAccessory {
+                    Text(valueAccessory)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .lineLimit(1)
+                }
+            }
+            if let detail {
+                Text(detail)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(detailInk?.color ?? GlassColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, GlassTokens.Space.s1)
+            }
         }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassTier(.card)
-        .accessibilityElement(children: .combine)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
-/// An error or caution line (#1146 `.tc-alert`): a quiet card carrying the
-/// status colour in its text, never in its fill or edge, and no dot.
+/// A failed request's line: plain caption text in the status colour, with
+/// no frame, drawn under the buttons it is about. Ron, 2026-10-09: a boxed
+/// line (#1146 `.tc-alert`'s quiet card) read as a disabled text field, so
+/// every card says a failure this way, under its buttons.
 public struct GlassAlert: View {
     private let text: String
 
@@ -51,13 +106,10 @@ public struct GlassAlert: View {
 
     public var body: some View {
         Text(text)
-            .glassType(GlassTokens.TypeScale.label.weight(.regular))
+            .glassType(GlassTokens.TypeScale.caption)
             .foregroundStyle(GlassTokens.Color.statusOutsideText.color)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.vertical, 10)
-            .padding(.horizontal, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .glassTier(.cardQuiet)
     }
 }
 

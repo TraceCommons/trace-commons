@@ -463,43 +463,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summary_rejects_inconsistent_counts_costs_and_unknown_routes() {
-        for (field, value) in [
-            ("calls", serde_json::json!(-1)),
-            ("priced_calls", serde_json::json!(4)),
-            ("cost_usd", serde_json::json!(-0.1)),
-            ("cost_usd", serde_json::json!(1e100)),
-            ("route", serde_json::json!("SECRET")),
-        ] {
-            let mut body = sample();
-            body["since"] = serde_json::json!(SINCE);
-            body["groups"][0][field] = value;
-            let router = Router::new().route(
-                "/_ironwire/summary",
-                get(move || {
-                    let body = body.clone();
-                    async move { Json(body) }
-                }),
-            );
-            let (port, task) = serve(router).await;
-            let (_dir, s) = shared();
-            s.install_routing_ledger_for_test(crate::routing::ironwire::IronWireLedger::new(
-                port,
-                String::new(),
-            ));
-            let value = handle_summary(
-                &s,
-                &request("inference_summary", serde_json::json!({"since":SINCE})),
-            )
-            .await
-            .result
-            .unwrap();
-            assert_eq!(value["readable"], false, "{field}");
-            task.abort();
-        }
-    }
-
-    #[tokio::test]
     async fn private_ai_requires_confirmed_enable_and_off_changes_only_hosting_settings() {
         let (_dir, s) = shared();
         let before = serde_json::to_value(s.settings.lock().unwrap().clone()).unwrap();

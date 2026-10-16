@@ -156,8 +156,15 @@ impl AccountStore {
         connection: ConnectionKind,
         label: &str,
     ) -> Result<AccountView, ManagedError> {
+        if tool == ToolId::Opencode && connection == ConnectionKind::Subscription {
+            return Err(ManagedError::InvalidRequest);
+        }
         let label = label.trim();
         if label.is_empty() || label.len() > 128 || label.chars().any(char::is_control) {
+            return Err(ManagedError::InvalidRequest);
+        }
+        // Sign-in entries derive from the sign-in and are never saved.
+        if connection == ConnectionKind::NearAiSignIn {
             return Err(ManagedError::InvalidRequest);
         }
         let account = AccountView {
@@ -231,27 +238,31 @@ impl AccountStore {
     }
 }
 
-/// Resolve an explicit account or a backend's default. Implicit launches always
-/// use NEAR AI; readiness is checked by the supervisor, never by falling back.
+/// The account a launch uses. `sign_in` holds the derived NEAR AI sign-in
+/// entries (empty while signed out); `defaults` may include their derived
+/// selections, which never count as saved choices.
+///
+/// With no `--account` and no `--connection`, the launch runs on NEAR AI:
+/// first the tool's saved NEAR AI default, then its sole saved NEAR AI key
+/// (several with no default is ambiguous), then its NEAR AI sign-in. A
+/// subscription or API-key default never wins an implicit launch.
+///
+/// An explicit `connection` filters to that backend and honours a saved
+/// default for it. `name` matches an exact label or ID, across the sign-in
+/// entries too. Readiness is checked by the supervisor; a missing
+/// credential is never a reason to fall back to another account.
 pub fn resolve_launch_account(
     accounts: &[AccountView],
+    sign_in: &[AccountView],
     defaults: &[Selection],
     tool: ToolId,
     name: Option<&str>,
     connection: Option<ConnectionKind>,
 ) -> Result<AccountView, ManagedError> {
-    let connection = if name.is_none() {
-        Some(connection.unwrap_or(ConnectionKind::NearAi))
-    } else {
-        connection
-    };
-    let candidates: Vec<_> = accounts
-        .iter()
-        .filter(|a| a.tool == tool && connection.is_none_or(|c| a.connection == c))
-        .collect();
+    let all = || accounts.iter().chain(sign_in).filter(|a| a.tool == tool);
     if let Some(name) = name {
-        let matches: Vec<_> = candidates
-            .into_iter()
+        let matches: Vec<_> = all()
+            .filter(|a| connection.is_none_or(|c| a.connection == c))
             .filter(|a| a.id.to_string() == name || a.label == name)
             .collect();
         return match matches.as_slice() {
@@ -260,21 +271,50 @@ pub fn resolve_launch_account(
             _ => Err(ManagedError::AmbiguousAccount),
         };
     }
-    if let Some(selection) = defaults
-        .iter()
-        .find(|s| s.tool == tool && connection.is_none_or(|c| s.connection == c))
-    {
+    // A saved default for the backend. Saved defaults are never sign-in
+    // entries, so a derived sign-in selection is skipped here.
+    let backend = connection.unwrap_or(ConnectionKind::NearAi);
+    if let Some(selection) = defaults.iter().find(|s| {
+        s.tool == tool && s.connection == backend && s.connection != ConnectionKind::NearAiSignIn
+    }) {
         return accounts
             .iter()
-            .find(|a| {
-                a.id == selection.account_id && a.tool == tool && Some(a.connection) == connection
-            })
+            .find(|a| a.id == selection.account_id && a.tool == tool && a.connection == backend)
             .cloned()
             .ok_or(ManagedError::NotFound);
     }
-    match candidates.as_slice() {
-        [account] => Ok((*account).clone()),
-        [] => Err(ManagedError::NotFound),
-        _ => Err(ManagedError::AmbiguousAccount),
+    let saved: Vec<_> = accounts
+        .iter()
+        .filter(|a| a.tool == tool && a.connection == backend)
+        .collect();
+    match saved.as_slice() {
+        [account] => return Ok((*account).clone()),
+        [_, _, ..] => return Err(ManagedError::AmbiguousAccount),
+        [] => {}
     }
+    if connection.is_none() {
+        if let Some(entry) = sign_in
+            .iter()
+            .find(|a| a.tool == tool && a.connection == ConnectionKind::NearAiSignIn)
+        {
+            return Ok(entry.clone());
+        }
+    }
+    Err(ManagedError::NotFound)
+}
+
+/// Each tool's implicit launch account, for a shell to preselect.
+pub fn launch_defaults(
+    accounts: &[AccountView],
+    sign_in: &[AccountView],
+    defaults: &[Selection],
+) -> std::collections::BTreeMap<ToolId, AccountId> {
+    [ToolId::Claude, ToolId::Codex, ToolId::Opencode]
+        .into_iter()
+        .filter_map(|tool| {
+            resolve_launch_account(accounts, sign_in, defaults, tool, None, None)
+                .ok()
+                .map(|account| (tool, account.id))
+        })
+        .collect()
 }

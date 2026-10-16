@@ -36,6 +36,11 @@ pub const DAEMON_HISTORY_FILE: &str = "daemon-history.jsonl";
 /// auto-upload, bulk-approving). This is user-facing visibility, not a
 /// security control -- see `daemon::audit`.
 pub const DAEMON_AUDIT_FILE: &str = "daemon-audit.jsonl";
+/// The settlement estimate's feature cache (`daemon::settlement_scan`):
+/// per-trace `lef1` counts keyed by a hash of the source and path, so an
+/// unchanged trace is never read twice. Holds no path and no content.
+/// Deleted when the estimate switch is turned off; swept by `wipe()`.
+pub const DAEMON_SETTLEMENT_FEATURES_FILE: &str = "daemon-settlement-features.json";
 /// The account session token from the loopback browser sign-in
 /// (`crate::account_auth`). A SECRET, written at 0600 inside the 0700 state
 /// directory exactly like the device key, and swept by `wipe()` -- a logout
@@ -65,6 +70,10 @@ pub const LEGACY_INVITE_LINK_FILE: &str = "legacy-invite-link.json";
 /// without asking the issuer or the contributor. A hash, never the code.
 /// Swept by `wipe()`.
 pub const INVITE_SUBJECT_FILE: &str = "invite-subject.json";
+/// A legacy invite move the server refused for good (a pooled tenant), so
+/// the daemon stops offering it (`daemon::legacy_migration`). Hashes only;
+/// belongs to this enrollment and swept by `wipe()`.
+pub const LEGACY_INVITE_REFUSAL_FILE: &str = "legacy-invite-refusal.json";
 /// The passkeys used on this Mac, remembered for the first run's "Welcome
 /// back" (`daemon::remembered_passkeys`). Names and account hashes only.
 /// Survives sign-out; swept by `wipe()`.
@@ -84,12 +93,13 @@ pub const DAEMON_APPROVED_ENVELOPE_PREFIX: &str = "daemon-approved-envelope-";
 /// itself), settings, folder rules and the queue (the person's choices about
 /// this Mac, not about an account), the NEAR AI notice marker, and the
 /// remembered passkeys (a passkey is not an enrollment).
-pub(crate) const ENROLLMENT_FILES: [&str; 5] = [
+pub(crate) const ENROLLMENT_FILES: [&str; 6] = [
     CONFIG_FILE,
     DAEMON_INFERENCE_CONNECTION_FILE,
     IDENTITY_SWITCH_JOURNAL_FILE,
     LEGACY_INVITE_LINK_FILE,
     INVITE_SUBJECT_FILE,
+    LEGACY_INVITE_REFUSAL_FILE,
 ];
 /// Runtime files, not persistent state: removed on shutdown, not by `wipe()`.
 pub const DAEMON_SOCK_FILE: &str = "daemon.sock";
@@ -1243,6 +1253,18 @@ impl ConfigStore {
         // Token review payloads belong to this enrollment. Never traverse a
         // substituted link into an agent's session directory. Remaining raw
         // capture leases expire independently in Ironwire's bounded spool.
+        // Collected exports belong to this contributor, while the native
+        // OpenCode profiles remain local session history. Never follow a
+        // substituted staging symlink into someone else's files.
+        let staged = self.dir.join(crate::managed::opencode::STAGING);
+        match std::fs::symlink_metadata(&staged) {
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+                std::fs::remove_dir_all(&staged).context("removing managed exports")?
+            }
+            Ok(_) => std::fs::remove_file(&staged).context("removing managed export link")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("reading managed exports"),
+        }
         let bundles = self.dir.join("token-bundles");
         match std::fs::symlink_metadata(&bundles) {
             Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
@@ -1269,7 +1291,9 @@ impl ConfigStore {
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
             INVITE_SUBJECT_FILE,
+            LEGACY_INVITE_REFUSAL_FILE,
             REMEMBERED_PASSKEYS_FILE,
+            DAEMON_SETTLEMENT_FEATURES_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -1294,7 +1318,9 @@ impl ConfigStore {
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
             INVITE_SUBJECT_FILE,
+            LEGACY_INVITE_REFUSAL_FILE,
             REMEMBERED_PASSKEYS_FILE,
+            DAEMON_SETTLEMENT_FEATURES_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))
@@ -1967,6 +1993,29 @@ mod tests {
     }
 
     #[test]
+    fn wipe_removes_the_settlement_feature_cache_and_its_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().join("state")).unwrap();
+        store
+            .write_daemon_file(DAEMON_SETTLEMENT_FEATURES_FILE, b"{}")
+            .unwrap();
+        let orphan = dir
+            .path()
+            .join("state")
+            .join(format!(".{DAEMON_SETTLEMENT_FEATURES_FILE}.tmp-synthetic"));
+        std::fs::write(&orphan, b"{}").unwrap();
+        store.wipe().unwrap();
+        assert!(
+            store
+                .read_daemon_file(DAEMON_SETTLEMENT_FEATURES_FILE)
+                .unwrap()
+                .is_none(),
+            "wipe() left the settlement feature cache"
+        );
+        assert!(!orphan.exists(), "wipe() left a settlement cache temp file");
+    }
+
+    #[test]
     fn wipe_removes_state() {
         let (_d, store) = store();
         store.save_config(&sample_config()).unwrap();
@@ -1990,6 +2039,23 @@ mod tests {
         assert!(!store.dir.join("token-bundles").exists());
         assert_eq!(
             std::fs::read(store.dir.join("agent-session.jsonl")).unwrap(),
+            b"original"
+        );
+    }
+
+    #[test]
+    fn wipe_removes_managed_exports_but_keeps_native_profiles() {
+        let (_d, store) = store();
+        let staged = store.dir.join(crate::managed::opencode::STAGING);
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(staged.join("trace.json"), b"private").unwrap();
+        let profile = store.dir.join("managed-profiles");
+        std::fs::create_dir(&profile).unwrap();
+        std::fs::write(profile.join("native-session"), b"original").unwrap();
+        store.wipe().unwrap();
+        assert!(!staged.exists());
+        assert_eq!(
+            std::fs::read(profile.join("native-session")).unwrap(),
             b"original"
         );
     }

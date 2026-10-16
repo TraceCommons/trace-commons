@@ -87,10 +87,35 @@ struct FolderInspector: View {
                 placeholder: "—"
             )
             .disabled(store.writing.contains(folder.id))
-            ForEach(store.disclosureLines(folder.disclosure), id: \.self) { caption($0) }
+            disclosure(words)
             if folder.isBucket, let note = ProjectCopy.unresolvedBucketNote { caption(note) }
         } else {
             caption(words.inspector.noRule)
+        }
+    }
+
+    /// What an armed folder is told: the one sentence for its route (owner,
+    /// 2026-10-12), with the long, precise disclosure behind an info button
+    /// beside it. If the core's "More about" words are unavailable the long
+    /// form is drawn instead, so it is never unreachable.
+    @ViewBuilder
+    private func disclosure(_ words: MonitorTracesCopy) -> some View {
+        if let copy = store.armedDisclosure(folder.disclosure) {
+            if let label = Self.moreAboutLabel(words.inspector.contributionRule) {
+                HStack(alignment: .top, spacing: GlassTokens.Space.s2) {
+                    caption(copy.summary)
+                    GlassInfoButton(label, text: copy.lines.joined(separator: "\n\n"))
+                }
+            } else {
+                ForEach(copy.lines, id: \.self) { caption($0) }
+            }
+        }
+    }
+
+    /// The core's "More about {title}" for the rule section, nil if unread.
+    static func moreAboutLabel(_ title: String) -> String? {
+        TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode).map {
+            FirstRunCopy.fill($0.uses.moreAbout, ["title": title])
         }
     }
 
@@ -101,55 +126,55 @@ struct FolderInspector: View {
     private func decisions(_ words: MonitorTracesCopy) -> some View {
         let offer = store.groupOffer(folder)
         let busy = store.writing.contains(folder.id)
-        GlassCard(quiet: true) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                    Text(folder.label)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                    if let path = folder.path, !path.isEmpty {
-                        caption(path)
-                    }
-                    caption(Self.waitingLine(folder.sessions.count, words: words))
-                    if let eligible = Self.eligibleLine(folder, offer: offer, words: words) {
-                        caption(eligible)
-                    }
+        // Its section is the card (`InspectorSection`): no card inside it.
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                Text(folder.label)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+                if let path = folder.path, !path.isEmpty {
+                    caption(path)
                 }
-                if let refused = store.writeErrors[folder.id] {
-                    GlassNotice(tone: .outside, title: words.line(for: refused)) { EmptyView() }
+                caption(Self.waitingLine(folder.sessions.count, words: words))
+                if let eligible = Self.eligibleLine(folder, offer: offer, words: words) {
+                    caption(eligible)
                 }
-                // Ron's buttons wrap as his row does at this width: Submit
-                // all eligible on its own line, then Submit all as and
-                // Ignore, every label on one line.
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    let submits = Self.offersSubmitAll(folder, store: store)
-                    if submits {
-                        Button(store.submittingFolder == folder.id
-                            ? words.tree.submitting : Self.submitAllTitle(offer.count, words: words))
-                        {
-                            Task { await store.contributeFolder(folder, verdict: nil) }
-                        }
+            }
+            // Submit all eligible and Submit all as are one split
+            // button (owner, 2026-10-10): the action, and a chevron
+            // that opens Submit all as. Ignore, the decline, is a link
+            // after it (Ron, 2026-10-09).
+            HStack(spacing: GlassTokens.Space.s4) {
+                let submits = Self.offersSubmitAll(folder, store: store)
+                let title = store.submittingFolder == folder.id
+                    ? words.tree.submitting : Self.submitAllTitle(offer.count, words: words)
+                if submits, let outcome = store.disclosure?.outcome {
+                    GlassSplitButton(title, menuLabel: outcome.submitAllAs) {
+                        Task { await store.contributeFolder(folder, verdict: nil) }
+                    } menu: {
+                        Button(outcome.submitAllAs) { choosingVerdict = true }
+                            .help(outcome.submitAllAsTooltip)
+                    }
+                    .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
+                } else if submits {
+                    Button(title) { Task { await store.contributeFolder(folder, verdict: nil) } }
                         .buttonStyle(GlassButtonStyle(.glass))
                         .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
-                    }
-                    HStack(spacing: GlassTokens.Space.s4) {
-                        if submits, let outcome = store.disclosure?.outcome {
-                            Button(outcome.submitAllAs) { choosingVerdict = true }
-                                .buttonStyle(GlassButtonStyle(.glass))
-                                .help(outcome.submitAllAsTooltip)
-                        }
-                        if let copy = ignoreCopy {
-                            Button(copy.button) { route(TracesTreeView.modeChange(folder, .ignore), .ignore) }
-                                .buttonStyle(GlassButtonStyle(.glass))
-                                .help(copy.tooltip)
-                        }
-                    }
                 }
-                .lineLimit(1)
-                .disabled(busy)
+                if let copy = ignoreCopy {
+                    Button(copy.button) { route(TracesTreeView.modeChange(folder, .ignore), .ignore) }
+                        .buttonStyle(GlassButtonStyle(.link))
+                        .help(copy.tooltip)
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .lineLimit(1)
+            .disabled(busy)
+            // A refused write, under the buttons it is about.
+            if let refused = store.writeErrors[folder.id] {
+                GlassAlert(words.line(for: refused))
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// Ron's `SubmitAllAsControl`: one outcome for every eligible session,

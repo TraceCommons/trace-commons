@@ -128,7 +128,8 @@ final class TracesParityTests: XCTestCase {
         let caveat = try Self.text("Views/ScrubbingCaveat.swift")
         let atCommitStart = try XCTUnwrap(caveat.range(of: "struct ScrubbingCaveatAtCommit")).lowerBound
         let atCommit = String(caveat[atCommitStart...])
-        for needle in ["GlassStatusLabel(ScrubbingCaveat.canonical, status: .ask)",
+        // A caution notice (owner, 2026-10-12: notices read as notifications).
+        for needle in ["GlassNotice(tone: .ask) { Text(ScrubbingCaveat.canonical) }",
                        ".accessibilityLabel(ScrubbingCaveat.beforeYouContribute + \" \" + ScrubbingCaveat.canonical)"] {
             XCTAssertTrue(atCommit.contains(needle), "ScrubbingCaveatAtCommit lacks \(needle)")
         }
@@ -445,33 +446,38 @@ final class TracesParityTests: XCTestCase {
         XCTAssertEqual(QueueLegacyWords.nothingWaiting, "Nothing is waiting.")
         XCTAssertEqual(
             QueueLegacyWords.nothingWaitingDetail,
-            "When a session finishes and goes quiet, it shows up here. Nothing is sent unless you say so.")
+            "When a trace finishes and goes quiet, it shows up here. Nothing is sent unless you say so.")
         XCTAssertEqual(
             QueueLegacyWords.undoWillSend,
-            "Approved sessions will send automatically. You can undo until uploading starts.")
+            "Approved traces will send automatically. You can undo until uploading starts.")
         XCTAssertEqual(
             QueueLegacyWords.closeNoticeStillSends,
-            "Close this notice. Approved sessions will still send automatically.")
+            "Close this notice. Approved traces will still send automatically.")
         XCTAssertEqual(QueueLegacyWords.closeNotice, "Close this notice.")
         XCTAssertEqual(QueueLegacyWords.approvedAgo(7), "Approved 7s ago")
         XCTAssertEqual(QueueLegacyWords.approvedAgo(AppModel.Undo.tickCeiling), "Approved 120s+ ago")
         XCTAssertEqual(QueueLegacyWords.approvedAgo(500), "Approved 120s+ ago")
-        XCTAssertEqual(QueueLegacyWords.noLongerWaiting(3), "Sessions no longer waiting (3)")
+        XCTAssertEqual(QueueLegacyWords.noLongerWaiting(3), "Traces no longer waiting (3)")
         XCTAssertEqual(
             QueueLegacyWords.notOfferedScope,
-            "This covers sessions that reached the queue. Sessions that were never queued at all are not counted here.")
+            "This covers traces that reached the queue. Traces that were never queued at all are not counted here.")
     }
 
-    /// Declining comes first and neither answer is the primary action, on
-    /// both offers (`QueueView.swift:1262-1268, 1321-1325`).
-    func test_neitherOfferLeadsTheEyeToYes() throws {
+    /// The accept comes first as a glass button and the decline after it as
+    /// a link, on both offers (Ron, 2026-10-09, which replaced the legacy
+    /// queue's decline-first order); neither answer is the primary action.
+    func test_bothOffersPutTheAcceptFirstAndTheDeclineAsALink() throws {
         let offers = try Self.text("Views/Monitor/TracesOffers.swift")
         let decline = try XCTUnwrap(offers.range(of: "copy.offerDecline"))
         let accept = try XCTUnwrap(offers.range(of: "copy.offerAccept"))
-        XCTAssertLessThan(decline.lowerBound, accept.lowerBound)
+        XCTAssertLessThan(accept.lowerBound, decline.lowerBound)
         let armDecline = try XCTUnwrap(offers.range(of: "Button(copy.decline"))
         let armConfirm = try XCTUnwrap(offers.range(of: "Button(copy.confirm"))
-        XCTAssertLessThan(armDecline.lowerBound, armConfirm.lowerBound)
+        XCTAssertLessThan(armConfirm.lowerBound, armDecline.lowerBound)
+        for declineCall in ["Button(copy.offerDecline, action: onDecline)\n                        .buttonStyle(GlassButtonStyle(.link))",
+                            "Button(copy.decline, action: onDecline)\n                            .buttonStyle(GlassButtonStyle(.link))"] {
+            XCTAssertTrue(offers.contains(declineCall), "the decline is not a link: \(declineCall)")
+        }
         let arming = try XCTUnwrap(offers.range(of: "struct ArmingOfferGlassCard"))
         XCTAssertFalse(offers[arming.lowerBound...].prefix(1500).contains("GlassButtonStyle(.primary"))
         let privateAI = try XCTUnwrap(offers.range(of: "struct PrivateAIOfferGlassCard"))
@@ -514,7 +520,7 @@ final class TracesParityTests: XCTestCase {
             XCTAssertTrue(inspector.contains(needle), "ToolFolderInspectors.swift lacks \(needle)")
         }
         let store = try Self.text("Views/Monitor/TracesStore.swift")
-        for needle in ["approveFolder(projectId: folder.id, verdict: verdict)", "verdict:", "excludedIneligible", "withheldLine(", "cancelFolder(projectId:",
+        for needle in ["projectId: folder.id, verdict: verdict, filter: idleOnly ? .idleSessions : nil", "verdict:", "excludedIneligible", "withheldLine(", "cancelFolder(projectId:",
                        "EligibilitySurface.groupSubmit("] {
             XCTAssertTrue(store.contains(needle), "TracesStore.swift lacks \(needle)")
         }
@@ -548,7 +554,8 @@ final class TracesParityTests: XCTestCase {
             try summary(#"{"api_key":2,"residual_secret_at:events.3.correction":1}"#)))
         XCTAssertEqual(line, TCCoreCopy.residualSecretLine(
             count: RedactionLabels.survivorTotal(counts), sites: RedactionLabels.survivors(counts).map(\.site)))
-        XCTAssertTrue(line.contains("events.3.correction"), line)
+        // Plain words, no schema path (owner, 2026-10-12).
+        XCTAssertEqual(line, "1 secret is still in this trace")
     }
 
     /// The queue card's facts, drawn by the inspector from the same sources:
@@ -558,7 +565,7 @@ final class TracesParityTests: XCTestCase {
         let card = try Self.text("Views/Monitor/SessionReviewCard.swift")
         let inspector = try XCTUnwrap(card.range(of: "struct SessionReviewCard: View"))
         let body = card[inspector.lowerBound...]
-        for needle in ["TracesStore.survivorLine(summary)", "GlassStatusLabel(survivor, status: .ask)",
+        for needle in ["TracesStore.survivorLine(summary)", "GlassNotice(tone: .outside, title: survivor)",
                        "RedactionLabels.removedTotal(redactions)",
                        "ScrubbingCaveat.rowLine(redactionCount: removed)",
                        "ScrubbingCaveat.status(redactionCount: removed)",

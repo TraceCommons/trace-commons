@@ -79,12 +79,12 @@
 
 /// Approved 2026-10-06.
 /// Core-owned disclosure for configured activity missions with rewards disabled.
-pub const ACTIVITY_MISSIONS_DISCLOSURE: &str = "Matching stays on this Mac; no activity profile or match result is sent. Missions change no capture or contribution permissions and send no sessions. Progress uses contributions made through your existing consent. Mission rewards are disabled, and no mission credit is available. Any future mission credit would remain pending and conditional until settlement.";
+pub const ACTIVITY_MISSIONS_DISCLOSURE: &str = "Matching stays on this Mac; no activity profile or match result is sent. Missions change no capture or contribution permissions and send no traces. Progress uses contributions made through your existing consent. Mission rewards are disabled, and no mission credit is available. Any future mission credit would remain pending and conditional until settlement.";
 
 /// Approved 2026-10-06.
 /// Core-owned disclosure for discovery, separate from daily activity mechanics.
 /// Skill awards do not become corpus credit or authorize a contribution.
-pub const MISSION_CATALOGUE_DISCLOSURE: &str = "These are published skill-evaluation tasks. Matching stays on this Mac; no activity profile or match result is sent. Viewing or selecting a mission changes no capture or contribution permissions and sends no sessions. Contributions still require your existing consent. Corpus credit remains pending and conditional until settlement. Skill-evaluation awards are separate from corpus credit.";
+pub const MISSION_CATALOGUE_DISCLOSURE: &str = "These are published skill-evaluation tasks. Matching stays on this Mac; no activity profile or match result is sent. Viewing or selecting a mission changes no capture or contribution permissions and sends no traces. Contributions still require your existing consent. Corpus credit remains pending and conditional until settlement. Skill-evaluation awards are separate from corpus credit.";
 
 /// The sentence that replaced the acknowledgement checkbox.
 ///
@@ -106,7 +106,7 @@ pub const GATE_STATEMENT: &str = "\"Exactly what would be sent\" is the exact te
 ///
 /// The whole claim in four words: this button sends this session, and it
 /// does not do anything else.
-pub const GATE_READY_HELP: &str = "Sends this session. Nothing else.";
+pub const GATE_READY_HELP: &str = "Sends this trace. Nothing else.";
 
 /// Why `Contribute` is off.
 ///
@@ -186,7 +186,29 @@ pub const AUTO_SCRUB_LIMIT: &str = "The patterns are reliable for the formats th
 /// that must not be. It is the whole difference between contributing
 /// automatically and reviewing each session. Do not shorten it for layout;
 /// change the layout.
-pub const AUTO_NO_REVIEW: &str = "No one looks at a session before it is sent, including you.";
+pub const AUTO_NO_REVIEW: &str = "No one looks at a trace before it is sent, including you.";
+
+/// The one sentence the Contribution rule card says under Automatic when
+/// no privacy model is confirmed to have run (`Disclosure::PatternsOnly`).
+///
+/// Approved 2026-10-12 (owner), word for word. The long, precise
+/// disclosure ([`AUTO_PATTERNS_ONLY_SCOPE`], [`AUTO_PATTERNS_ONLY_LIMIT`],
+/// [`AUTO_NO_REVIEW`]) stays one click away, behind the card's info button,
+/// and in the arming dialog.
+pub const AUTO_SUMMARY_PATTERNS_ONLY: &str = concat!(
+    crate::app_name!(),
+    " removes keys, emails, phone numbers and file paths, but names and anything written in plain text can still go out, and no one reviews traces before they're sent."
+);
+
+/// The one sentence for the route where a privacy model runs
+/// (`Disclosure::ModelScrubbed`).
+///
+/// Approved 2026-10-12 (owner), word for word. See
+/// [`AUTO_SUMMARY_PATTERNS_ONLY`].
+pub const AUTO_SUMMARY_MODEL: &str = concat!(
+    crate::app_name!(),
+    " removes keys, emails, phone numbers and file paths, and a privacy model catches most names, but some personal details can still go out, and no one reviews traces before they're sent."
+);
 
 /// Every fixed string on this surface, in one payload.
 ///
@@ -251,7 +273,7 @@ pub const VOID_REASONS_HEADING: &str = "What changed";
 pub const VOID_ACKNOWLEDGE: &str = "Got it";
 
 /// What a project's void notice says happened.
-pub const VOID_PROJECT_BODY: &str = "It was turned on under settings that have since changed, so it now asks before contributing. Its new sessions wait for you to review them, and nothing more is sent from it on its own.";
+pub const VOID_PROJECT_BODY: &str = "It was turned on under settings that have since changed, so it now asks before contributing. Its new traces wait for you to review them, and nothing more is sent from it on its own.";
 
 /// What the Flow 1 grant's void notice says happened.
 pub const VOID_GRANT_BODY: &str = "It was turned on under settings that have since changed, so new projects now ask before contributing. Nothing is sent from a new project on its own.";
@@ -304,7 +326,7 @@ pub const VOID_OVERRIDE_TITLE: &str = concat!(
 pub const VOID_OVERRIDE_BODY: &str = concat!(
     "Settings it was turned on under have since changed, so ",
     crate::project_copy::folder_mode_auto_label!(),
-    " is off and each folder is back on its own setting. Sessions from folders that ask first \
+    " is off and each folder is back on its own setting. Traces from folders that ask first \
      wait for you again."
 );
 
@@ -352,25 +374,25 @@ pub fn void_notice_title(project_label: Option<&str>) -> String {
 #[must_use]
 pub fn void_reason_line(label: &str) -> &'static str {
     match label {
-        "destination-changed" => "Your sessions would now go to a different Trace Commons server.",
+        "destination-changed" => "Your traces would now go to a different Trace Commons server.",
         "identity-changed" => {
-            "Your sessions would now be sent under a different account, identity or device."
+            "Your traces would now be sent under a different account, identity or device."
         }
         "scopes-widened" => "You now allow your contributions to be used in more ways.",
         "privacy-filter-changed" => {
-            "The privacy filter that reads your sessions before they are sent was added, removed or changed."
+            "The privacy filter that reads your traces before they are sent was added, removed or changed."
         }
         "receipt-endpoint-changed" => {
-            "Your AI provider would now be asked for a receipt for the last call in each of your sessions, which tells it they are being contributed."
+            "Your AI provider would now be asked for a receipt for the last call in each of your traces, which tells it they are being contributed."
         }
         "witness-changed" => {
-            "A different witness, the service that checks and scrubs your sessions before they are contributed, would now read them."
+            "A different witness, the service that checks and scrubs your traces before they are contributed, would now read them."
         }
         "witness-measurement-admitted" => {
-            "A new version of the witness, the service that checks and scrubs your sessions before they are contributed, was approved to read them."
+            "A new version of the witness, the service that checks and scrubs your traces before they are contributed, was approved to read them."
         }
         "attested-bodies-on" => {
-            "The full text of your attested AI calls would now be sent with your sessions."
+            "The full text of your attested AI calls would now be sent with your traces."
         }
         // `policy::OVERRIDE_TERMS_UNRECORDED`:
         // only an "Automatic" override saved by a pre-release build.
@@ -585,7 +607,7 @@ pub fn void_notice_for_wire_with_regrant(
 /// confirms one did, which is what `automatic_gate::disclosure` answering
 /// `PatternsOnly` means. "Trust relaxes what may be sent, never what may be
 /// said."
-pub const AUTO_PATTERNS_ONLY_SCOPE: &str = "Fixed patterns remove API keys and tokens in the formats we know, and many file paths and email addresses that name you. A bearer token in any other format is removed when it is long, looks random and follows \"Bearer\" after a space or colon, unless it is shaped like a UUID or another known kind of ID; one that is short, or run straight onto \"Bearer\", can get through. Nothing confirms that a model checked these sessions, so treat names, people, addresses, account numbers and a password typed into a sentence as sent.";
+pub const AUTO_PATTERNS_ONLY_SCOPE: &str = "Fixed patterns remove API keys and tokens in the formats we know, and many file paths and email addresses that name you. A bearer token in any other format is removed when it is long, looks random and follows \"Bearer\" after a space or colon, unless it is shaped like a UUID or another known kind of ID; one that is short, or run straight onto \"Bearer\", can get through. Nothing confirms that a model checked these traces, so treat names, people, addresses, account numbers and a password typed into a sentence as sent.";
 
 /// The limit of the patterns, for the same route as
 /// [`AUTO_PATTERNS_ONLY_SCOPE`].
@@ -603,7 +625,7 @@ pub const AUTO_PATTERNS_ONLY_LIMIT: &str = "The patterns are reliable for the fo
 /// classifier call, which puts the classifier's operator inside the
 /// transcript's trust boundary, and the classifier receives the
 /// deterministic-pass output rather than the unredacted session.
-pub const AUTO_RAW_SEND_BOTH_ENCLAVES: &str = "Each session is sent unredacted to your witness, which redacts it inside an enclave. The witness can pass the text its fixed patterns leave to NEAR AI's privacy filter, which runs in a second enclave with a second operator, NEAR AI. The witness does not check that second enclave's attestation on each call, so NEAR AI's operator is trusted with that text.";
+pub const AUTO_RAW_SEND_BOTH_ENCLAVES: &str = "Each trace is sent unredacted to your witness, which redacts it inside an enclave. The witness can pass the text its fixed patterns leave to NEAR AI's privacy filter, which runs in a second enclave with a second operator, NEAR AI. The witness does not check that second enclave's attestation on each call, so NEAR AI's operator is trusted with that text.";
 
 // Where the witness came from -- the spec's second "further sentence" -- is
 // no longer one hedged constant here. The config now records the origin
@@ -624,18 +646,18 @@ pub const AUTO_PROJECT_DISCLOSURE_UNAVAILABLE: &str =
 ///
 /// Approved 2026-10-06. R7: the picker has no default, and a
 /// contributor who does not choose gets no grant and lands on Flow 2.
-pub const AUTO_SCOPE_REQUIRED: &str = "Automatic contributing needs your choice of how your traces may be used. Nothing is selected for you. If you don't choose, nothing is contributed automatically and each session waits for you.";
+pub const AUTO_SCOPE_REQUIRED: &str = "Automatic contributing needs your choice of how your traces may be used. Nothing is selected for you. If you don't choose, nothing is contributed automatically and each trace waits for you.";
 
 /// The automatic path, as the path question offers it.
 ///
 /// Approved 2026-10-06. Worded to `grant_automatic`'s K3 and K4: it
 /// arms projects discovered after the grant, and a project with any session
 /// on disk at the grant keeps asking, for its new sessions too. "Have
-/// sessions", not "already on this computer": the daemon exempts only
+/// traces", not "already on this computer": the daemon exempts only
 /// projects with sessions on disk (`AutomaticGrant::projects_on_disk` in
 /// `daemon::policy`), so a folder that exists but holds no session yet is
 /// armed when its first one lands.
-pub const AUTO_PATH_AUTOMATIC: &str = "Contribute automatically from projects that first appear after you turn this on. Projects that already have sessions on this computer keep asking first.";
+pub const AUTO_PATH_AUTOMATIC: &str = "Contribute automatically from projects that first appear after you turn this on. Projects that already have traces on this computer keep asking first.";
 
 /// The automatic path's first line, which a shell shows on its own with
 /// [`AUTO_PATH_AUTOMATIC_DETAIL`] behind an info button.
@@ -661,12 +683,12 @@ pub const AUTO_PATH_AUTOMATIC_DETAIL: &str = "Only projects that first appear af
 /// "Contributed", not "sent": reviewing with a witness or the privacy scan
 /// sends a session somewhere before approval.
 pub const AUTO_PATH_ASK_FIRST: &str =
-    "Review each session yourself. Nothing is contributed until you approve it.";
+    "Review each trace yourself. Nothing is contributed until you approve it.";
 
 /// The ask-first path's first line, shown on its own with
 /// [`AUTO_PATH_ASK_FIRST_DETAIL`] behind an info button. Approved
 /// 2026-10-08 (owner, dictated).
-pub const AUTO_PATH_ASK_FIRST_TITLE: &str = "Review each session yourself.";
+pub const AUTO_PATH_ASK_FIRST_TITLE: &str = "Review each trace yourself.";
 
 /// The rest of [`AUTO_PATH_ASK_FIRST`]. Approved 2026-10-08 (owner,
 /// dictated).
@@ -723,19 +745,18 @@ pub const SCRUB_CHECK_AUTOMATIC_LABEL: &str = "Automatic";
 
 /// Approved 2026-10-06. What Automatic does. Names both second-look
 /// reasons and says what the check is not.
-pub const SCRUB_CHECK_AUTOMATIC_HELP: &str = "In folders set to share automatically, a session is sent on its own once it has been scrubbed, unless nothing personal was removed from it, something left in it still looks like personal data, or it was trimmed to fit. Those wait for you. This only counts and looks for patterns; it does not check that the scrubbing was right.";
+pub const SCRUB_CHECK_AUTOMATIC_HELP: &str = "In folders set to share automatically, a trace is sent on its own once it has been scrubbed, unless nothing personal was removed from it, something left in it still looks like personal data, or it was trimmed to fit. Those wait for you. This only counts and looks for patterns; it does not check that the scrubbing was right.";
 
 /// Approved 2026-10-06. The Manual choice (`scrub_check: "manual"`).
 pub const SCRUB_CHECK_MANUAL_LABEL: &str = "Manual";
 
 /// Approved 2026-10-06. What Manual does.
-pub const SCRUB_CHECK_MANUAL_HELP: &str = "Every session waits for you, including in folders set to share automatically. Nothing is sent until you approve it.";
+pub const SCRUB_CHECK_MANUAL_HELP: &str = "Every trace waits for you, including in folders set to share automatically. Nothing is sent until you approve it.";
 
 /// Approved 2026-10-06. On a session held under
 /// `second-look-review-required`. The particular reason is the row's own
 /// `second_look` sentence; this says only that it did not move and will not.
-pub const SCRUB_CHECK_HELD: &str =
-    "This session was not sent on its own. It waits until you decide.";
+pub const SCRUB_CHECK_HELD: &str = "This trace was not sent on its own. It waits until you decide.";
 
 /// What the fixed patterns remove and where they stop, for one disclosure.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
@@ -756,6 +777,10 @@ pub struct AutomaticGrantCopy {
     pub disclosure: &'static str,
     pub patterns_only: Option<ScrubCopy>,
     pub model_scrubbed: Option<ScrubCopy>,
+    /// The one sentence a card shows for this disclosure (approved
+    /// 2026-10-12). `patterns_only`, `model_scrubbed` and `no_review` are the
+    /// long form, for an info button and the arming dialog.
+    pub summary: &'static str,
     pub no_review: &'static str,
     pub scope_required: &'static str,
     pub path_automatic: &'static str,
@@ -776,9 +801,10 @@ pub fn automatic_grant_copy(
     disclosure: crate::daemon::automatic_gate::Disclosure,
 ) -> AutomaticGrantCopy {
     use crate::daemon::automatic_gate::Disclosure;
-    let (label, patterns_only, model_scrubbed) = match disclosure {
+    let (label, summary, patterns_only, model_scrubbed) = match disclosure {
         Disclosure::PatternsOnly => (
             "patterns_only",
+            AUTO_SUMMARY_PATTERNS_ONLY,
             Some(ScrubCopy {
                 scope: AUTO_PATTERNS_ONLY_SCOPE,
                 limit: AUTO_PATTERNS_ONLY_LIMIT,
@@ -787,6 +813,7 @@ pub fn automatic_grant_copy(
         ),
         Disclosure::ModelScrubbed => (
             "model_scrubbed",
+            AUTO_SUMMARY_MODEL,
             None,
             Some(ScrubCopy {
                 scope: AUTO_SCRUB_SCOPE,
@@ -798,6 +825,7 @@ pub fn automatic_grant_copy(
         disclosure: label,
         patterns_only,
         model_scrubbed,
+        summary,
         no_review: AUTO_NO_REVIEW,
         scope_required: AUTO_SCOPE_REQUIRED,
         path_automatic: AUTO_PATH_AUTOMATIC,
@@ -872,16 +900,16 @@ pub struct WitnessCapacityCopy {
 /// machine, and the daemon retries on its own.
 #[must_use]
 pub fn witness_capacity_notice(waiting_sessions: u64) -> WitnessCapacityCopy {
-    const REST: &str = "because the privacy witness is busy checking other sessions. Nothing is sent until the witness can check";
+    const REST: &str = "because the privacy witness is busy checking other traces. Nothing is sent until the witness can check";
     let body = match waiting_sessions {
         0 => format!(
-            "Approved sessions are waiting {REST} them. They will be tried again automatically, and nothing has been lost."
+            "Approved traces are waiting {REST} them. They will be tried again automatically, and nothing has been lost."
         ),
         1 => format!(
-            "1 approved session is waiting {REST} it. It will be tried again automatically, and nothing has been lost."
+            "1 approved trace is waiting {REST} it. It will be tried again automatically, and nothing has been lost."
         ),
         n => format!(
-            "{n} approved sessions are waiting {REST} them. They will be tried again automatically, and nothing has been lost."
+            "{n} approved traces are waiting {REST} them. They will be tried again automatically, and nothing has been lost."
         ),
     };
     WitnessCapacityCopy {
@@ -904,10 +932,13 @@ pub fn witness_capacity_notice_for_wire(value: &serde_json::Value) -> Option<Wit
 // Moving a legacy invite identity to a NEAR AI account
 // ---------------------------------------------------------------------------
 //
-// Every constant in this section was approved 2026-10-06: written with the
-// client half of the legacy invite migration so that no shell writes its
-// own. The Tauri client renders all of it; macOS,
-// Windows and GTK render only the notice after a move
+// The constants in this section were approved 2026-10-06, except
+// `LEGACY_MIGRATION_OFFER_DISMISS` and `LEGACY_MIGRATION_OFFER_LATER`, which
+// were approved 2026-10-11. They were written with the client half of the
+// legacy invite migration so that no shell writes its own. The Tauri and
+// macOS clients render the offer (macOS also as a dismissible card in its
+// notices, which is what the two 2026-10-11 constants are for); Windows and
+// GTK render only the notice after a move
 // (`legacy_migration_notice_for_wire`), not the offer. The daemon reports
 // the move under `status.legacy_invite_migration` and refuses it with
 // `legacy_migration_*` labels (`daemon::legacy_migration::LABELS`).
@@ -916,12 +947,45 @@ pub fn witness_capacity_notice_for_wire(value: &serde_json::Value) -> Option<Wit
 /// `status.legacy_invite_migration.offered` is true.
 pub const LEGACY_MIGRATION_OFFER_TITLE: &str = "Move to your NEAR AI account";
 
-/// Approved 2026-10-06. The offer. Says it is optional and that
+/// Reworded 2026-10-11 around the passkey step (owner direction); the new
+/// wording is not yet approved. The offer. Says it is optional and that
 /// declining changes nothing, because coexistence is the default.
-pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You can move your contributions to your NEAR AI account instead. Nothing changes unless you choose to, and your invite keeps working if you don't.";
+pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You can move your contributions to your NEAR AI account instead, by creating or using your passkey in your browser. Nothing changes unless you choose to, and your invite keeps working if you don't.";
 
 /// Approved 2026-10-06. The button that starts the move. Approved 2026-10-08 (button rule).
 pub const LEGACY_MIGRATION_OFFER_ACTION: &str = "Move";
+
+/// Approved 2026-10-11. Puts away the offer where it is a card among a shell's
+/// notices, for good on that device; the move stays in Settings. Its own
+/// key, not the notice's acknowledgement (`docs/ui-copy-guide.md` 4).
+pub const LEGACY_MIGRATION_OFFER_DISMISS: &str = "Dismiss";
+
+/// Approved 2026-10-11. Beside the dismiss on the offer card, so putting the
+/// card away is not taken for declining the move for good.
+pub const LEGACY_MIGRATION_OFFER_LATER: &str = "You can move later from Settings.";
+
+/// Not yet approved. Shown while the shell waits on the passkey step in the
+/// browser, which it starts itself when the move needs it
+/// (`legacy_migration_no_near_ai_session`), before it retries the move.
+pub const LEGACY_MIGRATION_PASSKEY_WAITING: &str = "Waiting for your passkey in your browser...";
+
+/// Not yet approved. The passkey step ended without finishing (it failed,
+/// or ran out of time). Nothing ran.
+pub const LEGACY_MIGRATION_PASSKEY_FAILED: &str = "Your passkey step didn't finish, so nothing was moved. Your invite keeps working; try again when you're ready.";
+
+/// Not yet approved. Stops waiting on the passkey step. Nothing is moved.
+pub const LEGACY_MIGRATION_PASSKEY_CANCEL: &str = "Cancel";
+
+/// Not yet approved. The accessible name of the offer card's Move button,
+/// so a screen reader can tell it from the one in Settings
+/// (`docs/ui-copy-guide.md` 5). The visible label stays
+/// `LEGACY_MIGRATION_OFFER_ACTION`.
+pub const LEGACY_MIGRATION_OFFER_ACTION_NAME_NOTICE: &str =
+    "Move to your NEAR AI account, from this notice";
+
+/// Not yet approved. The accessible name of the Move button in Settings.
+pub const LEGACY_MIGRATION_OFFER_ACTION_NAME_SETTINGS: &str =
+    "Move to your NEAR AI account, from Settings";
 
 /// Approved 2026-10-06. Shown while the move runs.
 pub const LEGACY_MIGRATION_WORKING: &str = "Moving to your NEAR AI account...";
@@ -1004,8 +1068,9 @@ pub fn legacy_migration_refusal_line(label: &str) -> &'static str {
         "legacy_migration_admission_not_ready" => {
             "This commons isn't accepting contributions by account yet. Your invite keeps working; try again later."
         }
+        // Reworded 2026-10-11 around the passkey step; not yet approved.
         "legacy_migration_no_near_ai_session" => {
-            "Sign in to NEAR AI first, then try again. Your invite keeps working."
+            "Finish the passkey step in your browser first, then try again. Your invite keeps working."
         }
         "legacy_migration_invite_needed" => {
             "We couldn't tell which invite you joined with. Paste your invite link to continue."
@@ -1053,6 +1118,20 @@ pub struct LegacyMigrationOfferCopy {
     pub working: &'static str,
     pub invite_prompt: &'static str,
     pub start_failed: &'static str,
+    /// The offer card's dismiss. Only where the offer is a dismissible card.
+    pub dismiss: &'static str,
+    /// Beside that dismiss: the move is still in Settings.
+    pub later: &'static str,
+    /// While the shell waits on the passkey step in the browser.
+    pub passkey_waiting: &'static str,
+    /// The passkey step ended without finishing.
+    pub passkey_failed: &'static str,
+    /// Stops waiting on the passkey step.
+    pub passkey_cancel: &'static str,
+    /// The accessible name of `action` on the offer card in the notices.
+    pub action_name_notice: &'static str,
+    /// The accessible name of `action` in Settings.
+    pub action_name_settings: &'static str,
 }
 
 #[must_use]
@@ -1064,6 +1143,13 @@ pub fn legacy_migration_offer() -> LegacyMigrationOfferCopy {
         working: LEGACY_MIGRATION_WORKING,
         invite_prompt: LEGACY_MIGRATION_INVITE_PROMPT,
         start_failed: LEGACY_MIGRATION_START_FAILED,
+        dismiss: LEGACY_MIGRATION_OFFER_DISMISS,
+        later: LEGACY_MIGRATION_OFFER_LATER,
+        passkey_waiting: LEGACY_MIGRATION_PASSKEY_WAITING,
+        passkey_failed: LEGACY_MIGRATION_PASSKEY_FAILED,
+        passkey_cancel: LEGACY_MIGRATION_PASSKEY_CANCEL,
+        action_name_notice: LEGACY_MIGRATION_OFFER_ACTION_NAME_NOTICE,
+        action_name_settings: LEGACY_MIGRATION_OFFER_ACTION_NAME_SETTINGS,
     }
 }
 
@@ -1091,7 +1177,7 @@ pub const MISSIONS_DISCLOSURE_MATCHING: &str =
 /// Approved 2026-10-06. The first sentence is the spec's (M2, M4);
 /// the second is new, and says the same as M2's "a session counts toward a
 /// mission only when it is contributed through one of the existing paths".
-pub const MISSIONS_DISCLOSURE_NOTHING_SENT: &str = "Nothing is sent because of a mission. A session counts toward one only when you contribute it, the same way as any other.";
+pub const MISSIONS_DISCLOSURE_NOTHING_SENT: &str = "Nothing is sent because of a mission. A trace counts toward one only when you contribute it, the same way as any other.";
 
 /// Approved 2026-10-06. The spec's words (M3, M4).
 pub const MISSIONS_DISCLOSURE_CREDIT: &str =
@@ -1134,12 +1220,12 @@ pub fn missions_disclosure_copy() -> MissionsDisclosureCopy {
 /// Approved 2026-10-06. States the change and that the mode did not
 /// change -- "already-armed folders stay armed" -- before what the arming now
 /// means, which is the patterns-only disclosure word for word.
-pub const REWORDED_BODY: &str = "When you turned on automatic contributing here, we said its sessions would be scrubbed. That said more than this app can confirm, so this is what it means now. Nothing about the project has changed: it still contributes automatically.";
+pub const REWORDED_BODY: &str = "When you turned on automatic contributing here, we said its traces would be scrubbed. That said more than this app can confirm, so this is what it means now. Nothing about the project has changed: it still contributes automatically.";
 
 /// The heading over the patterns-only sentences in a rewording notice.
 ///
 /// Approved 2026-10-06.
-pub const REWORDED_NOW_HEADING: &str = "What happens to its sessions";
+pub const REWORDED_NOW_HEADING: &str = "What happens to its traces";
 
 /// The button that switches a reworded folder to ask-first. A shell sends it
 /// as `set_project_mode` with the element's `project_id` and `notify_only`,
@@ -1219,15 +1305,15 @@ pub fn arming_reworded_notice_for_wire(
                 || "The Scrub check is now Automatic".to_string(),
                 |label| format!("The Scrub check is now Automatic for {label}"),
             ),
-            body: "Your Scrub check was previously unset. This update makes it Automatic. This folder stays set to share automatically, but more sessions may now wait for your review.",
+            body: "Your Scrub check was previously unset. This update makes it Automatic. This folder stays set to share automatically, but more traces may now wait for your review.",
             now_heading: "What happens now",
             scope: SCRUB_CHECK_AUTOMATIC_HELP,
             limit: concat!(
                 "Choose ",
                 crate::project_copy::folder_mode_ask_label!(),
-                " for this folder if you want to review every session from it."
+                " for this folder if you want to review every trace from it."
             ),
-            no_review: "Held sessions are not sent until you decide.",
+            no_review: "Held traces are not sent until you decide.",
             acknowledge: VOID_ACKNOWLEDGE,
             ask_first_action: has_id.then_some(ASK_ME_FIRST_ACTION),
             ask_first_failed: has_id.then_some(ASK_ME_FIRST_FAILED),
@@ -1264,7 +1350,7 @@ pub const GATE_HELD_RELEASE: &str = "Nothing from these projects is sent while t
 ///
 /// Approved 2026-10-06.
 pub const GATE_HELD_ASK_FIRST: &str = concat!(
-    "To review a project's sessions yourself instead, switch it to ",
+    "To review a project's traces yourself instead, switch it to ",
     crate::project_copy::folder_mode_ask_label!(),
     "."
 );
@@ -1295,9 +1381,9 @@ pub fn gate_held_reason_line(label: &str) -> &'static str {
 #[must_use]
 pub fn gate_held_count_line(held_sessions: u64) -> String {
     match held_sessions {
-        0 => "Sessions from projects set to contribute automatically are waiting.".to_string(),
-        1 => "1 session from a project set to contribute automatically is waiting.".to_string(),
-        n => format!("{n} sessions from projects set to contribute automatically are waiting."),
+        0 => "Traces from projects set to contribute automatically are waiting.".to_string(),
+        1 => "1 trace from a project set to contribute automatically is waiting.".to_string(),
+        n => format!("{n} traces from projects set to contribute automatically are waiting."),
     }
 }
 
@@ -1305,8 +1391,8 @@ pub fn gate_held_count_line(held_sessions: u64) -> String {
 #[must_use]
 pub fn gate_held_project_line(project_label: &str, held_sessions: u64) -> String {
     match held_sessions {
-        1 => format!("{project_label}: 1 session waiting"),
-        n => format!("{project_label}: {n} sessions waiting"),
+        1 => format!("{project_label}: 1 trace waiting"),
+        n => format!("{project_label}: {n} traces waiting"),
     }
 }
 
@@ -1414,7 +1500,7 @@ pub fn gate_held_notice_for_wire(value: &serde_json::Value) -> Option<GateHeldNo
 /// The disclosure panel's title.
 ///
 /// Approved 2026-10-06.
-pub const DISCLOSURE_TITLE: &str = "Where your sessions go";
+pub const DISCLOSURE_TITLE: &str = "Where your traces go";
 
 /// The route line when a witness is configured and refusing.
 ///
@@ -1422,14 +1508,14 @@ pub const DISCLOSURE_TITLE: &str = "Where your sessions go";
 /// (`WitnessTrustState::is_refusing`): the submission path refuses before any
 /// network call.
 pub const DISCLOSURE_ROUTE_WITNESS_REFUSING: &str =
-    "A witness is set up but this app cannot check it, so no session is sent until that is fixed.";
+    "A witness is set up but this app cannot check it, so no trace is sent until that is fixed.";
 
 /// The route line with no witness configured.
 ///
 /// Approved 2026-10-06. With no witness the redactor runs in this
 /// process (`envelope::build_redactor`), and only the redacted envelope is
 /// uploaded. What an attached filter receives is the next sentence's job.
-pub const DISCLOSURE_ROUTE_LOCAL: &str = "No witness is set up. Sessions are redacted on this computer, and the unredacted session does not leave it.";
+pub const DISCLOSURE_ROUTE_LOCAL: &str = "No witness is set up. Traces are redacted on this computer, and the unredacted trace does not leave it.";
 
 /// The route line for a device that is not enrolled.
 ///
@@ -1473,7 +1559,7 @@ pub const DISCLOSURE_LOCAL_FILTER_SIDECAR: &str = "The text the fixed patterns l
 /// Approved 2026-10-06. `build_redactor_with` refuses an unknown
 /// `pii_filter`, and the protocol crate refuses a malformed environment
 /// backend; neither falls back to patterns only.
-pub const DISCLOSURE_LOCAL_FILTER_INVALID: &str = "The privacy filter setting cannot be used, so sessions are not redacted or sent until it is fixed.";
+pub const DISCLOSURE_LOCAL_FILTER_INVALID: &str = "The privacy filter setting cannot be used, so traces are not redacted or sent until it is fixed.";
 
 /// The witness block's heading.
 ///
@@ -1492,7 +1578,7 @@ pub const DISCLOSURE_WITNESS_MEASUREMENTS_LABEL: &str = "Pinned measurements";
 /// constructor of the `VerifiedWitness` the transport requires: a fresh
 /// nonce-bound quote whose measurement must match a pin and whose report
 /// data must name the pinned signing address.
-pub const DISCLOSURE_WITNESS_CHECK: &str = "Before a session is sent, this app asks the witness for a fresh attestation and sends nothing unless it matches a measurement pinned here and names this signing key.";
+pub const DISCLOSURE_WITNESS_CHECK: &str = "Before a trace is sent, this app asks the witness for a fresh attestation and sends nothing unless it matches a measurement pinned here and names this signing key.";
 
 /// The second enclave, from what this client can and cannot see.
 ///
@@ -1542,20 +1628,20 @@ pub const DISCLOSURE_RECEIPTS_OFF: &str =
 ///
 /// Approved 2026-10-06. Worded to the config field's own limit: it
 /// reads the report's self-description without verifying the quote.
-pub const DISCLOSURE_RECEIPTS_CHECKED: &str = "Before a session goes to your witness, this app may ask the inference provider for a signed receipt of the session's last model call. Asking tells the provider that the exchange is being contributed. This app also checks that the receipt was signed by the key NEAR AI's attestation report names, reading the report without verifying its quote.";
+pub const DISCLOSURE_RECEIPTS_CHECKED: &str = "Before a trace goes to your witness, this app may ask the inference provider for a signed receipt of the trace's last model call. Asking tells the provider that the exchange is being contributed. This app also checks that the receipt was signed by the key NEAR AI's attestation report names, reading the report without verifying its quote.";
 
 /// Receipts on, the attestation check off.
 ///
 /// Approved 2026-10-06. Whether the witness pins receipt signers is
 /// its configuration, invisible to this client (IPC contract, "The
 /// attested-inference record").
-pub const DISCLOSURE_RECEIPTS_UNCHECKED: &str = "Before a session goes to your witness, this app may ask the inference provider for a signed receipt of the session's last model call. Asking tells the provider that the exchange is being contributed. This app does not compare the receipt's signer with NEAR AI's attestation report, and whether your witness does depends on its setup, which this app cannot see.";
+pub const DISCLOSURE_RECEIPTS_UNCHECKED: &str = "Before a trace goes to your witness, this app may ask the inference provider for a signed receipt of the trace's last model call. Asking tells the provider that the exchange is being contributed. This app does not compare the receipt's signer with NEAR AI's attestation report, and whether your witness does depends on its setup, which this app cannot see.";
 
 /// `ironwire_attested_bodies` on, witness route.
 ///
 /// Approved 2026-10-06. The bodies reach only a witness, never an
 /// envelope (`DaemonSettings::ironwire_attested_bodies`).
-pub const DISCLOSURE_ATTESTED_BODIES: &str = "When this app holds a verbatim copy of a session's last model call, your prompt and the reply, it sends that to your witness too. It is not part of what the commons receives.";
+pub const DISCLOSURE_ATTESTED_BODIES: &str = "When this app holds a verbatim copy of a trace's last model call, your prompt and the reply, it sends that to your witness too. It is not part of what the commons receives.";
 
 /// The per-session block's heading and labels.
 ///
@@ -1576,7 +1662,7 @@ pub const DISCLOSURE_SESSION_NOTHING_SENT: &str = "Nothing is sent.";
 /// approve it": an armed project contributes without an approval.
 ///
 /// Approved 2026-10-06.
-pub const DISCLOSURE_SESSION_AFTER: &str = "What the commons receives when this session is contributed. This is what the redacted view shows.";
+pub const DISCLOSURE_SESSION_AFTER: &str = "What the commons receives when this trace is contributed. This is what the redacted view shows.";
 
 /// The per-session sentences.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
@@ -1723,11 +1809,11 @@ pub fn route_disclosure_for_wire(value: &serde_json::Value) -> Option<serde_json
 /// never mistaken for nothing to disclose.
 ///
 /// Approved by Zaki with #1102.
-pub const DISCLOSURE_UNREADABLE: &str = "Where sessions go could not be read.";
+pub const DISCLOSURE_UNREADABLE: &str = "Where traces go could not be read.";
 /// The same, on a single session's review.
 ///
 /// Approved by Zaki with #1102.
-pub const DISCLOSURE_SESSION_UNREADABLE: &str = "Where this session goes could not be read.";
+pub const DISCLOSURE_SESSION_UNREADABLE: &str = "Where this trace goes could not be read.";
 
 /// [`DISCLOSURE_UNREADABLE`] and [`DISCLOSURE_SESSION_UNREADABLE`], with the
 /// section's [`DISCLOSURE_TITLE`] so an unreadable panel is still named, for
@@ -1767,10 +1853,10 @@ pub struct CertificateDetailCopy {
 #[must_use]
 pub fn certificate_detail_copy() -> CertificateDetailCopy {
     CertificateDetailCopy {
-        heading: "Checked when your witness reviewed this session",
+        heading: "Checked when your witness reviewed this trace",
         measurement_label: "Witness measurement",
         signer_label: "Signed by",
-        verified_at_review: "This app checked the witness's attestation against your pins when the witness reviewed this session, and checked the certificate's signature against this signing key.",
+        verified_at_review: "This app checked the witness's attestation against your pins when the witness reviewed this trace, and checked the certificate's signature against this signing key.",
     }
 }
 
@@ -1790,7 +1876,7 @@ pub fn certificate_detail_copy() -> CertificateDetailCopy {
 /// Approved 2026-10-06. "Changes nothing" rather than "stays on this
 /// computer": a contributor who joined through NEAR AI may already have the
 /// commons' witness, and skipping leaves that as it is.
-pub const INFERENCE_WHY: &str = "Connecting inference is optional. It is one way to get a witness, a service that redacts your sessions inside an enclave before they are contributed. If you skip it, nothing about how your sessions are redacted changes.";
+pub const INFERENCE_WHY: &str = "Connecting inference is optional. It is one way to get a witness, a service that redacts your traces inside an enclave before they are contributed. If you skip it, nothing about how your traces are redacted changes.";
 
 /// Why the step asks for account sign-in: every connection method presents
 /// the account session, never the device key.
@@ -1821,7 +1907,7 @@ pub const INFERENCE_NONE_OFFERED: &str =
 /// Approved 2026-10-06. The IPC contract: no folder, trace,
 /// raw-session, consent-scope or standing contribution consent follows from
 /// selecting or installing, and no project mode changes.
-pub const INFERENCE_GRANTS_NOTHING: &str = "Connecting chooses no folders or sessions, does not change how your traces may be used, and does not turn on automatic contributing.";
+pub const INFERENCE_GRANTS_NOTHING: &str = "Connecting chooses no folders or traces, does not change how your traces may be used, and does not turn on automatic contributing.";
 
 /// One installed device per account, said before selecting.
 ///
@@ -1841,7 +1927,7 @@ pub const INFERENCE_OTHER_DEVICE: &str = "Your account is connected on another d
 /// under R6, so the watcher's next sweep voids every armed project and the
 /// automatic grant given under the old terms, each with its own notice. The
 /// IPC contract asks a shell to say so before the contributor confirms.
-pub const INFERENCE_INSTALL: &str = "Using this connection's witness on this device is a separate step. It changes who reads your sessions, so any automatic contributing already turned on here stops, and you are asked again before it restarts.";
+pub const INFERENCE_INSTALL: &str = "Using this connection's witness on this device is a separate step. It changes who reads your traces, so any automatic contributing already turned on here stops, and you are asked again before it restarts.";
 
 /// After install.
 ///
@@ -1900,7 +1986,7 @@ pub const INFERENCE_UNKNOWN_DISCLOSURE: &str =
 /// address, pins) and, optionally, an inference receipt endpoint; the
 /// receipt sentence follows `void_reason_line("receipt-endpoint-changed")`.
 /// The server's own description text is never shown.
-pub const INFERENCE_DISCLOSURE_V1: &str = "The commons you joined publishes this connection. Once it is set up on this device, sessions you contribute are sent unredacted to its witness first, which redacts them inside an enclave. If the connection includes a receipt address, your AI provider is also asked for a receipt for the last call in each of those sessions, which tells it they are being contributed.";
+pub const INFERENCE_DISCLOSURE_V1: &str = "The commons you joined publishes this connection. Once it is set up on this device, traces you contribute are sent unredacted to its witness first, which redacts them inside an enclave. If the connection includes a receipt address, your AI provider is also asked for a receipt for the last call in each of those traces, which tells it they are being contributed.";
 
 /// The words for an offer's `disclosure_version`, or `None` for a version
 /// this build does not know. A shell that gets `None` does not offer the
@@ -2500,10 +2586,7 @@ mod tests {
         assert_eq!(copy.title, "The Scrub check is now Automatic for api");
         assert!(copy.body.contains("previously unset"));
         assert_eq!(copy.scope, SCRUB_CHECK_AUTOMATIC_HELP);
-        assert_eq!(
-            copy.no_review,
-            "Held sessions are not sent until you decide."
-        );
+        assert_eq!(copy.no_review, "Held traces are not sent until you decide.");
         assert!(copy.ask_first_action.is_some());
     }
 
@@ -2524,7 +2607,7 @@ mod tests {
         assert_eq!(n.title, GATE_HELD_TITLE);
         assert_eq!(
             n.body,
-            "3 sessions from projects set to contribute automatically are waiting."
+            "3 traces from projects set to contribute automatically are waiting."
         );
         assert_eq!(
             n.reasons,
@@ -2535,8 +2618,8 @@ mod tests {
         );
         assert_eq!(n.release, GATE_HELD_RELEASE);
         assert_eq!(n.projects.len(), 2);
-        assert_eq!(n.projects[0].line, "api: 2 sessions waiting");
-        assert_eq!(n.projects[1].line, "web: 1 session waiting");
+        assert_eq!(n.projects[0].line, "api: 2 traces waiting");
+        assert_eq!(n.projects[1].line, "web: 1 trace waiting");
         assert_eq!(n.projects[0].project_id.as_deref(), Some("p-1"));
         assert_eq!(n.projects[0].ask_first_action, Some(ASK_ME_FIRST_ACTION));
 
@@ -2546,7 +2629,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             one.body,
-            "1 session from a project set to contribute automatically is waiting."
+            "1 trace from a project set to contribute automatically is waiting."
         );
         assert_eq!(
             one.reasons,
@@ -2882,7 +2965,7 @@ mod tests {
         assert!(AUTO_SCOPE_REQUIRED.contains("Nothing is selected for you"));
         // The exemption is for projects with sessions on disk at the grant,
         // not every folder that exists: an empty one is armed.
-        assert!(AUTO_PATH_AUTOMATIC.contains("already have sessions"));
+        assert!(AUTO_PATH_AUTOMATIC.contains("already have traces"));
         assert!(!AUTO_PATH_AUTOMATIC.contains("already on this computer"));
     }
 
@@ -3010,8 +3093,34 @@ mod tests {
         );
         assert_eq!(
             AUTO_NO_REVIEW,
-            "No one looks at a session before it is sent, including you."
+            "No one looks at a trace before it is sent, including you."
         );
+        // Approved 2026-10-12 (owner), word for word.
+        assert_eq!(
+            AUTO_SUMMARY_PATTERNS_ONLY,
+            "Near.ai removes keys, emails, phone numbers and file paths, but names and anything written in plain text can still go out, and no one reviews traces before they're sent."
+        );
+        assert_eq!(
+            AUTO_SUMMARY_MODEL,
+            "Near.ai removes keys, emails, phone numbers and file paths, and a privacy model catches most names, but some personal details can still go out, and no one reviews traces before they're sent."
+        );
+    }
+
+    /// Each route gets its own one sentence, chosen here and not in a shell.
+    #[test]
+    fn the_grant_copy_carries_the_one_sentence_for_its_route() {
+        use crate::daemon::automatic_gate::Disclosure;
+        assert_eq!(
+            automatic_grant_copy(Disclosure::PatternsOnly).summary,
+            AUTO_SUMMARY_PATTERNS_ONLY
+        );
+        assert_eq!(
+            automatic_grant_copy(Disclosure::ModelScrubbed).summary,
+            AUTO_SUMMARY_MODEL
+        );
+        // The summary names the app by the macro, so a rename moves it.
+        assert!(AUTO_SUMMARY_MODEL.starts_with(crate::app_name!()));
+        assert!(AUTO_SUMMARY_PATTERNS_ONLY.starts_with(crate::app_name!()));
     }
 
     /// The two sentences make claims about the deterministic redactor, and
@@ -3065,6 +3174,53 @@ mod tests {
         assert!(!removed(&format!("Bearer{random_long}"), random_long));
     }
 
+    /// The one-sentence forms (approved 2026-10-12) list four things the
+    /// redactor removes: keys, emails, phone numbers and file paths. Each is
+    /// shown removed by the deterministic redactor, with no model, in
+    /// ordinary prose (`redact_text` is the path every text leaf takes), and
+    /// the limits of each are pinned so the sentence cannot drift past them.
+    #[test]
+    fn the_summary_sentences_list_only_what_the_redactor_removes() {
+        use trace_commons_protocol::trace_contribution::DeterministicTraceRedactor;
+
+        let redactor = DeterministicTraceRedactor::deterministic_only(Vec::new());
+        let removed = |text: &str, value: &str| {
+            let (out, _) = redactor.redact_text(text);
+            !out.contains(value)
+        };
+
+        // Keys, in a format the patterns know.
+        let key = "sk-proj-AbCdEf0123456789GhIjKlMnOpQrStUv";
+        assert!(removed(&format!("my key is {key} thanks"), key));
+        let aws = "AKIAIOSFODNN7EXAMPLE";
+        assert!(removed(&format!("export AWS_ACCESS_KEY_ID={aws}"), aws));
+
+        // Emails.
+        let email = "jane.doe@example.com";
+        assert!(removed(&format!("write to {email} about it"), email));
+
+        // File paths: a home directory path, which names the account.
+        let path = "/Users/janedoe/projects/secret-app/src/main.rs";
+        assert!(removed(&format!("edited {path} today"), "janedoe"));
+
+        // Phone numbers, in prose. International and parenthesised forms
+        // are removed on their own.
+        for number in ["+1 415 555 0132", "+44 20 7946 0958", "(415) 555-0132"] {
+            assert!(
+                removed(&format!("please ring me on {number} later"), number),
+                "{number} must be removed"
+            );
+        }
+        // A bare dashed number is removed only next to a word like "phone";
+        // ten digits with no separator, and a dashed number with no such
+        // word, are not. The sentence says "phone numbers" without this
+        // qualification; the long disclosure does not list phone numbers
+        // at all. Reported to the owner 2026-10-12.
+        assert!(removed("phone: 415-555-0132", "415-555-0132"));
+        assert!(!removed("order 415-555-0132 shipped", "415-555-0132"));
+        assert!(!removed("my number is 4155550132 ok", "4155550132"));
+    }
+
     /// The scope sentence may not promise more than the scrubber does.
     ///
     /// Two overclaims were found in review and each is pinned out: an
@@ -3082,10 +3238,30 @@ mod tests {
     /// grant a different act from the one described.
     #[test]
     fn no_review_is_stated_without_qualification() {
-        assert!(AUTO_NO_REVIEW.starts_with("No one looks at a session before it is sent"));
+        assert!(AUTO_NO_REVIEW.starts_with("No one looks at a trace before it is sent"));
         assert!(AUTO_NO_REVIEW.contains("including you"));
         for hedge in ["usually", "may ", "might", "generally", "typically"] {
             assert!(!AUTO_NO_REVIEW.contains(hedge), "hedged with {hedge:?}");
+        }
+        // The one-sentence forms say it the same way: the clause is exact
+        // and no hedge word is anywhere in the sentence that carries it.
+        for summary in [AUTO_SUMMARY_PATTERNS_ONLY, AUTO_SUMMARY_MODEL] {
+            assert!(summary.ends_with("and no one reviews traces before they're sent."));
+            let clause = summary
+                .rsplit(", ")
+                .next()
+                .expect("the sentence has a last clause");
+            for hedge in [
+                "usually",
+                "may ",
+                "might",
+                "generally",
+                "typically",
+                "mostly",
+                "most ",
+            ] {
+                assert!(!clause.contains(hedge), "hedged with {hedge:?}");
+            }
         }
     }
 
@@ -3121,11 +3297,11 @@ mod tests {
     fn the_receipt_reason_names_the_last_call_not_every_call() {
         let line = void_reason_line(crate::daemon::grant_terms::VOID_RECEIPT_ENDPOINT);
         assert!(
-            !line.contains("the calls in your sessions"),
+            !line.contains("the calls in your traces"),
             "reads as a receipt for every call: {line:?}"
         );
         assert!(
-            line.contains("the last call in each of your sessions"),
+            line.contains("the last call in each of your traces"),
             "does not name the call a receipt covers: {line:?}"
         );
     }
@@ -3318,12 +3494,12 @@ mod tests {
         let uncounted = witness_capacity_notice(0);
         assert_eq!(one.title, WITNESS_CAPACITY_TITLE);
         assert!(
-            one.body.starts_with("1 approved session is waiting"),
+            one.body.starts_with("1 approved trace is waiting"),
             "{}",
             one.body
         );
         assert!(
-            many.body.starts_with("3 approved sessions are waiting"),
+            many.body.starts_with("3 approved traces are waiting"),
             "{}",
             many.body
         );
@@ -3389,6 +3565,74 @@ mod tests {
                 .contains("keeps working"),
             "a pooled invite is told it keeps working"
         );
+    }
+
+    /// The offer card in a shell's notices can be put away for good, so it
+    /// carries its own dismiss -- a separate key from the notice's
+    /// acknowledgement and from the move, and a short one -- and a line that
+    /// says where the move still is once it has gone.
+    #[test]
+    fn the_migration_offer_can_be_dismissed_and_says_where_it_stays() {
+        let offer = legacy_migration_offer();
+        assert_eq!(offer.dismiss, LEGACY_MIGRATION_OFFER_DISMISS);
+        assert_eq!(offer.later, LEGACY_MIGRATION_OFFER_LATER);
+        assert!(!offer.dismiss.is_empty());
+        assert!(offer.dismiss.split_whitespace().count() <= 2);
+        assert_ne!(offer.dismiss, offer.action);
+        assert_ne!(offer.dismiss, "Not this one");
+        assert!(offer.later.contains("Settings"));
+        let fields = serde_json::to_value(&offer).unwrap();
+        for key in ["dismiss", "later"] {
+            assert!(fields[key].as_str().is_some_and(|s| !s.is_empty()), "{key}");
+        }
+    }
+
+    /// The two Move buttons, on the card and in Settings, look the same and
+    /// are named apart for a screen reader; each name says the visible
+    /// action (`docs/ui-copy-guide.md` 5).
+    #[test]
+    fn the_two_move_buttons_have_distinct_accessible_names() {
+        let offer = legacy_migration_offer();
+        assert_ne!(offer.action_name_notice, offer.action_name_settings);
+        for name in [offer.action_name_notice, offer.action_name_settings] {
+            assert!(name.starts_with(offer.action), "{name}");
+            assert_ne!(name, offer.action);
+        }
+        assert!(offer.action_name_settings.contains("Settings"));
+        let fields = serde_json::to_value(&offer).unwrap();
+        for key in ["action_name_notice", "action_name_settings"] {
+            assert!(fields[key].as_str().is_some_and(|s| !s.is_empty()), "{key}");
+        }
+    }
+
+    /// The move leads with the passkey step (owner, 2026-10-11): with no
+    /// session the shell runs the browser step itself, and the offer, the
+    /// wait and the refusal speak of the passkey, never of signing in to
+    /// NEAR AI. The step's own words are separate keys, and its button is
+    /// short.
+    #[test]
+    fn the_migration_leads_with_the_passkey_step() {
+        let offer = legacy_migration_offer();
+        assert_eq!(offer.passkey_waiting, LEGACY_MIGRATION_PASSKEY_WAITING);
+        assert_eq!(offer.passkey_failed, LEGACY_MIGRATION_PASSKEY_FAILED);
+        assert_eq!(offer.passkey_cancel, LEGACY_MIGRATION_PASSKEY_CANCEL);
+        let no_session = legacy_migration_refusal_line("legacy_migration_no_near_ai_session");
+        for line in [offer.body, offer.passkey_waiting, no_session] {
+            assert!(line.contains("passkey"), "{line}");
+        }
+        for line in [
+            offer.body,
+            offer.passkey_waiting,
+            offer.passkey_failed,
+            no_session,
+        ] {
+            assert!(!line.to_lowercase().contains("sign in"), "{line}");
+        }
+        assert!(offer.passkey_failed.contains("nothing was moved"));
+        assert!(offer.passkey_failed.contains("keeps working"));
+        assert!(offer.passkey_cancel.split_whitespace().count() <= 2);
+        assert_ne!(offer.passkey_cancel, offer.dismiss);
+        assert_ne!(offer.passkey_waiting, offer.working);
     }
 
     #[test]

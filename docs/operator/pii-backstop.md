@@ -9,7 +9,9 @@ driver task family, runs the chunked NEAR AI prose-PII classifier over the
 held trace's message text, re-redacts any residual PII, re-stores a
 rescrubbed envelope (appends `+near-ai-pii-backstop-v1` to the pipeline
 version, writes a `RescrubbedEnvelope` object ref, and invalidates the old
-`submitted_envelope` ref), and transitions the submission to
+`submitted_envelope` ref), records the post-backstop `redaction_counts` and
+`privacy_risk` on the submission, rebuilds the submission's derived record
+from the rescrubbed envelope, and transitions the submission to
 `Accepted`/`Quarantined`, releasing the hold. On failure it bumps the
 `trace_pii_backstop` attempt counter and leaves the trace held — fail-closed,
 never released un-rescrubbed. It ships **disabled**.
@@ -165,6 +167,88 @@ next tick.
   liveness/health canary against the NEAR AI privacy filter; if the filter
   is unhealthy, the entire tick aborts rather than partially processing (or
   releasing unrescrubbed) held submissions.
+
+## Derived record, counts and risk on release
+
+The derived duplicate-precheck record (`trace_derived_records`, and the file
+copy under `tenants/<key>/derived/`) carries a `canonical_summary` that copies
+the first events' redacted prose verbatim. It feeds the ranker and benchmark
+exports, the process-evaluator candidates, reviewer views, the replay dataset
+summary and the vector worker's embedding input. The backstop therefore
+rebuilds it from the rescrubbed envelope **while the submission is still
+held**: in one release attempt it mirrors the submission row (now with the
+post-backstop `redaction_counts`, `privacy_risk` and summary hash), writes the
+`RescrubbedEnvelope` ref, rewrites the derived row with that ref as its input
+(then the file copy), and only then releases the hold atomically. If any of
+those writes fails the hold stays in place and the next tick retries; no
+consumer-visible status ever exposes a summary built from the pre-backstop
+envelope.
+
+Check one released submission (hash and counts only):
+
+```sql
+SELECT d.input_hash = r.content_sha256 AS derived_from_rescrubbed,
+       s.canonical_summary_hash = d.canonical_summary_hash AS summary_hash_matches,
+       s.redaction_counts
+  FROM trace_submissions s
+  JOIN trace_derived_records d
+    ON d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+   AND d.worker_kind = 'duplicate_precheck'
+  JOIN trace_object_refs r
+    ON r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
+   AND r.artifact_kind = 'rescrubbed_envelope'
+   AND r.invalidated_at IS NULL AND r.deleted_at IS NULL
+ WHERE s.tenant_id = '<tenant>' AND s.submission_id = '<id>';
+-- expect: true, true, and privacy_filter:<label> counts for any span the classifier redacted
+```
+
+## Remediating submissions released before the derived-record fix (GHSA-q7pr-c684-grrq)
+
+Before this fix the backstop replaced the envelope but left the derived
+record built at submit from the pre-backstop envelope, so a released trace's
+`canonical_summary` could still carry the prose PII the classifier removed,
+and its vector entries were embedded from that text. It also left the
+submit-time `redaction_counts` and `privacy_risk` on the submission row, so
+the database cannot tell which released submissions the classifier actually
+redacted: every backstop-released submission is a candidate.
+
+`POST /v1/admin/pii-backstop-rederive-released?limit=N[&dry_run=true]` (admin
+credential; scoped to that credential's tenant) repairs them. For each
+accepted or quarantined, unrevoked submission whose active envelope is a
+`RescrubbedEnvelope` and whose derived row does not already name that ref as
+its input, it:
+
+1. loads the rescrubbed envelope and rebuilds the derived record from it;
+2. records the envelope's `privacy_risk`, `redaction_counts` and the new
+   summary hash on the submission row, through a narrow update that refuses a
+   row which has since been revoked, purged or re-held (counted as
+   `skipped_status_changed`, nothing else is touched);
+3. rewrites the derived row (and the file copy, where one exists);
+4. when the summary changed, marks the submission's vector entries
+   invalidated. The rebuilt summary has a new hash and so a new vector entry
+   id, which the vector worker indexes on its next run.
+
+The response is counts only: `examined`, `backstop_released`,
+`already_current`, `rederived`, `summary_changed`,
+`vector_entries_invalidated`, `skipped_status_changed`, `failed`, `remaining`.
+`limit` defaults to 25 and is clamped to 1..=500; it bounds the submissions
+rewritten per call, not the ones examined. Unknown query parameters are a
+400, so a mistyped `dry_run` is never read as the writing default.
+
+Procedure, per tenant:
+
+1. Deploy the fixed ingest binary first, so no new release adds to the set.
+2. Dry run: `?dry_run=true&limit=500`. `rederived` is the number that would be
+   rewritten in a 500-row batch, `summary_changed` how many of those still
+   carry a pre-backstop summary, and `remaining` what is left beyond it.
+3. Run `?limit=100` repeatedly until `remaining` is 0. The pass is idempotent:
+   a rewritten row names the rescrubbed ref, so later calls count it as
+   `already_current`. A non-zero `failed` is logged hash-only; rerun after
+   investigating, since failed rows stay candidates.
+4. Run the vector index worker so the invalidated entries are re-embedded
+   from the rebuilt summaries.
+5. Any export produced from these tenants before the remediation may contain
+   pre-backstop summaries; treat those artifacts as affected.
 
 ## Known caveat: `require_object_refs` tenants and the read path
 

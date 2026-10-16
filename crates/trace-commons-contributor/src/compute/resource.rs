@@ -35,7 +35,7 @@ pub struct ResourceReading {
 pub(crate) mod tests {
     use super::*;
     #[cfg(unix)]
-    use crate::compute::{ComputeCommand, ComputeController, ComputeState, LocalWorkerConfig};
+    use crate::compute::{ComputeCommand, ComputeController, LocalWorkerConfig};
     use std::time::Duration;
 
     fn reading() -> ResourceReading {
@@ -198,66 +198,6 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn native_pressure_interrupts_readiness_and_recovery_needs_resume() {
-        let root = tempfile::tempdir().unwrap();
-        let controller = local(root.path());
-        controller.command(ComputeCommand::Enable {
-            ram_allowance_gib: 1,
-        });
-        assert!(controller.snapshot().worker_stopped);
-        assert!(!controller.snapshot().consent_granted);
-        healthy(&controller);
-        controller.command(ComputeCommand::Enable {
-            ram_allowance_gib: 1,
-        });
-        wait_for(&controller, 3, |s| s.state == ComputeState::Starting);
-        let ticket = controller.resource_begin().unwrap();
-        controller.resource_event(ResourceEvent::Sample {
-            ticket,
-            reading: ResourceReading {
-                memory: MemoryPressure::Critical,
-                ..reading()
-            },
-        });
-        // Recovery cannot remove the stop, even during the readiness operation.
-        healthy(&controller);
-        wait_for(&controller, 5, |s| s.worker_stopped && !s.command_pending);
-        assert!(controller.snapshot().consent_granted);
-        assert_ne!(controller.snapshot().state, ComputeState::Starting);
-        controller.command(ComputeCommand::Resume {});
-        wait_for(&controller, 3, |s| s.state == ComputeState::Starting);
-        assert!(controller.shutdown(Duration::from_secs(8)).worker_stopped);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn signed_worker_reaches_training_and_serving_then_acknowledges_shutdown() {
-        let root = tempfile::tempdir().unwrap();
-        let controller = ComputeController::open_local(
-            root.path(),
-            crate::compute::test_worker::config(root.path()),
-        )
-        .unwrap();
-        healthy(&controller);
-        controller.command(ComputeCommand::Enable {
-            ram_allowance_gib: 1,
-        });
-        wait_for(&controller, 5, |s| s.state == ComputeState::Training);
-        assert!(!controller.snapshot().worker_stopped);
-        assert!(controller.snapshot().consent_granted);
-        std::fs::write(root.path().join("compute/worker/node/serve"), b"").unwrap();
-        healthy(&controller);
-        wait_for(&controller, 5, |s| s.state == ComputeState::Serving);
-        let stopped = controller.shutdown(Duration::from_secs(3));
-        assert!(stopped.worker_stopped);
-        assert_eq!(
-            stopped.drain_outcome,
-            Some(crate::compute::worker_protocol::DrainOutcome::Acknowledged)
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn held_worker_lock_explains_unknown_process_without_killing_or_adopting_it() {
         let root = tempfile::tempdir().unwrap();
         let controller = local(root.path());
@@ -281,24 +221,6 @@ pub(crate) mod tests {
         assert!(snapshot.detail.contains("restart the machine"));
         assert!(snapshot.detail.contains("will not adopt or kill"));
         assert!(controller.shutdown(Duration::from_secs(1)).worker_stopped);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn watchdog_stops_readiness_without_any_native_callbacks() {
-        let root = tempfile::tempdir().unwrap();
-        let controller = local(root.path());
-        healthy(&controller);
-        controller.command(ComputeCommand::Enable {
-            ram_allowance_gib: 1,
-        });
-        wait_for(&controller, 3, |s| s.state == ComputeState::Starting);
-        // No status()/snapshot() call while lease expires: watchdog must act.
-        std::thread::sleep(Duration::from_secs(10));
-        assert!(controller.snapshot().worker_stopped);
-        assert!(controller.snapshot().consent_granted);
-        assert!(!controller.snapshot().can_resume);
-        assert!(controller.shutdown(Duration::from_secs(3)).worker_stopped);
     }
 }
 

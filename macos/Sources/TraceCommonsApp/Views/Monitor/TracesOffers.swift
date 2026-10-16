@@ -122,10 +122,9 @@ struct NotOfferedGlassDisclosure: View {
 }
 
 /// The offer to answer model calls on this computer, in the core's words
-/// only. Declining comes first and neither answer is the primary action:
-/// this question opens a listener anything on the machine can use. (#1146
-/// puts Turn it on first as its primary; that order is a consent change
-/// left to the owner, so the card keeps it.)
+/// only. The accept comes first as a glass button and the decline after it
+/// as a link, as #1146 orders it: the order the owner ruled for every card
+/// (Ron, 2026-10-09).
 ///
 /// #1146's `PrivateInferenceOffer` head and body: the destination as a
 /// mono accent eyebrow, the title as an h2, then the four paragraphs drawn
@@ -177,11 +176,11 @@ struct PrivateAIOfferGlassCard: View {
                     Button(copy.offerLearnMore) { learnMore = true }
                         .buttonStyle(GlassButtonStyle(.link))
                 }
-                HStack(spacing: GlassTokens.Space.s3) {
-                    Button(copy.offerDecline, action: onDecline)
-                        .buttonStyle(GlassButtonStyle(.glass))
+                HStack(spacing: GlassTokens.Space.s4) {
                     Button(copy.offerAccept, action: onAccept)
                         .buttonStyle(GlassButtonStyle(.glass))
+                    Button(copy.offerDecline, action: onDecline)
+                        .buttonStyle(GlassButtonStyle(.link))
                 }
             }
         }
@@ -226,9 +225,9 @@ private struct CardClose: View {
 
 /// The offer to stop being asked about one project. Arming is a grant, so
 /// it is offered only in the core's words (`tc_arming_offer_copy_json`) and
-/// nothing is drawn without them. Evidence first, question second; declining
-/// first and neither answer emphasised, since previews from the project stop.
-/// Ron's shape (#1146 `ArmingOffer`): the eyebrow over the card, and the
+/// nothing is drawn without them. Evidence first, question second; the
+/// confirm first as a glass button and the decline after it as a link, the
+/// order the owner ruled for every card (Ron, 2026-10-09). Ron's shape (#1146 `ArmingOffer`): the eyebrow over the card, and the
 /// card's confirm opens a confirmation with the core's body before anything
 /// is armed.
 struct ArmingOfferGlassCard: View {
@@ -272,11 +271,11 @@ struct ArmingOfferGlassCard: View {
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: GlassTokens.Space.s3) {
-                        Button(copy.decline, action: onDecline)
-                            .buttonStyle(GlassButtonStyle(.glass))
+                    HStack(spacing: GlassTokens.Space.s4) {
                         Button(copy.confirm) { confirming = true }
                             .buttonStyle(GlassButtonStyle(.glass))
+                        Button(copy.decline, action: onDecline)
+                            .buttonStyle(GlassButtonStyle(.link))
                     }
                 }
             }

@@ -71,9 +71,9 @@ impl ProviderSelector {
         let root = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         style::append_body(&root, copy.credential_provider_label);
         let selector = gtk::DropDown::from_strings(&[
+            copy.credential_provider_near,
             copy.credential_provider_github,
             copy.credential_provider_google,
-            copy.credential_provider_near,
         ]);
         selector.set_selected(selected);
         selector.set_size_request(-1, 44);
@@ -81,11 +81,11 @@ impl ProviderSelector {
             .label(copy.credential_wallet_notice)
             .wrap(true)
             .xalign(0.0)
-            .visible(selected == 2)
+            .visible(selected == 0)
             .build();
         selector.connect_selected_notify({
             let notice = notice.clone();
-            move |selector| notice.set_visible(selector.selected() == 2)
+            move |selector| notice.set_visible(selector.selected() == 0)
         });
         root.append(&selector);
         root.append(&notice);
@@ -98,7 +98,7 @@ impl ProviderSelector {
 }
 
 fn provider_id(selected: u32) -> Option<&'static str> {
-    ["github", "google", "near"].get(selected as usize).copied()
+    ["near", "github", "google"].get(selected as usize).copied()
 }
 
 /// The section's widgets. Built once and refilled, like every other screen in
@@ -385,7 +385,7 @@ pub(super) fn act_with_provider(app: &Rc<App>, action: CredentialAction, provide
 /// come back as an error -- and both mean the same thing to the caller: no tab
 /// opened anywhere. The distinction is not worth keeping, because the answer
 /// to either is the same.
-fn open_browser(url: &str) -> bool {
+pub(super) fn open_browser(url: &str) -> bool {
     gtk::gio::AppInfo::launch_default_for_uri(url, None::<&gtk::gio::AppLaunchContext>).is_ok()
 }
 
@@ -404,10 +404,13 @@ fn open_browser(url: &str) -> bool {
 /// names the ceremony it belongs to rather than whatever is running. macOS and
 /// Windows do the same thing for the same reason.
 ///
-/// Every other outcome ends in a read. There is no shared sentence for a start
-/// that did not start, and inventing one in this shell is the thing this whole
-/// surface is written against -- so the answer to a refusal is to ask the
-/// daemon what is true and draw that.
+/// **A start that produced no attempt says so, then reads.** A refused call,
+/// one whose answer was lost, and one that came back with neither an attempt
+/// nor a browser all show the shared `write_unconfirmed` sentence -- the one
+/// macOS and Windows show for the same press. It does not claim nothing
+/// happened, which a call whose answer was lost cannot know, and the re-read
+/// beside it draws whatever the daemon actually holds. Before this, the
+/// screen did not change at all and a press read as unheard (#728).
 fn start(app: &Rc<App>, provider: &str) {
     app.call(
         "near_ai_credential_start",
@@ -432,6 +435,9 @@ fn start(app: &Rc<App>, provider: &str) {
                 // the same press still being answered, and clears it itself.
                 cancel(app);
                 return;
+            }
+            if !opened {
+                app.toast(copy::PRIVATE_INFERENCE_WRITE_UNCONFIRMED);
             }
             view.pending.set(false);
             refresh(app);
@@ -875,6 +881,43 @@ mod tests {
         assert!(
             body.contains("filter(|url| !url.is_empty())"),
             "an empty browser URL is treated as a browser that opened"
+        );
+    }
+
+    /// A start that produced no attempt says so, in the shared words.
+    ///
+    /// The press that does not come back used to end in a silent re-read:
+    /// the screen did not change and nothing said the button had been
+    /// heard (#728). `write_unconfirmed` is the sentence macOS and Windows
+    /// already show for this: it does not claim nothing happened, which a
+    /// call whose answer was lost cannot know, and the re-read beside it
+    /// draws whatever the daemon actually holds.
+    ///
+    /// Only where no attempt is held. A start that minted an attempt and
+    /// then could not open a browser is answered by the cancel, as above,
+    /// and the state that cancel leaves already has a sentence.
+    #[test]
+    fn a_start_that_did_not_start_says_so_in_the_shared_words() {
+        let body = code()
+            .split("fn start(")
+            .nth(1)
+            .expect("start is in this file")
+            .split("\n}\n")
+            .next()
+            .expect("start closes");
+        let toast = body
+            .find("app.toast(copy::PRIVATE_INFERENCE_WRITE_UNCONFIRMED)")
+            .expect("a start that did not start says nothing");
+        let cancel = body
+            .find("cancel(app);")
+            .expect("the failed launch still cancels");
+        assert!(
+            cancel < toast,
+            "the sentence is drawn before the attempt it should defer to is cancelled"
+        );
+        assert!(
+            body[toast..].contains("refresh(app);"),
+            "the sentence replaced the re-read instead of joining it"
         );
     }
 

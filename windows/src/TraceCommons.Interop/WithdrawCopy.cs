@@ -120,7 +120,7 @@ public static class WithdrawCopy
         + "these two applies:";
 
     public const string AmbiguityUnknown =
-        "This session may already have been distributed. Withdrawal cannot recall distributed copies.";
+        "This trace may already have been distributed. Withdrawal cannot recall distributed copies.";
 
     /// <summary>
     /// The signed-out withdrawal line, the core's
@@ -165,7 +165,7 @@ public static class WithdrawCopy
     /// cannot be honoured at all.
     /// </remarks>
     public const string NoBulk =
-        "Withdraw sessions individually to see the result for each one.";
+        "Withdraw traces individually to see the result for each one.";
 
     /// <summary>
     /// The daemon labels that mean not-found.

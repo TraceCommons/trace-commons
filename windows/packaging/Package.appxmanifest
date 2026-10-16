@@ -29,7 +29,7 @@
     ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>Trace Commons</DisplayName>
+    <DisplayName>Near.ai</DisplayName>
     <PublisherDisplayName>Iqlusion Inc</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
 
@@ -72,7 +72,7 @@
   <Applications>
     <Application Id="App" Executable="TraceCommons.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="Trace Commons"
+        DisplayName="Near.ai"
         Description="Review and contribute agent traces from this machine."
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
@@ -106,7 +106,7 @@
           <desktop:StartupTask
             TaskId="TraceCommonsStartup"
             Enabled="false"
-            DisplayName="Trace Commons" />
+            DisplayName="Near.ai" />
         </desktop:Extension>
       </Extensions>
     </Application>

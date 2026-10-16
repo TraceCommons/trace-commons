@@ -12,7 +12,7 @@ final class ShellNoticesPlacementTests: XCTestCase {
             XCTAssertTrue(try MonitorNavigationTests.text(file).contains("ShellNotices()"), "\(file) does not draw the notices")
         }
         let notices = try MonitorNavigationTests.text("Views/ShellNotices.swift")
-        for card in ["AttachedDaemonNotice()", "GrantVoidNotices(", "ArmingRewordingNotices(", "GateHeldNoticeCard(", "LegacyMigrationNoticeCard("] {
+        for card in ["AttachedDaemonNotice()", "GrantVoidNotices(", "ArmingRewordingNotices(", "GateHeldNoticeCard(", "LegacyMigrationNoticeCard(", "LegacyMigrationOfferCard("] {
             XCTAssertTrue(notices.contains(card), "ShellNotices lacks \(card)")
         }
         XCTAssertNil(notices.range(of: #"\bTC\."#, options: .regularExpression))
@@ -25,7 +25,8 @@ final class ShellNoticesPlacementTests: XCTestCase {
     func test_theCardsAreDefinedOnce() throws {
         let notices = try MonitorNavigationTests.text("Views/ShellNotices.swift")
         for name in ["ShellNotices", "AttachedDaemonNotice", "GrantVoidNotices", "GrantVoidNoticeCard",
-                     "ArmingRewordingNotices", "ArmingRewordedNoticeCard", "GateHeldNoticeCard", "LegacyMigrationNoticeCard"] {
+                     "ArmingRewordingNotices", "ArmingRewordedNoticeCard", "GateHeldNoticeCard", "LegacyMigrationNoticeCard",
+                     "LegacyMigrationOfferCard", "LegacyMigrationMoveControls"] {
             XCTAssertEqual(notices.components(separatedBy: "struct \(name): View").count - 1, 1, "\(name) is not defined once")
         }
         XCTAssertEqual(notices.components(separatedBy: "GrantVoidNotices(").count - 1, 1)
@@ -43,6 +44,12 @@ final class ShellNoticesPlacementTests: XCTestCase {
         let cards: [(name: String, buttons: [String])] = [
             ("AttachedDaemonNotice", []),
             ("LegacyMigrationNoticeCard", [acknowledge]),
+            ("LegacyMigrationOfferCard", []),
+            ("LegacyMigrationMoveControls", [
+                "Button(offer.action) { Task { await model.migrateLegacyInvite(invite: invite) } }",
+                "Button(offer.dismiss, action: onDismiss)",
+                "Button(offer.passkeyCancel) { model.cancelLegacyMigrationPasskey() }",
+            ]),
             ("GrantVoidNoticeCard", ["Button(action, action: onRearm)", acknowledge]),
             ("ArmingRewordedNoticeCard", ["Button(action, action: onAskFirst)", acknowledge]),
             ("GateHeldNoticeCard", ["Button(action) { onAskFirst(projectID) }"]),
@@ -63,11 +70,27 @@ final class ShellNoticesPlacementTests: XCTestCase {
         }
     }
 
+    /// The card's Move and the one in Settings look the same; each is named
+    /// for its place, so a screen reader can tell them apart
+    /// (`docs/ui-copy-guide.md` 5). The controls take the place explicitly
+    /// rather than inferring it from the dismiss.
+    func test_theTwoMoveButtonsAreNamedForTheirPlace() throws {
+        let notices = try MonitorNavigationTests.text("Views/ShellNotices.swift")
+        XCTAssertEqual(
+            notices.components(separatedBy: ".accessibilityLabel(offer.actionName(for: placement))").count - 1, 1)
+        XCTAssertTrue(notices.contains("LegacyMigrationMoveControls(offer: offer, placement: .notice, onDismiss: onDismiss)"))
+        let settings = try MonitorNavigationTests.text("Views/Settings/ConnectionSection.swift")
+        XCTAssertTrue(settings.contains("LegacyMigrationMoveControls(offer: offer, placement: .settings)"))
+        XCTAssertTrue(settings.contains("model.isLegacyMigrationOfferDrawn"))
+        // Move only while the daemon offers it; a held refusal draws without it.
+        XCTAssertTrue(notices.contains("model.offersLegacyMigrationMove"))
+    }
+
     /// A card is a glass notice, its state carries words (the title is a
     /// status label), and no literal sentence is written here.
     func test_theCardsAreGlassNoticesWithNoSentenceOfTheirOwn() throws {
         let notices = try MonitorNavigationTests.text("Views/ShellNotices.swift")
-        XCTAssertGreaterThanOrEqual(notices.components(separatedBy: "GlassNotice(").count - 1, 5)
+        XCTAssertGreaterThanOrEqual(notices.components(separatedBy: "GlassNotice(").count - 1, 6)
         XCTAssertNil(notices.range(of: #"Text\(\s*""#, options: .regularExpression), "a literal Text(\"...\")")
         XCTAssertNil(notices.range(of: #"Button\(\s*""#, options: .regularExpression), "a literal Button(\"...\")")
     }

@@ -69,7 +69,7 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertEqual(checked(nil), [])
         let before = try await client.status()
         XCTAssertEqual(before.contributionMode, "notify_only")
-        XCTAssertEqual(checked(before), ["notify_only"], "every folder on Ask me checks Ask me, not Mixed")
+        XCTAssertEqual(checked(before), ["notify_only"], "every folder on Ask checks Ask, not Mixed")
         XCTAssertEqual(checked(try Self.status(before, contributionMode: "mixed")), [nil])
         XCTAssertEqual(checked(try Self.status(before, contributionMode: "auto_upload")), ["auto_upload"])
         XCTAssertEqual(checked(before, stale: true), [])
@@ -279,6 +279,7 @@ final class MenuBarGlassPanelTests: XCTestCase {
         // No credit figure of any kind: no projected or pending credit.
         for forbidden in ["setProjectMode", "approve(", "applyPrivateInference(true)", "setPrivateAI(",
                           "setContributionOverride(", "clearContributionOverride(", ".disabled(true)",
+                          "setInsightsLedgerFeed(",
                           "creditPoints", "creditPending", "creditFinal", "creditRange", "commonsCreditSummary"] {
             XCTAssertFalse(source.contains(forbidden), "the popover contains \(forbidden)")
         }
@@ -385,8 +386,8 @@ final class MenuBarGlassPanelTests: XCTestCase {
 
     /// Under an Automatic override, clearing starts no new unattended
     /// sending (a folder set to Automatic already sends under its own
-    /// arming, and Ask me folders go back to asking), so Mixed clears at
-    /// once; under Ask me or Never it is still confirmed (#1256 review).
+    /// arming, and Ask folders go back to asking), so Mixed clears at
+    /// once; under Ask or Never it is still confirmed (#1256 review).
     func test_mixedClearsAnAutomaticOverrideAtOnce() async throws {
         let ask = ProjectRow(projectId: "a", projectLabel: "a", mode: .ignore, folderMode: .ask)
         let auto = ProjectRow(projectId: "u", projectLabel: "u", mode: .ignore, folderMode: .autoUpload)
@@ -538,5 +539,85 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertEqual(MenuWords.on, MonitorWords.table?.on)
         XCTAssertEqual(MenuBarGlassPanel.modeCaption, MonitorWords.table?.contributionMode)
         XCTAssertFalse(MenuWords.quit.isEmpty)
+    }
+
+    /// The popover keeps its top edge under the menu bar when a pill's
+    /// sub-list opens or closes: a resized window keeps its bottom edge,
+    /// so the pin moves it back to the top it opened at.
+    func test_thePopoverKeepsItsTopEdgeWhenItsHeightChanges() {
+        let top: CGFloat = 870
+        // Shrunk with its bottom edge kept: the top fell 120pt.
+        let shrunk = CGRect(x: 900, y: 400, width: 380, height: 350)
+        XCTAssertEqual(MenuBarTopEdgePin.pinnedOrigin(shrunk, top: top), CGPoint(x: 900, y: 520))
+        // Grown: the top is put back too, and the window extends downward.
+        let grown = CGRect(x: 900, y: 400, width: 380, height: 520)
+        XCTAssertEqual(MenuBarTopEdgePin.pinnedOrigin(grown, top: top), CGPoint(x: 900, y: 350))
+        // Already in place, or no top learned yet: nothing moves.
+        XCTAssertNil(MenuBarTopEdgePin.pinnedOrigin(CGRect(x: 900, y: 400, width: 380, height: 470), top: top))
+        XCTAssertNil(MenuBarTopEdgePin.pinnedOrigin(shrunk, top: nil))
+    }
+
+    /// The pinned top is the menu bar's bottom edge on the window's screen,
+    /// never a top the window happened to have: a panel that shrank before
+    /// it became key no longer hangs below the bar.
+    func test_thePopoverPinsToTheMenuBarsBottomEdge() {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        // The menu bar shown: the visible frame stops under it.
+        XCTAssertEqual(MenuBarTopEdgePin.menuBarBottom(
+            screen: screen, visible: CGRect(x: 0, y: 0, width: 1512, height: 945), thickness: 24), 945)
+        // The menu bar hidden: the visible frame reaches the top.
+        XCTAssertEqual(MenuBarTopEdgePin.menuBarBottom(screen: screen, visible: screen, thickness: 24), 958)
+    }
+
+    /// A resize notification arrives inside SwiftUI's own resize of the
+    /// panel, so the pin moves the window on the next turn of the run loop
+    /// rather than there, the shape that crashed the edge rail (#1402).
+    func test_thePinMovesTheWindowOutsideTheResizePass() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("GlassWindowFrame.onNextTurn { [weak self, weak window] in"))
+    }
+
+
+    // MARK: The settlement estimate line
+
+    private static let settlementCopy = NudgeCopy(table: [
+        "ESTIMATE_TOTAL_LABEL": "Estimate", "ESTIMATE_TOTAL_ACTION": "Review traces",
+    ])
+
+    private static let settlementStatus = #"""
+        {"settlement_estimate":{"low_usd_micros":3500000,"high_usd_micros":9000000,"up_to":false,
+         "known":4,"unknown":1,"table_version":"t1","pricing_version":"p1","estimated_at":"2026-10-15T09:00:00Z",
+         "text":"About $3.50 to $9 of inference in traces on this Mac"}}
+        """#
+
+    private func decodeStatus(_ json: String) throws -> DaemonData.Status {
+        try DaemonDataDecoding.decoder().decode(DaemonData.Status.self, from: Data(json.utf8))
+    }
+
+    func testSettlementLineRendersFromAStatusFixture() throws {
+        let status = try decodeStatus(Self.settlementStatus)
+        let estimate = try XCTUnwrap(status.settlementEstimate)
+        XCTAssertEqual(estimate.lowUsdMicros, 3_500_000)
+        XCTAssertEqual(estimate.highUsdMicros, 9_000_000)
+        XCTAssertEqual(estimate.known, 4)
+        XCTAssertEqual(estimate.pricingVersion, "p1")
+        let line = MenuPanelStatus.settlementLine(status, available: true, copy: Self.settlementCopy)
+        XCTAssertEqual(line, MenuPanelStatus.SettlementLine(
+            text: "About $3.50 to $9 of inference in traces on this Mac", label: "Estimate", action: "Review traces"))
+    }
+
+    func testSettlementLineIsAbsentWhenNotDrawable() throws {
+        // No key: nothing is drawn, never a $0 line.
+        XCTAssertNil(MenuPanelStatus.settlementLine(try decodeStatus("{}"), available: true, copy: Self.settlementCopy))
+        XCTAssertNil(MenuPanelStatus.settlementLine(nil, available: true, copy: Self.settlementCopy))
+        // A panel that cannot vouch for its data draws nothing.
+        let status = try decodeStatus(Self.settlementStatus)
+        XCTAssertNil(MenuPanelStatus.settlementLine(status, available: false, copy: Self.settlementCopy))
+        // The core's words missing: nothing is drawn.
+        XCTAssertNil(MenuPanelStatus.settlementLine(status, available: true, copy: NudgeCopy(table: [:])))
+        XCTAssertNil(MenuPanelStatus.settlementLine(status, available: true, copy: nil))
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "trace-commons-contributor"
-version = "0.12.4"
+version = "0.17.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -47,6 +47,8 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
 hex = "0.4"
+# Approved for read-only OpenCode session discovery; already used by IronWire.
+rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
 # OS credential stores approved by the operator on 2026-09-09.
 keyring-core = "=1.0.0"
 # IronWire's proxy, run in-process behind the private_inference switch.

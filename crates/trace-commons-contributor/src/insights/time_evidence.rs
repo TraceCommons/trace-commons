@@ -11,7 +11,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::SourceFormat;
-use crate::source::{codex, trajectory};
+use crate::source::{claude_code, codex, trajectory};
 
 pub const MAX_EXTREMUM_EVENT_REFS: usize = 16;
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
@@ -197,7 +197,9 @@ pub fn extract_recorded_time_evidence(
             records.push((index as u64 + 1, record));
         }
         match source {
-            SourceFormat::ClaudeCode => return Err(invalid()),
+            SourceFormat::ClaudeCode => {
+                observe_claude_records(&mut result, records.iter().map(|(i, v)| (*i, v)))?
+            }
             SourceFormat::Codex => {
                 observe_codex_records(&mut result, records.iter().map(|(i, v)| (*i, v)))?
             }
@@ -233,6 +235,24 @@ fn observe_codex_records<'a>(
     }
     if !saw_session_meta {
         return Err(invalid());
+    }
+    Ok(())
+}
+
+fn observe_claude_records<'a>(
+    result: &mut RecordedTimeEvidence,
+    records: impl Iterator<Item = (u64, &'a Value)>,
+) -> Result<()> {
+    for (index, record) in records {
+        let object = record.as_object().ok_or_else(invalid)?;
+        let kind = object
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)?;
+        // Eligibility is the adapter's rule, never a second copy here.
+        if claude_code::is_event_record_kind(kind) {
+            observe_timestamp(result, index, object.get("timestamp"));
+        }
     }
     Ok(())
 }
@@ -467,6 +487,51 @@ mod tests {
         assert_eq!(evidence.total_eligible_records, 0);
         assert!(evidence.earliest.is_none());
         assert!(evidence.latest.is_none());
+    }
+
+    /// Claude Code eligibility is the adapter's rule: user and assistant
+    /// records count, metadata records (summaries, snapshots) do not.
+    #[test]
+    fn claude_user_and_assistant_records_are_observed() {
+        let bytes = jsonl(&[
+            json!({"type":"summary","summary":"PRIVATE","leafUuid":"x"}),
+            json!({"type":"user","timestamp":"2026-09-12T12:00:03Z","message":{"content":"hi"}}),
+            json!({"type":"assistant","timestamp":"2026-09-12T12:00:01Z","message":{"id":"m","content":[]}}),
+            json!({"type":"file-history-snapshot","timestamp":"2026-09-12T11:00:00Z"}),
+            json!({"type":"assistant","message":{"id":"n","content":[]}}),
+            json!({"type":"user","timestamp":"yesterday","message":{"content":"hi"}}),
+        ]);
+        let evidence = extract_recorded_time_evidence(SourceFormat::ClaudeCode, &bytes).unwrap();
+        evidence.validate().unwrap();
+        assert_eq!(evidence.source_format, SourceFormat::ClaudeCode);
+        assert_eq!(
+            evidence.coordinates,
+            TimeRecordCoordinates::JsonlPhysicalLinesOneBased
+        );
+        assert_eq!(evidence.total_eligible_records, 4);
+        assert_eq!(evidence.valid_timestamps, 2);
+        assert_eq!(evidence.missing_timestamps, 1);
+        assert_eq!(evidence.invalid_timestamps, 1);
+        let earliest = evidence.earliest.unwrap();
+        assert_eq!(earliest.event_refs[0].record_index, 3);
+        assert_eq!(evidence.latest.unwrap().event_refs[0].record_index, 2);
+        assert!(
+            earliest
+                .recorded_at
+                .to_rfc3339()
+                .starts_with("2026-09-12T12:00:01")
+        );
+    }
+
+    #[test]
+    fn claude_record_without_a_type_fails_closed() {
+        let bytes = jsonl(&[json!({"timestamp":"2026-09-12T12:00:03Z"})]);
+        assert_eq!(
+            extract_recorded_time_evidence(SourceFormat::ClaudeCode, &bytes)
+                .unwrap_err()
+                .to_string(),
+            "insights-time-evidence-invalid"
+        );
     }
 
     #[test]

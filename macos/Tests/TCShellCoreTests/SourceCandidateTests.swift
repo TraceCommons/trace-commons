@@ -62,7 +62,7 @@ final class SourceCandidateTests: XCTestCase {
             mostRecent: nil,
             relocatedByEnv: false
         )
-        // "0 sessions" and "that folder is not here" are materially
+        // "0 traces" and "that folder is not here" are materially
         // different answers to "may I watch this", and a contributor
         // deciding between them deserves the difference.
         XCTAssertEqual(missing.evidence(now: Date()), "Not found on this machine")
@@ -77,7 +77,7 @@ final class SourceCandidateTests: XCTestCase {
             mostRecent: nil,
             relocatedByEnv: false
         )
-        XCTAssertEqual(empty.evidence(now: Date()), "Found, but holding no sessions yet")
+        XCTAssertEqual(empty.evidence(now: Date()), "Found, but holding no traces yet")
     }
 
     func testEvidenceCountsSessionsAndSaysHowRecent() {
@@ -90,7 +90,7 @@ final class SourceCandidateTests: XCTestCase {
             mostRecent: now.addingTimeInterval(-2 * 60 * 60),
             relocatedByEnv: false
         )
-        XCTAssertEqual(candidate.evidence(now: now), "953 sessions, most recent 2 hours ago")
+        XCTAssertEqual(candidate.evidence(now: now), "953 traces, most recent 2 hours ago")
     }
 
     func testASingleSessionIsNotPluralised() {
@@ -103,7 +103,7 @@ final class SourceCandidateTests: XCTestCase {
             mostRecent: now.addingTimeInterval(-90),
             relocatedByEnv: false
         )
-        XCTAssertEqual(candidate.evidence(now: now), "1 session, most recent just now")
+        XCTAssertEqual(candidate.evidence(now: now), "1 trace, most recent just now")
     }
 
     func testRelocationIsSurfacedSoAnUnusualPathHasAnExplanation() {

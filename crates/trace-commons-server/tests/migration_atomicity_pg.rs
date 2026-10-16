@@ -384,17 +384,9 @@ async fn owned_database(
         .get(0);
     // Listed on every version so the statement is exercised wherever this runs;
     // only the grants are version-specific.
-    let existing = admin
-        .query(
-            "SELECT rolname FROM pg_roles
-              WHERE rolname LIKE 'trace\\_%' AND NOT rolsuper AND rolname <> $1",
-            &[&owner],
-        )
-        .await
-        .expect("list the roles already on this server");
+    let existing = roles_to_grant(&admin, owner).await;
     if sixteen_or_later {
-        for row in existing {
-            let role: String = row.get(0);
+        for role in existing {
             admin
                 .execute(
                     &format!("GRANT \"{role}\" TO {owner} {}", standing.grant_options()),
@@ -424,6 +416,163 @@ async fn owned_database(
         .expect("put the public schema in its PostgreSQL 15 shape");
 
     admin
+}
+
+/// The `trace_` roles already on the server that `owned_database` gives its
+/// owner probe. Never another owner probe: one left behind by a run that died
+/// before its cleanup may hold this probe already, and granting it back is a
+/// membership cycle PostgreSQL refuses (#1335).
+async fn roles_to_grant(admin: &tokio_postgres::Client, owner: &str) -> Vec<String> {
+    admin
+        .query(
+            "SELECT rolname FROM pg_roles
+              WHERE rolname LIKE 'trace\\_%' AND rolname NOT LIKE '%\\_owner\\_probe'
+                AND NOT rolsuper AND rolname <> $1",
+            &[&owner],
+        )
+        .await
+        .expect("list the roles already on this server")
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect()
+}
+
+/// An owner probe for `owned_database`, dropped again however its test ends.
+///
+/// Roles are per server, so dropping the test's database leaves the probe
+/// behind, and a leftover probe failed the next run on the same server
+/// (#1335). `claim` drops whatever an earlier run left, `release` drops it on
+/// the way out of a test that got that far, and `Drop` covers a test that
+/// panicked first. Declare it after the `VIRGIN_DATABASE` guard, so that it is
+/// dropped while the lock is still held.
+struct ProbeRole {
+    url: String,
+    role: &'static str,
+    databases: Vec<&'static str>,
+    released: bool,
+}
+
+impl ProbeRole {
+    async fn claim(url: &str, role: &'static str, databases: &[&'static str]) -> Self {
+        drop_probe_role(url, role, databases).await;
+        Self {
+            url: url.to_owned(),
+            role,
+            databases: databases.to_vec(),
+            released: false,
+        }
+    }
+
+    async fn release(mut self) {
+        self.released = true;
+        drop_probe_role(&self.url, self.role, &self.databases).await;
+    }
+}
+
+impl Drop for ProbeRole {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        // No async drop: run the cleanup on a runtime of its own. A panic in
+        // there stays in that thread, so it cannot abort an unwinding test.
+        let (url, role, databases) = (self.url.clone(), self.role, self.databases.clone());
+        let _ = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime to drop the owner probe on")
+                .block_on(drop_probe_role(&url, role, &databases));
+        })
+        .join();
+    }
+}
+
+/// Drops `databases`, then everything `role` owns or was granted in the
+/// databases left that it can have touched, then `role` itself. A no-op when
+/// the role is not there.
+async fn drop_probe_role(url: &str, role: &str, databases: &[&str]) {
+    let admin = connect(&with_database(url, "postgres")).await;
+    for database in databases {
+        admin
+            .execute(
+                &format!("DROP DATABASE IF EXISTS {database} WITH (FORCE)"),
+                &[],
+            )
+            .await
+            .unwrap_or_else(|error| panic!("drop {database} before dropping {role}: {error}"));
+    }
+    if !role_exists(url, role).await {
+        return;
+    }
+    // DROP OWNED works one database at a time; since PostgreSQL 16 it also
+    // revokes the memberships the role granted, which would otherwise block
+    // DROP ROLE.
+    connect(url)
+        .await
+        .batch_execute(&format!("DROP OWNED BY {role};"))
+        .await
+        .unwrap_or_else(|error| panic!("drop what {role} owns in the test database: {error}"));
+    admin
+        .batch_execute(&format!(
+            "DROP OWNED BY {role}; DROP ROLE IF EXISTS {role};"
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("drop {role}: {error}"));
+}
+
+/// Whether `role` exists on the server `url` points at.
+async fn role_exists(url: &str, role: &str) -> bool {
+    connect(&with_database(url, "postgres"))
+        .await
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)",
+            &[&role],
+        )
+        .await
+        .expect("look the role up")
+        .get(0)
+}
+
+/// Issue #1335: the owner probes outlived their tests, and on PostgreSQL 16 the
+/// next run's `owned_database` tried to grant one probe to another, which is a
+/// membership cycle PostgreSQL refuses (`grant admin on trace_v90_owner_probe:
+/// db error`). A probe left by a run that crashed before its cleanup must not
+/// be handed to another probe. The listing runs on every version, so this
+/// checks it here even where the grants themselves are skipped.
+#[tokio::test]
+async fn a_leftover_owner_probe_is_not_granted_to_another_probe() {
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+    let _turn = VIRGIN_DATABASE.lock().await;
+
+    const STALE: &str = "trace_stale_owner_probe";
+    let admin = connect(&with_database(&url, "postgres")).await;
+    admin
+        .batch_execute(&format!(
+            "DO $$ BEGIN
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{STALE}') THEN
+                     CREATE ROLE {STALE} NOLOGIN;
+                 END IF;
+             END $$;"
+        ))
+        .await
+        .expect("leave a probe behind, as a crashed run would");
+    let listed = roles_to_grant(&admin, "trace_migration_owner_probe").await;
+    admin
+        .batch_execute(&format!("DROP ROLE IF EXISTS {STALE};"))
+        .await
+        .expect("drop the stale probe");
+
+    assert!(
+        !listed.iter().any(|role| role == STALE),
+        "a leftover owner probe must not be granted to the next one: {listed:?}"
+    );
 }
 
 /// Every suite migrates as a superuser, and a superuser may do things the role
@@ -456,6 +605,7 @@ async fn a_non_superuser_owner_can_apply_every_migration() {
 
     const OWNER: &str = "trace_migration_owner_probe";
     const OWNER_DB: &str = "trace_migration_owner_probe_db";
+    let probe = ProbeRole::claim(&url, OWNER, &[OWNER_DB]).await;
     let admin = owned_database(&url, OWNER, OWNER_DB, Standing::Creator).await;
 
     let owner_url = with_user(&with_database(&url, OWNER_DB), OWNER, "probe");
@@ -511,6 +661,11 @@ async fn a_non_superuser_owner_can_apply_every_migration() {
         acl_problems.join("\n  ")
     );
     dropped.expect("drop the owner-probe database");
+    probe.release().await;
+    assert!(
+        !role_exists(&url, OWNER).await,
+        "{OWNER} is per server and must not outlive the test (#1335)"
+    );
 }
 
 /// V60 on a fresh PostgreSQL 16 server, whichever test runs first.
@@ -549,6 +704,7 @@ async fn v60_applies_whether_the_migrator_made_the_admission_guard_or_was_grante
     // PostgreSQL refuses.
     const OWNER: &str = "tc_v60_owner_probe";
     const DB: &str = "trace_v60_owner_probe_db";
+    let probe = ProbeRole::claim(&url, OWNER, &[DB]).await;
 
     let server = connect(&with_database(&url, "postgres")).await;
     let sixteen_or_later: bool = server
@@ -682,6 +838,11 @@ async fn v60_applies_whether_the_migrator_made_the_admission_guard_or_was_grante
         problems.is_empty(),
         "a CREATEROLE migrator must apply V60 whichever way it holds trace_admission_guard:\n  {}",
         problems.join("\n  ")
+    );
+    probe.release().await;
+    assert!(
+        !role_exists(&url, OWNER).await,
+        "{OWNER} is per server and must not outlive the test (#1335)"
     );
 }
 
@@ -1122,22 +1283,26 @@ async fn v90_gives_a_pilot_shaped_runtime_group_what_submit_repost_and_withdraw_
                FROM pg_auth_members a
                JOIN pg_roles g ON g.oid = a.roleid
                JOIN pg_roles m ON m.oid = a.member
-               JOIN pg_roles gr ON gr.oid = a.grantor
+               LEFT JOIN pg_roles gr ON gr.oid = a.grantor
               WHERE m.rolname IN ('trace_ingest_runtime', $1, $2)",
             &[&INGEST, &ADMISSION],
         )
         .await
         .expect("list the memberships left on this server");
     for row in memberships {
-        let (granted, member, grantor): (String, String, String) =
+        let (granted, member, grantor): (String, String, Option<String>) =
             (row.get(0), row.get(1), row.get(2));
         // Before 16 a membership is one row whoever granted it; since 16 each
         // grantor's grant is its own row, and a superuser's REVOKE removes only
-        // its own unless told whose.
-        let revoke = if sixteen_or_later {
-            format!("REVOKE \"{granted}\" FROM \"{member}\" GRANTED BY \"{grantor}\"")
-        } else {
-            format!("REVOKE \"{granted}\" FROM \"{member}\"")
+        // its own unless told whose. Before 16 the grantor is also not a
+        // dependency, so the row outlives a dropped grantor -- V90's grant
+        // made by an owner probe that a later cleanup dropped (#1335) -- and
+        // an inner join on it would hide the row from this loop.
+        let revoke = match (sixteen_or_later, grantor) {
+            (true, Some(grantor)) => {
+                format!("REVOKE \"{granted}\" FROM \"{member}\" GRANTED BY \"{grantor}\"")
+            }
+            _ => format!("REVOKE \"{granted}\" FROM \"{member}\""),
         };
         server
             .batch_execute(&revoke)
@@ -1152,6 +1317,7 @@ async fn v90_gives_a_pilot_shaped_runtime_group_what_submit_repost_and_withdraw_
         .expect("put both logins in the group");
     drop(server);
 
+    let probe = ProbeRole::claim(&url, OWNER, &[DB]).await;
     let admin = owned_database(&url, OWNER, DB, Standing::Creator).await;
     let owner_url = with_user(&with_database(&url, DB), OWNER, "probe");
     let mut owner = connect(&owner_url).await;
@@ -1660,6 +1826,11 @@ async fn v90_gives_a_pilot_shaped_runtime_group_what_submit_repost_and_withdraw_
         "re-applying V90 keeps the runtime ready: {readiness_after_reapply:?}"
     );
     dropped.expect("drop the V90 probe database");
+    probe.release().await;
+    assert!(
+        !role_exists(&url, OWNER).await,
+        "{OWNER} is per server and must not outlive the test (#1335)"
+    );
 }
 
 /// Role setup must work for CREATEROLE without accepting an existing role

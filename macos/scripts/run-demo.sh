@@ -15,7 +15,7 @@ PACKAGE_DIR="$PWD"
 # first, for comparing themes); TC_DEMO_SKIP_BUILD=1 launches it as it is.
 # Rebuilding the bundle under a running demo kills that demo, so a second
 # one runs from a copy outside .build.
-APP="${TC_DEMO_APP:-$PACKAGE_DIR/.build/TraceCommons.app}"
+APP="${TC_DEMO_APP:-$PACKAGE_DIR/.build/Near.ai.app}"
 
 # Short path on purpose: the control socket is <dir>/daemon.sock and the
 # daemon refuses a socket path over 104 bytes.
@@ -118,10 +118,12 @@ TRACE_COMMONS_SHOW_WINDOW="${TRACE_COMMONS_SHOW_WINDOW:-1}" \
   --env TRACE_COMMONS_CONTRIBUTOR_DIR="$STATE_DIR" \
   --env TRACE_COMMONS_SHOW_WINDOW="${TRACE_COMMONS_SHOW_WINDOW:-1}" \
   --env TRACE_COMMONS_SCREENSHOT_DIR="${TRACE_COMMONS_SCREENSHOT_DIR:-}" \
+  --env TRACE_COMMONS_GLASS_PROBE="${TRACE_COMMONS_GLASS_PROBE:-}" \
   --env TRACE_COMMONS_DEMO_PREVIEW="${TRACE_COMMONS_DEMO_PREVIEW:-}" \
   --env TRACE_COMMONS_QUIT_AFTER_SHOT="${TRACE_COMMONS_QUIT_AFTER_SHOT:-}" \
   --env TRACE_COMMONS_SELFTEST_OUT="${TRACE_COMMONS_SELFTEST_OUT:-}" \
   --env TRACE_COMMONS_APPEARANCE="${TRACE_COMMONS_APPEARANCE:-}" \
+  --env TC_REVIEW_SKIP_SIGN_IN="${TC_REVIEW_SKIP_SIGN_IN:-}" \
   --env TC_GLASS_THEME="${TC_GLASS_THEME:-}" \
   --env TC_GLASS_MATERIAL="${TC_GLASS_MATERIAL:-}"
 

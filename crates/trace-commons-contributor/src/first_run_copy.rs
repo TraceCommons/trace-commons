@@ -5,7 +5,7 @@
 //! The strings are Ron's, verbatim, with these departures:
 //!
 //! - No "Share automatically". The Sharing and per-folder rule choices are
-//!   `project_copy::contribution_mode_copy` (Ask me / Automatic / Never),
+//!   `project_copy::contribution_mode_copy` (Ask / Automatic / Never),
 //!   and a shell renders those.
 //! - No data-use scope title or description. Those are the core's consent
 //!   table, `daemon::enroll::consent_options`, which carries each scope's
@@ -130,9 +130,8 @@ pub struct FrameCopy {
 pub struct JoinCopy {
     pub title_light: &'static str,
     pub title_bold: &'static str,
-    /// One paragraph (owner ruling, 2026-10-08): the "later" sentence is
-    /// back in it. The button it names reads "Skip" whenever no account
-    /// was signed into on Join.
+    /// One paragraph (owner ruling, 2026-10-08). Sign-in is required
+    /// (owner, 2026-10-12): Join has no Skip, so the body names none.
     pub body: &'static str,
     pub invite_eyebrow: &'static str,
     pub invite_placeholder: &'static str,
@@ -179,21 +178,14 @@ pub struct JoinCopy {
     pub unknown: &'static str,
     pub signed_in: &'static str,
     pub no_sharing: &'static str,
+    /// Unread by the macOS shell since sign-in became required (owner,
+    /// 2026-10-12): Join has no Skip. Kept so the wire table is unchanged.
     pub skip_note: &'static str,
-    /// Approved 2026-10-08 (button rule).
+    /// Approved 2026-10-08 (button rule). Unread since 2026-10-12, as
+    /// `skip_note`.
     pub skip: &'static str,
     /// After the passkey verification is cancelled (`ftux-page.tsx`).
     pub signed_out: &'static str,
-}
-
-/// Each asked-about tool's own install page, keyed by the tool, for "Get {tool}".
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct InstallUrls {
-    pub claude_code: &'static str,
-    pub codex: &'static str,
-    pub gemini_cli: &'static str,
-    pub cline: &'static str,
-    pub opencode: &'static str,
 }
 
 /// Folders, Quick setup's tool list (`tool-screens.tsx`, `tool-row.tsx`).
@@ -208,11 +200,14 @@ pub struct FoldersCopy {
     /// `{tool}`: the row's accessible picker label.
     pub watch_question: &'static str,
     pub choose_folder: &'static str,
+    /// An installed tool whose folder was not found: the button in place of
+    /// the picker, and (`{tool}`) its accessible name.
+    pub choose_tool_folder: &'static str,
+    pub choose_tool_folder_accessibility: &'static str,
+    /// A tool that is not installed. Where it leads is
+    /// `crate::install_guides`, the table every surface reads.
     pub get_tool: &'static str,
     pub download_tool: &'static str,
-    /// Where "Get {tool}" sends a person for each tool the Mac is asked about:
-    /// the tool's own install page, over https.
-    pub install_urls: InstallUrls,
     /// Discovery returned no row the shell could read.
     pub discovery_failed: &'static str,
     /// Runs discovery again after `discovery_failed`.
@@ -331,7 +326,7 @@ pub struct UsesCopy {
     /// 2026-10-08: the owner's example wording.
     pub more_about: &'static str,
     pub start: &'static str,
-    /// Start finished on Ask me because the Automatic grant was refused.
+    /// Start finished on Ask because the Automatic grant was refused.
     pub sharing_refused: &'static str,
     /// Start stopped before anything it sends was saved: the data uses.
     pub scopes_failed: &'static str,
@@ -444,7 +439,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             custom_setup_instead: "Customize",
             continue_button: "Continue",
             answer_every_tool: "Answer every tool above to continue",
-            session_count: "{count} sessions",
+            session_count: "{count} traces",
             undo: "Undo",
             choose: "Choose…",
             back: "Back",
@@ -452,7 +447,7 @@ pub fn first_run_copy() -> FirstRunCopy {
         join: JoinCopy {
             title_light: "Get started on ",
             title_bold: "your terms",
-            body: "Start with an invite link, sign-up or sign-in with an existing account, or just click \"Skip\". You'll be able to setup or connect your account later.",
+            body: "Sign in with your NEAR AI account to get started.",
             invite_eyebrow: "Invite link",
             invite_placeholder: "https://issuer.tracecommons.ai/onboard#…",
             look_up: "Look up",
@@ -467,7 +462,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             passkey_create: "Create passkey",
             passkey_done: "Done",
             passkey_chosen: "You'll create your passkey once watching starts.",
-            passkey_unavailable: "Couldn't start passkey setup, so no account was made. Try again, or skip and just watch.",
+            passkey_unavailable: "Couldn't start passkey setup, so no account was made. Try again, or sign in with NEAR AI.",
             near_ai_eyebrow: "Sign in with near.ai",
             near_ai_text: "Use the login you already have. Credits land in that account.",
             near_ai_sign_in: "Sign in",
@@ -483,24 +478,23 @@ pub fn first_run_copy() -> FirstRunCopy {
         folders: FoldersCopy {
             title_light: "Which folders may this ",
             title_bold: "app watch?",
-            body: "We've found the following tools on your device. Traces work by reading coding-session transcripts from locations you specify. Select an option from each of the tools below to continue.",
+            body: "We've found the following tools on your device. Traces work by reading coding-agent transcripts from locations you specify. Select an option from each of the tools below to continue.",
             loading: "Looking for coding tools on this Mac…",
             // Approved 2026-10-08 (button rule): the picker's answers.
             watch: "Watch",
             dont_use: "Not used",
             watch_question: "{tool}: watch this folder?",
             choose_folder: "Choose a different folder for {tool}",
-            // Approved 2026-10-08 (button rule); the row names the tool, and
-            // `download_tool` is the button's accessible name.
-            get_tool: "Download",
-            download_tool: "Download {tool}",
-            install_urls: InstallUrls {
-                claude_code: "https://claude.com/product/claude-code",
-                codex: "https://github.com/openai/codex",
-                gemini_cli: "https://github.com/google-gemini/gemini-cli",
-                cline: "https://cline.bot/",
-                opencode: "https://opencode.ai/",
-            },
+            // Approved 2026-10-15 (#1419 review, decision 2): an installed
+            // tool with no folder found keeps its row; this button stands
+            // where Watch / Not used would be. No caption under it.
+            choose_tool_folder: "Choose folder",
+            choose_tool_folder_accessibility: "Choose {tool} folder",
+            // Approved 2026-10-15 (#1419 review, decision 3): "Install"
+            // everywhere. The row names the tool, and `download_tool` is the
+            // button's accessible name.
+            get_tool: "Install",
+            download_tool: "Install {tool}",
             discovery_failed: "Could not look for coding tools on this Mac.",
             retry: "Look again",
             enroll_refused: "Your invite was found, but joining with it did not go through. Press Continue to try again.",
@@ -513,7 +507,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             title_bold: "tools and folders.",
             add_tool: "Not seeing your tool above? Click to add or drag & drop.",
             add_tool_caption: "OpenCode, a moved Claude Code or Codex folder, or a folder of exported traces",
-            add_tool_refused: "Trace Commons can't read this folder yet.",
+            add_tool_refused: concat!(crate::app_name!(), " can't read this folder yet."),
             added_by_you: "Added by you",
             which_kind: "What does {folder} hold?",
             trajectory_label: "Exported traces",
@@ -523,23 +517,23 @@ pub fn first_run_copy() -> FirstRunCopy {
         rules: RulesCopy {
             title_light: "Set your ",
             title_bold: "rules and permissions.",
-            loading: "Reading repos from your sessions…",
-            empty: "No repos to set rules for yet. Rules appear for repos found in the sessions of a tool you watch.",
-            repos_found: "Repos found in {tools} sessions",
+            loading: "Reading repos from your traces…",
+            empty: "No repos to set rules for yet. Rules appear for repos found in the traces of a tool you watch.",
+            repos_found: "Repos found in {tools} traces",
             rule_for: "Rule for {folder}",
-            past_sessions: "Past sessions, by folder",
+            past_sessions: "Past traces, by folder",
             selected_summary: "{selected} of {total} selected",
             folder_selected: "{selected} of {total}",
-            include_every: "Include every past session in {folder}",
+            include_every: "Include every past trace in {folder}",
             show_all: "Show all",
             show_fewer: "Show fewer",
             never_count: "{count} · rule is Never",
             never_label: "{folder}: rule is Never",
-            unavailable: "Couldn't read repos from your sessions.",
+            unavailable: "Couldn't read repos from your traces.",
             retry: "Try again",
-            sessions_unavailable: "Past sessions unavailable",
-            past_sessions_watch_only: "You're watching only, so the sessions you pick wait on this Mac, unsent, until you join.",
-            not_listed: "Older sessions not listed here: {count}",
+            sessions_unavailable: "Past traces unavailable",
+            past_sessions_watch_only: "You're watching only, so the traces you pick wait on this Mac, unsent, until you join.",
+            not_listed: "Older traces not listed here: {count}",
             weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
             months: [
                 "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -562,9 +556,9 @@ pub fn first_run_copy() -> FirstRunCopy {
             sharing_unavailable: "Sharing copy unavailable. Starting is disabled.",
             more_about: "More about {title}",
             start: "Start sharing",
-            sharing_refused: "Setup finished, but Automatic wasn't turned on. Sharing is on Ask me.",
+            sharing_refused: "Setup finished, but Automatic wasn't turned on. Sharing is on Ask.",
             scopes_failed: "How your traces may be used couldn't be saved. Setup hasn't finished; try Start sharing again.",
-            rules_failed: "A folder rule or past-session choice couldn't be saved. Setup hasn't finished; try Start sharing again.",
+            rules_failed: "A folder rule or past-trace choice couldn't be saved. Setup hasn't finished; try Start sharing again.",
             private_ai_failed: "The Private AI setting couldn't be saved. Setup hasn't finished; try Start sharing again.",
             complete_failed: "Your choices were saved, but setup couldn't be marked done. Setup hasn't finished; try Start sharing again.",
         },
@@ -574,7 +568,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             choose_title: "Continue with passkey",
             use_existing: "Use existing",
             create_new: "Create new",
-            choose_note: "A passkey is your sign-in for Trace Commons and near.ai. Nothing about your sessions is sent by signing in.",
+            choose_note: "A passkey is your sign-in for Trace Commons and near.ai. Nothing about your traces is sent by signing in.",
             name_title: "Create new passkey",
             name_submit: "Create",
             name_field: "Passkey name",
@@ -592,7 +586,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             welcome_sign_in: "Sign in",
             other_options: "Other options",
             refused: "The passkey step didn't go through. Try again, or close this and choose another way to join.",
-            bound_elsewhere: "This passkey's account wasn't created with a passkey, and adding a Mac to it with a passkey isn't possible yet, so you were signed out here. Close this to choose another way to join, or to watch only.",
+            bound_elsewhere: "This passkey's account wasn't created with a passkey, and adding a Mac to it with a passkey isn't possible yet, so you were signed out here. Close this to choose another way to join.",
             near_ai_mismatch: "This Mac is signed in to a different near.ai account from the one this passkey's account uses, so this Mac wasn't added to it, and you were signed out here. Sign in to near.ai with the account you use on your other Mac and try again, or close this to choose another way to join.",
         },
         private_ai: PrivateAiCopy {
@@ -609,20 +603,6 @@ pub fn first_run_copy() -> FirstRunCopy {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_install_url_is_https() {
-        let urls = first_run_copy().folders.install_urls;
-        for url in [
-            urls.claude_code,
-            urls.codex,
-            urls.gemini_cli,
-            urls.cline,
-            urls.opencode,
-        ] {
-            assert!(url.starts_with("https://"), "{url}");
-        }
-    }
 
     #[test]
     fn a_dead_invite_and_a_pay_range_have_their_own_words() {
@@ -878,7 +858,7 @@ mod tests {
     #[test]
     fn start_failures_say_what_happened() {
         let uses = first_run_copy().uses;
-        assert!(uses.sharing_refused.contains("Ask me"));
+        assert!(uses.sharing_refused.contains("on Ask."));
         assert!(uses.sharing_refused.contains("Automatic"));
         for line in [
             uses.sharing_refused,
@@ -935,7 +915,9 @@ mod tests {
             crate::onboarding_copy::WATCHER_START_FAILED
         );
         assert!(!join.passkey_unavailable.contains("folder"));
-        assert!(join.passkey_unavailable.contains("skip and just watch"));
+        // Owner, 2026-10-12: sign-in required, so nothing offers watching only.
+        assert!(!join.passkey_unavailable.contains("watch"));
+        assert!(join.passkey_unavailable.contains("NEAR AI"));
     }
 
     /// A new passkey creates an account of its own, so Join says why it is

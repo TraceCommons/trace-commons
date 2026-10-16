@@ -839,8 +839,13 @@ final class RoutingBindingTests: XCTestCase {
             "the probe sentence is no longer read from the model: \(body)"
         )
         XCTAssertTrue(body.contains("Text(probeLine)"), "the probe sentence is decorated rather than shown")
+        // A failed check is the same sentence as the failed request's red
+        // line (Ron, 2026-10-09): bound once, compared once to pick the
+        // style, drawn once in each style.
+        XCTAssertTrue(body.contains("if probeLine == copy.probeReachable {"))
+        XCTAssertTrue(body.contains("GlassAlert(probeLine)"), "a failed check is not the red line")
         XCTAssertEqual(
-            RoutingCard.occurrences(of: "probeLine", in: body), 2,
+            RoutingCard.occurrences(of: "probeLine", in: body), 4,
             "the probe sentence is used somewhere besides its own line"
         )
     }

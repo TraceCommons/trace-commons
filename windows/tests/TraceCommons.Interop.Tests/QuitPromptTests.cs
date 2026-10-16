@@ -61,7 +61,7 @@ public sealed class QuitPromptTests : IDisposable
 
         Assert.NotNull(prompt);
         Assert.Equal("hosting", prompt!.Role);
-        Assert.StartsWith("Quitting stops Trace Commons watching", prompt.Body, StringComparison.Ordinal);
+        Assert.StartsWith("Quitting stops Near.ai watching", prompt.Body, StringComparison.Ordinal);
         Assert.False(string.IsNullOrWhiteSpace(prompt.Title));
         Assert.False(string.IsNullOrWhiteSpace(prompt.Confirm));
         Assert.False(string.IsNullOrWhiteSpace(prompt.Cancel));
@@ -96,7 +96,7 @@ public sealed class QuitPromptTests : IDisposable
             AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "MainWindow.xaml.cs.txt"));
 
         Assert.DoesNotContain("Quitting stops", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"Quit Trace Commons?\"", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"Quit Near.ai?\"", source, StringComparison.Ordinal);
         Assert.Contains("QuitPrompt()", source, StringComparison.Ordinal);
     }
 }

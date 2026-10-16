@@ -43,6 +43,25 @@ final class MenuBarPanelTests: XCTestCase {
         XCTAssertTrue(GlassMenuBarStrip.grey(.paused))
     }
 
+    /// The nudge mark: the news ring only in the badge's empty slot on a
+    /// live strip; the halo only around a badge that is drawn. Never over
+    /// the attention mark, never on an unavailable strip.
+    func test_theMarkIsDrawnOnlyWhereItsSlotIs() {
+        XCTAssertEqual(GlassMenuBarStrip.shownMark(.news, badge: nil, condition: .live), .news)
+        XCTAssertEqual(GlassMenuBarStrip.shownMark(.news, badge: 3, condition: .live), .none)
+        XCTAssertEqual(GlassMenuBarStrip.shownMark(.news, badge: nil, condition: .paused), .none)
+        XCTAssertEqual(GlassMenuBarStrip.shownMark(.news, badge: nil, condition: .attention), .none)
+        XCTAssertEqual(GlassMenuBarStrip.shownMark(.news, badge: nil, condition: .unavailable), .none)
+
+        XCTAssertEqual(GlassMenuBarStrip.shownMark(.ready, badge: 3, condition: .live), .ready)
+        XCTAssertEqual(GlassMenuBarStrip.shownMark(.ready, badge: 3, condition: .paused), .ready)
+        XCTAssertEqual(GlassMenuBarStrip.shownMark(.ready, badge: nil, condition: .live), .none)
+        XCTAssertEqual(GlassMenuBarStrip.shownMark(.ready, badge: 0, condition: .live), .none)
+        XCTAssertEqual(GlassMenuBarStrip.shownMark(.ready, badge: 3, condition: .unavailable), .none)
+
+        XCTAssertEqual(GlassMenuBarStrip.shownMark(.none, badge: 3, condition: .live), .none)
+    }
+
     /// A menu row's own hit rect clears the 28pt target: the room between
     /// two selections belongs to a row, not to a gap no button owns.
     @MainActor

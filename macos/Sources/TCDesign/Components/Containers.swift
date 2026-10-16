@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// A rule one device pixel thick, as a browser draws #1146's 0.5px border:
@@ -61,6 +62,259 @@ public struct GlassCard<Content: View>: View {
     }
 }
 
+/// A bare refresh glyph, no pill around it (owner, 2026-10-10), named for
+/// assistive tech and in its tooltip.
+public struct GlassRefreshButton: View {
+    private let label: String
+    private let size: CGFloat
+    private let action: () -> Void
+
+    public init(_ label: String, size: CGFloat = 13, action: @escaping () -> Void) {
+        self.label = label
+        self.size = size
+        self.action = action
+    }
+
+    public var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.clockwise")
+                .glassGlyph(size, weight: .medium)
+                .foregroundStyle(GlassColor.textSecondary)
+                .frame(width: size + 7, height: size + 7)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(GlassPressStyle())
+        .accessibilityLabel(label)
+        .help(label)
+    }
+}
+
+/// An icon card's re-read control: its name and what it does.
+public struct GlassCardRefresh {
+    let label: String
+    let isDisabled: Bool
+    let action: () -> Void
+
+    public init(_ label: String, isDisabled: Bool = false, action: @escaping () -> Void) {
+        self.label = label
+        self.isDisabled = isDisabled
+        self.action = action
+    }
+}
+
+extension VerticalAlignment {
+    /// An icon card's head: the icon's top on the title's cap height.
+    private enum IconTitleTop: AlignmentID {
+        static func defaultValue(in context: ViewDimensions) -> CGFloat { context[.top] }
+    }
+
+    static let iconTitleTop = VerticalAlignment(IconTitleTop.self)
+}
+
+/// A card headed by an icon (owner, 2026-10-10), laid out the same on
+/// every card:
+/// - the icon in a fixed column at the top left, level with the title;
+/// - the title, with the card's re-read icon right after it on its line;
+/// - the subtitle under it, with an info icon after its last line for the
+///   card's fine print (shown on hover and in a popover);
+/// - the card's actions on the right, centred on the head;
+/// - anything else the card holds under the head, aligned with the title.
+public struct GlassIconCard<Accessory: View, Content: View>: View {
+    /// The card's re-read control.
+    public typealias Refresh = GlassCardRefresh
+
+    private let systemImage: String
+    private let title: String
+    private let subtitle: [String]
+    private let info: String?
+    private let refresh: Refresh?
+    private let accessory: Accessory
+    private let content: Content
+    /// Whether the whole card is a control (its caller wraps it in one): it
+    /// then lifts under the pointer, as an interactive `GlassCard` does.
+    private let interactive: Bool
+    /// A promotion treatment in place of the card tier (owner, 2026-10-11:
+    /// Home's Missions card). The icon then takes the accent colour.
+    private let promo: GlassPromoTreatment?
+    /// A chevron at the card's trailing edge, centred on the whole card
+    /// rather than on its head (owner, 2026-10-11), for a card that is a
+    /// way into somewhere, as `GlassEyebrowCard`'s is.
+    private let chevron: Bool
+    @State private var infoOpen = false
+
+    /// The icon's point size, and the column it sits in.
+    public static var iconSize: CGFloat { 22 }
+    static var iconColumn: CGFloat { 26 }
+    /// The clear space an SF Symbol at `iconSize` keeps above its drawn
+    /// top, measured from a render: the drawn top, not the frame, meets the
+    /// title's capitals.
+    static var iconTopInset: CGFloat { 2.25 }
+    /// The title face's cap height: from its baseline to the top of its
+    /// capitals.
+    static var titleCapHeight: CGFloat {
+        NSFont.systemFont(ofSize: GlassTokens.TypeScale.bodyStrong.size, weight: .semibold).capHeight
+    }
+
+    /// `subtitle` is drawn line by line under the title, empty lines left
+    /// out; `info` goes behind the info icon after it.
+    public init(
+        systemImage: String, title: String, subtitle: [String] = [], info: String? = nil, refresh: Refresh? = nil,
+        interactive: Bool = false, promo: GlassPromoTreatment? = nil, chevron: Bool = false,
+        @ViewBuilder accessory: () -> Accessory, @ViewBuilder content: () -> Content
+    ) {
+        self.interactive = interactive
+        self.promo = promo
+        self.chevron = chevron
+        self.systemImage = systemImage
+        self.title = title
+        self.subtitle = subtitle.filter { !$0.isEmpty }
+        self.info = info.flatMap { $0.isEmpty ? nil : $0 }
+        self.refresh = refresh
+        self.accessory = accessory()
+        self.content = content()
+    }
+
+    public var body: some View {
+        if let promo {
+            GlassPromoCard(promo, interactive: interactive) { withChevron }
+        } else {
+            GlassCard(interactive: interactive) { withChevron }
+        }
+    }
+
+    /// The card's stack, and its chevron centred on the whole of it.
+    private var withChevron: some View {
+        HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
+            stack
+            if chevron { GlassChevron() }
+        }
+    }
+
+    /// The head and anything under it.
+    private var stack: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            HStack(alignment: .center, spacing: GlassTokens.Space.s5) {
+                HStack(alignment: .iconTitleTop, spacing: GlassTokens.Space.s5) {
+                    // The icon's top on the title's cap height, the top
+                    // of its letters (owner, 2026-10-10), on every card.
+                    Image(systemName: systemImage)
+                        .glassGlyph(Self.iconSize, weight: .regular)
+                        .foregroundStyle(promo == nil ? GlassColor.textSecondary : GlassColor.accentText)
+                        .frame(width: Self.iconColumn)
+                        .alignmentGuide(.iconTitleTop) { $0[.top] + Self.iconTopInset }
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                        HStack(alignment: .center, spacing: GlassTokens.Space.s2) {
+                            Text(title)
+                                .glassType(GlassTokens.TypeScale.bodyStrong)
+                                .foregroundStyle(GlassColor.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .alignmentGuide(.iconTitleTop) { $0[.firstTextBaseline] - Self.titleCapHeight }
+                                .accessibilityAddTraits(.isHeader)
+                            if let refresh {
+                                GlassRefreshButton(refresh.label, size: 12, action: refresh.action)
+                                    .disabled(refresh.isDisabled)
+                            }
+                            if subtitle.isEmpty { infoButton }
+                        }
+                        ForEach(Array(subtitle.enumerated()), id: \.offset) { index, line in
+                            if index == subtitle.count - 1, info != nil {
+                                infoLine(line)
+                            } else {
+                                Text(line)
+                                    .glassType(GlassTokens.TypeScale.caption)
+                                    .foregroundStyle(GlassColor.textSecondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+                Spacer(minLength: GlassTokens.Space.s4)
+                accessory
+            }
+            if Content.self != EmptyView.self {
+                content
+                    .padding(.leading, Self.iconColumn + GlassTokens.Space.s5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    /// The info icon on its own, after the title when there is no subtitle.
+    @ViewBuilder
+    private var infoButton: some View {
+        if let info {
+            Button { infoOpen.toggle() } label: {
+                Self.infoGlyph
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(GlassPressStyle())
+            .accessibilityLabel(info)
+            .help(info)
+            .popover(isPresented: $infoOpen, arrowEdge: .bottom) { infoPopover(info) }
+        }
+    }
+
+    /// The subtitle's last line with the info icon set in its text, right
+    /// after the last word wherever the line wraps. The line opens the
+    /// popover and shows the fine print on hover.
+    @ViewBuilder
+    private func infoLine(_ line: String) -> some View {
+        if let info {
+            Button { infoOpen.toggle() } label: {
+                (Text(line).foregroundColor(GlassColor.textSecondary)
+                    + Text("\u{00a0}\u{00a0}")
+                    + Self.infoGlyph.foregroundColor(GlassColor.textTertiary))
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(GlassPressStyle())
+            .accessibilityLabel(line)
+            .accessibilityHint(info)
+            .help(info)
+            .popover(isPresented: $infoOpen, arrowEdge: .bottom) { infoPopover(info) }
+        }
+    }
+
+    private static var infoGlyph: Text { Text(Image(systemName: "info.circle")) }
+
+    private func infoPopover(_ info: String) -> some View {
+        Text(info)
+            .glassType(GlassTokens.TypeScale.caption)
+            .foregroundStyle(GlassColor.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: 260, alignment: .leading)
+            .padding(GlassTokens.Space.s5)
+    }
+}
+
+public extension GlassIconCard where Content == EmptyView {
+    /// A head-only card: `trailing` is the control on its right.
+    init(
+        systemImage: String, title: String, subtitle: [String] = [], info: String? = nil, refresh: Refresh? = nil,
+        interactive: Bool = false, promo: GlassPromoTreatment? = nil, chevron: Bool = false,
+        @ViewBuilder trailing: () -> Accessory
+    ) {
+        self.init(systemImage: systemImage, title: title, subtitle: subtitle, info: info, refresh: refresh,
+                  interactive: interactive, promo: promo, chevron: chevron, accessory: trailing) { EmptyView() }
+    }
+}
+
+public extension GlassIconCard where Accessory == EmptyView {
+    init(
+        systemImage: String, title: String, subtitle: [String] = [], info: String? = nil, refresh: Refresh? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.init(systemImage: systemImage, title: title, subtitle: subtitle, info: info, refresh: refresh,
+                  accessory: { EmptyView() }, content: content)
+    }
+}
+
 /// A card with an eyebrow heading and an optional accessory on the right.
 /// With `title`, #1146's two-level head: the eyebrow over an h2, the
 /// accessory (a chip, a re-read link) top-right. With `action` the whole
@@ -71,40 +325,54 @@ public struct GlassEyebrowCard<Accessory: View, Content: View>: View {
     private let accessory: Accessory
     private let content: Content
     private let action: (() -> Void)?
+    private let chevron: Bool
 
+    /// `chevron` draws a chevron at the card's trailing edge, centred on the
+    /// whole card rather than on its heading (owner, 2026-10-10), for a card
+    /// that is a way into somewhere; `accessory` stays beside the heading.
     public init(
         _ eyebrow: String,
         title: String? = nil,
         action: (() -> Void)? = nil,
+        chevron: Bool = false,
         @ViewBuilder accessory: () -> Accessory = { EmptyView() },
         @ViewBuilder content: () -> Content
     ) {
         self.eyebrow = eyebrow
         self.title = title
         self.action = action
+        self.chevron = chevron
         self.accessory = accessory()
         self.content = content()
     }
 
     private var card: some View {
         GlassCard(interactive: action != nil) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                HStack(alignment: title == nil ? .center : .top, spacing: GlassTokens.Space.s6) {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                        Text(eyebrow).glassType(GlassTokens.TypeScale.eyebrow).foregroundStyle(GlassColor.textTertiary)
-                        if let title {
-                            Text(title)
-                                .glassType(GlassTokens.TypeScale.title)
-                                .foregroundStyle(GlassColor.textPrimary)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .accessibilityAddTraits(.isHeader)
-                        }
-                    }
-                    Spacer(minLength: GlassTokens.Space.s4)
-                    accessory
-                }
-                content
+            HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
+                stack
+                if chevron { GlassChevron() }
             }
+        }
+    }
+
+    /// The heading, its accessory, and the content under them.
+    private var stack: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            HStack(alignment: title == nil ? .center : .top, spacing: GlassTokens.Space.s6) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    Text(eyebrow).glassType(GlassTokens.TypeScale.eyebrow).foregroundStyle(GlassColor.textTertiary)
+                    if let title {
+                        Text(title)
+                            .glassType(GlassTokens.TypeScale.title)
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityAddTraits(.isHeader)
+                    }
+                }
+                Spacer(minLength: GlassTokens.Space.s4)
+                accessory
+            }
+            content
         }
     }
 
@@ -115,6 +383,19 @@ public struct GlassEyebrowCard<Accessory: View, Content: View>: View {
         } else {
             card
         }
+    }
+}
+
+/// The chevron on a card that is a way into somewhere. Decorative: the
+/// card says where it goes.
+public struct GlassChevron: View {
+    public init() {}
+
+    public var body: some View {
+        Image(systemName: "chevron.right")
+            .glassGlyph(10, weight: .semibold)
+            .foregroundStyle(GlassColor.textTertiary)
+            .accessibilityHidden(true)
     }
 }
 
@@ -196,8 +477,8 @@ public struct GlassLegendCell: View {
 }
 
 /// Label and value pairs, labels right-aligned in a 70pt column (the
-/// inspector's Path, Sessions, User), inset 6pt on each side (#1146
-/// `.tc-kv`).
+/// inspector's Path, Sessions, User), flush with its card (#1146
+/// `.tc-kv`, less its 6pt inset: owner, 2026-10-12).
 public struct GlassKeyValueList: View {
     public struct Item: Identifiable {
         public let label: String
@@ -222,9 +503,14 @@ public struct GlassKeyValueList: View {
         Grid(alignment: .topLeading, horizontalSpacing: 10, verticalSpacing: 6) {
             ForEach(items) { item in
                 GridRow {
+                    // Leading-aligned, the column as wide as its longest
+                    // label, flush with the card's other content (owner,
+                    // 2026-10-12: the fixed 70pt trailing column pushed the
+                    // values too far right).
                     Text(item.label)
                         .foregroundStyle(GlassColor.textTertiary)
-                        .frame(width: 70, alignment: .trailing)
+                        .fixedSize()
+                        .gridColumnAlignment(.leading)
                     Group {
                         if item.mono {
                             Text(item.value).glassType(GlassTokens.TypeScale.mono)
@@ -238,11 +524,8 @@ public struct GlassKeyValueList: View {
                 .accessibilityElement(children: .combine)
             }
         }
-        .padding(.horizontal, Self.inset)
         .glassType(GlassTokens.TypeScale.label.weight(.regular))
     }
-
-    static let inset: CGFloat = 6
 }
 
 /// A grid row inside a flush card: hairline above, never around.
@@ -326,21 +609,53 @@ public struct GlassNotice<Content: View>: View {
         self.content = content()
     }
 
-    static var titleGap: CGFloat { GlassTokens.Space.s3 }
+    static var titleGap: CGFloat { GlassTokens.Space.s2 }
+
+    /// The tone's icon, in place of a dot (owner, 2026-10-12: notices read
+    /// as notifications): a warning triangle for outside, an exclamation
+    /// for ask, a check for on, and information otherwise.
+    static func icon(_ tone: GlassStatus) -> String {
+        switch tone {
+        case .outside: "exclamationmark.triangle.fill"
+        case .ask: "exclamationmark.circle.fill"
+        case .on: "checkmark.circle.fill"
+        default: "info.circle.fill"
+        }
+    }
+
+    /// The box's fill: the tone's colour, faint, so the tone reads at a
+    /// glance; a neutral wash for a tone that is not a warning.
+    static func fill(_ tone: GlassStatus) -> Color {
+        switch tone {
+        case .outside, .ask, .on: tone.color.opacity(0.14)
+        default: GlassColor.ink(0.05)
+        }
+    }
 
     public var body: some View {
-        GlassCard(quiet: true) {
-            // Title to body: space-3 (#1146 `.tc-notice`); the title stays
-            // secondary text, its tone carried by the dot.
+        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
+            Image(systemName: Self.icon(tone))
+                .glassGlyph(13, weight: .semibold)
+                .foregroundStyle(tone.color)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: Self.titleGap) {
                 if let title {
-                    GlassStatusLabel(title, status: tone).fontWeight(.semibold)
+                    Text(title)
+                        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 content
                     .glassType(GlassTokens.TypeScale.label.weight(.regular))
                     .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            Spacer(minLength: 0)
         }
+        .padding(.vertical, GlassTokens.Space.s5)
+        .padding(.horizontal, GlassTokens.Space.s5)
+        .background(
+            RoundedRectangle(cornerRadius: GlassTier.cardQuiet.radius, style: .continuous).fill(Self.fill(tone)))
         .accessibilityElement(children: .contain)
     }
 }

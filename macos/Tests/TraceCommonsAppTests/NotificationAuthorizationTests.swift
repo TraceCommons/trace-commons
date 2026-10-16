@@ -20,6 +20,10 @@ final class NotificationAuthorizationTests: XCTestCase {
         let start = try XCTUnwrap(source.range(of: "func configure() {"))
         let end = try XCTUnwrap(source.range(of: "func authorizationStatus()", range: start.upperBound..<source.endIndex))
         XCTAssertFalse(source[start.upperBound..<end.lowerBound].contains(".requestAuthorization("))
+        // Launch registers every category at once (`launchCategories`):
+        // setting the digest's alone would drop the re-engagement buttons
+        // from notifications delivered before a relaunch.
+        XCTAssertTrue(source[start.upperBound..<end.lowerBound].contains("Self.launchCategories(Self.nudgeCopy)"))
         let posting = try XCTUnwrap(source.range(of: "func postDigest("))
         let add = try XCTUnwrap(source.range(of: ".add(request)", range: posting.upperBound..<source.endIndex))
         XCTAssertTrue(source[posting.upperBound..<add.lowerBound].contains("Self.canPostDigest(await authorizationStatus())"))

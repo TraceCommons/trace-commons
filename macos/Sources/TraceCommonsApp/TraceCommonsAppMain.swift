@@ -84,6 +84,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
             MenuBarGlassPanel(navigation: navigation, store: menuPanel)
                 .environmentObject(model)
                 .tint(GlassTokens.Color.purpleSoft.color)
+                // No focus ring drawn round controls (owner, 2026-10-11).
+                .focusEffectDisabled()
         } label: {
             Launcher(model: model, compute: compute, navigation: navigation,
                      appDelegate: appDelegate, missionDrafts: missionDrafts, menuPanel: menuPanel)
@@ -104,6 +106,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
             MenuBarPreviewWindow(navigation: navigation, store: menuPanel)
                 .environmentObject(model)
                 .tint(GlassTokens.Color.purpleSoft.color)
+                // No focus ring drawn round controls (owner, 2026-10-11).
+                .focusEffectDisabled()
         }
         .windowResizability(.contentSize)
         #endif
@@ -115,6 +119,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
             FirstRunWindowView(navigation: navigation)
                 .environmentObject(model)
                 .tint(GlassTokens.Color.purpleSoft.color)
+                // No focus ring drawn round controls (owner, 2026-10-11).
+                .focusEffectDisabled()
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 860, height: 760)
@@ -127,6 +133,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
                 .environmentObject(model)
                 .environment(compute)
                 .tint(GlassTokens.Color.purpleSoft.color)
+                // No focus ring drawn round controls (owner, 2026-10-11).
+                .focusEffectDisabled()
         }
         .defaultSize(width: GlassTokens.Size.modalWidth, height: 640)
         .windowResizability(.contentMinSize)
@@ -144,11 +152,7 @@ struct SettingsWindowView: View {
         SettingsModal(
             request: navigation.settingsRequest ?? SettingsRequest(section: nil),
             navigation: navigation, paused: model.status.paused,
-            onClose: { dismiss() },
-            onPrivateAI: {
-                // The Private AI pointer opens Inference in the Monitor.
-                OpenMonitor.request(.inference)
-            })
+            onClose: { dismiss() })
             .frame(minWidth: GlassTokens.Size.modalNavWidth * 3, minHeight: 420)
             // Confirmations raised by a section cover this window, with
             // #1146's close button in the core's words.
@@ -179,9 +183,12 @@ struct MonitorScene: Scene {
                 // user's chosen accent colour is a real departure from macOS
                 // convention and it is made on purpose: the accent is the
                 // single strongest cue that this app is the Trace product.
-                // Everything else about the controls -- shape, focus ring,
-                // keyboard behaviour -- stays stock.
+                // Everything else about the controls -- shape, keyboard
+                // behaviour -- stays stock; the focus ring is not drawn
+                // (owner, 2026-10-11).
                 .tint(GlassTokens.Color.purpleSoft.color)
+                // No focus ring drawn round controls (owner, 2026-10-11).
+                .focusEffectDisabled()
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
@@ -357,12 +364,38 @@ private struct Launcher: View {
         appDelegate.compute = compute
         appDelegate.model = model
         // The edge rail, if the contributor turned it on in Settings.
-        EdgeRailController.shared.attach(model: model, compute: compute)
+        EdgeRailController.shared.attach(model: model)
         navigation.registerServiceStart { startServices() }
         activateServices()
-        // The only thing a notification action may do is open the Monitor
-        // at Traces.
+        // The only thing a digest action may do is open the Monitor at
+        // Traces.
         Notifier.shared.onReview = { OpenMonitor.request(.traces(entryId: nil)) }
+        // A re-engagement button sends its one request (best effort: the
+        // place opens either way, and a "Not now" the core did not take
+        // leaves the suggestion as it was) and opens its place, if any.
+        Notifier.shared.onNudge = { intent in
+            let effect = NudgeSurface.effect(intent)
+            if let client = model.daemonData {
+                Task { try? await NudgeSurface.send(effect, through: client) }
+            }
+            if let destination = effect.destination {
+                OpenMonitor.request(MonitorDestination(nudge: destination))
+            }
+        }
+
+        // The re-engagement declaration follows whether a notification can
+        // be posted: re-read once the prompt is answered, and whenever the
+        // app comes forward, since System Settings may have changed it.
+        Notifier.shared.onAuthorizationAnswered = {
+            Task { @MainActor in await model.refreshReengageDeclaration() }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in await model.refreshReengageDeclaration() }
+        }
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,

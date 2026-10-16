@@ -201,10 +201,13 @@ async fn disarming_auto_upload_from_the_cli_takes_effect_immediately() {
     // without restarting the daemon.
     let h = Running::new().await;
     let project = tempfile::tempdir().unwrap();
-    let key = std::fs::canonicalize(project.path())
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
+    // The key a session in that directory resolves to: folded on macOS and
+    // Windows, whatever spelling the CLI is given (#992).
+    let key = trace_commons_contributor::daemon::policy::project_key_for(Some(
+        &std::fs::canonicalize(project.path())
+            .unwrap()
+            .to_string_lossy(),
+    ));
     h.shared
         .policy
         .lock()
@@ -309,10 +312,13 @@ async fn with_no_daemon_running_commands_still_work_against_the_files() {
     let dir = tempfile::tempdir().unwrap();
     let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
     let project = tempfile::tempdir().unwrap();
-    let key = std::fs::canonicalize(project.path())
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
+    // The key a session in that directory resolves to: folded on macOS and
+    // Windows, whatever spelling the CLI is given (#992).
+    let key = trace_commons_contributor::daemon::policy::project_key_for(Some(
+        &std::fs::canonicalize(project.path())
+            .unwrap()
+            .to_string_lossy(),
+    ));
 
     // Arming records the terms in force, so it needs a config.
     store.save_config(&test_config("sha256:aa".into())).unwrap();

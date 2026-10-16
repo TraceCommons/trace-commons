@@ -38,6 +38,9 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use trace_commons_protocol::llm::recording::{
+    ExpectedToolResult, TraceFile, TraceResponse, TraceStep, TraceToolCall,
+};
 
 /// Per-translator text budget, in characters. Long sessions get truncated
 /// rather than dropped.
@@ -709,6 +712,112 @@ pub fn passes_word_filter(body: &str, min_words: usize, max_words: usize) -> boo
     n >= min_words && n <= max_words
 }
 
+/// Turn one session event into the trace steps it needs.
+///
+/// Most records map to one step. A record that carried prose *and* tool
+/// calls -- the dominant assistant shape in pi-mono and DeepSeek -- maps to
+/// two, both stamped with that record's own real time, because a `TraceStep`
+/// holds exactly one response and neither half may be dropped.
+///
+/// A tool result rides a step whose response is an empty `ToolCalls`: the
+/// result itself lives in `expected_tool_results`, and an empty call list
+/// emits no event of its own, so the result keeps its own real timestamp
+/// instead of borrowing the timestamp of whichever step it was attached to.
+/// `from_recorded_trace` pairs it back to its call by `tool_call_id`, not by
+/// position, so the pairing survives the result being its own step.
+#[allow(dead_code)] // called by the submitter and the corpus export; other targets that include this file do not
+pub fn trace_steps_for(event: &SessionEvent) -> Vec<TraceStep> {
+    let mut steps = Vec::new();
+
+    // A pi-mono/DeepSeek tool-result record's extracted text *is* its result
+    // content. Emitting it as prose too would put the same bytes in the
+    // envelope twice.
+    let text_is_the_result = matches!(
+        &event.tool,
+        Some(SessionEventTool::Results(results))
+            if results.iter().any(|r| r.content == event.text)
+    );
+
+    if !event.text.is_empty() && !text_is_the_result {
+        steps.push(TraceStep {
+            request_hint: None,
+            response: match event.role {
+                SessionEventRole::User | SessionEventRole::Other => TraceResponse::UserInput {
+                    content: event.text.clone(),
+                },
+                SessionEventRole::Assistant => TraceResponse::Text {
+                    content: event.text.clone(),
+                    // These corpus-building datasets do not carry real
+                    // per-event token counts. 0 is an explicit "not
+                    // measured", not a fabricated value -- unlike
+                    // `timestamp`, `TraceResponse::Text` has no absent-value
+                    // representation for this field.
+                    input_tokens: 0,
+                    output_tokens: 0,
+                },
+            },
+            expected_tool_results: Vec::new(),
+            timestamp: event.timestamp,
+        });
+    }
+
+    match &event.tool {
+        Some(SessionEventTool::Calls(calls)) => steps.push(TraceStep {
+            request_hint: None,
+            response: TraceResponse::ToolCalls {
+                tool_calls: calls
+                    .iter()
+                    .map(|call| TraceToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                    })
+                    .collect(),
+                input_tokens: 0,
+                output_tokens: 0,
+            },
+            expected_tool_results: Vec::new(),
+            timestamp: event.timestamp,
+        }),
+        Some(SessionEventTool::Results(results)) => steps.push(TraceStep {
+            request_hint: None,
+            response: TraceResponse::ToolCalls {
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+            },
+            expected_tool_results: results
+                .iter()
+                .map(|result| ExpectedToolResult {
+                    tool_call_id: result.tool_call_id.clone(),
+                    name: result.name.clone(),
+                    content: result.content.clone(),
+                })
+                .collect(),
+            timestamp: event.timestamp,
+        }),
+        None => {}
+    }
+
+    steps
+}
+
+/// The recorded trace that `build_envelope_from_draft` redacts: one step for
+/// each session event, in order.
+#[allow(dead_code)] // called by the submitter and the corpus export; other targets that include this file do not
+pub fn trace_file_for(draft: &SubmissionDraft) -> TraceFile {
+    TraceFile {
+        model_name: format!("pilot-bootstrap/{}", draft.source_dataset),
+        memory_snapshot: Vec::new(),
+        http_exchanges: Vec::new(),
+        steps: draft
+            .session_events
+            .iter()
+            .flat_map(trace_steps_for)
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,6 +849,11 @@ mod tests {
             serde_json::json!({"type":"system","content":"third system text"}),
         ]);
         let draft = t.translate("session-1.jsonl", &bytes).unwrap();
+        let again = t.translate("session-1.jsonl", &bytes).unwrap();
+        assert_eq!(
+            draft, again,
+            "same session bytes must yield identical draft"
+        );
         let expected = "first user text\n\nsecond assistant text\n\nthird system text";
         assert_eq!(draft.trace_body, expected);
         assert_eq!(draft.source_dataset, "jedisct1/agent-traces-swival");
@@ -947,6 +1061,13 @@ mod tests {
         assert!(passes_word_filter("a b c", 1, 3));
         assert!(!passes_word_filter("a b c d", 1, 3));
         assert!(!passes_word_filter("", 1, 3));
+        let body_ok = (0..50)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!passes_word_filter("one two three", 10, 100));
+        assert!(passes_word_filter(&body_ok, 10, 100));
+        assert!(!passes_word_filter(&body_ok, 10, 49));
     }
 }
 

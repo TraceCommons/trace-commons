@@ -25,12 +25,15 @@ final class ThreePaneTests: XCTestCase {
     func test_theDefaultWidthsAreTheTokens() {
         XCTAssertEqual(main, 440)
         XCTAssertEqual(main, GlassTokens.Size.paneLeftWidth + 40)
-        XCTAssertEqual(mapWidth, 600)
+        // The map opens as wide as the main pane (owner, 2026-10-10).
+        XCTAssertEqual(mapWidth, 440)
+        XCTAssertEqual(mapWidth, main)
         XCTAssertEqual(inspector, 293)
         XCTAssertEqual(GlassTokens.Size.mapMinWidth, 360)
         XCTAssertEqual(GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
                        padding * 2 + main + gap + mapWidth + gap + inspector)
-        XCTAssertEqual(GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth, 1353)
+        XCTAssertEqual(GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth, 1193)
+        XCTAssertEqual(GlassTokens.Size.windowHeight, 614)
     }
 
     /// At its default width every composition is its panes, gaps and

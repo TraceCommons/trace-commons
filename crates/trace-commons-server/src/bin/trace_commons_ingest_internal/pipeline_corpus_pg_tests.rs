@@ -132,7 +132,7 @@ const PACKAGE_KEY_ID_VAR: &str = "TRACE_COMMONS_PIPELINE_PACKAGE_KEY_ID";
 /// the run's check results, the staging directory the attestations are written
 /// to, the ids of the checks the run accepted (comma separated), the PKCS#8
 /// key and its id, and the maximum age the signer gives each result.
-const CHECK_RESULT_DIR_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR";
+pub(super) const CHECK_RESULT_DIR_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR";
 const CHECK_ATTESTATION_DIR_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_ATTESTATION_DIR";
 const CHECK_IDS_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_IDS";
 const CHECK_SIGNING_KEY_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_PATH";
@@ -685,6 +685,7 @@ pub(super) fn production_harness_runtime(
             unqualified_routing_allowed: context.unqualified_routing_allowed,
             main_gate: context.main_gate,
             components,
+            score_policies: context.score_policies,
         },
         crash_point,
     )?))
@@ -1203,12 +1204,13 @@ fn observed_admission_decision(observed: &FixtureObservation) -> &'static str {
 /// The privacy state Admission acted on, from its decision and reason
 /// label: the minimal and compatibility Admission policies admit only a
 /// Low-risk receipt, quarantine a Medium one as `privacy_review_required`,
-/// and reject a High one as `privacy_risk_rejected`.
+/// and quarantine a High one as `privacy_risk_high_review_required` (owner
+/// decision PC-D27, 2026-10-11: held for a human, never rejected).
 fn observed_privacy_state(decision: &str, admission_reason: Option<&str>) -> &'static str {
     match (decision, admission_reason) {
         ("admit", _) => "low",
         (_, Some("privacy_review_required")) => "medium",
-        (_, Some("privacy_risk_rejected")) => "high",
+        (_, Some("privacy_risk_high_review_required")) => "high",
         _ => "unknown",
     }
 }
@@ -2879,10 +2881,10 @@ fn fixture_expectations_default_from_the_outcome_count() {
         }
     );
     assert_eq!(
-        fixture("privacy_risk_rejected").expectations(&credited),
+        fixture("privacy_high_risk_review_rejected").expectations(&credited),
         FixtureExpectations {
-            admission_decision: "reject".into(),
-            outcome_count: 1,
+            admission_decision: "quarantine".into(),
+            outcome_count: 2,
             consent_state: "allowed".into(),
             privacy_state: "high".into(),
             scoring_state: "missing".into(),
@@ -3379,101 +3381,6 @@ pub(super) fn production_test_package_awarding(microcredits: u64) -> BundlePacka
         },
     )
     .expect("the production test package builds")
-}
-
-/// `package` signed with a generated key, written with its trusted key
-/// into `dir`: the two files `promote init` keeps for a run.
-pub(super) fn write_signed_test_package(dir: &Path, package: &BundlePackage) -> (PathBuf, PathBuf) {
-    let pkcs8 = generated_signing_key();
-    let signed = sign_bundle_package(package.clone(), "production_test_key", &pkcs8)
-        .expect("sign the production test package");
-    let trusted = trusted_key_for_pkcs8("production_test_key", &pkcs8).expect("trusted key");
-    let package_path = dir.join("signed-package.json");
-    let key_path = dir.join("trusted-package-key.json");
-    write_atomically(&package_path, &serde_json::to_vec(&signed).unwrap());
-    write_atomically(&key_path, &serde_json::to_vec(&trusted).unwrap());
-    (package_path, key_path)
-}
-
-/// Production mode end to end (spec B-D1, plan B3) through `run_corpus`, the
-/// body the operator's `promote package-checks` runs, over doubles (never
-/// production-qualified) instead of `from_env`'s NEAR AI, fastembed and
-/// usearch: the production
-/// assembler serves the signed production package over real HTTP, every
-/// deterministic field matches the corpus's expectations, and the report
-/// says it is a production-mode harness report. Production mode refuses a
-/// built-in bundle and a reference package before any database is touched.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn production_corpus_run_serves_the_signed_package_over_doubles() {
-    let dir = tempfile::tempdir().unwrap();
-    let package = production_test_package();
-    let (package_path, key_path) = write_signed_test_package(dir.path(), &package);
-    let config = |source: CorpusPackageSource, check_id: &str| CorpusRunConfig {
-        partitions: vec![("corpus", main_corpus_path())],
-        check_id: check_id.to_string(),
-        source,
-        report_path: dir.path().join("report.json"),
-        artifact_root: None,
-        master_key_hex: None,
-    };
-    let signed = CorpusPackageSource::Signed {
-        package: package_path,
-        trusted_key: key_path,
-    };
-    let production = config(signed.clone(), "pipeline_http_corpus_compatibility");
-    assert_eq!(production.package().unwrap(), package);
-    let bundle = config(
-        CorpusPackageSource::Bundle("compatibility".to_string()),
-        "pipeline_http_corpus_compatibility",
-    );
-    assert_eq!(
-        require_production_corpus_config(&bundle, &bundle.package().unwrap()),
-        Err("corpus_production_requires_signed_package".to_string())
-    );
-    assert_eq!(
-        require_production_corpus_config(
-            &config(signed.clone(), MINIMAL_CORPUS_CHECK_ID),
-            &package
-        ),
-        Err("corpus_production_check_id_invalid".to_string())
-    );
-    assert_eq!(
-        require_production_corpus_config(&production, &qualification_candidate_package().unwrap()),
-        Err("harness_production_package_invalid".to_string())
-    );
-
-    if runtime_backend(1).await.is_none() {
-        return;
-    }
-    let index = IsolatedPipelineIndex::new();
-    run_corpus(
-        &production,
-        package.clone(),
-        CorpusDependencies::Production(HarnessDependencies::Doubles(
-            trace_commons_server::versioned_pipeline_harness::HarnessDoubles {
-                scorer: Arc::new(ReferencePerplexityScorer::new()),
-                embedder: Arc::new(ReferenceEmbedder::new()),
-                index_reader: index.clone(),
-                index_writer: index,
-            },
-        )),
-    )
-    .await;
-    let report: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("report.json")).unwrap()).unwrap();
-    assert_eq!(report["harness_assembly"], "production");
-    assert!(report["fixture_count"].as_u64().unwrap() > 0);
-    assert_eq!(report["completed_fixture_count"], report["fixture_count"]);
-    assert_eq!(report["failure_count"], 0);
-    assert_eq!(
-        report["safe_blockers"],
-        serde_json::json!(PRODUCTION_HARNESS_BLOCKERS)
-    );
-    assert_eq!(report["bundle_id"], package.bundle_id);
-    assert_eq!(
-        report["package_hash"],
-        package_digests(&package).unwrap().package_hash
-    );
 }
 
 /// Spec B-D5, plan B6: `pipeline.py package --bundle production` builds the

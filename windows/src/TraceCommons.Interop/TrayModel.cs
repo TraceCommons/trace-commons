@@ -108,7 +108,7 @@ public sealed class TrayModel
         if (decisionsOwed is null)
         {
             return new TrayModel(TrayIconState.Unhealthy, null,
-                $"Trace Commons — {DecisionCountUnavailable}", DecisionCountUnavailable);
+                $"Near.ai — {DecisionCountUnavailable}", DecisionCountUnavailable);
         }
         int owed = Math.Max(0, decisionsOwed.Value);
 
@@ -136,7 +136,7 @@ public sealed class TrayModel
             _ => "Watching. Nothing waiting.",
         };
 
-        return new TrayModel(state, owed, Truncate($"Trace Commons — {detail}"), detail);
+        return new TrayModel(state, owed, Truncate($"Near.ai — {detail}"), detail);
     }
 
     /// <summary>The rail badge: unknown stays distinct from an exact zero.</summary>
@@ -148,13 +148,13 @@ public sealed class TrayModel
     };
 
     /// <summary>
-    /// "3 sessions waiting for review." -- the same sentence the main window's
+    /// "3 traces waiting for review." -- the same sentence the main window's
     /// status line uses, so the tray and the window never word the same fact
     /// two ways.
     /// </summary>
     private static string Waiting(int owed) => owed == 1
-        ? "1 session waiting for review."
-        : string.Format(CultureInfo.CurrentCulture, "{0} sessions waiting for review.", owed);
+        ? "1 trace waiting for review."
+        : string.Format(CultureInfo.CurrentCulture, "{0} traces waiting for review.", owed);
 
     /// <summary>
     /// Trims to what <c>szTip</c> can hold, on a character boundary and with
@@ -317,7 +317,7 @@ public sealed class TrayProjectLine
 public static class DigestText
 {
     /// <summary>The notification title on every shell.</summary>
-    public const string Title = "Trace Commons";
+    public const string Title = "Near.ai";
 
     /// <summary>
     /// The second line, which is the whole reassurance: an unread digest
@@ -333,14 +333,14 @@ public static class DigestText
     {
         ArgumentNullException.ThrowIfNull(projectLabels);
 
-        string noun = pendingCount == 1 ? "session" : "sessions";
+        string noun = pendingCount == 1 ? "trace" : "traces";
         string from = JoinProjects(projectLabels);
         return $"{pendingCount} {noun} ready{from}.\n{NothingSent}";
     }
 
     /// <summary>
     /// The contribution half: what went out unasked since the last digest.
-    /// Null when nothing did -- a line reading "0 sessions contributed" is
+    /// Null when nothing did -- a line reading "0 traces contributed" is
     /// worse than no line.
     /// </summary>
     /// <remarks>
@@ -365,7 +365,7 @@ public static class DigestText
             return null;
         }
 
-        string noun = contributedCount == 1 ? "session" : "sessions";
+        string noun = contributedCount == 1 ? "trace" : "traces";
         var named = new List<string>(projectLabels.Count);
         foreach (string label in projectLabels)
         {

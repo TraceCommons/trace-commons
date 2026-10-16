@@ -2,9 +2,11 @@
 
 pub mod accounts;
 pub mod cli;
+pub mod opencode;
 pub mod profiles;
 pub mod secrets;
 pub mod sessions;
+pub mod signin;
 pub mod supervisor;
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +19,7 @@ use uuid::Uuid;
 pub enum ToolId {
     Claude,
     Codex,
+    Opencode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -25,6 +28,11 @@ pub enum ConnectionKind {
     NearAi,
     Subscription,
     ApiKey,
+    /// Runs on the app's NEAR AI sign-in. Derived, never saved: see
+    /// [`signin`]. Not offered on the command line's `--connection`.
+    #[serde(rename = "near_ai_signin")]
+    #[value(skip)]
+    NearAiSignIn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,16 +90,22 @@ pub enum ManagedError {
     AmbiguousAccount,
     #[error("managed storage unavailable")]
     StorageUnavailable,
+    #[error("native tool is not installed or is unavailable")]
+    ToolUnavailable,
     #[error("unsupported native tool version")]
     UnsupportedVersion,
     #[error("sign in to this account before launching")]
     SignInRequired,
-    #[error("start the Trace Commons daemon before launching")]
+    #[error("sign in to NEAR AI before launching")]
+    NearAiSignInRequired,
+    #[error("start the {} daemon before launching", crate::brand::APP_NAME)]
     DaemonUnavailable,
     #[error("launch status unknown; reconcile before retrying")]
     LaunchUnknown,
     #[error("invalid managed request")]
     InvalidRequest,
+    #[error("the chosen terminal app was not found")]
+    TerminalNotFound,
 }
 
 pub mod copy;

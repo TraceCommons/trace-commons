@@ -80,7 +80,7 @@ let anyone who knew a NEAR account name compute its tenant id offline.
 An earlier version of this section also said the end-to-end matrix that would
 catch this is `#[ignore]`d and therefore does not run. **That was wrong when
 written.** `#[ignore]` is how the `postgres-suites` job *selects* these tests:
-they run on every PR via `cargo test --bin trace-commons-ingest
+they run on every PR via `cargo test -p trace-commons-server --lib
 admission_pg_tests -- --ignored`, and that job's `xact_commit` guard fails if
 they silently do not. Three tests cover this path —
 `actual_postgres_challenge_witness_ingest_and_terminal_retry`,
@@ -228,9 +228,10 @@ reservation. The only subtraction is `trace_transition_admission(... ,
 processing began. Nothing else decrements, no window rolls, and retention
 explicitly retains the counters. These are stop-valves with a finite lifetime
 supply, not rate limits. Rate limiting is done elsewhere and is already tight:
-30 submissions per principal per minute with concurrency 2
-(`SUBMIT_PER_PRINCIPAL_LIMIT` / `SUBMIT_PER_PRINCIPAL_CONCURRENCY`), and 10
-challenge mints per minute.
+30 submissions per principal per minute with concurrency 2 by default
+(`TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN` /
+`TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY`, see
+[`env-reference.md`](env-reference.md)), and 10 challenge mints per minute.
 
 **Three of the six are frozen at first use.** `trace_reserve_admission`
 compares the passed `p_global_limit` against the stored singleton row, and

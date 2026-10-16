@@ -1,0 +1,206 @@
+import SwiftUI
+import TCBridge
+import TCDesign
+import TCShellCore
+
+// The re-engagement nudges on the glass system: the Traces and History
+// cards, the Traces order control and idle filter, and a session row's
+// tags. Every sentence is the daemon's (`status.nudge.text`) or the core's
+// fixed nudge words (`tc_nudge_copy_json`, `tc_nudge_entry_tags_json`); this
+// file lays them out and composes none. Built from existing glass
+// components for the designer's review.
+
+/// A nudge card: the daemon's title, its body when it has one, and its
+/// buttons in the daemon's order. "Not now" is the lesser action, drawn as
+/// a link after the action, as every card's decline is. A refused request
+/// is said under the buttons, in the core's line for it.
+struct NudgeGlassCard: View {
+    let card: NudgeSurface.Card
+    let busy: Bool
+    let refusal: String?
+    let act: (NudgeSurface.Intent) -> Void
+
+    /// The button style for one action.
+    static func style(_ intent: NudgeSurface.Intent) -> GlassButtonKind {
+        if case .notNow = intent { return .link }
+        return .glass
+    }
+
+    var body: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                Text(card.title)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
+                if let body = card.body {
+                    Text(body)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if !card.actions.isEmpty {
+                    HStack(spacing: GlassTokens.Space.s4) {
+                        ForEach(Array(card.actions.enumerated()), id: \.offset) { _, action in
+                            Button(action.label) { act(action.intent) }
+                                .buttonStyle(GlassButtonStyle(Self.style(action.intent)))
+                                .disabled(busy)
+                        }
+                    }
+                }
+                if let refusal { GlassAlert(refusal) }
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
+/// Above the Traces tree: its heading, the idle filter while it is on, with
+/// its way out, then search, History and the order control. Each is drawn
+/// only with the core's words for it. Suggested first is selected until
+/// another order is chosen.
+struct TracesListControls: View {
+    @Bindable var store: TracesStore
+    /// Opens History on the Traces tab; nil draws no History button.
+    var openHistory: (() -> Void)?
+
+    /// Whether the search field is open. It opens inline from its icon
+    /// (owner, 2026-10-12) and closes, cleared, from its clear button or
+    /// Escape.
+    @State private var searching = false
+    @FocusState private var searchFocused: Bool
+
+    /// The order control's icon (owner, 2026-10-11: an icon, not the
+    /// chosen order's words).
+    static let orderIcon = "line.3.horizontal.decrease"
+    /// Search and History, left of the order control (owner, 2026-10-12).
+    static let searchIcon = "magnifyingglass"
+    static let historyIcon = "clock.arrow.circlepath"
+    /// The open field's widest: room for a few words beside the heading.
+    static let searchWidth: CGFloat = 220
+
+    var body: some View {
+        let copy = store.nudgeCopy
+        HStack(spacing: GlassTokens.Space.s4) {
+            if let title = store.words?.tree.treeTitle {
+                // The cards' title face (owner, 2026-10-11: no larger than
+                // the app's other titles).
+                Text(title)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .lineLimit(1)
+                    .accessibilityAddTraits(.isHeader)
+            }
+            if store.idleOnly, let label = copy?[.listFilterIdle], let clear = copy?[.listFilterClear] {
+                GlassTag(label, tone: .accent)
+                Button(clear) { Task { await store.showIdleOnly(false) } }
+                    .buttonStyle(GlassButtonStyle(.link))
+                    .fixedSize()
+            }
+            Spacer(minLength: 0)
+            if let tree = store.words?.tree {
+                search(tree)
+                if let openHistory {
+                    GlassRoundButton(tree.openHistory, systemImage: Self.historyIcon, action: openHistory)
+                }
+            }
+            if let suggested = copy?[.listOrderSuggested], let queue = copy?[.listOrderQueue],
+               let label = Self.orderLabel(copy)
+            {
+                // An icon on the round glass control whose menu checks the
+                // chosen order (owner, 2026-10-11), never a purple
+                // segmented pill (owner, 2026-10-10).
+                GlassIconMenu(
+                    label,
+                    systemImage: Self.orderIcon,
+                    selection: Binding(
+                        get: { store.order },
+                        set: { chosen in
+                            guard let chosen, chosen != store.order else { return }
+                            Task { await store.setOrder(chosen) }
+                        }),
+                    options: [
+                        GlassPickerOption(suggested, value: DaemonData.PendingOrder.suggested),
+                        GlassPickerOption(queue, value: DaemonData.PendingOrder.queue),
+                    ])
+            }
+        }
+    }
+
+    /// The search icon, or the open field with its clear button.
+    @ViewBuilder
+    private func search(_ tree: MonitorTreeCopy) -> some View {
+        if searching {
+            HStack(spacing: GlassTokens.Space.s3) {
+                GlassTextField(tree.search, text: $store.searchText, prompt: tree.searchPrompt,
+                               showsLabel: false, focus: $searchFocused)
+                    .frame(maxWidth: Self.searchWidth)
+                    .onExitCommand(perform: closeSearch)
+                GlassRoundButton(tree.searchClear, systemImage: "xmark", small: true, action: closeSearch)
+            }
+            .transition(.opacity.combined(with: .move(edge: .trailing)))
+        } else {
+            GlassRoundButton(tree.search, systemImage: Self.searchIcon) {
+                withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) { searching = true }
+                DispatchQueue.main.async { searchFocused = true }
+            }
+        }
+    }
+
+    private func closeSearch() {
+        store.searchText = ""
+        withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) { searching = false }
+    }
+
+    /// The order control's accessible name, the core's; nil without it,
+    /// and the control is then not drawn.
+    static func orderLabel(_ copy: NudgeCopy?) -> String? {
+        copy?[.listOrderLabel]
+    }
+}
+
+/// A session row's tags, under the row: "Fits a mission" and the estimate
+/// tier as tags, then the estimate band with its explainer behind an info
+/// button. Drawn only from the core's answer for the row; nothing when it
+/// has nothing to say.
+struct NudgeRowTags: View {
+    let tags: NudgeEntryTags
+    @State private var explaining = false
+
+    var body: some View {
+        if !tags.isEmpty {
+            HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                if let fit = tags.missionFit { GlassTag(fit, tone: .accent) }
+                if let tier = tags.estimateTier { GlassTag(tier) }
+                if let band = tags.estimateBand {
+                    Text(band)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let explainer = tags.estimateExplainer {
+                        Button { explaining.toggle() } label: {
+                            Image(systemName: "info.circle").glassGlyph(11)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .accessibilityLabel(band)
+                        .accessibilityHint(explainer)
+                        .help(explainer)
+                        .popover(isPresented: $explaining, arrowEdge: .bottom) {
+                            Text(explainer)
+                                .glassType(GlassTokens.TypeScale.caption)
+                                .foregroundStyle(GlassColor.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(width: 260, alignment: .leading)
+                                .padding(GlassTokens.Space.s5)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, TracesTreeView.noteInset)
+            .padding(.bottom, GlassTokens.Space.s2)
+        }
+    }
+}

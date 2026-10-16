@@ -128,14 +128,17 @@ private struct FirstRunSteps: View {
             }
     }
 
+    /// Where Install leads, from the core's one table (`install_guides`).
+    private static let installGuides = InstallGuides(json: TCCoreCopy.installGuidesJSON())
+
     @ViewBuilder private var screen: some View {
         switch runner.state.step {
         case .join:
             JoinScreen(copy: copy, runner: runner, passkeyAccount: passkeyAccount)
         case .folders:
-            FoldersScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:))
+            FoldersScreen(copy: copy, runner: runner, installURL: Self.installGuides.url(for:))
         case .tools:
-            ToolsScreen(copy: copy, runner: runner, installURL: copy.folders.installURL(for:))
+            ToolsScreen(copy: copy, runner: runner, installURL: Self.installGuides.url(for:))
         case .rules:
             RulesScreen(copy: copy, runner: runner, source: model)
         case .uses:

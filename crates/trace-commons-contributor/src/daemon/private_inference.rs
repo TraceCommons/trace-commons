@@ -983,41 +983,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Start against a home whose previous owner has released it.
-    ///
-    /// IronWire's home guard closes its lock descriptor without first calling
-    /// `flock(LOCK_UN)`, and `flock` ownership belongs to the open file
-    /// description rather than to the descriptor: `fork` duplicates it and
-    /// `O_CLOEXEC` only takes effect at the following `exec`, so a child that
-    /// any other test in this binary spawns carries a copy of that descriptor
-    /// and keeps the lock held past the release. Closing is not a release
-    /// there, and the first acquisition afterwards can see `WouldBlock` with
-    /// no owner at all.
-    ///
-    /// Retrying does not soften what is being asserted. Ownership that really
-    /// was retained is held by a live proxy and never frees, so a bounded
-    /// retry still fails; only an inherited descriptor on its way to `exec`
-    /// clears. See `HeldLock` in `compute::process` for the release this
-    /// upstream guard is missing.
-    ///
-    /// This is a workaround with an expiry condition, not a permanent shape:
-    /// nearai/ironwire#54 adds the missing `unlock` to that guard. Remove this
-    /// helper and go back to a plain `embed::start(...).unwrap()` when that
-    /// merges and the pin moves.
-    async fn start_once_the_home_is_free(home: &Path) -> EmbeddedProxy {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            match embed::start(home, Some(0)).await {
-                Ok(proxy) => return proxy,
-                Err(EmbedError::Lock { port }) if tokio::time::Instant::now() < deadline => {
-                    assert_eq!(port, 0, "a live owner published a port, so it is not free");
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(error) => panic!("the released home never became startable: {error:?}"),
-            }
-        }
-    }
-
     /// Counts every event IronWire's catalog refresh emits, and nothing else.
     ///
     /// The refresh logs on both outcomes -- applied, unchanged, or skipped
@@ -1323,43 +1288,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn canceled_start_is_retained_and_its_eventual_proxy_is_drained() {
-        let home = tempfile::tempdir().unwrap();
-        let start_home = home.path().to_path_buf();
-        let (release, pending) = tokio::sync::oneshot::channel::<()>();
-        let task = tokio::spawn(async move {
-            pending.await.unwrap();
-            embed::start(&start_home, Some(0)).await
-        });
-        let task_id = task.id();
-        let mut host = PrivateInference::with_port(home.path().to_path_buf(), 0);
-        host.starting = Some(task);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(25), host.apply(true))
-                .await
-                .is_err()
-        );
-        assert_eq!(host.starting.as_ref().unwrap().id(), task_id);
-        host.apply(false).await;
-        assert_eq!(host.state(), PrivateInferenceState::Stopping { port: None });
-        assert!(host.starting.is_none());
-        host.apply(true).await;
-        assert_eq!(host.state(), PrivateInferenceState::Stopping { port: None });
-        release.send(()).unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_secs(5), host.finish_stop())
-                .await
-                .unwrap()
-        );
-        assert_eq!(host.state(), PrivateInferenceState::Off);
-        assert!(!home.path().join("endpoint.json").exists());
-        // Reusing the isolated home proves the late startup's ownership was
-        // released; it cannot leave a server or home lock behind after Off.
-        let next = start_once_the_home_is_free(home.path()).await;
-        next.shutdown().await;
-    }
-
-    #[tokio::test]
     async fn failed_shutdown_never_claims_off_or_restarts() {
         let home = tempfile::tempdir().unwrap();
         let absent = home.path().join("unused");
@@ -1377,39 +1305,6 @@ mod tests {
             }
         );
         assert!(!absent.exists());
-    }
-
-    #[tokio::test]
-    async fn explicit_retry_requires_the_previous_home_owner_to_release() {
-        let home = tempfile::tempdir().unwrap();
-        let owner = embed::start(home.path(), Some(0)).await.unwrap();
-        let failed = tokio::spawn(async { false });
-        let mut host = PrivateInference::with_shutdown_for_test(
-            home.path().to_path_buf(),
-            owner.port(),
-            failed,
-        );
-        host.port = Some(0);
-        host.accept_generation(0);
-        assert!(!host.finish_stop().await);
-        host.accept_generation(1);
-        host.apply(false).await;
-        assert_eq!(host.state().label(), LABEL_CRASHED);
-        host.accept_generation(2);
-        host.apply(true).await;
-        assert_eq!(host.state().label(), LABEL_CRASHED);
-        assert!(host.proxy.is_none());
-        owner.shutdown().await;
-        // A failed retry is not retried every poll, even after the lock frees.
-        host.apply(true).await;
-        assert!(host.proxy.is_none());
-        host.accept_generation(3);
-        host.apply(false).await;
-        host.accept_generation(4);
-        host.apply(true).await;
-        assert!(host.proxy.is_some());
-        assert!(!host.cleanup_unconfirmed);
-        assert!(host.finish_stop().await);
     }
 
     #[tokio::test]

@@ -736,6 +736,20 @@ struct DaemonSettingsView: Decodable, Equatable {
     var privateInferenceAnswered: Bool { privateInferenceOfferSeen == true }
     /// What the listener is actually doing.
     var privateInferenceState: PrivateInferenceStateView? = nil
+    /// Whether Insights may read the proxy ledger's token counters
+    /// (`insights_ledger_feed`). On by default; Settings' Private AI
+    /// section is the one place that turns it off. Absent from a daemon
+    /// that predates the key, which draws no switch rather than an "off"
+    /// nobody set.
+    var insightsLedgerFeed: Bool? = nil
+    /// Whether the daemon counts tokens in the watched folders for
+    /// Insights (`insights_counter_pass`; owner decision D4, off by
+    /// default). Absent from an older daemon: no switch, never an "off".
+    var insightsCounterPass: Bool? = nil
+    /// The weekly summary card's switch (`insights_recap_card_enabled`, on
+    /// by default); "Hide" on the card turns it off. Absent from an older
+    /// daemon: no switch, never an "off".
+    var insightsRecapCardEnabled: Bool? = nil
 
     /// The four source modes as the routing surface takes them. Absent
     /// means `unset`, which watches the conventional location and is
@@ -773,6 +787,9 @@ struct DaemonSettingsView: Decodable, Equatable {
         case privateInference = "private_inference"
         case privateInferenceOfferSeen = "private_inference_offer_seen"
         case privateInferenceState = "private_inference_state"
+        case insightsLedgerFeed = "insights_ledger_feed"
+        case insightsCounterPass = "insights_counter_pass"
+        case insightsRecapCardEnabled = "insights_recap_card_enabled"
     }
 }
 
@@ -846,6 +863,9 @@ enum DaemonEvent: Equatable {
         creditPending: Double,
         text: String
     )
+    /// One standalone re-engagement notification, in the daemon's words.
+    /// Delivered only because this app subscribes declaring it accepts it.
+    case reengageDue(DaemonData.ReengageDue)
     case resyncRequired
     /// The ABI's synthetic frame for a delivery gap. Treated exactly like
     /// `resync_required`: refetch rather than reason about what was missed.

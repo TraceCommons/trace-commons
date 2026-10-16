@@ -38,6 +38,8 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
     /// Ron's plain Dismiss (#1146): the undo bar's, the Dismiss-session
     /// confirmation's and the review card's. Not `dismiss` ("Not this one").
     public let dismissAction: String
+    /// Acknowledges every acknowledgeable notice above the tabs at once.
+    public let dismissAll: String
     /// The arming offer's eyebrow.
     public let optionalAutomation: String
     /// Ron's #1146 inspector words (#1241), by the part that shows them.
@@ -61,6 +63,7 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
         case coreUnreachable = "core_unreachable"
         case requestFailed = "request_failed"
         case dismissAction = "dismiss_action"
+        case dismissAll = "dismiss_all"
         case optionalAutomation = "optional_automation"
         case tree, counts, inspector
         case summaryPanel = "summary_panel"
@@ -74,7 +77,7 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
         "review", "tool", "folder", "started", "length", "prompts", "size", "sends", "marks", "unsure",
         "eligibility", "attestation", "held", "sample", "residual_risk", "personal_information",
         "second_look_waiting", "contribute", "keep", "dismiss", "undo_contribute", "undo_keep", "core_unreachable", "request_failed",
-        "dismiss_action", "optional_automation", "tree", "counts", "inspector", "summary_panel", "session_review",
+        "dismiss_action", "dismiss_all", "optional_automation", "tree", "counts", "inspector", "summary_panel", "session_review",
         "look_inside", "undo",
     ]
 
@@ -102,7 +105,7 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
             copy.residualRisk, copy.personalInformation, copy.secondLookWaiting,
             copy.contribute, copy.keep, copy.dismiss,
             copy.undoContribute, copy.undoKeep, copy.coreUnreachable, copy.requestFailed,
-            copy.dismissAction, copy.optionalAutomation,
+            copy.dismissAction, copy.dismissAll, copy.optionalAutomation,
         ]
         let tables: [Bool] = [
             copy.tree.isWhole, copy.counts.isWhole, copy.inspector.isWhole, copy.summaryPanel.isWhole,
@@ -145,7 +148,17 @@ extension MonitorWordTable {
 /// The Traces tree's rows and the Dismiss-session confirmation (`traces-tree.tsx`).
 public struct MonitorTreeCopy: MonitorWordTable {
     public let treeLabel: String
+    /// The heading above the tree, beside its order control.
+    public let treeTitle: String
     public let readingQueue: String
+    /// The Traces search: the button's name, the field's prompt, the clear
+    /// button's name, and the line when nothing matches.
+    public let search: String
+    public let searchPrompt: String
+    public let searchClear: String
+    public let searchNone: String
+    /// The History icon button's name, beside the order control.
+    public let openHistory: String
     public let submit: String
     public let submitCount: String
     public let submitting: String
@@ -173,7 +186,13 @@ public struct MonitorTreeCopy: MonitorWordTable {
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case treeLabel = "tree_label"
+        case treeTitle = "tree_title"
         case readingQueue = "reading_queue"
+        case search
+        case searchPrompt = "search_prompt"
+        case searchClear = "search_clear"
+        case searchNone = "search_none"
+        case openHistory = "open_history"
         case submit
         case submitCount = "submit_count"
         case submitting
@@ -314,6 +333,7 @@ public struct MonitorSessionReviewCopy: MonitorWordTable {
     public let outcomeUnavailable: String
     public let outcomeLoading: String
     public let lookInside: String
+    public let traceDetails: String
     public let enrollToApprove: String
     public let notEligible: String
     public let checkingEligibility: String
@@ -342,6 +362,7 @@ public struct MonitorSessionReviewCopy: MonitorWordTable {
         case outcomeUnavailable = "outcome_unavailable"
         case outcomeLoading = "outcome_loading"
         case lookInside = "look_inside"
+        case traceDetails = "trace_details"
         case enrollToApprove = "enroll_to_approve"
         case notEligible = "not_eligible"
         case checkingEligibility = "checking_eligibility"
@@ -681,6 +702,25 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let sources: String
     public let missionCatalogue: String
     public let historyDescription: String
+    /// Home's Missions, Insights and mission catalogue card subtitles.
+    public let missionsSubtitle: String
+    public let insightsSubtitle: String
+    public let catalogueSubtitle: String
+    /// Home's Uncontributed tile, Credit tile delta, Insights promotion and
+    /// NEAR AI campaign card (owner, 2026-10-12).
+    public let uncontributed: String
+    public let uncontributedSize: String
+    public let uncontributedEstimate: String
+    public let creditDelta: String
+    public let creditDeltaNone: String
+    public let insightsToday: String
+    public let insightsTeaser: String
+    public let campaignEyebrow: String
+    public let campaignTitle: String
+    public let campaignBody: String
+    public let campaignAction: String
+    public let missionsAction: String
+    public let insightsAction: String
     public let submissions: String
     public let contributionHistory: String
     public let readingHistory: String
@@ -710,6 +750,22 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case sources
         case missionCatalogue = "mission_catalogue"
         case historyDescription = "history_description"
+        case missionsSubtitle = "missions_subtitle"
+        case insightsSubtitle = "insights_subtitle"
+        case catalogueSubtitle = "catalogue_subtitle"
+        case uncontributed
+        case uncontributedSize = "uncontributed_size"
+        case uncontributedEstimate = "uncontributed_estimate"
+        case creditDelta = "credit_delta"
+        case creditDeltaNone = "credit_delta_none"
+        case insightsToday = "insights_today"
+        case insightsTeaser = "insights_teaser"
+        case campaignEyebrow = "campaign_eyebrow"
+        case campaignTitle = "campaign_title"
+        case campaignBody = "campaign_body"
+        case campaignAction = "campaign_action"
+        case missionsAction = "missions_action"
+        case insightsAction = "insights_action"
         case submissions
         case contributionHistory = "contribution_history"
         case readingHistory = "reading_history"

@@ -46,13 +46,15 @@ final class SummaryInspectorTests: XCTestCase {
         // A condition with no rollup is still no figure.
         XCTAssertEqual(SummaryFacts.pending(rollup: nil, credit: known).value, "—")
 
-        // The view draws pending credit only through that rule, and says
-        // the commons' condition beside it.
+        // The view draws pending credit only through that rule. Neither the
+        // commons' condition nor the not-currency sentence is drawn beside
+        // it (owner, 2026-10-13).
         let view = try Self.source("Views/Monitor/SummaryInspector.swift")
         XCTAssertTrue(view.contains("SummaryFacts.pending(rollup: rollup, credit: credit)"))
         XCTAssertEqual(view.components(separatedBy: "creditPending").count - 1, 1,
                        "the pending figure is read in one place, the D6 rule")
-        XCTAssertTrue(view.contains("MonitorWords.creditNotCurrency"))
+        XCTAssertFalse(view.contains("MonitorWords.creditNotCurrency"))
+        XCTAssertFalse(view.contains("Text(condition)"))
     }
 
     /// A count the core did not give is a dash, never a zero and never a

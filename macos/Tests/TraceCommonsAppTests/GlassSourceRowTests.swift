@@ -56,6 +56,66 @@ final class GlassSourceRowTests: XCTestCase {
         XCTAssertEqual(none.line, expected)
     }
 
+    func test_nativeOpenCodeDatabaseRemainsAnExplicitSettingsCandidate() throws {
+        let copy = try XCTUnwrap(TCSourceChecks.settingsCopy())
+        let candidate = SourceCandidate(
+            source: .opencode, path: "/synthetic/opencode/opencode.db", exists: true,
+            sessionCount: 2, mostRecent: nil, relocatedByEnv: false)
+        for mode in [nil, "unset"] as [String?] {
+            let answer = SourceRowState.answer(
+                copy: copy, kind: .opencode, reportedMode: mode,
+                choice: .undecided, candidate: candidate)
+            XCTAssertEqual(answer.candidatePath, "/synthetic/opencode/opencode.db")
+            XCTAssertNotNil(answer.evidence)
+            XCTAssertNil(answer.selectedPath)
+        }
+        let watched = SourceRowState.answer(
+            copy: copy, kind: .opencode, reportedMode: nil,
+            choice: .watch(path: "/synthetic/opencode/opencode.db"), candidate: candidate)
+        XCTAssertEqual(watched.selectedPath, "/synthetic/opencode/opencode.db")
+        XCTAssertNil(watched.candidatePath)
+        let declined = SourceRowState.answer(
+            copy: copy, kind: .opencode, reportedMode: "off",
+            choice: .undecided, candidate: candidate)
+        XCTAssertEqual(declined.line, TCSourceChecks.checkLine(tool: "opencode", sourceMode: "off"))
+        XCTAssertNil(declined.candidatePath)
+        XCTAssertNil(declined.selectedPath)
+        XCTAssertNil(declined.evidence)
+    }
+
+    func test_newOpenCodeFolderSelectionUsesRecognisedNativeDatabase() {
+        let native = FolderMatch(
+            kind: .source(.opencode), path: "/synthetic/opencode/opencode.db",
+            sessionCount: 2, mostRecent: nil)
+        XCTAssertEqual(SourceFolderSelection.path(
+            for: .opencode, chosenFolder: "/synthetic/opencode", matches: [native]),
+            "/synthetic/opencode/opencode.db")
+        XCTAssertEqual(SourceFolderSelection.path(
+            for: .opencode, chosenFolder: "/synthetic/other", matches: [native]),
+            "/synthetic/other")
+        for kind in SourceKind.allCases where kind != .opencode {
+            XCTAssertEqual(SourceFolderSelection.path(
+                for: kind, chosenFolder: "/synthetic/opencode", matches: [native]),
+                "/synthetic/opencode")
+        }
+    }
+
+    func test_newOpenCodeExportFolderSelectionKeepsItsDirectory() {
+        let export = FolderMatch(
+            kind: .source(.opencode), path: "/synthetic/exports",
+            sessionCount: 2, mostRecent: nil)
+        let trajectory = FolderMatch(
+            kind: .trajectory, path: "/synthetic/exports", sessionCount: 2, mostRecent: nil)
+        let native = FolderMatch(
+            kind: .source(.opencode), path: "/synthetic/exports/opencode.db",
+            sessionCount: 2, mostRecent: nil)
+        for matches in [[], [export], [export, trajectory], [native, trajectory]] {
+            XCTAssertEqual(SourceFolderSelection.path(
+                for: .opencode, chosenFolder: "/synthetic/exports", matches: matches),
+                "/synthetic/exports")
+        }
+    }
+
     /// A watched choice with an empty path says a folder is selected and
     /// shows no path.
     func test_watchWithoutAPathShowsNoPath() throws {

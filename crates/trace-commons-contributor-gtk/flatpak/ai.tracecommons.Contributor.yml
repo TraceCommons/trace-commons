@@ -20,7 +20,7 @@
 # it must not get a blanket grant of `home` to do it. So `finish-args` below
 # names exactly those two directories, read-only, and nothing wider. The
 # design spec's wording for why -- "Trace Commons needs to read your Claude
-# Code and Codex session files. It asks for access to those folders only."
+# Code and Codex trace files. It asks for access to those folders only."
 # -- is pinned in `src/copy.rs` as `FLATPAK_SESSION_ROOTS_EXPLANATION`,
 # ready for onboarding to show once onboarding exists (it does not yet;
 # see the report).

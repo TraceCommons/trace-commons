@@ -102,8 +102,13 @@ final class HoverStateTests: XCTestCase {
         XCTAssertNil(GlassCard<EmptyView>.hoverFill(interactive: false))
     }
 
-    func test_theNoticeTitleSitsSixPointsOverItsBody() {
-        XCTAssertEqual(GlassNotice<EmptyView>.titleGap, 6)
+    /// A notice is a tinted box with its tone's icon, its title 4pt over
+    /// its body (owner, 2026-10-12: notices read as notifications).
+    func test_theNoticeIsAnIconBox() {
+        XCTAssertEqual(GlassNotice<EmptyView>.titleGap, 4)
+        XCTAssertEqual(GlassNotice<EmptyView>.icon(.outside), "exclamationmark.triangle.fill")
+        XCTAssertEqual(GlassNotice<EmptyView>.icon(.ask), "exclamationmark.circle.fill")
+        XCTAssertEqual(GlassNotice<EmptyView>.icon(.off), "info.circle.fill")
     }
 
     /// The pointer reaches the tabs, the crumbs, the round, pill-icon and
@@ -112,14 +117,15 @@ final class HoverStateTests: XCTestCase {
     func test_hoverIsWiredWhereTheDesignAsksForIt() throws {
         let sources = Dictionary(uniqueKeysWithValues: try DesignSources.components())
         let navigation = try XCTUnwrap(sources["Navigation.swift"])
-        for name in ["struct GlassSegmentedTabs", "struct GlassBreadcrumb"] {
+        for name in ["struct GlassSegmentedTabs", "struct GlassRuleTabs", "struct GlassBreadcrumb"] {
             let body = try XCTUnwrap(navigation.range(of: name).map { String(navigation[$0.lowerBound...].prefix(5000)) })
             XCTAssertTrue(body.contains(".onHover"), "\(name) has no hover")
         }
         let controls = try XCTUnwrap(sources["Controls.swift"])
         // A control with a fill takes the hover in its place; the toolbar
         // glyph has no fill, so its hover is a fill of its own.
-        for name in ["struct GlassRoundButton", "struct GlassPillIconButton", "struct GlassPickerPill", "struct GlassFolderButton"] {
+        for name in ["struct GlassRoundButton", "struct GlassPillIconButton", "struct GlassPickerPill", "struct GlassFolderButton",
+                     "struct GlassIconMenu"] {
             let body = try XCTUnwrap(controls.range(of: name).map { String(controls[$0.lowerBound...].prefix(2000)) })
             XCTAssertTrue(body.contains("hover: GlassTokens.Color.controlHover"), "\(name) has no hover")
         }

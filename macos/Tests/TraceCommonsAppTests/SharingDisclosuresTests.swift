@@ -7,7 +7,7 @@ import XCTest
 /// The Sharing moment's Automatic path (owner, 2026-09-28 points 2 and 4):
 /// the scrub disclosure, then the witness disclosure, then the core decides
 /// whether the grant may be asked for (`TCFlow1.grantRequestJSON`) and with
-/// which witness. Ask me shows neither and grants nothing.
+/// which witness. Ask shows neither and grants nothing.
 final class SharingDisclosuresTests: XCTestCase {
     private let scopes: Set<String> = ["debugging_evaluation"]
 
@@ -73,7 +73,7 @@ final class SharingDisclosuresTests: XCTestCase {
     }
 
     /// Not ready (for example, the account is not connected): setup finishes
-    /// on Ask me and says why; it never claims Automatic.
+    /// on Ask and says why; it never claims Automatic.
     func test_aGrantTheCoreRefusesFinishesOnAskMe() throws {
         var flow = SharingDisclosureFlow()
         flow.acknowledgeScrub()
@@ -117,7 +117,7 @@ final class SharingDisclosuresTests: XCTestCase {
 
     /// Spec rule 10 and Ron's review of #1235, item 1: turning on Private AI
     /// is a consent event that leads to the witness disclosure. On the
-    /// Automatic path it is the second of the two sheets; on Ask me, or
+    /// Automatic path it is the second of the two sheets; on Ask, or
     /// watching only, it is shown directly, and Start then grants nothing.
     func test_privateAIOnWithoutAutomaticShowsTheWitnessDisclosure() throws {
         var askMe = onUses(.askMe)

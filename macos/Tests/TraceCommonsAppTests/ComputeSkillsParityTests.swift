@@ -260,7 +260,7 @@ final class ComputeSkillsParityTests: XCTestCase {
                        "TCSkillLearning.validateDraftJSON(", "TCSkillLearning.errorLine(label:", "copy.rollbackDisclosure",
                        "copy.evaluationDisclosure", "GlassTextField(", "GlassEyebrowCard(copy.heading)",
                        "GlassExpander(copy.sourceEvidence,", "GlassExpander(copy.inspectRuns,",
-                       "GlassExpander(copy.modelOutput,", "GlassNotice(tone: .outside)", ".task(id: draft)",
+                       "GlassExpander(copy.modelOutput,", "GlassAlert(message)", ".task(id: draft)",
                        ".milliseconds(150)", "private struct SkillReviewPreview: View",
                        "private struct SkillEvaluationResults: View", "private struct SkillTrialRow: View",
                        "private struct SkillInstallPreview: View", "private struct InstalledSkillPanel: View"] {

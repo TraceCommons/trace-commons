@@ -274,7 +274,8 @@ fn spawn_http_counter() -> (
                                     "category": category,
                                     "start": start,
                                     "end": start + needle.len(),
-                                    "score": 0.99
+                                    "score": 0.99,
+                                    "text": needle
                                 })
                             })
                         })
@@ -418,7 +419,15 @@ fn unenrolled_dry_run_marks_json_output() {
         "stdout={stdout}"
     );
     assert_eq!(document["results"][0]["outcome"], "previewed");
-    assert!(document["results"][0]["preview_id"].is_string());
+    // The unenrolled path emits a version-8 preview id, never a version-5
+    // submission id.
+    let preview_id = document["results"][0]["preview_id"]
+        .as_str()
+        .expect("preview id");
+    assert_eq!(
+        uuid::Uuid::parse_str(preview_id).unwrap().get_version_num(),
+        8
+    );
     assert!(document["results"][0]["submission_id"].is_null());
 }
 
@@ -434,39 +443,6 @@ fn unenrolled_preview_ignores_flagged_and_inherited_network_filters() {
     assert_eq!(
         run_preview_against_http_counter(&trajectory, false, true),
         0
-    );
-}
-
-#[test]
-fn preview_id_is_disjoint_from_real_submission_id() {
-    let fixture_dir = tempfile::tempdir().unwrap();
-    let trajectory = write_trajectory(fixture_dir.path(), "inspect this session");
-
-    let preview_config = tempfile::tempdir().unwrap();
-    let preview = run_submit(preview_config.path(), &trajectory, true, true);
-    let preview_doc: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();
-    let preview_id = preview_doc["results"][0]["preview_id"]
-        .as_str()
-        .expect("preview id");
-
-    let enrolled_config = tempfile::tempdir().unwrap();
-    write_enrolled_config(enrolled_config.path());
-    let enrolled = run_submit(enrolled_config.path(), &trajectory, true, true);
-    let enrolled_doc: serde_json::Value = serde_json::from_slice(&enrolled.stdout).unwrap();
-    let submission_id = enrolled_doc["results"][0]["submission_id"]
-        .as_str()
-        .expect("submission id");
-
-    assert_ne!(preview_id, submission_id);
-    assert_eq!(
-        uuid::Uuid::parse_str(preview_id).unwrap().get_version_num(),
-        8
-    );
-    assert_eq!(
-        uuid::Uuid::parse_str(submission_id)
-            .unwrap()
-            .get_version_num(),
-        5
     );
 }
 
@@ -676,9 +652,18 @@ fn unenrolled_real_submit_still_requires_login() {
     let output = run_submit(config_dir.path(), &trajectory, false, false);
     let stderr = String::from_utf8(output.stderr).unwrap();
 
+    // No terminal (stdin is closed for `output()`), so no sign-in starts:
+    // the refusal names both ways to enroll.
     assert!(!output.status.success());
     assert!(
-        stderr.contains("not logged in; run `login` first"),
+        stderr.contains(
+            "This device isn't enrolled. Run `trace-commons-contributor login` to sign in \
+             with NEAR AI, or pass an invite with `--invite <link>`."
+        ),
+        "stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("near.ai in your browser"),
         "stderr={stderr}"
     );
 }

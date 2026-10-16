@@ -63,7 +63,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     /// </summary>
     private const string LocalLoadingTitle = "Scrubbing it locally…";
 
-    private const string LocalLoadingDetail = "Reading the session and running the redaction pass.";
+    private const string LocalLoadingDetail = "Reading the trace and running the redaction pass.";
 
     /// <summary>
     /// A preview that could not be opened or could not be understood. The

@@ -94,6 +94,8 @@ mod insights;
 pub use insights::{tc_insights_call, tc_insights_copy_json};
 mod mission_drafts;
 pub use mission_drafts::tc_mission_drafts_call;
+mod nudge;
+pub use nudge::{tc_nudge_copy_json, tc_nudge_digest_help_json, tc_nudge_entry_tags_json};
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -1431,6 +1433,65 @@ pub unsafe extern "C" fn tc_subscribe(
     cb: Option<extern "C" fn(event_json: *const c_char, ctx: *mut c_void)>,
     ctx: *mut c_void,
 ) -> u64 {
+    unsafe { subscribe_inner(handle, None, cb, ctx) }
+}
+
+/// `tc_subscribe`, declaring which opt-in events this subscriber can render
+/// (`subscribe`'s `accepts`), so it receives them. `accepts_json` is a
+/// borrowed UTF-8 JSON array of event names, such as `["reengage_due"]`;
+/// names this build does not know are ignored. NULL declares none and is
+/// exactly `tc_subscribe`.
+///
+/// On the in-process path the subscription counts as a renderer until
+/// `tc_unsubscribe` returns, so the daemon posts a standalone re-engagement
+/// notification only while some subscriber can draw it. On the attached
+/// path the declaration travels in the `subscribe` request.
+///
+/// Returns 0 on failure, recording a fixed `tc_last_error` label: every
+/// label `tc_subscribe` records, plus `"subscribe-accepts-invalid"` when
+/// `accepts_json` is not valid UTF-8 JSON holding an array of strings.
+///
+/// # Safety
+/// As `tc_subscribe`. `accepts_json`, if non-null, must point to a
+/// NUL-terminated string valid for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_subscribe_with_accepts(
+    handle: *mut tc_handle,
+    accepts_json: *const c_char,
+    cb: Option<extern "C" fn(event_json: *const c_char, ctx: *mut c_void)>,
+    ctx: *mut c_void,
+) -> u64 {
+    let accepts = if accepts_json.is_null() {
+        None
+    } else {
+        let parsed = unsafe { CStr::from_ptr(accepts_json) }
+            .to_str()
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
+        // Every element is checked here, before either path: over the
+        // socket the daemon's refusal arrives as a response, not an error,
+        // and would otherwise leave the caller a live token with no events.
+        match parsed {
+            Some(value @ serde_json::Value::Array(_)) if ipc::subscribe_accepts_valid(&value) => {
+                Some(value)
+            }
+            _ => {
+                set_last_error(ipc::ERR_SUBSCRIBE_ACCEPTS_INVALID);
+                return 0;
+            }
+        }
+    };
+    unsafe { subscribe_inner(handle, accepts, cb, ctx) }
+}
+
+/// The body both subscribe entry points share. `accepts` is `None` for
+/// `tc_subscribe`: a subscriber that declares nothing.
+unsafe fn subscribe_inner(
+    handle: *mut tc_handle,
+    accepts: Option<serde_json::Value>,
+    cb: Option<extern "C" fn(event_json: *const c_char, ctx: *mut c_void)>,
+    ctx: *mut c_void,
+) -> u64 {
     let outcome = guard(|| {
         if handle.is_null() {
             set_last_error(ERR_NULL_HANDLE);
@@ -1458,14 +1519,18 @@ pub unsafe extern "C" fn tc_subscribe(
         if let Some(attached) = attached_of(handle_ref) {
             let ctx = SendPtr(ctx);
             let token = handle_ref.next_subscription.fetch_add(1, Ordering::Relaxed);
+            let declared = accepts.clone().unwrap_or(serde_json::Value::Null);
             if attached
-                .subscribe(move |event| {
-                    let ctx = &ctx;
-                    let json = serde_json::to_string(&event).unwrap_or_default();
-                    if let Ok(c) = CString::new(json) {
-                        cb(c.as_ptr(), ctx.0);
-                    }
-                })
+                .subscribe_with_accepts(
+                    move |event| {
+                        let ctx = &ctx;
+                        let json = serde_json::to_string(&event).unwrap_or_default();
+                        if let Ok(c) = CString::new(json) {
+                            cb(c.as_ptr(), ctx.0);
+                        }
+                    },
+                    &declared,
+                )
                 .is_err()
             {
                 set_last_error(ERR_DAEMON_NOT_RUNNING);
@@ -1479,6 +1544,17 @@ pub unsafe extern "C" fn tc_subscribe(
             return Ok(0u64);
         };
         let ctx = SendPtr(ctx);
+        // The in-process subscriber's `accepts`, counted as a renderer for as
+        // long as the task below delivers events. With none declared it
+        // withholds every opt-in event, exactly as the socket does.
+        let declaration = match accepts.as_ref().map(|a| shared.declare_renderer(a)) {
+            None => None,
+            Some(Ok(declaration)) => Some(declaration),
+            Some(Err(label)) => {
+                set_last_error(label);
+                return Ok(0u64);
+            }
+        };
 
         // Subscribed here, synchronously, rather than inside the spawned
         // task: `broadcast::Receiver::subscribe` starts buffering from this
@@ -1496,6 +1572,18 @@ pub unsafe extern "C" fn tc_subscribe(
                     break;
                 }
                 match tokio::time::timeout(std::time::Duration::from_millis(250), rx.recv()).await {
+                    // An opt-in event reaches only a subscriber that declared
+                    // it, exactly as the socket withholds it from one that
+                    // did not. `tc_subscribe` declares nothing. See
+                    // `ipc::OPT_IN_EVENTS`.
+                    Ok(Ok(event))
+                        if ipc::event_is_opt_in(&event.event)
+                            && !declaration
+                                .as_ref()
+                                .is_some_and(|d| d.accepts(&event.event)) =>
+                    {
+                        continue;
+                    }
                     Ok(Ok(event)) => {
                         let json = serde_json::to_string(&event).unwrap_or_default();
                         if let Ok(c) = CString::new(json) {
@@ -2172,12 +2260,10 @@ unsafe fn borrow_str<'a>(ptr: *const c_char) -> anyhow::Result<&'a str> {
 /// stops a daemon from starting.
 ///
 /// Returns an owned JSON array; free it with [`tc_string_free`]. Each
-/// element carries `source` (`claude-code`, `codex`, `gemini-cli` or
-/// `cline`), `path`, `exists`, `session_count`, `most_recent` (RFC 3339 or
-/// null), `relocated_by_env` and `answers_at` (the vendor this tool's own
-/// calls answer at by default, e.g. `"Anthropic"`, or null for a tool with
-/// no single default -- see [`tc_discover_opencode_export`]'s doc for why
-/// OpenCode is one of those and is absent from this list entirely).
+/// element carries `source` (`claude-code`, `codex`, `gemini-cli`, `cline`
+/// or `opencode`), `path`, `exists`, `session_count`, `most_recent`,
+/// `relocated_by_env` and `answers_at`. OpenCode identifies its database file;
+/// selecting it explicitly opts into local session discovery.
 ///
 /// `answers_at` is a fixed label this build ships with, never something
 /// checked against the tool actually installed: it names what the released
@@ -2188,8 +2274,8 @@ unsafe fn borrow_str<'a>(ptr: *const c_char) -> anyhow::Result<&'a str> {
 /// being told about a trace. Here the caller is the contributor's own
 /// machine asking the contributor which of their own folders to watch, and a
 /// consent prompt that will not name what it is asking about is not a
-/// consent prompt. It reads directory entries and metadata only, and never
-/// opens a session file.
+/// consent prompt. It reads directory entries and session metadata only;
+/// OpenCode uses a read-only database query, never transcript bodies.
 ///
 /// Returns NULL only on a caught panic.
 #[unsafe(no_mangle)]
@@ -2205,14 +2291,9 @@ pub extern "C" fn tc_discover_sources() -> *mut c_char {
 /// export directory, so a Customize screen can say "N sessions found" for
 /// the folder they just picked rather than trusting the folder name alone.
 ///
-/// Needs no handle, like [`tc_discover_sources`], and for a stronger reason:
-/// OpenCode has no conventional per-user store to guess at before anyone has
-/// said anything -- its export folder is picked by the contributor, one at a
-/// time -- so it is not one of [`tc_discover_sources`]'s rows at all, blind
-/// or otherwise. This call exists so OpenCode can still be described once a
-/// folder is actually named, whether that is moments after a folder chooser
-/// closes or on a later run, reading back whatever this contributor already
-/// declared (`opencode_source` in the daemon's settings).
+/// Needs no handle, like [`tc_discover_sources`]. A path ending in
+/// `opencode.db` describes a native store; a directory describes exports.
+/// Existing directory declarations retain their export-only scope.
 ///
 /// Returns an owned JSON object with the same shape as one row of
 /// [`tc_discover_sources`] -- `source` (always `"opencode"`), `path`,
@@ -2221,8 +2302,8 @@ pub extern "C" fn tc_discover_sources() -> *mut c_char {
 /// `answers_at` (always `null`: OpenCode ships with no single default
 /// vendor to name). Free it with [`tc_string_free`].
 ///
-/// Reads directory entries and metadata only, and never opens a session
-/// file, per the same rule [`tc_discover_sources`] follows.
+/// Reads session metadata only, including read-only SQLite metadata queries
+/// for an explicitly selected native database.
 ///
 /// Returns NULL for a NULL or non-UTF-8 `path`, recording `null-pointer` or
 /// `invalid-utf8`, and NULL on a caught panic.
@@ -5534,7 +5615,7 @@ pub unsafe extern "C" fn tc_arming_offer_copy_json(
 /// The menu-bar Contribution mode pill (#1173,
 /// `project_copy::contribution_mode_copy`): a JSON object `{title, mixed,
 /// choices, override_active, clear}`, `choices` being `[{mode, label,
-/// line}]` for Ask me, Automatic and Never, in that order. `mode` is
+/// line}]` for Ask, Automatic and Never, in that order. `mode` is
 /// what `set_contribution_override` takes.
 ///
 /// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
@@ -6502,5 +6583,260 @@ mod scalar_guard_tests {
         set_last_error("fixture-untouched");
         assert_eq!(guarded_scalar_no_err(TC_WITNESS_TONE_REFUSED, || Ok(3)), 3);
         assert_eq!(borrowed_text(tc_last_error()), "fixture-untouched");
+    }
+}
+
+/// A4 (nudge design section 5): the in-process `tc_subscribe` path cannot
+/// declare `accepts`, so it is an older shell's subscriber and must never
+/// receive an opt-in event such as `reengage_due`.
+#[cfg(test)]
+mod in_process_subscribe_tests {
+    use super::*;
+
+    static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    extern "C" fn record_cb(event_json: *const c_char, _ctx: *mut c_void) {
+        let text = unsafe { CStr::from_ptr(event_json) }.to_string_lossy();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        let name = v["event"].as_str().unwrap_or_default().to_string();
+        SEEN.lock().unwrap_or_else(|p| p.into_inner()).push(name);
+    }
+
+    #[test]
+    fn an_in_process_subscriber_never_receives_an_opt_in_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        for root in ["claude-root", "codex-root"] {
+            std::fs::create_dir_all(dir.path().join(root)).unwrap();
+        }
+        let settings = trace_commons_contributor::daemon::settings::DaemonSettings {
+            claude_source: Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("claude-root"),
+                },
+            ),
+            codex_source: Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("codex-root"),
+                },
+            ),
+            ..Default::default()
+        };
+        settings.save(&store).unwrap();
+
+        let path = CString::new(dir.path().to_str().unwrap()).unwrap();
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let h = unsafe { tc_daemon_start(path.as_ptr(), &mut err) };
+        assert!(!h.is_null(), "tc_daemon_start failed");
+        let shared = shared_of(unsafe { &*h }).expect("an in-process daemon");
+
+        let token = unsafe { tc_subscribe(h, Some(record_cb), std::ptr::null_mut()) };
+        assert_ne!(token, 0);
+        shared.publish(ipc::EVENT_REENGAGE_DUE, serde_json::json!({}));
+        shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+        for _ in 0..200 {
+            if SEEN
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .any(|e| e == ipc::EVENT_QUEUE_CHANGED)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        unsafe { tc_unsubscribe(h, token) };
+        drop(shared);
+        unsafe { tc_daemon_stop(h) };
+        unsafe { tc_handle_free(h) };
+
+        let seen = SEEN.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        assert!(
+            seen.iter().any(|e| e == ipc::EVENT_QUEUE_CHANGED),
+            "the event published after it was never delivered: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|e| e == ipc::EVENT_REENGAGE_DUE),
+            "an in-process subscriber received an opt-in event: {seen:?}"
+        );
+    }
+    static SEEN_ACCEPTING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    extern "C" fn record_accepting_cb(event_json: *const c_char, _ctx: *mut c_void) {
+        let text = unsafe { CStr::from_ptr(event_json) }.to_string_lossy();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        let name = v["event"].as_str().unwrap_or_default().to_string();
+        SEEN_ACCEPTING
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(name);
+    }
+
+    /// `tc_subscribe_with_accepts` on the in-process path: a subscriber
+    /// that declares `reengage_due` receives it and counts as a renderer
+    /// exactly until `tc_unsubscribe` returns. A malformed declaration is
+    /// refused with a fixed label and counts nothing.
+    #[test]
+    fn an_in_process_subscriber_that_accepts_receives_and_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        for root in ["claude-root", "codex-root"] {
+            std::fs::create_dir_all(dir.path().join(root)).unwrap();
+        }
+        let settings = trace_commons_contributor::daemon::settings::DaemonSettings {
+            claude_source: Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("claude-root"),
+                },
+            ),
+            codex_source: Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("codex-root"),
+                },
+            ),
+            ..Default::default()
+        };
+        settings.save(&store).unwrap();
+        let path = CString::new(dir.path().to_str().unwrap()).unwrap();
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let h = unsafe { tc_daemon_start(path.as_ptr(), &mut err) };
+        assert!(!h.is_null(), "tc_daemon_start failed");
+        let shared = shared_of(unsafe { &*h }).expect("an in-process daemon");
+
+        let bad = CString::new("\"reengage_due\"").unwrap();
+        let refused = unsafe {
+            tc_subscribe_with_accepts(
+                h,
+                bad.as_ptr(),
+                Some(record_accepting_cb),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(refused, 0);
+        assert_eq!(
+            unsafe { CStr::from_ptr(tc_last_error()) }.to_str().unwrap(),
+            ipc::ERR_SUBSCRIBE_ACCEPTS_INVALID
+        );
+        assert!(!shared.has_renderer(ipc::EVENT_REENGAGE_DUE));
+
+        let accepts = CString::new("[\"reengage_due\", \"some_future_event\"]").unwrap();
+        let token = unsafe {
+            tc_subscribe_with_accepts(
+                h,
+                accepts.as_ptr(),
+                Some(record_accepting_cb),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(token, 0);
+        assert!(shared.has_renderer(ipc::EVENT_REENGAGE_DUE));
+        shared.publish(ipc::EVENT_REENGAGE_DUE, serde_json::json!({}));
+        for _ in 0..200 {
+            if SEEN_ACCEPTING
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .any(|e| e == ipc::EVENT_REENGAGE_DUE)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        unsafe { tc_unsubscribe(h, token) };
+        assert!(
+            !shared.has_renderer(ipc::EVENT_REENGAGE_DUE),
+            "the declaration outlived its subscription"
+        );
+        drop(shared);
+        unsafe { tc_daemon_stop(h) };
+        unsafe { tc_handle_free(h) };
+        let seen = SEEN_ACCEPTING
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        assert!(
+            seen.iter().any(|e| e == ipc::EVENT_REENGAGE_DUE),
+            "an accepting subscriber missed reengage_due: {seen:?}"
+        );
+    }
+}
+
+/// Discovers installed coding tools without a daemon or subprocess.
+/// Returns the same tools array as managed_snapshot (Claude Code, Codex and
+/// OpenCode). Availability implies no trace access or contribution consent.
+/// Free the returned owned JSON string with tc_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_managed_tools_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(&serde_json::to_string(
+            &trace_commons_contributor::managed::profiles::tools(),
+        )?))
+    })
+}
+
+/// Each coding tool's setup guide, `{source slug: https url}`, from
+/// `install_guides`: the one table first run and managed sessions read.
+/// Returns an owned JSON object; free it with tc_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_install_guides_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(&serde_json::to_string(
+            &trace_commons_contributor::install_guides::json(),
+        )?))
+    })
+}
+
+/// Shared managed-session wording, available before daemon startup.
+/// Returns an owned JSON object; free it with tc_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_managed_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        Ok(to_owned_cstring(&serde_json::to_string(
+            &trace_commons_contributor::managed::copy::copy(),
+        )?))
+    })
+}
+
+#[cfg(test)]
+mod managed_availability_tests {
+    use super::*;
+
+    fn owned_json(pointer: *mut c_char) -> serde_json::Value {
+        assert!(!pointer.is_null());
+        // SAFETY: these exports return owned NUL-terminated strings. Copy the
+        // JSON before releasing the allocation exactly once through the ABI.
+        let text = unsafe { CStr::from_ptr(pointer) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        unsafe { tc_string_free(pointer) };
+        serde_json::from_str(&text).unwrap()
+    }
+
+    #[test]
+    fn tools_and_copy_are_available_without_a_daemon_handle() {
+        let tools = owned_json(tc_managed_tools_json());
+        let rows = tools.as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        for (row, name) in rows.iter().zip(["claude", "codex", "opencode"]) {
+            assert_eq!(row["tool"], name);
+            assert!(row["installed"].is_boolean());
+            assert!(row["install_url"].as_str().unwrap().starts_with("https://"));
+            assert_eq!(row.as_object().unwrap().len(), 3);
+        }
+        let copy = owned_json(tc_managed_copy_json());
+        for key in [
+            "tools_title",
+            "tools_empty",
+            "install",
+            "refresh",
+            "tool_unavailable",
+        ] {
+            assert!(copy[key].is_string(), "missing {key}");
+        }
+        assert_eq!(copy, trace_commons_contributor::managed::copy::copy());
+        let guides = owned_json(tc_install_guides_json());
+        assert_eq!(guides, trace_commons_contributor::install_guides::json());
+        assert_eq!(guides["claude-code"], tools[0]["install_url"]);
     }
 }

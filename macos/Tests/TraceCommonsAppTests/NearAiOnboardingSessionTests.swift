@@ -79,7 +79,7 @@ private final class OnboardingSessionDaemon: DaemonCalling {
 /// Holds the credential section's provider choice outside the view, so a test
 /// can see and make the change the picker makes.
 private final class ProviderSelection: ObservableObject {
-    @Published var provider = "github"
+    @Published var provider = "near"
 }
 
 private struct ProviderSelectionHost: View {
@@ -110,8 +110,8 @@ final class NearAiOnboardingSessionTests: XCTestCase {
             .obtain)
         let options = CredentialSection.providerOptions(copy)
         XCTAssertEqual(options.map(\.title),
-                       [copy.credentialProviderGithub, copy.credentialProviderGoogle, copy.credentialProviderNear])
-        XCTAssertEqual(options.map(\.tag), ["github", "google", "near"])
+                       [copy.credentialProviderNear, copy.credentialProviderGithub, copy.credentialProviderGoogle])
+        XCTAssertEqual(options.map(\.tag), ["near", "github", "google"])
 
         let selection = ProviderSelection()
         let content = ProviderSelectionHost(selection: selection, copy: copy)

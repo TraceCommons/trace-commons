@@ -28,12 +28,14 @@ struct SessionReviewDraft: Equatable {
         correctionOffered ? CorrectionCopy.toSend(correction) : nil
     }
 
-    /// One answer pressed. The chosen answer again takes it back; leaving
-    /// Partly or Failed withdraws what was written under them, so text
-    /// nobody can see any more never rides along on the approval.
+    /// One answer pressed. The chosen answer again takes it back. What was
+    /// written under Partly or Failed is kept when the answer leaves them
+    /// (the arrow keys step through Worked on the way from Partly to
+    /// Failed), but it is sent only while they are chosen
+    /// (`correctionToSend`), so text nobody can see never rides along on
+    /// the approval.
     mutating func choose(_ option: ContributorVerdict) {
         verdict = verdict == option ? nil : option
-        if !correctionOffered { correction = "" }
     }
 
     /// The correction as typed, held to the core's limit at the keyboard so
@@ -70,6 +72,8 @@ struct SessionReviewCard: View {
     @State private var previewing: QueueEntry?
     /// The verdict and correction, for the session they were written for.
     @State private var draft = SessionReviewDraft(entryId: "")
+    /// Whether the trace's facts are shown; collapsed by default.
+    @State private var detailsOpen = false
 
     /// The preview, keyed by the session it was asked for. Only the
     /// selected session's answer is ever read out of it.
@@ -97,7 +101,10 @@ struct SessionReviewCard: View {
                         if let review {
                             // Ron's review card ends with its buttons.
                             GlassCard(quiet: true) {
-                                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                                // Groups a full step apart, so the card reads
+                                // as sections rather than one block (owner,
+                                // 2026-10-12: too condensed).
+                                VStack(alignment: .leading, spacing: Self.groupGap) {
                                     preview(entry, review)
                                     actions(entry)
                                 }
@@ -131,8 +138,9 @@ struct SessionReviewCard: View {
 
     /// Loading or the read that failed; then what would leave this
     /// computer, the redaction summary, the surviving secret, the residual
-    /// risk, the gate statement, the consent scopes, eligibility, the
-    /// verdict and correction, and the credential refusal.
+    /// risk, the consent scopes, eligibility, the
+    /// verdict and correction. The credential refusal is said under the
+    /// buttons (`actions`).
     @ViewBuilder
     private func preview(_ entry: DaemonData.QueueEntry, _ review: MonitorSessionReviewCopy) -> some View {
         if let failure {
@@ -140,65 +148,81 @@ struct SessionReviewCard: View {
                 Text(words?.line(for: failure) ?? review.cannotShowBody)
             }
         } else if let summary {
-            HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+            // The eyebrow and the enrolment chip share a line, so the
+            // heading runs the card's width rather than wrapping beside the
+            // chip (owner, 2026-10-10: a less crowded card).
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
                     Text(review.eyebrow)
                         .glassType(GlassTokens.TypeScale.eyebrow)
                         .foregroundStyle(GlassColor.textTertiary)
-                    Text(review.heading)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
+                    Spacer(minLength: 0)
+                    // Unknown is not enrolled: Contribute stays disarmed.
+                    // #1146's glass chip, no dot; Not enrolled is tinted and
+                    // secondary.
+                    GlassChip(glass: summary.enrolled == true ? review.enrolled : review.notEnrolled,
+                              muted: summary.enrolled != true)
                 }
-                Spacer(minLength: 0)
-                // Unknown is not enrolled: Contribute stays disarmed. #1146's
-                // glass chip, no dot; Not enrolled is tinted and secondary.
-                GlassChip(glass: summary.enrolled == true ? review.enrolled : review.notEnrolled,
-                          muted: summary.enrolled != true)
-            }
-            GlassCard(quiet: true) {
-                Text(summary.openingPrompt.flatMap { $0.isEmpty ? nil : $0 } ?? review.noOpeningPrompt)
-                    .glassType(GlassTokens.TypeScale.body)
+                Text(review.heading)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
                     .foregroundStyle(GlassColor.textPrimary)
-                    .lineLimit(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            if let measures = Self.measures(summary, review) {
-                Text(measures)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
+            // The opening prompt as a quotation, and what the person pasted
+            // set apart from what they typed (owner, 2026-10-12).
+            VStack(alignment: .leading, spacing: Self.lineGap) {
+                GlassCard(quiet: true) {
+                    PromptQuote(
+                        prompt: summary.openingPrompt.flatMap { $0.isEmpty ? nil : $0 },
+                        empty: review.noOpeningPrompt)
+                }
+                if let measures = Self.measures(summary, review) {
+                    Text(measures)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textTertiary)
+                }
             }
             redactions(summary, review)
+            // What scrubbing found and could not remove: one warning, the
+            // core's plain line over its plain explanation (owner,
+            // 2026-10-12), in place of a dotted line and a notice saying it
+            // twice.
             if let survivor = TracesStore.survivorLine(summary) {
-                GlassStatusLabel(survivor, status: .ask)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityLabel(survivor)
-            } else if RedactionLabels.survivorTotal(summary.redactions ?? [:]) > 0 {
-                caption(review.residualUnavailable, outside: true)
-            }
-            // #1146: one tertiary caption line each, the label in bold and
-            // the core's values as it sends them.
-            if let words, let risk = summary.residualRisk, !risk.isEmpty {
-                labelled(words.residualRisk, risk)
-            }
-            if let consent {
-                caption(consent.gateStatement, tertiary: true)
-            }
-            if let scopes = summary.consentScopes, !scopes.isEmpty {
-                labelled(review.consentScopes, scopes.joined(separator: " · "), bold: false)
-            }
-            eligibility(entry, review)
-            if let outcome {
-                verdict(outcome)
-                if store.correctionRefused == entry.entryId {
-                    GlassNotice(tone: .outside, title: outcome.correctionCredentialHeadline) {
-                        Text(outcome.correctionCredentialBody)
+                GlassNotice(tone: .outside, title: survivor) {
+                    if let why = Self.redactionRows(summary)?.stillPresent.first?.description, !why.isEmpty {
+                        Text(why)
                     }
                 }
+                .accessibilityElement(children: .combine)
+            } else if RedactionLabels.survivorTotal(summary.redactions ?? [:]) > 0 {
+                GlassNotice(tone: .outside) { Text(review.residualUnavailable) }
+            }
+            // Residual risk and the consent scopes, each a titled section
+            // with its words in full (owner, 2026-10-12: not behind an "i").
+            // A scope is named by the core's title for it, never its id. The
+            // gate statement is not repeated here (owner, 2026-10-10): the
+            // scrubbing caveat over the buttons says the same, and the Look
+            // inside sheet keeps the statement in full.
+            if let words, let risk = summary.residualRisk.flatMap({ $0.isEmpty ? nil : $0 }) {
+                section(words.residualRisk) { line(risk) }
+            }
+            if let scopes = summary.consentScopes.flatMap({ $0.isEmpty ? nil : $0 }) {
+                section(review.consentScopes) {
+                    ForEach(scopes, id: \.self) { scope in
+                        bullet(store.disclosure?.consentScopeTitles?[scope] ?? scope)
+                    }
+                }
+            }
+            if TracesStore.eligibility(entry) != nil {
+                eligibility(entry, review)
+            }
+            if let outcome {
+                verdict(outcome)
             } else {
                 caption(review.outcomeUnavailable, outside: true)
             }
         } else {
-            caption(review.buildingPreview)
+            line(review.buildingPreview)
         }
     }
 
@@ -233,28 +257,23 @@ struct SessionReviewCard: View {
     @ViewBuilder
     private func redactions(_ summary: DaemonData.PreviewSummary, _ review: MonitorSessionReviewCopy) -> some View {
         if let rows = Self.redactionRows(summary) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                Text(review.removed)
-                    .glassType(GlassTokens.TypeScale.label)
-                    .foregroundStyle(GlassColor.textPrimary)
+            // The title over a bulleted list (owner, 2026-10-12): each row
+            // its count and kind in the title face, what it covered in the
+            // reading face. What the category is goes behind the row's
+            // tooltip and accessibility hint (owner, 2026-10-10). What was
+            // left in is the warning under it (`preview`).
+            section(review.removed) {
                 if rows.removed.isEmpty {
-                    caption(review.nothingRemoved)
+                    line(review.nothingRemoved)
                 } else {
                     ForEach(rows.removed, id: \.family) { row in
-                        Self.redactionLine(row)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-            }
-            if !rows.stillPresent.isEmpty {
-                GlassNotice(tone: .outside, title: review.stillPresent) {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                        ForEach(rows.stillPresent, id: \.family) { row in
-                            Self.redactionLine(row)
+                        bulletRow {
+                            Self.redactionLine(row, describe: false)
+                                .glassType(Self.lineType)
+                                .foregroundStyle(GlassColor.textSecondary)
                         }
+                        .help(row.description)
+                        .accessibilityHint(row.description)
                     }
                 }
             }
@@ -273,9 +292,11 @@ struct SessionReviewCard: View {
             if let copy = store.inferenceCopy,
                 let state = EligibilitySurface.stateLine(eligibility, copy: copy, calls: TracesStore.eligibilityCalls)
             {
-                caption(state)
+                // The state, with its reason behind the "i".
                 if let reason = EligibilitySurface.reasonLine(eligibility, calls: TracesStore.eligibilityCalls) {
-                    caption(reason)
+                    infoLine(state, info: reason, title: false)
+                } else {
+                    line(state)
                 }
             } else {
                 caption(review.eligibilityFailed, outside: true)
@@ -289,24 +310,28 @@ struct SessionReviewCard: View {
     private func verdict(_ outcome: ContributorDisclosureCopy.Outcome) -> some View {
         let draft = self.draft.current(for: entry?.entryId ?? "")
         let busy = entry.map { store.acting.contains($0.entryId) } ?? true
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-            // #1146's legend: 12/600, primary.
-            Text(outcome.verdictQuestion)
-                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                .foregroundStyle(GlassColor.textPrimary)
-            HStack(spacing: GlassTokens.Space.s2) {
-                verdictOption(.worked, outcome.worked, draft)
-                verdictOption(.partly, outcome.partly, draft)
-                verdictOption(.failed, outcome.failed, draft)
-                Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: Self.lineGap) {
+            // #1146's legend: 12/600, primary, with what the answer is for
+            // behind its "i" (owner, 2026-10-12).
+            infoLine(outcome.verdictQuestion, info: outcome.verdictCaption)
+            // Radios, one answer at most (owner, 2026-10-10); pressing the
+            // chosen one again clears it, as the answer is optional.
+            GlassRadioRow(
+                outcome.verdictQuestion, selection: draft.verdict,
+                options: [
+                    GlassRadioOption(outcome.worked, value: ContributorVerdict.worked),
+                    GlassRadioOption(outcome.partly, value: ContributorVerdict.partly),
+                    GlassRadioOption(outcome.failed, value: ContributorVerdict.failed),
+                ],
+                none: outcome.verdictNone
+            ) { option in
+                var next = draft
+                next.choose(option)
+                self.draft = next
             }
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel(outcome.verdictQuestion)
-            caption(outcome.verdictCaption)
             if draft.correctionOffered {
-                Text(outcome.correctionQuestion)
-                    .glassType(GlassTokens.TypeScale.label)
-                    .foregroundStyle(GlassColor.textPrimary)
+                sectionTitle(outcome.correctionQuestion)
+                    .padding(.top, GlassTokens.Space.s2)
                 // The question above names it; the cap works on the binding.
                 GlassTextArea(outcome.correctionQuestion, text: Binding(
                     get: { draft.correction },
@@ -329,22 +354,6 @@ struct SessionReviewCard: View {
         .disabled(busy)
     }
 
-    /// One answer, #1146's `GlassButton` with `aria-pressed`: the standard
-    /// glass button, and the chosen one purple (the CTA fill, on-accent
-    /// ink) with the selected trait, so which is chosen is never the
-    /// colour alone to assistive tech.
-    private func verdictOption(
-        _ option: ContributorVerdict, _ label: String, _ draft: SessionReviewDraft
-    ) -> some View {
-        let selected = draft.verdict == option
-        return Button(label) {
-            var next = draft
-            next.choose(option)
-            self.draft = next
-        }
-        .buttonStyle(GlassButtonStyle(.glass, selected: selected))
-    }
-
     // MARK: Native's kept lines
 
     /// What the queue card said that Ron's review does not: what scrubbing
@@ -358,19 +367,19 @@ struct SessionReviewCard: View {
         // read as "nothing matched".
         if let redactions = summary?.redactions {
             let removed = RedactionLabels.removedTotal(redactions)
-            GlassStatusLabel(
-                ScrubbingCaveat.rowLine(redactionCount: removed),
-                status: ScrubbingCaveat.status(redactionCount: removed))
-                .fixedSize(horizontal: false, vertical: true)
+            // An information notice rather than a dotted line (owner,
+            // 2026-10-12).
+            GlassNotice(tone: ScrubbingCaveat.status(redactionCount: removed) == .ask ? .ask : .off) {
+                Text(ScrubbingCaveat.rowLine(redactionCount: removed))
+            }
         }
         // A load-time fact on the entry, so it is said before the preview
         // is in: a trimmed conversation never reaches a decision unsaid.
         if let line = SubagentCopy.line(count: entry.subagentCount ?? 0, dropped: entry.subagentsDropped ?? 0) {
             if (entry.subagentsDropped ?? 0) > 0 {
-                GlassStatusLabel(line, status: .ask)
-                    .fixedSize(horizontal: false, vertical: true)
+                GlassNotice(tone: .ask) { Text(line) }
             } else {
-                caption(line)
+                self.line(line)
             }
         }
         if let reasons = entry.secondLook, !reasons.isEmpty {
@@ -379,61 +388,70 @@ struct SessionReviewCard: View {
                 ForEach(reasons, id: \.self) { GlassChip($0, status: .ask) }
             }
         }
-        if let words {
-            GlassKeyValueList(Self.rows(
-                entry, summary, words: words, attestation: store.attestationValue(entry)))
-        }
-        // The token distribution, the daemon's own line, which the deleted
-        // What's-in-it tab drew. Absent draws nothing: no fact is invented.
-        if let line = summary?.tokenDistributionSummary, !line.isEmpty {
-            caption(line)
+        // The session's facts and the token distribution, collapsed under
+        // one heading (owner, 2026-10-10: a less crowded inspector). They
+        // describe the trace; nothing in them is needed before deciding.
+        if let words, let review {
+            // On a quiet card, as the inspector's sections are (owner,
+            // 2026-10-11).
+            GlassCard(quiet: true) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    GlassExpander(review.traceDetails, isOpen: $detailsOpen)
+                    if detailsOpen {
+                        GlassKeyValueList(Self.rows(
+                            entry, summary, words: words, attestation: store.attestationValue(entry)))
+                        // The daemon's own line, which the deleted What's-in-it
+                        // tab drew. Absent draws nothing: no fact is invented.
+                        if let line = summary?.tokenDistributionSummary, !line.isEmpty {
+                            self.line(line)
+                        }
+                    }
+                }
+            }
         }
     }
 
     // MARK: Actions
 
-    /// Look inside, Dismiss and Contribute on one line, as Ron's review
-    /// ends (`waiting-review.tsx`): Look inside a link on the left, Dismiss
-    /// and Contribute on the right. No label wraps or shortens: a
-    /// Contribute label too long for the line ("Enroll to approve") moves
-    /// Look inside onto a line of its own above, rather than clip the one
-    /// button that sends. Native's Keep is a link on the line under them.
-    /// The scrubbing caveat sits directly above the buttons, at reading
-    /// weight, as the review sheet repeats it at the commit.
+    /// Contribute, Dismiss and Look inside on one line, left-aligned: the
+    /// action first as the primary button, then Dismiss and Look inside as
+    /// links, the order the owner ruled for every card (Ron, 2026-10-09).
+    /// No label wraps or shortens: a Contribute label too long for the line
+    /// ("Enroll to approve") moves Look inside onto a line of its own
+    /// below, rather than clip the one button that sends. Native's Keep is
+    /// a link on the line under them. The scrubbing caveat sits directly
+    /// above the buttons, at reading weight, as the review sheet repeats it
+    /// at the commit; a refused action is said directly below them.
     @ViewBuilder
     private func actions(_ entry: DaemonData.QueueEntry) -> some View {
         let busy = store.acting.contains(entry.entryId)
         ScrubbingCaveatAtCommit()
-        TracesRefusal(store: store, entryId: entry.entryId)
         if let words, let review {
-            VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) {
-                ViewThatFits(in: .horizontal) {
-                    // At least 4 before Dismiss, not the row's 8: the three
-                    // fit Ron's 300 inspector with a point to spare.
-                    HStack(spacing: 0) {
-                        lookInside(entry, review)
-                        Spacer(minLength: GlassTokens.Space.s2)
-                        HStack(spacing: GlassTokens.Space.s4) {
-                            dismiss(entry, words)
-                            contribute(entry, words)
-                        }
-                    }
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                        lookInside(entry, review)
-                        HStack(spacing: GlassTokens.Space.s4) {
-                            Spacer(minLength: 0)
-                            dismiss(entry, words)
-                            contribute(entry, words)
-                        }
-                    }
+            // Contribute and Look inside (owner, 2026-10-12: no Dismiss or
+            // Keep on the card; Dismiss stays on the tree row's menu).
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: GlassTokens.Space.s5) {
+                    contribute(entry, words)
+                    lookInside(entry, review)
                 }
-                Button(words.keep) { act(.keep, entry) }
-                    .buttonStyle(GlassButtonStyle(.link))
-                    .lineLimit(1)
-                    .fixedSize()
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    contribute(entry, words)
+                    lookInside(entry, review)
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .trailing)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .disabled(busy)
+        }
+        // A refused action, then a refused correction, under the buttons
+        // they are about (Ron, 2026-10-09).
+        TracesRefusal(store: store, entryId: entry.entryId)
+        if let outcome {
+            if store.correctionRefused == entry.entryId {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                    GlassAlert(outcome.correctionCredentialHeadline)
+                    GlassAlert(outcome.correctionCredentialBody)
+                }
+            }
         }
     }
 
@@ -447,13 +465,6 @@ struct SessionReviewCard: View {
         .buttonStyle(GlassButtonStyle(.link))
         .lineLimit(1)
         .fixedSize()
-    }
-
-    private func dismiss(_ entry: DaemonData.QueueEntry, _ words: MonitorTracesCopy) -> some View {
-        Button(words.dismissAction) { act(.dismiss, entry) }
-            .buttonStyle(GlassButtonStyle(.glass))
-            .lineLimit(1)
-            .fixedSize()
     }
 
     private func contribute(_ entry: DaemonData.QueueEntry, _ words: MonitorTracesCopy) -> some View {
@@ -568,21 +579,85 @@ struct SessionReviewCard: View {
     }
 
     /// #1146's redaction line: the count in bold, then what the category
-    /// is and the sub-labels it covered, all the core's words.
-    static func redactionLine(_ row: RedactionSummaryRow) -> Text {
-        var tail = row.description.isEmpty ? "" : ": " + row.description
+    /// is (unless `describe` is false) and the sub-labels it covered, all
+    /// the core's words.
+    static func redactionLine(_ row: RedactionSummaryRow, describe: Bool = true) -> Text {
+        var tail = !describe || row.description.isEmpty ? "" : ": " + row.description
         if !row.detail.isEmpty { tail += " (" + row.detail.joined(separator: ", ") + ")" }
-        return Text(row.countLine).bold().foregroundColor(GlassColor.textPrimary) + Text(tail)
+        return Text(row.countLine).fontWeight(.semibold).foregroundColor(GlassColor.textPrimary) + Text(tail)
     }
 
-    /// "Label: value" as one tertiary caption line (#1146), the label bold
-    /// where #1146 bolds it.
-    private func labelled(_ label: String, _ value: String, bold: Bool = true) -> some View {
-        (Text(label + ":").bold(bold) + Text(" " + value))
-            .glassType(GlassTokens.TypeScale.caption)
-            .foregroundStyle(GlassColor.textTertiary)
+    // MARK: The card's type and rhythm (owner, 2026-10-12)
+
+    /// Between the card's groups, and between the lines of one group.
+    static let groupGap = GlassTokens.Space.s8
+    static let lineGap = GlassTokens.Space.s3
+    /// Every reading line on the card: one face, so nothing reads as a
+    /// smaller aside unless it is one.
+    static let lineType = GlassTokens.TypeScale.label.weight(.regular)
+
+    /// The core's "More about {title}", for an "i"'s accessible name.
+    private static let moreAboutTemplate = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.uses.moreAbout
+
+    static func moreAbout(_ title: String) -> String {
+        moreAboutTemplate.map { FirstRunCopy.fill($0, ["title": title]) } ?? title
+    }
+
+    /// A titled group: the title, then its lines.
+    private func section(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: Self.lineGap) {
+            sectionTitle(title)
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) { content() }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// A bulleted line in the reading face.
+    private func bullet(_ text: String) -> some View {
+        bulletRow { line(text) }
+    }
+
+    private func bulletRow(@ViewBuilder _ content: () -> some View) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+            Text("\u{2022}")
+                .glassType(Self.lineType)
+                .foregroundStyle(GlassColor.textTertiary)
+                .accessibilityHidden(true)
+            content()
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// A group's title: label, semibold, primary.
+    private func sectionTitle(_ text: String) -> some View {
+        Text(text)
+            .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+            .foregroundStyle(GlassColor.textPrimary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// A reading line in the card's one face.
+    private func line(_ text: String) -> some View {
+        Text(text)
+            .glassType(Self.lineType)
+            .foregroundStyle(GlassColor.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// A title (or, with `title: false`, a reading line) with its longer
+    /// text behind an "i" (`GlassInfoButton`: hover shows it, a click pins
+    /// it, VoiceOver reads it as the button's value).
+    private func infoLine(_ text: String, info: String, title: Bool = true) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s2) {
+            Text(text)
+                .glassType(title ? GlassTokens.TypeScale.label.weight(.semibold) : Self.lineType)
+                .foregroundStyle(title ? GlassColor.textPrimary : GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            GlassInfoButton(Self.moreAbout(text), text: info)
+            Spacer(minLength: 0)
+        }
     }
 
     private func caption(_ text: String, outside: Bool = false, tertiary: Bool = false) -> some View {

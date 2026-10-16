@@ -266,7 +266,7 @@ enum RulesScreenLayout {
         return ListFormatter.localizedString(byJoining: watched.map(\.displayName))
     }
 
-    /// Ron's #1030 `RULE_DOTS`: Ask me on the ask colour, Automatic on the
+    /// Ron's #1030 `RULE_DOTS`: Ask on the ask colour, Automatic on the
     /// on colour, Never on the off colour.
     static func dot(for mode: ProjectMode) -> GlassStatus? {
         switch mode {

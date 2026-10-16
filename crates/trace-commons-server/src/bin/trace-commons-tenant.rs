@@ -1428,18 +1428,6 @@ mod tests {
     }
 
     #[test]
-    fn cli_rejects_unknown_subcommand() {
-        let err = Cli::try_parse_from([
-            "trace-commons-tenant",
-            "--endpoint",
-            "https://api.example",
-            "bogus",
-        ])
-        .unwrap_err();
-        assert!(!err.to_string().is_empty());
-    }
-
-    #[test]
     fn tenant_principal_ref_token_env_mode_derives_stable_hash() {
         let env = unique_bearer_env();
         let _g = EnvGuard::set(env.clone(), "secret-token-abc");

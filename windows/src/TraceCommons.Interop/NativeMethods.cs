@@ -304,6 +304,24 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? noticeJson);
 
     /// <summary>
+    /// The offer to move a legacy invite identity to a NEAR AI account, as an
+    /// owned JSON object of the offer's sentences. Free it the way
+    /// <see cref="TakeOwnedString"/> does. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_legacy_migration_offer_json();
+
+    /// <summary>
+    /// The sentence for a refused <c>legacy_invite_migrate</c>, from the IPC
+    /// error's label. A label this build does not know gets the core's own
+    /// fallback sentence. Free it the way <see cref="TakeOwnedString"/> does.
+    /// NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_legacy_migration_refusal_text(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
+
+    /// <summary>
     /// The notice for approved sessions held on a busy privacy witness, from
     /// <c>status.witness_capacity</c>, as an owned JSON object (title, body,
     /// next_check). Free it the way <see cref="TakeOwnedString"/> does. NULL
@@ -1119,6 +1137,13 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_onboarding_copy();
+
+    // Owned JSON strings; release with tc_string_free.
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_managed_tools_json();
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_managed_copy_json();
 
     /// <summary>
     /// The disclosure bundle (<c>disclosure_copy::contributor_disclosure_copy</c>)

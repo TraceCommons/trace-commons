@@ -18,26 +18,26 @@
 <component type="desktop-application">
   <id>ai.tracecommons.Contributor</id>
 
-  <name>Trace Commons</name>
-  <summary>Review and contribute your coding sessions</summary>
+  <name>Near.ai</name>
+  <summary>Review and contribute your coding traces</summary>
 
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT OR Apache-2.0</project_license>
 
   <description>
     <p>
-      Trace Commons contributes the sessions you have with coding agents to an
-      open corpus, with your explicit consent for each one. Nothing leaves your
+      Near.ai contributes the traces you have with coding agents to Trace
+      Commons, an open corpus, with your explicit consent for each one. Nothing leaves your
       machine until you have seen exactly what it contains.
     </p>
     <p>
-      The application watches the session folders you nominate, and nothing
+      The application watches the trace folders you nominate, and nothing
       else. It will not guess: until you say which folders to watch, it watches
       none of them.
     </p>
     <p>
-      Every session is scanned for secrets and personal information and shown
-      to you in full before anything is sent. You decide per session, or arm a
+      Every trace is scanned for secrets and personal information and shown
+      to you in full before anything is sent. You decide per trace, or arm a
       project you trust to contribute without asking.
     </p>
   </description>
@@ -62,6 +62,56 @@
   </provides>
 
   <releases>
+    <release version="0.17.0" date="2026-10-16">
+      <description>
+        <p>Linux gains OpenCode trace discovery, managed sessions you can open in the terminal you choose, and a retry for uploads that could not be answered. The native macOS app gains the matching screens and a redesigned look.</p>
+      </description>
+    </release>
+    <release version="0.16.2" date="2026-10-14">
+      <description>
+        <p>Maintenance release for Linux: the version number follows the macOS app, which fixes two more window-resizing paths that could crash it.</p>
+      </description>
+    </release>
+    <release version="0.16.1" date="2026-10-13">
+      <description>
+        <p>Maintenance release for Linux: the version number follows the macOS app, which fixes a crash in its edge rail.</p>
+      </description>
+    </release>
+    <release version="0.16.0" date="2026-10-12">
+      <description>
+        <p>The command-line contributor can now enroll with a NEAR AI sign-in in your browser, with no invite needed. Invites still work.</p>
+      </description>
+    </release>
+    <release version="0.15.0" date="2026-10-12">
+      <description>
+        <p>Maintenance release for Linux: the version number follows the macOS and Windows apps, which can now start Claude Code or Codex on a NEAR AI sign-in.</p>
+      </description>
+    </release>
+    <release version="0.14.0" date="2026-10-12">
+      <description>
+        <p>If you joined with an invite, the app now offers to move your contributions to a NEAR AI account, and NEAR AI sign-in uses your NEAR wallet by default. More is removed from tool output before it leaves the device: git author names, IP addresses, private host names, account user names and phone numbers.</p>
+      </description>
+    </release>
+    <release version="0.13.1" date="2026-10-11">
+      <description>
+        <p>When many notices are shown at once they now scroll instead of pushing the rest of the window out of view, and they can be dismissed together.</p>
+      </description>
+    </release>
+    <release version="0.13.0" date="2026-10-11">
+      <description>
+        <p>The app is now called Near.ai. Trace Commons remains the name of the commons your traces are contributed to. Folder modes have one set of names in every app: Ask me, Automatic and Never. Traces waiting on a busy privacy check show as waiting, the app shows where its inference requests are routed, and uploads the server rate-limits stay queued and are retried at a steady pace.</p>
+      </description>
+    </release>
+    <release version="0.12.6" date="2026-09-15">
+      <description>
+        <p>Trace previews for Codex and Claude Code now skip known injected setup instructions and show the first task request. Traces containing only setup display “No task description found.” Full transcripts and redaction remain unchanged. Windows settings saves retry temporary file-replacement locks.</p>
+      </description>
+    </release>
+    <release version="0.12.5" date="2026-09-15">
+      <description>
+        <p>Signing in to NEAR AI Cloud now keeps working after the browser closes. The retained session records the agent that created it, which the service requires on every refresh, so the account and balance screens no longer report an expired session minutes after a successful sign-in.</p>
+      </description>
+    </release>
     <release version="0.12.4" date="2026-09-15">
       <description>
         <p>Signing in to NEAR AI through the browser now reports success only after the inference key is created and stored, so a failed setup is visible instead of hidden behind an older key.</p>

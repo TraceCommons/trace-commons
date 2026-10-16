@@ -1,3 +1,5 @@
+import TCShellCore
+
 /// Home's pages. Top-level rather than nested in `HomeTabView` (which names
 /// it `HomeTabView.Page`), so `MonitorDestination` can name one without
 /// reaching into a view.
@@ -9,17 +11,38 @@ enum HomePage: String {
     case missionDrafts
 }
 
+/// The Traces tab's pages: the tree, or History, opened from the History
+/// button beside the order control (owner, 2026-10-12: History moved here
+/// from Home), with a breadcrumb back to the tree.
+enum TracesPage: String {
+    case tree
+    case history
+}
+
 /// Where an outside caller wants the Monitor to go. Nothing here sends.
 enum MonitorDestination: Equatable, Sendable {
     case home(HomePage)
     case inference
     case traces(entryId: String?)
+    /// Traces narrowed to the idle sessions a nudge named
+    /// (`list_pending {filter: "idle_sessions"}`).
+    case idleSessions
     case settings(SettingsSection)
 
     /// The Settings section this destination opens, nil for a Monitor tab.
     var settingsSection: SettingsSection? {
         if case .settings(let section) = self { return section }
         return nil
+    }
+}
+
+extension MonitorDestination {
+    /// Where a nudge action opens the Monitor.
+    init(nudge destination: NudgeSurface.Destination) {
+        switch destination {
+        case .traces(let idleOnly): self = idleOnly ? .idleSessions : .traces(entryId: nil)
+        case .history: self = .home(.history)
+        }
     }
 }
 

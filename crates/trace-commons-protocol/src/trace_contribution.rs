@@ -30,6 +30,8 @@ use crate::canonical_json;
 use crate::llm::recording::{TraceFile, TraceResponse};
 use crate::redaction::redact_sensitive_json;
 
+mod tool_output_detectors;
+
 pub const TRACE_CONTRIBUTION_SCHEMA_VERSION: &str = "ironclaw.trace_contribution.v1";
 pub const TRACE_CONTRIBUTION_POLICY_VERSION: &str = "2026-04-24";
 /// Bumped to v3 when the contextual-entropy pass began re-anchoring after `=`
@@ -4603,9 +4605,17 @@ impl DeterministicTraceRedactor {
         state: &mut RedactionState,
     ) -> (String, RedactionReport) {
         let mut report = RedactionReport::default();
-        let mut redacted = self.redact_private_emails(input, state, &mut report);
+        // Ahead of the email pass, so a `user@host.local` prompt or an
+        // `Author: Name <addr>` line is labelled for what it is; the email
+        // pass still takes the address itself. See `tool_output_detectors`.
+        let mut redacted = tool_output_detectors::redact_identity_shapes(input, state, &mut report);
+        redacted = self.redact_private_emails(&redacted, state, &mut report);
         redacted = self.redact_generic_paths(&redacted, state, &mut report);
         redacted = self.redact_known_paths(&redacted, state, &mut report);
+        // After both path passes, so a name inside `/Users/<name>/...` is
+        // already a `local_path` placeholder and never reaches these.
+        redacted =
+            tool_output_detectors::redact_network_and_account_shapes(&redacted, state, &mut report);
         if state.edit_map.is_some() {
             state.track_ranges(
                 &pem_block_regex()
@@ -6211,7 +6221,23 @@ fn resolve_post_scrub_risk(
 /// `privacy.redaction_counts`, because the report is an annotation on an
 /// accepted record. Dropping the count would trade one information loss for
 /// another.
-const NON_SEVERITY_REDACTION_LABELS: &[&str] = &["local_path"];
+///
+/// `ip_address`, `private_hostname` and `os_username` (#1362) join it for
+/// the same reason and on the same footing. They identify a machine, not a
+/// person: a prompt, an `ls -l` row or a `ping` carries them in the ordinary
+/// course of any terminal session, so as tier drivers they would rebuild
+/// the Medium-for-everyone floor #219a removed. The person-shaped labels
+/// from the same detectors -- `git_author` and `phone_number` -- are not
+/// listed and bear severity, like `private_email`. A classifier's
+/// `ip_address` span still bears severity through its namespaced
+/// `privacy_filter:ip_address` count, which this exact-match list does not
+/// name.
+const NON_SEVERITY_REDACTION_LABELS: &[&str] = &[
+    "local_path",
+    tool_output_detectors::IP_ADDRESS,
+    tool_output_detectors::PRIVATE_HOSTNAME,
+    tool_output_detectors::OS_USERNAME,
+];
 
 /// Whether a redaction label contributes to the residual-risk tier.
 ///

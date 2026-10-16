@@ -35,6 +35,19 @@ export type LegacyMigrationResult =
   | { kind: "invite_needed"; line: string }
   | { kind: "refused"; label: string; line: string };
 
+/**
+ * Whether the panel is drawn, and whether it shows Move. The core stops
+ * offering the move after a refusal that is final (a pooled invite), so a
+ * refusal this panel holds keeps it drawn -- to say why -- but without Move.
+ */
+export function legacyMigrationPanelState(
+  offered: boolean,
+  answer: LegacyMigrationResult | null,
+): { drawn: boolean; move: boolean } {
+  const held = answer !== null && answer.kind !== "migrated";
+  return { drawn: offered || held, move: offered };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

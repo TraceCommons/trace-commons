@@ -24,6 +24,12 @@ pub struct LaunchArgs {
     /// Project folder (defaults to the current directory).
     #[arg(long)]
     pub cwd: Option<PathBuf>,
+    /// Explicit model ID for a managed OpenCode session.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Collect this OpenCode session on exit for the usual review pipeline.
+    #[arg(long)]
+    pub collect_traces: bool,
 }
 
 #[derive(Subcommand)]
@@ -85,6 +91,9 @@ pub enum SessionCommand {
 #[derive(Deserialize)]
 pub struct Snapshot {
     pub accounts: Vec<AccountView>,
+    /// Derived from the NEAR AI sign-in, never saved; empty without one.
+    #[serde(default)]
+    pub sign_in_accounts: Vec<AccountView>,
     pub defaults: Vec<Selection>,
     pub generations: std::collections::BTreeMap<ToolId, Generation>,
 }
@@ -112,6 +121,7 @@ pub fn resolve(
 ) -> Result<AccountView, ManagedError> {
     super::accounts::resolve_launch_account(
         &snapshot.accounts,
+        &snapshot.sign_in_accounts,
         &snapshot.defaults,
         tool,
         name,
@@ -145,6 +155,8 @@ pub async fn launch(store: &ConfigStore, args: LaunchArgs) -> anyhow::Result<i32
         .copied()
         .unwrap_or_default();
     let request = LaunchRequest {
+        model: args.model,
+        collect_traces: args.collect_traces,
         purpose: super::sessions::LaunchPurpose::Coding,
         request_id: Uuid::new_v4(),
         tool: args.tool,
@@ -205,7 +217,10 @@ pub async fn accounts(
         }
         return login(store, &account, json_output).await;
     }
-    let snapshot: Snapshot = call(store, "managed_snapshot", json!({}))?;
+    let mut snapshot: Snapshot = call(store, "managed_snapshot", json!({}))?;
+    // Saved accounts only: a sign-in entry cannot be renamed, removed,
+    // reconnected or saved as a default.
+    snapshot.sign_in_accounts.clear();
     let (name, tool) = match &command {
         AccountCommand::Rename { account, tool, .. }
         | AccountCommand::Reconnect { account, tool }
@@ -284,6 +299,7 @@ fn tool_name(tool: ToolId) -> &'static str {
     match tool {
         ToolId::Claude => "claude",
         ToolId::Codex => "codex",
+        ToolId::Opencode => "opencode",
     }
 }
 

@@ -52,8 +52,15 @@ struct PublicProfileSection: View {
             } else {
                 optInCard
             }
+            // A refusal is the failed request's red line: under the
+            // panel's buttons when the panel is drawn, else here (Ron,
+            // 2026-10-09). What went through stays a notice.
             if let sentence = profileOutcomeSentence {
-                GlassNotice(tone: outcomeTone) { Text(sentence) }
+                if outcomeTone == .outside {
+                    if !panelShown { GlassAlert(sentence) }
+                } else {
+                    GlassNotice(tone: outcomeTone) { Text(sentence) }
+                }
             }
             Text(PublicProfileCopy.footnote)
                 .glassType(GlassTokens.TypeScale.caption)
@@ -117,9 +124,15 @@ struct PublicProfileSection: View {
                     .disabled(model.profileBusy || handleDraft.trimmingCharacters(
                         in: .whitespacesAndNewlines
                     ).isEmpty)
+                    // Leaving is the secondary action: a link after Save
+                    // (Ron, 2026-10-09).
                     Button(PublicProfileCopy.leaveRoster) { model.leaveRoster() }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.link))
                         .disabled(model.profileBusy)
+                }
+                // A refused save or leave, under the buttons it is about.
+                if outcomeTone == .outside, let sentence = profileOutcomeSentence {
+                    GlassAlert(sentence)
                 }
             }
         }
@@ -163,6 +176,11 @@ struct PublicProfileSection: View {
         case .leaveRefused(let label):
             return PublicProfileCopy.leaveFailureSentence(label)
         }
+    }
+
+    /// The roster panel is drawn, so a refusal is said under its buttons.
+    private var panelShown: Bool {
+        model.publicProfile?.handle != nil
     }
 
     private var outcomeTone: GlassStatus {

@@ -276,7 +276,7 @@ final class RulesScreenTests: XCTestCase {
     }
 
     /// Ron's review of #1235, item 13: the Rules picker shows its status
-    /// dots, in Ron's order -- Ask me on the ask colour, Automatic on the
+    /// dots, in Ron's order -- Ask on the ask colour, Automatic on the
     /// on colour, Never on the off colour. Settings' picker is unchanged.
     func test_theRulesPickerShowsItsStatusDots() throws {
         let modes = try XCTUnwrap(ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON()))

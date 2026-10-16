@@ -118,9 +118,9 @@ pub const DAILY_BUDGET_TITLE: &str = "Today's upload limit is used up.";
 /// restarts a stopped service, so this does not clear on its own.
 pub fn core_down_copy() -> HealthLineCopy {
     HealthLineCopy::actionable(
-        "Can't reach the Trace Commons service.",
-        "Nothing is being watched or sent while it's down. Your queue and the sessions \
-         already sent are safe, and sessions from while it was down will be picked up when \
+        concat!("Can't reach ", crate::app_name!(), "'s background service."),
+        "Nothing is being watched or sent while it's down. Your queue and the traces \
+         already sent are safe, and traces from while it was down will be picked up when \
          it's running again.",
         None,
     )
@@ -153,7 +153,7 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
     match label {
         health::LABEL_NOT_LOGGED_IN => HealthLineCopy::actionable(
             "Not connected.",
-            "Sessions are being queued, but nothing can be sent until you reconnect. Nothing \
+            "Traces are being queued, but nothing can be sent until you reconnect. Nothing \
              has been lost.",
             Some(("Reconnect", HealthActionKind::Reconnect)),
         ),
@@ -181,9 +181,14 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
         // The upload servers, not the app's own background service, are out
         // of reach; "Trace Commons" read as the app (owner ruling, 2026-10-08).
         health::LABEL_CLAIM_MINT_FAILED | health::LABEL_INGEST_UNREACHABLE => {
+            // The upload that set either label ended `Failed`, and nothing
+            // re-sends a failed entry, so this must not promise a retry.
+            // A rate-limited upload, which is kept and re-sent, never sets
+            // either label (`uploader::health_label_for`).
             HealthLineCopy::waiting(
                 "Can't upload right now.",
-                "Your queue is safe; it'll retry on its own.",
+                "A trace that didn't upload won't be retried on its own. New traces will \
+                 still be tried.",
             )
         }
         health::LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED => {
@@ -206,7 +211,7 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
                 None => "-- the queue is full. Review or clear some to start again.".to_string(),
             };
             HealthLineCopy::actionable(
-                "Trace Commons has stopped queuing new sessions",
+                concat!(crate::app_name!(), " has stopped queuing new traces"),
                 &detail,
                 Some(("Review", HealthActionKind::ReviewQueue)),
             )
@@ -287,7 +292,10 @@ mod tests {
     #[test]
     fn core_down_says_the_queue_is_safe_and_new_sessions_are_picked_up() {
         let copy = core_down_copy();
-        assert_eq!(copy.title, "Can't reach the Trace Commons service.");
+        assert_eq!(
+            copy.title,
+            concat!("Can't reach ", crate::app_name!(), "'s background service.")
+        );
         assert!(copy.detail.contains("Your queue"), "{}", copy.detail);
         assert!(
             copy.detail.contains("already sent are safe"),
@@ -362,6 +370,28 @@ mod tests {
             assert!(
                 health_copy_for_label(label, None).action.is_none(),
                 "{label} has no button and must not offer a dead one"
+            );
+        }
+    }
+
+    /// The upload that set these labels ended terminal `Failed`; nothing
+    /// re-sends it. The banner must not promise that it will.
+    #[test]
+    fn an_upload_failure_banner_does_not_promise_an_automatic_retry() {
+        for label in [
+            health::LABEL_INGEST_UNREACHABLE,
+            health::LABEL_CLAIM_MINT_FAILED,
+        ] {
+            let copy = health_copy_for_label(label, None);
+            assert!(
+                !copy.detail.contains("it'll retry on its own"),
+                "{label}: {}",
+                copy.detail
+            );
+            assert!(
+                copy.detail.contains("won't be retried on its own"),
+                "{label} says what happens to the trace: {}",
+                copy.detail
             );
         }
     }

@@ -4,7 +4,7 @@
 //! HTTP acceptance coverage for participant reward offers and reservations.
 //! INTEGRATION: `tests.rs` includes this module after the reward routes are wired.
 
-use crate::tests::*;
+use crate::ingest::app::tests::*;
 
 // Mission HTTP/PG coverage stays nested so it can reuse this suite's private
 // real-router reward fixture without widening or splitting inherited helpers.

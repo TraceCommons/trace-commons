@@ -1,5 +1,6 @@
 {
   "revision": 4,
+  "has_launched": false,
   "accounts": [
     {
       "id": "00000000-0000-0000-0000-000000000001",
@@ -23,6 +24,24 @@
       "auth_state": "ready"
     }
   ],
+  "sign_in_accounts": [
+    {
+      "id": "6e656172-2d61-4900-8000-000000000001",
+      "tool": "claude",
+      "connection": "near_ai_signin",
+      "label": "NEAR AI",
+      "auth_state": "ready",
+      "verified_at": null
+    },
+    {
+      "id": "6e656172-2d61-4900-8000-000000000002",
+      "tool": "codex",
+      "connection": "near_ai_signin",
+      "label": "NEAR AI",
+      "auth_state": "ready",
+      "verified_at": null
+    }
+  ],
   "sessions": [
     {
       "id": "00000000-0000-0000-0000-000000000003",
@@ -39,15 +58,41 @@
   "defaults": [],
   "generations": {
     "claude": 0,
-    "codex": 0
+    "codex": 0,
+    "opencode": 0
   },
   "capabilities": {
     "managed_launch": true,
     "terminal_launch": true,
-    "terminal_destination": "Terminal"
+    "terminal_destination": "Terminal",
+    "terminal_current": "terminal",
+    "terminal_choices": [
+      {
+        "id": "terminal",
+        "name": "Terminal"
+      },
+      {
+        "id": "ghostty",
+        "name": "Ghostty"
+      }
+    ],
+    "near_ai_signin": true
   },
   "copy": {
     "title": "Managed sessions",
+    "provider_openai": "OpenAI",
+    "provider_anthropic": "Anthropic",
+    "provider_near_ai": "NEAR AI",
+    "collection_off": "Trace collection off",
+    "map_scope": "Session routes; model calls are unverified.",
+    "collection_disabled": "Trace collection off",
+    "model_required": "Enter a model ID to launch OpenCode.",
+    "tools_title": "Coding tools",
+    "tools_empty": "Install a coding tool to get started.",
+    "install": "Install",
+    "tool_unavailable": "{tool} wasn't found on this computer.",
+    "unsupported_version": "This tool version is not supported. Install a supported version, then try again.",
+    "update": "Update",
     "description": "Start a session with a saved account. Your other sessions keep running.",
     "launch": "Launch",
     "launch_title": "Launch managed session",
@@ -59,7 +104,7 @@
     "sign_in": "Sign-in",
     "exit_code": "Exit code {code}",
     "dismiss": "Dismiss",
-    "connecting": "Connecting…",
+    "connecting": "Connecting\u2026",
     "retry": "Retry",
     "rename": "Rename account",
     "label": "Name",
@@ -76,11 +121,20 @@
     "verify": "Check sign-in",
     "near_ai": "NEAR AI",
     "api_key": "API key",
+    "openai_api_key": "OpenAI API key",
     "subscription": "Subscription",
     "save_title": "Add account",
     "tool": "Tool",
     "claude": "Claude Code",
     "codex": "Codex",
+    "opencode": "OpenCode",
+    "model": "Model ID",
+    "collect_traces": "Collect this session",
+    "opencode_scope": "Uses only the selected key and model in an isolated profile. Project OpenCode settings and plugins are disabled. API key means an OpenAI key; NEAR AI uses a NEAR AI key.",
+    "collection_scope": "Collects this session when OpenCode exits, under your existing review and contribution settings. Other sessions created inside OpenCode are not collected.",
+    "collection_pending": "Trace collection pending",
+    "collection_collected": "Trace collected",
+    "collection_failed": "Trace collection failed; local session preserved",
     "connection": "Sign-in type",
     "label_placeholder": "e.g. Personal or Work",
     "login_description": "You'll sign in through the tool in Terminal.",
@@ -91,6 +145,7 @@
     "choose_account": "Choose account",
     "project_placeholder": "No folder chosen",
     "choose_folder": "Choose folder",
+    "folder_choice": "Choose a folder for {tool} to work in. It opens in {destination}.",
     "launch_scope": "Opens in {destination}.",
     "launch_default_scope": "Uses your NEAR AI default. Choose another saved account to change the backend. If no default is available, choose an account or add NEAR AI from Add account.",
     "launch_short": "Launch",
@@ -100,6 +155,7 @@
     "launch_unknown": "Refresh, then try again.",
     "action_failed": "That didn't work. Try again.",
     "accounts_title": "Saved accounts",
+    "accounts_refresh_accessibility": "Refresh saved accounts",
     "state_starting": "Starting",
     "state_running": "Running",
     "state_exited": "Exited",
@@ -108,9 +164,40 @@
     "auth_sign_in_required": "Needs sign-in",
     "auth_checking": "Checking",
     "auth_ready": "Ready",
-    "auth_unavailable": "Unavailable"
+    "auth_unavailable": "Unavailable",
+    "start_claude": "Start Claude Code",
+    "start_codex": "Start Codex",
+    "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
+    "sign_in_needed": "Sign in to NEAR AI to start a session.",
+    "sign_in_near_ai": "Sign in",
+    "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
+    "terminal_choice": "Open sessions in",
+    "terminal_not_found": "{terminal} wasn't found on this computer. Choose another in Settings.",
+    "show": "Show",
+    "stop": "Stop",
+    "stop_question": "Stop this session?",
+    "stop_description": "{tool} stops what it's doing in {folder}.",
+    "start_again": "Start again"
   },
   "launch_defaults": {
-    "claude": "00000000-0000-0000-0000-000000000004"
-  }
+    "claude": "00000000-0000-0000-0000-000000000004",
+    "codex": "6e656172-2d61-4900-8000-000000000002"
+  },
+  "tools": [
+    {
+      "tool": "claude",
+      "installed": true,
+      "install_url": "https://code.claude.com/docs/en/setup"
+    },
+    {
+      "tool": "codex",
+      "installed": true,
+      "install_url": "https://developers.openai.com/codex/cli/"
+    },
+    {
+      "tool": "opencode",
+      "installed": true,
+      "install_url": "https://opencode.ai/docs/"
+    }
+  ]
 }

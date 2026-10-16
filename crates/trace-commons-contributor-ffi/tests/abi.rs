@@ -1828,7 +1828,7 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
 
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
     let items = parsed.as_array().expect("an array");
-    assert_eq!(items.len(), 4, "one candidate per known agent: {json}");
+    assert_eq!(items.len(), 5, "one candidate per known agent: {json}");
 
     let sources: Vec<&str> = items
         .iter()
@@ -1839,7 +1839,10 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
     // an absent Gemini answer is not disqualifying, so the shells prompt for
     // it without refusing to start. Adding a source belongs here; adding one
     // to that gate would stop the daemon on every installed client.
-    assert_eq!(sources, vec!["claude-code", "codex", "gemini-cli", "cline"]);
+    assert_eq!(
+        sources,
+        vec!["claude-code", "codex", "gemini-cli", "cline", "opencode"]
+    );
 
     for item in items {
         // The fields a consent prompt needs to be specific rather than
@@ -3150,7 +3153,7 @@ fn the_witness_copy_call_carries_the_whole_card() {
         object["certificate_means"]
             .as_str()
             .unwrap()
-            .contains("not a statement that a session is clean")
+            .contains("not a statement that a trace is clean")
     );
 }
 
@@ -5245,7 +5248,7 @@ fn the_residual_secret_line_crosses_the_abi_with_its_sites() {
     );
     assert_eq!(
         take_owned(unsafe { tc_residual_secret_line_text(1, std::ptr::null()) }),
-        "A secret found here is still in what would be sent"
+        "1 secret is still in this trace"
     );
     let not_a_list = cstr_str(r#"{"a":1}"#);
     assert_eq!(
@@ -5502,7 +5505,7 @@ fn the_monitor_traces_copy_crosses_the_abi() {
     // Ron's #1146 inspector words (#1241) cross as nested tables.
     for (pointer, word) in [
         ("/tree/submit_count", "Submit \u{00b7} {count}"),
-        ("/tree/dismiss_session_title", "Dismiss this session?"),
+        ("/tree/dismiss_session_title", "Dismiss this trace?"),
         ("/inspector/contribution_rule", "Contribution rule"),
         ("/summary_panel/statistics", "Statistics"),
         ("/session_review/heading", "What would leave this computer"),
@@ -6163,4 +6166,42 @@ fn the_first_run_copy_crosses_the_abi() {
     let value = json_owned(tc_first_run_copy_json());
     assert_eq!(value, serde_json::to_value(first_run_copy()).unwrap());
     assert_eq!(value["frame"]["quick_setup"], "Quick setup");
+}
+
+/// #1407: Show, Stop and Start again reach the daemon through the same
+/// `tc_call` as every managed method, and each fails closed on a session
+/// the daemon never opened: a refusal label, never a signal or a window.
+#[test]
+fn managed_session_actions_cross_tc_call_and_refuse_an_unknown_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path());
+    let hello: serde_json::Value = serde_json::from_str(&call(h, "hello", "{}")).unwrap();
+    let methods = hello["result"]["methods"].as_array().unwrap();
+    let session = "00000000-0000-0000-0000-0000000000aa";
+    for (method, params) in [
+        (
+            "managed_session_focus",
+            format!(r#"{{"session_id":"{session}"}}"#),
+        ),
+        (
+            "managed_session_stop",
+            format!(r#"{{"session_id":"{session}"}}"#),
+        ),
+        (
+            "managed_session_start_again",
+            format!(r#"{{"session_id":"{session}","request_id":"{session}"}}"#),
+        ),
+    ] {
+        assert!(
+            methods.contains(&serde_json::json!(method)),
+            "{method} advertised"
+        );
+        let response: serde_json::Value = serde_json::from_str(&call(h, method, &params)).unwrap();
+        assert!(response["result"].is_null(), "{method}: {response}");
+        assert_eq!(
+            response["error"]["code"], "managed-not-found",
+            "{method}: {response}"
+        );
+    }
+    stop(h);
 }
