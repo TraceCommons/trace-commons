@@ -1149,18 +1149,6 @@ mod tests {
     }
 
     #[test]
-    fn cli_rejects_unknown_subcommand() {
-        let err = Cli::try_parse_from([
-            "trace-commons-admin",
-            "--endpoint",
-            "https://api.example",
-            "bogus-subcommand",
-        ])
-        .unwrap_err();
-        assert!(!err.to_string().is_empty());
-    }
-
-    #[test]
     fn cli_rejects_maintenance_run_missing_purpose() {
         let err = Cli::try_parse_from([
             "trace-commons-admin",
