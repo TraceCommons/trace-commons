@@ -63,17 +63,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-26
             target: aarch64-apple-darwin
           # macos-13 is a retired GitHub-hosted runner image. A job targeting
           # a label that no longer exists does not fail -- it queues forever,
           # confirmed empirically: this leg sat queued while macos-14,
           # windows-latest and ubuntu-24.04 all completed, and actionlint has
           # been flagging the label as unknown. Build x86_64 as a cross build
-          # on macos-14 instead: Xcode ships both SDKs, and the toolchain
+          # on macos-26 instead: Xcode ships both SDKs, and the toolchain
           # action below already installs whatever target is requested. Do
           # not "restore" macos-13 -- it will silently hang the whole run.
-          - os: macos-14
+          # Both legs use macos-26, the image the app release builds on, so
+          # the CLI and the app are built with the same Xcode and SDK.
+          - os: macos-26
             target: x86_64-apple-darwin
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu

@@ -1413,10 +1413,34 @@ fn runbook_states_why_zap_spares_the_device_key() {
     );
 }
 
+/// Every macOS leg of a release builds on the image the app release already
+/// uses, macos-26 (owner, 2026-10-16). An older image ships an older Xcode
+/// and SDK than the one the signed app is built with.
+#[test]
+fn release_macos_legs_run_on_macos_26() {
+    for path in [
+        ".github/workflows/release-apps.yml",
+        ".github/workflows/release-contributor.yml",
+    ] {
+        let workflow = read(path);
+        for line in workflow
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+        {
+            for old in ["macos-14", "macos-15", "macos-latest"] {
+                assert!(
+                    !line.contains(old),
+                    "{path}: release macOS legs run on macos-26, found {old}: {line}"
+                );
+            }
+        }
+    }
+}
+
 /// macos-13 is a retired GitHub-hosted runner image. A job targeting a
 /// retired image label does not fail -- it queues forever, confirmed
 /// empirically against this exact matrix entry. x86_64-apple-darwin must be
-/// built as a cross build on macos-14 instead.
+/// built as a cross build on macos-26 instead.
 #[test]
 fn no_workflow_references_the_retired_macos_13_runner() {
     for path in [
@@ -1435,7 +1459,7 @@ fn no_workflow_references_the_retired_macos_13_runner() {
             "{path}: macos-13 is a retired runner image -- a job targeting \
              it queues forever instead of failing, silently starving that \
              matrix leg. Build x86_64-apple-darwin as a cross build on \
-             macos-14 instead."
+             macos-26 instead."
         );
     }
     let contributor = read(".github/workflows/release-contributor.yml");
