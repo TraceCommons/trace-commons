@@ -1,5 +1,5 @@
 import { NavLink, useLocation } from "react-router-dom";
-import { navItems, routePaths } from "../app/routes";
+import { type NavItem, routePaths, visibleNavItems } from "../app/routes";
 import { BrandMarkIcon } from "./brand-mark-icon";
 import { NavIcon } from "./nav-icon";
 import { ThemeSelector } from "./theme-selector";
@@ -19,12 +19,14 @@ import {
 
 type NavbarProfile = { on_roster: boolean; handle: string | null };
 type AppNavbarProps = {
+  missionsEnabled: boolean;
   decisionsOwed: number | null;
   profile: NavbarProfile | null;
   profileState: "loading" | "ready" | "error";
 };
 
 export function AppNavbar({
+  missionsEnabled,
   decisionsOwed,
   profile,
   profileState,
@@ -51,7 +53,7 @@ export function AppNavbar({
           <SidebarGroupLabel>Workspace</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navItems
+              {visibleNavItems(missionsEnabled)
                 .filter((item) => item.group === "workspace")
                 .map((item) => (
                   <NavButton
@@ -67,7 +69,7 @@ export function AppNavbar({
           <SidebarGroupLabel>Account</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navItems
+              {visibleNavItems(missionsEnabled)
                 .filter((item) => item.group === "account")
                 .map((item) => (
                   <NavButton key={item.id} item={item} count={item.count} />
@@ -103,7 +105,7 @@ export function AppNavbar({
 }
 
 type NavButtonProps = {
-  item: (typeof navItems)[number];
+  item: NavItem;
   count?: number | null;
 };
 
