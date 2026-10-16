@@ -75,6 +75,35 @@ cargo test -p trace-commons-server --test trace_corpus_storage_contract
 cargo test -p trace-commons-server --test trace_corpus_pg_store   # requires PostgreSQL
 ```
 
+### Shared compile cache (recommended)
+
+Each worktree has its own `target/`, so a new worktree compiles the whole
+third-party dependency graph from scratch, and the copies add up: on one
+machine on 2026-10-15, sixteen worktree `target/` directories held 523 GB
+and filled the disk. Install sccache and point cargo at it in your
+user-level config:
+
+```bash
+brew install sccache        # or: cargo install sccache --locked
+```
+
+```toml
+# ~/.cargo/config.toml
+[build]
+rustc-wrapper = "sccache"
+```
+
+Worktrees then share compiled third-party crates. The workspace's own
+crates build incrementally under the dev profile, which sccache does not
+cache, so those still compile once per worktree. `sccache --show-stats`
+shows the hit rate, the cache location and its size limit (10 GiB by
+default; on macOS, raise it with `[cache.disk]` `size = <bytes>` in
+`~/Library/Application Support/Mozilla.sccache/config`). With the cache in
+place, deleting the `target/` of a worktree whose PR has merged is cheap.
+
+Never set `rustc-wrapper` in the repository's own `.cargo/config.toml`:
+CI runners do not install sccache, and every build there would fail.
+
 The ingest service's PostgreSQL tests (`ingest::app::`, in the library)
 self-skip without `TRACE_COMMONS_PG_TEST_DATABASE_URL`, and the
 `postgres-suites` job runs only named slices of them. To run all of them
