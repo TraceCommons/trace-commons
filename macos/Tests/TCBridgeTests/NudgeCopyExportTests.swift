@@ -67,7 +67,7 @@ final class NudgeCopyExportTests: XCTestCase {
         let tags = try XCTUnwrap(NudgeEntryTags.decode(
             fromJSON: TCCoreCopy.nudgeEntryTagsJSON(entryJSON: NudgeEntryTags.input(for: entry))))
         XCTAssertEqual(tags.missionFit, "Fits a mission")
-        XCTAssertEqual(tags.estimateBand, "Estimate: about 2 to 4.5 credit")
+        XCTAssertEqual(tags.estimateBand, "Estimate: about 2 to 4.5 of inference")
         XCTAssertEqual(tags.estimateTier, "Higher estimate")
         XCTAssertNotNil(tags.estimateExplainer)
     }

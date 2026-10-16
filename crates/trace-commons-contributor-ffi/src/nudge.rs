@@ -189,7 +189,10 @@ mod tests {
             r#"{"entry_id":"e1","mission_fit":1,"credit_estimate":{"low":2.0,"high":4.5,"tier":"higher","calibration":"lef1.t2/cq3","basis":"published","drawn":true}}"#,
         ));
         assert_eq!(value["mission_fit"], "Fits a mission");
-        assert_eq!(value["estimate_band"], "Estimate: about 2 to 4.5 credit");
+        assert_eq!(
+            value["estimate_band"],
+            "Estimate: about 2 to 4.5 of inference"
+        );
         assert_eq!(value["estimate_tier"], "Higher estimate");
         assert_eq!(
             value["estimate_explainer"],
