@@ -88,8 +88,10 @@ card's only switch. Goals and "Not useful" are stored as rule IDs and Monday
 dates only. Feed T sessions carry no reference, so its cards do not drill
 down to sessions.
 
-Insights is a Home page, so it draws in the main window's main pane:
-440pt at the window's default width, 408pt inside the pane's insets. Every
+Insights is the main window's fourth tab (Cmd-4; 2026-10-15, before that
+a Home page, and Home's Insights card now switches to the tab). It draws in
+the main pane: 440pt at the window's default width, 408pt inside the
+pane's insets. Every
 tab is laid out for that width (direction B, 2026-10-15): one column of
 cards, and a second only when the pane is wider than about 690pt. Overview
 puts the week and the Sessions figure on one row, then one card per harness
@@ -99,7 +101,12 @@ legend under the pointer. Codex records whole-trace totals, so its card says
 so instead of drawing days. Charts plot on `chartSurface` in `chartSeries1`
 to `chartSeries4` (the Near AI OS chart tokens), each 3:1 or more on it. A
 figure that does not drill is drawn plain. Drill-down rows are two lines,
-not a table. `InsightsPaneWidthRenderTests` renders each tab at 408pt from
+not a table. Every tab keeps one type and spacing scale
+(`InsightsLayout`): each section is a card under a title at the card-title
+step, groups inside it open with a body-strong heading, and explanatory
+notices sit behind an "i" (`InsightsInfo`, named with the core's "More about
+{title}") beside what they explain; status, failures, prerequisites and an
+irreversible consequence stay on the page. `InsightsPaneWidthRenderTests` renders each tab at 408pt from
 the sample week; set `TC_INSIGHTS_RENDER_DIR` (and `TC_GLASS_THEME=flat`) to
 keep the PNGs.
 

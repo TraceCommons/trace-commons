@@ -17,11 +17,15 @@ final class MonitorHomeInsightsTests: XCTestCase {
         XCTAssertTrue(nav.contains("case insights\n"))
         XCTAssertTrue(nav.contains("case missionDrafts\n"))
         let home = try MonitorNavigationTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("InsightsView(storeSelection: insightsStoreSelection, daemon: store.client)"))
+        // Insights is its own tab (2026-10-15): Home's card switches to it,
+        // and the window hosts it.
+        XCTAssertFalse(home.contains("InsightsView("))
         XCTAssertTrue(home.contains("MissionDraftsView(model: missionDrafts)"))
-        XCTAssertTrue(home.contains("openInsights: { page = .insights }"))
+        XCTAssertTrue(home.contains("openInsights: openInsights"))
         XCTAssertTrue(home.contains("openMissionDrafts: { page = .missionDrafts }"))
         let window = try MonitorNavigationTests.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("InsightsView(storeSelection: insightsStoreSelection, daemon: home.client)"))
+        XCTAssertTrue(window.contains("openInsights: { tab = .insights }"))
         XCTAssertTrue(window.contains("insightsStoreSelection: insightsStoreSelection"))
         XCTAssertTrue(window.contains("missionDrafts: missionDrafts"))
         let main = try MonitorNavigationTests.text("TraceCommonsAppMain.swift")
@@ -36,8 +40,8 @@ final class MonitorHomeInsightsTests: XCTestCase {
     func test_theHomeCardsTakeTheirHeadingsFromTheCore() throws {
         let home = try MonitorNavigationTests.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains("private static let insightsCopy = TCInsights.copy()"))
-        // One reading: the card and the shell's breadcrumb both take it from
-        // `HomeTabView.hostedHeading` (Ron's breadcrumb, #1241).
+        // One reading: Home's card and the Insights tab's name both take it
+        // from `HomeTabView.insightsHeading` (its own tab since 2026-10-15).
         XCTAssertEqual(home.components(separatedBy: #"Self.insightsCopy?["title"]"#).count - 1, 1)
         XCTAssertTrue(home.contains("case .missionDrafts: HomeFormat.cardHeading(MonitorWords.missions)"))
         XCTAssertTrue(home.contains("systemImage: Self.catalogueIcon, title: catalogue,"))

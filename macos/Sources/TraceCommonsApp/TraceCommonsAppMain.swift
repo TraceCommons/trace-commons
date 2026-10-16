@@ -238,6 +238,7 @@ struct MonitorCommands: Commands {
         case .home: "1"
         case .inference: "2"
         case .traces: "3"
+        case .insights: "4"
         }
     }
 
@@ -247,6 +248,7 @@ struct MonitorCommands: Commands {
         case .home: .home(.overview)
         case .inference: .inference
         case .traces: .traces(entryId: nil)
+        case .insights: .insights
         }
     }
 

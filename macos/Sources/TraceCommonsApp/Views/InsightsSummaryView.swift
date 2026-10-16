@@ -11,51 +11,62 @@ struct InsightsSummaryView: View {
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(text("summary_title")).insightsTitle()
-            Text(text("summary_scope"))
-            SummaryCountRow(label: text("summary_snapshots"), count: summary.saved_snapshots)
-            if summary.saved_snapshots == 0 { Text(text("summary_empty")) }
-            Text("\(text("provider")): \(summary.provider.id) · \(summary.provider.version)")
-                .glassType(GlassTokens.TypeScale.caption)
-            Text("\(text("rubric")): \(summary.provider.rubric_version)").glassType(GlassTokens.TypeScale.caption)
-            Text("\(text("summary_analysis_range")): \(analysisRange)").glassType(GlassTokens.TypeScale.caption)
-            SummaryCountRow(label: text("summary_assessed"), count: summary.user_reported.assessed_snapshots)
-            SummaryCountRow(label: text("summary_unassessed"), count: summary.user_reported.unassessed_snapshots)
-            HStack(alignment: .top, spacing: 24) {
+        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+            // What the summary covers, who computed it, and what it cannot
+            // say, behind the title's "i".
+            VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                InsightsSectionTitle(text("summary_title"), info: [
+                    text("summary_scope"),
+                    "\(text("provider")): \(summary.provider.id) · \(summary.provider.version)",
+                    "\(text("rubric")): \(summary.provider.rubric_version)",
+                ] + summary.limitations.map { text("summary_limitation_" + $0.rawValue) })
+                Text("\(text("summary_analysis_range")): \(analysisRange)").insightsCaption()
+            }
+            VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                SummaryCountRow(label: text("summary_snapshots"), count: summary.saved_snapshots)
+                if summary.saved_snapshots == 0 { Text(text("summary_empty")).insightsNote() }
+                SummaryCountRow(label: text("summary_assessed"), count: summary.user_reported.assessed_snapshots)
+                SummaryCountRow(label: text("summary_unassessed"), count: summary.user_reported.unassessed_snapshots)
+            }
+            HStack(alignment: .top, spacing: InsightsLayout.groupGap) {
                 categories
                 outcomes
             }
-            Text(text("summary_metrics")).insightsHeading()
-            ForEach(summary.metrics) { metric in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(text("metric_" + metric.id)).insightsHeading()
-                    Text("\(text("summary_observed_sum")): \(InsightsSummaryFormatting.value(metric.observed_value_sum, unknown: text("unknown")))")
-                    Text("\(text("summary_available")): \(metric.available_snapshots.formatted()) · \(text("summary_missing")): \(metric.missing_snapshots.formatted())")
-                        .glassType(GlassTokens.TypeScale.caption)
-                    Text("\(text("summary_record_coverage")): \(metric.record_coverage.observed.formatted()) / \(metric.record_coverage.total.formatted()) \(text("summary_unit_" + metric.coverage_unit.rawValue))")
-                        .glassType(GlassTokens.TypeScale.caption)
-                    evidenceLinks(metric.evidence_snapshot_ids)
+            VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                InsightsGroupHeading(text("summary_metrics"))
+                ForEach(summary.metrics) { metric in
+                    metricView(metric)
                 }
             }
-            Text(text("summary_limitations")).insightsHeading()
-            ForEach(summary.limitations, id: \.self) { limitation in
-                Text(text("summary_limitation_" + limitation.rawValue)).glassType(GlassTokens.TypeScale.label.weight(.regular))
-            }
-            Text(text("summary_evidence")).insightsHeading()
-            if summary.snapshots.isEmpty { Text(text("summary_no_evidence")) }
-            ForEach(summary.snapshots) { snapshot in
-                Button { openSnapshot(snapshot.id) } label: {
-                    VStack(alignment: .leading) {
-                        Text("\(text("summary_open_snapshot")) · \(text(snapshot.source_format))")
-                        Text(InsightsDate.label(snapshot.analyzed_at)).glassType(GlassTokens.TypeScale.caption)
-                        Text(snapshot.id).insightsMono().lineLimit(2)
-                    }.frame(maxWidth: .infinity, alignment: .leading).insightsRowCard()
+            VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                InsightsGroupHeading(text("summary_evidence"))
+                if summary.snapshots.isEmpty { Text(text("summary_no_evidence")).insightsNote() }
+                ForEach(summary.snapshots) { snapshot in
+                    Button { openSnapshot(snapshot.id) } label: {
+                        VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                            Text("\(text("summary_open_snapshot")) · \(text(snapshot.source_format))")
+                            Text(InsightsDate.label(snapshot.analyzed_at)).insightsCaption()
+                            Text(snapshot.id).insightsMono().lineLimit(2)
+                        }.frame(maxWidth: .infinity, alignment: .leading).insightsRowCard()
+                    }
+                    .buttonStyle(GlassPressStyle())
                 }
-                .buttonStyle(GlassPressStyle())
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func metricView(_ metric: SavedInsightsSummary.Metric) -> some View {
+        VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+            Text(text("metric_" + metric.id))
+            Text("\(text("summary_observed_sum")): \(InsightsSummaryFormatting.value(metric.observed_value_sum, unknown: text("unknown")))")
+                .monospacedDigit()
+            Text("\(text("summary_available")): \(metric.available_snapshots.formatted()) · \(text("summary_missing")): \(metric.missing_snapshots.formatted())")
+                .insightsCaption()
+            Text("\(text("summary_record_coverage")): \(metric.record_coverage.observed.formatted()) / \(metric.record_coverage.total.formatted()) \(text("summary_unit_" + metric.coverage_unit.rawValue))")
+                .insightsCaption()
+            evidenceLinks(metric.evidence_snapshot_ids)
+        }
     }
 
     private var analysisRange: String {
@@ -64,8 +75,8 @@ struct InsightsSummaryView: View {
     }
 
     private var categories: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(text("summary_categories")).insightsHeading()
+        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+            InsightsGroupHeading(text("summary_categories"))
             ForEach(summary.user_reported.categories) { category in
                 SummaryCountRow(label: text("category_" + category.category), count: category.snapshots)
                 evidenceLinks(category.evidence_snapshot_ids)
@@ -74,8 +85,8 @@ struct InsightsSummaryView: View {
     }
 
     private var outcomes: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(text("summary_outcomes")).insightsHeading()
+        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+            InsightsGroupHeading(text("summary_outcomes"))
             ForEach(summary.user_reported.outcomes) { outcome in
                 SummaryCountRow(label: text("outcome_" + outcome.outcome), count: outcome.snapshots)
                 evidenceLinks(outcome.evidence_snapshot_ids)

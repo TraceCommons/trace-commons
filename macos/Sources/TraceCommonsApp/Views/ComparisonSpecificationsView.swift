@@ -9,19 +9,19 @@ struct ComparisonSpecificationsView: View {
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(text("comparison_specification_title")).insightsTitle()
-                Spacer(); Button(text("comparison_specification_refresh")) { model.refresh() }
+        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+            // That a comparison only looks back, behind the title's "i".
+            InsightsSectionTitle(title: text("comparison_specification_title"),
+                                 info: [text("comparison_retrospective_notice")]) {
+                Button(text("comparison_specification_refresh")) { model.refresh() }
                     .accessibilityLabel(text("comparison_specification_refresh_accessibility"))
                 if model.busy { GlassSpinner() }
             }
-            Text(text("comparison_retrospective_notice")).foregroundStyle(GlassColor.textSecondary)
             if let notice = model.notice { Text(text(notice)).foregroundStyle(GlassStatus.on.textColor) }
             if let error = model.error { Text(text(error)).foregroundStyle(GlassStatus.outside.textColor) }
             draft
             if let specification = model.previewSpecification, let result = model.previewResult {
-                InsightsRule(); Text(text("comparison_preview_notice")).insightsHeading()
+                InsightsGroupHeading(text("comparison_preview_notice"))
                 specificationView(specification); resultView(result)
                 // Save is short; what it cannot undo is said beside it.
                 Text(text("comparison_specification_immutable_notice")).insightsCaption()
@@ -34,8 +34,8 @@ struct ComparisonSpecificationsView: View {
     }
 
     private var draft: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(text("comparison_specification_draft")).insightsHeading()
+        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+            InsightsGroupHeading(text("comparison_specification_draft"))
             if model.options.isEmpty { Text(text("comparison_specification_need_context")) }
             GlassSelect(text("comparison_specification_stratum"), selection: Binding(
                 get: { model.selectedStratumID }, set: model.selectStratum),
@@ -49,8 +49,8 @@ struct ComparisonSpecificationsView: View {
                     Text(option.stratum.project_id).insightsMono()
                     Text(option.stratum.configuration_fingerprint).insightsMono()
                 }
-                Text(text("comparison_specification_candidate_declarations")).insightsHeading()
-                Text(text("comparison_cohort_declaration_notice")).insightsCaption()
+                InsightsGroupHeading(text("comparison_specification_candidate_declarations"),
+                                     info: [text("comparison_cohort_declaration_notice")])
                 if option.cohortCandidates.count < 2 {
                     Text(text("comparison_specification_need_cohorts"))
                 }
@@ -64,8 +64,10 @@ struct ComparisonSpecificationsView: View {
                        displayedComponents: .date)
             DatePicker(text("comparison_specification_date_end"), selection: $model.dateEnd,
                        displayedComponents: .date)
-            DatePicker(text("comparison_specification_cutoff"), selection: $model.evidenceCutoff)
-            Text(text("comparison_specification_cutoff_notice")).insightsCaption()
+            HStack(spacing: GlassTokens.Space.s4) {
+                DatePicker(text("comparison_specification_cutoff"), selection: $model.evidenceCutoff)
+                InsightsInfo(text("comparison_specification_cutoff"), [text("comparison_specification_cutoff_notice")])
+            }
             Button(text("comparison_specification_preview")) { model.preview() }.disabled(!model.canDraft)
         }.onChange(of: model.dateStart) { _, _ in model.draftChanged() }
          .onChange(of: model.dateEnd) { _, _ in model.draftChanged() }
@@ -73,8 +75,8 @@ struct ComparisonSpecificationsView: View {
     }
 
     private var saved: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(text("comparison_specification_saved")).insightsHeading()
+        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+            InsightsGroupHeading(text("comparison_specification_saved"))
             if model.specifications.isEmpty { Text(text("comparison_specifications_empty")) }
             ForEach(model.specifications) { spec in
                 Button { model.select(spec.id) } label: {
@@ -118,10 +120,13 @@ struct ComparisonSpecificationsView: View {
     }
 
     private func resultView(_ result: DescriptiveComparisonResult) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(text("comparison_specification_result")).insightsHeading()
-            Text(text(result.exact_estimation == nil ? "comparison_descriptive_notice" : "comparison_exact_notice"))
-                .foregroundStyle(GlassColor.textSecondary)
+        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+            // What the result is and what its counts are out of, behind the
+            // heading's "i".
+            InsightsGroupHeading(text("comparison_specification_result"), info: [
+                text(result.exact_estimation == nil ? "comparison_descriptive_notice" : "comparison_exact_notice"),
+                text("comparison_denominator_notice"),
+            ])
             if result.included_task_ids.isEmpty { Text(text("comparison_no_eligible_evidence")) }
             ForEach(result.cohorts) { cohort in
                 VStack(alignment: .leading) {
@@ -136,7 +141,6 @@ struct ComparisonSpecificationsView: View {
                     Text("\(text("comparison_specification_observed_tokens")): \(cohort.usage.observed_attributed_tokens)")
                 }.insightsCard()
             }
-            Text(text("comparison_denominator_notice")).insightsCaption()
             if let exact = result.exact_estimation { exactResult(exact, cohorts: result.cohorts) }
             if !result.included_task_ids.isEmpty {
                 Text(text("comparison_specification_included")).insightsHeading()
@@ -161,9 +165,8 @@ struct ComparisonSpecificationsView: View {
     private func exactResult(_ exact: QualifiedExactEstimation,
                              cohorts: [CohortDescriptiveResult]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("\(exact.cohort_labels[1]) \(text("comparison_exact_minus")) \(exact.cohort_labels[0])")
-                .insightsHeading()
-            Text(text("comparison_exact_orientation")).insightsCaption()
+            InsightsGroupHeading("\(exact.cohort_labels[1]) \(text("comparison_exact_minus")) \(exact.cohort_labels[0])",
+                                 info: [text("comparison_exact_orientation"), text("comparison_exact_positive_direction")])
             ForEach(Array(zip(exact.assessed_counts, cohorts).enumerated()), id: \.offset) { _, row in
                 Text("\(row.1.cohort_label): \(text("comparison_specification_assessed")): \(row.0.total) / \(text("comparison_specification_included")): \(row.1.included_tasks)")
             }
@@ -182,7 +185,6 @@ struct ComparisonSpecificationsView: View {
                         Text(text(decisionKey(row.1.decision))).foregroundStyle(GlassColor.textSecondary)
                     }.padding(.vertical, 3).id(index)
                 }
-                Text(text("comparison_exact_positive_direction")).insightsCaption()
             }
             InsightsDisclosure(text("comparison_task_advanced_evidence")) {
                 Text(exact.output_digest)

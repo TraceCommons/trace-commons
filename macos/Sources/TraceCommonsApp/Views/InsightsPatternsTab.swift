@@ -42,7 +42,6 @@ struct InsightsPatternsTab: View {
                             }
                         }
                     }
-                    Text(text("analytics_patterns_overlap")).insightsCaption()
                     LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                         rereadTable(patterns)
                         if patterns.feed == "counter_pass", let found = comparisons.comparisons {
@@ -75,18 +74,20 @@ struct InsightsPatternsTab: View {
                     }
                 }
             }
-            Text(text("analytics_patterns_intro")).insightsNote()
-                .fixedSize(horizontal: false, vertical: true)
-            InsightsCoverageLine(coverage: patterns.coverage, copy: copy)
-            ForEach(InsightsOverviewWords.feedLines(patterns.feed, copy: copy), id: \.self) { line in
-                Text(line).insightsCaption()
-            }
+            // How the patterns are found, that they overlap, and which feed
+            // this is: behind the coverage line's "i".
+            InsightsCoverageLine(
+                coverage: patterns.coverage, copy: copy,
+                info: [text("analytics_patterns_intro"), text("analytics_patterns_overlap")]
+                    + InsightsOverviewWords.feedLines(patterns.feed, copy: copy))
         }
     }
 
     private func patternCard(_ card: InsightsPatternCard, threshold: UInt64) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            Text(InsightsPatternsWords.title(card.kind, copy: copy)).insightsTitle()
+            // How the figure was arrived at, behind the title's "i".
+            InsightsSectionTitle(InsightsPatternsWords.title(card.kind, copy: copy),
+                                 info: InsightsPatternsWords.basisLines(card, copy: copy))
             // The token figure is the headline; the count sits beneath it.
             HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s5) {
                 Text(figure(card.tokens)).insightsFigure()
@@ -97,9 +98,6 @@ struct InsightsPatternsTab: View {
             Text(InsightsPatternsWords.countLine(card, threshold: threshold, copy: copy)).insightsNote()
                 .fixedSize(horizontal: false, vertical: true)
             weeklyBars(card)
-            ForEach(InsightsPatternsWords.basisLines(card, copy: copy), id: \.self) { line in
-                Text(line).insightsCaption()
-            }
             if card.sessions > 0, model.counter == nil {
                 Button(InsightsPatternsWords.seeSessions(card, copy: copy)) {
                     if model.sessions?.pattern == card.kind { model.hideSessions() } else { model.showSessions(card.kind) }
@@ -108,7 +106,7 @@ struct InsightsPatternsTab: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .insightsCard()
+        .insightsSection()
     }
 
     /// A goal's tokens on the card it covers (feed T only).
@@ -181,8 +179,7 @@ struct InsightsPatternsTab: View {
     /// not colour alone. Marks, not a run of weeks (owner decision D1, open).
     private func goals(_ found: InsightsComparisons) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            Text(text("analytics_goals_title")).insightsTitle()
-            Text(text("analytics_goals_note")).insightsCaption()
+            InsightsSectionTitle(text("analytics_goals_title"), info: [text("analytics_goals_note")])
             VStack(spacing: 0) {
                 ForEach(Array(found.goals.enumerated()), id: \.element.id) { index, goal in
                     GlassTableRow(first: index == 0) {
@@ -245,7 +242,7 @@ struct InsightsPatternsTab: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsCard()
+        .insightsSection()
     }
 
     /// The re-read files in four columns sized for the main pane; the long
@@ -285,7 +282,7 @@ struct InsightsPatternsTab: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsCard()
+        .insightsSection()
     }
 }
 
@@ -340,6 +337,6 @@ struct InsightsPatternSessionsView: View {
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsCard()
+        .insightsSection()
     }
 }

@@ -65,9 +65,9 @@ struct InsightsSessionsTab: View {
         HStack(alignment: .top, spacing: GlassTokens.Space.s5) {
             InsightsHarnessTile(source: drill.source ?? "")
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                Text(InsightsSessionsWords.header(drill, copy: copy)).insightsTitle()
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(text("analytics_feed_saved")).insightsCaption()
+                // Which traces are counted, behind the header's "i".
+                InsightsSectionTitle(InsightsSessionsWords.header(drill, copy: copy),
+                                     info: [text("analytics_feed_saved")])
                 if !drill.reasons.isEmpty {
                     Text(drill.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
                         .joined(separator: " \u{b7} "))
@@ -131,12 +131,15 @@ struct InsightsSessionsTab: View {
                 }
             }
             Chart {
+                // The turn being read, one turn wide. The axis is Double so
+                // the wash can span exactly the turn's band.
                 if let readTurn {
-                    RectangleMark(x: .value(text("analytics_turn"), readTurn), width: .ratio(1))
+                    RectangleMark(xStart: .value(text("analytics_turn"), Double(readTurn) - 0.5),
+                                  xEnd: .value(text("analytics_turn"), Double(readTurn) + 0.5))
                         .foregroundStyle(GlassColor.ink(0.08))
                 }
                 ForEach(segments) { segment in
-                    BarMark(x: .value(text("analytics_turn"), Int(segment.turn)),
+                    BarMark(x: .value(text("analytics_turn"), Double(segment.turn)),
                             y: .value(text("analytics_card_tokens"), segment.tokens))
                     .foregroundStyle(by: .value(text("analytics_card_tokens"), segment.series))
                 }
@@ -147,7 +150,7 @@ struct InsightsSessionsTab: View {
                         Text(figure(drill.long_context_threshold)).insightsTick(current: true)
                     }
                 ForEach(drill.markers) { marker in
-                    RuleMark(x: .value(text("analytics_turn"), Int(marker.turn_ordinal)))
+                    RuleMark(x: .value(text("analytics_turn"), Double(marker.turn_ordinal)))
                         .lineStyle(StrokeStyle(lineWidth: 1))
                         .foregroundStyle(readTurn == Int(marker.turn_ordinal) ? GlassColor.textPrimary : GlassColor.textTertiary)
                         .annotation(position: .top, spacing: 0) {
@@ -157,9 +160,11 @@ struct InsightsSessionsTab: View {
             }
             .chartForegroundStyleScale(domain: series.map { text($0.key) }, range: series.map { $0.color.color })
             .chartLegend(.hidden)
-            .chartXSelection(value: $readTurn)
+            .chartXSelection(value: Binding(
+                get: { readTurn.map(Double.init) },
+                set: { readTurn = $0.map { min(max(Int($0.rounded()), Int(first)), Int(last)) } }))
             .chartXAxis(.hidden)
-            .chartXScale(domain: Int(first) - 1...Int(max(last, first)) + 1)
+            .chartXScale(domain: Double(first) - 1...Double(max(last, first)) + 1)
             .chartYScale(domain: 0...max(top, 1))
             .chartYAxis {
                 AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
@@ -181,37 +186,40 @@ struct InsightsSessionsTab: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsCard()
+        .insightsSection()
     }
 
-    /// A marker: its letter, the core's lines, and its turn. Pressing it
-    /// reads its turn on the chart; pressing it again reads the session.
+    /// The derivation a marker's lines end with ("Inferred from token
+    /// counts."), which goes behind the title's "i"; `nil` when the marker
+    /// carries none.
+    static let derivationBases: Set<String> = ["inferred_from_counters", "from_counters", "from_tool_calls"]
+
+    /// A marker: its letter, the core's lines with the derivation behind an
+    /// "i", and its turn, which reads that turn on the chart (a second
+    /// press reads the session). The card itself is not a button, so the
+    /// "i" is never a control inside a control.
     private func markerCard(_ marker: InsightsDrillMarker, threshold: UInt64) -> some View {
-        let lines = InsightsSessionsWords.markerLines(marker, threshold: threshold, copy: copy)
+        var lines = InsightsSessionsWords.markerLines(marker, threshold: threshold, copy: copy)
+        let derivation = Self.derivationBases.contains(marker.basis) && lines.count > 1 ? lines.removeLast() : nil
         let turn = Int(marker.turn_ordinal)
-        return Button {
-            readTurn = readTurn == turn ? nil : turn
-        } label: {
-            HStack(alignment: .top, spacing: GlassTokens.Space.s5) {
-                InsightsMarkerBadge(letter: marker.letter)
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
-                        if index == 0 {
-                            Text(line).insightsHeading()
-                        } else {
-                            Text(line).insightsNote()
-                        }
-                    }
+        return HStack(alignment: .top, spacing: GlassTokens.Space.s5) {
+            InsightsMarkerBadge(letter: marker.letter)
+            VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                if let title = lines.first {
+                    InsightsGroupHeading(title, info: derivation.map { [$0] } ?? [])
                 }
-                .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: GlassTokens.Space.s4)
-                Text(InsightsSessionsWords.turnLabel(marker.turn_ordinal, copy: copy)).insightsTick(current: readTurn == turn)
+                ForEach(Array(lines.dropFirst().enumerated()), id: \.offset) { _, line in
+                    Text(line).insightsNote().fixedSize(horizontal: false, vertical: true)
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .insightsRowCard()
+            Spacer(minLength: GlassTokens.Space.s4)
+            Button(InsightsSessionsWords.turnLabel(marker.turn_ordinal, copy: copy)) {
+                readTurn = readTurn == turn ? nil : turn
+            }
+            .buttonStyle(GlassButtonStyle(.link))
         }
-        .buttonStyle(GlassPressStyle())
-        .accessibilityElement(children: .combine)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .insightsSection()
     }
 }
 

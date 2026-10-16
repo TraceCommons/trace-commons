@@ -103,15 +103,101 @@ struct InsightsRule: View {
 /// column of cards there; a second column appears only when the pane is
 /// wider (the map hidden in a zoomed window).
 enum InsightsLayout {
-    /// A column's narrowest width. Two columns need about 690pt.
+    /// A column's narrowest width. Two columns need about 700pt.
     static let columnMinimum: CGFloat = 340
 
     static var columns: [GridItem] {
-        [GridItem(.adaptive(minimum: columnMinimum), spacing: GlassTokens.Space.cardGap, alignment: .top)]
+        [GridItem(.adaptive(minimum: columnMinimum), spacing: sectionGap, alignment: .top)]
     }
 
-    /// Between a tab's sections.
-    static let sectionGap: CGFloat = GlassTokens.Space.s7
+    /// The type and spacing scale every Insights tab keeps (owner,
+    /// 2026-10-15: sections ran together, Analyze worst). A section is a
+    /// card under a title at the card-title step; a group inside it opens
+    /// with a heading at the body-strong step; lines in a group sit close,
+    /// groups apart, sections further apart again.
+    ///
+    /// Between sections (cards).
+    static let sectionGap: CGFloat = GlassTokens.Space.s8
+    /// Between groups inside a section.
+    static let groupGap: CGFloat = GlassTokens.Space.s8
+    /// From a heading to what it heads.
+    static let headingGap: CGFloat = GlassTokens.Space.s4
+    /// Between the lines of one group.
+    static let lineGap: CGFloat = GlassTokens.Space.s2
+}
+
+extension View {
+    /// A section: a card on the pane (cards inside it are quiet).
+    func insightsSection() -> some View {
+        GlassCard { self }
+    }
+}
+
+/// Explanatory lines behind an "i" beside what they explain (owner,
+/// 2026-10-15: on every Insights tab the notices move into info tooltips).
+/// The popover is the core's lines; its name is the core's "More about
+/// {title}". Nothing is drawn when there are no lines. Status, failures and
+/// what an action needs first stay on the page.
+struct InsightsInfo: View {
+    let title: String
+    let lines: [String]
+
+    init(_ title: String, _ lines: [String]) {
+        self.title = title
+        self.lines = lines
+    }
+
+    var body: some View {
+        let shown = lines.filter { !$0.isEmpty }
+        if !shown.isEmpty {
+            GlassInfoButton(SessionReviewCard.moreAbout(title), text: shown.joined(separator: "\n\n"))
+        }
+    }
+}
+
+/// A section's title at the card-title step, its info, and whatever sits
+/// at its trailing edge (a refresh, a link).
+struct InsightsSectionTitle<Trailing: View>: View {
+    let title: String
+    let info: [String]
+    @ViewBuilder var trailing: () -> Trailing
+
+    var body: some View {
+        HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
+            Text(title).insightsTitle()
+                .fixedSize(horizontal: false, vertical: true)
+            InsightsInfo(title, info)
+            Spacer(minLength: GlassTokens.Space.s4)
+            trailing()
+        }
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
+extension InsightsSectionTitle where Trailing == EmptyView {
+    init(_ title: String, info: [String] = []) {
+        self.init(title: title, info: info, trailing: { EmptyView() })
+    }
+}
+
+/// A group's heading at the body-strong step, with its info.
+struct InsightsGroupHeading: View {
+    let title: String
+    var info: [String] = []
+
+    init(_ title: String, info: [String] = []) {
+        self.title = title
+        self.info = info
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
+            Text(title).insightsHeading()
+                .fixedSize(horizontal: false, vertical: true)
+            InsightsInfo(title, info)
+        }
+        .accessibilityAddTraits(.isHeader)
+    }
 }
 
 extension View {
@@ -175,6 +261,9 @@ enum InsightsSeries: CaseIterable {
 struct InsightsCoverageLine: View {
     let coverage: InsightsWeekCoverage
     let copy: [String: String]
+    /// What qualifies the counts (which feed, undated and overlapping
+    /// traces, a tab's own notes), behind the line's "i".
+    var info: [String] = []
 
     static func status(_ coverage: InsightsWeekCoverage) -> GlassStatus {
         if coverage.sessions == 0 { return .off }
@@ -187,6 +276,8 @@ struct InsightsCoverageLine: View {
                 .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
             Text(InsightsOverviewWords.coverageLine(coverage, copy: copy)).insightsNote()
                 .fixedSize(horizontal: false, vertical: true)
+            InsightsInfo(copy["analytics_drill_coverage"] ?? "", info)
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
         }
     }
 }

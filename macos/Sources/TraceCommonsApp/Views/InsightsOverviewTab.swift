@@ -107,28 +107,31 @@ struct InsightsOverviewTab: View {
                     }
                 }
             }
-            InsightsCoverageLine(coverage: overview.coverage, copy: copy)
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                if overview.undated_sessions > 0 {
-                    Text(InsightsOverviewWords.fill(text("analytics_coverage_undated"),
-                                                    ["d": String(overview.undated_sessions)])).insightsCaption()
-                }
-                if let overlap = overview.coverage.reasons["reimport_overlap"], overlap > 0 {
-                    Text(InsightsOverviewWords.fill(text("analytics_coverage_overlap"),
-                                                    ["r": String(overlap)])).insightsCaption()
-                }
-                ForEach(InsightsOverviewWords.feedLines(overview.feed, copy: copy), id: \.self) { line in
-                    Text(line).insightsCaption()
-                }
-                if overview.feed == "saved", let notice { Text(notice).insightsCaption() }
-            }
+            InsightsCoverageLine(coverage: overview.coverage, copy: copy, info: headerInfo(overview))
         }
+    }
+
+    /// What qualifies the week's counts, behind the coverage line's "i":
+    /// undated and overlapping traces, which feed this is, and why
+    /// watched-folder counting is not showing.
+    private func headerInfo(_ overview: InsightsWeekOverview) -> [String] {
+        var lines: [String] = []
+        if overview.undated_sessions > 0 {
+            lines.append(InsightsOverviewWords.fill(text("analytics_coverage_undated"),
+                                                    ["d": String(overview.undated_sessions)]))
+        }
+        if let overlap = overview.coverage.reasons["reimport_overlap"], overlap > 0 {
+            lines.append(InsightsOverviewWords.fill(text("analytics_coverage_overlap"), ["r": String(overlap)]))
+        }
+        lines += InsightsOverviewWords.feedLines(overview.feed, copy: copy)
+        if overview.feed == "saved", let notice { lines.append(notice) }
+        return lines
     }
 
     /// The weekly summary card, on the first opens after a week closes.
     private func recapCard(_ recap: InsightsRecap) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            Text(InsightsComparisonsWords.recapTitle(recap, copy: copy)).insightsHeading()
+            Text(InsightsComparisonsWords.recapTitle(recap, copy: copy)).insightsTitle()
             HStack(alignment: .top, spacing: GlassTokens.Space.s8) {
                 ForEach(recap.sources) { source in
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
@@ -160,7 +163,7 @@ struct InsightsOverviewTab: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsCard()
+        .insightsSection()
     }
 
     /// The lever of the week: an observation only (owner decision D2, open).
@@ -176,7 +179,7 @@ struct InsightsOverviewTab: View {
                         .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous)
                             .fill(GlassTokens.Color.tintAccent.color))
                         .accessibilityHidden(true)
-                    Text(text("analytics_lever_title")).insightsHeading()
+                    Text(text("analytics_lever_title")).insightsTitle()
                 }
                 ForEach(InsightsComparisonsWords.leverLines(pick, copy: copy), id: \.self) { line in
                     Text(line).insightsNote()
@@ -192,7 +195,7 @@ struct InsightsOverviewTab: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .insightsCard()
+            .insightsSection()
         } else if !lever.disabled.isEmpty {
             Text(text("analytics_lever_off")).insightsCaption()
         }
@@ -221,7 +224,7 @@ struct InsightsOverviewTab: View {
     /// One harness: its tokens and cache share side by side, then its days
     /// (Claude Code) or the note that it records whole-trace totals (Codex).
     private func harnessCard(_ source: InsightsWeekSource, overview: InsightsWeekOverview) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
             // The core's line for the harness says how it is counted:
             // "Claude Code · counted per turn".
             HStack(spacing: GlassTokens.Space.s5) {
@@ -268,7 +271,7 @@ struct InsightsOverviewTab: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsCard()
+        .insightsSection()
     }
 
     /// Codex counts whole traces, not days: a dashed box, never zero bars.
@@ -347,6 +350,10 @@ struct InsightsOverviewTab: View {
                                        range: InsightsSeries.allCases.map { $0.color.color })
             .chartLegend(.hidden)
             .chartXSelection(value: $readDay)
+            // The days in their own order, always. Without it the hover
+            // wash, drawn first, made the hovered day the first category,
+            // and the bars reordered under the pointer.
+            .chartXScale(domain: days.map(\.name))
             .chartYScale(domain: 0...top)
             .chartYAxis {
                 AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
@@ -376,9 +383,8 @@ struct InsightsOverviewTab: View {
     /// The same week's patterns, by name and figure, in the core's order.
     private func whereTokensWent(_ patterns: InsightsWeekPatterns) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(text("analytics_where_tokens_went")).insightsTitle()
-                Spacer(minLength: GlassTokens.Space.s4)
+            InsightsSectionTitle(title: text("analytics_where_tokens_went"),
+                                 info: [text("analytics_patterns_overlap")]) {
                 Button(text("analytics_tab_patterns")) { showPatterns() }
                     .buttonStyle(GlassButtonStyle(.link))
             }
@@ -393,18 +399,20 @@ struct InsightsOverviewTab: View {
                     }
                 }
             }
-            Text(text("analytics_patterns_overlap")).insightsCaption()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsCard()
+        .insightsSection()
     }
 
     private func breakdownCard(_ overview: InsightsWeekOverview) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            GlassSegmentedTabs(text("analytics_card_by_model"), selection: $breakdown, segments: [
-                GlassSegment(text("analytics_card_by_model"), value: Breakdown.model),
-                GlassSegment(text("analytics_card_by_tool"), value: Breakdown.tool),
-            ])
+            HStack(spacing: GlassTokens.Space.s4) {
+                GlassSegmentedTabs(text("analytics_card_by_model"), selection: $breakdown, segments: [
+                    GlassSegment(text("analytics_card_by_model"), value: Breakdown.model),
+                    GlassSegment(text("analytics_card_by_tool"), value: Breakdown.tool),
+                ])
+                InsightsInfo(text("analytics_card_by_model"), [text("analytics_model_labels_note")])
+            }
             switch breakdown {
             case .model:
                 let rows = InsightsOverviewWords.modelRows(overview, copy: copy)
@@ -419,7 +427,6 @@ struct InsightsOverviewTab: View {
                         InsightsShareBar(fraction: most == 0 ? 0 : Double(row.tokens) / Double(most))
                     }
                 }
-                Text(text("analytics_model_labels_note")).insightsCaption()
             case .tool:
                 ForEach(overview.by_tool) { tool in
                     HStack {
@@ -431,7 +438,7 @@ struct InsightsOverviewTab: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsCard()
+        .insightsSection()
     }
 }
 
@@ -507,7 +514,7 @@ struct InsightsCounterSessionsView: View {
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsCard()
+        .insightsSection()
     }
 
     /// "Private AI", the category's word, then its split in proxy tokens
@@ -568,7 +575,7 @@ struct InsightsCardInputsView: View {
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsCard()
+        .insightsSection()
     }
 
     /// Numerator over denominator, both the core's counts.
