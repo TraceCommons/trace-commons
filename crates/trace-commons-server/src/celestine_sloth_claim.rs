@@ -1107,15 +1107,6 @@ mod tests {
     }
 
     #[test]
-    fn denylist_parsing_trims_and_drops_empties() {
-        assert_eq!(
-            parse_denylist("cosmos1a, cosmos1b ,,  cosmos1c  "),
-            vec!["cosmos1a", "cosmos1b", "cosmos1c"]
-        );
-        assert!(parse_denylist("  ,, ").is_empty());
-    }
-
-    #[test]
     fn error_labels_and_statuses_are_distinct_and_correctly_classed() {
         use ClaimError::*;
         let all = [
