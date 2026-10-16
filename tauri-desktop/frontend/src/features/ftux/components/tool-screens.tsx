@@ -1,0 +1,148 @@
+import { useState } from "react";
+import { ButtonPrimary, TertiaryLink } from "../../../design-system";
+import type { WatchAnswer } from "../ftux-model";
+import type { DetectedTool } from "../types";
+import { ScreenBody, ScreenFooter, ScreenTitle } from "./ftux-frame";
+import { Spinner } from "./icons";
+import { ToolRow } from "./tool-row";
+
+type ToolListProps = {
+  tools: DetectedTool[] | null;
+  answers: Record<string, WatchAnswer>;
+  customFolders: Record<string, string>;
+  canContinue: boolean;
+  onAnswer: (toolId: string, answer: WatchAnswer) => void;
+  onChooseFolder: (toolId: string) => void;
+  onInstall: (url: string) => void;
+  onContinue: () => void;
+};
+
+function ToolList({
+  tools,
+  answers,
+  customFolders,
+  compactMeta,
+  onAnswer,
+  onChooseFolder,
+  onInstall,
+}: ToolListProps & { compactMeta?: boolean }) {
+  if (tools === null) {
+    return (
+      <p className="tc-status tc-text-secondary m-0" role="status">
+        <Spinner /> Looking for coding tools on this Mac…
+      </p>
+    );
+  }
+  return (
+    <>
+      {tools.map((tool) => (
+        <ToolRow
+          key={tool.id}
+          tool={tool}
+          compactMeta={compactMeta}
+          answer={answers[tool.id] ?? "unanswered"}
+          folder={customFolders[tool.id] ?? tool.folder}
+          onAnswer={(answer) => onAnswer(tool.id, answer)}
+          onChooseFolder={() => onChooseFolder(tool.id)}
+          onInstall={onInstall}
+        />
+      ))}
+    </>
+  );
+}
+
+function ContinueButton({
+  enabled,
+  onContinue,
+}: {
+  enabled: boolean;
+  onContinue: () => void;
+}) {
+  return (
+    <ButtonPrimary
+      disabled={!enabled}
+      title={enabled ? undefined : "Answer every tool above to continue"}
+      onClick={onContinue}
+    >
+      Continue
+    </ButtonPrimary>
+  );
+}
+
+// Quick setup: W-2.
+export function FoldersScreen(props: ToolListProps & { onCustom: () => void }) {
+  return (
+    <>
+      <ScreenTitle light="Which folders may this " bold="app watch?" />
+      <p className="m-0 tc-text-secondary">
+        We've found the following tools on your device. Traces work by reading
+        coding-session transcripts from locations you specify. Select an option
+        from each of the tools below to continue.
+      </p>
+      <ScreenBody>
+        <ToolList {...props} />
+      </ScreenBody>
+      <ScreenFooter
+        note={
+          <TertiaryLink onClick={props.onCustom}>
+            Custom setup instead
+          </TertiaryLink>
+        }
+      >
+        <ContinueButton
+          enabled={props.canContinue}
+          onContinue={props.onContinue}
+        />
+      </ScreenFooter>
+    </>
+  );
+}
+
+// Custom setup: W-4.
+export function ToolsScreen(props: ToolListProps & { onAddTool: () => void }) {
+  const [dragging, setDragging] = useState(false);
+  return (
+    <>
+      <ScreenTitle light="Connect your " bold="tools and folders." />
+      <ScreenBody>
+        <ToolList {...props} compactMeta />
+        {props.tools ? (
+          <button
+            type="button"
+            className="ftux-add-tool"
+            data-dragging={dragging}
+            onClick={() => props.onAddTool()}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(event) => {
+              event.preventDefault();
+              setDragging(false);
+              props.onAddTool();
+            }}
+          >
+            <span className="tc-tool-tile tc-tool-tile--lg" aria-hidden="true">
+              +
+            </span>
+            <span className="tc-stack ftux-gap-0">
+              <span className="tc-body-strong">
+                Not seeing your tool above? Click to add or drag &amp; drop.
+              </span>
+              <span className="tc-caption tc-text-tertiary">
+                OpenCode, Theia IDE, Cursor, or a dev server over SSH
+              </span>
+            </span>
+          </button>
+        ) : null}
+      </ScreenBody>
+      <ScreenFooter>
+        <ContinueButton
+          enabled={props.canContinue}
+          onContinue={props.onContinue}
+        />
+      </ScreenFooter>
+    </>
+  );
+}
