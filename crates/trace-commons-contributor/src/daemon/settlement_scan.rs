@@ -7,12 +7,16 @@
 //! anything (spec S4, S9). It reads the queue only to leave out traces that
 //! were already sent, kept on this Mac, or declined.
 //!
-//! **Never is resolved before any open** (D3). A ref's project comes from
-//! `SessionRef::cwd` or from the watcher's cwd cache when that entry still
-//! matches the file's size and mtime -- never from `load`. A folder that
-//! resolves to `Ignore`, the global Never override included, is skipped
-//! before its transcript is opened. A ref with no cheap project answer is
-//! counted as unknown and is never opened either.
+//! **Never is resolved before any open** (D3). Refs come from
+//! `TraceSource::discover_unopened`, which reads no transcript bytes (no
+//! cwd peek), so discovery itself opens nothing in a Never folder. A ref's
+//! project comes from `SessionRef::cwd` when the source knows it without a
+//! transcript (a sidecar, a metadata row), or from the watcher's cwd cache
+//! when that entry still matches the file's size and mtime -- never from
+//! `load`. A folder that resolves to `Ignore`, the global Never override
+//! included, is skipped before its transcript is opened. A ref with no
+//! cheap project answer is counted as unknown and is never opened either,
+//! so a Codex or Claude Code trace the watcher has not seen stays unknown.
 //!
 //! No logging here: the caller writes one counts-only line.
 
@@ -223,7 +227,7 @@ pub fn scan(
         .unwrap_or(chrono::Duration::MAX);
 
     'sources: for source in sources {
-        let refs = match source.discover() {
+        let refs = match source.discover_unopened() {
             Ok(refs) => refs,
             Err(_) => {
                 if !outcome.skipped_sources.contains(&source.name()) {
@@ -387,6 +391,9 @@ mod tests {
             self.name
         }
         fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
+            panic!("the estimate must discover without opening transcripts");
+        }
+        fn discover_unopened(&self) -> anyhow::Result<Vec<SessionRef>> {
             if self.fail_discover {
                 anyhow::bail!("synthetic discover failure");
             }
@@ -803,5 +810,51 @@ mod tests {
             path_hash("codex", Path::new("/tmp/synthetic/other.jsonl"))
         );
         assert_eq!(h, path_hash("codex", p));
+    }
+
+    /// The real Codex and Claude Code adapters discover for the estimate
+    /// without opening a transcript: a Never folder whose cwd sits only in
+    /// the file's bytes is never read, not even by discovery. Its trace is
+    /// counted unknown instead.
+    #[test]
+    fn real_sources_discover_a_never_folder_without_opening_it() {
+        let mut fx = Fixture::new();
+        fx.policy
+            .set_mode(&fx.project_key(), ProjectMode::Ignore, now())
+            .unwrap();
+        let cwd = fx.cwd.to_string_lossy().to_string();
+
+        let codex_root = fx.dir.path().join("codex");
+        std::fs::create_dir_all(&codex_root).unwrap();
+        let rollout = codex_root.join("rollout-2026-08-20T10-00-00-x.jsonl");
+        let content =
+            serde_json::json!({"type": "response_item", "payload": {"text": "synthetic"}});
+        let meta = serde_json::json!({"type": "session_meta", "payload": {"cwd": cwd}});
+        std::fs::write(&rollout, format!("{content}\n{meta}\n")).unwrap();
+
+        let claude_root = fx.dir.path().join("claude");
+        let project_dir = claude_root.join("-synthetic-never-project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let transcript = project_dir.join("00000000-0000-4000-8000-000000000001.jsonl");
+        let line =
+            serde_json::json!({"type": "user", "cwd": cwd, "message": {"content": "synthetic"}});
+        std::fs::write(&transcript, format!("{line}\n")).unwrap();
+
+        let sources: Vec<Box<dyn TraceSource>> = vec![
+            Box::new(crate::source::codex::CodexSource::new(codex_root)),
+            Box::new(crate::source::claude_code::ClaudeCodeSource::new(
+                claude_root,
+            )),
+        ];
+        for source in &sources {
+            let refs = source.discover_unopened().unwrap();
+            assert_eq!(refs.len(), 1, "{}", source.name());
+            assert_eq!(refs[0].cwd, None, "{} read the transcript", source.name());
+        }
+        let mut cache = FeatureCache::default();
+        let outcome = scan(&sources, &fx.inputs(), &mut cache, &never_stop);
+        assert_eq!(outcome.no_project, 2);
+        assert_eq!(outcome.ignored, 0);
+        assert_eq!(outcome.cache_misses, 0, "nothing was loaded");
     }
 }

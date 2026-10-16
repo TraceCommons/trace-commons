@@ -42,6 +42,7 @@ public struct NudgeCopy: Equatable, Sendable {
         case notifySettlementBody = "NOTIFY_SETTLEMENT_BODY"
         case notifySettlementBodyUpTo = "NOTIFY_SETTLEMENT_BODY_UP_TO"
         case notifySettlementBodyPricing = "NOTIFY_SETTLEMENT_BODY_PRICING"
+        case notifySettlementBodyPricingUpTo = "NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO"
         case notifySettlementActionReview = "NOTIFY_SETTLEMENT_ACTION_REVIEW"
         case notifySettlementActionNotNow = "NOTIFY_SETTLEMENT_ACTION_NOT_NOW"
         case markA11ySettlement = "MARK_A11Y_SETTLEMENT"

@@ -454,6 +454,20 @@ pub trait TraceSource: Send + Sync {
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>>;
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript>;
 
+    /// Discovery that opens no transcript, for the settlement estimate,
+    /// which must resolve a folder's Never mode before it reads any of that
+    /// folder's traces. A ref it returns carries a `cwd` only when the
+    /// source knows it without reading transcript bytes (a sidecar, a
+    /// directory name, a metadata row); otherwise `cwd` is `None` and the
+    /// caller treats the project as unknown.
+    ///
+    /// Fails closed: the default finds nothing, so a source whose
+    /// `discover` reads transcripts is never reached through here until it
+    /// says how to discover without doing so.
+    fn discover_unopened(&self) -> anyhow::Result<Vec<SessionRef>> {
+        Ok(Vec::new())
+    }
+
     /// Which session, if any, a changed filesystem path belongs to.
     ///
     /// Event-driven watching learns that *a path* moved and has to turn

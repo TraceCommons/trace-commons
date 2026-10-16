@@ -145,6 +145,11 @@ pub enum SettlementCandidacy {
     /// The first drawable estimate: record it as the baseline and say
     /// nothing.
     SeedBaseline,
+    /// The table's pricing changed but moved the total too little to
+    /// announce. Record the new `pricing_version` against the last
+    /// announcement (its low and mid stay), so a later move under the same
+    /// pricing is not taken for a pricing change. Say nothing.
+    AdoptPricing,
     /// Nothing to announce.
     Quiet,
 }
@@ -170,10 +175,13 @@ pub fn settlement_candidacy(
     let last_mid = u128::from(last.mid_usd_micros);
     let moved = mid.abs_diff(last_mid) * 1_000_000
         >= last_mid * u128::from(SETTLEMENT_NOTIFY_GROWTH_MICROS);
-    let pricing_changed = shown.pricing_version != last.pricing_version && moved;
+    let pricing_differs = shown.pricing_version != last.pricing_version;
+    let pricing_changed = pricing_differs && moved;
 
     if grown || pricing_changed {
         SettlementCandidacy::Candidate { pricing_changed }
+    } else if pricing_differs {
+        SettlementCandidacy::AdoptPricing
     } else {
         SettlementCandidacy::Quiet
     }
@@ -606,14 +614,29 @@ mod tests {
             settlement_candidacy(&shown_at(4_000_000, 8_000_000, "p3"), Some(&last)),
             pricing
         );
-        // Mid 9_999_999 / 9_999_998: just under 25%.
+        // Mid 9_999_999 / 9_999_998: just under 25%. The new pricing is
+        // adopted silently.
         assert_eq!(
             settlement_candidacy(&shown_at(7_999_999, 11_999_999, "p3"), Some(&last)),
-            SettlementCandidacy::Quiet
+            SettlementCandidacy::AdoptPricing
         );
         // Same pricing, mid 6_000_000, low fell: quiet.
         assert_eq!(
             settlement_candidacy(&shown_at(4_000_000, 8_000_000, "p2"), Some(&last)),
+            SettlementCandidacy::Quiet
+        );
+    }
+
+    #[test]
+    fn a_drop_after_an_adopted_pricing_change_is_quiet() {
+        let last = notified(8_000_000, 10_000_000, "p1");
+        assert_eq!(
+            settlement_candidacy(&shown_at(8_500_000, 12_500_000, "p2"), Some(&last)),
+            SettlementCandidacy::AdoptPricing
+        );
+        let adopted = notified(8_000_000, 10_000_000, "p2");
+        assert_eq!(
+            settlement_candidacy(&shown_at(5_000_000, 9_000_000, "p2"), Some(&adopted)),
             SettlementCandidacy::Quiet
         );
     }
@@ -763,6 +786,9 @@ mod tests {
             "fixture"
         }
         fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
+            Ok(self.refs.clone())
+        }
+        fn discover_unopened(&self) -> anyhow::Result<Vec<SessionRef>> {
             Ok(self.refs.clone())
         }
         fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
@@ -1081,6 +1107,70 @@ mod tests {
         );
         assert!(r.error.is_none(), "{:?}", r.error);
         assert!(due(&s), "turning on asks for a full scan");
+    }
+
+    /// The settlement table is fetched on its schedule whatever the switch,
+    /// so turning the switch on starts a full scan at the next tick instead
+    /// of waiting a day for the next fetch. The fetch's timing never depends
+    /// on the switch.
+    #[tokio::test]
+    async fn turning_on_after_a_fetch_made_while_off_starts_a_scan() {
+        let app = Router::new().fallback(move |uri: axum::http::Uri| async move {
+            if uri.path() == SETTLEMENT_TABLE_PATH {
+                Json(table_value()).into_response()
+            } else {
+                StatusCode::NOT_FOUND.into_response()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let s = shared();
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.ingest_url = base.clone();
+        cfg.allowed_hosts = Some("127.0.0.1".to_string());
+        s.store.save_config(&cfg).unwrap();
+        let r = handle_request(
+            &s,
+            &req(
+                "set_settings",
+                json!({"settlement_estimate_enabled": false}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert!(tick_with_sources(&s, now(), |_| Vec::new()).is_none());
+
+        let mut schedule = EstimateTableSchedule::starting(now(), 0.0);
+        super::super::refresh_estimate_table(&s, now(), &mut schedule).await;
+        assert!(
+            s.settlement.lock().unwrap().table.is_some(),
+            "the table is fetched while the switch is off"
+        );
+        assert!(
+            s.status_value_at(now())
+                .get("settlement_estimate")
+                .is_none_or(|v| v.is_null())
+        );
+
+        let r = handle_request(
+            &s,
+            &req("set_settings", json!({"settlement_estimate_enabled": true})),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let source = FixtureSource {
+            refs: fixture_refs(1),
+            gate: None,
+        };
+        tick_with_sources(&s, now(), move |_| {
+            vec![Box::new(source) as Box<dyn TraceSource>]
+        })
+        .expect("turning the switch on starts a full scan")
+        .await
+        .unwrap();
+        server.abort();
     }
 
     #[tokio::test]

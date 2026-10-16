@@ -69,6 +69,9 @@ struct Prepared {
     /// The first drawable estimate, to be recorded as the baseline without
     /// a notification.
     settlement_seed: Option<SettlementNotified>,
+    /// A pricing change too small to announce: the `pricing_version` to
+    /// write onto the last announcement record.
+    settlement_adopt_pricing: Option<Option<String>>,
     settings: NotifySettings,
     log: Vec<AttentionEntry>,
 }
@@ -194,6 +197,7 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
         verdicts: None,
         settlement: None,
         settlement_seed: None,
+        settlement_adopt_pricing: None,
         settings,
         log,
     };
@@ -295,8 +299,14 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
             .last_error_label
             .is_none()
             && !shared.daily_budget(now).blocked();
-        if healthy {
-            match settlement_candidacy(&shown, notified.as_ref()) {
+        let candidacy = settlement_candidacy(&shown, notified.as_ref());
+        // Bookkeeping, not an announcement: adopted whatever the health
+        // gate, so a pricing change seen while it is shut is not taken for
+        // one later.
+        if candidacy == SettlementCandidacy::AdoptPricing {
+            prepared.settlement_adopt_pricing = Some(shown.pricing_version.clone());
+        } else if healthy {
+            match candidacy {
                 SettlementCandidacy::SeedBaseline => {
                     prepared.settlement_seed = Some(notified_from(&shown, now));
                 }
@@ -311,7 +321,7 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
                     });
                     prepared.settlement = Some((shown, pricing_changed));
                 }
-                SettlementCandidacy::Quiet => {}
+                SettlementCandidacy::AdoptPricing | SettlementCandidacy::Quiet => {}
             }
         }
     }
@@ -442,6 +452,14 @@ fn apply(
         if state.settlement_notified.is_none() {
             state.settlement_notified = Some(seed.clone());
             changed = true;
+        }
+    }
+    if let Some(pricing_version) = &prepared.settlement_adopt_pricing {
+        if let Some(notified) = state.settlement_notified.as_mut() {
+            if notified.pricing_version != *pricing_version {
+                notified.pricing_version = pricing_version.clone();
+                changed = true;
+            }
         }
     }
     if changed {
@@ -935,6 +953,54 @@ mod tests {
         let notified = state.settlement_notified.as_ref().unwrap();
         assert_eq!(notified.low_usd_micros, 6_000_000);
         assert_eq!(notified.mid_usd_micros, 7_500_000);
+    }
+
+    /// A pricing change too small to announce is adopted silently, so a
+    /// later drop under the same pricing is not posted as "Pricing changed".
+    #[test]
+    fn a_quiet_pricing_change_is_adopted_and_a_later_drop_stays_quiet() {
+        let s = live();
+        digest_off(&s);
+        let _r = renderer(&s);
+        let mut rx = s.events.subscribe();
+        s.state.lock().unwrap().settlement_notified = Some(SettlementNotified {
+            low_usd_micros: 8_000_000,
+            mid_usd_micros: 10_000_000,
+            pricing_version: Some("p1".to_string()),
+            at: noon(),
+        });
+        let later = noon() + Duration::days(4);
+        s.state.lock().unwrap().last_history_poll_at = Some(later);
+        // New pricing, mid 10_500_000: under 25%, quiet.
+        show_estimate(&s, 8_500_000, 12_500_000, "p2");
+        s.settlement
+            .lock()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .published_at = later;
+        assert_eq!(tick(&s, later, &Utc, digest(false, 0)).standalone, None);
+        {
+            let state = s.state.lock().unwrap();
+            let notified = state.settlement_notified.as_ref().unwrap();
+            assert_eq!(notified.pricing_version.as_deref(), Some("p2"));
+            assert_eq!(notified.low_usd_micros, 8_000_000);
+            assert_eq!(notified.mid_usd_micros, 10_000_000);
+        }
+        // Later, same pricing, mid fell to 7_000_000: no pricing change now.
+        let after = later + Duration::days(4);
+        s.state.lock().unwrap().last_history_poll_at = Some(after);
+        show_estimate(&s, 5_000_000, 9_000_000, "p2");
+        s.settlement
+            .lock()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .published_at = after;
+        assert_eq!(tick(&s, after, &Utc, digest(false, 0)).standalone, None);
+        assert!(settlement_frames(&mut rx).is_empty());
     }
 
     /// Every existing gate holds the settlement notification, one case each.

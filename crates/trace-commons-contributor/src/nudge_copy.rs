@@ -426,6 +426,10 @@ pub const NOTIFY_SETTLEMENT_BODY_UP_TO: &str =
 /// The body when the published pricing changed. DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_SETTLEMENT_BODY_PRICING: &str =
     "Pricing changed. Traces on this Mac are now estimated at about {low} to {high} of inference.";
+/// [`NOTIFY_SETTLEMENT_BODY_PRICING`] when the rounded low end is $0. DRAFT,
+/// NEEDS APPROVAL.
+pub const NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO: &str =
+    "Pricing changed. Traces on this Mac are now estimated at up to {high} of inference.";
 /// The settlement notification's primary action. DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_SETTLEMENT_ACTION_REVIEW: &str = "Review traces";
 /// The settlement notification's dismissal; it sends nothing. DRAFT, NEEDS
@@ -671,6 +675,10 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     (
         "NOTIFY_SETTLEMENT_BODY_PRICING",
         NOTIFY_SETTLEMENT_BODY_PRICING,
+    ),
+    (
+        "NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO",
+        NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO,
     ),
     (
         "NOTIFY_SETTLEMENT_ACTION_REVIEW",
@@ -1035,6 +1043,10 @@ mod tests {
                 "NOTIFY_SETTLEMENT_BODY_PRICING",
                 fill_usd_max(NOTIFY_SETTLEMENT_BODY_PRICING),
             ),
+            (
+                "NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO",
+                fill_usd_max(NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO),
+            ),
         ];
         for (key, body) in bodies {
             let len = body.chars().count();
@@ -1324,7 +1336,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(figures, 9);
+        assert_eq!(figures, 10);
     }
 
     /// Ron's #1303 design review, item 8: the backlog title names the

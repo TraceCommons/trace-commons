@@ -102,7 +102,8 @@ final class NudgeCopyExportTests: XCTestCase {
         let keys: [NudgeCopy.Key] = [
             .estimateTotalLine, .estimateTotalLineUpTo, .estimateTotalLabel, .estimateTotalAction,
             .notifySettlementTitle, .notifySettlementBody, .notifySettlementBodyUpTo,
-            .notifySettlementBodyPricing, .notifySettlementActionReview, .notifySettlementActionNotNow,
+            .notifySettlementBodyPricing, .notifySettlementBodyPricingUpTo,
+            .notifySettlementActionReview, .notifySettlementActionNotNow,
             .markA11ySettlement, .markTooltipSettlement, .settlementEstimateExplainer,
             .settingSettlementEstimate, .settingSettlementEstimateHelp,
         ]

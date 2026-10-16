@@ -1809,19 +1809,15 @@ async fn refresh_estimate_table(
     // refetch of one that had expired brings it back.
     shared.publish_estimate_in_force_change(now, Some(before));
     // The settlement table rides this same fetch and schedule; it has none
-    // of its own. Skipped while the settlement estimate is switched off.
-    let settlement_on = shared
-        .settings
-        .lock()
-        .expect("settings lock")
-        .settlement_estimate_enabled;
-    if settlement_on {
-        let settlement = match &client {
-            Ok(client) => client.fetch_settlement().await,
-            Err(refused) => Err(*refused),
-        };
-        settlement_estimate::apply_table_fetch(shared, settlement);
-    }
+    // of its own. Fetched whatever the settlement switch says, so the
+    // request's timing never depends on it, and so turning the switch on
+    // finds a table in memory and scans at the next tick. The switch gates
+    // the scan and every surface, not this anonymous public read.
+    let settlement = match &client {
+        Ok(client) => client.fetch_settlement().await,
+        Err(refused) => Err(*refused),
+    };
+    settlement_estimate::apply_table_fetch(shared, settlement);
 }
 
 /// How long after an upload the server is asked for verdicts.

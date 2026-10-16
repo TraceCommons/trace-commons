@@ -192,12 +192,11 @@ pub fn settlement_total_line(total: &SettlementTotal) -> String {
 #[must_use]
 pub fn settlement_notification(total: &SettlementTotal, pricing_changed: bool) -> NotificationText {
     let (values, up_to) = settlement_band(total.low_usd_micros, total.high_usd_micros);
-    let template = if pricing_changed {
-        copy::NOTIFY_SETTLEMENT_BODY_PRICING
-    } else if up_to {
-        copy::NOTIFY_SETTLEMENT_BODY_UP_TO
-    } else {
-        copy::NOTIFY_SETTLEMENT_BODY
+    let template = match (pricing_changed, up_to) {
+        (true, true) => copy::NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO,
+        (true, false) => copy::NOTIFY_SETTLEMENT_BODY_PRICING,
+        (false, true) => copy::NOTIFY_SETTLEMENT_BODY_UP_TO,
+        (false, false) => copy::NOTIFY_SETTLEMENT_BODY,
     };
     NotificationText {
         title: copy::NOTIFY_SETTLEMENT_TITLE.to_string(),
@@ -736,6 +735,16 @@ mod tests {
             up.body,
             "Up to $0.50 of inference, estimated on this Mac. Nothing was sent."
         );
+    }
+
+    /// A pricing change whose rounded low end is $0 reads "up to", never
+    /// "$0 to".
+    #[test]
+    fn a_pricing_change_with_a_zero_low_end_reads_up_to() {
+        let p = settlement_notification(&total(0, 1_500_000), true);
+        assert!(p.body.starts_with("Pricing changed."), "{}", p.body);
+        assert!(p.body.contains("up to $1.50"), "{}", p.body);
+        assert!(!p.body.contains("$0 to"), "{}", p.body);
     }
 
     #[test]
