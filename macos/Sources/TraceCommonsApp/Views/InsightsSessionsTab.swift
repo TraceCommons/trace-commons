@@ -104,81 +104,20 @@ struct InsightsSessionsTab: View {
         return figure(turns.compactMap(value).reduce(0, +))
     }
 
+    /// The series the per-turn chart stacks, in palette order.
+    static let turnSeries: [InsightsSeries] = [.cacheRead, .uncached, .cacheWrite]
+
+    /// The per-turn chart's card: its heading, legend, plot and end turns.
+    /// Built from small pieces: as one expression it is more than the Xcode
+    /// 26 type checker will finish.
     private func chart(_ drill: InsightsSessionDrill) -> some View {
         let turns = (drill.series ?? []).map(\.ordinal)
         let first = turns.min() ?? 1
         let last = turns.max() ?? 1
-        let segments = stacked(drill)
-        let tallest = (drill.series ?? []).compactMap { turn -> UInt64? in
-            guard let read = turn.cache_read, let uncached = turn.uncached, let write = turn.cache_write else { return nil }
-            return UInt64(read) + UInt64(uncached) + write
-        }.max() ?? 0
-        // Room above the tallest bar and the threshold for the marker letters.
-        let top = Double(max(tallest, drill.long_context_threshold)) * 1.18
-        let series: [InsightsSeries] = [.cacheRead, .uncached, .cacheWrite]
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(text("analytics_input_each_turn")).insightsHeading()
-                Spacer(minLength: GlassTokens.Space.s4)
-                if let readTurn {
-                    Text(InsightsSessionsWords.turnLabel(UInt32(readTurn), copy: copy)).insightsCaption()
-                }
-            }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: GlassTokens.Space.s3)],
-                      spacing: GlassTokens.Space.s3) {
-                ForEach(series, id: \.self) { item in
-                    GlassLegendCell(text(item.key), value: legendValue(item, drill: drill), series: item.color)
-                }
-            }
-            Chart {
-                // The turn being read, one turn wide. The axis is Double so
-                // the wash can span exactly the turn's band.
-                if let readTurn {
-                    RectangleMark(xStart: .value(text("analytics_turn"), Double(readTurn) - 0.5),
-                                  xEnd: .value(text("analytics_turn"), Double(readTurn) + 0.5))
-                        .foregroundStyle(GlassColor.ink(0.08))
-                }
-                ForEach(segments) { segment in
-                    BarMark(x: .value(text("analytics_turn"), Double(segment.turn)),
-                            y: .value(text("analytics_card_tokens"), segment.tokens))
-                    .foregroundStyle(by: .value(text("analytics_card_tokens"), segment.series))
-                }
-                RuleMark(y: .value(text("analytics_pattern_long_context"), drill.long_context_threshold))
-                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
-                    .foregroundStyle(GlassTokens.Color.statusAsk.color)
-                    .annotation(position: .top, alignment: .trailing, spacing: GlassTokens.Space.s1) {
-                        Text(figure(drill.long_context_threshold)).insightsTick(current: true)
-                    }
-                ForEach(drill.markers) { marker in
-                    RuleMark(x: .value(text("analytics_turn"), Double(marker.turn_ordinal)))
-                        .lineStyle(StrokeStyle(lineWidth: 1))
-                        .foregroundStyle(readTurn == Int(marker.turn_ordinal) ? GlassColor.textPrimary : GlassColor.textTertiary)
-                        .annotation(position: .top, spacing: 0) {
-                            InsightsMarkerBadge(letter: marker.letter)
-                        }
-                }
-            }
-            .chartForegroundStyleScale(domain: series.map { text($0.key) }, range: series.map { $0.color.color })
-            .chartLegend(.hidden)
-            .chartXSelection(value: Binding(
-                get: { readTurn.map(Double.init) },
-                set: { readTurn = $0.map { min(max(Int($0.rounded()), Int(first)), Int(last)) } }))
-            .chartXAxis(.hidden)
-            .chartXScale(domain: Double(first) - 1...Double(max(last, first)) + 1)
-            .chartYScale(domain: 0...max(top, 1))
-            .chartYAxis {
-                AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
-                    AxisGridLine().foregroundStyle(GlassTokens.Color.chartGrid.color)
-                    AxisValueLabel {
-                        if let tokens = value.as(Double.self) {
-                            Text(figure(UInt64(max(0, tokens)))).insightsTick()
-                        }
-                    }
-                }
-            }
-            .frame(height: 200)
-            .insightsPlot()
-            .accessibilityHidden(true)
+            chartHeading
+            legend(drill)
+            plot(drill, first: first, last: last)
             HStack {
                 Text(InsightsSessionsWords.turnLabel(first, copy: copy)).insightsTick()
                 Spacer()
@@ -187,6 +126,114 @@ struct InsightsSessionsTab: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
+    }
+
+    private var chartHeading: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(text("analytics_input_each_turn")).insightsHeading()
+            Spacer(minLength: GlassTokens.Space.s4)
+            if let readTurn {
+                Text(InsightsSessionsWords.turnLabel(UInt32(readTurn), copy: copy)).insightsCaption()
+            }
+        }
+    }
+
+    private func legend(_ drill: InsightsSessionDrill) -> some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: GlassTokens.Space.s3)],
+                  spacing: GlassTokens.Space.s3) {
+            ForEach(Self.turnSeries, id: \.self) { item in
+                GlassLegendCell(text(item.key), value: legendValue(item, drill: drill), series: item.color)
+            }
+        }
+    }
+
+    /// The top of the value axis: room above the tallest bar and the
+    /// threshold for the marker letters.
+    private func plotTop(_ drill: InsightsSessionDrill) -> Double {
+        let tallest: UInt64 = (drill.series ?? []).compactMap { turn -> UInt64? in
+            guard let read = turn.cache_read, let uncached = turn.uncached, let write = turn.cache_write else { return nil }
+            return UInt64(read) + UInt64(uncached) + write
+        }.max() ?? 0
+        return max(Double(max(tallest, drill.long_context_threshold)) * 1.18, 1)
+    }
+
+    /// The hovered turn as the chart's selection, held to the session's turns.
+    private func selection(first: UInt32, last: UInt32) -> Binding<Double?> {
+        Binding(
+            get: { readTurn.map(Double.init) },
+            set: { value in readTurn = value.map { min(max(Int($0.rounded()), Int(first)), Int(last)) } })
+    }
+
+    private func plot(_ drill: InsightsSessionDrill, first: UInt32, last: UInt32) -> some View {
+        let series = Self.turnSeries
+        let domain: ClosedRange<Double> = (Double(first) - 1)...(Double(max(last, first)) + 1)
+        return Chart {
+            washMark
+            barMarks(drill)
+            thresholdMark(drill)
+            markerMarks(drill)
+        }
+        .chartForegroundStyleScale(domain: series.map { text($0.key) }, range: series.map { $0.color.color })
+        .chartLegend(.hidden)
+        .chartXSelection(value: selection(first: first, last: last))
+        .chartXAxis(.hidden)
+        .chartXScale(domain: domain)
+        .chartYScale(domain: 0...plotTop(drill))
+        .chartYAxis { valueAxis }
+        .frame(height: 200)
+        .insightsPlot()
+        .accessibilityHidden(true)
+    }
+
+    /// The turn being read, one turn wide. The axis is Double so the wash
+    /// spans exactly the turn's band.
+    @ChartContentBuilder
+    private var washMark: some ChartContent {
+        if let readTurn {
+            RectangleMark(xStart: .value(text("analytics_turn"), Double(readTurn) - 0.5),
+                          xEnd: .value(text("analytics_turn"), Double(readTurn) + 0.5))
+                .foregroundStyle(GlassColor.ink(0.08))
+        }
+    }
+
+    private func barMarks(_ drill: InsightsSessionDrill) -> some ChartContent {
+        ForEach(stacked(drill)) { segment in
+            BarMark(x: .value(text("analytics_turn"), Double(segment.turn)),
+                    y: .value(text("analytics_card_tokens"), segment.tokens))
+            .foregroundStyle(by: .value(text("analytics_card_tokens"), segment.series))
+        }
+    }
+
+    private func thresholdMark(_ drill: InsightsSessionDrill) -> some ChartContent {
+        RuleMark(y: .value(text("analytics_pattern_long_context"), drill.long_context_threshold))
+            .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+            .foregroundStyle(GlassTokens.Color.statusAsk.color)
+            .annotation(position: .top, alignment: .trailing, spacing: GlassTokens.Space.s1) {
+                Text(figure(drill.long_context_threshold)).insightsTick(current: true)
+            }
+    }
+
+    private func markerMarks(_ drill: InsightsSessionDrill) -> some ChartContent {
+        ForEach(drill.markers) { marker in
+            let read = readTurn == Int(marker.turn_ordinal)
+            RuleMark(x: .value(text("analytics_turn"), Double(marker.turn_ordinal)))
+                .lineStyle(StrokeStyle(lineWidth: 1))
+                .foregroundStyle(read ? GlassColor.textPrimary : GlassColor.textTertiary)
+                .annotation(position: .top, spacing: 0) {
+                    InsightsMarkerBadge(letter: marker.letter)
+                }
+        }
+    }
+
+    private var valueAxis: some AxisContent {
+        AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
+            AxisGridLine().foregroundStyle(GlassTokens.Color.chartGrid.color)
+            AxisValueLabel {
+                if let tokens = value.as(Double.self) {
+                    Text(figure(UInt64(max(0, tokens)))).insightsTick()
+                }
+            }
+        }
     }
 
     /// The derivation a marker's lines end with ("Inferred from token
