@@ -6042,6 +6042,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     let scrub_check_before = settings.scrub_check;
     let suggestions_before = settings.suggestions_enabled;
     let settlement_before = settings.settlement_estimate_enabled;
+    let missions_before = settings.missions_enabled;
     let attention_before = attention_settings(&settings);
     // `apply_settings_object` is the same validation
     // `tc_daemon_start_with_settings` (the C ABI's pre-start
@@ -6126,8 +6127,15 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             // is a status change whichever request made it.
             // Nudge A2: so are the mark, the master, the per-kind switches
             // and the one-time offers.
+            // The missions switch moves `status.nudge`'s and every
+            // `list_pending` row's `mission_fit`, so it is both.
+            let missions_changed = value["missions_enabled"].as_bool() != Some(missions_before);
+            if missions_changed {
+                shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+            }
             if value["suggestions_enabled"].as_bool() != Some(suggestions_before)
                 || attention_after != attention_before
+                || missions_changed
             {
                 shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
             }
@@ -9214,6 +9222,103 @@ mod tests {
     mod missions {
         include!("mission_catalogue_tests.rs");
         include!("activity_missions_tests.rs");
+
+        /// Every test in this module is a test of missions shown: the
+        /// switch is turned on here, so each keeps the coverage it had
+        /// before missions could be hidden. The hidden case is
+        /// [`hidden_shared`].
+        fn shared() -> DaemonShared {
+            let s = hidden_shared();
+            s.settings.lock().unwrap().missions_enabled = true;
+            s
+        }
+
+        /// The fixture as a fresh install has it: missions hidden.
+        fn hidden_shared() -> DaemonShared {
+            super::shared()
+        }
+
+        /// Hidden, each mission method refuses with the fixed label before
+        /// reading a config or sending anything; shown, the same calls get
+        /// past the gate (here to their own missing-config refusals).
+        #[tokio::test]
+        async fn hidden_missions_refuse_every_mission_method() {
+            let s = hidden_shared();
+            for method in [
+                "mission_catalogue",
+                "activity_missions_catalogue",
+                "activity_missions_status",
+            ] {
+                let r = handle_request_async(&s, &req(method, serde_json::json!({}))).await;
+                assert!(r.result.is_none(), "{method}");
+                let e = r.error.expect("refused");
+                assert_eq!(e.code, ERR_UNAVAILABLE, "{method}");
+                assert_eq!(e.message, "missions-disabled", "{method}");
+            }
+            let r = handle_request_async(
+                &s,
+                &req(
+                    "mission_matches",
+                    serde_json::json!({"catalogue": {"schema_version": 1, "missions": []}}),
+                ),
+            )
+            .await;
+            assert_eq!(r.error.expect("refused").message, "missions-disabled");
+
+            s.settings.lock().unwrap().missions_enabled = true;
+            for method in [
+                "mission_catalogue",
+                "activity_missions_catalogue",
+                "activity_missions_status",
+            ] {
+                let r = handle_request_async(&s, &req(method, serde_json::json!({}))).await;
+                let e = r.error.expect("no config");
+                assert_ne!(e.message, "missions-disabled", "{method}");
+            }
+        }
+
+        /// Hidden, the supervisor's refresh sends nothing and empties a
+        /// slot that holds a catalogue, announcing the change; turned on,
+        /// the next tick fetches at once rather than waiting an interval.
+        #[tokio::test]
+        async fn hidden_missions_skip_the_slot_refresh_and_empty_the_slot() {
+            use crate::daemon::activity_missions::{MissionSlotSchedule, refresh_mission_slot};
+            let answer = Arc::new(std::sync::Mutex::new((
+                StatusCode::OK,
+                predicate_catalogue(&[claude_rust()]),
+            )));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let (base, server) = activity_server(answer, calls.clone()).await;
+            let s = shared();
+            configure_catalogue(&s, &base);
+            let mut schedule = MissionSlotSchedule::default();
+            let now = Utc::now();
+            refresh_mission_slot(&s, now, &mut schedule).await;
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert!(s.mission_catalogue.lock().unwrap().is_some());
+
+            s.settings.lock().unwrap().missions_enabled = false;
+            let mut events = s.events.subscribe();
+            refresh_mission_slot(&s, now + chrono::TimeDelta::days(30), &mut schedule).await;
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "nothing is fetched");
+            assert!(s.mission_catalogue.lock().unwrap().is_none());
+            let mut names = Vec::new();
+            while let Ok(e) = events.try_recv() {
+                names.push(e.event);
+            }
+            assert!(names.iter().any(|n| n == EVENT_STATUS_CHANGED), "{names:?}");
+            assert!(names.iter().any(|n| n == EVENT_QUEUE_CHANGED), "{names:?}");
+
+            s.settings.lock().unwrap().missions_enabled = true;
+            refresh_mission_slot(&s, now + chrono::TimeDelta::seconds(1), &mut schedule).await;
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                2,
+                "due at once when shown again"
+            );
+            assert!(s.mission_catalogue.lock().unwrap().is_some());
+            server.abort();
+        }
     }
     mod witnessed_flow {
         include!("ipc_witness_flow_test.rs");
@@ -19858,7 +19963,15 @@ mod tests {
             }
         }
 
+        /// A live catalogue with missions shown: every mission-fit test
+        /// below is a test of the switch on.
         fn receive_missions(s: &DaemonShared, missions: serde_json::Value) {
+            s.settings.lock().unwrap().missions_enabled = true;
+            receive_missions_hidden(s, missions);
+        }
+
+        /// The slot filled while `missions_enabled` stays as it is.
+        fn receive_missions_hidden(s: &DaemonShared, missions: serde_json::Value) {
             crate::daemon::mission_matching::receive_catalogue(
                 &s.mission_catalogue,
                 &serde_json::json!({"schema_version": 1, "missions": missions}),
@@ -19937,6 +20050,123 @@ mod tests {
             assert!(!status.to_string().contains("\"claude\""), "{status}");
         }
 
+        /// Missions hidden (the default): a live catalogue every idle row
+        /// fits draws nothing -- no `mission_fit` on `status.idle_sessions`,
+        /// `status.nudge` or any `list_pending` row, and no mission text --
+        /// and the lead is unchanged. Turning the switch on brings them back.
+        #[test]
+        fn hidden_missions_draw_no_mission_fit_even_with_a_matching_catalogue() {
+            let s = live();
+            assert!(
+                !s.settings.lock().unwrap().missions_enabled,
+                "off by default"
+            );
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 6);
+            see_every_pending_entry(&s);
+            receive_missions_hidden(&s, claude_mission());
+
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["lead"], "idle_sessions", "{status}");
+            assert!(
+                status["idle_sessions"].get("mission_fit").is_none(),
+                "{status}"
+            );
+            assert!(status["nudge"].get("mission_fit").is_none(), "{status}");
+            assert!(!status.to_string().contains("mission"), "{status}");
+            let listed = handle_request(&s, &req("list_pending", serde_json::json!({})));
+            let listed = listed.result.expect("list answers");
+            let rows = listed["pending"].as_array().unwrap();
+            assert_eq!(rows.len(), 2);
+            assert!(
+                rows.iter().all(|e| e.get("mission_fit").is_none()),
+                "{rows:?}"
+            );
+            // `submission_id` aside, no row says anything about a mission.
+            assert!(!listed.to_string().contains("\"mission"), "{listed}");
+
+            s.settings.lock().unwrap().missions_enabled = true;
+            assert_eq!(idle_rows_fitting(&s), 2);
+            assert_eq!(status_of(&s)["nudge"]["mission_fit"], 2);
+        }
+
+        /// `set_settings {missions_enabled}` round-trips through
+        /// `get_settings` and announces both `status_changed` and
+        /// `queue_changed` on a change, nothing on a repeat.
+        #[test]
+        fn the_missions_switch_round_trips_and_announces_a_change() {
+            let s = live();
+            let got = handle_request(&s, &req("get_settings", serde_json::json!({})));
+            assert_eq!(got.result.expect("settings")["missions_enabled"], false);
+
+            let mut events = s.events.subscribe();
+            let set = handle_request(
+                &s,
+                &req(
+                    "set_settings",
+                    serde_json::json!({"missions_enabled": true}),
+                ),
+            );
+            assert_eq!(set.result.expect("set answers")["missions_enabled"], true);
+            let mut names = Vec::new();
+            while let Ok(e) = events.try_recv() {
+                names.push(e.event);
+            }
+            assert!(names.iter().any(|n| n == EVENT_STATUS_CHANGED), "{names:?}");
+            assert!(names.iter().any(|n| n == EVENT_QUEUE_CHANGED), "{names:?}");
+            let got = handle_request(&s, &req("get_settings", serde_json::json!({})));
+            assert_eq!(got.result.expect("settings")["missions_enabled"], true);
+
+            let again = handle_request(
+                &s,
+                &req(
+                    "set_settings",
+                    serde_json::json!({"missions_enabled": true}),
+                ),
+            );
+            assert!(again.error.is_none(), "{:?}", again.error);
+            let mut names = Vec::new();
+            while let Ok(e) = events.try_recv() {
+                names.push(e.event);
+            }
+            assert!(!names.iter().any(|n| n == EVENT_QUEUE_CHANGED), "{names:?}");
+
+            let bad = handle_request(
+                &s,
+                &req(
+                    "set_settings",
+                    serde_json::json!({"missions_enabled": "yes"}),
+                ),
+            );
+            assert!(bad.error.is_some());
+        }
+
+        /// Missions hidden: the mission methods refuse with the fixed
+        /// label before reading anything.
+        #[test]
+        fn hidden_missions_refuse_mission_matches() {
+            let s = live();
+            let r = handle_request(
+                &s,
+                &req(
+                    "mission_matches",
+                    serde_json::json!({"catalogue": {"schema_version": 1, "missions": []}}),
+                ),
+            );
+            let e = r.error.expect("refused");
+            assert_eq!(e.code, ERR_UNAVAILABLE);
+            assert_eq!(e.message, "missions-disabled");
+            s.settings.lock().unwrap().missions_enabled = true;
+            let r = handle_request(
+                &s,
+                &req(
+                    "mission_matches",
+                    serde_json::json!({"catalogue": {"schema_version": 1, "missions": []}}),
+                ),
+            );
+            assert!(r.error.is_none(), "{:?}", r.error);
+        }
+
         /// A leading backlog nudge counts its own subjects: the previewed
         /// Ask entries `unpurposed_traces` counts.
         #[test]
@@ -19966,6 +20196,7 @@ mod tests {
             let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let (base, server) = super::missions::activity_server(answer.clone(), calls).await;
             let s = live();
+            s.settings.lock().unwrap().missions_enabled = true;
             let mut cfg = s.store.load_config().unwrap().unwrap();
             cfg.ingest_url = format!("{base}/v1/traces");
             cfg.allowed_hosts = Some("127.0.0.1".into());

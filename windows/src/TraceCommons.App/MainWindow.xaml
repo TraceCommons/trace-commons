@@ -325,7 +325,8 @@
                     </Button>
 
                     <Button Content="Insights" Click="OnShowInsights" HorizontalAlignment="Stretch" />
-                    <Button Content="Mission drafts" Click="OnShowMissionDrafts" HorizontalAlignment="Stretch" />
+                    <Button Content="Mission drafts" Click="OnShowMissionDrafts" HorizontalAlignment="Stretch"
+                            Visibility="{x:Bind ViewModel.MissionsShown, Mode=OneWay}" />
 
                     <Button HorizontalAlignment="Stretch"
                             HorizontalContentAlignment="Stretch"

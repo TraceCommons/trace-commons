@@ -149,12 +149,13 @@ else
     fail "first-run Insights created contributor state"
   fi
 
-  # Mission drafts must be reachable without starting Contributions, and
+  # Mission drafts are absent while missions are hidden and, with the switch
+  # on, reachable without starting Contributions, and
   # inspection/quit failures must preserve the live local view.
   WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
     run_ignored_test "local-first mission draft navigation required contributor startup" \
     cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
-    ui::insights::tests::local_first_window_exposes_insights_and_mission_drafts_without_a_worker \
+    ui::insights::tests::local_first_window_lists_mission_drafts_only_while_missions_are_shown \
     -- --exact --ignored --test-threads=1
   WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
     run_ignored_test "mission draft lifecycle, failed inspection or declined close failed" \

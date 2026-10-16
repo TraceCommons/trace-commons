@@ -70,3 +70,23 @@ export const navItems: NavItem[] = [
   { id: "profile", label: "Profile", group: "account", icon: "profile" },
   { id: "settings", label: "Settings", group: "account", icon: "settings" },
 ];
+
+/**
+ * The navigation rows to show. Missions are hidden while the daemon's
+ * `missions_enabled` setting is off, so the Mission drafts row goes with it.
+ */
+export function visibleNavItems(missionsEnabled: boolean): NavItem[] {
+  return navItems.filter((item) => missionsEnabled || item.id !== "mission-drafts");
+}
+
+/** Whether a path from a desktop event may be navigated to. */
+export function isNavigablePath(
+  value: unknown,
+  missionsEnabled: boolean,
+): value is (typeof routePaths)[RouteId] {
+  return (
+    typeof value === "string" &&
+    (missionsEnabled || value !== routePaths["mission-drafts"]) &&
+    Object.values(routePaths).some((path) => path === value)
+  );
+}

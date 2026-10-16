@@ -187,7 +187,8 @@ struct MonitorWindowView: View {
                 showsGraph: $showsGraph,
                 showsIgnored: $showsIgnored,
                 breadcrumb: Self.breadcrumb(
-                    tab: Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding), homePage: homePage,
+                    tab: Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding),
+                    homePage: homePage.shown(missions: model.missionsShown),
                     tracesPage: tracesPage,
                     hosted: { HomeTabView.hostedHeading($0, missionDrafts: missionDrafts) },
                     back: { homePage = .overview }, backToTraces: { tracesPage = .tree }),
@@ -241,7 +242,8 @@ struct MonitorWindowView: View {
                             tab = .traces
                             tracesPage = .history
                         },
-                        insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts)
+                        insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts,
+                        missionsEnabled: model.missionsShown)
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).
@@ -317,6 +319,11 @@ struct MonitorWindowView: View {
         // A destination this window could not show yet (before the core
         // said) is taken once it can.
         .onChange(of: model.onboardingKnown) { _, _ in consumePending() }
+        // Restored scene state cannot hold a mission page open while
+        // missions are hidden.
+        .onChange(of: model.missionsShown, initial: true) { _, shown in
+            homePage = homePage.shown(missions: shown)
+        }
         // Modals and confirmations raised anywhere in the window cover all
         // of it, Settings' sections' own included: the Settings modal sits
         // inside this host.
@@ -376,7 +383,7 @@ struct MonitorWindowView: View {
                                             onboardingKnown: model.onboardingKnown)
         else { return }
         Self.land(destination, tab: &tab, homePage: &homePage, tracesPage: &tracesPage,
-                  selection: &selection, showsInspector: &showsInspector)
+                  selection: &selection, showsInspector: &showsInspector, missionsEnabled: model.missionsShown)
         navigation.pending = nil
         if destination == .idleSessions {
             // Held by the store until the window's first attach when the
@@ -567,16 +574,17 @@ struct MonitorWindowView: View {
     /// opens the Settings modal (`Launcher`) and leaves the tabs alone.
     static func land(
         _ destination: MonitorDestination, tab: inout Tab, homePage: inout HomeTabView.Page,
-        selection: inout MonitorSelection?, showsInspector: inout Bool
+        selection: inout MonitorSelection?, showsInspector: inout Bool, missionsEnabled: Bool = false
     ) {
         var tracesPage = TracesPage.tree
         land(destination, tab: &tab, homePage: &homePage, tracesPage: &tracesPage,
-             selection: &selection, showsInspector: &showsInspector)
+             selection: &selection, showsInspector: &showsInspector, missionsEnabled: missionsEnabled)
     }
 
     static func land(
         _ destination: MonitorDestination, tab: inout Tab, homePage: inout HomeTabView.Page,
-        tracesPage: inout TracesPage, selection: inout MonitorSelection?, showsInspector: inout Bool
+        tracesPage: inout TracesPage, selection: inout MonitorSelection?, showsInspector: inout Bool,
+        missionsEnabled: Bool = false
     ) {
         switch destination {
         case .home(.history):
@@ -585,7 +593,9 @@ struct MonitorWindowView: View {
             tracesPage = .history
         case .home(let page):
             tab = .home
-            homePage = page
+            // A mission page falls back to the overview while missions are
+            // hidden.
+            homePage = page.shown(missions: missionsEnabled)
         case .inference:
             // The account is on the main pane (Ron's #1146), and the
             // inspector stays closed on Inference (owner, 2026-10-09).

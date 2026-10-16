@@ -9,6 +9,16 @@ enum HomePage: String {
     case missions
     case insights
     case missionDrafts
+
+    /// Whether this page is one of the two mission screens.
+    var isMission: Bool { self == .missions || self == .missionDrafts }
+
+    /// This page, or Home's overview when it is a mission screen and
+    /// missions are hidden: a restored scene, a deep link or a stale
+    /// destination cannot open what the owner hid.
+    func shown(missions enabled: Bool) -> HomePage {
+        isMission && !enabled ? .overview : self
+    }
 }
 
 /// The Traces tab's pages: the tree, or History, opened from the History

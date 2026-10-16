@@ -925,6 +925,10 @@ extension DaemonData {
         /// daemon stops reading traces for it. `nil` from a daemon that
         /// predates it, never drawn as off.
         public let settlementEstimateEnabled: Bool?
+        /// Whether missions are shown at all (owner decision 2026-10-16:
+        /// hidden for now, off by default). `nil` from a daemon that
+        /// predates it, which reads as off; only an exact `true` shows them.
+        public let missionsEnabled: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case quiescenceSecs = "quiescence_secs"
@@ -958,6 +962,7 @@ extension DaemonData {
             case insightsCounterPass = "insights_counter_pass"
             case insightsRecapCardEnabled = "insights_recap_card_enabled"
             case settlementEstimateEnabled = "settlement_estimate_enabled"
+            case missionsEnabled = "missions_enabled"
         }
 
         public var scrubCheckMode: ScrubCheckMode? { scrubCheck.flatMap(ScrubCheckMode.init(rawValue:)) }

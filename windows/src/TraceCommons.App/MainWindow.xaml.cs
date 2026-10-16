@@ -1080,6 +1080,8 @@ public sealed partial class MainWindow : Window
 
     private async void OnShowMissionDrafts(object sender, RoutedEventArgs e)
     {
+        if (!ViewModel.MissionsShown)
+            return;
         if (MissionDraftsPane.Content is not MissionDraftsView)
             MissionDraftsPane.Content = new MissionDraftsView(WinRT.Interop.WindowNative.GetWindowHandle(this));
         ViewModel.ShowMissionDrafts();

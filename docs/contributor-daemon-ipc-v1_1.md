@@ -666,7 +666,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `managed_terminal` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `managed_terminal` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -4712,7 +4712,8 @@ Takes a JSON object whose top-level keys must come from
 `trajectory_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
 `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`,
-`settlement_estimate_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`,
+`settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`,
+`menu_bar_mark_enabled`, `notify`,
 `verdicts_offer_pending`, `idle_offer_pending`,
 `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`,
 `insights_context_threshold`, `insights_counter_pass`,
@@ -4759,6 +4760,23 @@ progress, deletes the estimate's feature cache, and drops
 it was present; on again starts a full scan. The estimate is made on this
 Mac and sends nothing about a trace anywhere. Any other JSON type is
 `bad_params` / `settings-invalid-value`.
+
+`missions_enabled` (boolean, default `false`; a settings file written
+before the key existed loads `false`) shows or hides missions (owner
+decision 2026-10-16: hidden for now). No shell offers a Settings row for it;
+it is set only through `set_settings`, and read back from `get_settings`.
+Off, the daemon does not fetch `GET /v1/activity-missions` and empties the
+catalogue it holds, so `status.nudge.mission_fit`,
+`status.idle_sessions.mission_fit`, `list_pending[].mission_fit` and the
+digest's idle mission clause are all absent; and `mission_catalogue`,
+`activity_missions_catalogue`, `activity_missions_status` and
+`mission_matches` are refused with `unavailable` / `missions-disabled`. The
+local mission-draft inbox is a C ABI function (`tc_mission_drafts_call`),
+not an IPC method, and does not consult the daemon; a shell hides it by
+this switch. On restores the
+behaviour from before the switch existed. A change publishes
+`status_changed`. Any other JSON type is `bad_params` /
+`settings-invalid-value`.
 
 `notifications_enabled`, `menu_bar_mark_enabled`, `notify`,
 `verdicts_offer_pending` and `idle_offer_pending` are the notification

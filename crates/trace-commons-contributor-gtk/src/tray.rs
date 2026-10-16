@@ -146,7 +146,7 @@ pub fn toggle_request(answering: bool) -> TrayRequest {
 /// The last row is the action, and which way it points is the whole of the
 /// asymmetry: while it is off it is another `Open`.
 fn menu_rows(answering: bool) -> Vec<(&'static str, TrayRequest)> {
-    let mut rows: Vec<(&'static str, TrayRequest)> = crate::ui::SCREENS
+    let mut rows: Vec<(&'static str, TrayRequest)> = crate::ui::screens()
         .iter()
         .map(|(name, label, _)| (*label, TrayRequest::Open(name)))
         .collect();
@@ -188,7 +188,7 @@ fn menu_request(id: i32, answering: bool) -> Option<TrayRequest> {
 
 /// The screen a plain click opens: the first one the window lists.
 fn default_screen() -> &'static str {
-    crate::ui::SCREENS[0].0
+    crate::ui::screens()[0].0
 }
 
 /// What the tray icon does. `notify.rs` has the same shape for the same
@@ -718,9 +718,10 @@ mod tests {
     fn the_menu_offers_one_item_per_screen_and_one_action() {
         for answering in [false, true] {
             let rows = menu_rows(answering);
-            assert_eq!(rows.len(), crate::ui::SCREENS.len() + 1);
-            for (id, (label, request)) in rows.iter().take(crate::ui::SCREENS.len()).enumerate() {
-                let (screen, title, _) = crate::ui::SCREENS[id];
+            let screens = crate::ui::screens();
+            assert_eq!(rows.len(), screens.len() + 1);
+            for (id, (label, request)) in rows.iter().take(screens.len()).enumerate() {
+                let (screen, title, _) = screens[id];
                 assert_eq!(*request, TrayRequest::Open(screen));
                 assert_eq!(*label, title);
             }
@@ -805,7 +806,7 @@ mod tests {
     /// `AboutToShow` is for.
     #[test]
     fn a_stale_menu_is_refetched_rather_than_acted_on() {
-        let action = menu_id(crate::ui::SCREENS.len());
+        let action = menu_id(crate::ui::screens().len());
         assert_eq!(
             menu_request(action, true),
             Some(TrayRequest::StopAnsweringModelCalls)
@@ -853,7 +854,7 @@ mod tests {
             match request {
                 TrayRequest::Open(screen) => {
                     assert!(
-                        crate::ui::SCREENS
+                        crate::ui::screens()
                             .iter()
                             .any(|(name, _, _)| *name == screen)
                     )

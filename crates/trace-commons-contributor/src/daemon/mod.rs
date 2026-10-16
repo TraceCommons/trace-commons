@@ -4774,6 +4774,7 @@ mod tests {
         let ingest = TransientRetryHarness::spawn(router).await;
         let dir = tempfile::tempdir().unwrap();
         let shared = shared_with_ingest(dir.path(), &ingest);
+        shared.settings.lock().unwrap().missions_enabled = true;
         let supervisor = tokio::spawn(run_supervisor(Arc::clone(&shared), false));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let filled = loop {
@@ -4793,6 +4794,46 @@ mod tests {
             .map(|m| m.mission_id)
             .collect();
         assert_eq!(ids, vec!["claude"]);
+    }
+
+    /// Missions hidden (the default): the tick loop never asks for the
+    /// activity catalogue, and empties a slot that already holds one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_supervisor_neither_fetches_nor_keeps_the_mission_slot_while_hidden() {
+        use axum::routing::get;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let router = Router::new().route(
+            "/v1/activity-missions",
+            get(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                async move { StatusCode::SERVICE_UNAVAILABLE }
+            }),
+        );
+        let ingest = TransientRetryHarness::spawn(router).await;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_with_ingest(dir.path(), &ingest);
+        assert!(!shared.settings.lock().unwrap().missions_enabled);
+        mission_matching::receive_catalogue(
+            &shared.mission_catalogue,
+            &serde_json::json!({"schema_version": 1, "missions": [{"mission_id": "any"}]}),
+            Utc::now(),
+        )
+        .unwrap();
+        let supervisor = tokio::spawn(run_supervisor(Arc::clone(&shared), false));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let emptied = loop {
+            let empty = shared.mission_catalogue.lock().unwrap().is_none();
+            if empty || std::time::Instant::now() > deadline {
+                break empty;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        shared.shutdown.store(true, Ordering::Relaxed);
+        shared.shutdown_signal.notify_one();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), supervisor).await;
+        assert!(emptied, "the first tick empties the slot");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "nothing is fetched");
     }
 
     /// Without a config there is no origin to ask: nothing is sent and the
