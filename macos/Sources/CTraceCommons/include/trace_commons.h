@@ -2202,10 +2202,12 @@ char*       tc_insights_copy_json(void);
 char*       tc_nudge_copy_json(void);
 /* A Traces row's tags, worded by the core from the row's own list_pending
  * fields. entry_json is a borrowed UTF-8 JSON object carrying the entry's
- * mission_fit and credit_estimate as the daemon sent them. Returns an owned
- * JSON object with mission_fit, estimate_band, estimate_tier and
- * estimate_explainer, each present only when there is something true to
- * draw: the mission tag above zero, the estimate only while drawn is true.
+ * mission_fit and settlement_estimate as the daemon sent them (the band is
+ * inference dollars; the older credit_estimate points band is ignored).
+ * Returns an owned JSON object with mission_fit, estimate_band,
+ * estimate_tier and estimate_explainer, each present only when there is
+ * something true to draw: the mission tag above zero, the estimate only
+ * while drawn is true.
  * NULL, unreadable or mistyped input answers {}, which draws nothing. Free
  * with tc_string_free. Returns NULL only after a caught panic. DRAFT, NEEDS
  * APPROVAL. */

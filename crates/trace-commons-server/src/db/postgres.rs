@@ -5727,6 +5727,84 @@ impl Database for PgBackend {
             .collect())
     }
 
+    async fn list_settlement_labels(
+        &self,
+        tenant_id: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<Vec<crate::trace_corpus_storage::SettlementLabelRow>, DatabaseError> {
+        use crate::trace_corpus_storage::{SettlementLabel, SettlementLabelRow};
+        if submission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // The run is the one that wrote the submission's pipeline gate
+        // decision (at most one per submission, V116), not the latest run:
+        // a re-run in flight never relabels a settled trace. Forced RLS on
+        // the tenant GUC scopes every table; the explicit `tenant_id = $1`
+        // predicates are belt-and-braces and keep the plans on the keys.
+        // `atomic_units` is NUMERIC(39,0); it is read as text and parsed, so
+        // an amount past u64 is excluded rather than truncated.
+        let rows = tx
+            .query(
+                "SELECT d.submission_id,
+                        r.state AS run_state,
+                        (o.run_id IS NOT NULL) AS has_score_outcome,
+                        s.atomic_units::TEXT AS atomic_units,
+                        s.operation_state
+                 FROM (
+                     SELECT DISTINCT ON (submission_id) submission_id, pipeline_run_id
+                     FROM trace_gate_decisions
+                     WHERE tenant_id = $1
+                       AND submission_id = ANY($2)
+                       AND pipeline_run_id IS NOT NULL
+                     ORDER BY submission_id, decided_at DESC, decision_id DESC
+                 ) d
+                 LEFT JOIN pipeline_runs r
+                        ON r.tenant_id = $1
+                       AND r.run_id = d.pipeline_run_id
+                       AND r.submission_id = d.submission_id
+                 LEFT JOIN phase_outcomes o
+                        ON o.tenant_id = $1
+                       AND o.run_id = r.run_id
+                       AND o.phase = 'score'
+                 LEFT JOIN pipeline_run_settlements s
+                        ON s.tenant_id = $1
+                       AND s.run_id = r.run_id
+                       AND s.instrument_id = 'trace_credit'",
+                &[&tenant_id, &submission_ids],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let run_state: Option<String> = row.get("run_state");
+                let has_score_outcome: bool = row.get("has_score_outcome");
+                let atomic_units: Option<String> = row.get("atomic_units");
+                let operation_state: Option<String> = row.get("operation_state");
+                let label = if run_state.as_deref() != Some("complete")
+                    || !has_score_outcome
+                    || operation_state.as_deref() == Some("held")
+                {
+                    SettlementLabel::Excluded
+                } else {
+                    match atomic_units {
+                        None => SettlementLabel::WithheldAtZero,
+                        Some(units) => units
+                            .parse::<u64>()
+                            .map_or(SettlementLabel::Excluded, SettlementLabel::Settled),
+                    }
+                };
+                SettlementLabelRow {
+                    submission_id: row.get("submission_id"),
+                    label,
+                }
+            })
+            .collect())
+    }
+
     async fn list_recent_gate_decision_keys(
         &self,
         limit: i64,

@@ -805,6 +805,12 @@ pub struct MarkInputs {
     /// The `notify.idle_sessions` setting. Muting the idle-session kind
     /// clears the halo too (spec section 4.1, "The halo").
     pub notify_idle_sessions: bool,
+    /// The settlement estimate is news: shown, its low end at least
+    /// `SETTLEMENT_MARK_MIN_LOW_USD_MICROS`, the estimate switch on, and
+    /// `notify.settlement_estimate` and the master switch on. The caller
+    /// computes it; the existing gates (paused, consent hold, signed out,
+    /// unhealthy, suggestions, the mark's own switch) are applied here.
+    pub settlement_lit: bool,
 }
 
 /// The menu-bar icon state the daemon reports. Four-valued: `News` and
@@ -860,6 +866,13 @@ impl Mark {
             kinds: vec![kind],
         }
     }
+
+    fn news(kinds: Vec<super::attention::Kind>) -> Self {
+        Self {
+            state: MarkState::News,
+            kinds,
+        }
+    }
 }
 
 /// The menu-bar icon state. Pure: see the module doc.
@@ -869,8 +882,10 @@ impl Mark {
 ///   "Not now" silences U4.
 /// - `news` when nothing is owed, every gate is open, the history poll is
 ///   fresh, and verdict news is waiting unacknowledged and younger than
-///   [`NEWS_MARK_TTL`]. Today U2 is the only mark kind; the weekly recap
-///   and Insights tips register later.
+///   [`NEWS_MARK_TTL`], or the settlement estimate is lit
+///   (`MarkInputs::settlement_lit`). Its kinds are the verdicts first, then
+///   the estimate, by precedence. The weekly recap and Insights tips
+///   register later.
 ///
 /// One needs `decisions_owed > 0` and the other `== 0`, so the two can
 /// never hold together. Nothing here reads whether a panel or window was
@@ -918,10 +933,17 @@ pub fn mark(
         let age = now.signed_duration_since(d.newest_at);
         d.total() > 0 && age >= Duration::zero() && age < NEWS_MARK_TTL
     });
+    let mut kinds = Vec::new();
     if news {
-        Mark::lit(MarkState::News, Kind::VerdictsLanded)
-    } else {
+        kinds.push(Kind::VerdictsLanded);
+    }
+    if inputs.settlement_lit {
+        kinds.push(Kind::SettlementEstimate);
+    }
+    if kinds.is_empty() {
         Mark::quiet(MarkState::None)
+    } else {
+        Mark::news(kinds)
     }
 }
 
@@ -2178,6 +2200,7 @@ mod tests {
             decisions_owed: Some(0),
             menu_bar_mark_enabled: true,
             notify_idle_sessions: true,
+            settlement_lit: false,
         }
     }
 
@@ -2214,6 +2237,91 @@ mod tests {
             }
         );
         assert_eq!(got.state.label(), "news");
+    }
+
+    fn settlement_inputs() -> MarkInputs {
+        MarkInputs {
+            settlement_lit: true,
+            ..mark_open(open())
+        }
+    }
+
+    #[test]
+    fn the_estimate_lights_the_news_mark_when_nothing_is_owed() {
+        use super::super::attention::Kind;
+        let got = mark(&settlement_inputs(), &empty(), now());
+        assert_eq!(
+            got,
+            Mark {
+                state: MarkState::News,
+                kinds: vec![Kind::SettlementEstimate],
+            }
+        );
+        // With verdict news as well, both, verdicts first.
+        let both = MarkInputs {
+            settlement_lit: true,
+            ..news_inputs(now() - Duration::hours(1))
+        };
+        assert_eq!(
+            mark(&both, &empty(), now()),
+            Mark {
+                state: MarkState::News,
+                kinds: vec![Kind::VerdictsLanded, Kind::SettlementEstimate],
+            }
+        );
+    }
+
+    #[test]
+    fn the_estimate_mark_follows_every_gate() {
+        let closed: [(&str, fn(&mut MarkInputs), MarkState); 6] = [
+            ("paused", |m| m.lead.paused = true, MarkState::None),
+            (
+                "consent hold",
+                |m| m.lead.consent_hold = true,
+                MarkState::None,
+            ),
+            ("not enrolled", |m| m.lead.enrolled = false, MarkState::None),
+            (
+                "suggestions off",
+                |m| m.lead.suggestions_enabled = false,
+                MarkState::None,
+            ),
+            (
+                "mark switch off",
+                |m| m.menu_bar_mark_enabled = false,
+                MarkState::None,
+            ),
+            ("unhealthy", |m| m.lead.healthy = false, MarkState::Unknown),
+        ];
+        for (name, close, state) in closed {
+            let mut inputs = settlement_inputs();
+            close(&mut inputs);
+            assert_eq!(mark(&inputs, &empty(), now()), quiet_mark(state), "{name}");
+        }
+        // Not lit: nothing.
+        let unlit = MarkInputs {
+            settlement_lit: false,
+            ..settlement_inputs()
+        };
+        assert_eq!(mark(&unlit, &empty(), now()), quiet_mark(MarkState::None));
+        // Decisions owed: the halo rules are unchanged, the estimate adds
+        // nothing.
+        let owed = MarkInputs {
+            decisions_owed: Some(2),
+            ..settlement_inputs()
+        };
+        assert_eq!(mark(&owed, &empty(), now()), quiet_mark(MarkState::None));
+        let halo = MarkInputs {
+            settlement_lit: true,
+            ..ready_inputs(2)
+        };
+        assert_eq!(
+            mark(&halo, &empty(), now()),
+            Mark {
+                state: MarkState::Ready,
+                kinds: vec![super::super::attention::Kind::IdleSessions],
+            }
+        );
     }
 
     #[test]
@@ -2319,6 +2427,7 @@ mod tests {
                                                     decisions_owed: owed,
                                                     menu_bar_mark_enabled: mark_on,
                                                     notify_idle_sessions: idle_on,
+                                                    settlement_lit: false,
                                                 };
                                                 let got = mark(&inputs, &ledger, now());
                                                 let gates = !paused

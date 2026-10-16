@@ -136,6 +136,12 @@ impl TraceSource for GeminiCliSource {
         SOURCE_GEMINI_CLI
     }
 
+    /// Discovery reads directories, file metadata and each project's
+    /// `.project_root` sidecar (a path), never a session document.
+    fn discover_unopened(&self) -> anyhow::Result<Vec<SessionRef>> {
+        self.discover()
+    }
+
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
         let mut sessions = Vec::new();
         let mut skipped = 0usize;

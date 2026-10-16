@@ -85,6 +85,8 @@ pub mod queue;
 pub mod remembered_passkeys;
 pub mod second_look;
 pub mod settings;
+pub mod settlement_estimate;
+pub mod settlement_scan;
 pub mod skill_loop;
 pub mod state;
 pub mod stored_cloud_credentials;
@@ -639,6 +641,11 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 if watcher::tick(shared, now).await.is_err() {
                     tracing::warn!(pass = "watch", "daemon pass failed");
                 }
+                // The settlement estimate's scan, when one is due. Started
+                // off the workers and not awaited, so a large machine never
+                // holds up this tick; it reads and sends nothing but local
+                // files, so pause and dry-run do not hold it back.
+                let _ = settlement_estimate::tick(shared, now);
                 expire_and_digest(shared, now);
                 // Everything above is read-only bookkeeping; uploading is
                 // what dry-run withholds.
@@ -1786,9 +1793,10 @@ async fn refresh_estimate_table(
     let Ok(origin) = crate::config::ingest_origin_url(&cfg.ingest_url, "/") else {
         return;
     };
-    let outcome = match EstimateTableClient::new(origin.as_str(), cfg.allowed_hosts.as_deref()) {
+    let client = EstimateTableClient::new(origin.as_str(), cfg.allowed_hosts.as_deref());
+    let outcome = match &client {
         Ok(client) => client.fetch().await,
-        Err(refused) => Err(refused),
+        Err(refused) => Err(*refused),
     };
     let before = {
         let mut slot = shared.estimate_table.lock().expect("estimate lock");
@@ -1800,6 +1808,16 @@ async fn refresh_estimate_table(
     // in force only renews its age and changes nothing they see, but a
     // refetch of one that had expired brings it back.
     shared.publish_estimate_in_force_change(now, Some(before));
+    // The settlement table rides this same fetch and schedule; it has none
+    // of its own. Fetched whatever the settlement switch says, so the
+    // request's timing never depends on it, and so turning the switch on
+    // finds a table in memory and scans at the next tick. The switch gates
+    // the scan and every surface, not this anonymous public read.
+    let settlement = match &client {
+        Ok(client) => client.fetch_settlement().await,
+        Err(refused) => Err(*refused),
+    };
+    settlement_estimate::apply_table_fetch(shared, settlement);
 }
 
 /// How long after an upload the server is asked for verdicts.

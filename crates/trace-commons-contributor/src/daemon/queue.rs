@@ -1134,7 +1134,7 @@ impl Queue {
     /// entries a queue holds, and it keeps the index current so a fixture
     /// built this way is indistinguishable from one the daemon built.
     #[cfg(test)]
-    fn push_for_test(&mut self, entry: QueueEntry) {
+    pub(crate) fn push_for_test(&mut self, entry: QueueEntry) {
         self.entries.push(entry);
         self.reindex();
     }

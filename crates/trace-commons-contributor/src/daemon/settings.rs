@@ -95,6 +95,11 @@ const DEFAULT_APPROVAL_HOLD_SECS: u64 = 10;
 /// decisions list.
 pub const DEFAULT_SUGGESTIONS_ENABLED: bool = true;
 
+/// Whether the settlement estimate ("Estimate what traces on this Mac are
+/// worth") is on for a settings file that never chose. On by default, per
+/// the settlement estimate design.
+pub const DEFAULT_SETTLEMENT_ESTIMATE_ENABLED: bool = true;
+
 /// "Notifications from Trace Commons", the master switch, for a settings
 /// file that never chose. DRAFT. Not an owner decision: on is today's
 /// behaviour, since the digest posts today with no switch at all.
@@ -123,6 +128,9 @@ pub const UPGRADE_NOTIFY_VERDICTS_LANDED: bool = false;
 /// `notify.weekly_recap` (N3). DRAFT, owner decision 1: U3 is held for the
 /// gamification ruling, and once ruled it is offered from the recap card.
 pub const DEFAULT_NOTIFY_WEEKLY_RECAP: bool = false;
+/// `notify.settlement_estimate` (N5). DRAFT, NEEDS APPROVAL: on by default,
+/// like the estimate switch it sits under.
+pub const DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE: bool = true;
 /// `notify.insights_tip` (N4). DRAFT, owner decision 25: Insights decides;
 /// the recommendation is off as a notification.
 pub const DEFAULT_NOTIFY_INSIGHTS_TIP: bool = false;
@@ -675,6 +683,14 @@ pub struct DaemonSettings {
     #[serde(default = "default_suggestions_enabled")]
     pub suggestions_enabled: bool,
 
+    /// The settlement estimate's switch: whether the daemon scans this
+    /// Mac's traces for an estimate and shows it anywhere. Defaults to
+    /// [`DEFAULT_SETTLEMENT_ESTIMATE_ENABLED`]; a settings file written
+    /// before this key existed loads with that default. Off stops any scan
+    /// in progress, hides every surface, and deletes the feature cache.
+    #[serde(default = "default_settlement_estimate_enabled")]
+    pub settlement_estimate_enabled: bool,
+
     /// Nudge: "Notifications from Trace Commons", the master switch over
     /// the digest and every re-engagement kind. Defaults to
     /// [`DEFAULT_NOTIFICATIONS_ENABLED`]. The OS permission stays a separate,
@@ -778,6 +794,9 @@ pub struct NotifyKinds {
     /// N4, Insights tips.
     #[serde(default)]
     pub insights_tip: bool,
+    /// N5, the settlement estimate.
+    #[serde(default = "default_notify_settlement_estimate")]
+    pub settlement_estimate: bool,
     /// Kind keys this build does not know, kept verbatim.
     #[serde(flatten)]
     pub other: BTreeMap<String, serde_json::Value>,
@@ -792,6 +811,7 @@ impl Default for NotifyKinds {
             verdicts_landed: DEFAULT_NOTIFY_VERDICTS_LANDED,
             weekly_recap: DEFAULT_NOTIFY_WEEKLY_RECAP,
             insights_tip: DEFAULT_NOTIFY_INSIGHTS_TIP,
+            settlement_estimate: DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE,
             other: BTreeMap::new(),
         }
     }
@@ -823,6 +843,7 @@ impl NotifyKinds {
             "verdicts_landed" => Some(&mut self.verdicts_landed),
             "weekly_recap" => Some(&mut self.weekly_recap),
             "insights_tip" => Some(&mut self.insights_tip),
+            "settlement_estimate" => Some(&mut self.settlement_estimate),
             _ => None,
         }
     }
@@ -834,6 +855,7 @@ impl NotifyKinds {
             "verdicts_landed" => Some(&self.verdicts_landed),
             "weekly_recap" => Some(&self.weekly_recap),
             "insights_tip" => Some(&self.insights_tip),
+            "settlement_estimate" => Some(&self.settlement_estimate),
             _ => None,
         }
     }
@@ -856,6 +878,10 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Option::<NotifyKinds>::deserialize(deserializer)?.unwrap_or_else(NotifyKinds::upgraded))
+}
+
+fn default_notify_settlement_estimate() -> bool {
+    DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE
 }
 
 fn default_notify_digest() -> bool {
@@ -1264,6 +1290,10 @@ fn default_suggestions_enabled() -> bool {
     DEFAULT_SUGGESTIONS_ENABLED
 }
 
+fn default_settlement_estimate_enabled() -> bool {
+    DEFAULT_SETTLEMENT_ESTIMATE_ENABLED
+}
+
 fn default_approval_hold_secs() -> u64 {
     DEFAULT_APPROVAL_HOLD_SECS
 }
@@ -1317,6 +1347,7 @@ impl Default for DaemonSettings {
             scrub_check: ScrubCheck::Automatic,
             scrub_check_defaulted_on_upgrade: false,
             suggestions_enabled: DEFAULT_SUGGESTIONS_ENABLED,
+            settlement_estimate_enabled: DEFAULT_SETTLEMENT_ESTIMATE_ENABLED,
             notifications_enabled: DEFAULT_NOTIFICATIONS_ENABLED,
             menu_bar_mark_enabled: DEFAULT_MENU_BAR_MARK_ENABLED,
             managed_terminal: Default::default(),
@@ -1521,6 +1552,7 @@ impl DaemonSettings {
             insights_tip: self.notify.insights_tip,
             verdicts_landed: self.notify.verdicts_landed,
             weekly_recap: self.notify.weekly_recap,
+            settlement_estimate: self.notify.settlement_estimate,
             renderer,
         }
     }
@@ -1970,6 +2002,13 @@ pub fn apply_settings_object(
             // because `status.nudge` reads it.
             "suggestions_enabled" => {
                 settings.suggestions_enabled = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // The settlement estimate's switch. `set_settings` turns the
+            // scan and every surface off (deleting the feature cache) or
+            // back on (a full scan); see `daemon::settlement_estimate`.
+            "settlement_estimate_enabled" => {
+                settings.settlement_estimate_enabled =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
             // Nudge A2: the master notification switch and the news mark.
             // Also reachable as `set_notifications_enabled` and
@@ -2868,6 +2907,53 @@ mod tests {
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
         assert!(!s.suggestions_enabled, "a refused value changes nothing");
+    }
+
+    /// The settlement estimate is on unless the person turns it off,
+    /// including for a settings file written before the switch existed, and
+    /// `set_settings` takes a boolean and nothing else. The change persists.
+    #[test]
+    fn settings_round_trip_the_estimate_switch() {
+        assert!(DaemonSettings::default().settlement_estimate_enabled);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(v["settlement_estimate_enabled"], true);
+        v.as_object_mut()
+            .unwrap()
+            .remove("settlement_estimate_enabled");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(
+            settings.settlement_estimate_enabled,
+            "an absent switch is on"
+        );
+
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"settlement_estimate_enabled": false})
+            ),
+            Ok(true)
+        );
+        assert!(!s.settlement_estimate_enabled);
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"settlement_estimate_enabled": "off"})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(
+            !s.settlement_estimate_enabled,
+            "a refused value changes nothing"
+        );
+        s.save(&store).unwrap();
+        assert!(
+            !DaemonSettings::load(&store)
+                .unwrap()
+                .settlement_estimate_enabled,
+            "off persists"
+        );
     }
 
     /// Nudge A2: a new install (no settings file) gets the decision-3 and

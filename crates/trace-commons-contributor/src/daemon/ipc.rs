@@ -632,6 +632,13 @@ pub const EVENT_USAGE_CHANGED: &str = "usage_changed";
 /// the daemon's own high-water mark. Counts only: `{newly_accepted,
 /// newly_held, newly_final}`. Always followed by `status_changed`.
 pub const EVENT_HISTORY_CHANGED: &str = "history_changed";
+/// The machine-wide settlement estimate on `status.settlement_estimate`
+/// changed as a reader draws it: the rounded band, its "up to" form, or the
+/// table or pricing it came from -- or it appeared or went away. A re-scan
+/// that moves the unrounded total without moving the rounded band publishes
+/// nothing. `{}`; always followed by `status_changed`. See
+/// `daemon::settlement_estimate`.
+pub const EVENT_SETTLEMENT_ESTIMATE_CHANGED: &str = "settlement_estimate_changed";
 
 /// A standalone re-engagement notification (nudge design section 5, "Knowing
 /// a standalone will render"). Opt-in: written only to a connection whose
@@ -1039,6 +1046,10 @@ pub struct DaemonShared {
     /// account-scoped, so `unenroll` leaves it. A leaf lock: read by cloning
     /// before any other lock here is taken.
     pub(crate) estimate_table: Mutex<EstimateTableSlot>,
+    /// The settlement estimate: its table, rescan schedule, and the band on
+    /// `status.settlement_estimate`. A leaf lock: nothing is locked while it
+    /// is held. See `daemon::settlement_estimate`.
+    pub(crate) settlement: Mutex<super::settlement_estimate::SettlementEstimateState>,
     /// Previews being built outside [`Self::previews`]: the preview sheet,
     /// a card and a witness review, each counted for as long as it builds
     /// (see [`Self::preview_build_started`]). With the scheduler's own
@@ -1152,13 +1163,44 @@ impl EstimateTableSlot {
 /// about the one in front of them. OWNER DECISION 2026-10-08.
 pub const ESTIMATE_MIN_DRAWN_TIERS: usize = 2;
 
-/// Whether shells draw estimates made under this slot's table, and whether
-/// core copy carries an estimate clause: only a published table with at
-/// least [`ESTIMATE_MIN_DRAWN_TIERS`] tiers. On the wire as `drawn`; the
-/// estimate itself stays on the wire either way.
+/// Whether shells draw the v1 points band: never. The owner replaced the
+/// points band with inference dollars (S8), so the v1 `credit_estimate`
+/// stays on the wire and is still fetched, and its `drawn` is always false;
+/// the batch clause is never worded. A row's dollar figure is
+/// `settlement_estimate`.
 #[must_use]
-pub fn estimate_is_drawn(slot: &EstimateTableSlot) -> bool {
-    slot.basis == ESTIMATE_BASIS_PUBLISHED && slot.table.tier_count() >= ESTIMATE_MIN_DRAWN_TIERS
+pub fn estimate_is_drawn(_slot: &EstimateTableSlot) -> bool {
+    false
+}
+
+/// `settlement_estimate` for one queue entry, or `None` (unknown, never $0):
+/// no drawable table, no features, or the entry is on its way or delivered
+/// (the same rule as [`local_credit_estimate_for`]).
+#[must_use]
+pub fn settlement_estimate_value(
+    e: &super::queue::QueueEntry,
+    table: Option<&trace_commons_protocol::settlement_estimate::SettlementEstimateTable>,
+    now: chrono::DateTime<Utc>,
+) -> Option<serde_json::Value> {
+    let sent = matches!(
+        e.state,
+        super::queue::QueueState::Uploading | super::queue::QueueState::Uploaded
+    ) || e.submission_id.is_some();
+    if sent {
+        return None;
+    }
+    let features = e.estimate_features.as_ref()?;
+    let estimate =
+        trace_commons_protocol::settlement_estimate::entry_estimate(features, table?, now)?;
+    let mut value = serde_json::json!({
+        "low_usd_micros": estimate.low_usd_micros,
+        "high_usd_micros": estimate.high_usd_micros,
+        "drawn": true,
+    });
+    if let Some(tier) = estimate.tier {
+        value["tier"] = serde_json::to_value(tier).ok()?;
+    }
+    Some(value)
 }
 
 /// The local estimate for one queue entry, or `None` (unknown, never 0).
@@ -1434,6 +1476,7 @@ impl DaemonShared {
             insights_counter,
             mission_catalogue: Mutex::new(None),
             estimate_table: Mutex::new(EstimateTableSlot::built_in()),
+            settlement: Mutex::new(Default::default()),
             preview_builds: std::sync::atomic::AtomicUsize::new(0),
             backfill_tried: Mutex::new(std::collections::HashSet::new()),
         })
@@ -2285,6 +2328,8 @@ impl DaemonShared {
             verdicts_pending,
             menu_bar_mark_enabled: settings.menu_bar_mark_enabled,
             notify_idle_sessions: settings.notify.idle_sessions,
+            notify_settlement_estimate: settings.notifications_enabled
+                && settings.notify.settlement_estimate,
         }
     }
 
@@ -2307,6 +2352,18 @@ impl DaemonShared {
         let view = serde_json::json!({
             "nudge": status.get("nudge"),
             "idle_sessions": status.get("idle_sessions"),
+            // A settlement table ageing past its window hides the estimate
+            // by the clock alone. Only what a reader draws: the counts and
+            // `estimated_at` move with every scan and are not drawn.
+            "settlement_estimate": status.get("settlement_estimate").map(|e| {
+                serde_json::json!({
+                    "low_usd_micros": e.get("low_usd_micros"),
+                    "high_usd_micros": e.get("high_usd_micros"),
+                    "up_to": e.get("up_to"),
+                    "table_version": e.get("table_version"),
+                    "pricing_version": e.get("pricing_version"),
+                })
+            }),
         });
         let changed = {
             let mut last = self
@@ -2407,6 +2464,9 @@ impl DaemonShared {
         // the built-in one (OWNER DECISION E11).
         let slot = self.estimate_table.lock().expect("estimate lock").clone();
         let estimate_table = slot.in_force(now);
+        // The settlement estimate: the settings switch, then its own leaf
+        // lock, each released before the policy and queue section.
+        let settlement_estimate = super::settlement_estimate::status_value(self, now);
         // Policy, then queue: the order every method above follows. Both
         // counts below come from this one queue guard, so `decisions_owed`
         // and `queue_depth` can never describe two different queues. The
@@ -2508,6 +2568,13 @@ impl DaemonShared {
             decisions_owed: Some(decisions_owed),
             menu_bar_mark_enabled: nudge_snapshot.menu_bar_mark_enabled,
             notify_idle_sessions: nudge_snapshot.notify_idle_sessions,
+            // `settlement_estimate` is present only while the estimate
+            // switch is on and a drawable table and a known trace exist.
+            settlement_lit: nudge_snapshot.notify_settlement_estimate
+                && settlement_estimate.as_ref().is_some_and(|e| {
+                    e["low_usd_micros"].as_u64().unwrap_or(0)
+                        >= super::settlement_estimate::SETTLEMENT_MARK_MIN_LOW_USD_MICROS
+                }),
         };
         let lead = super::nudge::lead(&mark_inputs.lead, &nudge_snapshot.ledger, now);
         let mark = super::nudge::mark(&mark_inputs, &nudge_snapshot.ledger, now);
@@ -2535,14 +2602,19 @@ impl DaemonShared {
             nudge["text"] = serde_json::to_value(card).unwrap_or_default();
         }
         let mark_text = match mark.state {
-            super::nudge::MarkState::News => mark_inputs.lead.verdicts_pending.as_ref().map(|d| {
-                crate::nudge_render::mark_news_text(&render_verdicts(
-                    d.newly_accepted,
-                    d.newly_held,
-                    d.credit_final_tenths(),
-                    d.since,
-                ))
-            }),
+            super::nudge::MarkState::News => match mark.kinds.first() {
+                Some(super::attention::Kind::SettlementEstimate) => {
+                    Some(crate::nudge_render::settlement_mark_text())
+                }
+                _ => mark_inputs.lead.verdicts_pending.as_ref().map(|d| {
+                    crate::nudge_render::mark_news_text(&render_verdicts(
+                        d.newly_accepted,
+                        d.newly_held,
+                        d.credit_final_tenths(),
+                        d.since,
+                    ))
+                }),
+            },
             super::nudge::MarkState::Ready => {
                 Some(crate::nudge_render::mark_ready_text(&idle_batch))
             }
@@ -2686,6 +2758,14 @@ impl DaemonShared {
         // while the kind is off (a queue TTL below 4 days).
         if let Some(idle) = idle_sessions {
             status["idle_sessions"] = idle;
+        }
+        // Additive. The machine-wide settlement estimate: `{low_usd_micros,
+        // high_usd_micros, up_to, known, unknown, table_version,
+        // pricing_version, estimated_at, text}`. Absent, never `null`, while
+        // the switch is off, no settlement table is drawable, or no trace's
+        // tier is known. Counts and rounded figures only.
+        if let Some(estimate) = settlement_estimate {
+            status["settlement_estimate"] = estimate;
         }
         // K2 (#1173): debug builds only, so the app shows the dry-run notice
         // from what this daemon is doing rather than parsing the
@@ -3528,6 +3608,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     EVENT_SNAPSHOT, EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED,
                     EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED, EVENT_INFERENCE_CALL_ADDED,
                     "managed_changed", EVENT_USAGE_CHANGED, EVENT_HISTORY_CHANGED,
+                    EVENT_SETTLEMENT_ESTIMATE_CHANGED,
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
             }),
@@ -3989,6 +4070,24 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
     // policy and queue locks below.
     let slot = shared.estimate_table.lock().expect("estimate lock").clone();
     let estimate_table = slot.in_force(Utc::now());
+    // The dollar table, only while the estimate switch is on (leaf locks,
+    // taken one at a time and released here).
+    let settlement_on = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .settlement_estimate_enabled;
+    let settlement_table = if settlement_on {
+        shared
+            .settlement
+            .lock()
+            .expect("settlement lock")
+            .table
+            .clone()
+    } else {
+        None
+    };
+    let settlement_now = Utc::now();
     // K5: an optional `project_id`, for Customize's past-session picker,
     // which lists one folder's waiting sessions at a time. Matched by the id
     // `entry_value` publishes, and refused rather than answered with an empty
@@ -4093,6 +4192,13 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
             // features, without an estimate, or once the entry is sent.
             if let Some(estimate) = credit_estimate_value(e, &estimate_table) {
                 value["credit_estimate"] = estimate;
+            }
+            // The row's inference dollars: absent without a drawable table,
+            // without features, with the switch off, or once sent.
+            if let Some(estimate) =
+                settlement_estimate_value(e, settlement_table.as_ref(), settlement_now)
+            {
+                value["settlement_estimate"] = estimate;
             }
             value
         })
@@ -5021,11 +5127,19 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // start holding sessions that arrived since.
     let prior_arming = policy.armed_from_now.get(&key).cloned();
     let rearm_from_now = from_now && prior_arming.is_some();
+    let was_never = policy.resolve(&key) == ProjectMode::Ignore;
     // `set_mode` refuses only what `check_mode` refused above, and before
     // touching anything, so this return leaves memory as it was.
     if let Err(e) = policy.set_mode(&key, mode, now) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
     }
+    // A move to or from Never changes which traces the settlement estimate
+    // counts. Its lock is a leaf, so taking it under the policy lock is safe.
+    super::settlement_estimate::note_never_change(
+        shared,
+        was_never,
+        policy.resolve(&key) == ProjectMode::Ignore,
+    );
     // #1208: the folder's mode is saved either way -- it is what clearing a
     // contribution override returns the folder to -- but while one is in
     // force and still decides this folder, the reply names it, so a shell
@@ -5325,6 +5439,10 @@ fn handle_set_contribution_override(shared: &DaemonShared, req: &Request) -> Res
             return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
         }
         let previous = policy.clone();
+        let was_never = previous
+            .contribution_override
+            .as_ref()
+            .is_some_and(|o| o.mode == ProjectMode::Ignore);
         if let Err(e) = policy.set_contribution_override(mode, Utc::now(), grant) {
             // Unreachable while `grant` is filled above for `auto_upload`;
             // kept so the policy's own refusal is never swallowed.
@@ -5336,6 +5454,13 @@ fn handle_set_contribution_override(shared: &DaemonShared, req: &Request) -> Res
             *policy = previous;
             return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
         }
+        // A Never override, set or replaced, changes which traces the
+        // settlement estimate counts (a leaf lock, safe here).
+        super::settlement_estimate::note_never_change(
+            shared,
+            was_never,
+            mode == ProjectMode::Ignore,
+        );
         // A stopping override is never refused for want of an audit row, and
         // is recorded after it takes effect, still under the lock.
         if mode != ProjectMode::AutoUpload {
@@ -5396,6 +5521,15 @@ fn handle_clear_contribution_override(shared: &DaemonShared, req: &Request) -> R
             policy.sessions_on_disk_at_arming = previous_record;
             return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
         }
+        // Clearing a Never override changes which traces the settlement
+        // estimate counts (a leaf lock, safe here).
+        super::settlement_estimate::note_never_change(
+            shared,
+            previous
+                .as_ref()
+                .is_some_and(|o| o.mode == ProjectMode::Ignore),
+            false,
+        );
         // Clearing an "Automatic" override takes a folder that asks
         // back to asking: what the override approved unattended there and
         // has not sent goes back to waiting.
@@ -5596,6 +5730,8 @@ pub(crate) struct NudgeSnapshot {
     /// the halo also obeys.
     pub menu_bar_mark_enabled: bool,
     pub notify_idle_sessions: bool,
+    /// The settlement estimate's mute: its kind switch and the master switch.
+    pub notify_settlement_estimate: bool,
 }
 
 /// The display names of the tools a batch came from, deduplicated and
@@ -5905,6 +6041,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     let capture_before = settings.token_capture_enabled;
     let scrub_check_before = settings.scrub_check;
     let suggestions_before = settings.suggestions_enabled;
+    let settlement_before = settings.settlement_estimate_enabled;
     let attention_before = attention_settings(&settings);
     // `apply_settings_object` is the same validation
     // `tc_daemon_start_with_settings` (the C ABI's pre-start
@@ -5955,7 +6092,13 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             let switched_to_manual = settings.scrub_check == manual && scrub_check_before != manual;
             let mut value = redacted_settings(&settings);
             let attention_after = attention_settings(&settings);
+            let settlement_after = settings.settlement_estimate_enabled;
             drop(settings);
+            // Off stops a running scan's result, hides the estimate and
+            // deletes the feature cache; on asks for a full scan.
+            if settlement_after != settlement_before {
+                super::settlement_estimate::set_enabled(shared, settlement_after);
+            }
             // The switch to the Manual Scrub check (K4 of #1118) returns
             // every unsent approval made on the contributor's behalf to
             // waiting at once, rather than leaving it reading approved until
@@ -20227,20 +20370,134 @@ mod tests {
                 .unwrap()
                 .apply_fetch(Ok(fetched_table()), Utc::now());
             assert_eq!(drawn(&s), no, "published, one tier");
+            // S8: the points band is never drawn, even under a published
+            // two-tier table. It stays on the wire.
             s.estimate_table
                 .lock()
                 .unwrap()
                 .apply_fetch(Ok(tiered_table()), Utc::now());
-            assert_eq!(
-                drawn(&s),
-                (serde_json::json!(true), serde_json::json!(true)),
-                "published, two tiers"
-            );
+            assert_eq!(drawn(&s), no, "published, two tiers");
             let rows = list_rows(&s, serde_json::json!({}));
             assert!(
                 rows[0]["credit_estimate"].get("tier").is_some(),
                 "{}",
                 rows[0]
+            );
+        }
+
+        /// A published three-tier slot still answers false (S8).
+        #[test]
+        fn the_points_band_is_never_drawn() {
+            let s = live();
+            seed_idle_estimated(&s, 5);
+            s.estimate_table
+                .lock()
+                .unwrap()
+                .apply_fetch(Ok(tiered_table()), Utc::now());
+            let slot = s.estimate_table.lock().unwrap().clone();
+            assert!(!estimate_is_drawn(&slot));
+            let rows = list_rows(&s, serde_json::json!({}));
+            assert_eq!(rows[0]["credit_estimate"]["drawn"], false);
+            let status = status_of(&s);
+            let text = status["nudge"]["text"].to_string();
+            assert!(!text.contains("Estimated credit"), "{text}");
+        }
+
+        /// A settlement table that is drawable now: a flat mean of four
+        /// dollars of inference per trace, a band of half to one and a half.
+        fn settlement_table_now()
+        -> trace_commons_protocol::settlement_estimate::SettlementEstimateTable {
+            trace_commons_protocol::settlement_estimate::SettlementEstimateTable::from_value(
+                &serde_json::json!({
+                    "schema_version": 2,
+                    "features_version": "lef1",
+                    "version": "s1",
+                    "pricing_version": "p1",
+                    "instrument_id": "trace_credit",
+                    "atomic_units_per_credit": 1_000_000,
+                    "usd_micros_per_credit": 1_000_000,
+                    "published_at": Utc::now().to_rfc3339(),
+                    "bytes_per_token": 4,
+                    "chunk_target_tokens": 2048,
+                    "chunk_cap": 16,
+                    "weights": [{"term": "ln_content_bytes", "weight": 1.0}],
+                    "cut_offs": [100.0],
+                    "tiers": [
+                        {"mean_atomic_units": 4_000_000, "withheld_share_micros": 0},
+                        {"mean_atomic_units": 8_000_000, "withheld_share_micros": 0}
+                    ],
+                    "aggregate_band": {
+                        "low_ratio_micros": 500_000,
+                        "high_ratio_micros": 1_500_000
+                    },
+                    "fit_rows": 40
+                }),
+            )
+            .expect("synthetic settlement table parses")
+        }
+
+        #[test]
+        fn list_pending_rows_carry_a_dollar_estimate_under_a_drawable_table() {
+            let s = live();
+            let with = seed_idle_estimated(&s, 1);
+            let without = seed_entry(&s, ASK);
+            s.settlement.lock().unwrap().table = Some(settlement_table_now());
+            let rows = list_rows(&s, serde_json::json!({}));
+            let row = |id: uuid::Uuid| {
+                rows.iter()
+                    .find(|r| r["entry_id"] == id.to_string())
+                    .unwrap()
+                    .clone()
+            };
+            let estimate = row(with)["settlement_estimate"].clone();
+            assert_eq!(estimate["low_usd_micros"], 2_000_000, "{estimate}");
+            assert_eq!(estimate["high_usd_micros"], 6_000_000, "{estimate}");
+            assert_eq!(estimate["drawn"], true);
+            assert!(row(without).get("settlement_estimate").is_none());
+        }
+
+        #[test]
+        fn no_row_estimate_without_a_drawable_table_or_once_sent() {
+            let s = live();
+            let id = seed_idle_estimated(&s, 1);
+            // No table at all.
+            let rows = list_rows(&s, serde_json::json!({}));
+            assert!(rows[0].get("settlement_estimate").is_none(), "{}", rows[0]);
+            // A table with no rate parses but draws nothing.
+            let mut no_rate = settlement_table_now();
+            no_rate.usd_micros_per_credit = None;
+            s.settlement.lock().unwrap().table = Some(no_rate);
+            let rows = list_rows(&s, serde_json::json!({}));
+            assert!(rows[0].get("settlement_estimate").is_none(), "{}", rows[0]);
+            s.settlement.lock().unwrap().table = Some(settlement_table_now());
+            let entry = s
+                .queue
+                .lock()
+                .unwrap()
+                .all()
+                .iter()
+                .find(|e| e.entry_id == id)
+                .cloned()
+                .unwrap();
+            assert!(
+                settlement_estimate_value(
+                    &entry,
+                    s.settlement.lock().unwrap().table.as_ref(),
+                    Utc::now()
+                )
+                .is_some()
+            );
+            let sent = crate::daemon::queue::QueueEntry {
+                state: crate::daemon::queue::QueueState::Uploaded,
+                ..entry
+            };
+            assert!(
+                settlement_estimate_value(
+                    &sent,
+                    s.settlement.lock().unwrap().table.as_ref(),
+                    Utc::now()
+                )
+                .is_none()
             );
         }
 

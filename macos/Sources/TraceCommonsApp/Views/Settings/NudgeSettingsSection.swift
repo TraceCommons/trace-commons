@@ -189,7 +189,7 @@ struct NudgeSettingsSection: View {
     /// A finer switch sits under the broader one it follows.
     static func indent(_ id: NudgeSettings.Switch) -> CGFloat {
         switch id {
-        case .suggestions, .notifications: 0
+        case .suggestions, .notifications, .settlementEstimate: 0
         case .menuBarMark, .notify: GlassTokens.Space.s6
         }
     }

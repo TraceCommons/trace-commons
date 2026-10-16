@@ -6204,6 +6204,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         credit_estimate_table: Arc::new(
             trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
         ),
+        credit_settlement_table: None,
         root,
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -30233,6 +30234,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         credit_estimate_table: Arc::new(
             trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
         ),
+        credit_settlement_table: None,
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -72912,6 +72914,15 @@ struct PerplexityDriverTestDb {
     /// `(tenant_id, submission_id)`. The two re-score writers leave them
     /// alone and report 0 rows, as the Postgres guard does.
     pipeline_settled: std::sync::RwLock<std::collections::HashSet<(String, Uuid)>>,
+    /// Settlement labels `list_settlement_labels` returns, as the D8 SQL
+    /// would have decided them. The SQL itself is pinned by the PostgreSQL
+    /// test `settlement_labels_follow_the_settled_run`.
+    settlement_labels: std::sync::RwLock<
+        std::collections::BTreeMap<
+            (String, Uuid),
+            trace_commons_server::trace_corpus_storage::SettlementLabel,
+        >,
+    >,
 }
 
 impl PerplexityDriverTestDb {
@@ -72930,7 +72941,21 @@ impl PerplexityDriverTestDb {
             audit_events: std::sync::RwLock::new(Vec::new()),
             gate_credit_reads: std::sync::RwLock::new(Vec::new()),
             pipeline_settled: std::sync::RwLock::new(std::collections::HashSet::new()),
+            settlement_labels: std::sync::RwLock::new(std::collections::BTreeMap::new()),
         }
+    }
+
+    /// Seeds the label `list_settlement_labels` returns for a submission.
+    fn seed_settlement_label(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+        label: trace_commons_server::trace_corpus_storage::SettlementLabel,
+    ) {
+        self.settlement_labels
+            .write()
+            .unwrap()
+            .insert((tenant_id.to_string(), submission_id), label);
     }
 
     /// Marks `submission_id` as one the pipeline's Settle wrote a row for.
@@ -74373,6 +74398,30 @@ impl Database for PerplexityDriverTestDb {
                     // written before V57 both surface as `None`.
                     dedup_signal_version: seen.and_then(|d| d.signal_version.clone()),
                 }
+            })
+            .collect())
+    }
+
+    /// In-memory analogue of the Postgres `list_settlement_labels`:
+    /// tenant-scoped, one row per asked-about submission with a seeded label.
+    async fn list_settlement_labels(
+        &self,
+        tenant_id: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<Vec<trace_commons_server::trace_corpus_storage::SettlementLabelRow>, DatabaseError>
+    {
+        let labels = self.settlement_labels.read().unwrap();
+        Ok(submission_ids
+            .iter()
+            .filter_map(|submission_id| {
+                labels
+                    .get(&(tenant_id.to_string(), *submission_id))
+                    .map(
+                        |label| trace_commons_server::trace_corpus_storage::SettlementLabelRow {
+                            submission_id: *submission_id,
+                            label: *label,
+                        },
+                    )
             })
             .collect())
     }
@@ -102381,12 +102430,16 @@ async fn near_ai_measurements_handler_refuses_without_a_credential() {
 mod credit_estimate_tests {
     use super::*;
     use axum::body::{Body, to_bytes};
-    use credit_estimate::{CreditEstimateEvalQuery, run_credit_estimate_eval};
+    use credit_estimate::{CreditEstimateEvalQuery, EstimateEvalTarget, run_credit_estimate_eval};
     use tower::ServiceExt;
     use trace_commons_protocol::local_credit_estimate::{
         LocalEstimateFeatures, LocalEstimateTable,
     };
+    use trace_commons_protocol::settlement_estimate::{
+        SETTLEMENT_TABLE_MAX_BYTES, SETTLEMENT_TABLE_PATH, SettlementEstimateTable,
+    };
     use trace_commons_server::credit_estimate_fit::EstimateWithheldLabel;
+    use trace_commons_server::trace_corpus_storage::SettlementLabel;
     use trace_commons_server::trace_gate_service::LegacyDeterministicGateService;
 
     const USER_TEXTS: [&str; 4] = [
@@ -102509,6 +102562,178 @@ mod credit_estimate_tests {
             dry_run,
             limit: None,
             fit,
+            target: EstimateEvalTarget::Display,
+            seed: None,
+        }
+    }
+
+    fn settlement_query(dry_run: bool, fit: bool) -> CreditEstimateEvalQuery {
+        CreditEstimateEvalQuery {
+            target: EstimateEvalTarget::Settlement,
+            seed: Some(1),
+            ..query(dry_run, fit)
+        }
+    }
+
+    /// The fixture's four submissions as the settlement label read decides
+    /// them: settled, settled at zero, held (excluded), settled.
+    fn seed_settlement_labels(fx: &EvalFixture) {
+        let labels = [
+            SettlementLabel::Settled(150_000),
+            SettlementLabel::WithheldAtZero,
+            SettlementLabel::Excluded,
+            SettlementLabel::Settled(600_000),
+        ];
+        for ((tenant_id, submission_id), label) in
+            TENANTS.iter().zip(&fx.submission_ids).zip(labels)
+        {
+            fx.db
+                .seed_settlement_label(tenant_id, *submission_id, label);
+        }
+    }
+
+    /// Under `target=settlement` a held run is left out and counted
+    /// unlabelled, a run settled with no award is a row labelled 0, and the
+    /// display rows are not returned.
+    #[tokio::test]
+    async fn settlement_eval_excludes_held_and_counts_withheld_as_zero() {
+        let fx = eval_fixture().await;
+        seed_settlement_labels(&fx);
+        let response = run_credit_estimate_eval(fx.state.as_ref(), &settlement_query(false, false))
+            .await
+            .expect("eval runs");
+        assert_eq!(response.counts.labelled, 3, "{:?}", response.counts);
+        assert_eq!(response.counts.unlabelled, 1, "{:?}", response.counts);
+        assert_eq!(response.counts.derived, 3, "{:?}", response.counts);
+        assert!(response.rows.is_empty());
+        assert!(response.fit.is_none());
+        assert!(response.settlement_fit.is_none());
+        assert_eq!(response.settlement_rows.len(), 3);
+        let mut labels: Vec<u64> = response
+            .settlement_rows
+            .iter()
+            .map(|row| row.settled_atomic_units)
+            .collect();
+        labels.sort_unstable();
+        assert_eq!(labels, vec![0, 150_000, 600_000]);
+        let held = response
+            .settlement_rows
+            .iter()
+            .find(|row| row.features == fx.features[2]);
+        assert!(held.is_none(), "the held run is not a row");
+
+        // A dry run counts the same and decrypts nothing.
+        let dry = run_credit_estimate_eval(fx.state.as_ref(), &settlement_query(true, false))
+            .await
+            .expect("dry run");
+        assert_eq!(dry.counts.labelled, 3);
+        assert_eq!(dry.counts.unlabelled, 1);
+        assert_eq!(dry.counts.derived, 0);
+        assert!(dry.settlement_rows.is_empty());
+
+        // With `fit`, the settlement report rides along; the corpus is far
+        // too small for one, so it says so.
+        let fitted = run_credit_estimate_eval(fx.state.as_ref(), &settlement_query(false, true))
+            .await
+            .expect("eval runs");
+        assert!(fitted.fit.is_none());
+        let report = fitted.settlement_fit.expect("a settlement report");
+        assert_eq!(report.seed, 1);
+        assert_eq!(report.table, None);
+        assert_eq!(report.no_table_reason, Some("insufficient_held_out_rows"));
+    }
+
+    /// Settlement rows are label-only, as display rows are.
+    #[tokio::test]
+    async fn settlement_eval_rows_carry_no_submission_id_or_tenant() {
+        let fx = eval_fixture().await;
+        seed_settlement_labels(&fx);
+        let response = run_credit_estimate_eval(fx.state.as_ref(), &settlement_query(false, false))
+            .await
+            .expect("eval runs");
+        assert_eq!(response.settlement_rows.len(), 3);
+        let json = serde_json::to_string(&response).expect("serializes");
+        for submission_id in &fx.submission_ids {
+            assert!(!json.contains(&submission_id.to_string()), "{json}");
+        }
+        for tenant_id in TENANTS {
+            assert!(!json.contains(&sha256_prefixed(tenant_id)), "{json}");
+        }
+        for needle in [
+            "tenant-a",
+            "tenant-b",
+            "ESTIMATE-FIXTURE",
+            "decided_at",
+            "submission_id",
+        ] {
+            assert!(!json.contains(needle), "{needle} leaked: {json}");
+        }
+        assert!(
+            response
+                .settlement_rows
+                .iter()
+                .all(|row| row.tenant_tag.starts_with('t'))
+        );
+    }
+
+    /// No `target` is today's display eval, even with settlement labels
+    /// stored: display rows, and no settlement field in the body.
+    #[tokio::test]
+    async fn display_remains_the_default_target() {
+        let fx = eval_fixture().await;
+        seed_settlement_labels(&fx);
+        let response = app(fx.state.clone())
+            .oneshot(admin(
+                "/v1/admin/credit-estimate-eval?limit=10",
+                "admin-token-a",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["rows"].as_array().map(Vec::len), Some(3), "{value}");
+        assert!(value.get("settlement_rows").is_none(), "{value}");
+        assert!(value.get("settlement_fit").is_none(), "{value}");
+
+        let response = app(fx.state.clone())
+            .oneshot(admin(
+                "/v1/admin/credit-estimate-eval?limit=10&target=settlement&seed=5",
+                "admin-token-a",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            value
+                .get("rows")
+                .is_some_and(|rows| rows.as_array().is_some_and(Vec::is_empty)),
+            "{value}"
+        );
+        assert_eq!(
+            value["settlement_rows"].as_array().map(Vec::len),
+            Some(3),
+            "{value}"
+        );
+    }
+
+    /// An unknown target is refused, not read as the default.
+    #[tokio::test]
+    async fn the_eval_query_refuses_an_unknown_target() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bare = test_state(temp.path().to_path_buf());
+        for uri in [
+            "/v1/admin/credit-estimate-eval?target=points",
+            "/v1/admin/credit-estimate-eval?target=Settlement",
+            "/v1/admin/credit-estimate-eval?seed=-1",
+        ] {
+            let response = app(bare.clone())
+                .oneshot(admin(uri, "admin-token-a"))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
         }
     }
 
@@ -102582,9 +102807,8 @@ mod credit_estimate_tests {
         let response = run_credit_estimate_eval(
             fx.state.as_ref(),
             &CreditEstimateEvalQuery {
-                dry_run: false,
                 limit: Some(2),
-                fit: false,
+                ..query(false, false)
             },
         )
         .await
@@ -102841,6 +103065,422 @@ mod credit_estimate_tests {
         for path in [bad, temp.path().join("missing.json")] {
             let err = credit_estimate::table_from_path(Some(&path)).unwrap_err();
             assert_eq!(err.to_string(), "credit_estimate_table_invalid");
+        }
+    }
+
+    /// A synthetic v2 settlement table. Every figure is made up.
+    fn settlement_table_value() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 2,
+            "features_version": "lef1",
+            "version": "s1",
+            "pricing_version": "p1",
+            "instrument_id": "trace_credit",
+            "atomic_units_per_credit": 1_000_000,
+            "usd_micros_per_credit": 1_000_000,
+            "published_at": "2026-10-20T00:00:00Z",
+            "bytes_per_token": 4,
+            "chunk_target_tokens": 2048,
+            "chunk_cap": 16,
+            "weights": [{"term": "ln_content_bytes", "weight": 1.0}],
+            "cut_offs": [5.0],
+            "tiers": [
+                {"mean_atomic_units": 1_000_000, "withheld_share_micros": 300_000},
+                {"mean_atomic_units": 4_000_000, "withheld_share_micros": 100_000}
+            ],
+            "aggregate_band": {"low_ratio_micros": 600_000, "high_ratio_micros": 1_500_000},
+            "fit_rows": 40
+        })
+    }
+
+    async fn get_settlement_table(state: Arc<AppState>) -> axum::response::Response {
+        app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(SETTLEMENT_TABLE_PATH)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response")
+    }
+
+    /// No installed table: the route answers 404 and clients draw nothing.
+    /// There is no built-in settlement table.
+    #[tokio::test]
+    async fn settlement_route_is_404_without_an_installed_table() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let response = get_settlement_table(test_state(temp.path().to_path_buf())).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Unauthenticated and outside tenant context, like the v1 table: no
+    /// credential is sent and the installed table comes back as the client
+    /// parser reads it, with the same cache and nosniff headers.
+    #[tokio::test]
+    async fn settlement_route_serves_the_installed_table_unauthenticated() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let installed = SettlementEstimateTable::from_value(&settlement_table_value()).unwrap();
+        Arc::make_mut(&mut state).credit_settlement_table = Some(Arc::new(installed.clone()));
+        let response = get_settlement_table(state).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("public, max-age=3600")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(
+            SettlementEstimateTable::from_value(&body).expect("client accepts it"),
+            installed
+        );
+    }
+
+    /// No path is no table; a valid file is that table; a file the client
+    /// would refuse, one that cannot be read, or one past the size limit is
+    /// a boot error with a label.
+    #[test]
+    fn settlement_table_from_path_loads_validates_or_refuses() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        assert!(
+            credit_estimate::settlement_table_from_path(None)
+                .unwrap()
+                .is_none()
+        );
+        let good = temp.path().join("good.json");
+        std::fs::write(&good, settlement_table_value().to_string()).unwrap();
+        assert_eq!(
+            credit_estimate::settlement_table_from_path(Some(&good)).unwrap(),
+            Some(SettlementEstimateTable::from_value(&settlement_table_value()).unwrap())
+        );
+        let mut refused = settlement_table_value();
+        refused["schema_version"] = serde_json::json!(1);
+        let bad = temp.path().join("bad.json");
+        std::fs::write(&bad, refused.to_string()).unwrap();
+        // Valid JSON padded with whitespace past the 16 KiB limit.
+        let mut padded = settlement_table_value().to_string();
+        padded.push_str(&" ".repeat(SETTLEMENT_TABLE_MAX_BYTES));
+        let large = temp.path().join("large.json");
+        std::fs::write(&large, padded).unwrap();
+        for path in [bad, large, temp.path().join("missing.json")] {
+            let err = credit_estimate::settlement_table_from_path(Some(&path)).unwrap_err();
+            assert_eq!(err.to_string(), "credit_settlement_table_invalid");
+        }
+    }
+
+    /// How one fixture run is shaped for the settlement label read.
+    struct LabelRun {
+        state: &'static str,
+        next_phase: &'static str,
+        score_outcome: bool,
+        /// `(instrument_id, atomic_units, operation_state)` legs.
+        legs: &'static [(&'static str, &'static str, &'static str)],
+        /// Whether a pipeline gate decision names the run (a legacy-only
+        /// decision otherwise).
+        pipeline_decision: bool,
+    }
+
+    /// Insert a submission, its run, outcome, legs and gate decision as the
+    /// pipeline would leave them, through an owner connection with the
+    /// tenant set. Returns the submission id.
+    async fn seed_label_run(
+        admin: &deadpool_postgres::Object,
+        tenant: &str,
+        bundle_id: &str,
+        run: &LabelRun,
+    ) -> Uuid {
+        let hash = || format!("sha256:{}", Uuid::new_v4().simple().to_string().repeat(2));
+        let submission_id = Uuid::new_v4();
+        let trace_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        let object_ref_id = Uuid::new_v4();
+        admin
+            .execute(
+                "INSERT INTO trace_submissions (
+                    tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
+                    consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                    status, privacy_risk, redaction_pipeline_version, redaction_hash,
+                    redaction_counts
+                 ) VALUES ($1, $2, $3, 'principal', 'ironclaw.trace_contribution.v1', 'v1',
+                           '[]'::jsonb, '[]'::jsonb, 'retention-default', 'accepted', 'low',
+                           'v1', $4, '{}'::jsonb)",
+                &[&tenant, &submission_id, &trace_id, &hash()],
+            )
+            .await
+            .expect("seed submission");
+        admin
+            .execute(
+                "INSERT INTO trace_object_refs (
+                    tenant_id, submission_id, object_ref_id, artifact_kind, object_store,
+                    object_key, content_sha256, encryption_key_ref, size_bytes
+                 ) VALUES ($1, $2, $3, 'submitted_envelope', 'store', 'key', $4, 'key-ref', 0)",
+                &[&tenant, &submission_id, &object_ref_id, &hash()],
+            )
+            .await
+            .expect("seed object ref");
+        admin
+            .execute(
+                "INSERT INTO pipeline_runs (
+                    tenant_id, run_id, submission_id, trace_id, bundle_id,
+                    request_idempotency_key, request_content_hash, source_object_ref_id,
+                    next_phase, state, admission_decision
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'admit')",
+                &[
+                    &tenant,
+                    &run_id,
+                    &submission_id,
+                    &trace_id,
+                    &bundle_id,
+                    &hash(),
+                    &hash(),
+                    &object_ref_id,
+                    &run.next_phase,
+                    &run.state,
+                ],
+            )
+            .await
+            .expect("seed run");
+        if run.score_outcome {
+            admin
+                .execute(
+                    "INSERT INTO phase_outcomes (
+                        tenant_id, outcome_id, run_id, trace_id, phase, bundle_id,
+                        outcome_schema_id, outcome_schema_version, decision, evidence,
+                        evaluation
+                     ) VALUES ($1, $2, $3, $4, 'score', $5, 'fixture', 1,
+                               '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)",
+                    &[&tenant, &Uuid::new_v4(), &run_id, &trace_id, &bundle_id],
+                )
+                .await
+                .expect("seed score outcome");
+        }
+        for (instrument, units, operation_state) in run.legs {
+            let result_ref = (*operation_state == "complete").then(hash);
+            admin
+                .execute(
+                    "INSERT INTO pipeline_run_settlements (
+                        tenant_id, run_id, instrument_id, atomic_units, operation_ref_hash,
+                        result_ref_hash, operation_state, payout_rail, payout_state,
+                        dispatched_at
+                     ) VALUES ($1, $2, $3, $4::TEXT::NUMERIC, $5, $6, $7, 'none', 'none',
+                               CASE WHEN $7 = 'complete' THEN NOW() END)",
+                    &[
+                        &tenant,
+                        &run_id,
+                        instrument,
+                        units,
+                        &hash(),
+                        &result_ref,
+                        operation_state,
+                    ],
+                )
+                .await
+                .expect("seed settlement leg");
+        }
+        let (source, pipeline_run_id) = if run.pipeline_decision {
+            ("pipeline_settle", Some(run_id))
+        } else {
+            ("legacy_gate", None)
+        };
+        admin
+            .execute(
+                "INSERT INTO trace_gate_decisions (
+                    tenant_id, decision_id, submission_id, gate_policy_version,
+                    gate_version_hash, perplexity_micros, tail_fraction_micros,
+                    perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                    novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+                    source, pipeline_run_id
+                 ) VALUES ($1, $2, $3, 'v', 'h', 0, 0, TRUE, 0, 'h', TRUE, 'h', 'h', $4, $5)",
+                &[
+                    &tenant,
+                    &Uuid::new_v4(),
+                    &submission_id,
+                    &source,
+                    &pipeline_run_id,
+                ],
+            )
+            .await
+            .expect("seed gate decision");
+        submission_id
+    }
+
+    /// The D8 label SQL against PostgreSQL: the run the pipeline gate
+    /// decision names labels the submission; a `trace_credit` leg is its
+    /// award, no leg is 0, and a held leg, an unfinished run or a run with
+    /// no Score outcome is excluded. A legacy-only decision has no row, and
+    /// another tenant's submission is never read. Self-skips without a
+    /// database.
+    #[tokio::test]
+    async fn settlement_labels_follow_the_settled_run() {
+        let Some(backend) = postgres_backend_for_ingest_test().await else {
+            return;
+        };
+        let suffix = Uuid::new_v4().simple().to_string();
+        let tenant = format!("tenant-settlement-labels-{suffix}");
+        let other_tenant = format!("tenant-settlement-labels-other-{suffix}");
+        let admin = backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .expect("admin connection");
+        let bundle_id = format!("sha256:{}", "c".repeat(64));
+        let mut seeded = Vec::new();
+        for tenant_id in [&tenant, &other_tenant] {
+            admin
+                .execute(
+                    "SELECT set_config('trace_commons.trace_tenant_id', $1, false)",
+                    &[tenant_id],
+                )
+                .await
+                .expect("set tenant");
+            admin
+                .execute(
+                    "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+                    &[tenant_id],
+                )
+                .await
+                .expect("seed tenant");
+            admin
+                .execute(
+                    "INSERT INTO pipeline_bundle_packages
+                        (tenant_id, bundle_id, manifest_format_version, package)
+                     VALUES ($1, $2, 1, '{}'::jsonb)",
+                    &[tenant_id, &bundle_id],
+                )
+                .await
+                .expect("seed bundle package");
+            let runs: &[LabelRun] = if *tenant_id == tenant {
+                &[
+                    // Settled, with a second instrument's leg beside it.
+                    LabelRun {
+                        state: "complete",
+                        next_phase: "none",
+                        score_outcome: true,
+                        legs: &[
+                            ("trace_credit", "150000", "complete"),
+                            ("storage_rebate", "9", "complete"),
+                        ],
+                        pipeline_decision: true,
+                    },
+                    // Settled with no trace_credit award: withheld at zero.
+                    LabelRun {
+                        state: "complete",
+                        next_phase: "none",
+                        score_outcome: true,
+                        legs: &[("storage_rebate", "9", "complete")],
+                        pipeline_decision: true,
+                    },
+                    // Scored, but the run has not finished.
+                    LabelRun {
+                        state: "pending",
+                        next_phase: "settle",
+                        score_outcome: true,
+                        legs: &[],
+                        pipeline_decision: true,
+                    },
+                    // A Score hold: parked with no outcome.
+                    LabelRun {
+                        state: "awaiting_review",
+                        next_phase: "score",
+                        score_outcome: false,
+                        legs: &[],
+                        pipeline_decision: true,
+                    },
+                    // Complete, but its trace_credit leg is held.
+                    LabelRun {
+                        state: "complete",
+                        next_phase: "none",
+                        score_outcome: true,
+                        legs: &[("trace_credit", "70000", "held")],
+                        pipeline_decision: true,
+                    },
+                    // A legacy decision only: no pipeline run to read.
+                    LabelRun {
+                        state: "complete",
+                        next_phase: "none",
+                        score_outcome: true,
+                        legs: &[("trace_credit", "50000", "complete")],
+                        pipeline_decision: false,
+                    },
+                ]
+            } else {
+                &[LabelRun {
+                    state: "complete",
+                    next_phase: "none",
+                    score_outcome: true,
+                    legs: &[("trace_credit", "990000", "complete")],
+                    pipeline_decision: true,
+                }]
+            };
+            for run in runs {
+                seeded.push(seed_label_run(&admin, tenant_id, &bundle_id, run).await);
+            }
+        }
+        admin
+            .execute(
+                "SELECT set_config('trace_commons.trace_tenant_id', '', false)",
+                &[],
+            )
+            .await
+            .expect("clear tenant");
+
+        let labels = backend
+            .list_settlement_labels(&tenant, &seeded)
+            .await
+            .expect("labels read");
+        let by_id: BTreeMap<Uuid, SettlementLabel> = labels
+            .iter()
+            .map(|row| (row.submission_id, row.label))
+            .collect();
+        assert_eq!(labels.len(), by_id.len(), "one row per submission");
+        assert_eq!(
+            by_id.get(&seeded[0]),
+            Some(&SettlementLabel::Settled(150_000))
+        );
+        assert_eq!(
+            by_id.get(&seeded[1]),
+            Some(&SettlementLabel::WithheldAtZero)
+        );
+        assert_eq!(by_id.get(&seeded[2]), Some(&SettlementLabel::Excluded));
+        assert_eq!(by_id.get(&seeded[3]), Some(&SettlementLabel::Excluded));
+        assert_eq!(by_id.get(&seeded[4]), Some(&SettlementLabel::Excluded));
+        assert_eq!(by_id.get(&seeded[5]), None, "legacy-only decision");
+        assert_eq!(by_id.get(&seeded[6]), None, "another tenant's submission");
+        assert_eq!(by_id.len(), 5);
+
+        let other = backend
+            .list_settlement_labels(&other_tenant, &seeded)
+            .await
+            .expect("labels read");
+        assert_eq!(
+            other
+                .iter()
+                .map(|row| (row.submission_id, row.label))
+                .collect::<Vec<_>>(),
+            vec![(seeded[6], SettlementLabel::Settled(990_000))]
+        );
+        assert!(
+            backend
+                .list_settlement_labels(&tenant, &[])
+                .await
+                .expect("empty read")
+                .is_empty()
+        );
+
+        for tenant_id in [&tenant, &other_tenant] {
+            cleanup_pg_trace_tenant(backend.as_ref(), tenant_id).await;
         }
     }
 }

@@ -183,16 +183,16 @@ final class NudgeSettingsTests: XCTestCase {
         let json = #"""
             {"pending":[{"entry_id":"e1","source":"codex","project_id":"p","project_label":"Secret project",
               "session_path":"/Users/x/s.jsonl","state":"pending","mission_fit":1,
-              "credit_estimate":{"low":2.0,"high":4.5,"tier":"higher","calibration":"c","basis":"published","drawn":true}}]}
+              "settlement_estimate":{"low_usd_micros":2000000,"high_usd_micros":4500000,"tier":"higher","drawn":true}}]}
             """#
         let entry = try DaemonDataDecoding.decoder().decode(DaemonData.PendingList.self, from: Data(json.utf8)).pending[0]
         let input = try XCTUnwrap(NudgeEntryTags.input(for: entry))
         let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
-        XCTAssertEqual(Set(object.keys), ["mission_fit", "credit_estimate"])
+        XCTAssertEqual(Set(object.keys), ["mission_fit", "settlement_estimate"])
         XCTAssertEqual(object["mission_fit"] as? Int, 1)
-        let estimate = try XCTUnwrap(object["credit_estimate"] as? [String: Any])
+        let estimate = try XCTUnwrap(object["settlement_estimate"] as? [String: Any])
         XCTAssertEqual(estimate["drawn"] as? Bool, true)
-        XCTAssertEqual(estimate["low"] as? Double, 2.0)
+        XCTAssertEqual(estimate["low_usd_micros"] as? Int, 2_000_000)
         XCTAssertFalse(input.contains("Secret project"))
         XCTAssertFalse(input.contains("s.jsonl"))
     }

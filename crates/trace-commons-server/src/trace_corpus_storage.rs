@@ -2264,6 +2264,31 @@ pub struct GateDecisionKeyRow {
     pub decided_at: DateTime<Utc>,
 }
 
+/// A submission's settlement label for the credit estimate eval under
+/// `target=settlement`, read tenant-scoped by
+/// `Database::list_settlement_labels`. Taken from the pipeline run that
+/// wrote the submission's gate decision (`trace_gate_decisions.pipeline_run_id`),
+/// not the latest run, so a re-run in flight never relabels a settled trace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementLabelRow {
+    pub submission_id: Uuid,
+    pub label: SettlementLabel,
+}
+
+/// What a settled run awarded in `trace_credit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettlementLabel {
+    /// The run is complete with a Score outcome and a `trace_credit`
+    /// settlement row: its `atomic_units`.
+    Settled(u64),
+    /// The run is complete with a Score outcome and no `trace_credit` row:
+    /// withheld at zero.
+    WithheldAtZero,
+    /// No pipeline run, no Score outcome, a run not complete, a `trace_credit`
+    /// row held, or an amount outside `u64`. Left out of the eval.
+    Excluded,
+}
+
 /// One decision row as the dedup re-derivation pass enumerates it (through
 /// the narrow `trace_gate_driver` pool, no tenant GUC, every column granted
 /// by V45 and V57). Carries what the pass needs to decide whether to reuse

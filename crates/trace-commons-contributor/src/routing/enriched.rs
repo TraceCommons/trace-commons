@@ -63,6 +63,10 @@ impl TraceSource for RoutingEnrichedSource {
         self.inner.discover()
     }
 
+    fn discover_unopened(&self) -> anyhow::Result<Vec<SessionRef>> {
+        self.inner.discover_unopened()
+    }
+
     fn session_for_path(&self, path: &Path) -> Option<std::path::PathBuf> {
         self.inner.session_for_path(path)
     }

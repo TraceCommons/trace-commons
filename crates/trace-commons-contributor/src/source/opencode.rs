@@ -125,9 +125,17 @@ impl OpenCodeSource {
             })
     }
     fn reference(&self, path: &Path) -> Option<SessionRef> {
+        self.reference_with(path, true)
+    }
+    /// `read_header: false` never opens the export: no `cwd`, no start.
+    fn reference_with(&self, path: &Path, read_header: bool) -> Option<SessionRef> {
         let path = self.address(path)?;
         let size_bytes = std::fs::metadata(&path).ok()?.len();
-        let header = export_header(&path);
+        let header = if read_header {
+            export_header(&path)
+        } else {
+            None
+        };
         let started_at = header
             .as_ref()
             .and_then(|h| (h.time.created >= 0).then_some(h.time.created))
@@ -151,11 +159,8 @@ impl OpenCodeSource {
         })
     }
 }
-impl TraceSource for OpenCodeSource {
-    fn name(&self) -> &'static str {
-        SOURCE_OPENCODE
-    }
-    fn discover(&self) -> Result<Vec<SessionRef>> {
+impl OpenCodeSource {
+    fn discover_with(&self, read_header: bool) -> Result<Vec<SessionRef>> {
         let mut refs = if self.native() {
             super::opencode_db::discover(self.root.parent().unwrap_or(&self.root))?
         } else {
@@ -177,13 +182,30 @@ impl TraceSource for OpenCodeSource {
                 if index >= budget {
                     bail!("opencode-discovery-entry-budget");
                 }
-                if let Some(reference) = entry.ok().and_then(|e| self.reference(&e.path())) {
+                if let Some(reference) = entry
+                    .ok()
+                    .and_then(|e| self.reference_with(&e.path(), read_header))
+                {
                     refs.push(reference);
                 }
             }
         }
         refs.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(refs)
+    }
+}
+impl TraceSource for OpenCodeSource {
+    fn name(&self) -> &'static str {
+        SOURCE_OPENCODE
+    }
+    fn discover(&self) -> Result<Vec<SessionRef>> {
+        self.discover_with(true)
+    }
+    /// Exports are listed without opening them. The native database's
+    /// listing reads only its session table (directory and times), never a
+    /// message, so it stays.
+    fn discover_unopened(&self) -> Result<Vec<SessionRef>> {
+        self.discover_with(false)
     }
     fn session_for_path(&self, path: &Path) -> Option<PathBuf> {
         if self.native()

@@ -1968,6 +1968,21 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The settlement label of each asked-about submission, for the credit
+    /// estimate eval under `target=settlement`: one row per submission with
+    /// a pipeline gate decision, labelled from the run that decision names
+    /// (see [`crate::trace_corpus_storage::SettlementLabel`]). A submission
+    /// with no pipeline decision has no row. Tenant-scoped through the
+    /// forced-RLS trace pool; the id list narrows, it never widens. Default:
+    /// empty (test doubles / backends without the pipeline tables).
+    async fn list_settlement_labels(
+        &self,
+        _tenant_id: &str,
+        _submission_ids: &[uuid::Uuid],
+    ) -> Result<Vec<crate::trace_corpus_storage::SettlementLabelRow>, DatabaseError> {
+        Ok(Vec::new())
+    }
+
     /// Enumerate correction-value signal rows (migration V48), cross-tenant,
     /// oldest-decided first, capped at `limit`. Reads through the gate-driver
     /// reader pool with NO tenant GUC (the trace_gate_driver role's permissive
