@@ -79606,11 +79606,12 @@ async fn novelty_credit_emission_withheld_on_non_production_gate() {
 //
 // These cover the env-driven gate-orchestrator config path that replaces
 // `EnclaveGateOrchestratorConfig::mock_default()`. They are feature-gated
-// because the helpers they call (`parse_required_u64_env`,
-// `compute_gate_version_hash`) are only compiled under
-// `local-gpu-models`.
+// because the helpers they call are only compiled under some features:
+// `parse_required_u64_env` under `local-gpu-models` or `near-ai-scorer` (the
+// pilot build, which the ingest near-ai-scorer CI job runs), and
+// `compute_gate_version_hash` under `local-gpu-models`.
 
-#[cfg(feature = "local-gpu-models")]
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 #[test]
 fn parse_required_u64_env_bails_when_unset() {
     // Use a per-test env var name so we don't race other tests.
@@ -79623,7 +79624,7 @@ fn parse_required_u64_env_bails_when_unset() {
     assert!(format!("{err}").contains("must be set"));
 }
 
-#[cfg(feature = "local-gpu-models")]
+#[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 #[test]
 fn parse_required_u64_env_accepts_zero() {
     // "0" is a valid u64 — only ALL-ZERO floors is invalid, and that
@@ -92788,14 +92789,15 @@ impl Database for PiiBackstopDriverTestDb {
 
 // --- Live-PG variant (Task 7 read-path finding) ------------------------
 //
-// `#[ignore]`d and gated on a reachable Postgres (`postgres_backend_for_ingest_test`).
-// CI never runs Postgres, so this does not run in CI; it compiles under
-// `cargo test --no-run` and is meant for local/PG runs. It pins the Task 7
+// Gated on a reachable Postgres (`postgres_backend_for_ingest_test`).
+// The ingest PostgreSQL CI jobs run this whole module against a real database,
+// so it runs there; without a database it self-skips. It was `#[ignore]`d on
+// the stale belief that CI never runs PostgreSQL, which left it unselected by
+// every job. It pins the Task 7
 // finding: a released-backstop trace (pre-backstop `SubmittedEnvelope` ref
 // invalidated, only a `RescrubbedEnvelope` ref active) must still be resolvable
 // by a `require_object_refs` reader via `read_envelope_from_active_db_object_ref`.
 #[tokio::test]
-#[ignore = "requires PostgreSQL (TRACE_COMMONS_PG_TEST_DATABASE_URL); not run in CI"]
 async fn released_backstop_trace_resolves_via_db_ref_read_path_live_pg() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;

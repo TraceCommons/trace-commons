@@ -1105,6 +1105,18 @@ jobs:
       # the CUDA toolkit and a GPU runtime, and is operator-tested on GPU
       # hosts only.
       - run: cargo check -p trace-commons-server --bins --features local-gpu-models
+      # `cargo check` never runs the error-label test for the production
+      # local-GPU scorer wiring. It loads no model (it points the helper at a
+      # bogus path and asserts the stable `local_perplexity_scorer_init_failed`
+      # label the gate-rollout drills match on), and local-gpu-models does not
+      # enable CUDA. A filter that matches nothing passes with "0 passed", so
+      # the step requires at least one.
+      - name: local-gpu-models init failure label test
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --features local-gpu-models --lib ingest::app::tests::enclave_local_gpu_init_returns_local_perplexity_scorer_init_failed 2>&1 | tee local-gpu-init-test.log
+          grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' local-gpu-init-test.log
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.
       - uses: ./.github/actions/trim-cargo-cache
@@ -1163,6 +1175,17 @@ jobs:
           set -euo pipefail
           cargo test -p trace-commons-server --features gcs-client --lib trace_artifact_gcs 2>&1 | tee gcs-client-tests.log
           grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' gcs-client-tests.log
+      # The config-status surface must not leak the bucket, KMS key, credential
+      # or endpoint of a gcs provider. The test is behind `gcs-client` and its
+      # name does not match the filter above, so no job selected it. It builds
+      # state with no database (the remote store is `remote_disabled`), so a
+      # pass is not vacuous; the step still requires at least one.
+      - name: gcs-client config status test
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --features gcs-client --lib ingest::app::tests::admin_config_status_reports_gcs_provider_when_feature_enabled 2>&1 | tee gcs-client-config-status.log
+          grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' gcs-client-config-status.log
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.
       - uses: ./.github/actions/trim-cargo-cache
