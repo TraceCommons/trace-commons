@@ -2294,6 +2294,8 @@ impl DaemonShared {
             verdicts_pending,
             menu_bar_mark_enabled: settings.menu_bar_mark_enabled,
             notify_idle_sessions: settings.notify.idle_sessions,
+            notify_settlement_estimate: settings.notifications_enabled
+                && settings.notify.settlement_estimate,
         }
     }
 
@@ -2532,6 +2534,13 @@ impl DaemonShared {
             decisions_owed: Some(decisions_owed),
             menu_bar_mark_enabled: nudge_snapshot.menu_bar_mark_enabled,
             notify_idle_sessions: nudge_snapshot.notify_idle_sessions,
+            // `settlement_estimate` is present only while the estimate
+            // switch is on and a drawable table and a known trace exist.
+            settlement_lit: nudge_snapshot.notify_settlement_estimate
+                && settlement_estimate.as_ref().is_some_and(|e| {
+                    e["low_usd_micros"].as_u64().unwrap_or(0)
+                        >= super::settlement_estimate::SETTLEMENT_MARK_MIN_LOW_USD_MICROS
+                }),
         };
         let lead = super::nudge::lead(&mark_inputs.lead, &nudge_snapshot.ledger, now);
         let mark = super::nudge::mark(&mark_inputs, &nudge_snapshot.ledger, now);
@@ -2559,14 +2568,19 @@ impl DaemonShared {
             nudge["text"] = serde_json::to_value(card).unwrap_or_default();
         }
         let mark_text = match mark.state {
-            super::nudge::MarkState::News => mark_inputs.lead.verdicts_pending.as_ref().map(|d| {
-                crate::nudge_render::mark_news_text(&render_verdicts(
-                    d.newly_accepted,
-                    d.newly_held,
-                    d.credit_final_tenths(),
-                    d.since,
-                ))
-            }),
+            super::nudge::MarkState::News => match mark.kinds.first() {
+                Some(super::attention::Kind::SettlementEstimate) => {
+                    Some(crate::nudge_render::settlement_mark_text())
+                }
+                _ => mark_inputs.lead.verdicts_pending.as_ref().map(|d| {
+                    crate::nudge_render::mark_news_text(&render_verdicts(
+                        d.newly_accepted,
+                        d.newly_held,
+                        d.credit_final_tenths(),
+                        d.since,
+                    ))
+                }),
+            },
             super::nudge::MarkState::Ready => {
                 Some(crate::nudge_render::mark_ready_text(&idle_batch))
             }
@@ -5656,6 +5670,8 @@ pub(crate) struct NudgeSnapshot {
     /// the halo also obeys.
     pub menu_bar_mark_enabled: bool,
     pub notify_idle_sessions: bool,
+    /// The settlement estimate's mute: its kind switch and the master switch.
+    pub notify_settlement_estimate: bool,
 }
 
 /// The display names of the tools a batch came from, deduplicated and

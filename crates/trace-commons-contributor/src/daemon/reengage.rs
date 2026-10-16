@@ -24,6 +24,8 @@ use super::attention::{
 };
 use super::ipc::{self, DaemonShared};
 use super::settings::DigestSchedule;
+use super::settlement_estimate::{SettlementCandidacy, SettlementShown, settlement_candidacy};
+use super::state::SettlementNotified;
 use crate::nudge_render::{self, Batch, NotificationText, Verdicts};
 
 /// The digest's own decision inputs, before the arbiter has a say.
@@ -61,6 +63,12 @@ struct Prepared {
     candidates: Vec<Candidate>,
     idle: Option<IdleAnnouncement>,
     verdicts: Option<Verdicts>,
+    /// The settlement estimate an announcement would carry, and whether its
+    /// wording is the pricing one.
+    settlement: Option<(SettlementShown, bool)>,
+    /// The first drawable estimate, to be recorded as the baseline without
+    /// a notification.
+    settlement_seed: Option<SettlementNotified>,
     settings: NotifySettings,
     log: Vec<AttentionEntry>,
 }
@@ -76,7 +84,7 @@ impl Prepared {
                 .verdicts
                 .as_ref()
                 .map(nudge_render::digest_verdict_sentence),
-            Kind::InsightsTip | Kind::WeeklyRecap => None,
+            Kind::InsightsTip | Kind::WeeklyRecap | Kind::SettlementEstimate => None,
         }
     }
 
@@ -90,6 +98,9 @@ impl Prepared {
                 .verdicts
                 .as_ref()
                 .map(nudge_render::verdicts_notification),
+            Kind::SettlementEstimate => self.settlement.as_ref().map(|(shown, pricing)| {
+                nudge_render::settlement_notification(&shown.total, *pricing)
+            }),
             Kind::InsightsTip | Kind::WeeklyRecap => None,
         }
     }
@@ -126,15 +137,30 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
     // settings, then the state, then (inside the idle section) the policy
     // and the queue in the order every other reader takes them.
     let renderer = shared.has_renderer(ipc::EVENT_REENGAGE_DUE);
-    let (settings, queue_ttl_days, history_poll_secs) = {
+    let (settings, queue_ttl_days, history_poll_secs, estimate_on, suggestions_on) = {
         let s = shared.settings.lock().expect("settings lock");
         (
             s.notify_snapshot(renderer),
             s.queue_ttl_days,
             s.history_poll_secs,
+            s.settlement_estimate_enabled,
+            s.suggestions_enabled,
         )
     };
-    let (log, announced, verdicts_pending, last_history_poll_at, ledger) = {
+    // The estimate on status, read from its own leaf lock with nothing else
+    // held. Absent when the switch is off or nothing is drawable, which also
+    // keeps this tick from reading anything when nothing can be announced.
+    let shown_estimate = if estimate_on {
+        let st = shared.settlement.lock().expect("settlement lock");
+        st.table
+            .as_ref()
+            .filter(|table| table.drawable_at(now))
+            .and(st.shown.clone())
+            .filter(|shown| shown.total.known > 0)
+    } else {
+        None
+    };
+    let (log, announced, verdicts_pending, last_history_poll_at, ledger, notified) = {
         let state = shared.state.lock().expect("state lock");
         (
             state.attention_log.clone(),
@@ -142,6 +168,7 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
             state.verdicts_pending.clone(),
             state.last_history_poll_at,
             state.nudges.clone(),
+            state.settlement_notified.clone(),
         )
     };
     // Only the kinds this tick could announce are gathered. With the master
@@ -149,8 +176,14 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
     // nothing from disk: the arbiter runs on every poll tick.
     let wants_idle = settings.master && settings.idle_sessions;
     let wants_verdicts = settings.master && settings.verdicts_landed;
-    let closed =
-        !(wants_idle || wants_verdicts) || shared.is_paused(now) || !shared.logged_in() || {
+    let wants_settlement = settings.master
+        && settings.settlement_estimate
+        && suggestions_on
+        && shown_estimate.is_some();
+    let closed = !(wants_idle || wants_verdicts || wants_settlement)
+        || shared.is_paused(now)
+        || !shared.logged_in()
+        || {
             note_config_read();
             crate::config::consent_hold(shared.store.load_config().ok().flatten().as_ref())
                 .is_some()
@@ -159,6 +192,8 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
         candidates: Vec::new(),
         idle: None,
         verdicts: None,
+        settlement: None,
+        settlement_seed: None,
         settings,
         log,
     };
@@ -249,7 +284,48 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
             });
         }
     }
+
+    // N5: the settlement estimate, only while the person's own health gate
+    // is open (the same source as the lead's `healthy`).
+    if let (true, Some(shown)) = (wants_settlement, shown_estimate) {
+        let healthy = shared
+            .health
+            .lock()
+            .expect("health lock")
+            .last_error_label
+            .is_none()
+            && !shared.daily_budget(now).blocked();
+        if healthy {
+            match settlement_candidacy(&shown, notified.as_ref()) {
+                SettlementCandidacy::SeedBaseline => {
+                    prepared.settlement_seed = Some(notified_from(&shown, now));
+                }
+                SettlementCandidacy::Candidate { pricing_changed } => {
+                    prepared.candidates.push(Candidate {
+                        kind: Kind::SettlementEstimate,
+                        foldable: false,
+                        resolves: Fact::EstimateAnnounced,
+                        since: shown.estimated_at,
+                        ttl: None,
+                        caps: Kind::SettlementEstimate.default_caps(Duration::zero()),
+                    });
+                    prepared.settlement = Some((shown, pricing_changed));
+                }
+                SettlementCandidacy::Quiet => {}
+            }
+        }
+    }
     prepared
+}
+
+/// The figures an announcement (or the silent baseline) records.
+fn notified_from(shown: &SettlementShown, now: DateTime<Utc>) -> SettlementNotified {
+    SettlementNotified {
+        low_usd_micros: shown.total.low_usd_micros,
+        mid_usd_micros: shown.total.mid_usd_micros(),
+        pricing_version: shown.pricing_version.clone(),
+        at: now,
+    }
 }
 
 /// When the digest is next due by its schedule, as the arbiter reads it.
@@ -354,8 +430,19 @@ fn apply(
                 state.idle_announced.extend(idle.ids.iter().copied());
             }
         }
+        if *kind == Kind::SettlementEstimate {
+            if let Some((shown, _)) = &prepared.settlement {
+                state.settlement_notified = Some(notified_from(shown, now));
+            }
+        }
         tracing::info!(kind = kind.label(), route = ?route, "re-engagement announced");
         changed = true;
+    }
+    if let Some(seed) = &prepared.settlement_seed {
+        if state.settlement_notified.is_none() {
+            state.settlement_notified = Some(seed.clone());
+            changed = true;
+        }
     }
     if changed {
         let _ = state.save(&shared.store);
@@ -742,5 +829,258 @@ mod tests {
             .with_timezone(&Utc);
         s.state.lock().unwrap().last_history_poll_at = Some(late);
         assert_eq!(tick(&s, late, &Utc, digest(false, 1)).standalone, None);
+    }
+
+    // ---- N5: the settlement estimate ----
+
+    fn settlement_table() -> trace_commons_protocol::settlement_estimate::SettlementEstimateTable {
+        trace_commons_protocol::settlement_estimate::SettlementEstimateTable::from_value(
+            &serde_json::json!({
+                "schema_version": 2,
+                "features_version": "lef1",
+                "version": "s1",
+                "pricing_version": "p2",
+                "instrument_id": "trace_credit",
+                "atomic_units_per_credit": 1_000_000,
+                "usd_micros_per_credit": 1_000_000,
+                "published_at": "2026-10-07T00:00:00Z",
+                "bytes_per_token": 4,
+                "chunk_target_tokens": 2048,
+                "chunk_cap": 16,
+                "weights": [{"term": "ln_content_bytes", "weight": 1.0}],
+                "cut_offs": [5.0],
+                "tiers": [
+                    {"mean_atomic_units": 1_000_000, "withheld_share_micros": 0},
+                    {"mean_atomic_units": 1_010_000, "withheld_share_micros": 0}
+                ],
+                "aggregate_band": {"low_ratio_micros": 600_000, "high_ratio_micros": 1_400_000},
+                "fit_rows": 40
+            }),
+        )
+        .expect("synthetic table parses")
+    }
+
+    /// Show an estimate whose rounded band is `low` to `high` dollar micros.
+    fn show_estimate(s: &DaemonShared, low: u64, high: u64, pricing: &str) {
+        let mut st = s.settlement.lock().unwrap();
+        st.table = Some(settlement_table());
+        st.shown = Some(SettlementShown {
+            total: trace_commons_protocol::settlement_estimate::SettlementTotal {
+                low_usd_micros: low,
+                high_usd_micros: high,
+                known: 3,
+                unknown: 0,
+            },
+            table_version: "s1".to_string(),
+            pricing_version: Some(pricing.to_string()),
+            estimated_at: noon(),
+        });
+    }
+
+    fn settlement_frames(
+        rx: &mut tokio::sync::broadcast::Receiver<ipc::Event>,
+    ) -> Vec<serde_json::Value> {
+        reengage_frames(rx)
+            .into_iter()
+            .filter(|f| f["kind"] == "settlement_estimate")
+            .collect()
+    }
+
+    /// The first estimate seeds the baseline silently; a grown one then
+    /// posts once with core's words and records the figures it announced.
+    #[test]
+    fn a_settlement_estimate_posts_once_with_core_words() {
+        let s = live();
+        digest_off(&s);
+        let _r = renderer(&s);
+        let mut rx = s.events.subscribe();
+        show_estimate(&s, 4_000_000, 6_000_000, "p2");
+        assert_eq!(tick(&s, noon(), &Utc, digest(false, 0)).standalone, None);
+        assert!(settlement_frames(&mut rx).is_empty(), "the first is silent");
+        assert_eq!(
+            s.state
+                .lock()
+                .unwrap()
+                .settlement_notified
+                .as_ref()
+                .map(|n| n.low_usd_micros),
+            Some(4_000_000)
+        );
+        assert!(s.state.lock().unwrap().attention_log.is_empty());
+
+        // Days later (past the minimum gap), the estimate grew.
+        let later = noon() + Duration::days(4);
+        s.state.lock().unwrap().last_history_poll_at = Some(later);
+        show_estimate(&s, 6_000_000, 9_000_000, "p2");
+        s.settlement
+            .lock()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .published_at = later;
+        let got = tick(&s, later, &Utc, digest(false, 0));
+        assert_eq!(got.standalone, Some(Kind::SettlementEstimate));
+        let frames = settlement_frames(&mut rx);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(
+            frames[0]["title"],
+            crate::nudge_copy::NOTIFY_SETTLEMENT_TITLE
+        );
+        assert_eq!(frames[0]["actions"][0]["id"], nudge_render::ACTION_REVIEW);
+        let state = s.state.lock().unwrap();
+        assert_eq!(state.attention_log.len(), 1);
+        assert_eq!(state.attention_log[0].kind, Kind::SettlementEstimate);
+        assert_eq!(state.attention_log[0].route, Route::Standalone);
+        let notified = state.settlement_notified.as_ref().unwrap();
+        assert_eq!(notified.low_usd_micros, 6_000_000);
+        assert_eq!(notified.mid_usd_micros, 7_500_000);
+    }
+
+    /// Every existing gate holds the settlement notification, one case each.
+    #[test]
+    fn each_gate_holds_the_settlement_notification() {
+        type Hold = (&'static str, fn(&DaemonShared, DateTime<Utc>));
+        let holds: [Hold; 11] = [
+            ("paused", |s, _now| {
+                s.paused.store(true, std::sync::atomic::Ordering::Relaxed);
+                s.state.lock().unwrap().paused = true;
+            }),
+            ("consent hold", |s, _now| {
+                let mut cfg = s.store.load_config().unwrap().unwrap();
+                cfg.consent_scopes_chosen = Some(false);
+                s.store.save_config(&cfg).unwrap();
+            }),
+            ("signed out", |s, _now| {
+                std::fs::remove_file(s.store.device_key_path()).unwrap();
+                assert!(!s.logged_in());
+            }),
+            ("unhealthy", |s, now| {
+                s.health
+                    .lock()
+                    .unwrap()
+                    .fail(crate::daemon::health::LABEL_QUEUE_FULL, now);
+            }),
+            ("suggestions off", |s, _now| {
+                s.settings.lock().unwrap().suggestions_enabled = false;
+            }),
+            ("estimate switch off", |s, _now| {
+                s.settings.lock().unwrap().settlement_estimate_enabled = false;
+            }),
+            ("kind switch off", |s, _now| {
+                s.settings.lock().unwrap().notify.settlement_estimate = false;
+            }),
+            ("master off", |s, _now| {
+                s.settings.lock().unwrap().notifications_enabled = false;
+            }),
+            ("quiet hours", |s, now| {
+                // Checked below with a late clock.
+                let _ = (s, now);
+            }),
+            ("daily cap", |s, now| {
+                s.state.lock().unwrap().record_attention(
+                    Kind::IdleSessions,
+                    Route::Standalone,
+                    now - Duration::hours(3),
+                );
+            }),
+            ("min gap", |s, now| {
+                s.state.lock().unwrap().record_attention(
+                    Kind::IdleSessions,
+                    Route::Standalone,
+                    now - Duration::minutes(10),
+                );
+            }),
+        ];
+        for (name, hold) in holds {
+            let s = live();
+            digest_off(&s);
+            let _r = renderer(&s);
+            let mut rx = s.events.subscribe();
+            let now = if name == "quiet hours" {
+                DateTime::parse_from_rfc3339("2026-10-11T23:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc)
+            } else {
+                noon() + Duration::days(4)
+            };
+            s.state.lock().unwrap().last_history_poll_at = Some(now);
+            show_estimate(&s, 6_000_000, 9_000_000, "p2");
+            s.settlement
+                .lock()
+                .unwrap()
+                .table
+                .as_mut()
+                .unwrap()
+                .published_at = now;
+            s.state.lock().unwrap().settlement_notified = Some(SettlementNotified {
+                low_usd_micros: 4_000_000,
+                mid_usd_micros: 6_000_000,
+                pricing_version: Some("p2".to_string()),
+                at: noon(),
+            });
+            hold(&s, now);
+            let got = tick(&s, now, &Utc, digest(false, 0));
+            assert_ne!(got.standalone, Some(Kind::SettlementEstimate), "{name}");
+            assert!(settlement_frames(&mut rx).is_empty(), "{name}");
+        }
+    }
+
+    /// "Not now" on the notification only dismisses: the daemon refuses
+    /// kind `settlement_estimate` on `nudge_decline`, writes no cooldown, and
+    /// the next grown estimate still posts after its kind interval.
+    #[test]
+    fn not_now_only_dismisses() {
+        let s = live();
+        digest_off(&s);
+        let _r = renderer(&s);
+        show_estimate(&s, 4_000_000, 6_000_000, "p2");
+        tick(&s, noon(), &Utc, digest(false, 0));
+        let later = noon() + Duration::days(4);
+        s.state.lock().unwrap().last_history_poll_at = Some(later);
+        show_estimate(&s, 6_000_000, 9_000_000, "p2");
+        s.settlement
+            .lock()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .published_at = later;
+        assert_eq!(
+            tick(&s, later, &Utc, digest(false, 0)).standalone,
+            Some(Kind::SettlementEstimate)
+        );
+
+        let before = s.state.lock().unwrap().nudges.clone();
+        let response = ipc::handle_request(
+            &s,
+            &ipc::Request {
+                id: 1,
+                method: "nudge_decline".to_string(),
+                params: serde_json::json!({"kind": "settlement_estimate"}),
+            },
+        );
+        assert!(response.error.is_some(), "refused as an unknown kind");
+        assert_eq!(
+            s.state.lock().unwrap().nudges,
+            before,
+            "no cooldown written"
+        );
+
+        // Grown again after the 72 hour interval and a new week: posts.
+        let much_later = later + Duration::days(8);
+        s.state.lock().unwrap().last_history_poll_at = Some(much_later);
+        show_estimate(&s, 12_000_000, 16_000_000, "p2");
+        s.settlement
+            .lock()
+            .unwrap()
+            .table
+            .as_mut()
+            .unwrap()
+            .published_at = much_later;
+        assert_eq!(
+            tick(&s, much_later, &Utc, digest(false, 0)).standalone,
+            Some(Kind::SettlementEstimate)
+        );
     }
 }

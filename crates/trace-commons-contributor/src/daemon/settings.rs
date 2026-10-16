@@ -128,6 +128,9 @@ pub const UPGRADE_NOTIFY_VERDICTS_LANDED: bool = false;
 /// `notify.weekly_recap` (N3). DRAFT, owner decision 1: U3 is held for the
 /// gamification ruling, and once ruled it is offered from the recap card.
 pub const DEFAULT_NOTIFY_WEEKLY_RECAP: bool = false;
+/// `notify.settlement_estimate` (N5). DRAFT, NEEDS APPROVAL: on by default,
+/// like the estimate switch it sits under.
+pub const DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE: bool = true;
 /// `notify.insights_tip` (N4). DRAFT, owner decision 25: Insights decides;
 /// the recommendation is off as a notification.
 pub const DEFAULT_NOTIFY_INSIGHTS_TIP: bool = false;
@@ -782,6 +785,9 @@ pub struct NotifyKinds {
     /// N4, Insights tips.
     #[serde(default)]
     pub insights_tip: bool,
+    /// N5, the settlement estimate.
+    #[serde(default = "default_notify_settlement_estimate")]
+    pub settlement_estimate: bool,
     /// Kind keys this build does not know, kept verbatim.
     #[serde(flatten)]
     pub other: BTreeMap<String, serde_json::Value>,
@@ -796,6 +802,7 @@ impl Default for NotifyKinds {
             verdicts_landed: DEFAULT_NOTIFY_VERDICTS_LANDED,
             weekly_recap: DEFAULT_NOTIFY_WEEKLY_RECAP,
             insights_tip: DEFAULT_NOTIFY_INSIGHTS_TIP,
+            settlement_estimate: DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE,
             other: BTreeMap::new(),
         }
     }
@@ -827,6 +834,7 @@ impl NotifyKinds {
             "verdicts_landed" => Some(&mut self.verdicts_landed),
             "weekly_recap" => Some(&mut self.weekly_recap),
             "insights_tip" => Some(&mut self.insights_tip),
+            "settlement_estimate" => Some(&mut self.settlement_estimate),
             _ => None,
         }
     }
@@ -838,6 +846,7 @@ impl NotifyKinds {
             "verdicts_landed" => Some(&self.verdicts_landed),
             "weekly_recap" => Some(&self.weekly_recap),
             "insights_tip" => Some(&self.insights_tip),
+            "settlement_estimate" => Some(&self.settlement_estimate),
             _ => None,
         }
     }
@@ -860,6 +869,10 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Option::<NotifyKinds>::deserialize(deserializer)?.unwrap_or_else(NotifyKinds::upgraded))
+}
+
+fn default_notify_settlement_estimate() -> bool {
+    DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE
 }
 
 fn default_notify_digest() -> bool {
@@ -1529,6 +1542,7 @@ impl DaemonSettings {
             insights_tip: self.notify.insights_tip,
             verdicts_landed: self.notify.verdicts_landed,
             weekly_recap: self.notify.weekly_recap,
+            settlement_estimate: self.notify.settlement_estimate,
             renderer,
         }
     }

@@ -43,7 +43,7 @@ use super::ipc::{DaemonShared, EVENT_SETTLEMENT_ESTIMATE_CHANGED, EVENT_STATUS_C
 use super::policy::ProjectPolicy;
 use super::queue::Queue;
 use super::settlement_scan::{self, FeatureCache, ScanInputs, ScanOutcome};
-use super::state::{CwdCacheEntry, PriorUpload};
+use super::state::{CwdCacheEntry, PriorUpload, SettlementNotified};
 
 /// How long after a watcher change the scan waits for things to go quiet.
 pub const RESCAN_DEBOUNCE: Duration = Duration::minutes(10);
@@ -123,6 +123,59 @@ impl SettlementShown {
             && self.total.up_to() == other.total.up_to()
             && self.table_version == other.table_version
             && self.pricing_version == other.pricing_version
+    }
+}
+
+/// A grown low end must be at least this much times the last announced low
+/// end, in millionths (1.25). DRAFT, owner decision S4.
+pub const SETTLEMENT_NOTIFY_GROWTH_MICROS: u64 = 250_000;
+
+/// And at least this many dollar micros above it ($1). DRAFT, owner decision
+/// S4.
+pub const SETTLEMENT_NOTIFY_MIN_RISE_USD_MICROS: u64 = 1_000_000;
+
+/// The news mark lights only when the low end is at least this much ($1).
+pub const SETTLEMENT_MARK_MIN_LOW_USD_MICROS: u64 = 1_000_000;
+
+/// Whether the current estimate is worth a notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettlementCandidacy {
+    /// Announce it. `pricing_changed` picks the pricing wording.
+    Candidate { pricing_changed: bool },
+    /// The first drawable estimate: record it as the baseline and say
+    /// nothing.
+    SeedBaseline,
+    /// Nothing to announce.
+    Quiet,
+}
+
+/// Decide whether `shown` is a notification candidate against what was last
+/// announced. Pure, integer arithmetic only. With no record the estimate is
+/// the first one and silently becomes the baseline.
+#[must_use]
+pub fn settlement_candidacy(
+    shown: &SettlementShown,
+    last: Option<&SettlementNotified>,
+) -> SettlementCandidacy {
+    let Some(last) = last else {
+        return SettlementCandidacy::SeedBaseline;
+    };
+    let low = u128::from(shown.total.low_usd_micros);
+    let last_low = u128::from(last.low_usd_micros);
+    let growth = 1_000_000 + u128::from(SETTLEMENT_NOTIFY_GROWTH_MICROS);
+    let grown = low * 1_000_000 >= last_low * growth
+        && low >= last_low + u128::from(SETTLEMENT_NOTIFY_MIN_RISE_USD_MICROS);
+
+    let mid = u128::from(shown.total.mid_usd_micros());
+    let last_mid = u128::from(last.mid_usd_micros);
+    let moved = mid.abs_diff(last_mid) * 1_000_000
+        >= last_mid * u128::from(SETTLEMENT_NOTIFY_GROWTH_MICROS);
+    let pricing_changed = shown.pricing_version != last.pricing_version && moved;
+
+    if grown || pricing_changed {
+        SettlementCandidacy::Candidate { pricing_changed }
+    } else {
+        SettlementCandidacy::Quiet
     }
 }
 
@@ -477,6 +530,92 @@ mod tests {
     /// Every figure below is synthetic.
     fn now() -> DateTime<Utc> {
         crate::daemon::test_support::at("2026-10-12T12:00:00Z")
+    }
+
+    fn shown_at(low: u64, high: u64, pricing: &str) -> SettlementShown {
+        SettlementShown {
+            total: SettlementTotal {
+                low_usd_micros: low,
+                high_usd_micros: high,
+                known: 3,
+                unknown: 0,
+            },
+            table_version: "s1".to_string(),
+            pricing_version: Some(pricing.to_string()),
+            estimated_at: now(),
+        }
+    }
+
+    fn notified(low: u64, mid: u64, pricing: &str) -> SettlementNotified {
+        SettlementNotified {
+            low_usd_micros: low,
+            mid_usd_micros: mid,
+            pricing_version: Some(pricing.to_string()),
+            at: now(),
+        }
+    }
+
+    #[test]
+    fn the_first_estimate_seeds_the_baseline_silently() {
+        assert_eq!(
+            settlement_candidacy(&shown_at(5_000_000, 9_000_000, "p2"), None),
+            SettlementCandidacy::SeedBaseline
+        );
+    }
+
+    #[test]
+    fn growth_needs_both_25_percent_and_one_dollar() {
+        let last = notified(4_000_000, 6_000_000, "p2");
+        let cand = SettlementCandidacy::Candidate {
+            pricing_changed: false,
+        };
+        // Same pricing; the mid stays inside 25% of 6_000_000 by keeping
+        // low + high close to the last mid.
+        assert_eq!(
+            settlement_candidacy(&shown_at(5_000_000, 6_000_000, "p2"), Some(&last)),
+            cand
+        );
+        assert_eq!(
+            settlement_candidacy(&shown_at(4_999_999, 6_000_000, "p2"), Some(&last)),
+            SettlementCandidacy::Quiet
+        );
+        let small = notified(2_000_000, 3_000_000, "p2");
+        assert_eq!(
+            settlement_candidacy(&shown_at(2_500_000, 3_000_000, "p2"), Some(&small)),
+            SettlementCandidacy::Quiet,
+            "25% but only $0.50"
+        );
+        assert_eq!(
+            settlement_candidacy(&shown_at(3_000_000, 3_000_000, "p2"), Some(&small)),
+            cand
+        );
+    }
+
+    #[test]
+    fn a_pricing_change_moves_the_mid_25_percent_either_way() {
+        let last = notified(8_000_000, 8_000_000, "p2");
+        let pricing = SettlementCandidacy::Candidate {
+            pricing_changed: true,
+        };
+        // Mid 10_000_000 and 6_000_000 under the new pricing.
+        assert_eq!(
+            settlement_candidacy(&shown_at(8_000_000, 12_000_000, "p3"), Some(&last)),
+            pricing
+        );
+        assert_eq!(
+            settlement_candidacy(&shown_at(4_000_000, 8_000_000, "p3"), Some(&last)),
+            pricing
+        );
+        // Mid 9_999_999 / 9_999_998: just under 25%.
+        assert_eq!(
+            settlement_candidacy(&shown_at(7_999_999, 11_999_999, "p3"), Some(&last)),
+            SettlementCandidacy::Quiet
+        );
+        // Same pricing, mid 6_000_000, low fell: quiet.
+        assert_eq!(
+            settlement_candidacy(&shown_at(4_000_000, 8_000_000, "p2"), Some(&last)),
+            SettlementCandidacy::Quiet
+        );
     }
 
     fn table_value() -> serde_json::Value {
