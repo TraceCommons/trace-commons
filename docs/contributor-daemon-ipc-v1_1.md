@@ -666,7 +666,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -4711,7 +4711,7 @@ Takes a JSON object whose top-level keys must come from
 `trajectory_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
 `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`,
-`notifications_enabled`, `menu_bar_mark_enabled`, `notify`,
+`settlement_estimate_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`,
 `verdicts_offer_pending`, `idle_offer_pending`,
 `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`,
 `insights_context_threshold`, `insights_counter_pass`,
@@ -4750,6 +4750,15 @@ row and the menu-bar mark -- on or off. It is the same setting `set_suggestions_
 and a change by either route publishes `status_changed`, because
 `status.nudge` reads it. See ["`status.nudge`"](#statusnudge).
 
+`settlement_estimate_enabled` (boolean, default `true`; a settings file
+written before the key existed loads `true`) is the settlement estimate's
+switch, "Estimate what traces on this Mac are worth". Off stops any scan in
+progress, deletes the estimate's feature cache, and drops
+`status.settlement_estimate`, publishing `settlement_estimate_changed` when
+it was present; on again starts a full scan. The estimate is made on this
+Mac and sends nothing about a trace anywhere. Any other JSON type is
+`bad_params` / `settings-invalid-value`.
+
 `notifications_enabled`, `menu_bar_mark_enabled`, `notify`,
 `verdicts_offer_pending` and `idle_offer_pending` are the notification
 settings; see ["Notification settings"](#notification-settings) for their
@@ -4770,8 +4779,9 @@ keeps them. `get_settings` reports them as stored.
   notification switch.
 - `notify` (object): one boolean per kind -- `digest` (N0, default `true`),
   `idle_sessions` (N1), `verdicts_landed` (N2), `weekly_recap` (N3, default
-  `false`, held for the gamification ruling) and `insights_tip` (N4, default
-  `false`, owner decision 25). One switch governs both the sentence folded
+  `false`, held for the gamification ruling), `insights_tip` (N4, default
+  `false`, owner decision 25) and `settlement_estimate` (N5, default `true`,
+  DRAFT, NEEDS APPROVAL). One switch governs both the sentence folded
   into a due digest and the standalone notification. Revision 2's
   `digest_enabled` is `notify.digest`; there is no `digest_extras_enabled`.
   A key this daemon does not know (a later kind written by a newer build)
