@@ -110,6 +110,34 @@ Tauri app (`--manifest-path tauri-desktop/src-tauri/Cargo.toml`, plus
 `pnpm test` and `pnpm build` in `tauri-desktop/frontend`). The Tauri checks
 run in `.github/workflows/tauri-desktop.yml`.
 
+## Executing a multi-task plan
+
+When a plan's tasks are carried out one after another, test and check once,
+after the last task is written, not after each task. This overrides the
+global guidance to run each change's targeted test straight away. A full
+compile-and-test cycle of the server and contributor crates takes minutes,
+and paying it once per task made a nine-task plan take hours.
+
+- Each task still writes every test its plan step specifies, with the
+  assertions, as TDD would. Only running them is deferred.
+- Per task, run at most a plain `cargo check -p <crate> --all-targets` on
+  the crates it touched (add `--features` for a feature-gated module), so
+  the next task builds on code that compiles. No test runs, no clippy, no
+  `RUSTFLAGS=-D warnings`, no Swift suite, no PostgreSQL suites.
+- Do not report a task as passing. Report which tests it wrote and did not
+  run.
+- After the last task, run everything once: the commands in "Local
+  development", clippy, `cargo fmt --all -- --check`, the PostgreSQL suites
+  the plan touched, the FFI build followed by `swift test`, and the
+  separate GTK and Tauri workspaces if touched. Fix every failure against
+  the spec, never by weakening a test. A failure that also fails on `main`
+  is pre-existing: note it and leave it.
+- Reviews of the branch come after that run, so they read code that passes.
+
+This covers implementation inside one branch. It does not relax "never claim
+green from a partial run", and it does not apply to a single fix, where the
+targeted test still runs immediately.
+
 ## CI
 
 `.github/workflows/ci.yml` holds the server-side jobs and runs every one of
