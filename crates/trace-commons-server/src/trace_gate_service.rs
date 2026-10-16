@@ -983,9 +983,10 @@ where
         };
         let dek = self.decryptor.unwrap_dek(wrapped_dek, &ctx)?;
         let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
-        // A parser error can quote the input, so it is replaced by a label.
+        // A parser error can quote the input, so it is replaced by a label
+        // built only from the schema side of the error.
         let envelope: TraceContributionEnvelope = serde_json::from_slice(&plaintext)
-            .map_err(|_| anyhow::anyhow!("EstimateFeaturesEnvelopeUnreadable"))?;
+            .map_err(|error| anyhow::anyhow!(estimate_envelope_unreadable_reason(&error)))?;
         Ok(LocalEstimateFeatures::from_envelope(&envelope))
     }
 
@@ -1023,6 +1024,81 @@ where
 
 /// If the bytes are valid base64, decode; otherwise treat them as raw.
 ///
+/// Prefix of every envelope parse failure from `derive_estimate_features`.
+/// Everything after it is built by [`estimate_envelope_unreadable_reason`]
+/// and is safe to log and return.
+pub const ESTIMATE_FEATURES_ENVELOPE_UNREADABLE: &str = "EstimateFeaturesEnvelopeUnreadable";
+
+/// The longest schema text a reason carries.
+const ESTIMATE_REASON_SCHEMA_TEXT_MAX: usize = 240;
+
+/// A content-free reason for an envelope that will not parse:
+/// `EstimateFeaturesEnvelopeUnreadable(<category>[ <kind>[ <schema text>]])`.
+///
+/// serde_json's message can quote the input (a found string, an unknown
+/// field or variant name), so only the schema side is kept: the name of a
+/// missing field, and the `expected ...` text, which serde writes from the
+/// type being parsed. The found value never appears.
+pub fn estimate_envelope_unreadable_reason(error: &serde_json::Error) -> String {
+    use serde_json::error::Category;
+    let category = match error.classify() {
+        Category::Io => "io",
+        Category::Syntax => "syntax",
+        Category::Data => "data",
+        Category::Eof => "eof",
+    };
+    if error.classify() != Category::Data {
+        return format!("{ESTIMATE_FEATURES_ENVELOPE_UNREADABLE}({category})");
+    }
+    let message = error.to_string();
+    // Drop serde's " at line N column M" suffix: a position, but not one
+    // that groups failures.
+    let message = match message.rfind(" at line ") {
+        Some(at) => &message[..at],
+        None => message.as_str(),
+    };
+    let schema_text = |text: &str| -> Option<String> {
+        let text = text.trim();
+        let safe = !text.is_empty()
+            && text
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || " _-`,.:".contains(c));
+        // ASCII only, so a byte cut is a character cut. A long field list
+        // is cut, not dropped: its head still names the type.
+        safe.then(|| text[..text.len().min(ESTIMATE_REASON_SCHEMA_TEXT_MAX)].to_string())
+    };
+    // serde writes the expected side last, after the found value.
+    let expected = message
+        .rfind(", expected ")
+        .and_then(|at| schema_text(&message[at + ", expected ".len()..]));
+    let detail = if let Some(rest) = message.strip_prefix("missing field ") {
+        // The field name comes from the type, not the input.
+        Some(match schema_text(rest) {
+            Some(name) => format!("missing_field {name}"),
+            None => "missing_field".to_string(),
+        })
+    } else {
+        [
+            ("unknown field ", "unknown_field"),
+            ("unknown variant ", "unknown_variant"),
+            ("invalid type: ", "invalid_type"),
+            ("invalid value: ", "invalid_value"),
+            ("invalid length ", "invalid_length"),
+            ("duplicate field ", "duplicate_field"),
+        ]
+        .iter()
+        .find(|(prefix, _)| message.starts_with(prefix))
+        .map(|(_, kind)| match &expected {
+            Some(expected) => format!("{kind} expected {expected}"),
+            None => (*kind).to_string(),
+        })
+    };
+    match detail {
+        Some(detail) => format!("{ESTIMATE_FEATURES_ENVELOPE_UNREADABLE}({category} {detail})"),
+        None => format!("{ESTIMATE_FEATURES_ENVELOPE_UNREADABLE}({category})"),
+    }
+}
+
 /// The artifact store persists ciphertext as base64, and the gate-worker route
 /// loads the artifact through `decrypt_artifact_json_with_kek` indirectly — by
 /// the time the gate worker hands us bytes, they may be either form depending
@@ -1054,6 +1130,78 @@ mod enclave_gate_service_tests {
     use crate::secrets::SecretsCrypto;
     use crate::trace_artifact_kek::{KekContext, LocalMasterKeyWrapper};
     use crate::trace_artifact_store::aead_encrypt_with_dek;
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct ReasonProbe {
+        kind: ReasonProbeKind,
+        count: u64,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum ReasonProbeKind {
+        Alpha,
+        Beta,
+    }
+
+    fn reason_for(json: &str) -> String {
+        let error = serde_json::from_str::<ReasonProbe>(json).expect_err("must not parse");
+        estimate_envelope_unreadable_reason(&error)
+    }
+
+    #[test]
+    fn an_unreadable_envelope_reason_names_the_schema_and_never_the_input() {
+        let cases = [
+            (
+                r#"{"kind":"alpha"}"#,
+                "EstimateFeaturesEnvelopeUnreadable(data missing_field `count`)",
+            ),
+            (
+                r#"{"kind":"SECRET_VARIANT","count":1}"#,
+                "EstimateFeaturesEnvelopeUnreadable(data unknown_variant expected `alpha` or `beta`)",
+            ),
+            (
+                r#"{"kind":"alpha","count":"SECRET text, expected nothing"}"#,
+                "EstimateFeaturesEnvelopeUnreadable(data invalid_type expected u64)",
+            ),
+            (
+                r#"{"kind":"alpha","count":1,"SECRET_FIELD":1}"#,
+                "EstimateFeaturesEnvelopeUnreadable(data unknown_field expected `kind` or `count`)",
+            ),
+            (
+                "not json SECRET",
+                "EstimateFeaturesEnvelopeUnreadable(syntax)",
+            ),
+            (
+                r#"{"kind":"alpha""#,
+                "EstimateFeaturesEnvelopeUnreadable(eof)",
+            ),
+        ];
+        for (json, want) in cases {
+            let reason = reason_for(json);
+            assert_eq!(reason, want, "{json}");
+            assert!(!reason.contains("SECRET"), "{reason}");
+            assert!(!reason.contains(" at line "), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_found_string_that_mimics_the_expected_text_is_not_reported() {
+        // The found value is quoted before serde's own ", expected ", so the
+        // last occurrence is serde's and the planted one is never read.
+        let error = serde_json::from_str::<ReasonProbe>(
+            r#"{"kind":"alpha","count":"a\"b, expected SECRET"}"#,
+        )
+        .expect_err("must not parse");
+        let reason = estimate_envelope_unreadable_reason(&error);
+        assert_eq!(
+            reason,
+            "EstimateFeaturesEnvelopeUnreadable(data invalid_type expected u64)"
+        );
+        assert!(!reason.contains("SECRET"), "{reason}");
+    }
 
     fn fixture_decryptor() -> Arc<dyn KmsKeyWrapper> {
         let crypto = SecretsCrypto::new(SecretString::new("a".repeat(32).into()))

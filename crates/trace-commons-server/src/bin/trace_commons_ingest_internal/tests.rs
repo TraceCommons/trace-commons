@@ -100558,6 +100558,23 @@ mod credit_estimate_tests {
     ];
     const TENANTS: [&str; 4] = ["tenant-a", "tenant-a", "tenant-b", "tenant-b"];
 
+    /// A parse reason is schema-only and returned as is; any other failure
+    /// (load or decrypt, whose text can name storage) is hashed.
+    #[test]
+    fn a_derive_failure_reason_passes_parse_reasons_and_hashes_the_rest() {
+        let parse = anyhow::anyhow!(
+            "EstimateFeaturesEnvelopeUnreadable(data missing_field `schema_version`)"
+        );
+        assert_eq!(
+            credit_estimate::derive_failure_reason(&parse),
+            "EstimateFeaturesEnvelopeUnreadable(data missing_field `schema_version`)"
+        );
+        let storage = anyhow::anyhow!("object gs://SECRET-bucket/key not found");
+        let reason = credit_estimate::derive_failure_reason(&storage);
+        assert!(reason.starts_with("sha256:"), "{reason}");
+        assert!(!reason.contains("SECRET"), "{reason}");
+    }
+
     struct EvalFixture {
         _temp: tempfile::TempDir,
         _artifact_temp: tempfile::TempDir,
