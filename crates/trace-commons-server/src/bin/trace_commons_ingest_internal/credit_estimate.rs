@@ -29,6 +29,15 @@
 //! tag is assigned per run in a random order and only says which rows share
 //! a tenant. With `fit=true` it also runs the E9 time split
 //! and returns the metrics and a candidate table. It writes nothing.
+//!
+//! With `target=settlement` the same rows are labelled instead with the
+//! settled `trace_credit` award of the pipeline run that wrote the
+//! submission's gate decision: its `atomic_units`, 0 for a run settled with
+//! no award, and left out (counted unlabelled) when the run is held, not
+//! complete, or has no Score outcome. With `fit=true` it fits a settlement
+//! table (`fit_settlement_table`), drawing its batches from `seed`
+//! (default 0) so a run is reproducible. The candidate carries no dollar
+//! rate and no pricing version; the operator adds both.
 
 use std::path::Path;
 
@@ -36,9 +45,10 @@ use rand::seq::SliceRandom as _;
 use trace_commons_protocol::local_credit_estimate::LocalEstimateTable;
 use trace_commons_protocol::settlement_estimate::SettlementEstimateTable;
 use trace_commons_server::credit_estimate_fit::{
-    EstimateEvalRow, EstimateFitInput, EstimateFitReport, displayed_credit, eval_label,
-    fit_estimate_table,
+    EstimateEvalRow, EstimateFitInput, EstimateFitReport, SettlementEvalRow, SettlementFitInput,
+    SettlementFitReport, displayed_credit, eval_label, fit_estimate_table, fit_settlement_table,
 };
+use trace_commons_server::trace_corpus_storage::SettlementLabel;
 
 use super::*;
 
@@ -155,6 +165,32 @@ pub(super) struct CreditEstimateEvalQuery {
     /// Also fit and evaluate a candidate table.
     #[serde(default)]
     pub(super) fit: bool,
+    /// Which label the rows carry and which table a fit produces.
+    #[serde(default)]
+    pub(super) target: EstimateEvalTarget,
+    /// Seeds the settlement fit's batch draw. Defaults to 0.
+    #[serde(default)]
+    pub(super) seed: Option<u64>,
+}
+
+/// What an eval run labels rows with.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum EstimateEvalTarget {
+    /// Displayed credit, for the v1 display table. Today's behaviour.
+    #[default]
+    Display,
+    /// The settled `trace_credit` award, for the v2 settlement table.
+    Settlement,
+}
+
+impl EstimateEvalTarget {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Display => "display",
+            Self::Settlement => "settlement",
+        }
+    }
 }
 
 /// Counts for one eval run. Aggregates only.
@@ -165,9 +201,11 @@ pub(super) struct CreditEstimateEvalCounts {
     /// Distinct submissions among them; each is labelled by its latest
     /// decision.
     pub(super) submissions: usize,
-    /// Submissions with a credit quality or a withheld reason.
+    /// Submissions with a credit quality or a withheld reason; under
+    /// `target=settlement`, with a settled award or a settlement at zero.
     pub(super) labelled: usize,
-    /// Submissions with neither: still being scored. Left out.
+    /// Submissions with neither: still being scored, or under
+    /// `target=settlement` excluded (held, unfinished, unscored). Left out.
     pub(super) unlabelled: usize,
     /// Labelled submissions whose features were derived.
     pub(super) derived: usize,
@@ -180,10 +218,25 @@ pub(super) struct CreditEstimateEvalCounts {
 pub(super) struct CreditEstimateEvalResponse {
     pub(super) dry_run: bool,
     pub(super) counts: CreditEstimateEvalCounts,
-    /// Shuffled, label-only.
+    /// Shuffled, label-only. Empty under `target=settlement`.
     pub(super) rows: Vec<EstimateEvalRow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) fit: Option<EstimateFitReport>,
+    /// Shuffled, label-only; only under `target=settlement`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) settlement_rows: Vec<SettlementEvalRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) settlement_fit: Option<SettlementFitReport>,
+}
+
+/// One submission's label, whichever target the run reads.
+enum RowLabel {
+    Display {
+        credit_quality_micros: Option<i64>,
+        calibration_version: Option<i32>,
+        withheld: Option<trace_commons_server::credit_estimate_fit::EstimateWithheldLabel>,
+    },
+    Settlement(u64),
 }
 
 /// One eval run. Enumerates decisions cross-tenant on the gate-driver pool,
@@ -246,24 +299,51 @@ pub(super) async fn run_credit_estimate_eval(
     };
 
     let mut inputs: Vec<EstimateFitInput> = Vec::new();
+    let mut settlement_inputs: Vec<SettlementFitInput> = Vec::new();
     for (tenant_id, submission_ids) in by_tenant {
-        let labels = db
-            .list_latest_gate_credit_decisions(tenant_id, &submission_ids)
-            .await?;
-        let labels: BTreeMap<Uuid, _> = labels
-            .into_iter()
-            .map(|row| (row.submission_id, row))
-            .collect();
+        // Both reads are tenant-scoped; a submission with no label is
+        // absent from the map and counted unlabelled.
+        let labels: BTreeMap<Uuid, RowLabel> = match query.target {
+            EstimateEvalTarget::Display => db
+                .list_latest_gate_credit_decisions(tenant_id, &submission_ids)
+                .await?
+                .into_iter()
+                .filter_map(|row| {
+                    eval_label(
+                        row.credit_quality_micros,
+                        row.credit_withheld_reason.as_deref(),
+                    )
+                    .map(|withheld| {
+                        (
+                            row.submission_id,
+                            RowLabel::Display {
+                                credit_quality_micros: row.credit_quality_micros,
+                                calibration_version: row.credit_quality_calibration_version,
+                                withheld,
+                            },
+                        )
+                    })
+                })
+                .collect(),
+            // A held, unfinished or unscored run is excluded: no label.
+            EstimateEvalTarget::Settlement => db
+                .list_settlement_labels(tenant_id, &submission_ids)
+                .await?
+                .into_iter()
+                .filter_map(|row| match row.label {
+                    SettlementLabel::Settled(units) => {
+                        Some((row.submission_id, RowLabel::Settlement(units)))
+                    }
+                    SettlementLabel::WithheldAtZero => {
+                        Some((row.submission_id, RowLabel::Settlement(0)))
+                    }
+                    SettlementLabel::Excluded => None,
+                })
+                .collect(),
+        };
         let tenant_hash = sha256_prefixed(tenant_id);
         for submission_id in submission_ids {
-            let label = labels.get(&submission_id).and_then(|row| {
-                eval_label(
-                    row.credit_quality_micros,
-                    row.credit_withheld_reason.as_deref(),
-                )
-                .map(|withheld| (row, withheld))
-            });
-            let Some((label_row, withheld)) = label else {
+            let Some(label) = labels.get(&submission_id) else {
                 counts.unlabelled += 1;
                 continue;
             };
@@ -305,31 +385,56 @@ pub(super) async fn run_credit_estimate_eval(
                 }
             };
             counts.derived += 1;
-            inputs.push(EstimateFitInput {
-                row: EstimateEvalRow {
-                    features,
-                    displayed_credit: label_row.credit_quality_micros.map(displayed_credit),
-                    credit_quality_calibration_version: label_row
-                        .credit_quality_calibration_version,
+            let tenant_tag = tenant_tags[tenant_id].clone();
+            let decided_at = latest[&(tenant_id.to_string(), submission_id)];
+            match label {
+                RowLabel::Display {
+                    credit_quality_micros,
+                    calibration_version,
                     withheld,
-                    tenant_tag: tenant_tags[tenant_id].clone(),
-                },
-                decided_at: latest[&(tenant_id.to_string(), submission_id)],
-            });
+                } => inputs.push(EstimateFitInput {
+                    row: EstimateEvalRow {
+                        features,
+                        displayed_credit: credit_quality_micros.map(displayed_credit),
+                        credit_quality_calibration_version: *calibration_version,
+                        withheld: *withheld,
+                        tenant_tag,
+                    },
+                    decided_at,
+                }),
+                RowLabel::Settlement(units) => settlement_inputs.push(SettlementFitInput {
+                    row: SettlementEvalRow {
+                        features,
+                        settled_atomic_units: *units,
+                        tenant_tag,
+                    },
+                    decided_at,
+                }),
+            }
         }
     }
 
-    let fit = query.fit.then(|| fit_estimate_table(&inputs));
-    let mut rows: Vec<EstimateEvalRow> = inputs.into_iter().map(|input| input.row).collect();
+    let fit = (query.fit && query.target == EstimateEvalTarget::Display)
+        .then(|| fit_estimate_table(&inputs));
+    let settlement_fit = (query.fit && query.target == EstimateEvalTarget::Settlement)
+        .then(|| fit_settlement_table(&settlement_inputs, query.seed.unwrap_or(0), Utc::now()));
     // Enumeration order is decision-time order; shuffling keeps a row from
     // being matched back to a submission by its position. The row's values
     // are unlinkable on their own: see the module docs.
+    let mut rows: Vec<EstimateEvalRow> = inputs.into_iter().map(|input| input.row).collect();
     rows.shuffle(&mut rand::thread_rng());
+    let mut settlement_rows: Vec<SettlementEvalRow> = settlement_inputs
+        .into_iter()
+        .map(|input| input.row)
+        .collect();
+    settlement_rows.shuffle(&mut rand::thread_rng());
     Ok(CreditEstimateEvalResponse {
         dry_run: query.dry_run,
         counts,
         rows,
         fit,
+        settlement_rows,
+        settlement_fit,
     })
 }
 
@@ -375,6 +480,7 @@ pub(super) async fn eval_handler(
     match run_credit_estimate_eval(state.as_ref(), &query).await {
         Ok(response) => {
             tracing::info!(
+                eval_target = query.target.label(),
                 dry_run = response.dry_run,
                 decisions = response.counts.decisions,
                 submissions = response.counts.submissions,
@@ -384,6 +490,11 @@ pub(super) async fn eval_handler(
                 failed = response.counts.failed,
                 fit_passed = response.fit.as_ref().map(|fit| fit.passed),
                 fit_tiers = response.fit.as_ref().map(|fit| fit.tiers),
+                settlement_fit_tiers = response.settlement_fit.as_ref().map(|fit| fit.tiers),
+                settlement_fit_table = response
+                    .settlement_fit
+                    .as_ref()
+                    .map(|fit| fit.table.is_some()),
                 "Trace Commons credit estimate eval completed"
             );
             Ok(Json(response))
