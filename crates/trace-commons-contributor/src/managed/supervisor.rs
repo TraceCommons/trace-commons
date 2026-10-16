@@ -87,13 +87,18 @@ async fn run_native(
     let opencode = if row.tool == super::ToolId::Opencode {
         let session =
             super::opencode::OpenCodeSession::new(store, &account, &native, row.id, &row.cwd)?;
-        let model = row.model.as_deref().ok_or(ManagedError::InvalidRequest)?;
+        // A saved key names its model; the sign-in's proxy has pinned one.
+        let model = || row.model.as_deref().ok_or(ManagedError::InvalidRequest);
         session.prepare()?;
         match row.connection {
-            ConnectionKind::Subscription | ConnectionKind::NearAiSignIn => {
+            ConnectionKind::Subscription => {
                 return Err(ManagedError::InvalidRequest.into());
             }
+            ConnectionKind::NearAiSignIn => {
+                command = opencode_sign_in_command(&session, context)?;
+            }
             ConnectionKind::ApiKey => {
+                let model = model()?;
                 command = session.command(
                     model,
                     "https://api.openai.com/v1",
@@ -101,6 +106,7 @@ async fn run_native(
                 )?;
             }
             ConnectionKind::NearAi => {
+                let model = model()?;
                 let proxy = super::route::ManagedRoute::start_selected(
                     store,
                     row.id,
@@ -306,6 +312,25 @@ async fn run_native(
     Ok(code)
 }
 
+/// OpenCode on the NEAR AI sign-in: the daemon hosts this session's proxy
+/// and says its loopback port and the model it pinned. This process never
+/// sees the credential; without the port or the model, no run.
+fn opencode_sign_in_command(
+    session: &super::opencode::OpenCodeSession,
+    context: &LaunchContext,
+) -> Result<std::process::Command, ManagedError> {
+    let port = context.route_port.ok_or(ManagedError::LaunchUnknown)?;
+    let model = context
+        .route_model
+        .as_deref()
+        .ok_or(ManagedError::LaunchUnknown)?;
+    session.command(
+        model,
+        &format!("http://127.0.0.1:{port}/openai/v1"),
+        "managed-local-session",
+    )
+}
+
 /// Point the tool at a session's local NEAR AI proxy. The tool gets the
 /// loopback URL and a placeholder token, never a credential.
 fn near_ai_route(
@@ -396,8 +421,80 @@ impl TerminalSignals {
 
 #[cfg(test)]
 mod tests {
-    use super::stop_asked;
+    use super::{opencode_sign_in_command, stop_asked};
+    use crate::config::ConfigStore;
+    use crate::managed::{
+        ConnectionKind, ManagedError, ToolId, opencode::OpenCodeSession, sessions::LaunchContext,
+        signin,
+    };
     use serde_json::json;
+
+    /// OpenCode on the NEAR AI sign-in runs against the daemon's proxy for
+    /// this session, on the model that proxy pinned, with a placeholder
+    /// key. Without the port or the model there is no command: no run.
+    #[test]
+    fn opencode_on_the_sign_in_uses_the_route_port_and_model_or_does_not_run() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let native = home.path().join("opencode");
+        std::fs::write(&native, b"never executed").unwrap();
+        let account = signin::entry(ToolId::Opencode).unwrap();
+        let id = uuid::Uuid::new_v4();
+        let session = OpenCodeSession::new(&store, &account, &native, id, home.path()).unwrap();
+        let context = |port: Option<u16>, model: Option<&str>| -> LaunchContext {
+            serde_json::from_value(json!({
+                "session": {
+                    "id": id, "tool": "opencode", "connection": "near_ai_signin",
+                    "account_id": account.id, "account_label": "NEAR AI",
+                    "selection_generation": 0, "project_label": "p", "cwd": home.path(),
+                    "started_at": "2026-10-16T00:00:00Z", "state": "starting",
+                    "exit_code": null, "can_focus": false,
+                },
+                "proof": "proof",
+                "route_port": port,
+                "route_model": model,
+            }))
+            .unwrap()
+        };
+        let command = opencode_sign_in_command(
+            &session,
+            &context(Some(4321), Some("deepseek-ai/DeepSeek-V3.1")),
+        )
+        .unwrap();
+        assert_eq!(
+            context(None, None).session.connection,
+            ConnectionKind::NearAiSignIn
+        );
+        let env = |name: &str| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        let config: serde_json::Value =
+            serde_json::from_str(&env("OPENCODE_CONFIG_CONTENT").unwrap()).unwrap();
+        assert_eq!(config["model"], "trace-managed/deepseek-ai/DeepSeek-V3.1");
+        assert_eq!(
+            config["provider"]["trace-managed"]["options"]["baseURL"],
+            "http://127.0.0.1:4321/openai/v1"
+        );
+        assert_eq!(
+            env("TRACE_COMMONS_OPENCODE_KEY").as_deref(),
+            Some("managed-local-session")
+        );
+        for (port, model) in [
+            (None, Some("deepseek-ai/DeepSeek-V3.1")),
+            (Some(4321), None),
+            (None, None),
+        ] {
+            assert_eq!(
+                opencode_sign_in_command(&session, &context(port, model)).err(),
+                Some(ManagedError::LaunchUnknown),
+                "{port:?} {model:?}"
+            );
+        }
+    }
 
     /// Only the daemon's explicit `stop: true` stops the tool. A missing
     /// field, another value or a failed report leaves it running.

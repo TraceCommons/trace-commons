@@ -13817,7 +13817,7 @@ mod tests {
         let r = handle_request_async(&s, &req("managed_snapshot", serde_json::json!({}))).await;
         let body = r.result.expect("snapshot");
         assert_eq!(body["capabilities"]["near_ai_signin"], true);
-        assert_eq!(body["sign_in_accounts"].as_array().unwrap().len(), 2);
+        assert_eq!(body["sign_in_accounts"].as_array().unwrap().len(), 3);
         let text = serde_json::to_string(&body).unwrap();
         assert!(!text.contains("sk-super-secret-key"), "{text}");
         let r = handle_request_async(&s, &req("managed_launch_prepare", launch())).await;
@@ -13879,10 +13879,10 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         let routes = |s: &DaemonShared| s.managed.lock().unwrap().as_ref().unwrap().route_count();
         let launch = |tool: &str| {
-            let tool_id = if tool == "claude" {
-                crate::managed::ToolId::Claude
-            } else {
-                crate::managed::ToolId::Codex
+            let tool_id = match tool {
+                "claude" => crate::managed::ToolId::Claude,
+                "opencode" => crate::managed::ToolId::Opencode,
+                _ => crate::managed::ToolId::Codex,
             };
             serde_json::json!({
                 "request_id": uuid::Uuid::new_v4(),
@@ -13913,6 +13913,9 @@ mod tests {
         let context = redeem("claude").await;
         let port = context["route_port"].as_u64().expect("a loopback port");
         assert!(port > 0);
+        // The model the proxy pinned, so a launcher that must name one
+        // (OpenCode) names the same model Claude Code and Codex get.
+        assert_eq!(context["route_model"], "fixture-model");
         assert!(
             !context.to_string().contains("sk-route-fixture-key"),
             "{context}"
@@ -13998,7 +14001,14 @@ mod tests {
         assert_eq!(state_of(&quiet["session"]["id"]).await, "failed");
 
         // A running session ends with the sign-in: proxy stopped, row ended.
-        let running = redeem("claude").await;
+        // OpenCode's, which is told the pinned model with the port.
+        let running = redeem("opencode").await;
+        assert!(running["route_port"].as_u64().is_some_and(|port| port > 0));
+        assert_eq!(running["route_model"], "fixture-model");
+        assert!(
+            !running.to_string().contains("sk-route-fixture-key"),
+            "{running}"
+        );
         let r = handle_request_async(
             &s,
             &req(

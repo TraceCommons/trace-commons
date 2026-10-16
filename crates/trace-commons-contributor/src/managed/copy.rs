@@ -6,6 +6,8 @@
 //! Sessions on the NEAR AI sign-in. Approved 2026-10-12:
 //! - `start_claude` "Start Claude Code"
 //! - `start_codex` "Start Codex"
+//! - `start_opencode` "Start OpenCode" -- Approved 2026-10-16. Shown only
+//!   while the snapshot's `tools` row for `opencode` says it is installed.
 //! - `sign_in_scope` "Uses your NEAR AI sign-in. Runs in {destination}, in the
 //!   folder you choose." Shells fill `{destination}` from
 //!   `capabilities.terminal_destination`, as for `launch_scope`, so Windows
@@ -141,6 +143,7 @@ pub fn copy() -> serde_json::Value {
             "auth_unavailable": "Unavailable",
             "start_claude": "Start Claude Code",
             "start_codex": "Start Codex",
+            "start_opencode": "Start OpenCode",
             "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
             "sign_in_needed": "Sign in to NEAR AI to start a session.",
             "sign_in_near_ai": "Sign in",
@@ -191,6 +194,7 @@ mod tests {
         let copy = copy();
         assert_eq!(copy["start_claude"], "Start Claude Code");
         assert_eq!(copy["start_codex"], "Start Codex");
+        assert_eq!(copy["start_opencode"], "Start OpenCode");
         assert_eq!(
             copy["sign_in_scope"],
             "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose."

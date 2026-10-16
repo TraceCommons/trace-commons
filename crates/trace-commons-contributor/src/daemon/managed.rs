@@ -561,7 +561,8 @@ pub async fn handle_async(shared: &DaemonShared, request: &Request) -> Response 
 }
 
 /// The daemon reads the sign-in here, at launch time, and gives it only to
-/// the session's proxy. The launcher is told a loopback port, nothing else.
+/// the session's proxy. The launcher is told a loopback port and the model
+/// the proxy pinned, nothing else.
 async fn redeem_async(shared: &DaemonShared, request: &Request) -> Response {
     let p: RedeemParams = match parse(request) {
         Ok(p) => p,
@@ -592,6 +593,7 @@ async fn redeem_async(shared: &DaemonShared, request: &Request) -> Response {
     let result = with_service(shared, |service| match started {
         Ok(route) => {
             context.route_port = Some(route.port());
+            context.route_model = Some(route.model().to_owned());
             service.routes.insert(p.session_id, route);
             Ok(json!(context))
         }
@@ -808,14 +810,14 @@ mod tests {
         let with = call(&mut service, "managed_snapshot", json!({}), true).unwrap();
         assert_eq!(with["capabilities"]["near_ai_signin"], true);
         let entries = with["sign_in_accounts"].as_array().unwrap();
-        assert_eq!(entries.len(), 2);
-        for (entry, tool) in entries.iter().zip(["claude", "codex"]) {
+        assert_eq!(entries.len(), 3);
+        for (entry, tool) in entries.iter().zip(["claude", "codex", "opencode"]) {
             assert_eq!(entry["tool"], tool);
             assert_eq!(entry["connection"], "near_ai_signin");
             assert_eq!(entry["auth_state"], "ready");
         }
         let defaults = with["defaults"].as_array().unwrap();
-        assert_eq!(defaults.len(), 2);
+        assert_eq!(defaults.len(), 3);
         assert!(defaults.iter().all(|d| d["connection"] == "near_ai_signin"));
         // Derived, not saved.
         assert_eq!(with["accounts"], json!([]));
@@ -838,13 +840,18 @@ mod tests {
         service.accounts.select(selection, Generation(0)).unwrap();
         let snapshot = call(&mut service, "managed_snapshot", json!({}), true).unwrap();
         let defaults = snapshot["defaults"].as_array().unwrap();
-        assert_eq!(defaults.len(), 2);
+        assert_eq!(defaults.len(), 3);
         let claude = defaults.iter().find(|d| d["tool"] == "claude").unwrap();
         assert_eq!(claude["account_id"], json!(saved.id));
         let codex = defaults.iter().find(|d| d["tool"] == "codex").unwrap();
         assert_eq!(
             codex["account_id"],
             json!(signin::account_id(ToolId::Codex))
+        );
+        let opencode = defaults.iter().find(|d| d["tool"] == "opencode").unwrap();
+        assert_eq!(
+            opencode["account_id"],
+            json!(signin::account_id(ToolId::Opencode))
         );
         // Signed out, the saved default stands alone.
         let snapshot = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
@@ -871,7 +878,7 @@ mod tests {
             )
             .unwrap();
         let snapshot = call(&mut service, "managed_snapshot", json!({}), true).unwrap();
-        assert_eq!(snapshot["sign_in_accounts"].as_array().unwrap().len(), 2);
+        assert_eq!(snapshot["sign_in_accounts"].as_array().unwrap().len(), 3);
         let defaults = snapshot["defaults"].as_array().unwrap();
         assert_eq!(defaults.len(), 3);
         let opencode = defaults.iter().find(|d| d["tool"] == "opencode").unwrap();
@@ -970,6 +977,30 @@ mod tests {
         );
     }
 
+    /// OpenCode starts on the sign-in like the others, with no model: the
+    /// proxy pins one at redeem. A request that names a model is refused.
+    #[test]
+    fn opencode_starts_on_the_sign_in_without_a_model() {
+        let (home, _store, mut service) = service();
+        let mut named = launch(ToolId::Opencode, home.path());
+        named["model"] = json!("gpt-5");
+        assert_eq!(
+            call(&mut service, "managed_launch_prepare", named, true),
+            Err(ManagedError::InvalidRequest)
+        );
+        let prepared = prepare(&mut service, ToolId::Opencode, home.path());
+        let (context, host) = service
+            .redeem(
+                prepared.session_id,
+                prepared.ticket.as_deref().unwrap(),
+                true,
+            )
+            .unwrap();
+        assert!(host);
+        assert_eq!(context.session.tool, ToolId::Opencode);
+        assert_eq!(context.session.model, None);
+    }
+
     #[test]
     fn a_signed_in_redeem_asks_its_caller_to_host_the_proxy() {
         let (home, _store, mut service) = service();
@@ -983,6 +1014,7 @@ mod tests {
             .unwrap();
         assert!(host);
         assert_eq!(context.route_port, None);
+        assert_eq!(context.route_model, None);
         assert_eq!(context.session.connection, ConnectionKind::NearAiSignIn);
         assert_eq!(context.session.account_label, "NEAR AI");
         assert!(service.take_routes(true).is_empty());
