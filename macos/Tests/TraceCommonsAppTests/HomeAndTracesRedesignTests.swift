@@ -113,6 +113,44 @@ final class HomeAndTracesRedesignTests: XCTestCase {
         let none = HomeUncontributed([try entry(4, "x", extra: estimate(1, 2, false))])
         XCTAssertNil(none.low, "no drawn estimate is no estimate, never zero")
     }
+
+    /// Dollars replace points on the tile (owner, 2026-10-16): the core's
+    /// finished machine-wide line, drawn as given, the same one the menu
+    /// bar draws.
+    func test_uncontributedTileDrawsTheDollarLineInPlaceOfPoints() throws {
+        guard let words = MonitorWords.table?.homeHistory else {
+            throw XCTSkip("core copy unavailable")
+        }
+        var a: [String: Any] = ["credit_estimate": ["low": 1, "high": 3, "calibration": "uncalibrated",
+                                                    "basis": "published", "drawn": true]]
+        a["state"] = "pending"
+        let line = "About $9 to $26 of inference in traces on this Mac"
+        let dollars = HomeUncontributed([try entry(1, "x", extra: a)], settlement: try settlement(line))
+        XCTAssertEqual(dollars.detail(words), line)
+
+        let points = HomeUncontributed([try entry(1, "x", extra: a)], settlement: nil)
+        XCTAssertEqual(points.detail(words), HomeUncontributed([try entry(1, "x", extra: a)]).detail(words),
+                       "without a dollar estimate the points line stays")
+        XCTAssertNotEqual(points.detail(words), line)
+
+        let blank = HomeUncontributed([try entry(1, "x", extra: a)], settlement: try settlement("  "))
+        XCTAssertEqual(blank.detail(words), points.detail(words), "an empty line is no line")
+
+        let nothingQueued = HomeUncontributed([], settlement: try settlement(line))
+        XCTAssertEqual(nothingQueued.detail(words), line,
+                       "the dollar line covers traces on this Mac, queued or not")
+        XCTAssertNil(HomeUncontributed([], settlement: nil).detail(words))
+    }
+
+    private func settlement(_ text: String) throws -> DaemonData.SettlementEstimate {
+        let json: [String: Any] = [
+            "low_usd_micros": 9_000_000, "high_usd_micros": 26_000_000, "up_to": false,
+            "known": 127, "unknown": 4, "table_version": "s1", "estimated_at": "2026-10-16T16:00:00Z",
+            "text": text,
+        ]
+        return try JSONDecoder().decode(DaemonData.SettlementEstimate.self,
+                                        from: JSONSerialization.data(withJSONObject: json))
+    }
 }
 
 /// The opening prompt, split into what was typed and what a tool wrapped
