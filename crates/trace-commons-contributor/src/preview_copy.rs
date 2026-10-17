@@ -1214,9 +1214,9 @@ pub struct MonitorHomeHistoryCopy {
     pub uncontributed_size: &'static str,
     pub uncontributed_estimate: &'static str,
     /// Home's Credit tile: the change in total credit since the last day
-    /// this Mac saw, `{amount}` signed; and no change. DRAFT, NEEDS APPROVAL.
+    /// this Mac saw, `{amount}` signed. No change says nothing (owner,
+    /// 2026-10-16). DRAFT, NEEDS APPROVAL.
     pub credit_delta: &'static str,
-    pub credit_delta_none: &'static str,
     /// Home's Insights promotion: today's routed tokens, and its line while
     /// no figures are read. DRAFT, NEEDS APPROVAL.
     pub insights_today: &'static str,
@@ -1504,7 +1504,6 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             uncontributed_size: "{size}",
             uncontributed_estimate: "Could earn {min}\u{2013}{max}",
             credit_delta: "{amount} since yesterday",
-            credit_delta_none: "No change since yesterday",
             insights_today: "{total} tokens today",
             insights_teaser: "See where your agents spend their tokens.",
             campaign_eyebrow: "New on NEAR AI",
