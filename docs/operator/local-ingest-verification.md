@@ -50,7 +50,7 @@ tool for verifying the server rather than the contributor experience.
 ### 1. Build
 
 ```bash
-cargo build --bin trace-commons-ingest
+cargo build -p trace-commons-ingest --bin trace-commons-ingest
 cargo build --release --bin trace-commons-pilot-bootstrap
 ```
 
@@ -67,10 +67,12 @@ RUST_LOG=info \
   ./target/debug/trace-commons-ingest
 ```
 
-The service logs under the target `trace_commons_server::ingest::app`
-(it was `trace_commons_ingest` before the service moved into the library),
-so a `RUST_LOG` directive or a log search keyed on the old target needs
-updating; a plain level such as `RUST_LOG=info` is unaffected.
+The service logs under the target `trace_commons_ingest::ingest::app`
+(it was `trace_commons_ingest` while the service was a binary, then
+`trace_commons_server::ingest::app` while it lived in the server library,
+before it moved to its own `trace-commons-ingest` crate), so a `RUST_LOG`
+directive or a log search keyed on an old target needs updating; a plain
+level such as `RUST_LOG=info` is unaffected.
 
 Token entries are comma-separated; each is `tenant:role:token` with an
 optional `;expires_at=<RFC3339>`. Roles parse per `TokenRole::parse` —

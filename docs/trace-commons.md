@@ -412,7 +412,7 @@ production storage path; the cutover sequence is in
 ```bash
 TRACE_COMMONS_TENANT_TOKENS='tenant-a:dev-token-a;expires_at=2026-04-27T00:00:00Z,tenant-a:reviewer:review-token-a,tenant-b:dev-token-b' \
 TRACE_COMMONS_BIND='127.0.0.1:3907' \
-cargo run --bin trace-commons-ingest
+cargo run -p trace-commons-ingest --bin trace-commons-ingest
 ```
 
 Then point a client at it:
@@ -625,7 +625,7 @@ TRACE_COMMONS_TENANT_POLICIES='{
     "allowed_uses": ["debugging", "evaluation", "benchmark_generation", "aggregate_analytics"]
   }
 }' \
-cargo run --bin trace-commons-ingest
+cargo run -p trace-commons-ingest --bin trace-commons-ingest
 ```
 
 Tenants without an entry keep the development default. Where a policy exists it

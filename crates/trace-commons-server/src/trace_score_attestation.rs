@@ -14,7 +14,7 @@
 //! read, that a specific `auth_principal_ref` (resolved ONLY from the
 //! caller's authenticated upload claim — never from a request parameter)
 //! owns a set of scored submissions. See
-//! `crates/trace-commons-server/src/bin/trace-commons-ingest.rs`'s
+//! `crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs`'s
 //! `score_attestation_handler` for the endpoint that uses this module; it is
 //! the only caller of `sign_score_attestation` and it must never accept a
 //! principal from the request.

@@ -8682,6 +8682,28 @@ name = "trace-commons-build-info"
 version = "0.1.0"
 
 [[package]]
+name = "trace-commons-client-server-tests"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "hex",
+ "k256",
+ "ring",
+ "serde_json",
+ "sha2 0.10.9",
+ "sha3",
+ "tempfile",
+ "tokio",
+ "trace-commons-contributor",
+ "trace-commons-protocol",
+ "trace-commons-server",
+ "uuid 1.23.1",
+]
+
+[[package]]
 name = "trace-commons-contributor"
 version = "0.19.0"
 dependencies = [
@@ -8704,7 +8726,6 @@ dependencies = [
  "reqwest 0.12.28",
  "ring",
  "rusqlite",
- "security-framework",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -8718,9 +8739,11 @@ dependencies = [
  "trace-commons-attestation",
  "trace-commons-build-info",
  "trace-commons-contributor",
+ "trace-commons-contributor-insights",
+ "trace-commons-contributor-platform",
+ "trace-commons-contributor-sources",
  "trace-commons-operator-client",
  "trace-commons-protocol",
- "trace-commons-server",
  "tracing",
  "url",
  "uuid 1.23.1",
@@ -8739,6 +8762,64 @@ dependencies = [
  "tokio",
  "trace-commons-contributor",
  "trace-commons-protocol",
+]
+
+[[package]]
+name = "trace-commons-contributor-insights"
+version = "0.19.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "chrono-tz",
+ "dirs",
+ "hex",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "trace-commons-contributor-platform",
+ "trace-commons-contributor-sources",
+ "trace-commons-protocol",
+ "uuid 1.23.1",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "trace-commons-contributor-platform"
+version = "0.19.0"
+dependencies = [
+ "anyhow",
+ "apple-native-keyring-store",
+ "keyring-core",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid 1.23.1",
+ "windows-native-keyring-store",
+ "windows-sys 0.61.2",
+ "zbus-secret-service-keyring-store",
+]
+
+[[package]]
+name = "trace-commons-contributor-sources"
+version = "0.19.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs",
+ "hex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "trace-commons-protocol",
+ "tracing",
+ "uuid 1.23.1",
 ]
 
 [[package]]
@@ -8775,6 +8856,56 @@ dependencies = [
  "tracing",
  "usearch",
  "uuid 1.23.1",
+]
+
+[[package]]
+name = "trace-commons-ingest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bs58",
+ "bytes",
+ "chrono",
+ "cookie",
+ "dcap-qvl",
+ "deadpool-postgres",
+ "dirs",
+ "hex",
+ "jsonwebtoken",
+ "k256",
+ "rand 0.8.6",
+ "reqwest 0.12.28",
+ "ring",
+ "rustls",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sha3",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tower 0.5.3",
+ "tower-http",
+ "trace-commons-attestation",
+ "trace-commons-build-info",
+ "trace-commons-contributor",
+ "trace-commons-gate-api",
+ "trace-commons-gate-enclave",
+ "trace-commons-operator-client",
+ "trace-commons-protocol",
+ "trace-commons-server",
+ "tracing",
+ "tracing-subscriber",
+ "uuid 1.23.1",
+ "webauthn-authenticator-rs",
+ "webauthn-rs",
+ "wiremock",
+ "zeroize",
 ]
 
 [[package]]
@@ -8840,10 +8971,8 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
- "cookie",
  "dcap-qvl",
  "deadpool-postgres",
- "dirs",
  "dotenvy",
  "google-cloud-kms",
  "google-cloud-storage",
@@ -8856,7 +8985,6 @@ dependencies = [
  "reqwest 0.12.28",
  "ring",
  "ripemd",
- "rustls",
  "secrecy",
  "serde",
  "serde_json",

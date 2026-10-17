@@ -146,7 +146,7 @@ refused weak session).
 ## Copy
 
 All page text is in one table, `STEP_UP_COPY` in
-`crates/trace-commons-server/src/bin/trace_commons_ingest_internal/step_up_page.rs`.
+`crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/step_up_page.rs`.
 It is **proposed** and awaits approval.
 
 ## Limits

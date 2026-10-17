@@ -39,7 +39,7 @@ Turning settlement on for real needs three things that do not exist yet:
 Beyond those, `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE`
 gates a further ~19-item config profile — see
 `credit_settlement_central_issuer_profile_missing_config` in
-`crates/trace-commons-server/src/bin/trace-commons-ingest.rs`, which enumerates
+`crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs`, which enumerates
 exactly what is missing and is the authoritative list. Do not transcribe it
 here; it will drift.
 

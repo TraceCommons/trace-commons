@@ -21,6 +21,8 @@ verbatim.
 ## What was verified
 
 - `cargo build --release -p trace-commons-server --bin trace-commons-pilot-bootstrap --bin trace-commons-ingest` succeeds.
+  (The ingest binary has since moved to its own crate; build it today with
+  `cargo build --release -p trace-commons-ingest --bin trace-commons-ingest`.)
 - `scripts/operator/pilot-bootstrap-smoke.sh` exits 0 with the expected
   `SmokePilotBootstrapOK: 10 submissions, idempotency confirmed` line.
 - The binary's hash-only logging policy holds on the failure path

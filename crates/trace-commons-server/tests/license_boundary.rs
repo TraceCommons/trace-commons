@@ -4,7 +4,7 @@
 //! The licence boundary is a dependency-direction invariant, and nothing about
 //! the code enforces it.
 //!
-//! `trace-commons-server`, `-gate-api`, and `-gate-enclave` are
+//! `trace-commons-server`, `-ingest`, `-gate-api`, and `-gate-enclave` are
 //! AGPL-3.0-or-later. Every other crate is `MIT OR Apache-2.0` so it can be
 //! embedded in proprietary software -- the contributor CLI, Tauri and the
 //! native desktop apps, and the envelope protocol depend on that.
@@ -240,6 +240,7 @@ fn both_sides_of_the_boundary_are_populated() {
         [
             "trace-commons-gate-api",
             "trace-commons-gate-enclave",
+            "trace-commons-ingest",
             "trace-commons-server",
         ],
         "the set of AGPL crates changed; update LICENSE and this test together"
@@ -249,6 +250,9 @@ fn both_sides_of_the_boundary_are_populated() {
         "trace-commons-protocol",
         "trace-commons-attestation",
         "trace-commons-contributor",
+        "trace-commons-contributor-sources",
+        "trace-commons-contributor-insights",
+        "trace-commons-contributor-platform",
         "trace-commons-contributor-ffi",
         "trace-commons-contributor-gtk",
         "trace-commons-operator-client",
@@ -340,10 +344,10 @@ fn a_permissive_crate_reaching_an_agpl_crate_is_caught() {
 ///
 /// These are allowed -- they never reach a shipped artifact -- but pinning the
 /// exact set means a new one has to be added here on purpose, by someone who
-/// has read why the previous ones were acceptable. `trace-commons-contributor`
-/// takes this one under `cfg(not(windows))` for three cross-check tests in
-/// `account_auth.rs` and the `e2e_enroll_and_submit` integration test; its own
-/// shipped code never touches the server crate.
+/// has read why the previous ones were acceptable. The unpublished
+/// `trace-commons-client-server-tests` package owns this edge under
+/// `cfg(not(windows))`. The contributor itself must have no server edge, even
+/// in tests, so ordinary client test runs do not build the server.
 #[test]
 fn dev_dependency_edges_across_the_boundary_are_the_known_ones() {
     let crates = all_crates();
@@ -367,7 +371,7 @@ fn dev_dependency_edges_across_the_boundary_are_the_known_ones() {
 
     assert_eq!(
         crossing,
-        ["trace-commons-contributor (dev) -> trace-commons-server"],
+        ["trace-commons-client-server-tests (dev) -> trace-commons-server"],
         "a dev-dependency edge across the licence boundary changed. This does \
          not violate the licence -- dev-dependencies do not ship -- but confirm \
          the crate's shipped code still never links the AGPL crate, then update \

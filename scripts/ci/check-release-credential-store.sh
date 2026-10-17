@@ -5,8 +5,9 @@
 # That feature replaces the OS credential store (device key, account session,
 # Private AI credentials) with a PLAINTEXT file in the config directory. It
 # exists so `cargo test` stops writing the developer's real login keychain, and
-# it is enabled only by trace-commons-contributor's dev-dependency on itself,
-# which cargo never activates for `cargo build`/`--release`. Nothing but this
+# it is enabled only by test dev-dependencies (the contributor's self edge
+# and the unpublished client/server test package), which cargo never activates
+# for `cargo build`/`--release`. Nothing but this
 # check stops a later edit from enabling it in a release: a `--features` flag
 # on a release build line, an `--all-features` build, a shell crate turning it
 # on in its `[dependencies]`, or the feature entering `default`. A
@@ -49,6 +50,9 @@ BUILD_FILES=(
 # every build of that crate, release included.
 SHIPPED_MANIFESTS=(
   crates/trace-commons-contributor/Cargo.toml
+  crates/trace-commons-contributor-sources/Cargo.toml
+  crates/trace-commons-contributor-insights/Cargo.toml
+  crates/trace-commons-contributor-platform/Cargo.toml
   crates/trace-commons-contributor-ffi/Cargo.toml
   crates/trace-commons-contributor-gtk/Cargo.toml
   tauri-desktop/src-tauri/Cargo.toml
@@ -102,7 +106,7 @@ check() {
   done
 
   # 3. Manifests of shipped crates. The only permitted mentions are the
-  #    feature's own `name = []` definition under [features] and the self
+  #    exact feature definitions/forwarding under [features] and the self
   #    dev-dependency in trace-commons-contributor. Anything else -- a normal
   #    dependency enabling it, or `default = [..., "test-credential-store"]`
   #    -- ships it.
@@ -119,9 +123,11 @@ check() {
         {
           line = $0; gsub(/[[:space:]]/, "", line)
           if (file ~ /trace-commons-contributor\/Cargo.toml$/) {
-            if (section == "[features]" && line == feature "=[]") next
+            if (section == "[features]" && line == feature "=[\"trace-commons-contributor-insights/" feature "\",\"trace-commons-contributor-platform/" feature "\"]") next
             if (section ~ /dev-dependencies\]$/ && line ~ /^trace-commons-contributor=\{path="\."/) next
           }
+          if (file ~ /trace-commons-contributor-insights\/Cargo.toml$/ && section == "[features]" && line == feature "=[\"trace-commons-contributor-platform/" feature "\"]") next
+          if (file ~ /trace-commons-contributor-platform\/Cargo.toml$/ && section == "[features]" && line == feature "=[]") next
           printf "line %d in %s enables the test-only feature outside the self dev-dependency: %s\n", NR, section, $0
         }' "$file"
     )
@@ -161,7 +167,9 @@ self_test() {
     "--all-features on the FFI dylib build|.github/workflows/release-apps.yml|s/cargo build --locked -p trace-commons-contributor-ffi --release/\$& --all-features/"
     "--all-features on a continuation line|.github/workflows/release-apps.yml|s/cargo build --locked -p trace-commons-contributor-ffi --release/\$& \\\\\n          --all-features/"
     "Tauri shell enabling it on its dependency|tauri-desktop/src-tauri/Cargo.toml|s#^trace-commons-contributor = \\{ path = \"../../crates/trace-commons-contributor\" \\}#trace-commons-contributor = { path = \"../../crates/trace-commons-contributor\", features = [\"$FEATURE\"] }#m"
-    "the feature entering default|crates/trace-commons-contributor/Cargo.toml|s/^$FEATURE = \\[\\]\$/\$&\\ndefault = [\"$FEATURE\"]/m"
+    "the feature entering default|crates/trace-commons-contributor/Cargo.toml|s/^$FEATURE = .*\$/\$&\\ndefault = [\"$FEATURE\"]/m"
+    "Insights enabling the forwarded feature by default|crates/trace-commons-contributor-insights/Cargo.toml|s/^$FEATURE = .*\$/\$&\\ndefault = [\"$FEATURE\"]/m"
+    "platform enabling the feature by default|crates/trace-commons-contributor-platform/Cargo.toml|s/^$FEATURE = .*\$/\$&\\ndefault = [\"$FEATURE\"]/m"
     "a flatpak build naming it|crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml|s/\\A/# $FEATURE\\n/"
   )
   local entry desc target program before

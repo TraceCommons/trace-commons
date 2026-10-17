@@ -1,0 +1,33 @@
+[package]
+name = "trace-commons-contributor-sources"
+# Released in lockstep with trace-commons-contributor, which re-exports this
+# crate's modules at their old `source` and `routing` paths.
+version = "0.19.0"
+edition.workspace = true
+rust-version.workspace = true
+# MIT OR Apache-2.0, like the contributor that embeds it. This crate must
+# never depend on an AGPL crate (see AGENTS.md, "The one rule").
+license.workspace = true
+repository.workspace = true
+description = "Session-store parsers and routing overlay for the Trace Commons contributor"
+
+# A leaf split out of trace-commons-contributor so that editing the daemon does
+# not recompile the session parsers and their unit tests. Every dependency
+# below repeats the contributor's own declaration of it, so this crate adds
+# no package and no feature to the graph.
+[dependencies]
+trace-commons-protocol = { path = "../trace-commons-protocol" }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+hex = "0.4"
+rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"

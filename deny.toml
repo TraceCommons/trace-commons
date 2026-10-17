@@ -1,6 +1,7 @@
 # Licence audit for the AGPL split.
 #
-# `trace-commons-server`, `-gate-api`, and `-gate-enclave` are AGPL-3.0-or-later.
+# `trace-commons-server`, `-gate-api`, `-gate-enclave`, and `-ingest` are
+# AGPL-3.0-or-later.
 # Everything they link must therefore be under a licence that can be combined
 # into an AGPL-3.0 work. The allow list below is exactly that set; a dependency
 # under GPL-2.0-only, SSPL, or a proprietary licence is a hard conflict.

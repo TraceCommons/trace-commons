@@ -1,0 +1,56 @@
+[package]
+name = "trace-commons-contributor-platform"
+# Released in lockstep with trace-commons-contributor, which re-exports this
+# crate's items at their old paths.
+version = "0.19.0"
+edition.workspace = true
+rust-version.workspace = true
+# MIT OR Apache-2.0, like the contributor that embeds it. This crate must
+# never depend on an AGPL crate (see AGENTS.md, "The one rule").
+license.workspace = true
+repository.workspace = true
+description = "OS credential storage and local file primitives shared by the Trace Commons contributor and its Insights crate"
+
+# A leaf split out of trace-commons-contributor so trace-commons-contributor-insights
+# can share it without depending on the contributor. Every dependency below
+# repeats the contributor's own declaration of it (same version, same
+# features), so this crate adds no package and no feature to the graph.
+
+[features]
+# TEST-ONLY. Forwarded from trace-commons-contributor's and
+# trace-commons-contributor-insights' `test-credential-store`. Makes every
+# `OsSecretBackend` constructor refuse outside this crate's own `cfg(test)`.
+# Never enable it for a shipped build.
+test-credential-store = []
+
+[dependencies]
+anyhow = "1"
+# OS credential stores approved by the operator on 2026-09-09.
+keyring-core = "=1.0.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-native-keyring-store = "=1.1.0"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "=1.0.2", features = ["keychain", "protected"] }
+# Pinned to the exact version `apple-native-keyring-store` resolves, because
+# `os_secret_store::storage_error` downcasts to this crate's `base::Error` to
+# recover the OSStatus. A different version is a different type and the
+# downcast would silently never match.
+security-framework = "=3.7.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = false, features = ["rt-tokio-crypto-rust"] }
+
+[dev-dependencies]
+tempfile = "3"

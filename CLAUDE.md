@@ -12,9 +12,11 @@ crate. Ironclaw should depend on `crates/trace-commons-protocol` when the
 client-side integration is rewired, but it does not live in this tree.
 
 It also holds the contributor side: the contributor CLI and daemon
-(`trace-commons-contributor`), the C ABI (`-contributor-ffi`), and four desktop
-shells -- macOS (`macos/`, Swift), Windows (`windows/`, C#), Linux GTK
-(`crates/trace-commons-contributor-gtk`), and Tauri (`tauri-desktop/`).
+(`trace-commons-contributor`, whose session-store parsers and routing
+overlay live in the leaf crate `-contributor-sources`), the C ABI
+(`-contributor-ffi`), and four desktop shells -- macOS (`macos/`, Swift),
+Windows (`windows/`, C#), Linux GTK (`crates/trace-commons-contributor-gtk`),
+and Tauri (`tauri-desktop/`).
 
 **Native SwiftUI (`macos/`) is the main client on macOS** (#1173 D1): no new
 Tauri work on macOS, and the Tauri app is retired there once the native
@@ -53,7 +55,10 @@ section of the roadmap.
 
 ## Binaries
 
-- `trace-commons-ingest` — hosted ingest / review / admin / worker API.
+- `trace-commons-ingest` — hosted ingest / review / admin / worker API. Built
+  from its own crate, `crates/trace-commons-ingest` (`cargo build -p
+  trace-commons-ingest --bin trace-commons-ingest`); the other binaries here
+  stay in `trace-commons-server`.
 - `trace-commons-upload-claim-issuer` — EdDSA/Ed25519 upload-claim issuer.
 - `trace-commons-gate-calibrate` — calibration tooling. Subcommands include
   `tail-floor --sidecar <path> --db-url <url> --percentile <n>` for tail-floor
@@ -67,13 +72,35 @@ section of the roadmap.
 ```bash
 RUSTFLAGS="-D warnings" cargo check -p trace-commons-server --bins
 RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --no-run
-cargo clippy -p trace-commons-server --all-targets -- \
+cargo clippy -p trace-commons-server -p trace-commons-ingest --all-targets -- \
   -A clippy::type_complexity -A clippy::collapsible_if \
   -A clippy::manual_option_as_slice -A clippy::useless_vec \
   -A clippy::redundant_pattern_matching
 cargo test -p trace-commons-server --test trace_corpus_storage_contract
 cargo test -p trace-commons-server --test trace_corpus_pg_store   # requires PostgreSQL
+RUSTFLAGS="-D warnings" cargo check -p trace-commons-ingest --bins
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-ingest --no-run
 ```
+
+For client work, select the client packages rather than the whole workspace:
+
+```bash
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-contributor
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-contributor-sources
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-contributor-insights
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-contributor-platform
+# Only when checking the client/server boundary (also run by workspace CI):
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-client-server-tests
+```
+
+The unpublished `trace-commons-client-server-tests` package has one `contracts`
+test executable holding enrollment/submission, admission and native-auth
+cross-checks. It owns the server dev-dependency; the contributor has none, so
+even client unit tests no longer build the server. `account_auth::wire` is
+exposed only under the test credential-store feature for those cross-checks;
+the shipped API keeps only its existing `NATIVE_REDIRECT_PATH` export. Run the
+contract package when changing either side of that boundary, not on every
+client-only edit. `cargo test --workspace` still runs all of it.
 
 ### Shared compile cache (recommended)
 
@@ -129,7 +156,8 @@ merged is cheap.
 Never set `rustc-wrapper` in the repository's own `.cargo/config.toml`:
 CI runners do not install sccache, and every build there would fail.
 
-The ingest service's PostgreSQL tests (`ingest::app::`, in the library)
+The ingest service's PostgreSQL tests (`ingest::app::`, in the
+`trace-commons-ingest` library)
 self-skip without `TRACE_COMMONS_PG_TEST_DATABASE_URL`, and the
 `postgres-suites` job runs only named slices of them. To run all of them
 locally, use a fresh
@@ -142,7 +170,7 @@ the tests share the `tenant-a` fixture tenant:
 createdb -h 127.0.0.1 admission_test_ingest_local
 TRACE_COMMONS_PG_TEST_DATABASE_URL=postgres://$USER@127.0.0.1:5432/admission_test_ingest_local \
 TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL=postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_ingest_local \
-cargo test -p trace-commons-server --lib ingest::app:: -- --test-threads=1
+cargo test -p trace-commons-ingest --lib -- --test-threads=1
 ```
 
 Without the resolver URL, about 74 account, passkey and login tests fail with
@@ -155,7 +183,8 @@ will not catch what CI catches. Always use the `RUSTFLAGS` form locally
 before claiming green. Clippy is CI-enforced — run it locally too.
 
 The protocol crate is `crates/trace-commons-protocol`; the server crate is
-`crates/trace-commons-server`. Migrations live in `migrations/`.
+`crates/trace-commons-server`; the ingest service is
+`crates/trace-commons-ingest`. Migrations live in `migrations/`.
 
 Two crates are separate Cargo workspaces with their own lockfiles, so `-p`
 from the repo root does not reach them: the GTK shell
@@ -304,13 +333,16 @@ This repo is **split-licensed**, and the split is load-bearing. `AGENTS.md`
 carries the full statement of it; the essentials are repeated here.
 
 - **AGPL-3.0-or-later**: `trace-commons-server`, `trace-commons-gate-api`,
-  `trace-commons-gate-enclave`. Copyright K&Z Partners LLC. Every `.rs` file in
-  these crates carries a two-line copyright + SPDX header; new files need one.
+  `trace-commons-gate-enclave`, `trace-commons-ingest`. Copyright K&Z Partners
+  LLC. Every `.rs` file in these crates carries a two-line copyright + SPDX
+  header; new files need one.
 - **MIT OR Apache-2.0**: everything else (`-protocol`, `-contributor`,
-  `-contributor-ffi`, `-contributor-gtk`, `-operator-client`, `-mark`,
-  `-build-info`, `-attestation`, and `tauri-desktop/src-tauri`
-  (`trace-commons-tauri-desktop`)). These ship inside proprietary agent
-  harnesses and must stay permissive.
+  `-contributor-sources`, `-contributor-insights`, `-contributor-platform`,
+  `-contributor-ffi`, `-contributor-gtk`,
+  `-operator-client`, `-mark`, `-build-info`, `-attestation`, the unpublished
+  `-client-server-tests`, and `tauri-desktop/src-tauri`
+  (`trace-commons-tauri-desktop`)). The shipped clients can be embedded in
+  proprietary agent harnesses and must stay permissive.
 
 **Contributions are licensed inbound under `MIT OR Apache-2.0`**, including to
 the AGPL crates -- deliberately not "inbound = outbound", so the project keeps
@@ -318,11 +350,12 @@ the right to relicense what it distributes. Stated in `CONTRIBUTING.md`, the PR
 template, `LICENSE`, and the README; keep those four consistent.
 
 **Permissive code may flow into the AGPL crates. Never the reverse.** Do not add
-`trace-commons-gate-api`, `-gate-enclave`, or `-server` to a permissive crate's
-dependencies -- not even to reuse a single trait. That silently makes a shipped
-client copyleft. `crates/trace-commons-server/tests/license_boundary.rs` fails
-if you do; do not "fix" it by editing the expected sets. Test-only
-dev-dependencies across the boundary are permitted but pinned in that same file.
+`trace-commons-gate-api`, `-gate-enclave`, `-server`, or `-ingest` to a
+permissive crate's dependencies -- not even to reuse a single trait. That
+silently makes a shipped client copyleft.
+`crates/trace-commons-server/tests/license_boundary.rs` fails if you do; do not
+"fix" it by editing the expected sets. Test-only dev-dependencies across the
+boundary are permitted but pinned in that same file.
 
 Note that `trace-commons-gate-api`'s traits being AGPL is deliberate: the
 proprietary-backend seam described below is available to the copyright holder
@@ -408,19 +441,20 @@ See rule 9 of the copy guide.
   each have their own bearer-token gate. Do not mix them.
 - Drills (`/v1/admin/*-drill`) produce hash-only evidence and feed rollout-smoke
   required checks. When you add a drill, wire it into the smoke evidence path.
-- `crates/trace-commons-server/src/bin/trace-commons-ingest.rs` is tens of
+- `crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs` is tens of
   thousands of lines of production code. Despite its path it is a library
-  module, `trace_commons_server::ingest::app`, declared by `#[path]` in
+  module, `trace_commons_ingest::ingest::app`, declared by `#[path]` in
   `src/ingest.rs`; the `trace-commons-ingest` binary is the thin
-  `src/bin/trace_commons_ingest_main.rs` over `trace_commons_server::ingest::run`,
+  `src/bin/trace_commons_ingest_main.rs` over `trace_commons_ingest::run`,
   so a build that registers its own Score policies can start the same service
   (`IngestOptions::with_score_policies`). Its unit tests therefore run under
   `--lib` with names prefixed `ingest::app::` (`cargo test -p
-  trace-commons-server --lib ingest::app::`); `--bin trace-commons-ingest`
-  runs none. Inside it and its `trace_commons_ingest_internal/` modules,
-  `crate::` is the library root, so a reference to the service's own items
-  is `crate::ingest::app::...` or `super::`. Its test module, larger still,
-  lives in a sibling file via `#[cfg(test)] #[path =
+  trace-commons-ingest --lib`); `--bin trace-commons-ingest` runs none.
+  Inside it and its `trace_commons_ingest_internal/` modules, `crate::` is
+  the `trace_commons_ingest` library root, so a reference to the service's
+  own items is `crate::ingest::app::...` or `super::`, and a reference to
+  the server library is `trace_commons_server::...`. Its test module, larger
+  still, lives in a sibling file via `#[cfg(test)] #[path =
   "trace_commons_ingest_internal/tests.rs"] mod tests;`. Reuse this pattern if other binaries need the same split; do not
   inline the tests back.
 - Pilot-bootstrap loads JSONL session files. Parquet + arrow deps were
@@ -431,15 +465,18 @@ See rule 9 of the copy guide.
 
 - Plain `cargo check` does not apply `-D warnings`; CI does. Always verify
   with `RUSTFLAGS='-D warnings' cargo check -p trace-commons-server --bins` and
-  `RUSTFLAGS='-D warnings' cargo test -p trace-commons-server --no-run` before
+  `RUSTFLAGS='-D warnings' cargo test -p trace-commons-server --no-run` (and
+  the same two with `-p trace-commons-ingest` for an ingest change) before
   claiming green. Dead-code and warning regressions slip through plain
   `cargo check`.
 - Pilot-bootstrap loader streams JSONL session files; parquet support was
   removed. See `crates/trace-commons-server/src/bin/pilot_bootstrap/hf_dataset.rs`.
 - `trace-commons-ingest.rs` test module is extracted to
   `trace_commons_ingest_internal/tests.rs` via `#[path = ...]`. The file is
-  compiled into the library (`ingest::app`), so its tests run under `--lib`;
-  a `--bin trace-commons-ingest <filter>` test run matches nothing and passes.
+  compiled into the `trace-commons-ingest` library (`ingest::app`), so its
+  tests run under `-p trace-commons-ingest --lib`; a `--bin
+  trace-commons-ingest <filter>` test run, or a `-p trace-commons-server
+  --lib ingest::app::` run, matches nothing and passes.
 - `cargo test -p <crate>` compiles none of a module behind a non-default
   feature, then reports a green run of the tests it did build. Measured on
   `main`: `-p trace-commons-attestation` runs 35 tests, `--features receipt`
@@ -448,6 +485,29 @@ See rule 9 of the copy guide.
   `trace-commons-protocol` 251 -> 289 under `near-ai-privacy-filter`. Pass
   `--features`, or use `cargo test --workspace`, which is what CI runs and
   which reaches them through feature unification.
+- The session-store parsers (`source/`) and the routing row, ledger trait,
+  attested capture and enriched source (`routing/{mod,attested,enriched}`)
+  live in `crates/trace-commons-contributor-sources`, a permissive leaf the
+  contributor re-exports at `trace_commons_contributor::source`, `::routing`,
+  and `daemon::settings::SourceDeclaration`, so callers keep their paths.
+  Their 231 unit tests run under `cargo test -p
+  trace-commons-contributor-sources`; `-p trace-commons-contributor` no longer
+  builds or runs them, and runs only the assertions that need the daemon
+  (`source/cross_layer_tests.rs`, `routing/cross_layer_tests.rs`). The split
+  means a daemon-only edit does not rebuild the parsers or their tests; no
+  build-time speedup has been measured yet. Fix a parser bug in the leaf
+  crate, which must never depend on the contributor.
+- Private local Insights lives in `trace-commons-contributor-insights`,
+  re-exported at `trace_commons_contributor::insights`. Its 495 unit tests
+  move with it. It depends on sources, protocol and the shared platform
+  crate, never on the daemon; daemon edits no longer invalidate Insights,
+  and Insights edits no longer invalidate the source parsers. Platform owns
+  OS credential storage and shared local-file primitives, with their tests.
+  The test credential-store feature is forwarded to both crates, but never
+  enabled in production. It still refuses OS credential access outside the
+  platform crate's own tests, and Insights' seeded digest key remains
+  `cfg(test)` only. Run the platform package's ignored OS round-trip tests
+  on the native OS (CI does), not under the contributor package's old path.
 - The shell test projects copy the FFI dylib only `Condition="Exists(...)"`
   (`windows/tests/TraceCommons.Interop.Tests/*.csproj`), so a stale or absent
   artifact fails nothing and the suite tests whatever ABI it last built. CI

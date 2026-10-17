@@ -109,7 +109,7 @@ RUNTIME_STEPS = (
     TestStep(
         "runtime_pipeline_runtime_bin",
         "cargo",
-        cargo_args=("-p", "trace-commons-server", "--lib"),
+        cargo_args=("-p", "trace-commons-ingest", "--lib"),
         test_filter="pipeline_runtime",
     ),
     TestStep(
@@ -149,14 +149,14 @@ POSTGRES_STEPS = (
     TestStep(
         "postgres_real_http_receipt",
         "cargo",
-        cargo_args=("-p", "trace-commons-server", "--lib"),
+        cargo_args=("-p", "trace-commons-ingest", "--lib"),
         test_filter="real_http_receipt_completes_and_resumes_after_restart",
         needs_pilot_check=True,
     ),
     TestStep(
         "postgres_compatibility_http",
         "cargo",
-        cargo_args=("-p", "trace-commons-server", "--lib"),
+        cargo_args=("-p", "trace-commons-ingest", "--lib"),
         test_filter="compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export",
         needs_login_resolver=True,
         needs_pilot_check=True,
@@ -164,7 +164,7 @@ POSTGRES_STEPS = (
     TestStep(
         "postgres_legacy_parity",
         "cargo",
-        cargo_args=("-p", "trace-commons-server", "--lib"),
+        cargo_args=("-p", "trace-commons-ingest", "--lib"),
         test_filter="legacy_and_pipeline_tenants_match_under_equivalent_configuration",
         needs_login_resolver=True,
         needs_pilot_check=True,
@@ -200,7 +200,7 @@ class DatabaseCheck:
 
 _LIB = ("-p", "trace-commons-server", "--lib")
 _RUNTIME_SUITE = ("-p", "trace-commons-server", "--test", "versioned_pipeline_runtime_pg")
-_INGEST_BIN = ("-p", "trace-commons-server", "--lib")
+_INGEST_BIN = ("-p", "trace-commons-ingest", "--lib")
 _HTTP_TESTS = "ingest::app::tests::pipeline_http_pg_tests::"
 
 

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Toolchains and native prerequisites for the root and Linux client workspaces.
+packages=(build-essential pkg-config libssl-dev libdbus-1-dev libclang-dev postgresql gnome-keyring dbus-x11
+    libgtk-4-dev libadwaita-1-dev libnotify-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev)
+missing=()
+for package in "${packages[@]}"; do
+    dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed' || missing+=("$package")
+done
+if ((${#missing[@]})); then
+    sudo apt-get update -qq
+    sudo apt-get install -y --no-install-recommends "${missing[@]}"
+fi
+
+if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+fi
+"$HOME/.cargo/bin/rustup" component add rustfmt clippy
+
+# Amp and supervised commands start in non-interactive login shells.
+if ! grep -Fq '. "$HOME/.cargo/env"' "$HOME/.bash_profile"; then
+    printf '\n. "$HOME/.cargo/env"\n' >> "$HOME/.bash_profile"
+fi

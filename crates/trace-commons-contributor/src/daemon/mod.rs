@@ -40,7 +40,11 @@ pub(crate) mod cloud_credential_test_support;
 pub mod commons_credit;
 pub mod community;
 pub mod contribution_eligibility;
-pub(crate) mod credential_store;
+/// Moved to the platform crate, which the Insights crate shares; re-exported
+/// here at its old path.
+pub(crate) mod credential_store {
+    pub(crate) use trace_commons_contributor_platform::credential_store::*;
+}
 pub mod eligibility;
 pub mod enroll;
 pub mod grant_terms;
@@ -69,10 +73,13 @@ pub mod nudge;
 pub(crate) mod reengage;
 #[cfg(feature = "test-credential-store")]
 pub(crate) mod test_credential_store;
-// Under `test-credential-store` (test builds only) nothing outside the manual
-// round-trip tests constructs the OS store, by design.
-#[cfg_attr(all(feature = "test-credential-store", not(test)), allow(dead_code))]
-pub(crate) mod os_secret_store;
+/// Moved, with its manual round-trip tests, to the platform crate, which the
+/// Insights crate shares; re-exported here at its old path. Under
+/// `test-credential-store` (test builds only) every constructor there
+/// refuses, including from this crate's own unit tests.
+pub(crate) mod os_secret_store {
+    pub(crate) use trace_commons_contributor_platform::os_secret_store::*;
+}
 pub mod past_sessions;
 pub mod policy;
 pub mod preview;
