@@ -1045,6 +1045,48 @@ pub struct MonitorFlowMapCopy {
     /// dashed. "Not watched", without "Tool" (owner, 2026-10-12). DRAFT,
     /// NEEDS APPROVAL.
     pub legend_not_watched: &'static str,
+    /// The "+N" pill under the folders draws the next few of them (owner,
+    /// 2026-10-15). Its visible text is the count alone; these are its
+    /// accessible names, `{count}` the folders the click draws. DRAFT,
+    /// NEEDS APPROVAL.
+    pub reveal_folders_one: &'static str,
+    pub reveal_folders: &'static str,
+    /// Once every folder is drawn, the pill folds them back: its visible
+    /// text, then its accessible name. DRAFT, NEEDS APPROVAL.
+    pub fold_folders: &'static str,
+    pub fold_folders_label: &'static str,
+    /// The tool group between the folders and this computer (owner,
+    /// 2026-10-16): its heading, and a coin's line under its name,
+    /// `{count}` the traces waiting from that tool. DRAFT, NEEDS APPROVAL.
+    pub tools_heading: &'static str,
+    pub coin_waiting: &'static str,
+    /// The legend's item for the lock on each coin: a tool's memory files
+    /// are never collected. DRAFT, NEEDS APPROVAL.
+    pub legend_memory: &'static str,
+    /// The card under the pointer while a trace is moving through the tool
+    /// group: whether it is being contributed or kept, the heading over
+    /// the trace, what happens to the tool's memory, and a note on the
+    /// memory text inside the trace, `{tool}` the tool's name. DRAFT, NEEDS
+    /// APPROVAL.
+    pub transfer_contributing: &'static str,
+    pub transfer_keeping: &'static str,
+    pub transfer_trace: &'static str,
+    pub memory_stays: &'static str,
+    pub transfer_contribute_note: &'static str,
+    pub transfer_keep_note: &'static str,
+    /// The tools' own memory files, which stay on this Mac: named on that
+    /// card for the tools whose files are known. DRAFT, NEEDS APPROVAL.
+    pub memory_claude_code: &'static str,
+    pub memory_codex: &'static str,
+    pub memory_opencode: &'static str,
+    pub memory_gemini_cli: &'static str,
+    pub memory_cline: &'static str,
+    /// Under this computer while a contribution's traces are being
+    /// gathered for the trip to the library, `{count}` of `{total}`; and
+    /// after traces are kept. DRAFT, NEEDS APPROVAL.
+    pub collected: &'static str,
+    pub kept_here_one: &'static str,
+    pub kept_here: &'static str,
     /// The Private AI destination's label: the credential the tools'
     /// calls are answered with.
     pub credential: &'static str,
@@ -1204,9 +1246,9 @@ pub struct MonitorHomeHistoryCopy {
     pub uncontributed_size: &'static str,
     pub uncontributed_estimate: &'static str,
     /// Home's Credit tile: the change in total credit since the last day
-    /// this Mac saw, `{amount}` signed; and no change. DRAFT, NEEDS APPROVAL.
+    /// this Mac saw, `{amount}` signed. No change says nothing (owner,
+    /// 2026-10-16). DRAFT, NEEDS APPROVAL.
     pub credit_delta: &'static str,
-    pub credit_delta_none: &'static str,
     /// Home's Insights promotion: today's routed tokens, and its line while
     /// no figures are read. DRAFT, NEEDS APPROVAL.
     pub insights_today: &'static str,
@@ -1473,6 +1515,28 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             connected: "{label} connected.",
             connected_line: "{label} connected",
             legend_not_watched: "Not watched",
+            reveal_folders_one: "Show 1 more folder",
+            reveal_folders: "Show {count} more folders",
+            fold_folders: "Show fewer",
+            fold_folders_label: "Show fewer folders",
+            tools_heading: "Tools",
+            coin_waiting: "{count} waiting",
+            legend_memory: "Memory stays on this Mac",
+            transfer_contributing: "Contributing",
+            transfer_keeping: "Keeping",
+            transfer_trace: "Trace",
+            memory_stays: "Memory files stay on this Mac.",
+            transfer_contribute_note: "What {tool} read from its memory is part of the trace, \
+                and is scrubbed with it before it leaves.",
+            transfer_keep_note: "The trace stays on this Mac with its memory. Nothing is sent.",
+            memory_claude_code: "CLAUDE.md, memory/",
+            memory_codex: "AGENTS.md",
+            memory_opencode: "AGENTS.md",
+            memory_gemini_cli: "GEMINI.md",
+            memory_cline: ".clinerules",
+            collected: "Collected {count} of {total}",
+            kept_here_one: "Kept on this Mac",
+            kept_here: "{count} kept on this Mac",
             credential: "NEAR AI credential",
             none_found: "No configured tools found.",
         },
@@ -1490,7 +1554,6 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             uncontributed_size: "{size}",
             uncontributed_estimate: "Could earn {min}\u{2013}{max}",
             credit_delta: "{amount} since yesterday",
-            credit_delta_none: "No change since yesterday",
             insights_today: "{total} tokens today",
             insights_teaser: "See where your agents spend their tokens.",
             campaign_eyebrow: "New on NEAR AI",
@@ -1916,6 +1979,27 @@ mod tests {
         }
         assert!(map.hub.contains("{label}") && map.hub.contains("{count}"));
         assert!(map.library.starts_with("{label} contributed"));
+        // The folder pill's names say how many it draws; its singular is
+        // its own line.
+        assert!(map.reveal_folders.contains("{count}"));
+        assert!(!map.reveal_folders_one.contains('{'));
+        assert!(!map.fold_folders.contains('{') && !map.fold_folders_label.contains('{'));
+        // The tool group and its transfer card: counts and the tool are
+        // holes, the singular is its own line, and a memory line names no
+        // hole at all.
+        assert!(map.coin_waiting.contains("{count}"));
+        assert!(map.transfer_contribute_note.contains("{tool}"));
+        assert!(map.collected.contains("{count}") && map.collected.contains("{total}"));
+        assert!(map.kept_here.contains("{count}") && !map.kept_here_one.contains('{'));
+        for memory in [
+            map.memory_claude_code,
+            map.memory_codex,
+            map.memory_opencode,
+            map.memory_gemini_cli,
+            map.memory_cline,
+        ] {
+            assert!(!memory.contains('{'), "{memory}");
+        }
         // Ron's exact words (2026-10-07, after the #1273 review).
         assert_eq!(
             map.hub,

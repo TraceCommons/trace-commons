@@ -87,6 +87,36 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
     public let connected: String
     public let connectedLine: String
     public let legendNotWatched: String
+    /// The folder pill's accessible names (`revealFolders(_:)`), and its
+    /// text and name once every folder is drawn.
+    public let revealFoldersOne: String
+    public let revealFolders: String
+    public let foldFolders: String
+    public let foldFoldersLabel: String
+    /// The tool group: its heading, a coin's waiting line, and the legend's
+    /// lock (a tool's memory stays on this Mac).
+    public let toolsHeading: String
+    public let coinWaiting: String
+    public let legendMemory: String
+    /// The card under the pointer while a trace moves through the tool
+    /// group (`transferNote(contributing:tool:)`).
+    public let transferContributing: String
+    public let transferKeeping: String
+    public let transferTrace: String
+    public let memoryStays: String
+    public let transferContributeNote: String
+    public let transferKeepNote: String
+    /// The tools' own memory files, named where known (`memoryFiles(_:)`).
+    public let memoryClaudeCode: String
+    public let memoryCodex: String
+    public let memoryOpencode: String
+    public let memoryGeminiCli: String
+    public let memoryCline: String
+    /// Under this computer while a contribution gathers its traces, and
+    /// after traces are kept.
+    public let collected: String
+    public let keptHereOne: String
+    public let keptHere: String
     public let credential: String
     public let noneFound: String
 
@@ -115,6 +145,27 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
         case connected
         case connectedLine = "connected_line"
         case legendNotWatched = "legend_not_watched"
+        case revealFoldersOne = "reveal_folders_one"
+        case revealFolders = "reveal_folders"
+        case foldFolders = "fold_folders"
+        case foldFoldersLabel = "fold_folders_label"
+        case toolsHeading = "tools_heading"
+        case coinWaiting = "coin_waiting"
+        case legendMemory = "legend_memory"
+        case transferContributing = "transfer_contributing"
+        case transferKeeping = "transfer_keeping"
+        case transferTrace = "transfer_trace"
+        case memoryStays = "memory_stays"
+        case transferContributeNote = "transfer_contribute_note"
+        case transferKeepNote = "transfer_keep_note"
+        case memoryClaudeCode = "memory_claude_code"
+        case memoryCodex = "memory_codex"
+        case memoryOpencode = "memory_opencode"
+        case memoryGeminiCli = "memory_gemini_cli"
+        case memoryCline = "memory_cline"
+        case collected
+        case keptHereOne = "kept_here_one"
+        case keptHere = "kept_here"
         case credential
         case noneFound = "none_found"
     }
@@ -179,6 +230,45 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
             folderCounts, label: Self.counted(waiting, one: sessionsOne, many: sessions), count: contributed)
         let place = path.flatMap { $0.isEmpty ? nil : $0 + "." }
         return [place, ruleLine, counts].compactMap { $0 }.joined(separator: " ")
+    }
+
+    /// The "+N" pill's accessible name: how many folders the click draws.
+    public func revealFolders(_ count: Int) -> String {
+        count == 1 ? revealFoldersOne : revealFolders.replacingOccurrences(of: "{count}", with: String(count))
+    }
+
+    /// A coin's line under its name: the traces waiting from that tool.
+    public func coinWaiting(_ count: Int) -> String {
+        coinWaiting.replacingOccurrences(of: "{count}", with: String(count))
+    }
+
+    /// The transfer card's note on the memory text inside the trace.
+    public func transferNote(contributing: Bool, tool: String) -> String {
+        contributing ? transferContributeNote.replacingOccurrences(of: "{tool}", with: tool) : transferKeepNote
+    }
+
+    /// A tool's own memory files, by its source name; nil for a tool whose
+    /// files the core does not name.
+    public func memoryFiles(_ source: String) -> String? {
+        switch source {
+        case "claude-code": memoryClaudeCode
+        case "codex": memoryCodex
+        case "opencode": memoryOpencode
+        case "gemini-cli": memoryGeminiCli
+        case "cline": memoryCline
+        default: nil
+        }
+    }
+
+    /// Under this computer while a contribution gathers its traces.
+    public func collected(_ count: Int, of total: Int) -> String {
+        collected.replacingOccurrences(of: "{count}", with: String(count))
+            .replacingOccurrences(of: "{total}", with: String(total))
+    }
+
+    /// Under this computer once traces are kept.
+    public func keptHere(_ count: Int) -> String {
+        count == 1 ? keptHereOne : keptHere.replacingOccurrences(of: "{count}", with: String(count))
     }
 
     /// The Private AI destination's card sentence and the line under its

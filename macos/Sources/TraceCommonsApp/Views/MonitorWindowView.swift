@@ -875,6 +875,15 @@ private struct MonitorMapPane: View {
     /// A folder node clicked on the Traces map, by project id.
     let onSelectFolder: (String) -> Void
     @EnvironmentObject private var model: AppModel
+    /// How many folders past the first ten the Traces map's pill has
+    /// drawn (`FlowMapScene.folderColumn`).
+    @State private var revealedFolders: [String: Int] = [:]
+    /// The traces moving across the Traces map (owner, 2026-10-16).
+    @StateObject private var transfers = MapTransferPlayer()
+    /// The traces the read before this one listed: a kept trace is found
+    /// there once the reload has dropped it.
+    @State private var listedBefore: [DaemonData.QueueEntry] = []
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         // The map is content, not chrome: its own field, so the selector,
@@ -892,7 +901,49 @@ private struct MonitorMapPane: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             }
         }
+        .onAppear { transfers.reduceMotion = reduceMotion }
+        .onChange(of: reduceMotion) { _, reduce in transfers.reduceMotion = reduce }
+        .onChange(of: history) { old, new in
+            transfers.enqueue(MapTransferDetector.contributions(from: old, to: new))
+        }
+        .onChange(of: traces.tree) { old, _ in listedBefore = old.allSessions }
+        .onChange(of: traces.lastKept) { _, kept in
+            if let transfer = MapTransferDetector.kept(kept, in: traces.tree.allSessions + listedBefore) {
+                transfers.enqueue([transfer])
+            }
+        }
+        #if DEBUG
+        .task { await demo() }
+        #endif
     }
+
+    #if DEBUG
+    /// A dry-run review aid (owner, 2026-10-16): with
+    /// `TRACE_COMMONS_MAP_DEMO=1` the Traces map plays a run every few
+    /// seconds from the folders it draws -- two contributions, then a keep
+    /// -- so the motion can be looked at without anything leaving this Mac.
+    /// Nothing is sent or kept; only the map moves.
+    private func demo() async {
+        guard ProcessInfo.processInfo.environment["TRACE_COMMONS_MAP_DEMO"] == "1" else { return }
+        var round = 0
+        while !Task.isCancelled {
+            let tree = traces.tree
+            let pairs = FlowMapScene.directories(tree).prefix(FlowMapScene.foldersShown).compactMap { folder in
+                FlowMapScene.carriers(of: folder, in: tree).first.map { (folder: folder.id, tool: $0.id) }
+            }
+            if !pairs.isEmpty {
+                let keep = round % 3 == 2
+                let picked = keep ? [pairs[round % pairs.count]] : Array(pairs.shuffled().prefix(3))
+                transfers.enqueue(picked.map {
+                    MapTransfer(id: "demo-\(round)-\($0.folder)", folder: $0.folder, tool: $0.tool,
+                                action: keep ? .keep : .contribute, at: .now)
+                })
+                round += 1
+            }
+            try? await Task.sleep(for: .seconds(12))
+        }
+    }
+    #endif
 
     @ViewBuilder
     private var map: some View {
@@ -911,12 +962,14 @@ private struct MonitorMapPane: View {
                 traces.tree,
                 gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations),
                 contributed: .init(history: history, failure: historyFailure), selectedTool: selectedTool,
-                space: space)
+                revealed: revealedFolders, space: space)
             FlowMapView(
                 scene: scene,
                 legend: [.autoUpload, .ask, .ignore], zoomable: true,
                 accessibilityName: FlowMapScene.words?.mapLabel ?? MonitorWindowView.Tab.traces.title, state: tracesState,
-                focus: scene.focusPoint(tool: focusTool), onSelectFolder: onSelectFolder)
+                focus: scene.focusPoint(tool: focusTool), onSelectFolder: onSelectFolder,
+                onReveal: { revealedFolders = FlowMapScene.revealing($0, in: revealedFolders) },
+                transferRun: transfers.run)
         case .privateAI:
             // The one tool list, while this window's client has read it and
             // the core still answers; otherwise nothing is drawn as current.

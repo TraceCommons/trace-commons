@@ -712,7 +712,6 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let uncontributedSize: String
     public let uncontributedEstimate: String
     public let creditDelta: String
-    public let creditDeltaNone: String
     public let insightsToday: String
     public let insightsTeaser: String
     public let campaignEyebrow: String
@@ -757,7 +756,6 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case uncontributedSize = "uncontributed_size"
         case uncontributedEstimate = "uncontributed_estimate"
         case creditDelta = "credit_delta"
-        case creditDeltaNone = "credit_delta_none"
         case insightsToday = "insights_today"
         case insightsTeaser = "insights_teaser"
         case campaignEyebrow = "campaign_eyebrow"

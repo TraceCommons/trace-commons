@@ -109,13 +109,14 @@ final class FlowMapSceneTests: XCTestCase {
     /// One node per tool this build knows and per drawn folder, plus this
     /// computer and the commons; every node inside the design space. The
     /// tools the tree leaves out are drawn too, dashed as not watched
-    /// (#1146 draws every tool).
+    /// (#1146 draws every tool), and every tool is a coin in the one pile.
     func test_theTracesSceneDrawsEveryToolAndFolder() async throws {
         for set in SampleDaemonClient.SampleSet.allCases where set != .coreDown {
             let tree = try await tree(set)
             let scene = FlowMapScene.traces(tree, gate: try await gate(set))
-            let folders = tree.tools.reduce(0) { $0 + min($1.folders.count, FlowMapScene.foldersShown) }
+            let folders = min(FlowMapScene.directories(tree).count, FlowMapScene.foldersShown)
             XCTAssertEqual(scene.nodes.count, SourceKind.allCases.count + folders + 2, "\(set)")
+            XCTAssertEqual(scene.stack?.tools, scene.nodes.filter { $0.id.hasPrefix("tool:") }.map(\.id), "\(set)")
             let tools = scene.nodes.filter { $0.id.hasPrefix("tool:") }
             XCTAssertEqual(tools.filter(\.dashed).count, SourceKind.allCases.count - tree.tools.count, "\(set)")
             for tool in tree.tools {
@@ -153,7 +154,13 @@ final class FlowMapSceneTests: XCTestCase {
         let automatic = armed.tools.filter { $0.mode != .off && $0.folders.contains { $0.mode == .autoUpload } }
         XCTAssertFalse(automatic.isEmpty, "the recorded armedFolder day arms a folder under a tool")
         let scene = FlowMapScene.traces(armed, gate: open)
-        XCTAssertEqual(flowing(scene), automatic.filter { open.sendsToCommons($0.kind) }.count)
+        // Each moving folder's line, and the one line out of the pile.
+        let moving = FlowMapScene.directories(armed).prefix(FlowMapScene.foldersShown).filter { folder in
+            folder.mode == .autoUpload && FlowMapScene.carriers(of: folder, in: armed)
+                .contains { $0.mode != .off && open.sendsToCommons($0.kind) }
+        }
+        XCTAssertFalse(moving.isEmpty)
+        XCTAssertEqual(flowing(scene), moving.count + 1)
         XCTAssertTrue(scene.flows)
         XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.kind, .library(active: true))
         // #1146's library card: what was contributed, in the core's words;
@@ -312,40 +319,101 @@ final class FlowMapSceneTests: XCTestCase {
         }
     }
 
-    /// Folders past the most a tool shows are counted, not drawn.
+    /// Folders past the most the column shows are counted, not drawn.
     func test_extraFoldersAreCounted() {
-        let folders = (0 ..< 9).map {
+        let folders = (0 ..< 13).map {
             TracesTree.FolderNode(id: "f\($0)", label: "f\($0)", mode: .ask, sessions: [])
         }
         let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: folders)], unplaced: [])
         let scene = FlowMapScene.traces(tree, gate: .init(state: .loading))
         XCTAssertEqual(scene.nodes.filter { if case .folder = $0.kind { true } else { false } }.count, FlowMapScene.foldersShown)
-        XCTAssertEqual(scene.overflows.map(\.count), [3])
+        XCTAssertEqual(scene.reveals.map(\.hidden), [3])
+        XCTAssertEqual(scene.reveals.map(\.next), [3])
     }
 
-    /// P13: a tool that has contributed is joined to the commons by a
-    /// quiet arc, and the library is lit once anything was contributed,
-    /// armed or not (#1146 `TracesMap`).
-    func test_contributedToolsReachTheLibrary() {
+    /// The "+N" pill draws the next six folders a click, until every one is
+    /// drawn; then it folds them back (owner, 2026-10-15).
+    func test_theFolderPillRevealsSixMoreThenFoldsBack() throws {
+        let folders = (0 ..< 20).map {
+            TracesTree.FolderNode(id: "f\($0)", label: "f\($0)", mode: .ask, sessions: [])
+        }
+        let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: folders)], unplaced: [])
+        func drawn(_ scene: FlowMapScene) -> Int {
+            scene.nodes.filter { if case .folder = $0.kind { true } else { false } }.count
+        }
+        var revealed: [String: Int] = [:]
+        var expected: [(drawn: Int, hidden: Int)] = [(10, 10), (16, 4), (20, 0)]
+        while let step = expected.first {
+            expected.removeFirst()
+            let scene = FlowMapScene.traces(tree, gate: .init(state: .ready), revealed: revealed)
+            let reveal = try XCTUnwrap(scene.reveals.first)
+            XCTAssertEqual(drawn(scene), step.drawn, "\(revealed)")
+            XCTAssertEqual(reveal.hidden, step.hidden, "\(revealed)")
+            XCTAssertEqual(drawn(scene) + reveal.hidden, folders.count)
+            // Every folder drawn sits in the band, however many there are.
+            let band = FlowMapScene.band(scene.space)
+            for node in scene.nodes where node.id.hasPrefix("folder:") {
+                XCTAssertTrue(band.contains(node.at.y), "\(node.id) off the band with \(revealed)")
+            }
+            XCTAssertTrue(band.contains(reveal.at.y), "the pill is off the band with \(revealed)")
+            revealed = FlowMapScene.revealing(reveal, in: revealed)
+        }
+        // The fold-back pill returns the column to the first ten.
+        XCTAssertEqual(revealed, [:])
+        let folded = FlowMapScene.traces(tree, gate: .init(state: .ready), revealed: revealed)
+        XCTAssertEqual(drawn(folded), FlowMapScene.foldersShown)
+        XCTAssertEqual(folded.space, FlowMapScene.size)
+    }
+
+    /// Folders a pill drew past what the band holds zoom the map out: the
+    /// design space grows, its shape kept, and the line height holds.
+    func test_revealedFoldersPastTheBandZoomTheMapOut() {
+        let folders = (0 ..< 40).map {
+            TracesTree.FolderNode(id: "f\($0)", label: "f\($0)", mode: .ask, sessions: [])
+        }
+        let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: folders)], unplaced: [])
+        let scene = FlowMapScene.traces(tree, gate: .init(state: .ready), revealed: [FlowMapScene.folderColumn: 30])
+        XCTAssertGreaterThan(scene.space.height, FlowMapScene.size.height)
+        XCTAssertEqual(scene.space.width / scene.space.height, FlowMapScene.size.width / FlowMapScene.size.height,
+                       accuracy: 0.0001)
+        let ys = scene.nodes.filter { $0.id.hasPrefix("folder:") }.map(\.at.y).sorted()
+        XCTAssertEqual(ys.count, 40)
+        let tightest = zip(ys, ys.dropFirst()).map { $1 - $0 }.min() ?? 0
+        XCTAssertGreaterThanOrEqual(tightest, FlowMapScene.folderStepRange.lowerBound - 0.5)
+    }
+
+    /// The pill's accessible names say how many it draws (one column of
+    /// folders since 2026-10-16, so no tool's name).
+    func test_theFolderPillIsNamed() throws {
+        let words = try XCTUnwrap(FlowMapScene.words)
+        XCTAssertEqual(words.revealFolders(6), "Show 6 more folders")
+        XCTAssertEqual(words.revealFolders(1), "Show 1 more folder")
+        XCTAssertEqual(words.foldFolders, "Show fewer")
+        XCTAssertEqual(words.foldFoldersLabel, "Show fewer folders")
+    }
+
+    /// The library is lit once anything was contributed, armed or not
+    /// (#1146 `TracesMap`), and no line reaches it (owner, 2026-10-16): a
+    /// contribution flies there from the pad.
+    func test_theLibraryIsLitByWhatWasContributed() {
         let folder = TracesTree.FolderNode(id: "f", label: "f", mode: .ask, sessions: [])
         let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: [folder])], unplaced: [])
         let none = FlowMapScene.traces(tree, gate: .init(state: .ready), contributed: .init(total: 0))
         XCTAssertEqual(none.nodes.first { $0.id == "library" }?.kind, .library(active: false))
-        XCTAssertTrue(none.arcs.allSatisfy { $0.to != FlowMapScene.libraryPoint }, "nothing reaches the library")
         let sent = FlowMapScene.traces(
             tree, gate: .init(state: .ready), contributed: .init(total: 4, byTool: [.claudeCode: 4]))
         XCTAssertEqual(sent.nodes.first { $0.id == "library" }?.kind, .library(active: true))
-        let toLibrary = sent.arcs.filter { $0.to == FlowMapScene.libraryPoint }
-        XCTAssertEqual(toLibrary.map(\.style), [.quiet])
+        let library = try? XCTUnwrap(sent.nodes.first { $0.id == "library" }?.at)
+        XCTAssertTrue(sent.arcs.allSatisfy { $0.to != library }, "a line reaches the library")
         XCTAssertFalse(sent.flows, "a past contribution never moves")
         // Unread history is never read as contributed.
         let unread = FlowMapScene.traces(tree, gate: .init(state: .ready), contributed: .unread)
         XCTAssertEqual(unread.nodes.first { $0.id == "library" }?.kind, .library(active: false))
     }
 
-    /// A selection's tool is ringed, the others faded to 0.3 and their
-    /// library arcs to 0.12 (#1146 `TracesMap`); nothing selected fades
-    /// nothing.
+    /// A selection's tool is ringed, the other tools and the folders it
+    /// has no traces in faded to 0.3 (#1146 `TracesMap`); nothing selected
+    /// fades nothing.
     func test_theSelectionsToolIsRingedAndTheOthersFade() {
         let folder = TracesTree.FolderNode(id: "f", label: "f", mode: .ask, sessions: [])
         let tree = TracesTree(tools: [
@@ -364,8 +432,9 @@ final class FlowMapSceneTests: XCTestCase {
         XCTAssertEqual(codex?.dim, 1)
         XCTAssertEqual(claude?.ringed, false)
         XCTAssertEqual(claude?.dim, 0.3)
-        let arcs = scene.arcs.filter { $0.to == FlowMapScene.libraryPoint }.map(\.dim).sorted()
-        XCTAssertEqual(arcs, [0.12, 1])
+        // The folder only Claude Code carries fades with it, line and all.
+        XCTAssertEqual(scene.nodes.first { $0.id == "folder:f" }?.dim, 0.3)
+        XCTAssertEqual(scene.arcs.filter { $0.to == scene.stack?.portLeft }.map(\.dim), [0.3])
         // Every tool stays drawn: the binoculars move the camera, they do
         // not filter the map.
         XCTAssertEqual(scene.focusPoint(tool: SourceKind.codex.rawValue), codex?.at)

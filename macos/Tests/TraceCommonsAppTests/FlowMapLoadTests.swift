@@ -50,7 +50,7 @@ final class FlowMapLoadTests: XCTestCase {
             }
             let folders = scene.nodes.filter { if case .folder = $0.kind { true } else { false } }
             XCTAssertGreaterThanOrEqual(Self.tightest(folders), FlowMapScene.folderStepRange.lowerBound - 0.5, "\(pane)")
-            XCTAssertEqual(folders.count + scene.overflows.map(\.count).reduce(0, +),
+            XCTAssertEqual(folders.count + scene.reveals.map(\.hidden).reduce(0, +),
                            tree.tools.map(\.folders.count).reduce(0, +), "every folder is drawn or counted at \(pane)")
             XCTAssertEqual(scene.nodes.filter { $0.id.hasPrefix("tool:") }.count, SourceKind.allCases.count)
         }
