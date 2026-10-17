@@ -28,6 +28,7 @@ pub async fn redeem_and_run(store: &ConfigStore, prepared: PreparedLaunch) -> an
     .await;
     if result.is_err() && !spawned {
         let report = LifecycleReport {
+            model: None,
             collection: context
                 .session
                 .collect_traces
@@ -107,10 +108,11 @@ async fn run_native(
             }
             ConnectionKind::NearAi => {
                 let model = model()?;
-                let proxy = super::route::ManagedRoute::start_selected(
+                let proxy = super::route::ManagedRoute::start(
                     store,
                     row.id,
                     SecretStore::new(store).get(account.id)?,
+                    row.tool,
                     Some(model),
                 )
                 .await?;
@@ -157,6 +159,8 @@ async fn run_native(
                     store,
                     row.id,
                     SecretStore::new(store).get(account.id)?,
+                    row.tool,
+                    row.model.as_deref(),
                 )
                 .await?;
                 near_ai_route(&mut command, row.tool, proxy.port())?;
@@ -208,7 +212,13 @@ async fn run_native(
         .process(sysinfo::Pid::from_u32(pid))
         .map(|p| format!("{}:{}", pid, p.start_time()))
         .unwrap_or_else(|| format!("{}:{}", pid, uuid::Uuid::new_v4()));
+    // A proxy this launcher started tells the daemon the model it pinned,
+    // so the row can show it.
+    let pinned = route
+        .as_ref()
+        .map(|r: &super::route::ManagedRoute| r.model().to_owned());
     let report = |state, exit_code| LifecycleReport {
+        model: pinned.clone(),
         collection: None,
         session_id: row.id,
         proof: context.proof.clone(),

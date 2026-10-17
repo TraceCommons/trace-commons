@@ -21,7 +21,9 @@ pub struct LaunchArgs {
     pub connection: Option<ConnectionKind>,
     #[arg(long)]
     pub cwd: Option<PathBuf>,
-    /// Explicit model ID for a managed OpenCode session.
+    /// Model ID. Required for OpenCode on a saved key. For Claude Code or
+    /// Codex on NEAR AI, picks the model the session runs on instead of the
+    /// tool's default; it must be a NEAR AI chat model.
     #[arg(long)]
     pub model: Option<String>,
     /// Collect this OpenCode session on exit for the usual review pipeline.

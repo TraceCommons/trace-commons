@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod cli;
+pub mod models;
 pub mod opencode;
 pub mod profiles;
 pub mod secrets;
@@ -106,6 +107,8 @@ pub enum ManagedError {
     InvalidRequest,
     #[error("the chosen terminal app was not found")]
     TerminalNotFound,
+    #[error("the chosen model is not available on NEAR AI")]
+    ModelUnavailable,
 }
 
 pub mod copy;

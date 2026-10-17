@@ -8150,3 +8150,24 @@ focusable or stoppable.
 
 `managed_session_report` answers `{accepted: true, stop: bool}`; an older
 launcher reads only `accepted`.
+
+### Managed session model choice
+
+`managed_launch_prepare` also accepts `model` for Claude Code and Codex on
+`near_ai` and `near_ai_signin`, where the session's proxy pins it; on
+`subscription` and `api_key` it is still refused (`managed-invalid-request`).
+Absent means the tool's default (see `docs/managed-sessions.md`). A model NEAR
+AI does not list as a chat model is refused when the proxy starts, with
+`managed-model-unavailable`: at `managed_launch_redeem` on the sign-in, in the
+launcher on a saved key.
+
+- `managed_model_catalogue {tool}` (async only) answers
+  `{models: [{id, name?}], default: string | null}`: NEAR AI's chat models in
+  its order, and the model `tool` gets when a launch names none. The catalogue
+  is public; no key is read or sent. `managed-model-unavailable` when NEAR AI
+  cannot be read; `managed-invalid-request` for other parameters.
+- Session views' `model` is the model the session runs on: the one named, or,
+  once a NEAR AI proxy has started, the one it pinned. The daemon records it
+  for a sign-in session; a launcher on a saved NEAR AI key reports it in the
+  additive `model` field of `managed_session_report`, accepted only for such a
+  session and only if it matches a model already recorded.

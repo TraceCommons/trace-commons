@@ -78,6 +78,9 @@ pub struct LaunchRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionView {
+    /// The model the session runs on: the one its request named, or, on
+    /// NEAR AI, the one its proxy pinned once that proxy has started.
+    /// None for a session that names no model and has no proxy.
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -136,8 +139,8 @@ pub struct LaunchContext {
     /// leaves the daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_port: Option<u16>,
-    /// The model that proxy pinned: the one NEAR AI lists first, as for
-    /// any session that requests none. Set with `route_port`; a launcher
+    /// The model that proxy pinned: the one the request named, or the
+    /// tool's default (`models::select`). Set with `route_port`; a launcher
     /// that must name a model (OpenCode) names this one. Additive: an
     /// older launcher ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,6 +160,10 @@ pub enum CollectionState {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LifecycleReport {
+    /// The model the launcher's own proxy pinned, for a session on a saved
+    /// NEAR AI key. Additive: absent from every other report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default)]
     pub collection: Option<CollectionState>,
     pub session_id: Uuid,
@@ -501,23 +508,35 @@ impl SessionRegistry {
         request: LaunchRequest,
         account: &AccountView,
     ) -> Result<PreparedLaunch, ManagedError> {
+        let named = request
+            .model
+            .as_deref()
+            .is_some_and(super::opencode::valid_model);
         if request.tool == ToolId::Opencode {
-            // On the NEAR AI sign-in the session's proxy pins the model, as
-            // it does for Claude Code and Codex, so the request names none.
-            // A saved key needs a model OpenCode can be told.
+            // On the NEAR AI sign-in the session's proxy pins its default
+            // model (`models::default_for`), so the request names none. A
+            // saved key needs a model OpenCode can be told.
             let model_ok = match request.connection {
                 ConnectionKind::Subscription => false,
                 ConnectionKind::NearAiSignIn => request.model.is_none(),
-                ConnectionKind::ApiKey | ConnectionKind::NearAi => request
-                    .model
-                    .as_deref()
-                    .is_some_and(super::opencode::valid_model),
+                ConnectionKind::ApiKey | ConnectionKind::NearAi => named,
             };
             if request.purpose != LaunchPurpose::Coding || !model_ok {
                 return Err(ManagedError::InvalidRequest);
             }
-        } else if request.model.is_some() || request.collect_traces {
-            return Err(ManagedError::InvalidRequest);
+        } else {
+            // A model can be named only where a NEAR AI proxy pins it; its
+            // availability is checked when that proxy starts.
+            let model_ok = request.model.is_none()
+                || (named
+                    && request.purpose == LaunchPurpose::Coding
+                    && matches!(
+                        request.connection,
+                        ConnectionKind::NearAi | ConnectionKind::NearAiSignIn
+                    ));
+            if !model_ok || request.collect_traces {
+                return Err(ManagedError::InvalidRequest);
+            }
         }
         if request.account_id != account.id
             || request.tool != account.tool
@@ -739,6 +758,17 @@ impl SessionRegistry {
         {
             return Err(ManagedError::Conflict);
         }
+        if let Some(model) = report.model {
+            if entry.view.connection != ConnectionKind::NearAi
+                || !super::opencode::valid_model(&model)
+            {
+                return Err(ManagedError::InvalidRequest);
+            }
+            if entry.view.model.as_ref().is_some_and(|m| *m != model) {
+                return Err(ManagedError::Conflict);
+            }
+            entry.view.model = Some(model);
+        }
         if let Some(collection) = report.collection {
             if !entry.view.collect_traces
                 || !matches!(report.state, SessionState::Exited | SessionState::Failed)
@@ -756,6 +786,29 @@ impl SessionRegistry {
         entry.view.state = report.state;
         entry.view.exit_code = report.exit_code;
         entry.last_seen = Utc::now();
+        self.commit(next)
+    }
+
+    /// Record the model a daemon-hosted proxy pinned for a session on the
+    /// NEAR AI sign-in, so its row can show it. A session that asked for a
+    /// model keeps it: a different one is a conflict.
+    pub fn record_model(&mut self, session_id: Uuid, model: &str) -> Result<(), ManagedError> {
+        let mut next = self.data.clone();
+        let entry = next
+            .entries
+            .iter_mut()
+            .find(|e| e.view.id == session_id)
+            .ok_or(ManagedError::NotFound)?;
+        if entry.view.connection != ConnectionKind::NearAiSignIn
+            || !super::opencode::valid_model(model)
+        {
+            return Err(ManagedError::InvalidRequest);
+        }
+        match entry.view.model.as_deref() {
+            Some(existing) if existing == model => return Ok(()),
+            Some(_) => return Err(ManagedError::Conflict),
+            None => entry.view.model = Some(model.to_owned()),
+        }
         self.commit(next)
     }
 
@@ -926,6 +979,195 @@ mod tests {
                 )
                 .err(),
             Some(ManagedError::InvalidRequest)
+        );
+    }
+
+    fn coding_with(
+        tool: ToolId,
+        account: &AccountView,
+        cwd: &std::path::Path,
+        model: Option<&str>,
+    ) -> LaunchRequest {
+        LaunchRequest {
+            model: model.map(str::to_owned),
+            collect_traces: false,
+            purpose: LaunchPurpose::Coding,
+            request_id: Uuid::new_v4(),
+            tool,
+            connection: account.connection,
+            account_id: account.id,
+            cwd: cwd.to_path_buf(),
+            expected_generation: Generation(0),
+            save_default: false,
+        }
+    }
+
+    /// Claude Code and Codex may name a model only where a NEAR AI proxy
+    /// pins it: on the sign-in or a saved NEAR AI key. Naming none is
+    /// always allowed and means the tool's default.
+    #[test]
+    fn claude_and_codex_name_a_model_only_on_near_ai() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let mut accounts = AccountStore::open(&store).unwrap();
+        for tool in [ToolId::Claude, ToolId::Codex] {
+            let sign_in = crate::managed::signin::entry(tool).unwrap();
+            let near_ai = accounts.add(tool, ConnectionKind::NearAi, "NEAR").unwrap();
+            let subscription = accounts
+                .add(tool, ConnectionKind::Subscription, "Plan")
+                .unwrap();
+            let api_key = accounts.add(tool, ConnectionKind::ApiKey, "Key").unwrap();
+            for account in [&subscription, &api_key] {
+                assert_eq!(
+                    registry
+                        .prepare(
+                            coding_with(tool, account, home.path(), Some("openai/gpt-5.5")),
+                            account
+                        )
+                        .err(),
+                    Some(ManagedError::InvalidRequest),
+                    "{tool:?} {:?}",
+                    account.connection
+                );
+                assert!(
+                    registry
+                        .prepare(coding_with(tool, account, home.path(), None), account)
+                        .is_ok()
+                );
+            }
+            for account in [&sign_in, &near_ai] {
+                for bad in ["", "bad model"] {
+                    assert_eq!(
+                        registry
+                            .prepare(coding_with(tool, account, home.path(), Some(bad)), account)
+                            .err(),
+                        Some(ManagedError::InvalidRequest),
+                        "{tool:?} {bad:?}"
+                    );
+                }
+                for model in [Some("openai/gpt-5.5"), None] {
+                    let prepared = registry
+                        .prepare(coding_with(tool, account, home.path(), model), account)
+                        .unwrap();
+                    let view = registry
+                        .views()
+                        .unwrap()
+                        .into_iter()
+                        .find(|v| v.id == prepared.session_id)
+                        .unwrap();
+                    assert_eq!(view.model.as_deref(), model);
+                }
+            }
+        }
+    }
+
+    /// The row says which model the proxy pinned: the daemon records it
+    /// for a sign-in session, the launcher reports it for a saved NEAR AI
+    /// key. A model the request named is never replaced.
+    #[test]
+    fn the_pinned_model_is_recorded_on_the_row() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let model_of = |registry: &mut SessionRegistry, id| {
+            registry
+                .views()
+                .unwrap()
+                .into_iter()
+                .find(|v| v.id == id)
+                .unwrap()
+                .model
+        };
+        let sign_in = crate::managed::signin::entry(ToolId::Claude).unwrap();
+        let default = registry
+            .prepare(
+                coding_with(ToolId::Claude, &sign_in, home.path(), None),
+                &sign_in,
+            )
+            .unwrap()
+            .session_id;
+        assert_eq!(model_of(&mut registry, default), None);
+        registry
+            .record_model(default, "anthropic/claude-sonnet-5-5")
+            .unwrap();
+        assert_eq!(
+            model_of(&mut registry, default).as_deref(),
+            Some("anthropic/claude-sonnet-5-5")
+        );
+        registry
+            .record_model(default, "anthropic/claude-sonnet-5-5")
+            .unwrap();
+        assert_eq!(
+            registry.record_model(default, "openai/gpt-5.5"),
+            Err(ManagedError::Conflict)
+        );
+        assert_eq!(
+            registry.record_model(default, "bad model"),
+            Err(ManagedError::InvalidRequest)
+        );
+        let named = registry
+            .prepare(
+                coding_with(
+                    ToolId::Claude,
+                    &sign_in,
+                    home.path(),
+                    Some("openai/gpt-5.5"),
+                ),
+                &sign_in,
+            )
+            .unwrap()
+            .session_id;
+        assert_eq!(
+            registry.record_model(named, "anthropic/claude-sonnet-5-5"),
+            Err(ManagedError::Conflict)
+        );
+
+        let mut accounts = AccountStore::open(&store).unwrap();
+        let near_ai = accounts
+            .add(ToolId::Codex, ConnectionKind::NearAi, "NEAR")
+            .unwrap();
+        let prepared = registry
+            .prepare(
+                coding_with(ToolId::Codex, &near_ai, home.path(), None),
+                &near_ai,
+            )
+            .unwrap();
+        let id = prepared.session_id;
+        // Only a daemon-hosted proxy is recorded by the daemon.
+        assert_eq!(
+            registry.record_model(id, "openai/gpt-6.1-sol"),
+            Err(ManagedError::InvalidRequest)
+        );
+        let context = registry
+            .redeem(id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        let running = |model: Option<&str>| LifecycleReport {
+            model: model.map(str::to_owned),
+            collection: None,
+            session_id: id,
+            proof: context.proof.clone(),
+            state: SessionState::Running,
+            process_id: Some(42),
+            process_identity: Some("42:1".into()),
+            exit_code: None,
+        };
+        registry
+            .report(running(Some("openai/gpt-6.1-sol")))
+            .unwrap();
+        assert_eq!(
+            model_of(&mut registry, id).as_deref(),
+            Some("openai/gpt-6.1-sol")
+        );
+        // Later reports without the field leave it; a different one is refused.
+        registry.report(running(None)).unwrap();
+        assert_eq!(
+            registry.report(running(Some("openai/gpt-5.5"))),
+            Err(ManagedError::Conflict)
+        );
+        assert_eq!(
+            model_of(&mut registry, id).as_deref(),
+            Some("openai/gpt-6.1-sol")
         );
     }
 
