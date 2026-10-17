@@ -41,10 +41,20 @@ enum ToolAnswerRowLayout {
         asks(candidate, in: state)
     }
 
-    /// "Download" sits on a row that does not ask, and only when the core
+    /// "Install" sits on a row that does not ask, and only when the core
     /// gave the tool an install page (Ron's `tool.installUrl ? ... : null`).
-    static func offersGetTool(_ candidate: SourceCandidate, installURL: URL?, in state: FirstRunState) -> Bool {
-        !asks(candidate, in: state) && installURL != nil
+    /// Not for a tool known to be installed: that row offers "Choose
+    /// folder" instead. `installed` is nil where the core does not detect
+    /// the tool's executable.
+    static func offersGetTool(_ candidate: SourceCandidate, installURL: URL?, installed: Bool? = nil, in state: FirstRunState) -> Bool {
+        !asks(candidate, in: state) && installURL != nil && installed != true
+    }
+
+    /// An installed tool whose folder was not found keeps its row, with
+    /// "Choose folder" where Watch / Not used would be and no caption (Ron's
+    /// review of #1419, 2026-10-15). Once a folder is chosen the row asks.
+    static func offersChooseFolder(_ candidate: SourceCandidate, installed: Bool?, in state: FirstRunState) -> Bool {
+        !asks(candidate, in: state) && installed == true
     }
 
     /// What the row shows as answered: the row's own answer, never a folder
@@ -97,8 +107,9 @@ enum ToolAnswerRowLayout {
 /// is the core's.
 ///
 /// `meta` is an optional caption under the path (`ToolsScreenLayout.meta`).
-/// `installURL` names where "Download" leads; with none there is no
-/// button.
+/// `installURL` names where "Install" leads; with none there is no
+/// button. `installed` is the core's executable discovery for the tool,
+/// nil where it has none.
 struct ToolAnswerRow: View {
     let copy: FirstRunCopy.Folders
     /// What the picker reads while unanswered: the core's "Choose…".
@@ -110,6 +121,7 @@ struct ToolAnswerRow: View {
     let meta: String?
     @Binding var state: FirstRunState
     var installURL: URL? = nil
+    var installed: Bool? = nil
 
     @State private var chosenFolder: String?
 
@@ -159,11 +171,28 @@ struct ToolAnswerRow: View {
                         }
                         .fixedSize()
                     }
-                } else if ToolAnswerRowLayout.offersGetTool(candidate, installURL: installURL, in: state),
+                } else if ToolAnswerRowLayout.offersChooseFolder(candidate, installed: installed, in: state) {
+                    // Installed, no folder found: "Choose folder" where the
+                    // picker would be, and no caption (Ron, 2026-10-15).
+                    Button {
+                        if let path = FolderPanel.choose() {
+                            let selectedPath = SourceFolderSelection.path(
+                                for: candidate.source, chosenFolder: path)
+                            chosenFolder = selectedPath
+                            ToolAnswerRowLayout.choose(folder: selectedPath, for: candidate, in: &state)
+                        }
+                    } label: {
+                        Label(copy.chooseToolFolder, systemImage: "folder")
+                    }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                    .fixedSize()
+                    .help(ToolAnswerRowLayout.fill(copy.chooseToolFolderAccessibility, tool: candidate.source))
+                    .accessibilityLabel(ToolAnswerRowLayout.fill(copy.chooseToolFolderAccessibility, tool: candidate.source))
+                } else if ToolAnswerRowLayout.offersGetTool(candidate, installURL: installURL, installed: installed, in: state),
                     let installURL
                 {
                     // Not on this Mac: not asked, and no line of its own
-                    // (owner, 2026-10-08); "Download" only with an install
+                    // (owner, 2026-10-08); "Install" only with an install
                     // page.
                     Button {
                         NSWorkspace.shared.open(installURL)
@@ -177,7 +206,7 @@ struct ToolAnswerRow: View {
                     .buttonStyle(GlassButtonStyle(.glass))
                     .fixedSize()
                     .help(ToolAnswerRowLayout.fill(copy.downloadTool, tool: candidate.source))
-                    // The label is "Download"; VoiceOver names the tool.
+                    // The label is "Install"; VoiceOver names the tool.
                     .accessibilityLabel(ToolAnswerRowLayout.fill(copy.downloadTool, tool: candidate.source))
                 }
             }

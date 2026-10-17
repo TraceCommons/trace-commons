@@ -7256,135 +7256,6 @@ pub(super) async fn route_request(
     (status, body)
 }
 
-/// Ruling T15-1: a compatibility run's `NoveltyUtility` ledger row carries
-/// the actor role `main`'s gate path records for that event
-/// (`vector_worker`). `main`'s database credit readers parse the role of
-/// every event type they map, and refuse the whole read on a role that is
-/// not a token role. With contributor and reviewer reads from PostgreSQL, as
-/// the pilot runs, a tenant with compatibility runs with a positive delta
-/// gets 200 from the submission-status route, the credit route, and both
-/// withdrawal routes.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn compatibility_credit_rows_stay_readable_by_mains_database_reads() {
-    let Some(runtime) = runtime_backend(4).await else {
-        return;
-    };
-    let owner = account_owner_backend()
-        .await
-        .expect("the same variable runtime_backend read is set");
-    let suffix = Uuid::new_v4().simple().to_string();
-    let tenant = format!("tenant-compat-reads-{suffix}");
-    let token = format!("token-compat-reads-{suffix}");
-    let mut tokens = BTreeMap::new();
-    insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
-    let dir = tempfile::tempdir().expect("temp dir");
-    let artifacts = local_artifacts(&dir);
-    let service = assemble_compatibility_pipeline_service(
-        runtime.clone(),
-        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
-        IsolatedPipelineIndex::new(),
-        2_500_000,
-        Arc::new(PassThroughPipelinePrivacyBoundary),
-    );
-    let mut state = test_state_with_options(
-        dir.path().to_path_buf(),
-        Some(mains_database().await),
-        Some(artifacts),
-        true,
-        true,
-        false,
-        false,
-    );
-    let state_mut = Arc::make_mut(&mut state);
-    state_mut.tokens = Arc::new(tokens);
-    state_mut.pipeline_service = Some(service.clone());
-    state_mut.pipeline_activation = routing_store(&runtime);
-    state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
-    let principal = static_token_principal_ref(&token);
-    let first = completed_run_of(
-        &service,
-        &tenant,
-        &principal,
-        &model_training_envelope().await,
-    )
-    .await;
-    let second = completed_run_of(
-        &service,
-        &tenant,
-        &principal,
-        &model_training_envelope().await,
-    )
-    .await;
-
-    let (status, documents) = route_request(
-        state.clone(),
-        "POST",
-        "/v1/contributors/me/submission-status",
-        auth_headers(&token),
-        Some(serde_json::json!({
-            "submission_ids": [first.submission_id, second.submission_id],
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{documents}");
-    assert_eq!(documents.as_array().map(Vec::len), Some(2), "{documents}");
-    let (status, credit) = route_request(
-        state.clone(),
-        "GET",
-        "/v1/contributors/me/credit",
-        auth_headers(&token),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{credit}");
-    assert_eq!(
-        credit["credit_points_ledger"].as_f64(),
-        Some(5.0),
-        "both runs' events count: {credit}"
-    );
-    let session = account_session_headers(&state, &token).await;
-    let (status, withdrawal) = route_request(
-        state.clone(),
-        "POST",
-        &format!(
-            "/v1/contributors/me/pipeline-submissions/{}/withdraw",
-            first.submission_id
-        ),
-        session.clone(),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{withdrawal}");
-    let (status, withdrawal) = route_request(
-        state.clone(),
-        "POST",
-        &format!("/v1/account/traces/{}/withdraw", second.submission_id),
-        session,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{withdrawal}");
-
-    // The rows the routes above read.
-    let mut client = owner.trace_pool_for_test().get().await.unwrap();
-    let tx = tenant_tx(&mut client, &tenant).await;
-    let rows = tx
-        .query(
-            "SELECT event_type, actor_role FROM trace_credit_ledger WHERE tenant_id = $1",
-            &[&tenant],
-        )
-        .await
-        .unwrap()
-        .iter()
-        .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
-        .collect::<Vec<_>>();
-    tx.commit().await.unwrap();
-    assert_eq!(
-        rows,
-        vec![("novelty_utility".to_string(), "vector_worker".to_string()); 2]
-    );
-}
-
 /// The shadow credit quality a run's committed Score outcome recorded, as
 /// the gate-decision row `main` builds its credit figure and explanation
 /// from.
@@ -9443,100 +9314,6 @@ async fn mains_revocation_routes_queue_the_pipeline_follow_up() {
         assert!(
             fixture.service.take_follow_ups(&tenant).index_invalidations,
             "{route}: the worker's invalidation step is woken"
-        );
-    }
-}
-
-/// `main`'s #1155 completes a source-session withdrawal from actual state:
-/// an account merge can join a live version to a session the other account
-/// had withdrawn, and the merge confirm (scoped to the survivor) and the
-/// revocation-propagation worker's reconciler (the whole tenant) both run
-/// `reconcile_source_session_withdrawals` over every such version. For a
-/// version with a pipeline run, that completion also makes the pipeline's
-/// follow-up -- its revision queued for removal from the pipeline index
-/// (reason `withdrawn`), its payload deletions, its runs' work ended -- and
-/// the version then drops off the incomplete list, though the pipeline
-/// keeps part of its cleanup in its own tables. Once as the merge's scoped
-/// call, once as the worker's.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_withdrawal_completion_runs_the_pipeline_follow_up_and_stops_listing_the_version() {
-    for scoped_to_the_survivor in [true, false] {
-        let Some(fixture) = withdrawal_fixture().await else {
-            return;
-        };
-        let state = &fixture.state;
-        let tenant = fixture.tenant.as_str();
-        let principal = static_token_principal_ref(&fixture.token);
-        let session = account_session_headers(state, &fixture.token).await;
-        let run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
-        let ext = account_ctx_ext(state, &session).await;
-        let account_id = ext.0.account_id.as_uuid();
-        let digest: [u8; 32] = Sha256::digest(tenant.as_bytes())
-            .as_slice()
-            .try_into()
-            .unwrap();
-        assert_eq!(
-            fixture
-                .owner
-                .claim_trace_source_session(tenant, account_id, &digest, run.submission_id)
-                .await
-                .unwrap(),
-            StorageTraceSourceSessionStatus::Active
-        );
-        // The session is withdrawn while this version is not: what a merge
-        // leaves when the other account had withdrawn the session.
-        {
-            let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
-            let tx = tenant_tx(&mut client, tenant).await;
-            tx.execute(
-                "UPDATE trace_source_sessions SET withdrawn_at = NOW()
-                  WHERE tenant_id = $1 AND account_id = $2",
-                &[&tenant, &account_id],
-            )
-            .await
-            .unwrap();
-            tx.commit().await.unwrap();
-        }
-        let db = state.db_mirror.clone().expect("main's database");
-        let incomplete = || {
-            let db = db.clone();
-            async move {
-                db.list_incomplete_source_session_withdrawals(tenant, None, &[], 100)
-                    .await
-                    .unwrap()
-                    .into_iter()
-                    .map(|version| version.submission_id)
-                    .collect::<Vec<_>>()
-            }
-        };
-        assert!(incomplete().await.contains(&run.submission_id));
-        let _ = fixture.service.take_follow_ups(tenant);
-
-        let summary = reconcile_source_session_withdrawals(
-            state.as_ref(),
-            &db,
-            tenant,
-            scoped_to_the_survivor.then_some(account_id),
-            &account_audit_tenant(&ext.0),
-            100,
-            false,
-        )
-        .await
-        .expect("the completion runs");
-        assert_eq!(
-            (summary.completed, summary.failed),
-            (1, 0),
-            "scoped: {scoped_to_the_survivor}"
-        );
-        assert_eq!(
-            queued_index_invalidation(&fixture.runtime, tenant, run.run_id).await,
-            (1, "pending".to_string()),
-            "the pipeline invalidation is queued (scoped: {scoped_to_the_survivor})"
-        );
-        assert!(fixture.service.take_follow_ups(tenant).index_invalidations);
-        assert!(
-            !incomplete().await.contains(&run.submission_id),
-            "the completed pipeline version is no longer listed (scoped: {scoped_to_the_survivor})"
         );
     }
 }
@@ -13736,6 +13513,7 @@ async fn serve_a_routed_tenant_end_to_end(mode: TenantPolicyMode) {
         },
         main_gate,
         Some(components),
+        ScorePolicyRegistry::new(),
     )
     .expect("a production assembly over doubles starts with the test opt-in")
     .expect("an assembler was given, so a service is returned");
@@ -13978,7 +13756,8 @@ async fn db_policy_tenant_authority_matches_legacy_admission() {
                 )
             };
             let root = tempfile::tempdir().unwrap();
-            let mut state = (*crate::tests::test_state(root.path().to_path_buf())).clone();
+            let mut state =
+                (*crate::ingest::app::tests::test_state(root.path().to_path_buf())).clone();
             state.db_mirror = Some(runtime.clone() as Arc<dyn Database>);
             state.db_tenant_policy_reads = global;
             state.tenant_rollout_gates = gates.clone();
@@ -16722,4 +16501,754 @@ async fn without_the_accept_medium_setting_a_found_and_removed_upload_is_quarant
     );
     assert_eq!(upload.admission_rule_id, "privacy_review_required");
     assert_eq!(upload.row_status, "quarantined");
+}
+
+/// The label the HTTP tests' holding Score policy holds every trace under.
+const HTTP_SCORE_HOLD_LABEL: &str = "operator_review_requested";
+const HTTP_SCORE_HOLD_IMPLEMENTATION: &str = "substituted.score.http_hold_test_only.v1";
+
+/// A registered Score policy that holds every trace for operator review.
+struct HttpHoldingScorePolicy {
+    manifest: trace_commons_gate_api::pipeline::BundleManifest,
+}
+
+#[async_trait::async_trait]
+impl trace_commons_gate_api::pipeline::ScorePolicy for HttpHoldingScorePolicy {
+    async fn execute(
+        &self,
+        _input: &trace_commons_gate_api::pipeline::ScoreInput,
+    ) -> Result<
+        trace_commons_gate_api::pipeline::ScoreOutput,
+        trace_commons_gate_api::pipeline::PolicyError,
+    > {
+        Ok(
+            trace_commons_gate_api::pipeline::ScoreOutput::held_for_review(
+                &self.manifest,
+                trace_commons_gate_api::pipeline::ReasonCode::new(HTTP_SCORE_HOLD_LABEL)
+                    .expect("a safe hold label"),
+                "http_hold_test_only_v1",
+            )
+            .expect("a held output is consistent"),
+        )
+    }
+}
+
+struct HttpHoldingScoreFactory;
+
+impl trace_commons_server::versioned_pipeline_score_registry::ScorePolicyFactory
+    for HttpHoldingScoreFactory
+{
+    fn dependency_identity(&self) -> &str {
+        "substituted_score_policy_http_hold_test_only"
+    }
+
+    fn trace_credit_event(
+        &self,
+    ) -> trace_commons_server::versioned_pipeline_bundle::PipelineTraceCreditEvent {
+        trace_commons_server::versioned_pipeline_bundle::PipelineTraceCreditEvent::PipelineScore
+    }
+
+    fn build(
+        &self,
+        dependencies: trace_commons_server::versioned_pipeline_score_registry::ScorePolicyDependencies<'_>,
+    ) -> Result<Arc<dyn trace_commons_gate_api::pipeline::ScorePolicy>, &'static str> {
+        Ok(Arc::new(HttpHoldingScorePolicy {
+            manifest: dependencies.manifest.clone(),
+        }))
+    }
+}
+
+/// A pipeline service whose registered Score policy holds every trace, and
+/// whose Review-start privacy pass escalates every run (High), so every run
+/// is first held at Review.
+fn score_holding_http_service(
+    backend: Arc<PgBackend>,
+    artifacts: Arc<LocalEncryptedTraceArtifactStore>,
+) -> Arc<PipelineService> {
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let mut package = MinimalPolicyBundle::compatibility_package(
+        &compatibility_test_config(2_500_000),
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("build the compatibility package");
+    package.manifest.score.policy_id = "substituted.score".to_string();
+    package.manifest.score.implementation_id = HTTP_SCORE_HOLD_IMPLEMENTATION.to_string();
+    package.bundle_id = package.manifest.bundle_id().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let registry = SettlementAdapterRegistry::new(vec![RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_http_hold_test_only",
+        "none",
+    ) as Arc<dyn SettlementAdapter>])
+    .unwrap();
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([(
+            InstrumentId::trace_credit().as_str().to_string(),
+            AtomicUnits::from_raw(u128::MAX),
+        )]),
+    };
+    let policies =
+        trace_commons_server::versioned_pipeline_score_registry::ScorePolicyRegistry::new()
+            .with_factory(
+                HTTP_SCORE_HOLD_IMPLEMENTATION,
+                Arc::new(HttpHoldingScoreFactory),
+            )
+            .unwrap();
+    Arc::new(
+        PipelineServiceBuilder::new(
+            backend,
+            artifacts,
+            package,
+            index.clone(),
+            index,
+            registry,
+            caps,
+        )
+        .with_scorer(scorer)
+        .with_embedder(embedder)
+        .with_novelty_utility_checks(PipelineNoveltyUtilityChecks {
+            issuer_principal_ref: Some(TEST_PIPELINE_CREDIT_ISSUER.to_string()),
+            ..PipelineNoveltyUtilityChecks::default()
+        })
+        .with_authority(allow_all_test_authority())
+        .with_privacy(Arc::new(EscalatingClassifierBoundary {
+            risk: ResidualPiiRisk::High,
+        }))
+        .with_unqualified_routing(true)
+        .with_score_policies(policies)
+        .build()
+        .expect("build the pipeline service"),
+    )
+}
+
+/// The review queue route says which phase each run is held at: `score`
+/// for a run its Score policy held (with the policy's label as the hold
+/// reason), `review` for a run held at Review. A Score hold is claimed and
+/// assessed through the same routes and reviewer credential as a Review
+/// hold; a rejection settles it with no credit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_review_queue_names_the_phase_of_each_hold() {
+    let Some(mut fixture) = withdrawal_fixture_with(score_holding_http_service, false).await else {
+        return;
+    };
+    let suffix = Uuid::new_v4().simple().to_string();
+    let reviewer = format!("token-review-phase-{suffix}");
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    fixture
+        .service
+        .register_default_bundle(&fixture.tenant)
+        .await
+        .expect("register the bundle");
+
+    let held_at_review = || async {
+        let mut envelope = model_training_envelope().await;
+        envelope.submission_id = Uuid::new_v4();
+        let raw = serde_json::to_vec(&envelope).unwrap();
+        let key = envelope.submission_id.to_string();
+        let PipelineReceiptResult::Created(created) = fixture
+            .service
+            .submit(PipelineReceiptRequest {
+                accept_medium_risk: false,
+                source_session: None,
+                tenant_id: &fixture.tenant,
+                actor_principal_ref: "principal_sha256:phase-queue",
+                counts_toward_quota: true,
+                request_idempotency_key: &key,
+                request_bytes: &raw,
+                server_envelope: &envelope,
+                residual_risk_basis: &[],
+                limits: PipelineAdmissionLimits {
+                    max_per_tenant_per_hour: 0,
+                    max_per_principal_per_hour: 0,
+                },
+            })
+            .await
+            .expect("the receipt succeeds")
+        else {
+            panic!("the receipt creates a run")
+        };
+        let held = fixture
+            .service
+            .process_run(&fixture.tenant, created.run_id)
+            .await
+            .expect("Review runs the privacy pass")
+            .expect("the run was claimed");
+        assert_eq!(held.state, PipelineRunState::AwaitingReview, "{held:?}");
+        assert_eq!(held.next_phase, Some(Phase::Review), "{held:?}");
+        held
+    };
+    let claim_and_assess = |run_id: Uuid, body: serde_json::Value| {
+        let state = fixture.state.clone();
+        let reviewer = reviewer.clone();
+        async move {
+            let (status, claim) = route_request(
+                state.clone(),
+                "POST",
+                &format!("/v1/review/pipeline/runs/{run_id}/claim"),
+                auth_headers(&reviewer),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{claim}");
+            let mut body = body;
+            body["lease_token"] = claim["lease_token"].clone();
+            route_request(
+                state,
+                "POST",
+                &format!("/v1/review/pipeline/runs/{run_id}/assessment"),
+                auth_headers(&reviewer),
+                Some(body),
+            )
+            .await
+        }
+    };
+
+    // One run is approved at Review and then held by the Score policy.
+    let score_held = held_at_review().await;
+    let (status, recorded) = claim_and_assess(
+        score_held.run_id,
+        serde_json::json!({
+            "recommendation": "approve",
+            "reason": "privacy_review_cleared",
+            "resolved_quarantine_reasons": ["privacy_pass_review_required"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{recorded}");
+    let reviewed = fixture
+        .service
+        .process_run(&fixture.tenant, score_held.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs on the assessment");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score), "{reviewed:?}");
+    let parked = fixture
+        .service
+        .process_run(&fixture.tenant, score_held.run_id)
+        .await
+        .unwrap()
+        .expect("the Score is claimed");
+    assert_eq!(
+        (parked.state, parked.next_phase),
+        (PipelineRunState::AwaitingReview, Some(Phase::Score)),
+        "{parked:?}"
+    );
+    // Another is still held at Review.
+    let review_held = held_at_review().await;
+
+    let (status, queue) = route_request(
+        fixture.state.clone(),
+        "GET",
+        "/v1/review/pipeline/quarantine",
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{queue}");
+    let queue = queue.as_array().expect("a review queue").clone();
+    assert_eq!(queue.len(), 2, "{queue:?}");
+    let item = |run_id: Uuid| {
+        queue
+            .iter()
+            .find(|item| item["run_id"] == run_id.to_string())
+            .unwrap_or_else(|| panic!("{run_id} is listed: {queue:?}"))
+            .clone()
+    };
+    let score_item = item(score_held.run_id);
+    assert_eq!(score_item["phase"], "score", "{score_item}");
+    assert_eq!(score_item["hold_reason"], HTTP_SCORE_HOLD_LABEL);
+    let review_item = item(review_held.run_id);
+    assert_eq!(review_item["phase"], "review", "{review_item}");
+    assert_eq!(review_item["hold_reason"], "privacy_pass_review_required");
+
+    // The Score hold is claimed and rejected through the same routes.
+    let (status, recorded) = claim_and_assess(
+        score_held.run_id,
+        serde_json::json!({
+            "recommendation": "reject",
+            "reason": "operator_rejected",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{recorded}");
+    // The route's audit event does not claim a status change: the
+    // submission stays accepted.
+    let assessment_id: Uuid = recorded["assessment_id"].as_str().unwrap().parse().unwrap();
+    let score_event =
+        audit_file_events_of_kind(&fixture, score_held.submission_id, "review_decision")
+            .into_iter()
+            .find(|event| event.event_id == assessment_id)
+            .expect("the route appended the Score assessment's event");
+    assert_eq!(score_event.status, Some(TraceCorpusStatus::Accepted));
+    assert_eq!(
+        score_event.reason.as_deref(),
+        Some(trace_free_text_audit_reason("score_hold_rejected").as_str())
+    );
+    for _ in 0..2 {
+        fixture
+            .service
+            .process_run(&fixture.tenant, score_held.run_id)
+            .await
+            .unwrap()
+            .expect("the released run is claimed");
+    }
+    let done = fixture
+        .service
+        .store()
+        .get_run(&fixture.tenant, score_held.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(done.state, PipelineRunState::Complete, "{done:?}");
+    assert!(
+        fixture
+            .service
+            .store()
+            .list_settlements(&fixture.tenant, score_held.run_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected Score hold pays nothing"
+    );
+    let (status, queue) = route_request(
+        fixture.state.clone(),
+        "GET",
+        "/v1/review/pipeline/quarantine",
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{queue}");
+    let queue = queue.as_array().expect("a review queue").clone();
+    assert_eq!(queue.len(), 1, "{queue:?}");
+    assert_eq!(queue[0]["phase"], "review");
+}
+
+/// A run holds an assessment per phase. When neither assessment's event
+/// was appended by a route, the review audit pass appends both, not only
+/// the latest, and a Score hold's event does not claim a corpus status
+/// change: the submission stays accepted whichever way the hold resolves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_repairs_both_assessment_events_of_a_run_held_at_score() {
+    let Some(mut fixture) = withdrawal_fixture_with(score_holding_http_service, false).await else {
+        return;
+    };
+    let reviewer = format!("token-review-two-phase-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    let state = Arc::make_mut(&mut fixture.state);
+    state.tokens = Arc::new(tokens);
+    state.require_db_mirror_writes = true;
+    fixture
+        .service
+        .register_default_bundle(&fixture.tenant)
+        .await
+        .expect("register the bundle");
+    let tenant = fixture.tenant.clone();
+
+    let mut envelope = model_training_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = fixture
+        .service
+        .submit(PipelineReceiptRequest {
+            accept_medium_risk: false,
+            source_session: None,
+            tenant_id: &tenant,
+            actor_principal_ref: "principal_sha256:two-phase-audit",
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    else {
+        panic!("the receipt creates a run")
+    };
+    let run_id = created.run_id;
+    fixture
+        .service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the privacy pass holds the run");
+    let reviewer_ref = format!(
+        "reviewer_sha256:{}",
+        hex::encode(Sha256::digest(
+            static_token_principal_ref(&reviewer).as_bytes()
+        ))
+    );
+    let assess = |recommendation: ReviewRecommendation, reason: &'static str, resolved: &str| {
+        let fixture = &fixture;
+        let reviewer = &reviewer;
+        let reviewer_ref = reviewer_ref.clone();
+        let tenant = tenant.clone();
+        let resolved = resolved.to_string();
+        async move {
+            let lease_token = claim_review_through_the_route(fixture, reviewer, run_id).await;
+            fixture
+                .service
+                .store()
+                .record_review_assessment(
+                    &PipelineReviewClaim {
+                        tenant_id: tenant,
+                        run_id,
+                        reviewer_principal_ref: reviewer_ref,
+                        lease_token: serde_json::from_value(lease_token).unwrap(),
+                        lease_expires_at: Utc::now(),
+                    },
+                    recommendation,
+                    ReasonCode::new(reason.to_string()).unwrap(),
+                    vec![ReasonCode::new(resolved).unwrap()],
+                )
+                .await
+                .expect("the assessment records")
+        }
+    };
+    let review_assessment = assess(
+        ReviewRecommendation::Approve,
+        "privacy_review_cleared",
+        "privacy_pass_review_required",
+    )
+    .await;
+    fixture
+        .service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Review runs on the assessment");
+    let parked = fixture
+        .service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the Score is claimed");
+    assert_eq!(parked.next_phase, Some(Phase::Score), "{parked:?}");
+    let score_assessment = assess(
+        ReviewRecommendation::Reject,
+        "operator_rejected",
+        HTTP_SCORE_HOLD_LABEL,
+    )
+    .await;
+    assert!(
+        audit_file_events_of_kind(&fixture, created.submission_id, "review_decision").is_empty(),
+        "no route appended an event"
+    );
+
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let events = audit_file_events_of_kind(&fixture, created.submission_id, "review_decision");
+    let event_of = |assessment_id: Uuid| {
+        events
+            .iter()
+            .find(|event| event.event_id == assessment_id)
+            .unwrap_or_else(|| panic!("{assessment_id} has an event: {events:?}"))
+    };
+    assert_eq!(
+        event_of(review_assessment.assessment_id).status,
+        Some(TraceCorpusStatus::Accepted)
+    );
+    let score_event = event_of(score_assessment.assessment_id);
+    assert_eq!(
+        score_event.status,
+        Some(TraceCorpusStatus::Accepted),
+        "a rejected Score hold leaves the submission accepted"
+    );
+    assert_eq!(
+        score_event.reason.as_deref(),
+        Some(trace_free_text_audit_reason("score_hold_rejected").as_str())
+    );
+    assert!(!review_audit_marker_is_set(&fixture, run_id).await);
+}
+
+/// #1313: a run held for an operator (`operator_held_at`, with the review
+/// audit marker its hold sets) gets one label-only `lifecycle_status_change`
+/// event from the review audit pass: status `accepted`, which the submission
+/// keeps, reason `pipeline_settle_held_for_operator`, its id derived from the
+/// run and the hold's time. The event is appended even though an operator
+/// failed the run before the pass ran, and a second pass adds none. The hold
+/// itself (`mark_failed` on a paid run whose Settle commit was refused) is
+/// driven in `versioned_pipeline_runtime_pg`; here the columns are set
+/// directly, as the owner, to test the audit pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_review_audit_pass_records_a_run_held_for_an_operator() {
+    let Some(fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_compatibility_pipeline_service(
+            runtime,
+            &ConfiguredTraceArtifactStore::legacy(artifacts),
+            IsolatedPipelineIndex::new(),
+            2_500_000,
+            Arc::new(PassThroughPipelinePrivacyBoundary),
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+    let held_at: chrono::DateTime<chrono::Utc> = {
+        let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let row = tx
+            .query_one(
+                "UPDATE pipeline_runs
+                    SET state = 'awaiting_operator',
+                        last_error_label = 'pipeline_gate_decision_conflict',
+                        operator_held_at = clock_timestamp(),
+                        review_audit_pending_at = clock_timestamp()
+                  WHERE tenant_id = $1 AND run_id = $2
+                  RETURNING operator_held_at",
+                &[&tenant, &created.run_id],
+            )
+            .await
+            .unwrap();
+        // The operator fails the run before the audit pass runs.
+        tx.execute(
+            "UPDATE pipeline_runs
+                SET state = 'failed', last_error_label = 'operator_failed_held_run'
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &created.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        row.get(0)
+    };
+
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let held_id =
+        pipeline_runtime::pipeline_settle_hold_audit_event_id(&tenant, created.run_id, held_at);
+    let events =
+        audit_file_events_of_kind(&fixture, envelope.submission_id, "lifecycle_status_change");
+    let held = events
+        .iter()
+        .filter(|event| event.event_id == held_id)
+        .collect::<Vec<_>>();
+    assert_eq!(held.len(), 1, "{events:?}");
+    assert_eq!(held[0].status, Some(TraceCorpusStatus::Accepted));
+    assert_eq!(
+        held[0].reason.as_deref(),
+        Some(trace_commons_server::versioned_pipeline::PIPELINE_SETTLE_HELD_FOR_OPERATOR_LABEL)
+    );
+    assert!(!review_audit_marker_is_set(&fixture, created.run_id).await);
+
+    set_review_audit_marker(&fixture, created.run_id).await;
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the second pass runs");
+    let again =
+        audit_file_events_of_kind(&fixture, envelope.submission_id, "lifecycle_status_change");
+    assert_eq!(
+        again
+            .iter()
+            .filter(|event| event.event_id == held_id)
+            .count(),
+        1,
+        "a second pass adds no event"
+    );
+}
+
+/// Holds `run_id` for an operator directly, as the owner: a route-level
+/// shortcut. The hold itself is driven in `versioned_pipeline_runtime_pg`.
+async fn hold_run_for_operator_as_owner(fixture: &ProductFixture, tenant: &str, run_id: Uuid) {
+    let mut owner = fixture
+        .base
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap();
+    let tx = tenant_tx(&mut owner, tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs
+            SET state = 'awaiting_operator',
+                last_error_label = 'pipeline_gate_decision_conflict',
+                operator_held_at = clock_timestamp()
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// #1413 review: `POST /v1/admin/pipeline/runs/{run_id}/held-run-resolution`
+/// is the operator's way to end a hold (`resolve_operator_held_run`). It
+/// needs `main`'s admin credential: a contributor is refused and another
+/// tenant's admin finds no held run. `release` and `fail` answer the run's
+/// new state, a run no longer held is `404`, and each resolution appends a
+/// label-only audit row: the submission's status, `accepted`, with the
+/// operator's decision as its reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_operator_route_resolves_a_held_run() {
+    let Some(fixture) = product_fixture().await else {
+        return;
+    };
+    let state = &fixture.base.state;
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let run = completed_pipeline_run(&fixture.base.service, tenant, &principal).await;
+    hold_run_for_operator_as_owner(&fixture, tenant, run.run_id).await;
+    let uri = format!("/v1/admin/pipeline/runs/{}/held-run-resolution", run.run_id);
+    let release = serde_json::json!({"resolution": "release"});
+    let run_state = |run_id: Uuid| {
+        let service = fixture.base.service.clone();
+        async move {
+            service
+                .store()
+                .get_run(tenant, run_id)
+                .await
+                .unwrap()
+                .expect("the run")
+                .state
+        }
+    };
+
+    let (status, _) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.base.token),
+        Some(release.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "a contributor is refused");
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.other_tenant_admin_token),
+        Some(release.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, _) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.admin_token),
+        Some(serde_json::json!({"resolution": "complete"})),
+    )
+    .await;
+    assert!(status.is_client_error(), "an unknown resolution: {status}");
+    assert_eq!(
+        run_state(run.run_id).await,
+        PipelineRunState::AwaitingOperator,
+        "no refused request changed it"
+    );
+
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.admin_token),
+        Some(release.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, serde_json::json!({"state": "retry"}));
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.admin_token),
+        Some(release),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a run no longer held: {body}"
+    );
+
+    hold_run_for_operator_as_owner(&fixture, tenant, run.run_id).await;
+    let (status, body) = route_request(
+        state.clone(),
+        "POST",
+        &uri,
+        auth_headers(&fixture.admin_token),
+        Some(serde_json::json!({"resolution": "fail"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, serde_json::json!({"state": "failed"}));
+    assert_eq!(run_state(run.run_id).await, PipelineRunState::Failed);
+
+    let mut client = fixture
+        .base
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let rows = tx
+        .query(
+            "SELECT metadata_json->>'reason_code' AS reason,
+                    metadata_json->>'resulting_status' AS status
+               FROM trace_audit_events
+              WHERE tenant_id = $1 AND submission_id = $2
+                AND metadata_json->>'reason_code' IN ($3, $4)
+              ORDER BY audit_sequence",
+            &[
+                &tenant,
+                &run.submission_id,
+                &trace_commons_server::versioned_pipeline::PIPELINE_OPERATOR_RELEASED_HELD_RUN_LABEL,
+                &trace_commons_server::versioned_pipeline::PIPELINE_OPERATOR_FAILED_HELD_RUN_LABEL,
+            ],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let recorded = rows
+        .iter()
+        .map(|row| {
+            (
+                row.get::<_, String>("reason"),
+                row.get::<_, String>("status"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recorded,
+        vec![
+            (
+                "operator_released_held_run".to_string(),
+                "accepted".to_string()
+            ),
+            (
+                "operator_failed_held_run".to_string(),
+                "accepted".to_string()
+            ),
+        ],
+        "one row per resolution the route made"
+    );
 }

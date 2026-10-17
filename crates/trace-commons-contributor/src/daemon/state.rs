@@ -26,6 +26,18 @@ use crate::config::{ConfigStore, DAEMON_STATE_FILE};
 
 pub const DAEMON_STATE_SCHEMA: &str = "trace_commons.daemon_state.v1";
 
+/// The figures the last settlement-estimate notification (or the silent
+/// first baseline) was made from, in dollar micros. Kept here and not in the
+/// attention log, which is pruned: a pruned baseline would re-notify. Figures
+/// and a pricing label only; never a path or a trace.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SettlementNotified {
+    pub low_usd_micros: u64,
+    pub mid_usd_micros: u64,
+    pub pricing_version: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
 /// How long the attention log keeps an entry. Derived, not an owner
 /// decision: the longest window a cap counts over is one local ISO week
 /// (owner decision 4's `STANDALONE_PER_WEEK` and the per-kind weekly caps),
@@ -261,6 +273,10 @@ pub struct DaemonState {
     /// is the evidence that it predates the kinds (constraint 12).
     #[serde(default)]
     pub notify_kinds_known: bool,
+    /// The settlement estimate last announced, or silently baselined on the
+    /// first drawable one. Cleared by `unenroll` (`clear_nudges`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_notified: Option<SettlementNotified>,
     /// Write-elision memo; see [`LastWritten`]. Never persisted, so a fresh
     /// process always writes once before it can skip anything.
     #[serde(skip)]
@@ -298,6 +314,7 @@ impl DaemonState {
             attention_log: Vec::new(),
             last_notified_at: None,
             notify_kinds_known: true,
+            settlement_notified: None,
             last_written: LastWritten::default(),
         }
     }
@@ -351,7 +368,9 @@ impl DaemonState {
             || self.verdicts_pending.is_some()
             || !self.idle_announced.is_empty()
             || !self.attention_log.is_empty()
-            || self.last_notified_at.is_some();
+            || self.last_notified_at.is_some()
+            || self.settlement_notified.is_some();
+        self.settlement_notified = None;
         self.nudges.clear();
         self.verdict_marks.clear();
         self.verdict_marks_seeded = false;
@@ -850,6 +869,30 @@ mod tests {
         // The stamp alone is enough to report a change.
         loaded.last_notified_at = Some(now);
         assert!(loaded.clear_nudges());
+    }
+
+    /// The new kind has a pinned label in the file, and the notified figures
+    /// survive a save and load and are forgotten by `clear_nudges`.
+    #[test]
+    fn the_settlement_kind_and_baseline_round_trip() {
+        use super::super::attention::Kind;
+        assert_eq!(
+            serde_json::to_value(Kind::SettlementEstimate).unwrap(),
+            "settlement_estimate"
+        );
+        let (_d, store) = temp_store();
+        let mut state = DaemonState::new();
+        state.settlement_notified = Some(SettlementNotified {
+            low_usd_micros: 4_000_000,
+            mid_usd_micros: 6_000_000,
+            pricing_version: Some("p1".to_string()),
+            at: utc("2026-10-20T12:00:00Z"),
+        });
+        state.save(&store).unwrap();
+        let mut loaded = DaemonState::load(&store).unwrap();
+        assert_eq!(loaded.settlement_notified, state.settlement_notified);
+        assert!(loaded.clear_nudges());
+        assert_eq!(loaded.settlement_notified, None);
     }
 
     /// Every arbiter kind serializes as its own label, so the file, the

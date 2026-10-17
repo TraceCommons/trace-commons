@@ -733,7 +733,7 @@ impl LocalEstimateTable {
     }
 }
 
-fn valid_label(label: &str) -> bool {
+pub(crate) fn valid_label(label: &str) -> bool {
     !label.is_empty()
         && label.len() <= ESTIMATE_MAX_LABEL_LEN
         && label
@@ -741,7 +741,7 @@ fn valid_label(label: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
-fn bounded(value: f64) -> bool {
+pub(crate) fn bounded(value: f64) -> bool {
     value.is_finite() && value.abs() <= ESTIMATE_MAX_ABS_WEIGHT
 }
 
@@ -774,6 +774,14 @@ pub fn estimate_score(features: &LocalEstimateFeatures, table: &LocalEstimateTab
     score.is_finite().then_some(score)
 }
 
+/// The index of the tier a score falls in: the number of cut-offs at or below
+/// it. A score at or above a cut-off is in the tier above it. Shared by the
+/// v1 band estimate and the settlement table, so both place a trace alike.
+#[must_use]
+pub fn tier_index(score: f64, cut_offs: &[f64]) -> usize {
+    cut_offs.iter().filter(|&&cut| score >= cut).count()
+}
+
 /// The estimate for one session under one table, or `None` when it cannot be
 /// made honestly: features of another version, no content, a weighted feature
 /// that is unknown, or a band that would display as 0.
@@ -791,7 +799,7 @@ pub fn estimate(
         (0, None)
     } else {
         let score = estimate_score(features, table)?;
-        let index = table.cut_offs.iter().filter(|&&cut| score >= cut).count();
+        let index = tier_index(score, &table.cut_offs);
         (index, Some(*labels.get(index)?))
     };
     let band = table.bands.get(index)?;

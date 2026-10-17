@@ -519,7 +519,7 @@ fn enroll(store: &ConfigStore) {
 /// the store, so a temp store alone records the machine it runs on: its
 /// username in `config_path`, and whichever tools it has installed and
 /// credentialed. This points all of them at one fake home, seeded with an
-/// installed Claude Code and Codex and no IronWire, before any daemon
+/// installed Claude Code, Codex and OpenCode and no IronWire, before any daemon
 /// starts. `normalize` rewrites its path to [`RECORDED_HOME`].
 ///
 /// Process-wide on purpose: the environment is, and both tests in this
@@ -545,6 +545,17 @@ fn sample_home() -> &'static SampleHome {
         std::fs::write(fake.join(".claude/settings.json"), "{}\n").unwrap();
         std::fs::create_dir_all(fake.join(".codex")).unwrap();
         std::fs::write(fake.join(".codex/config.toml"), "").unwrap();
+        // Availability probes native executables, separately from session stores.
+        // Seed every supported tool so the recording is independent of the
+        // developer's PATH and platform-wide executable search locations.
+        let bin = fake.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for tool in ["claude", "codex", "opencode"] {
+            use std::os::unix::fs::PermissionsExt;
+            let executable = bin.join(tool);
+            std::fs::write(&executable, "#!/bin/sh\nexit 1\n").unwrap();
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         // SAFETY: set once, before any daemon or other thread in this test
         // binary reads the environment (see the doc above).
         unsafe {
@@ -627,6 +638,8 @@ const VOLATILE_KEYS: &[&str] = &[
 /// sample file the decoder cannot parse defeats the entire point of
 /// recording real replies.
 const VOLATILE_TIMESTAMP_PLACEHOLDER: &str = "1970-01-01T00:00:00Z";
+/// `managed_terminal` as macOS reports it by default; see `normalize`.
+const MACOS_DEFAULT_TERMINAL: &str = "terminal";
 
 fn normalize(value: &mut Value, key: Option<&str>) {
     match value {
@@ -650,6 +663,13 @@ fn normalize(value: &mut Value, key: Option<&str>) {
                 "account scope carries a complete SHA-256 digest"
             );
             *s = format!("sha256:{}", "0".repeat(64));
+        }
+        // The default terminal is the first app the recording platform
+        // offers: "terminal" on macOS, "gnome_terminal" on Linux. The samples
+        // are macOS's, and the drift check runs on Linux in CI, so record
+        // and compare macOS's default wherever the daemon ran.
+        Value::String(s) if key == Some("managed_terminal") => {
+            *s = MACOS_DEFAULT_TERMINAL.to_string();
         }
         Value::String(s) if key.is_some_and(|k| VOLATILE_KEYS.contains(&k)) && !s.is_empty() => {
             *s = VOLATILE_TIMESTAMP_PLACEHOLDER.to_string();
@@ -1446,6 +1466,18 @@ fn first_diff_reports_a_field_added_or_removed_even_when_null() {
         first_diff(&json!({"a": null}), &json!({"a": null}), ""),
         None
     );
+}
+
+#[test]
+fn managed_terminal_normalizes_to_the_macos_default_on_every_platform() {
+    for recorded in ["terminal", "gnome_terminal", "windows_terminal"] {
+        let mut value = serde_json::json!({"managed_terminal": recorded});
+        normalize(&mut value, None);
+        assert_eq!(value, serde_json::json!({"managed_terminal": "terminal"}));
+    }
+    let mut absent = serde_json::json!({});
+    normalize(&mut absent, None);
+    assert_eq!(absent, serde_json::json!({}));
 }
 
 #[test]

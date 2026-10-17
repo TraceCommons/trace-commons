@@ -10,6 +10,9 @@ use uuid::Uuid;
 pub struct ManagedRoute {
     proxy: EmbeddedProxy,
     home: PathBuf,
+    /// The NEAR AI model this route pinned: the requested one, or the
+    /// first NEAR AI lists when none was requested.
+    model: String,
 }
 
 /// A test build's NEAR AI endpoint, so a daemon-level test can start a
@@ -136,11 +139,21 @@ base_url = {base_url}
         if !pinned.status().is_success() {
             return Err(ManagedError::LaunchUnknown);
         }
-        Ok(Self { proxy, home })
+        Ok(Self {
+            proxy,
+            home,
+            model: selected_model,
+        })
     }
 
     pub fn port(&self) -> u16 {
         self.proxy.port()
+    }
+
+    /// The model this route pinned, so a tool that must name one asks for
+    /// the model the proxy already serves.
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     pub async fn shutdown(self) {
@@ -210,6 +223,10 @@ mod tests {
         .await
         .unwrap();
         assert_ne!(a.port(), b.port());
+        // The model each route pinned: the first listed when none is
+        // requested, the requested one otherwise.
+        assert_eq!(a.model(), "deepseek-ai/DeepSeek-V3.1");
+        assert_eq!(b.model(), "selected-model");
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         for route in [&a, &b] {
             let result = client.post(format!("http://127.0.0.1:{}/anthropic/v1/messages", route.port()))

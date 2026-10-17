@@ -39,6 +39,71 @@ final class FlowMapSceneTests: XCTestCase {
         scene.arcs.filter { $0.style == .flowing }.count
     }
 
+    func test_managedOpenCodeAppearsInTraceCardWithoutClaimingContribution() async throws {
+        let client = SampleDaemonClient(.normalDay)
+        let original = try await client.toolDestinations()
+        var wire = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+        wire["managed_sessions"] = [["id": "managed-one", "tool": "opencode", "connection": "api_key",
+            "provider": "openai", "model": "gpt-4.1", "collection_state": "pending", "state": "running"]]
+        wire["managed_copy"] = ["title": "Managed sessions", "state_running": "Running", "collection_pending": "Trace collection pending", "provider_openai": "OpenAI"]
+        let destinations = try JSONDecoder().decode(DaemonData.ToolDestinations.self, from: JSONSerialization.data(withJSONObject: wire))
+        let scene = FlowMapScene.traces(try await tree(.normalDay), gate: .init(state: .ready, status: nil, destinations: destinations))
+        let node = try XCTUnwrap(scene.nodes.first { $0.id == "tool:opencode" })
+        XCTAssertTrue(node.detail.contains("gpt-4.1"))
+        XCTAssertTrue(node.detail.contains("OpenAI"))
+        XCTAssertTrue(node.detail.contains("Trace collection pending"))
+        XCTAssertFalse(scene.flows, "A managed running process is not evidence of contribution or model calls")
+    }
+
+    func test_managedRoutesAreSeparateAndNeverAnimateUnobservedCalls() throws {
+        let wire = #"{"tools":[],"managed_copy":{"opencode":"OpenCode","provider_openai":"OpenAI","provider_near_ai":"NEAR AI","state_running":"Running","collection_off":"Trace collection off","collection_pending":"Trace collection pending","title":"Managed sessions"},"managed_sessions":[{"id":"a","tool":"opencode","connection":"api_key","provider":"openai","model":"gpt-4.1","state":"running","collection_state":"off"},{"id":"b","tool":"opencode","connection":"near_ai","provider":"near_ai","model":"model-b","state":"running","collection_state":"pending"}]}"#
+        let destinations = try JSONDecoder().decode(DaemonData.ToolDestinations.self, from: Data(wire.utf8))
+        let scene = FlowMapScene.privateAI(.none, destinationLabel: "D", privateAI: nil, sentence: { _ in nil }, state: { _ in .unknown }).addingManagedRoutes(destinations)
+        XCTAssertEqual(scene.nodes.count, 4)
+        XCTAssertEqual(Set(scene.nodes.map(\.id)).count, 4)
+        XCTAssertEqual(scene.arcs.map(\.style), [.dashed, .dashed])
+        XCTAssertFalse(scene.flows)
+        XCTAssertNil(scene.nodes.first { $0.id == "destination" }, "Managed routes never imply a global harness connection")
+        XCTAssertTrue(scene.nodes.contains { $0.detail.contains("Trace collection off") })
+        XCTAssertTrue(scene.nodes.contains { $0.label == "OpenAI" })
+        XCTAssertTrue(scene.nodes.contains { $0.label == "NEAR AI" })
+        XCTAssertTrue(scene.nodes.allSatisfy { CGRect(origin: .zero, size: FlowMapScene.size).contains($0.at) })
+        XCTAssertTrue(FlowMapScene().addingManagedRoutes(nil).nodes.isEmpty)
+    }
+
+    /// Managed routes sit right of and below the Private AI destination in
+    /// any design space, so their names never cover its card.
+    func test_managedRoutesStayClearOfTheDestination() throws {
+        let wire = #"{"tools":[],"managed_copy":{"title":"Managed sessions"},"managed_sessions":[{"id":"a","tool":"opencode","connection":"api_key","provider":"openai","model":"m","state":"running","collection_state":"off"},{"id":"b","tool":"opencode","connection":"near_ai","provider":"near_ai","model":"m","state":"running","collection_state":"off"},{"id":"c","tool":"claude","connection":"api_key","provider":"anthropic","model":null,"state":"running","collection_state":"off"}]}"#
+        let destinations = try JSONDecoder().decode(DaemonData.ToolDestinations.self, from: Data(wire.utf8))
+        for space in [FlowMapScene.size, FlowMapScene.space(for: CGSize(width: 1200, height: 500)), FlowMapScene.space(for: CGSize(width: 400, height: 1000))] {
+            let scene = FlowMapScene.privateAI(.none, destinationLabel: "D", privateAI: nil, sentence: { _ in nil }, state: { _ in .unknown }, space: space)
+                .addingManagedRoutes(destinations)
+            let destination = FlowMapScene.destination(in: space)
+            XCTAssertEqual(scene.nodes.count, 6)
+            for node in scene.nodes {
+                XCTAssertTrue(CGRect(origin: .zero, size: space).contains(node.at), "\(node.id) outside \(space)")
+                XCTAssertGreaterThan(node.at.x, destination.x, node.id)
+                XCTAssertGreaterThan(node.at.y - destination.y, 60, "\(node.id) sits on the destination in \(space)")
+            }
+        }
+    }
+
+    func test_mapHidesAbsentToolsWithInstalledEvidenceButKeepsImportedSources() throws {
+        let wire = #"{"tools":[{"tool":"claude-code","installed":false},{"tool":"codex","installed":false},{"tool":"opencode","installed":true}]}"#
+        let destinations = try JSONDecoder().decode(DaemonData.ToolDestinations.self, from: Data(wire.utf8))
+        let empty = TracesTree(tools: [], unplaced: [])
+        let gate = FlowMapScene.CommonsGate(state: .ready, status: nil, destinations: destinations)
+        let scene = FlowMapScene.traces(empty, gate: gate)
+        XCTAssertNil(scene.nodes.first { $0.id == "tool:claude-code" })
+        XCTAssertNil(scene.nodes.first { $0.id == "tool:codex" })
+        XCTAssertNotNil(scene.nodes.first { $0.id == "tool:opencode" })
+        let imported = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: [])], unplaced: [])
+        XCTAssertNotNil(FlowMapScene.traces(imported, gate: gate).nodes.first { $0.id == "tool:claude-code" })
+        let unknown = FlowMapScene.traces(empty, gate: .init(state: .ready))
+        XCTAssertEqual(unknown.nodes.filter { $0.id.hasPrefix("tool:") }.count, SourceKind.allCases.count)
+    }
+
     // MARK: Traces
 
     /// One node per tool this build knows and per drawn folder, plus this
@@ -318,6 +383,16 @@ final class FlowMapSceneTests: XCTestCase {
         XCTAssertEqual(drawn.x, 290 + 1.6 * 50, accuracy: 0.001)
         XCTAssertEqual(drawn.y, 380, accuracy: 0.001)
         XCTAssertEqual(FlowMapGeometry(size: size, zoom: 1).scale, 1, accuracy: 0.0001)
+    }
+
+    func test_openCodeOnlyInstallHidesAbsentGlobalHarnessChoices() async throws {
+        let harnesses = try await SampleDaemonClient(.normalDay).harnessList()
+        let wire = #"{"tools":[{"tool":"claude-code","installed":false},{"tool":"codex","installed":false},{"tool":"opencode","installed":true}]}"#
+        let destinations = try JSONDecoder().decode(DaemonData.ToolDestinations.self, from: Data(wire.utf8))
+        let scene = FlowMapScene.privateAI(harnesses, destinationLabel: "D", privateAI: "off", sentence: { _ in nil }, state: { _ in .notConnected }, destinations: destinations)
+        XCTAssertNil(scene.nodes.first { $0.id == "harness:claude" })
+        XCTAssertNil(scene.nodes.first { $0.id == "harness:codex" })
+        XCTAssertFalse(scene.flows)
     }
 
     // MARK: Private AI

@@ -10,16 +10,20 @@ use uuid::Uuid;
 
 const CLAUDE: Uuid = Uuid::from_u128(0x6e65_6172_2d61_4900_8000_0000_0000_0001);
 const CODEX: Uuid = Uuid::from_u128(0x6e65_6172_2d61_4900_8000_0000_0000_0002);
+const OPENCODE: Uuid = Uuid::from_u128(0x6e65_6172_2d61_4900_8000_0000_0000_0003);
 
-pub const TOOLS: [ToolId; 2] = [ToolId::Claude, ToolId::Codex];
+/// OpenCode runs on the model its session's proxy pins, as Claude Code and
+/// Codex do; the daemon tells its launcher that model with the port.
+pub const TOOLS: [ToolId; 3] = [ToolId::Claude, ToolId::Codex, ToolId::Opencode];
 
 /// The stable id of a tool's sign-in entry. Stable so the tool's isolated
-/// profile directory survives between launches. OpenCode has no sign-in entry.
+/// profile directory survives between launches. Optional so a tool added
+/// later can have none.
 pub fn account_id(tool: ToolId) -> Option<AccountId> {
     Some(AccountId(match tool {
         ToolId::Claude => CLAUDE,
         ToolId::Codex => CODEX,
-        ToolId::Opencode => return None,
+        ToolId::Opencode => OPENCODE,
     }))
 }
 
@@ -42,7 +46,7 @@ pub fn entry(tool: ToolId) -> Option<AccountView> {
     })
 }
 
-/// Both tools' entries while signed in; none otherwise.
+/// Every tool's entry while signed in; none otherwise.
 pub fn entries(signed_in: bool) -> Vec<AccountView> {
     if signed_in {
         TOOLS.into_iter().filter_map(entry).collect()
@@ -84,10 +88,12 @@ mod tests {
     #[test]
     fn entries_follow_the_sign_in() {
         assert!(entries(false).is_empty());
-        assert_eq!(account_id(ToolId::Opencode), None);
-        assert_eq!(entry(ToolId::Opencode), None);
         let present = entries(true);
-        assert_eq!(present.len(), 2);
+        assert_eq!(present.len(), 3);
+        assert_eq!(
+            present.iter().map(|a| a.tool).collect::<Vec<_>>(),
+            vec![ToolId::Claude, ToolId::Codex, ToolId::Opencode]
+        );
         for (account, tool) in present.iter().zip(TOOLS) {
             assert_eq!(account.tool, tool);
             assert_eq!(account.connection, ConnectionKind::NearAiSignIn);
@@ -95,6 +101,13 @@ mod tests {
             assert_eq!(tool_for(account.id), Some(tool));
         }
         assert_ne!(account_id(ToolId::Claude), account_id(ToolId::Codex));
+        assert_ne!(account_id(ToolId::Claude), account_id(ToolId::Opencode));
+        assert_ne!(account_id(ToolId::Codex), account_id(ToolId::Opencode));
+        // Stable, so OpenCode's isolated profile survives between launches.
+        assert_eq!(
+            account_id(ToolId::Opencode).map(|id| id.0.to_string()),
+            Some("6e656172-2d61-4900-8000-000000000003".to_owned())
+        );
         assert_eq!(tool_for(AccountId(Uuid::new_v4())), None);
     }
 
@@ -107,11 +120,15 @@ mod tests {
             generation: Generation(3),
         };
         let out = defaults(vec![saved.clone()], true, |_| Generation(7));
-        assert_eq!(out.len(), 2);
+        assert_eq!(out.len(), 3);
         assert_eq!(out[0], saved);
         assert_eq!(out[1].tool, ToolId::Codex);
         assert_eq!(Some(out[1].account_id), account_id(ToolId::Codex));
         assert_eq!(out[1].generation, Generation(7));
+        // OpenCode with nothing saved defaults to the sign-in too.
+        assert_eq!(out[2].tool, ToolId::Opencode);
+        assert_eq!(out[2].connection, ConnectionKind::NearAiSignIn);
+        assert_eq!(Some(out[2].account_id), account_id(ToolId::Opencode));
         assert_eq!(
             defaults(vec![saved.clone()], false, |_| Generation(7)),
             vec![saved]

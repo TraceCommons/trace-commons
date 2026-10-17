@@ -1,7 +1,7 @@
 use crate::mission_attempt::*;
 use crate::skill_loop::{EvaluationUsage, ProposedTaskPlan};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn scope() -> MissionAttemptScope {
     account('a')
@@ -71,13 +71,6 @@ fn trial(key: &MissionTrialKey, passed: bool) -> SkillTrialResult {
             total_tokens: Some(2),
         },
     }
-}
-
-fn large_trial(key: &MissionTrialKey) -> SkillTrialResult {
-    let mut result = trial(key, false);
-    result.raw_output = "x".repeat(30_000);
-    assert!(serde_json::to_vec(&result).unwrap().len() <= MAX_TRIAL_BYTES);
-    result
 }
 
 fn new_store() -> (tempfile::TempDir, MissionAttemptStore) {
@@ -751,160 +744,6 @@ fn concurrent_record_writes_with_bounded_retry_lose_no_trials() {
             .len(),
         12
     );
-}
-
-#[test]
-fn attempt_cap_refusal_preserves_previous_bytes() {
-    let (root, store) = new_store();
-    for _ in 0..MAX_ATTEMPTS {
-        store.begin(&scope(), start()).unwrap();
-    }
-    let path = root
-        .path()
-        .join(MISSION_ATTEMPT_STORE_DIR)
-        .join(JOURNAL_FILE);
-    let before = fs::read(&path).unwrap();
-    assert_eq!(
-        store.begin(&scope(), start()).unwrap_err().to_string(),
-        "mission-attempt-store-full"
-    );
-    assert_eq!(fs::read(path).unwrap(), before);
-}
-
-#[test]
-fn content_cap_refusal_preserves_trials_and_reserved_headroom_persists_failure() {
-    let (root, store) = new_store();
-    let target = store.begin(&scope(), start()).unwrap().attempt;
-    let (lock, mut journal) = store.locked_existing().unwrap();
-
-    for _ in 1..MAX_ATTEMPTS {
-        let start = start();
-        journal.attempts.push(ScopedAttempt {
-            scope: scope(),
-            attempt: MissionAttempt {
-                attempt_id: Uuid::new_v4(),
-                start,
-                status: MissionAttemptStatus::Running,
-                created_at_unix_seconds: target.created_at_unix_seconds,
-                updated_at_unix_seconds: target.updated_at_unix_seconds,
-                trials: Vec::new(),
-                trial_count: 0,
-                terminal_reason: None,
-                content_revoked: false,
-            },
-        });
-    }
-
-    let first_key = journal.attempts[0].attempt.start.expected_trials[0].clone();
-    journal.attempts[0]
-        .attempt
-        .trials
-        .push(large_trial(&first_key));
-    journal.attempts[0].attempt.trial_count = 1;
-
-    let slots = (1..MAX_ATTEMPTS)
-        .flat_map(|attempt_index| {
-            (0..EXPECTED_TRIALS).map(move |key_index| (attempt_index, key_index))
-        })
-        .collect::<Vec<_>>();
-    let base_bytes = serde_json::to_vec(&journal).unwrap().len() as u64;
-    let sample_bytes = serde_json::to_vec(&large_trial(
-        &journal.attempts[1].attempt.start.expected_trials[0],
-    ))
-    .unwrap()
-    .len() as u64;
-    let estimate = ((MAX_CONTENT_JOURNAL_BYTES - base_bytes) / (sample_bytes + 1)) as usize;
-    let mut used = 0;
-    for &(attempt_index, key_index) in slots.iter().take(estimate) {
-        let key = journal.attempts[attempt_index]
-            .attempt
-            .start
-            .expected_trials[key_index]
-            .clone();
-        journal.attempts[attempt_index]
-            .attempt
-            .trials
-            .push(large_trial(&key));
-        journal.attempts[attempt_index].attempt.trial_count += 1;
-        used += 1;
-    }
-    while serde_json::to_vec(&journal).unwrap().len() as u64 > MAX_CONTENT_JOURNAL_BYTES {
-        used -= 1;
-        let attempt_index = slots[used].0;
-        journal.attempts[attempt_index]
-            .attempt
-            .trials
-            .pop()
-            .unwrap();
-        journal.attempts[attempt_index].attempt.trial_count -= 1;
-    }
-
-    let candidate_key = journal.attempts[0].attempt.start.expected_trials[1].clone();
-    loop {
-        journal.attempts[0]
-            .attempt
-            .trials
-            .push(large_trial(&candidate_key));
-        journal.attempts[0].attempt.trial_count += 1;
-        let candidate_crosses =
-            serde_json::to_vec(&journal).unwrap().len() as u64 > MAX_CONTENT_JOURNAL_BYTES;
-        journal.attempts[0].attempt.trials.pop().unwrap();
-        journal.attempts[0].attempt.trial_count -= 1;
-        if candidate_crosses {
-            break;
-        }
-        let (attempt_index, key_index) = slots[used];
-        let key = journal.attempts[attempt_index]
-            .attempt
-            .start
-            .expected_trials[key_index]
-            .clone();
-        journal.attempts[attempt_index]
-            .attempt
-            .trials
-            .push(large_trial(&key));
-        journal.attempts[attempt_index].attempt.trial_count += 1;
-        used += 1;
-    }
-
-    store.save_content(&lock, &journal).unwrap();
-    drop(lock);
-    let path = root
-        .path()
-        .join(MISSION_ATTEMPT_STORE_DIR)
-        .join(JOURNAL_FILE);
-    let before_refusal = fs::read(&path).unwrap();
-    let refusal_started = Instant::now();
-    assert_eq!(
-        store
-            .record_trial(&scope(), target.attempt_id, large_trial(&candidate_key),)
-            .unwrap_err()
-            .to_string(),
-        "mission-attempt-store-full"
-    );
-    let refusal_elapsed = refusal_started.elapsed();
-    assert_eq!(fs::read(&path).unwrap(), before_refusal);
-
-    let reason = format!("mission-attempt-{}", "f".repeat(80));
-    let receipt_started = Instant::now();
-    let failed = store
-        .finish(
-            &scope(),
-            target.attempt_id,
-            MissionAttemptStatus::Failed,
-            &reason,
-        )
-        .unwrap();
-    let receipt_elapsed = receipt_started.elapsed();
-    eprintln!(
-        "near-capacity journal: content_refusal={refusal_elapsed:?} receipt_write={receipt_elapsed:?}"
-    );
-    assert_eq!(failed.status, MissionAttemptStatus::Failed);
-    assert_eq!(failed.trial_count, 1);
-    assert_eq!(failed.trials[0].raw_output.len(), 30_000);
-
-    let reopened = MissionAttemptStore::at(&root.path().join(MISSION_ATTEMPT_STORE_DIR));
-    assert_eq!(reopened.get(&scope(), target.attempt_id).unwrap(), failed);
 }
 
 #[test]

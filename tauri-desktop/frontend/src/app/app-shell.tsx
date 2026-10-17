@@ -5,6 +5,7 @@ import { AppNavbar } from "../components/app-navbar";
 import { SidebarInset, SidebarProvider } from "../components/ui/sidebar";
 import { useOnboardingCompletion } from "../features/onboarding/public";
 import { privateAiKeys } from "../features/private-ai/public";
+import { useSettings } from "../features/settings/public";
 import { usePublicProfile } from "../features/profile/public";
 import { useCoreStatus } from "../lib/tauri/use-core-status";
 import { AppRoutes } from "./app-routes";
@@ -33,7 +34,10 @@ export function AppShell() {
   const publicProfile = usePublicProfile();
   const tenantId = core.data?.daemon.tenant_id ?? null;
   const onboarding = useOnboardingCompletion(tenantId);
-  const desktop = useDesktopEvents(refreshPrivateAiCredential);
+  // Missions are hidden unless the daemon says otherwise: off while the
+  // settings load, on error, or when the key is absent.
+  const missionsEnabled = useSettings().data?.missions_enabled === true;
+  const desktop = useDesktopEvents(refreshPrivateAiCredential, missionsEnabled);
   const errors = [
     desktop.error,
     daemonEventError
@@ -48,6 +52,7 @@ export function AppShell() {
   return (
     <SidebarProvider>
       <AppNavbar
+        missionsEnabled={missionsEnabled}
         decisionsOwed={
           core.state === "ready"
             ? (core.data?.daemon.decisions_owed ?? null)
@@ -77,6 +82,7 @@ export function AppShell() {
           />
           <GateHeldNotice held={core.data?.daemon.automatic_contribution_held} />
           <AppRoutes
+            missionsEnabled={missionsEnabled}
             requiresOnboarding={requiresOnboarding}
             core={core}
             publicProfile={publicProfile}

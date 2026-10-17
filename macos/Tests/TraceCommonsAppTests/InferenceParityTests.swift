@@ -416,7 +416,7 @@ final class InferenceParityTests: XCTestCase {
         let source = try Self.text("Views/HarnessListView.swift")
         XCTAssertTrue(source.contains("if model.harnesses == HarnessList.none {\n"
             + "                RouteDisclosureUnreadableGlassLine(line: nil)\n"
-            + "            } else if model.harnesses.harnesses.isEmpty {\n"
+            + "            } else if visibleHarnesses.isEmpty {\n"
             + "                Text(copy.harnessesNoneFound)"),
                       "an unanswered list must not read as an empty one")
     }

@@ -12,9 +12,10 @@ use crate::{
         secrets::{ApiKey, SecretStore},
         sessions::{
             LaunchContext, LaunchPurpose, LaunchRequest, LifecycleReport, SessionRegistry,
-            SessionState,
+            SessionState, SessionView,
         },
         signin,
+        terminal::{self, TerminalApp, TerminalHandle, TerminalSetting},
     },
 };
 use serde::Deserialize;
@@ -30,6 +31,21 @@ pub struct ManagedService {
     /// Proxies the daemon hosts for sessions on the NEAR AI sign-in, by
     /// session id. Only the daemon holds the sign-in credential.
     routes: std::collections::HashMap<Uuid, ManagedRoute>,
+    /// Which terminal apps are installed. A field so tests answer it
+    /// without asking the OS; asked through `installed_cache`.
+    installed_terminals: fn() -> Vec<TerminalApp>,
+    /// The last answer, reused for a short window so a snapshot does not
+    /// start a probe process each time a shell asks.
+    installed_cache: terminal::InstalledCache,
+    /// Brings a session's window to the front. A field so tests can record
+    /// the call rather than drive a real terminal.
+    focus: fn(&TerminalHandle) -> Result<(), ManagedError>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionParams {
+    session_id: Uuid,
 }
 
 #[derive(Deserialize)]
@@ -48,7 +64,68 @@ impl ManagedService {
             config_dir: store.dir().to_path_buf(),
             secrets: SecretStore::new(store),
             routes: std::collections::HashMap::new(),
+            installed_terminals: terminal::installed,
+            installed_cache: terminal::InstalledCache::default(),
+            focus: crate::managed::terminal::focus,
         })
+    }
+
+    /// The installed terminal apps, from the cache when it is fresh and
+    /// holds `launching`.
+    fn installed_terminals(&mut self, launching: Option<TerminalApp>) -> Vec<TerminalApp> {
+        let probe = self.installed_terminals;
+        self.installed_cache
+            .get(std::time::Instant::now(), launching, probe)
+    }
+
+    /// The account a launch request names: the NEAR AI sign-in's entry
+    /// for its tool, only while signed in and only for coding, or a saved
+    /// account.
+    fn launch_account(
+        &self,
+        p: &LaunchRequest,
+        sign_in: bool,
+    ) -> Result<AccountView, ManagedError> {
+        if p.connection == ConnectionKind::NearAiSignIn {
+            if !sign_in {
+                return Err(ManagedError::NearAiSignInRequired);
+            }
+            if signin::tool_for(p.account_id) != Some(p.tool) || p.purpose != LaunchPurpose::Coding
+            {
+                return Err(ManagedError::InvalidRequest);
+            }
+            signin::entry(p.tool).ok_or(ManagedError::InvalidRequest)
+        } else {
+            self.account(p.account_id)
+        }
+    }
+
+    /// Whether an ended coding row can be launched again as it was: same
+    /// account (still saved, or still signed in) and same folder (still
+    /// there). A shell also needs `capabilities.terminal_launch` to offer it,
+    /// as it does for any launch.
+    fn can_start_again(&self, view: &SessionView, sign_in: bool) -> bool {
+        !view.state.holds_profile()
+            && view.purpose == LaunchPurpose::Coding
+            && view.cwd.is_absolute()
+            && view.cwd.is_dir()
+            && self
+                .launch_account(
+                    &LaunchRequest {
+                        model: None,
+                        collect_traces: false,
+                        purpose: view.purpose,
+                        request_id: view.id,
+                        tool: view.tool,
+                        connection: view.connection,
+                        account_id: view.account_id,
+                        cwd: view.cwd.clone(),
+                        expected_generation: Generation(0),
+                        save_default: false,
+                    },
+                    sign_in,
+                )
+                .is_ok_and(|a| a.tool == view.tool && a.connection == view.connection)
     }
 
     /// Redeem a ticket. A session on the NEAR AI sign-in is refused without
@@ -102,11 +179,20 @@ impl ManagedService {
             .ok_or(ManagedError::NotFound)
     }
 
-    /// `sign_in` says only whether the daemon holds a NEAR AI sign-in.
-    fn handle(&mut self, request: &Request, sign_in: bool) -> Result<Value, ManagedError> {
+    /// `sign_in` says only whether the daemon holds a NEAR AI sign-in;
+    /// `choice` is the terminal the settings name.
+    fn handle(
+        &mut self,
+        request: &Request,
+        sign_in: bool,
+        choice: TerminalSetting,
+    ) -> Result<Value, ManagedError> {
         match request.method.as_str() {
             "managed_snapshot" => {
-                let sessions = self.sessions.views()?;
+                let mut sessions = self.sessions.views()?;
+                for view in &mut sessions {
+                    view.can_start_again = self.can_start_again(view, sign_in);
+                }
                 let saved = [
                     self.accounts.selection(ToolId::Claude),
                     self.accounts.selection(ToolId::Codex),
@@ -117,8 +203,21 @@ impl ManagedService {
                 .collect::<Vec<_>>();
                 let defaults =
                     signin::defaults(saved, sign_in, |tool| self.accounts.generation(tool));
+                // The offered apps found here, for a shell's picker.
+                let choices: Vec<Value> = self
+                    .installed_terminals(None)
+                    .into_iter()
+                    .map(|app| json!({"id":app.id(),"name":app.name()}))
+                    .collect();
+                // Off macOS, with no offered terminal found there is nothing
+                // to choose and nothing to open: Launch stays off and the
+                // shells show their "unavailable" line, rather than a
+                // refusal pointing at a picker that is not drawn. macOS
+                // always has Terminal, so a failed probe never dims it.
+                let terminal_launch = terminal::launch_available()
+                    && (cfg!(target_os = "macos") || !choices.is_empty());
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"revision":self.sessions.revision(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":crate::managed::terminal::destination().is_some(),"terminal_destination":crate::managed::terminal::destination()}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
                 )
             }
             "managed_account_add" => {
@@ -148,23 +247,7 @@ impl ManagedService {
             }
             "managed_launch_prepare" => {
                 let p: LaunchRequest = parse(request)?;
-                let account = if p.connection == ConnectionKind::NearAiSignIn {
-                    if !sign_in {
-                        return Err(ManagedError::NearAiSignInRequired);
-                    }
-                    if signin::tool_for(p.account_id) != Some(p.tool)
-                        || p.purpose != LaunchPurpose::Coding
-                    {
-                        return Err(ManagedError::InvalidRequest);
-                    }
-                    signin::entry(p.tool).ok_or(ManagedError::InvalidRequest)?
-                } else {
-                    self.accounts
-                        .list()
-                        .into_iter()
-                        .find(|a| a.id == p.account_id)
-                        .ok_or(ManagedError::NotFound)?
-                };
+                let account = self.launch_account(&p, sign_in)?;
                 let generation = self.accounts.generation(p.tool);
                 if p.expected_generation != generation {
                     return Err(ManagedError::Conflict);
@@ -173,6 +256,7 @@ impl ManagedService {
                 if p.save_default {
                     return Err(ManagedError::InvalidRequest);
                 }
+                verify_visible_version(&self.profiles, &account)?;
                 Ok(json!(self.sessions.prepare(p, &account)?))
             }
             "managed_terminal_launch" => {
@@ -183,9 +267,18 @@ impl ManagedService {
                     ticket: String,
                 }
                 let p: Params = parse(request)?;
-                self.sessions.validate_ticket(p.session_id, &p.ticket)?;
-                crate::managed::terminal::launch(&self.config_dir, p.session_id, &p.ticket)?;
-                Ok(json!({"opened":true,"destination":crate::managed::terminal::destination()}))
+                let cwd = self.sessions.launch_cwd(p.session_id, &p.ticket)?;
+                let installed = self.installed_terminals(choice.app());
+                let window = terminal::launch(
+                    choice,
+                    &installed,
+                    &self.config_dir,
+                    &cwd,
+                    p.session_id,
+                    &p.ticket,
+                )?;
+                self.sessions.opened_in_terminal(p.session_id, window)?;
+                Ok(json!({"opened":true,"destination":terminal::destination(choice)}))
             }
             "managed_launch_redeem" => {
                 let p: RedeemParams = parse(request)?;
@@ -201,8 +294,42 @@ impl ManagedService {
             }
             "managed_session_report" => {
                 let report: LifecycleReport = parse(request)?;
+                let id = report.session_id;
                 self.sessions.report(report)?;
-                Ok(json!({"accepted":true}))
+                // Additive: an older launcher reads only `accepted`.
+                Ok(json!({"accepted":true,"stop":self.sessions.stop_requested(id)}))
+            }
+            "managed_session_focus" => {
+                let p: SessionParams = parse(request)?;
+                let window = self.sessions.terminal_for(p.session_id)?;
+                (self.focus)(&window)?;
+                Ok(json!({"focused":true}))
+            }
+            "managed_session_stop" => {
+                let p: SessionParams = parse(request)?;
+                self.sessions.request_stop(p.session_id)?;
+                Ok(json!({"stopping":true}))
+            }
+            "managed_session_start_again" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Params {
+                    session_id: Uuid,
+                    request_id: Uuid,
+                }
+                let p: Params = parse(request)?;
+                let mut again = self
+                    .sessions
+                    .start_again_request(p.session_id, p.request_id)?;
+                if let Some(existing) = self.sessions.replayed(&again) {
+                    return Ok(json!(existing));
+                }
+                let account = self.launch_account(&again, sign_in)?;
+                if !again.cwd.is_absolute() || !again.cwd.is_dir() {
+                    return Err(ManagedError::InvalidRequest);
+                }
+                again.expected_generation = self.accounts.generation(again.tool);
+                Ok(json!(self.sessions.prepare(again, &account)?))
             }
             "managed_session_dismiss" => {
                 #[derive(Deserialize)]
@@ -271,6 +398,7 @@ impl ManagedService {
                 if self.sessions.holds_profile(p.account_id) {
                     return Err(ManagedError::Conflict);
                 }
+                verify_visible_version(&self.profiles, &account)?;
                 let request = LaunchRequest {
                     model: None,
                     collect_traces: false,
@@ -329,6 +457,21 @@ fn sign_in_key(shared: &DaemonShared) -> Option<String> {
         .map(|c| c.key.clone())
 }
 
+/// The terminal the settings name, read per request like the sign-in.
+fn terminal_choice(shared: &DaemonShared) -> TerminalSetting {
+    shared
+        .settings
+        .lock()
+        .map(|s| s.managed_terminal)
+        .unwrap_or(TerminalSetting::Unrecognized)
+}
+
+/// The terminal choice changed: move the revision so every shell re-reads
+/// the snapshot, whose destination and picker follow it.
+pub fn terminal_changed(shared: &DaemonShared) {
+    let _ = with_service(shared, |service| service.sessions.changed());
+}
+
 fn sign_in_present(shared: &DaemonShared) -> bool {
     shared
         .settings
@@ -385,9 +528,10 @@ fn respond(request: &Request, result: Result<Value, Refusal>) -> Response {
 /// requests its shutdown; the asynchronous entry also awaits it.
 pub fn handle(shared: &DaemonShared, request: &Request) -> Response {
     let sign_in = sign_in_present(shared);
+    let choice = terminal_choice(shared);
     let mut ended = vec![];
     let result = with_service(shared, |service| {
-        let value = service.handle(request, sign_in);
+        let value = service.handle(request, sign_in, choice);
         ended = service.take_routes(false);
         value
     });
@@ -403,9 +547,10 @@ pub async fn handle_async(shared: &DaemonShared, request: &Request) -> Response 
         return redeem_async(shared, request).await;
     }
     let sign_in = sign_in_present(shared);
+    let choice = terminal_choice(shared);
     let mut ended = vec![];
     let result = with_service(shared, |service| {
-        let value = service.handle(request, sign_in);
+        let value = service.handle(request, sign_in, choice);
         ended = service.take_routes(false);
         value
     });
@@ -416,7 +561,8 @@ pub async fn handle_async(shared: &DaemonShared, request: &Request) -> Response 
 }
 
 /// The daemon reads the sign-in here, at launch time, and gives it only to
-/// the session's proxy. The launcher is told a loopback port, nothing else.
+/// the session's proxy. The launcher is told a loopback port and the model
+/// the proxy pinned, nothing else.
 async fn redeem_async(shared: &DaemonShared, request: &Request) -> Response {
     let p: RedeemParams = match parse(request) {
         Ok(p) => p,
@@ -447,6 +593,7 @@ async fn redeem_async(shared: &DaemonShared, request: &Request) -> Response {
     let result = with_service(shared, |service| match started {
         Ok(route) => {
             context.route_port = Some(route.port());
+            context.route_model = Some(route.model().to_owned());
             service.routes.insert(p.session_id, route);
             Ok(json!(context))
         }
@@ -503,30 +650,50 @@ pub async fn sweep(shared: &DaemonShared, now: chrono::DateTime<chrono::Utc>) {
     }
 }
 
+/// The check before a ticket is issued, against the executable this
+/// process can see. The tool runs where the helper runs: a CLI launch from
+/// a terminal whose PATH holds a tool the daemon cannot see is not refused
+/// here, because the helper resolves and version-checks it there before
+/// starting it (`supervisor::redeem_and_run`). One the daemon does find is
+/// checked now, so an unsupported version is refused before a ticket.
+fn verify_visible_version(
+    profiles: &NativeProfiles,
+    account: &AccountView,
+) -> Result<(), ManagedError> {
+    match find_native(account.tool) {
+        Ok(native) => profiles.verify_version(account, &native),
+        Err(ManagedError::ToolUnavailable) => Ok(()),
+        Err(other) => Err(other),
+    }
+}
+
 fn label(error: ManagedError) -> &'static str {
     match error {
         ManagedError::Conflict => "managed-conflict",
         ManagedError::NotFound => "managed-not-found",
         ManagedError::AmbiguousAccount => "managed-ambiguous-account",
         ManagedError::StorageUnavailable => "managed-storage-unavailable",
+        ManagedError::ToolUnavailable => "managed-tool-unavailable",
         ManagedError::UnsupportedVersion => "managed-unsupported-version",
         ManagedError::SignInRequired => "managed-sign-in-required",
         ManagedError::NearAiSignInRequired => "managed-near-ai-sign-in-required",
         ManagedError::DaemonUnavailable => "managed-daemon-unavailable",
         ManagedError::LaunchUnknown => "managed-launch-unknown",
         ManagedError::InvalidRequest => "managed-invalid-request",
+        ManagedError::TerminalNotFound => "managed-terminal-not-found",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::managed::sessions::PreparedLaunch;
+    use crate::managed::{sessions::PreparedLaunch, terminal::TerminalHandle};
 
     fn service() -> (tempfile::TempDir, ConfigStore, ManagedService) {
         let home = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
-        let service = ManagedService::open(&store).unwrap();
+        let mut service = ManagedService::open(&store).unwrap();
+        service.installed_terminals = || TerminalApp::offered().to_vec();
         (home, store, service)
     }
 
@@ -536,6 +703,16 @@ mod tests {
         params: Value,
         sign_in: bool,
     ) -> Result<Value, ManagedError> {
+        call_with(service, method, params, sign_in, TerminalSetting::default())
+    }
+
+    fn call_with(
+        service: &mut ManagedService,
+        method: &str,
+        params: Value,
+        sign_in: bool,
+        choice: TerminalSetting,
+    ) -> Result<Value, ManagedError> {
         service.handle(
             &Request {
                 id: 1,
@@ -543,6 +720,7 @@ mod tests {
                 params,
             },
             sign_in,
+            choice,
         )
     }
 
@@ -572,10 +750,59 @@ mod tests {
         .unwrap()
     }
 
+    /// #1408: the snapshot says whether a coding session has started on
+    /// this computer, and the first one started flips it.
+    #[test]
+    fn the_snapshot_says_once_a_session_has_started() {
+        let (home, _store, mut service) = service();
+        let before = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
+        assert_eq!(before["has_launched"], false);
+        let account = service
+            .accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_launch_prepare",
+                json!(LaunchRequest {
+                    purpose: LaunchPurpose::Coding,
+                    request_id: Uuid::new_v4(),
+                    tool: ToolId::Claude,
+                    connection: ConnectionKind::Subscription,
+                    account_id: account.id,
+                    cwd: home.path().to_path_buf(),
+                    expected_generation: Generation(0),
+                    save_default: false,
+                    model: None,
+                    collect_traces: false,
+                }),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let prepared_only = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
+        assert_eq!(prepared_only["has_launched"], false);
+        call(
+            &mut service,
+            "managed_launch_redeem",
+            json!({"session_id":prepared.session_id,"ticket":prepared.ticket.unwrap()}),
+            false,
+        )
+        .unwrap();
+        let after = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
+        assert_eq!(after["has_launched"], true);
+    }
+
     #[test]
     fn the_snapshot_derives_sign_in_entries_and_defaults_from_the_sign_in() {
         let (_home, _store, mut service) = service();
         let without = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
+        let tools = without["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[2]["tool"], "opencode");
+        assert_eq!(without["generations"].as_object().unwrap().len(), 3);
         assert_eq!(without["capabilities"]["near_ai_signin"], false);
         assert_eq!(without["sign_in_accounts"], json!([]));
         assert_eq!(without["defaults"], json!([]));
@@ -583,14 +810,14 @@ mod tests {
         let with = call(&mut service, "managed_snapshot", json!({}), true).unwrap();
         assert_eq!(with["capabilities"]["near_ai_signin"], true);
         let entries = with["sign_in_accounts"].as_array().unwrap();
-        assert_eq!(entries.len(), 2);
-        for (entry, tool) in entries.iter().zip(["claude", "codex"]) {
+        assert_eq!(entries.len(), 3);
+        for (entry, tool) in entries.iter().zip(["claude", "codex", "opencode"]) {
             assert_eq!(entry["tool"], tool);
             assert_eq!(entry["connection"], "near_ai_signin");
             assert_eq!(entry["auth_state"], "ready");
         }
         let defaults = with["defaults"].as_array().unwrap();
-        assert_eq!(defaults.len(), 2);
+        assert_eq!(defaults.len(), 3);
         assert!(defaults.iter().all(|d| d["connection"] == "near_ai_signin"));
         // Derived, not saved.
         assert_eq!(with["accounts"], json!([]));
@@ -613,13 +840,18 @@ mod tests {
         service.accounts.select(selection, Generation(0)).unwrap();
         let snapshot = call(&mut service, "managed_snapshot", json!({}), true).unwrap();
         let defaults = snapshot["defaults"].as_array().unwrap();
-        assert_eq!(defaults.len(), 2);
+        assert_eq!(defaults.len(), 3);
         let claude = defaults.iter().find(|d| d["tool"] == "claude").unwrap();
         assert_eq!(claude["account_id"], json!(saved.id));
         let codex = defaults.iter().find(|d| d["tool"] == "codex").unwrap();
         assert_eq!(
             codex["account_id"],
             json!(signin::account_id(ToolId::Codex))
+        );
+        let opencode = defaults.iter().find(|d| d["tool"] == "opencode").unwrap();
+        assert_eq!(
+            opencode["account_id"],
+            json!(signin::account_id(ToolId::Opencode))
         );
         // Signed out, the saved default stands alone.
         let snapshot = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
@@ -646,7 +878,7 @@ mod tests {
             )
             .unwrap();
         let snapshot = call(&mut service, "managed_snapshot", json!({}), true).unwrap();
-        assert_eq!(snapshot["sign_in_accounts"].as_array().unwrap().len(), 2);
+        assert_eq!(snapshot["sign_in_accounts"].as_array().unwrap().len(), 3);
         let defaults = snapshot["defaults"].as_array().unwrap();
         assert_eq!(defaults.len(), 3);
         let opencode = defaults.iter().find(|d| d["tool"] == "opencode").unwrap();
@@ -745,6 +977,30 @@ mod tests {
         );
     }
 
+    /// OpenCode starts on the sign-in like the others, with no model: the
+    /// proxy pins one at redeem. A request that names a model is refused.
+    #[test]
+    fn opencode_starts_on_the_sign_in_without_a_model() {
+        let (home, _store, mut service) = service();
+        let mut named = launch(ToolId::Opencode, home.path());
+        named["model"] = json!("gpt-5");
+        assert_eq!(
+            call(&mut service, "managed_launch_prepare", named, true),
+            Err(ManagedError::InvalidRequest)
+        );
+        let prepared = prepare(&mut service, ToolId::Opencode, home.path());
+        let (context, host) = service
+            .redeem(
+                prepared.session_id,
+                prepared.ticket.as_deref().unwrap(),
+                true,
+            )
+            .unwrap();
+        assert!(host);
+        assert_eq!(context.session.tool, ToolId::Opencode);
+        assert_eq!(context.session.model, None);
+    }
+
     #[test]
     fn a_signed_in_redeem_asks_its_caller_to_host_the_proxy() {
         let (home, _store, mut service) = service();
@@ -758,9 +1014,562 @@ mod tests {
             .unwrap();
         assert!(host);
         assert_eq!(context.route_port, None);
+        assert_eq!(context.route_model, None);
         assert_eq!(context.session.connection, ConnectionKind::NearAiSignIn);
         assert_eq!(context.session.account_label, "NEAR AI");
         assert!(service.take_routes(true).is_empty());
+    }
+
+    /// The snapshot names the chosen app and offers the installed ones, by
+    /// id and name; an unknown stored choice names none.
+    #[test]
+    fn the_snapshot_carries_the_terminal_choice_and_the_installed_apps() {
+        let (_home, _store, mut service) = service();
+        // This platform's last app, so the choice is not the default.
+        let chosen = *TerminalApp::offered().last().expect("an offered app");
+        let snapshot = call_with(
+            &mut service,
+            "managed_snapshot",
+            json!({}),
+            false,
+            TerminalSetting::from(chosen),
+        )
+        .unwrap();
+        let capabilities = &snapshot["capabilities"];
+        assert_eq!(capabilities["terminal_current"], chosen.id());
+        let offered: Vec<Value> = TerminalApp::offered()
+            .iter()
+            .map(|app| json!({"id":app.id(),"name":app.name()}))
+            .collect();
+        assert_eq!(capabilities["terminal_choices"], json!(offered));
+        // Named only where a helper ships beside the daemon; where one
+        // does, the name follows the choice.
+        if terminal::helper_path().is_ok() && terminal::launch_available() {
+            assert_eq!(capabilities["terminal_destination"], chosen.name());
+        }
+
+        let unknown = call_with(
+            &mut service,
+            "managed_snapshot",
+            json!({}),
+            false,
+            TerminalSetting::Unrecognized,
+        )
+        .unwrap();
+        assert_eq!(unknown["capabilities"]["terminal_current"], Value::Null);
+        assert_eq!(unknown["capabilities"]["terminal_destination"], Value::Null);
+    }
+
+    /// Off macOS, no offered terminal found means no Launch, rather than a
+    /// refusal pointing at a picker that is not drawn.
+    #[test]
+    fn no_terminal_found_turns_launch_off_except_on_macos() {
+        let (_home, _store, mut service) = service();
+        service.installed_terminals = Vec::new;
+        let snapshot = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
+        let capabilities = &snapshot["capabilities"];
+        assert_eq!(capabilities["terminal_choices"], json!([]));
+        let expected = cfg!(target_os = "macos") && terminal::launch_available();
+        assert_eq!(capabilities["terminal_launch"], expected);
+    }
+
+    #[test]
+    fn the_terminal_refusal_has_its_own_label() {
+        assert_eq!(
+            label(ManagedError::TerminalNotFound),
+            "managed-terminal-not-found"
+        );
+    }
+
+    static FOCUSED: std::sync::Mutex<Vec<TerminalHandle>> = std::sync::Mutex::new(vec![]);
+
+    /// Records the window it was asked to raise. Tests never drive a real
+    /// terminal.
+    fn record_focus(handle: &TerminalHandle) -> Result<(), ManagedError> {
+        FOCUSED.lock().unwrap().push(handle.clone());
+        Ok(())
+    }
+
+    /// A saved-account session, redeemed and reported running, as the
+    /// launcher leaves it. Returns its id and the launcher's proof.
+    fn running(service: &mut ManagedService, cwd: &std::path::Path) -> (Uuid, String) {
+        let account = match service.accounts.list().into_iter().next() {
+            Some(account) => account,
+            None => service
+                .accounts
+                .add(ToolId::Claude, ConnectionKind::Subscription, "Work")
+                .unwrap(),
+        };
+        let mut request: LaunchRequest =
+            serde_json::from_value(launch(ToolId::Claude, cwd)).unwrap();
+        request.connection = ConnectionKind::Subscription;
+        request.account_id = account.id;
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(service, "managed_launch_prepare", json!(request), false).unwrap(),
+        )
+        .unwrap();
+        let context = service
+            .sessions
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        report(
+            service,
+            prepared.session_id,
+            &context.proof,
+            "running",
+            None,
+        )
+        .unwrap();
+        (prepared.session_id, context.proof)
+    }
+
+    fn report(
+        service: &mut ManagedService,
+        id: Uuid,
+        proof: &str,
+        state: &str,
+        exit_code: Option<i32>,
+    ) -> Result<Value, ManagedError> {
+        call(
+            service,
+            "managed_session_report",
+            json!({"session_id":id,"proof":proof,"state":state,"process_id":42,"process_identity":"42:1","exit_code":exit_code}),
+            false,
+        )
+    }
+
+    fn row(service: &mut ManagedService, id: Uuid, sign_in: bool) -> Value {
+        let snapshot = call(service, "managed_snapshot", json!({}), sign_in).unwrap();
+        snapshot["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == json!(id))
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn a_session_started_elsewhere_can_be_neither_shown_nor_stopped() {
+        let (home, _store, mut service) = service();
+        service.focus = record_focus;
+        let (id, proof) = running(&mut service, home.path());
+        let row = row(&mut service, id, false);
+        assert_eq!(row["can_focus"], false);
+        assert_eq!(row["can_stop"], false);
+        for method in ["managed_session_focus", "managed_session_stop"] {
+            assert_eq!(
+                call(&mut service, method, json!({"session_id":id}), false),
+                Err(ManagedError::Conflict),
+                "{method}"
+            );
+        }
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_stop",
+                json!({"session_id":Uuid::new_v4()}),
+                false
+            ),
+            Err(ManagedError::NotFound)
+        );
+        // The launcher is never told to stop a session nobody could stop.
+        assert_eq!(
+            report(&mut service, id, &proof, "running", None).unwrap()["stop"],
+            false
+        );
+    }
+
+    #[test]
+    fn a_session_the_daemon_opened_in_terminal_can_be_shown_and_stopped() {
+        let (home, _store, mut service) = service();
+        service.focus = record_focus;
+        let account = service
+            .accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Work")
+            .unwrap();
+        let mut request: LaunchRequest =
+            serde_json::from_value(launch(ToolId::Claude, home.path())).unwrap();
+        request.connection = ConnectionKind::Subscription;
+        request.account_id = account.id;
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_launch_prepare",
+                json!(request),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let handle = TerminalHandle::AppleTerminal {
+            tty: "/dev/ttys042".into(),
+        };
+        service
+            .sessions
+            .opened_in_terminal(prepared.session_id, Some(handle.clone()))
+            .unwrap();
+        // Not running yet: nothing to show or stop.
+        let starting = row(&mut service, prepared.session_id, false);
+        assert_eq!(starting["can_focus"], false);
+        assert_eq!(starting["can_stop"], false);
+        let context = service
+            .sessions
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        let id = prepared.session_id;
+        assert_eq!(
+            report(&mut service, id, &context.proof, "running", None).unwrap()["stop"],
+            false
+        );
+        let running = row(&mut service, id, false);
+        assert_eq!(running["can_focus"], true);
+        assert_eq!(running["can_stop"], true);
+
+        call(
+            &mut service,
+            "managed_session_focus",
+            json!({"session_id":id}),
+            false,
+        )
+        .unwrap();
+        assert!(FOCUSED.lock().unwrap().contains(&handle));
+
+        call(
+            &mut service,
+            "managed_session_stop",
+            json!({"session_id":id}),
+            false,
+        )
+        .unwrap();
+        // Asked once: the row offers no second Stop, still shows its window,
+        // and the launcher hears it on its next report.
+        let stopping = row(&mut service, id, false);
+        assert_eq!(stopping["can_stop"], false);
+        assert_eq!(stopping["can_focus"], true);
+        assert_eq!(stopping["state"], "running");
+        call(
+            &mut service,
+            "managed_session_stop",
+            json!({"session_id":id}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            report(&mut service, id, &context.proof, "running", None).unwrap()["stop"],
+            true
+        );
+
+        // The exit is recorded as any other.
+        report(&mut service, id, &context.proof, "exited", Some(143)).unwrap();
+        let ended = row(&mut service, id, false);
+        assert_eq!(ended["state"], "exited");
+        assert_eq!(ended["exit_code"], 143);
+        assert_eq!(ended["can_focus"], false);
+        assert_eq!(ended["can_stop"], false);
+        for method in ["managed_session_focus", "managed_session_stop"] {
+            assert_eq!(
+                call(&mut service, method, json!({"session_id":id}), false),
+                Err(ManagedError::Conflict),
+                "{method}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_opened_where_no_window_can_be_named_can_be_stopped_but_not_shown() {
+        let (home, _store, mut service) = service();
+        service.focus = record_focus;
+        let account = service
+            .accounts
+            .add(ToolId::Codex, ConnectionKind::Subscription, "Work")
+            .unwrap();
+        let mut request: LaunchRequest =
+            serde_json::from_value(launch(ToolId::Codex, home.path())).unwrap();
+        request.connection = ConnectionKind::Subscription;
+        request.account_id = account.id;
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_launch_prepare",
+                json!(request),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        service
+            .sessions
+            .opened_in_terminal(prepared.session_id, None)
+            .unwrap();
+        let context = service
+            .sessions
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        report(
+            &mut service,
+            prepared.session_id,
+            &context.proof,
+            "running",
+            None,
+        )
+        .unwrap();
+        let row = row(&mut service, prepared.session_id, false);
+        assert_eq!(row["can_focus"], false);
+        assert_eq!(row["can_stop"], true);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_focus",
+                json!({"session_id":prepared.session_id}),
+                false
+            ),
+            Err(ManagedError::Conflict)
+        );
+    }
+
+    #[test]
+    fn start_again_replays_an_ended_launch_in_the_same_folder() {
+        let (home, _store, mut service) = service();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let (id, proof) = running(&mut service, &folder);
+        let again = json!({"session_id":id,"request_id":Uuid::new_v4()});
+        // Running: nothing to start again.
+        assert_eq!(row(&mut service, id, false)["can_start_again"], false);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                again.clone(),
+                false
+            ),
+            Err(ManagedError::Conflict)
+        );
+        report(&mut service, id, &proof, "exited", Some(0)).unwrap();
+        assert_eq!(row(&mut service, id, false)["can_start_again"], true);
+
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                again.clone(),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_ne!(prepared.session_id, id);
+        assert!(prepared.ticket.is_some());
+        let fresh = row(&mut service, prepared.session_id, false);
+        let old = row(&mut service, id, false);
+        for field in ["tool", "connection", "account_id", "cwd", "purpose"] {
+            assert_eq!(fresh[field], old[field], "{field}");
+        }
+        assert_eq!(fresh["state"], "starting");
+        // The same request twice is one session.
+        let repeated: PreparedLaunch = serde_json::from_value(
+            call(&mut service, "managed_session_start_again", again, false).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(repeated.session_id, prepared.session_id);
+        assert!(repeated.ticket.is_none());
+    }
+
+    #[test]
+    fn start_again_retried_after_a_selection_change_is_still_one_session() {
+        let (home, _store, mut service) = service();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let (id, proof) = running(&mut service, &folder);
+        report(&mut service, id, &proof, "exited", Some(0)).unwrap();
+        let again = json!({"session_id":id,"request_id":Uuid::new_v4()});
+        let first: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                again.clone(),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        // The selection moves between the request and its retry.
+        let account = service.accounts.list().into_iter().next().unwrap();
+        let generation = service.accounts.generation(ToolId::Claude);
+        service
+            .accounts
+            .select(
+                Selection {
+                    tool: ToolId::Claude,
+                    connection: ConnectionKind::Subscription,
+                    account_id: account.id,
+                    generation,
+                },
+                generation,
+            )
+            .unwrap();
+        let retried: PreparedLaunch = serde_json::from_value(
+            call(&mut service, "managed_session_start_again", again, false).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(retried.session_id, first.session_id);
+        assert!(retried.ticket.is_none());
+    }
+
+    #[test]
+    fn a_second_terminal_launch_for_one_session_is_refused() {
+        let (home, _store, mut service) = service();
+        let account = service
+            .accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Work")
+            .unwrap();
+        let mut request: LaunchRequest =
+            serde_json::from_value(launch(ToolId::Claude, home.path())).unwrap();
+        request.connection = ConnectionKind::Subscription;
+        request.account_id = account.id;
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_launch_prepare",
+                json!(request),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let ticket = prepared.ticket.unwrap();
+        service
+            .sessions
+            .validate_ticket(prepared.session_id, &ticket)
+            .unwrap();
+        service
+            .sessions
+            .opened_in_terminal(prepared.session_id, None)
+            .unwrap();
+        assert_eq!(
+            service
+                .sessions
+                .validate_ticket(prepared.session_id, &ticket),
+            Err(ManagedError::Conflict)
+        );
+    }
+
+    #[test]
+    fn start_again_is_withheld_when_the_folder_or_account_is_gone() {
+        let (home, _store, mut service) = service();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let (id, proof) = running(&mut service, &folder);
+        report(&mut service, id, &proof, "exited", Some(0)).unwrap();
+        std::fs::remove_dir(&folder).unwrap();
+        assert_eq!(row(&mut service, id, false)["can_start_again"], false);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                false
+            ),
+            Err(ManagedError::InvalidRequest)
+        );
+
+        std::fs::create_dir(&folder).unwrap();
+        let account = service.accounts.list()[0].id;
+        call(
+            &mut service,
+            "managed_account_remove",
+            json!({"account_id":account}),
+            false,
+        )
+        .ok();
+        // Removing a subscription account needs the native tool; drop it
+        // from the store directly when that is absent here.
+        if !service.accounts.list().is_empty() {
+            service.accounts.remove(account).unwrap();
+        }
+        assert_eq!(row(&mut service, id, false)["can_start_again"], false);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                false
+            ),
+            Err(ManagedError::NotFound)
+        );
+    }
+
+    #[test]
+    fn a_sign_in_session_starts_again_only_while_signed_in() {
+        let (home, _store, mut service) = service();
+        let prepared = prepare(&mut service, ToolId::Claude, home.path());
+        let (context, _) = service
+            .redeem(
+                prepared.session_id,
+                prepared.ticket.as_deref().unwrap(),
+                true,
+            )
+            .unwrap();
+        let id = prepared.session_id;
+        report(&mut service, id, &context.proof, "running", None).unwrap();
+        report(&mut service, id, &context.proof, "exited", Some(0)).unwrap();
+        assert_eq!(row(&mut service, id, true)["can_start_again"], true);
+        assert_eq!(row(&mut service, id, false)["can_start_again"], false);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                false
+            ),
+            Err(ManagedError::NearAiSignInRequired)
+        );
+        assert!(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                true
+            )
+            .unwrap()["ticket"]
+                .is_string()
+        );
+    }
+
+    #[test]
+    fn a_sign_in_row_never_starts_again() {
+        let (_home, _store, mut service) = service();
+        let account = service
+            .accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Work")
+            .unwrap();
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_account_reconnect",
+                json!({"account_id":account.id}),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let context = service
+            .sessions
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        let id = prepared.session_id;
+        report(&mut service, id, &context.proof, "exited", Some(0)).unwrap();
+        assert_eq!(row(&mut service, id, false)["can_start_again"], false);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                false
+            ),
+            Err(ManagedError::InvalidRequest)
+        );
     }
 
     #[test]

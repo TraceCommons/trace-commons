@@ -3059,6 +3059,7 @@ fn production_harness_service_for(
             unqualified_routing_allowed: false,
             main_gate: pins.main_gate,
             components,
+            score_policies: Default::default(),
         },
     )?))
 }
@@ -3218,6 +3219,7 @@ async fn production_assembly_is_constructible_from_the_library() {
             novelty_utility_microcredits: 2_500_000,
         },
         components,
+        score_policies: Default::default(),
     })
     .expect("the production assembly builds over doubles");
     let candidate = service.default_package().clone();
@@ -50194,4 +50196,2085 @@ async fn accept_medium_leaves_a_declared_and_a_consent_flag_medium_as_they_were(
         submission_status(&backend, &tenant, consent.submission_id).await,
         "accepted"
     );
+}
+
+// A Score policy an embedding binary registers (`ScorePolicyRegistry`) runs
+// under the same runtime controls as the compatibility Score policy: the
+// tenant's Score lock, the `trace_gate_decisions` row, and `main`'s
+// duplicate short-circuits. The registered policy below is a test-only
+// factory that builds the compatibility Score policy over the substituted
+// manifest, so its evidence carries every field the gate decision row
+// needs.
+
+const REGISTERED_SCORE_IMPLEMENTATION: &str = "substituted.score.runtime_test_only.v1";
+
+struct RegisteredTestScoreFactory {
+    trace_credit_event: PipelineTraceCreditEvent,
+    /// Award adjustments the policy records on its Score evidence.
+    award_adjustments: Vec<trace_commons_gate_api::pipeline::AwardAdjustment>,
+    /// When set, the policy asks for every trace to be held for operator
+    /// review under this label instead of pricing it.
+    hold: Option<&'static str>,
+    /// With `hold`: the policy prices a trace whose input carries the
+    /// operator's approval of exactly this hold, and holds every other one.
+    hold_until_approved: bool,
+    /// When set, the policy's evidence leaves out this gate-row field.
+    omit_gate_field: Option<&'static str>,
+}
+
+impl trace_commons_server::versioned_pipeline_score_registry::ScorePolicyFactory
+    for RegisteredTestScoreFactory
+{
+    fn dependency_identity(&self) -> &str {
+        "substituted_score_policy_runtime_test_only"
+    }
+
+    fn trace_credit_event(&self) -> PipelineTraceCreditEvent {
+        self.trace_credit_event
+    }
+
+    fn build(
+        &self,
+        dependencies: trace_commons_server::versioned_pipeline_score_registry::ScorePolicyDependencies<'_>,
+    ) -> Result<Arc<dyn trace_commons_gate_api::pipeline::ScorePolicy>, &'static str> {
+        let config: CompatibilityBundleConfig = serde_json::from_slice(dependencies.configuration)
+            .map_err(|_| "substituted_configuration_invalid")?;
+        let policy =
+            trace_commons_server::versioned_pipeline_compat::CompatibilityScorePolicy::new(
+                dependencies.manifest.clone(),
+                config,
+                dependencies.scorer,
+                dependencies.embedder,
+                dependencies.index_reader,
+            )
+            .map_err(|_| "substituted_configuration_invalid")?;
+        if let Some(label) = self.hold {
+            return Ok(Arc::new(HoldingScorePolicy {
+                manifest: dependencies.manifest.clone(),
+                label,
+                priced: self.hold_until_approved.then(|| {
+                    Arc::new(policy) as Arc<dyn trace_commons_gate_api::pipeline::ScorePolicy>
+                }),
+            }));
+        }
+        if let Some(field) = self.omit_gate_field {
+            return Ok(Arc::new(OmittingScorePolicy {
+                inner: Arc::new(policy),
+                field,
+            }));
+        }
+        if self.award_adjustments.is_empty() {
+            return Ok(Arc::new(policy));
+        }
+        Ok(Arc::new(AdjustingScorePolicy {
+            inner: Arc::new(policy),
+            award_adjustments: self.award_adjustments.clone(),
+        }))
+    }
+}
+
+/// A registered Score policy that asks for every trace to be held for
+/// operator review instead of pricing it -- unless `priced` is set and the
+/// input carries the operator's approval of exactly this hold, which it
+/// then prices with `priced`.
+struct HoldingScorePolicy {
+    manifest: trace_commons_gate_api::pipeline::BundleManifest,
+    label: &'static str,
+    priced: Option<Arc<dyn trace_commons_gate_api::pipeline::ScorePolicy>>,
+}
+
+#[async_trait::async_trait]
+impl trace_commons_gate_api::pipeline::ScorePolicy for HoldingScorePolicy {
+    async fn execute(
+        &self,
+        input: &trace_commons_gate_api::pipeline::ScoreInput,
+    ) -> Result<
+        trace_commons_gate_api::pipeline::ScoreOutput,
+        trace_commons_gate_api::pipeline::PolicyError,
+    > {
+        let approved = input.operator_review
+            == Some(trace_commons_gate_api::pipeline::ScoreHoldReview {
+                decision: ReviewRecommendation::Approve,
+                hold_label: ReasonCode::new(self.label).expect("a safe hold label"),
+            });
+        if let (true, Some(priced)) = (approved, &self.priced) {
+            return priced.execute(input).await;
+        }
+        Ok(
+            trace_commons_gate_api::pipeline::ScoreOutput::held_for_review(
+                &self.manifest,
+                ReasonCode::new(self.label).expect("a safe hold label"),
+                "substituted_hold_test_only_v1",
+            )
+            .expect("a held output is consistent"),
+        )
+    }
+}
+
+/// A registered Score policy whose evidence leaves out one of the fields
+/// Settle's gate decision row needs.
+struct OmittingScorePolicy {
+    inner: Arc<dyn trace_commons_gate_api::pipeline::ScorePolicy>,
+    field: &'static str,
+}
+
+#[async_trait::async_trait]
+impl trace_commons_gate_api::pipeline::ScorePolicy for OmittingScorePolicy {
+    async fn execute(
+        &self,
+        input: &trace_commons_gate_api::pipeline::ScoreInput,
+    ) -> Result<
+        trace_commons_gate_api::pipeline::ScoreOutput,
+        trace_commons_gate_api::pipeline::PolicyError,
+    > {
+        let (mut result, index_command, neighbor_artifact) =
+            self.inner.execute(input).await?.into_parts();
+        let evidence = &mut result.evidence;
+        match self.field {
+            "perplexity_micros" => evidence.perplexity_micros = None,
+            "tail_fraction_micros" => evidence.tail_fraction_micros = None,
+            "novelty_score_micros" => evidence.novelty_score_micros = None,
+            "quality_passed" => evidence.quality_passed = None,
+            "novelty_passed" => evidence.novelty_passed = None,
+            "nearest_neighbor_hash" => evidence.nearest_neighbor_hash = None,
+            other => panic!("not a gate-row field: {other}"),
+        }
+        Ok(trace_commons_gate_api::pipeline::ScoreOutput::new(
+            result,
+            index_command,
+            neighbor_artifact,
+        )
+        .expect("the output without the field is consistent"))
+    }
+}
+
+/// A registered Score policy that records `award_adjustments` on the
+/// evidence of the policy it wraps.
+struct AdjustingScorePolicy {
+    inner: Arc<dyn trace_commons_gate_api::pipeline::ScorePolicy>,
+    award_adjustments: Vec<trace_commons_gate_api::pipeline::AwardAdjustment>,
+}
+
+#[async_trait::async_trait]
+impl trace_commons_gate_api::pipeline::ScorePolicy for AdjustingScorePolicy {
+    async fn execute(
+        &self,
+        input: &trace_commons_gate_api::pipeline::ScoreInput,
+    ) -> Result<
+        trace_commons_gate_api::pipeline::ScoreOutput,
+        trace_commons_gate_api::pipeline::PolicyError,
+    > {
+        let (mut result, index_command, neighbor_artifact) =
+            self.inner.execute(input).await?.into_parts();
+        result.evidence.award_adjustments = self.award_adjustments.clone();
+        Ok(trace_commons_gate_api::pipeline::ScoreOutput::new(
+            result,
+            index_command,
+            neighbor_artifact,
+        )
+        .expect("the adjusted output is consistent"))
+    }
+}
+
+/// The compatibility package over `config`, with its Score policy ref
+/// renamed to `REGISTERED_SCORE_IMPLEMENTATION`.
+fn registered_score_package(config: &CompatibilityBundleConfig) -> BundlePackage {
+    let mut package = MinimalPolicyBundle::compatibility_package(
+        config,
+        &ReferencePerplexityScorer::new(),
+        &ReferenceEmbedder::new(),
+    )
+    .expect("build compatibility bundle package");
+    package.manifest.score.policy_id = "substituted.score".to_string();
+    package.manifest.score.implementation_id = REGISTERED_SCORE_IMPLEMENTATION.to_string();
+    package.bundle_id = package.manifest.bundle_id().unwrap();
+    package
+        .validate()
+        .expect("the substituted package validates");
+    package
+}
+
+/// `compatibility_test_builder`, with `registered_score_package` as its
+/// default package and a registry holding the test factory.
+fn registered_score_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+    checks: PipelineNoveltyUtilityChecks,
+    trace_credit_event: PipelineTraceCreditEvent,
+) -> Arc<PipelineService> {
+    registered_score_service_with(
+        backend,
+        artifact_store,
+        config,
+        checks,
+        trace_credit_event,
+        Vec::new(),
+    )
+}
+
+/// `registered_score_service`, with a policy that records
+/// `award_adjustments` on its Score evidence.
+fn registered_score_service_with(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+    checks: PipelineNoveltyUtilityChecks,
+    trace_credit_event: PipelineTraceCreditEvent,
+    award_adjustments: Vec<trace_commons_gate_api::pipeline::AwardAdjustment>,
+) -> Arc<PipelineService> {
+    registered_score_service_holding(
+        backend,
+        artifact_store,
+        config,
+        checks,
+        trace_credit_event,
+        award_adjustments,
+        None,
+    )
+}
+
+/// `registered_score_service_with`, with a policy that holds every trace
+/// for operator review under `hold` when it is set.
+fn registered_score_service_holding(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+    checks: PipelineNoveltyUtilityChecks,
+    trace_credit_event: PipelineTraceCreditEvent,
+    award_adjustments: Vec<trace_commons_gate_api::pipeline::AwardAdjustment>,
+    hold: Option<&'static str>,
+) -> Arc<PipelineService> {
+    registered_score_service_options(
+        backend,
+        artifact_store,
+        config,
+        checks,
+        trace_credit_event,
+        RegisteredTestScoreFactory {
+            trace_credit_event,
+            award_adjustments,
+            hold,
+            hold_until_approved: false,
+            omit_gate_field: None,
+        },
+    )
+}
+
+/// `registered_score_service`, with the test factory `factory`.
+fn registered_score_service_options(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: CompatibilityBundleConfig,
+    checks: PipelineNoveltyUtilityChecks,
+    trace_credit_event: PipelineTraceCreditEvent,
+    factory: RegisteredTestScoreFactory,
+) -> Arc<PipelineService> {
+    assert_eq!(factory.trace_credit_event, trace_credit_event);
+    let index = IsolatedPipelineIndex::new();
+    let package = registered_score_package(&config);
+    let registry = SettlementAdapterRegistry::new(vec![RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    ) as Arc<dyn SettlementAdapter>])
+    .expect("build settlement adapter registry");
+    let policies =
+        trace_commons_server::versioned_pipeline_score_registry::ScorePolicyRegistry::new()
+            .with_factory(REGISTERED_SCORE_IMPLEMENTATION, Arc::new(factory))
+            .expect("register the test factory");
+    Arc::new(
+        PipelineServiceBuilder::new(
+            backend,
+            artifact_store,
+            package,
+            index.clone(),
+            index,
+            registry,
+            uncapped_caps(&["trace_credit"]),
+        )
+        .with_scorer(Arc::new(ReferencePerplexityScorer::new()))
+        .with_embedder(Arc::new(ReferenceEmbedder::new()))
+        .with_authority(allow_all_authority())
+        .with_privacy(default_privacy_boundary())
+        .with_unqualified_routing(true)
+        .with_novelty_utility_checks(checks)
+        .with_score_policies(policies)
+        .build()
+        .expect("build pipeline service"),
+    )
+}
+
+/// (i) A registered Score policy takes the tenant's Score lock: one that
+/// finds it held is released uncharged as `score_lock_busy`, as a
+/// compatibility Score is, and scores once the lock is free.
+#[tokio::test]
+async fn a_registered_score_policy_takes_the_tenant_score_lock() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for event in [
+        PipelineTraceCreditEvent::PipelineScore,
+        PipelineTraceCreditEvent::NoveltyUtility,
+    ] {
+        let service = registered_score_service(
+            backend.clone(),
+            artifact_store(&dir),
+            near_duplicate_config(),
+            issuing_checks(),
+            event,
+        );
+        let tenant = format!("registered-lock-{}", uuid::Uuid::new_v4());
+        let reviewed = compatibility_run_past_review(&service, &tenant).await;
+
+        let mut holder = owner_client().await;
+        let lock = holder.transaction().await.unwrap();
+        hold_compatibility_score_lock(&lock, &tenant).await;
+        let released = service
+            .process_run(&tenant, reviewed.run_id)
+            .await
+            .unwrap()
+            .expect("the Score is claimed");
+        assert_eq!(
+            (
+                released.state,
+                released.last_error_label.as_deref(),
+                released.attempt_count,
+                released.next_phase,
+            ),
+            (
+                PipelineRunState::Retry,
+                Some(PIPELINE_SCORE_LOCK_BUSY_LABEL),
+                reviewed.attempt_count,
+                Some(Phase::Score),
+            ),
+            "a registered Score that finds its tenant lock held is released uncharged"
+        );
+        lock.commit().await.unwrap();
+        force_due(&backend, &tenant, reviewed.run_id).await;
+        let scored = service
+            .process_run(&tenant, reviewed.run_id)
+            .await
+            .unwrap()
+            .expect("the Score runs once the lock is free");
+        assert_eq!(scored.next_phase, Some(Phase::Settle), "{scored:?}");
+    }
+}
+
+/// (ii) A run under a registered Score policy writes its
+/// `trace_gate_decisions` row at Settle, from its Score evidence, as a
+/// compatibility run does.
+#[tokio::test]
+async fn a_registered_score_policy_writes_a_gate_decision_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for event in [
+        PipelineTraceCreditEvent::PipelineScore,
+        PipelineTraceCreditEvent::NoveltyUtility,
+    ] {
+        let service = registered_score_service(
+            backend.clone(),
+            artifact_store(&dir),
+            CompatibilityBundleConfig::local_reference(),
+            issuing_checks(),
+            event,
+        );
+        let tenant = format!("registered-gate-row-{}", uuid::Uuid::new_v4());
+        let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+        assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+        let rows = gate_decision_rows(&tenant, run.submission_id).await;
+        assert_eq!(rows.len(), 1, "one row for the submission: {rows:?}");
+        let row = &rows[0];
+        assert_eq!(
+            row.decision_id,
+            expected_pipeline_decision_id(&tenant, run.run_id)
+        );
+        assert_eq!(row.source, "pipeline_settle");
+        assert_eq!(row.pipeline_run_id, Some(run.run_id));
+        let evidence: ScoreEvidence = serde_json::from_value(
+            score_outcome_of(&service, &tenant, run.run_id)
+                .await
+                .evidence,
+        )
+        .unwrap();
+        assert_eq!(
+            Some(row.perplexity_micros),
+            evidence
+                .perplexity_micros
+                .map(|value| i64::try_from(value).unwrap())
+        );
+    }
+}
+
+/// (iii) `main`'s duplicate short-circuits gate a registered Score policy's
+/// award as they gate a compatibility one: a second submission that
+/// duplicates the first earns nothing, whichever Trace Credit event the
+/// factory declares, its gate decision row records the label, and it is
+/// kept out of the index.
+#[tokio::test]
+async fn a_duplicate_earns_nothing_under_a_registered_score_policy() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for event in [
+        PipelineTraceCreditEvent::PipelineScore,
+        PipelineTraceCreditEvent::NoveltyUtility,
+    ] {
+        let mut config = CompatibilityBundleConfig::local_reference();
+        config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+        let service = registered_score_service(
+            backend.clone(),
+            artifact_store(&dir),
+            config,
+            PipelineNoveltyUtilityChecks {
+                duplicate_controls: Some(PipelineDuplicateControls::MAIN_DEFAULT),
+                ..issuing_checks()
+            },
+            event,
+        );
+        let tenant = format!("registered-dup-{}", uuid::Uuid::new_v4());
+        service.register_default_bundle(&tenant).await.unwrap();
+        let first = submit_envelope_and_complete(
+            &service,
+            &tenant,
+            RECEIPT_PRINCIPAL,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await;
+        let second = submit_envelope_and_complete(
+            &service,
+            &tenant,
+            RECEIPT_PRINCIPAL,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await;
+        assert_eq!(first.state, PipelineRunState::Complete, "{first:?}");
+        assert_eq!(second.state, PipelineRunState::Complete, "{second:?}");
+
+        let first_leg = trace_credit_settlement(&service, &tenant, first.run_id).await;
+        assert!(first_leg.credit_event_id.is_some(), "{first_leg:?}");
+        assert!(
+            credit_ledger_event_for_run(&backend, &tenant, first.run_id)
+                .await
+                .is_some()
+        );
+
+        let leg = trace_credit_settlement(&service, &tenant, second.run_id).await;
+        assert_eq!(
+            (
+                leg.operation_state.as_str(),
+                leg.last_error_label.as_deref(),
+                leg.credit_event_id,
+            ),
+            ("complete", Some("skipped_duplicate"), None),
+            "a duplicate's leg is withheld: {leg:?}"
+        );
+        assert_eq!(
+            credit_ledger_event_for_run(&backend, &tenant, second.run_id).await,
+            None,
+            "a duplicate writes no ledger row"
+        );
+        let rows = gate_decision_rows(&tenant, second.submission_id).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].credit_withheld_reason.as_deref(),
+            Some("skipped_duplicate")
+        );
+        assert_eq!(rows[0].credit_quality_micros, None);
+        assert_eq!(second.index_write_state, "none", "{second:?}");
+    }
+}
+
+/// The award adjustments a registered Score policy records persist with its
+/// Score outcome, Settle reads them back, and the run settles and writes its
+/// gate decision row as it would without them.
+#[tokio::test]
+async fn a_registered_score_policy_award_adjustments_persist_with_its_evidence() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let adjustments = vec![
+        trace_commons_gate_api::pipeline::AwardAdjustment::new(
+            ReasonCode::new("coverage_factor").unwrap(),
+            750_000,
+            Some(600_000),
+        )
+        .unwrap(),
+    ];
+    let service = registered_score_service_with(
+        backend.clone(),
+        artifact_store(&dir),
+        CompatibilityBundleConfig::local_reference(),
+        issuing_checks(),
+        PipelineTraceCreditEvent::PipelineScore,
+        adjustments.clone(),
+    );
+    let tenant = format!("registered-adjustments-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    let stored = score_outcome_of(&service, &tenant, run.run_id)
+        .await
+        .evidence;
+    assert_eq!(
+        stored["award_adjustments"],
+        serde_json::json!([
+            {"label": "coverage_factor", "factor_micros": 750000, "basis_micros": 600000}
+        ])
+    );
+    let evidence: ScoreEvidence = serde_json::from_value(stored).unwrap();
+    assert_eq!(evidence.award_adjustments, adjustments);
+    assert_eq!(
+        gate_decision_rows(&tenant, run.submission_id).await.len(),
+        1
+    );
+}
+
+/// A registered Score policy that asks for a trace to be held for operator
+/// review parks the run in the existing review hold state
+/// (`awaiting_review`) at Score, uncharged, under the policy's label:
+/// nothing is committed for the Score, so no award is seeded and no leg can
+/// pay, no attempt row is left staged, and the run is listed in the
+/// pipeline review queue with the label as its hold reason. The
+/// compatibility policy never holds: under the same configuration its run
+/// goes on to Settle.
+#[tokio::test]
+async fn a_registered_score_policy_can_hold_a_trace_for_operator_review() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let label = "operator_review_requested";
+    let service = registered_score_service_holding(
+        backend.clone(),
+        artifact_store(&dir),
+        CompatibilityBundleConfig::local_reference(),
+        issuing_checks(),
+        PipelineTraceCreditEvent::PipelineScore,
+        Vec::new(),
+        Some(label),
+    );
+    let tenant = format!("registered-hold-{}", uuid::Uuid::new_v4());
+    let reviewed = compatibility_run_past_review(&service, &tenant).await;
+    let held = service
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the Score is claimed");
+    assert_eq!(
+        (
+            held.state,
+            held.next_phase,
+            held.last_error_label.as_deref(),
+            held.attempt_count,
+        ),
+        (
+            PipelineRunState::AwaitingReview,
+            Some(Phase::Score),
+            Some(label),
+            reviewed.attempt_count,
+        ),
+        "a held trace parks at Score, uncharged, under the policy's label"
+    );
+    assert!(
+        service
+            .store()
+            .outcome_for_phase(&tenant, held.run_id, Phase::Score)
+            .await
+            .unwrap()
+            .is_none(),
+        "a held Score commits no outcome"
+    );
+    assert!(
+        service
+            .store()
+            .list_settlements(&tenant, held.run_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a held Score seeds no settlement leg"
+    );
+    assert_eq!(
+        credit_ledger_event_for_run(&backend, &tenant, held.run_id).await,
+        None
+    );
+    assert_eq!(
+        score_attempt_rows_with_hashes(&backend, &tenant, held.run_id).await,
+        Vec::new(),
+        "a held Score leaves no staged attempt row"
+    );
+    // Nothing claims a parked run.
+    assert!(
+        service
+            .process_run(&tenant, held.run_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a held run is not claimed again"
+    );
+    let queue = service
+        .store()
+        .list_review_queue(&tenant, 10)
+        .await
+        .unwrap();
+    let entry = queue
+        .iter()
+        .find(|entry| entry.run.run_id == held.run_id)
+        .expect("the held run is in the review queue");
+    assert_eq!(entry.hold_reason.as_deref(), Some(label));
+    assert_eq!(entry.run.next_phase, Some(Phase::Score));
+    // The worker's invalidation step leaves a hold whose submission is
+    // still operable parked.
+    assert_eq!(
+        service
+            .release_inoperable_parked_runs(&tenant, 32)
+            .await
+            .unwrap(),
+        0,
+        "an operable Score hold is not released"
+    );
+    assert_eq!(
+        service
+            .store()
+            .get_run(&tenant, held.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        PipelineRunState::AwaitingReview
+    );
+
+    // The compatibility policy, over the same configuration, never holds.
+    let compatibility = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("compat-no-hold-{}", uuid::Uuid::new_v4());
+    let reviewed = compatibility_run_past_review(&compatibility, &tenant).await;
+    let scored = compatibility
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the Score is claimed");
+    assert_eq!(
+        (scored.state, scored.next_phase),
+        (PipelineRunState::Pending, Some(Phase::Settle)),
+        "{scored:?}"
+    );
+}
+
+/// A Score hold whose submission is withdrawn does not park again: the
+/// worker's invalidation step releases it
+/// (`release_inoperable_parked_runs`), and the released Score refuses the
+/// hold under the same submission guard a Score commit takes, so the run
+/// ends as `submission_inoperable` instead of cycling between the hold and
+/// the release.
+#[tokio::test]
+async fn a_withdrawn_score_hold_ends_instead_of_parking_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = registered_score_service_holding(
+        backend.clone(),
+        artifact_store(&dir),
+        CompatibilityBundleConfig::local_reference(),
+        issuing_checks(),
+        PipelineTraceCreditEvent::PipelineScore,
+        Vec::new(),
+        Some("operator_review_requested"),
+    );
+    let tenant = format!("registered-hold-withdrawn-{}", uuid::Uuid::new_v4());
+    let reviewed = compatibility_run_past_review(&service, &tenant).await;
+    let held = service
+        .process_run(&tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the Score is claimed");
+    assert_eq!(held.state, PipelineRunState::AwaitingReview, "{held:?}");
+
+    withdraw_submission(&backend, &tenant, held.submission_id).await;
+    assert_eq!(
+        service
+            .release_inoperable_parked_runs(&tenant, 32)
+            .await
+            .unwrap(),
+        1,
+        "the worker releases the held run"
+    );
+    let ended = service
+        .process_run(&tenant, held.run_id)
+        .await
+        .unwrap()
+        .expect("the runner claims the released run");
+    assert_eq!(
+        (ended.state, ended.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+        ),
+        "{ended:?}"
+    );
+    assert!(
+        service
+            .store()
+            .list_settlements(&tenant, held.run_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// A service whose registered Score policy holds every trace under
+/// `SCORE_HOLD_TEST_LABEL`; with `until_approved`, it prices a trace whose
+/// input carries the operator's approval of that hold.
+fn score_hold_service(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    until_approved: bool,
+) -> Arc<PipelineService> {
+    registered_score_service_options(
+        backend.clone(),
+        artifact_store(dir),
+        CompatibilityBundleConfig::local_reference(),
+        issuing_checks(),
+        PipelineTraceCreditEvent::PipelineScore,
+        RegisteredTestScoreFactory {
+            trace_credit_event: PipelineTraceCreditEvent::PipelineScore,
+            award_adjustments: Vec::new(),
+            hold: Some(SCORE_HOLD_TEST_LABEL),
+            hold_until_approved: until_approved,
+            omit_gate_field: None,
+        },
+    )
+}
+
+const SCORE_HOLD_TEST_LABEL: &str = "operator_review_requested";
+
+/// A run of `service` held at Score under `SCORE_HOLD_TEST_LABEL`.
+async fn score_held_run(service: &PipelineService, tenant: &str) -> PipelineRunRecord {
+    let reviewed = compatibility_run_past_review(service, tenant).await;
+    let held = service
+        .process_run(tenant, reviewed.run_id)
+        .await
+        .unwrap()
+        .expect("the Score is claimed");
+    assert_eq!(
+        (
+            held.state,
+            held.next_phase,
+            held.last_error_label.as_deref()
+        ),
+        (
+            PipelineRunState::AwaitingReview,
+            Some(Phase::Score),
+            Some(SCORE_HOLD_TEST_LABEL)
+        ),
+        "{held:?}"
+    );
+    held
+}
+
+/// A reviewer's claim of a Score hold.
+async fn claim_score_hold(
+    service: &PipelineService,
+    tenant: &str,
+    run_id: uuid::Uuid,
+) -> PipelineReviewClaim {
+    service
+        .store()
+        .claim_review(
+            tenant,
+            run_id,
+            &reviewer_principal_ref('c'),
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("a Score hold is claimable")
+}
+
+/// An operator's approval of a Score hold sends the run back to Score, whose
+/// policy now sees the approval (the decision and the hold label) on its
+/// input and prices the trace; the run settles as any priced run does. The
+/// Score hold's assessment is its own, beside the run's Review state: the
+/// Review arm never reads it, and the run cannot be claimed again.
+#[tokio::test]
+async fn an_approved_score_hold_reruns_score_with_the_approval() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = score_hold_service(&backend, &dir, true);
+    let tenant = format!("score-hold-approved-{}", uuid::Uuid::new_v4());
+    let held = score_held_run(&service, &tenant).await;
+    let store = service.store();
+    let claim = claim_score_hold(&service, &tenant, held.run_id).await;
+    let label = ReasonCode::new(SCORE_HOLD_TEST_LABEL).unwrap();
+    // An approval must name the hold it resolves, as a Review approval
+    // names the reasons that hold its run.
+    let unresolved = store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            ReasonCode::new("operator_approved").unwrap(),
+            Vec::new(),
+        )
+        .await
+        .expect_err("an approval that does not resolve the hold is refused");
+    assert!(
+        matches!(&unresolved, DatabaseError::Constraint(message) if message == "quarantine reason is unresolved"),
+        "{unresolved:?}"
+    );
+    store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            ReasonCode::new("operator_approved").unwrap(),
+            vec![label.clone()],
+        )
+        .await
+        .expect("an approval that resolves the hold is recorded");
+    let released = store.get_run(&tenant, held.run_id).await.unwrap().unwrap();
+    assert_eq!(
+        (released.state, released.next_phase),
+        (PipelineRunState::Pending, Some(Phase::Score)),
+        "{released:?}"
+    );
+    assert!(
+        store
+            .list_review_queue(&tenant, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "an assessed Score hold leaves the queue"
+    );
+    assert!(
+        store
+            .load_review_assessment(&tenant, held.run_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the Review arm never reads a Score hold's assessment"
+    );
+    let scored = service
+        .process_run(&tenant, held.run_id)
+        .await
+        .unwrap()
+        .expect("the released Score is claimed");
+    assert_eq!(
+        (scored.state, scored.next_phase),
+        (PipelineRunState::Pending, Some(Phase::Settle)),
+        "the approved policy prices the trace: {scored:?}"
+    );
+    let evidence: ScoreEvidence = serde_json::from_value(
+        score_outcome_of(&service, &tenant, held.run_id)
+            .await
+            .evidence,
+    )
+    .unwrap();
+    assert_eq!(evidence.operator_rejected_hold, None);
+    process_until_idle(&service, &tenant).await;
+    let done = store.get_run(&tenant, held.run_id).await.unwrap().unwrap();
+    assert_eq!(done.state, PipelineRunState::Complete, "{done:?}");
+    assert_eq!(
+        gate_decision_rows(&tenant, held.submission_id).await.len(),
+        1
+    );
+}
+
+/// A policy that holds again on an input that carries the operator's
+/// approval would loop between Score and the queue. It fails the run
+/// closed instead, under `pipeline_score_hold_repeated`: nothing of the
+/// Score is committed and no leg exists.
+#[tokio::test]
+async fn a_policy_that_holds_again_after_approval_fails_the_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = score_hold_service(&backend, &dir, false);
+    let tenant = format!("score-hold-repeated-{}", uuid::Uuid::new_v4());
+    let held = score_held_run(&service, &tenant).await;
+    let claim = claim_score_hold(&service, &tenant, held.run_id).await;
+    let label = ReasonCode::new(SCORE_HOLD_TEST_LABEL).unwrap();
+    service
+        .store()
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            ReasonCode::new("operator_approved").unwrap(),
+            vec![label],
+        )
+        .await
+        .unwrap();
+    let ended = service
+        .process_run(&tenant, held.run_id)
+        .await
+        .unwrap()
+        .expect("the released Score is claimed");
+    assert_eq!(
+        (ended.state, ended.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_SCORE_HOLD_REPEATED_LABEL)
+        ),
+        "{ended:?}"
+    );
+    assert!(
+        service
+            .store()
+            .outcome_for_phase(&tenant, held.run_id, Phase::Score)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        service
+            .store()
+            .list_settlements(&tenant, held.run_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        service
+            .store()
+            .list_review_queue(&tenant, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a failed run is not held again"
+    );
+}
+
+/// An operator's rejection of a Score hold: the server commits a zero Score
+/// outcome itself, without running the policy -- no award, evidence naming
+/// the hold label as the reason, no index command -- and the run settles
+/// with no credit, no leg, no index write and no gate decision row.
+#[tokio::test]
+async fn a_rejected_score_hold_settles_with_no_credit() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // A policy that would price an approved trace: the rejection must not
+    // reach it.
+    let service = score_hold_service(&backend, &dir, true);
+    let tenant = format!("score-hold-rejected-{}", uuid::Uuid::new_v4());
+    let held = score_held_run(&service, &tenant).await;
+    let claim = claim_score_hold(&service, &tenant, held.run_id).await;
+    service
+        .store()
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Reject,
+            ReasonCode::new("operator_rejected").unwrap(),
+            Vec::new(),
+        )
+        .await
+        .expect("a rejection needs no resolved reason");
+    let scored = service
+        .process_run(&tenant, held.run_id)
+        .await
+        .unwrap()
+        .expect("the released Score is claimed");
+    assert_eq!(scored.next_phase, Some(Phase::Settle), "{scored:?}");
+    let outcome = score_outcome_of(&service, &tenant, held.run_id).await;
+    let evidence: ScoreEvidence = serde_json::from_value(outcome.evidence).unwrap();
+    assert_eq!(
+        evidence
+            .operator_rejected_hold
+            .as_ref()
+            .map(ReasonCode::as_str),
+        Some(SCORE_HOLD_TEST_LABEL)
+    );
+    assert!(evidence.fixed_awards.is_empty());
+    assert_eq!(evidence.embedding_artifact_hash, None);
+    assert_eq!(
+        outcome.evaluation["rule_id"],
+        serde_json::json!(trace_commons_gate_api::pipeline::SCORE_HOLD_REJECTED_RULE_ID)
+    );
+    assert!(
+        service
+            .store()
+            .list_settlements(&tenant, held.run_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a rejected hold seeds no leg"
+    );
+    process_until_idle(&service, &tenant).await;
+    let done = service
+        .store()
+        .get_run(&tenant, held.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(done.state, PipelineRunState::Complete, "{done:?}");
+    assert_eq!(done.index_write_state, "none", "{done:?}");
+    assert_eq!(
+        credit_ledger_event_for_run(&backend, &tenant, held.run_id).await,
+        None
+    );
+    assert!(
+        gate_decision_rows(&tenant, held.submission_id)
+            .await
+            .is_empty(),
+        "a rejected hold writes no gate decision row"
+    );
+}
+
+/// The six gate-row fields a registered Score policy's evidence must carry:
+/// one left out fails the run at Settle under
+/// `pipeline_gate_decision_evidence_incomplete`, before any leg pays.
+#[tokio::test]
+async fn a_registered_policy_missing_a_gate_row_field_fails_at_settle() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for field in [
+        "perplexity_micros",
+        "tail_fraction_micros",
+        "novelty_score_micros",
+        "quality_passed",
+        "novelty_passed",
+        "nearest_neighbor_hash",
+    ] {
+        let service = registered_score_service_options(
+            backend.clone(),
+            artifact_store(&dir),
+            near_duplicate_config(),
+            issuing_checks(),
+            PipelineTraceCreditEvent::PipelineScore,
+            RegisteredTestScoreFactory {
+                trace_credit_event: PipelineTraceCreditEvent::PipelineScore,
+                award_adjustments: Vec::new(),
+                hold: None,
+                hold_until_approved: false,
+                omit_gate_field: Some(field),
+            },
+        );
+        let tenant = format!("registered-omits-{}", uuid::Uuid::new_v4());
+        let reviewed = compatibility_run_past_review(&service, &tenant).await;
+        let scored = service
+            .process_run(&tenant, reviewed.run_id)
+            .await
+            .unwrap()
+            .expect("the Score is claimed");
+        assert_eq!(
+            scored.next_phase,
+            Some(Phase::Settle),
+            "{field}: {scored:?}"
+        );
+        let settled = service
+            .process_run(&tenant, reviewed.run_id)
+            .await
+            .unwrap()
+            .expect("the Settle is claimed");
+        assert_eq!(
+            (settled.state, settled.last_error_label.as_deref()),
+            (
+                PipelineRunState::Failed,
+                Some(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL)
+            ),
+            "{field}: {settled:?}"
+        );
+        assert_eq!(
+            credit_ledger_event_for_run(&backend, &tenant, reviewed.run_id).await,
+            None,
+            "{field}: no leg pays"
+        );
+        for leg in service
+            .store()
+            .list_settlements(&tenant, reviewed.run_id)
+            .await
+            .unwrap()
+        {
+            assert_eq!(leg.credit_event_id, None, "{field}: {leg:?}");
+            assert_eq!(leg.dispatched_at, None, "{field}: {leg:?}");
+        }
+        assert!(
+            gate_decision_rows(&tenant, reviewed.submission_id)
+                .await
+                .is_empty(),
+            "{field}"
+        );
+    }
+}
+
+/// A factory for a registered Score policy over production-qualified
+/// dependencies: it builds the compatibility Score policy, declares its own
+/// production qualification, and qualifies a configuration exactly when the
+/// compatibility configuration it decodes is qualifiable.
+struct QualifiedRegisteredScoreFactory {
+    qualified: bool,
+}
+
+impl trace_commons_server::versioned_pipeline_score_registry::ScorePolicyFactory
+    for QualifiedRegisteredScoreFactory
+{
+    fn dependency_identity(&self) -> &str {
+        "substituted_score_policy_qualified_test_only"
+    }
+
+    fn trace_credit_event(&self) -> PipelineTraceCreditEvent {
+        PipelineTraceCreditEvent::PipelineScore
+    }
+
+    fn build(
+        &self,
+        dependencies: trace_commons_server::versioned_pipeline_score_registry::ScorePolicyDependencies<'_>,
+    ) -> Result<Arc<dyn trace_commons_gate_api::pipeline::ScorePolicy>, &'static str> {
+        let config: CompatibilityBundleConfig = serde_json::from_slice(dependencies.configuration)
+            .map_err(|_| "substituted_configuration_invalid")?;
+        Ok(Arc::new(
+            trace_commons_server::versioned_pipeline_compat::CompatibilityScorePolicy::new(
+                dependencies.manifest.clone(),
+                config,
+                dependencies.scorer,
+                dependencies.embedder,
+                dependencies.index_reader,
+            )
+            .map_err(|_| "substituted_configuration_invalid")?,
+        ))
+    }
+
+    fn production_qualified(&self) -> bool {
+        self.qualified
+    }
+
+    fn configuration_is_qualifiable(&self, configuration: &[u8]) -> bool {
+        serde_json::from_slice::<CompatibilityBundleConfig>(configuration)
+            .is_ok_and(|config| config.is_qualifiable())
+    }
+}
+
+const QUALIFIED_REGISTERED_SCORE_IMPLEMENTATION: &str = "substituted.score.qualified.v1";
+
+/// `qualify_bundle` records a qualification for a package whose Score
+/// policy a registry supplies only through a store given that registry, and
+/// only when the factory declares itself production-qualified; a store with
+/// no registry (the open build) refuses the package as an unknown
+/// implementation, as before.
+#[tokio::test]
+async fn qualify_bundle_accepts_a_registered_score_policy_only_when_qualified() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let scorer = Arc::new(QualifiedProductionScorer(ReferencePerplexityScorer::new()));
+    let embedder = Arc::new(QualifiedProductionEmbedder(ReferenceEmbedder::new()));
+    let mut package = MinimalPolicyBundle::compatibility_package(
+        &production_compatible_config(),
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("production-compatible bundle package builds");
+    package.manifest.score.policy_id = "substituted.score".to_string();
+    package.manifest.score.implementation_id =
+        QUALIFIED_REGISTERED_SCORE_IMPLEMENTATION.to_string();
+    package.bundle_id = package.manifest.bundle_id().unwrap();
+    let registry = |qualified: bool| {
+        trace_commons_server::versioned_pipeline_score_registry::ScorePolicyRegistry::new()
+            .with_factory(
+                QUALIFIED_REGISTERED_SCORE_IMPLEMENTATION,
+                Arc::new(QualifiedRegisteredScoreFactory { qualified }),
+            )
+            .unwrap()
+    };
+    let index = Arc::new(QualifiedProductionIndex(IsolatedPipelineIndex::new()));
+    let service = PipelineServiceBuilder::new(
+        backend.clone(),
+        artifact_store(&dir),
+        package.clone(),
+        index.clone(),
+        index,
+        SettlementAdapterRegistry::new(vec![Arc::new(QualifiedProductionSettlementAdapter {
+            instrument_id: InstrumentId::trace_credit(),
+        }) as Arc<dyn SettlementAdapter>])
+        .unwrap(),
+        PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        },
+    )
+    .with_scorer(scorer)
+    .with_embedder(embedder)
+    .with_authority(Arc::new(QualifiedProductionAuthority))
+    .with_privacy(Arc::new(QualifiedProductionPrivacy))
+    .with_unqualified_routing(true)
+    .with_score_policies(registry(true))
+    .build()
+    .expect("build a pipeline service with the registered Score policy");
+    let profile = ProductionDependencyProfile::for_bundle(
+        &service,
+        &package,
+        all_production_infrastructure(),
+    )
+    .expect("the service resolves the package");
+    assert!(profile.blockers().is_empty(), "{:?}", profile.blockers());
+
+    let random = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&random).unwrap();
+    let signed = sign_bundle_package(package.clone(), "qualification-release-key", pkcs8.as_ref())
+        .expect("package signs");
+    let trust = BundlePackageTrustStore::new([trusted_key_for_pkcs8(
+        "qualification-release-key",
+        pkcs8.as_ref(),
+    )
+    .expect("trusted key builds")])
+    .unwrap();
+    let evidence = evidence_from_check_results(&package, &sha256_prefixed(b"code-revision"), None);
+    let promotion = promotion_now(&evidence);
+    assert!(promotion.ready, "{:?}", promotion.safe_blockers);
+    let metadata = BundleQualificationMetadata {
+        corpus_digest: sha256_prefixed(b"corpus"),
+        input_digest: sha256_prefixed(b"input"),
+        configuration_digest: package_digests(&package).unwrap().configuration_digest,
+        code_revision_hash: sha256_prefixed(b"code-revision"),
+        runtime_dependency_digest: profile.runtime_identity_digest().unwrap(),
+        evidence_hash: promotion.evidence_hash.clone(),
+    };
+    let tenant = format!("qualify-registered-{}", uuid::Uuid::new_v4());
+    let qualify = |store: PipelineQualificationStore| {
+        let (tenant, signed, trust, metadata, profile, evidence) = (
+            tenant.clone(),
+            signed.clone(),
+            trust.clone(),
+            metadata.clone(),
+            profile.clone(),
+            evidence.clone(),
+        );
+        async move {
+            store
+                .qualify_bundle(
+                    &tenant, &signed, &trust, &metadata, &profile, &evidence, None,
+                )
+                .await
+        }
+    };
+    let refused_as = |result: Result<BundleQualificationRecord, DatabaseError>, label: &str| matches!(result, Err(DatabaseError::Constraint(ref refused)) if refused == label);
+
+    assert!(refused_as(
+        qualify(PipelineQualificationStore::new(backend.clone())).await,
+        PACKAGE_IMPLEMENTATION_UNKNOWN_LABEL
+    ));
+    assert!(refused_as(
+        qualify(PipelineQualificationStore::new(backend.clone()).with_score_policies(registry(false)))
+            .await,
+        trace_commons_server::versioned_pipeline_qualification::PACKAGE_SCORE_POLICY_NOT_QUALIFIED_LABEL
+    ));
+    let record = qualify(
+        PipelineQualificationStore::new(backend.clone())
+            .with_score_policies(service.score_policies().clone()),
+    )
+    .await
+    .expect("a qualified registered Score policy's package qualifies");
+    assert_eq!(record.bundle_id, package.bundle_id);
+}
+
+// #1313: a Settle run whose legs are all terminal finishes rather than
+// failing (case (b), N-7 kept); a paid run whose Settle commit is refused for
+// good waits for an operator; and a compatibility Score records the
+// unapplied runs it counted (case (a), bases only). Design:
+// docs/superpowers/specs/2026-10-14-pipeline-duplicate-basis-repair-design.md.
+
+/// A minimal config that awards only `trace_credit`, so the one leg is the
+/// last leg and `AfterInstrumentOperation` fires after it completed.
+fn indexed_trace_credit_only_config() -> PipelineBundleConfig {
+    PipelineBundleConfig {
+        instrument_awards: vec![PipelineInstrumentAwardConfig {
+            instrument_id: InstrumentId::trace_credit().as_str().to_string(),
+            atomic_units: AtomicUnits::from_raw(1_000_000),
+            descriptor: trace_credit_descriptor(),
+        }],
+        include_index: true,
+        variant: None,
+    }
+}
+
+/// Sets `run_id`'s `attempt_count` to `max_attempts - 1`, so its next claim
+/// takes its last attempt.
+async fn spend_all_but_one_attempt(backend: &Arc<PgBackend>, tenant: &str, run_id: uuid::Uuid) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET attempt_count = max_attempts - 1
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// The run's `pipeline_index_invalidations` row count and whether its one
+/// extra Settle attempt was granted (`settle_finish_granted_at`).
+async fn invalidations_and_finish_grant(
+    backend: &Arc<PgBackend>,
+    tenant: &str,
+    run_id: uuid::Uuid,
+) -> (i64, bool) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT (SELECT COUNT(*) FROM pipeline_index_invalidations
+                      WHERE tenant_id = $1 AND run_id = $2),
+                    (SELECT settle_finish_granted_at IS NOT NULL FROM pipeline_runs
+                      WHERE tenant_id = $1 AND run_id = $2)",
+            &[&tenant, &run_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (row.get(0), row.get(1))
+}
+
+/// Drives a `indexed_trace_credit_only_config` run to a crash right after its Trace
+/// Credit leg completed, on its last Settle attempt. Returns the service,
+/// the index, the recording adapters and the leased run.
+async fn crash_after_the_paid_leg_on_the_last_attempt(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    tenant: &str,
+) -> (
+    Arc<PipelineService>,
+    Arc<IsolatedPipelineIndex>,
+    Vec<Arc<RecordingSettlementAdapter>>,
+    PipelineRunRecord,
+) {
+    let (service, index, adapters) = test_service(
+        backend.clone(),
+        artifact_store(dir),
+        indexed_trace_credit_only_config(),
+        Some(PipelineCrashPoint::AfterInstrumentOperation),
+    )
+    .await;
+    let (run, _) = run_to_settle_ready(&service, tenant).await;
+    spend_all_but_one_attempt(backend, tenant, run.run_id).await;
+    let crashed = service
+        .process_run(tenant, run.run_id)
+        .await
+        .expect_err("Settle crashes after the Trace Credit leg");
+    assert_eq!(crashed.to_string(), INJECTED_PIPELINE_CRASH);
+    let leased = service
+        .store()
+        .get_run(tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(leased.state, PipelineRunState::Leased);
+    assert_eq!(leased.attempt_count, leased.max_attempts);
+    let legs = service
+        .store()
+        .list_settlements(tenant, run.run_id)
+        .await
+        .unwrap();
+    assert!(
+        !legs.is_empty()
+            && legs
+                .iter()
+                .all(|leg| leg.operation_state == "complete" && leg.credit_event_id.is_some()),
+        "the Trace Credit leg paid before the crash: {legs:?}"
+    );
+    (service, index, adapters, leased)
+}
+
+/// #1313 (b), the claim sweep: a run whose Trace Credit leg paid, crashed on
+/// its last Settle attempt, is not failed by the sweep. It gets one extra
+/// attempt, which pays nothing again, and ends `complete`, so N-7 never
+/// removes its paid revision from the index.
+#[tokio::test]
+async fn a_paid_settle_run_that_crashes_on_its_last_attempt_completes_and_stays_indexed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("finish-sweep-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (service, index, adapters, leased) =
+        crash_after_the_paid_leg_on_the_last_attempt(&backend, &dir, &tenant).await;
+    let entries = index.entry_count(&tenant_ref, MINIMAL_INDEX_ID);
+    assert!(
+        entries > 0,
+        "the crashed Settle wrote the revision's entries"
+    );
+    let calls_before = adapters[1].requests().len();
+    expire_lease(&backend, &tenant, leased.run_id).await;
+
+    let finished = service
+        .process_one(&tenant)
+        .await
+        .unwrap()
+        .expect("the finishable run is claimed for its extra attempt");
+    assert_eq!(finished.run_id, leased.run_id);
+    assert_eq!(finished.state, PipelineRunState::Complete, "{finished:?}");
+    assert_eq!(finished.next_phase, None);
+    let (invalidations, granted) =
+        invalidations_and_finish_grant(&backend, &tenant, leased.run_id).await;
+    assert_eq!(
+        invalidations, 0,
+        "a completed run's revision is not removed"
+    );
+    assert!(granted, "the extra attempt is recorded");
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), entries);
+    assert_eq!(
+        adapters[1].requests().len(),
+        calls_before,
+        "the extra attempt calls no adapter"
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, leased.run_id).await,
+        1,
+        "the extra attempt writes no second ledger row"
+    );
+    assert!(
+        service
+            .store()
+            .outcome_for_phase(&tenant, leased.run_id, Phase::Settle)
+            .await
+            .unwrap()
+            .is_some(),
+        "the extra attempt committed the Settle outcome"
+    );
+}
+
+/// #1313 (b), `mark_retry`: a charged retry that would exhaust a finishable
+/// Settle run gives it its extra attempt instead of failing it, and that
+/// attempt completes it.
+#[tokio::test]
+async fn a_charged_retry_that_exhausts_a_paid_settle_run_gives_it_one_extra_attempt() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("finish-retry-{}", uuid::Uuid::new_v4());
+    let (service, _, _, leased) =
+        crash_after_the_paid_leg_on_the_last_attempt(&backend, &dir, &tenant).await;
+
+    let retried = service
+        .store()
+        .mark_retry(&leased, PIPELINE_OPERATIONAL_ERROR_LABEL)
+        .await
+        .expect("the charged retry records");
+    assert_eq!(retried.state, PipelineRunState::Retry, "{retried:?}");
+    assert_eq!(retried.attempt_count, retried.max_attempts - 1);
+    let (invalidations, granted) =
+        invalidations_and_finish_grant(&backend, &tenant, leased.run_id).await;
+    assert_eq!(invalidations, 0);
+    assert!(granted);
+
+    let finished = service
+        .process_run(&tenant, leased.run_id)
+        .await
+        .unwrap()
+        .expect("the extra attempt runs");
+    assert_eq!(finished.state, PipelineRunState::Complete, "{finished:?}");
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, leased.run_id).await,
+        1
+    );
+}
+
+/// #1313 (b): the extra attempt is given once. A finishable run charged
+/// again on it fails as before, and N-7 queues its revision's removal.
+#[tokio::test]
+async fn a_finishable_run_charged_again_on_its_extra_attempt_fails_under_n7() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("finish-bounded-{}", uuid::Uuid::new_v4());
+    let (service, _, _, leased) =
+        crash_after_the_paid_leg_on_the_last_attempt(&backend, &dir, &tenant).await;
+    service
+        .store()
+        .mark_retry(&leased, PIPELINE_OPERATIONAL_ERROR_LABEL)
+        .await
+        .expect("the first exhaustion grants the extra attempt");
+    let reclaimed = service
+        .store()
+        .claim_run(&tenant, leased.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the extra attempt is claimable");
+    assert_eq!(reclaimed.attempt_count, reclaimed.max_attempts);
+    let failed = service
+        .store()
+        .mark_retry(&reclaimed, PIPELINE_OPERATIONAL_ERROR_LABEL)
+        .await
+        .expect("the second exhaustion records");
+    assert_eq!(failed.state, PipelineRunState::Failed, "{failed:?}");
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+    );
+    let (invalidations, _) = invalidations_and_finish_grant(&backend, &tenant, leased.run_id).await;
+    assert_eq!(invalidations, 1, "N-7 removes a failed run's revision");
+}
+
+/// #1313, the gap: a run whose Trace Credit leg paid, and whose Settle
+/// commit is then refused for good (another run's pipeline gate decision row
+/// for the submission), is not failed. It waits for an operator in
+/// `awaiting_operator`, keeps its index entries, is marked for a label-only
+/// audit event, and shows on the operational summary. The operator's
+/// `Fail` ends it under N-7.
+#[tokio::test]
+async fn a_paid_run_whose_settle_commit_is_refused_waits_for_an_operator() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let tenant = format!("operator-held-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let run_id = receive_envelope(&service, &tenant, "principal_sha256:operator-held", &env).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    let other_run = uuid::Uuid::new_v4();
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        tx.execute(
+            "INSERT INTO trace_gate_decisions (
+                 tenant_id, decision_id, submission_id, gate_policy_version,
+                 gate_version_hash, perplexity_micros, tail_fraction_micros,
+                 perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                 novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+                 source, pipeline_run_id
+             ) VALUES ($1,$2,$3,'v','h',1,0,true,1,'n',true,'e','a','pipeline_settle',$4)",
+            &[
+                &tenant,
+                &expected_pipeline_decision_id(&tenant, other_run),
+                &env.submission_id,
+                &other_run,
+            ],
+        )
+        .await
+        .expect("another run's pipeline row");
+        tx.commit().await.unwrap();
+    }
+
+    let held = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(held.state, PipelineRunState::AwaitingOperator, "{held:?}");
+    assert_eq!(held.next_phase, Some(Phase::Settle));
+    assert_eq!(
+        held.last_error_label.as_deref(),
+        Some(PIPELINE_GATE_DECISION_CONFLICT_LABEL)
+    );
+    assert_eq!(
+        count_novelty_utility_rows_for_run(&backend, &tenant, run_id).await,
+        1
+    );
+    let (invalidations, _) = invalidations_and_finish_grant(&backend, &tenant, run_id).await;
+    assert_eq!(invalidations, 0, "the paid revision stays in the index");
+    assert_eq!(index.revision_count(&tenant_ref, MINIMAL_INDEX_ID), 1);
+
+    let audits = service
+        .store()
+        .list_pending_review_audits(&tenant, 10)
+        .await
+        .unwrap();
+    let audit = audits
+        .iter()
+        .find(|item| item.run_id == run_id)
+        .expect("the hold is marked for its audit event");
+    assert!(audit.settle_held_for_operator_at.is_some(), "{audit:?}");
+
+    let summary = PipelineProductStore::new(backend.clone())
+        .operational_summary(&tenant)
+        .await
+        .unwrap();
+    assert_eq!(summary.operator_held_run_count, 1);
+    assert!(
+        summary
+            .work
+            .iter()
+            .any(|item| item.state == "awaiting_operator"
+                && item.reason_label.as_deref() == Some(PIPELINE_GATE_DECISION_CONFLICT_LABEL)),
+        "{:?}",
+        summary.work
+    );
+    assert!(
+        service.process_one(&tenant).await.unwrap().is_none(),
+        "no claim selects a held run"
+    );
+
+    let resolved = service
+        .store()
+        .resolve_operator_held_run(&tenant, run_id, PipelineOperatorHeldRunResolution::Fail)
+        .await
+        .unwrap()
+        .expect("the held run resolves");
+    assert_eq!(resolved.state, PipelineRunState::Failed);
+    let (invalidations, _) = invalidations_and_finish_grant(&backend, &tenant, run_id).await;
+    assert_eq!(invalidations, 1, "an operator's failure applies N-7");
+    assert!(
+        service
+            .store()
+            .resolve_operator_held_run(&tenant, run_id, PipelineOperatorHeldRunResolution::Fail)
+            .await
+            .unwrap()
+            .is_none(),
+        "a run no longer held is left alone"
+    );
+}
+
+/// #1313, the gap, operator `Release`: the held run gets one more attempt,
+/// which completes it once the conflicting row is gone, with no second
+/// payment.
+#[tokio::test]
+async fn an_operator_released_held_run_completes_without_paying_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let tenant = format!("operator-release-{}", uuid::Uuid::new_v4());
+    let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let run_id =
+        receive_envelope(&service, &tenant, "principal_sha256:operator-release", &env).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    let other_run = uuid::Uuid::new_v4();
+    let decision_id = expected_pipeline_decision_id(&tenant, other_run);
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        tx.execute(
+            "INSERT INTO trace_gate_decisions (
+                 tenant_id, decision_id, submission_id, gate_policy_version,
+                 gate_version_hash, perplexity_micros, tail_fraction_micros,
+                 perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                 novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+                 source, pipeline_run_id
+             ) VALUES ($1,$2,$3,'v','h',1,0,true,1,'n',true,'e','a','pipeline_settle',$4)",
+            &[&tenant, &decision_id, &env.submission_id, &other_run],
+        )
+        .await
+        .expect("another run's pipeline row");
+        tx.commit().await.unwrap();
+    }
+    let held = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(held.state, PipelineRunState::AwaitingOperator, "{held:?}");
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        tx.execute(
+            "DELETE FROM trace_gate_decisions WHERE tenant_id = $1 AND decision_id = $2",
+            &[&tenant, &decision_id],
+        )
+        .await
+        .expect("the operator removes the conflicting row");
+        tx.commit().await.unwrap();
+    }
+    let released = service
+        .store()
+        .resolve_operator_held_run(&tenant, run_id, PipelineOperatorHeldRunResolution::Release)
+        .await
+        .unwrap()
+        .expect("the held run resolves");
+    assert_eq!(released.state, PipelineRunState::Retry, "{released:?}");
+    let finished = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the released run runs");
+    assert_eq!(finished.state, PipelineRunState::Complete, "{finished:?}");
+    assert_eq!(
+        count_novelty_utility_rows_for_run(&backend, &tenant, run_id).await,
+        1,
+        "no second payment"
+    );
+}
+
+/// #1313 (a), bases only: a Score judged a near-duplicate of a run whose
+/// command Settle has not applied records that run as its basis; the first,
+/// novel Score records none.
+#[tokio::test]
+async fn a_near_duplicate_score_records_the_unapplied_run_it_counted() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        IsolatedPipelineIndex::new(),
+    )
+    .await;
+    let (tenant, first, second) = identical_receipts().await;
+    let principal = "principal_sha256:score-bases";
+    let first_run = receive_envelope(&service, &tenant, principal, &first).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, first_run)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    let second_run = receive_envelope(&service, &tenant, principal, &second).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, second_run)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("the second run's {phase} runs"));
+    }
+    let first_record = service
+        .store()
+        .get_run(&tenant, first_run)
+        .await
+        .unwrap()
+        .expect("the first run");
+    assert_eq!(
+        service
+            .store()
+            .list_score_bases(&tenant, second_run)
+            .await
+            .unwrap(),
+        vec![(
+            first_run,
+            first_record
+                .approved_revision_id
+                .expect("approved revision")
+        )]
+    );
+    assert!(
+        service
+            .store()
+            .list_score_bases(&tenant, first_run)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a novel Score records no basis"
+    );
+    assert_eq!(count_tenant_rows(&tenant, "pipeline_score_bases").await, 1);
+}
+
+/// Drives a compatibility run through Review and Score, writes another run's
+/// pipeline gate decision row for its submission, and runs Settle: the Trace
+/// Credit leg pays, the commit is refused (`pipeline_gate_decision_conflict`)
+/// and the run is held for an operator. Returns the service, the index, the
+/// run id and the conflicting row's decision id.
+async fn hold_a_paid_run_for_an_operator(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    tenant: &str,
+) -> (
+    Arc<PipelineService>,
+    Arc<IsolatedPipelineIndex>,
+    uuid::Uuid,
+    uuid::Uuid,
+) {
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(dir),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        index.clone(),
+    )
+    .await;
+    let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let run_id = receive_envelope(&service, tenant, "principal_sha256:operator-hold", &env).await;
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(tenant, run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    let other_run = uuid::Uuid::new_v4();
+    let decision_id = expected_pipeline_decision_id(tenant, other_run);
+    {
+        let mut owner = owner_client().await;
+        let tx = owner_tenant_tx(&mut owner, tenant).await;
+        tx.execute(
+            "INSERT INTO trace_gate_decisions (
+                 tenant_id, decision_id, submission_id, gate_policy_version,
+                 gate_version_hash, perplexity_micros, tail_fraction_micros,
+                 perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                 novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+                 source, pipeline_run_id
+             ) VALUES ($1,$2,$3,'v','h',1,0,true,1,'n',true,'e','a','pipeline_settle',$4)",
+            &[&tenant, &decision_id, &env.submission_id, &other_run],
+        )
+        .await
+        .expect("another run's pipeline row");
+        tx.commit().await.unwrap();
+    }
+    let held = service
+        .process_run(tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(held.state, PipelineRunState::AwaitingOperator, "{held:?}");
+    (service, index, run_id, decision_id)
+}
+
+/// Whether the run's V128 `operator_held_at` is set.
+async fn operator_held_at(
+    backend: &Arc<PgBackend>,
+    tenant: &str,
+    run_id: uuid::Uuid,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT operator_held_at FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &run_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    row.get(0)
+}
+
+/// #1413 review: a released run whose attempt crashes is held for the
+/// operator again when the claim sweep finds its lease expired. It is not
+/// failed, so N-7 leaves its paid revision in the index, and the new hold is
+/// marked for its own audit event.
+#[tokio::test]
+async fn a_released_run_whose_attempt_crashes_is_held_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("release-crash-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (service, index, run_id, _) =
+        hold_a_paid_run_for_an_operator(&backend, &dir, &tenant).await;
+    let first_hold = operator_held_at(&backend, &tenant, run_id)
+        .await
+        .expect("the hold is recorded");
+    service
+        .store()
+        .resolve_operator_held_run(&tenant, run_id, PipelineOperatorHeldRunResolution::Release)
+        .await
+        .unwrap()
+        .expect("the held run resolves");
+    let claimed = service
+        .store()
+        .claim_run(&tenant, run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the released attempt is claimable");
+    assert_eq!(claimed.attempt_count, claimed.max_attempts);
+    // The worker dies here: the lease runs out with no outcome recorded.
+    expire_lease(&backend, &tenant, run_id).await;
+
+    assert!(
+        service.process_one(&tenant).await.unwrap().is_none(),
+        "the sweep holds the run; no claim selects it"
+    );
+    let swept = service
+        .store()
+        .get_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(swept.state, PipelineRunState::AwaitingOperator, "{swept:?}");
+    assert_eq!(
+        swept.last_error_label.as_deref(),
+        Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+    );
+    let (invalidations, _) = invalidations_and_finish_grant(&backend, &tenant, run_id).await;
+    assert_eq!(invalidations, 0, "the paid revision stays in the index");
+    assert_eq!(index.revision_count(&tenant_ref, MINIMAL_INDEX_ID), 1);
+    let second_hold = operator_held_at(&backend, &tenant, run_id)
+        .await
+        .expect("the new hold is recorded");
+    assert!(second_hold > first_hold, "{second_hold} > {first_hold}");
+    let audits = service
+        .store()
+        .list_pending_review_audits(&tenant, 10)
+        .await
+        .unwrap();
+    let audit = audits
+        .iter()
+        .find(|item| item.run_id == run_id)
+        .expect("the new hold is marked for its audit event");
+    assert_eq!(audit.settle_held_for_operator_at, Some(second_hold));
+}
+
+/// #1413 review: a released run whose attempt ends in a charged retry is
+/// held for the operator again rather than failed under N-7.
+#[tokio::test]
+async fn a_released_run_charged_on_its_attempt_is_held_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("release-retry-{}", uuid::Uuid::new_v4());
+    let (service, _, run_id, _) = hold_a_paid_run_for_an_operator(&backend, &dir, &tenant).await;
+    service
+        .store()
+        .resolve_operator_held_run(&tenant, run_id, PipelineOperatorHeldRunResolution::Release)
+        .await
+        .unwrap()
+        .expect("the held run resolves");
+    let claimed = service
+        .store()
+        .claim_run(&tenant, run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the released attempt is claimable");
+    let retried = service
+        .store()
+        .mark_retry(&claimed, PIPELINE_OPERATIONAL_ERROR_LABEL)
+        .await
+        .expect("the charged retry records");
+    assert_eq!(
+        retried.state,
+        PipelineRunState::AwaitingOperator,
+        "{retried:?}"
+    );
+    let (invalidations, _) = invalidations_and_finish_grant(&backend, &tenant, run_id).await;
+    assert_eq!(invalidations, 0, "the paid revision stays in the index");
+}
+
+/// #1413 review: the hold also covers a paid run whose commit is refused as
+/// `pipeline_gate_decision_evidence_incomplete`, not only as a conflict.
+#[tokio::test]
+async fn a_paid_run_refused_for_incomplete_evidence_waits_for_an_operator() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("held-incomplete-{}", uuid::Uuid::new_v4());
+    let (service, _, _, leased) =
+        crash_after_the_paid_leg_on_the_last_attempt(&backend, &dir, &tenant).await;
+    service
+        .store()
+        .mark_failed(&leased, PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL)
+        .await
+        .expect("the refusal records");
+    let held = service
+        .store()
+        .get_run(&tenant, leased.run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(held.state, PipelineRunState::AwaitingOperator, "{held:?}");
+    assert!(
+        operator_held_at(&backend, &tenant, leased.run_id)
+            .await
+            .is_some()
+    );
+    let (invalidations, _) = invalidations_and_finish_grant(&backend, &tenant, leased.run_id).await;
+    assert_eq!(invalidations, 0);
+}
+
+/// #1413 review: a leg paid through an adapter other than Trace Credit (a
+/// receipt, with no ledger event and, here, no external receipt hash) counts
+/// as paid for the hold.
+#[tokio::test]
+async fn a_run_paid_by_another_adapter_waits_for_an_operator() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = format!("held-external-{}", uuid::Uuid::new_v4());
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        PipelineBundleConfig {
+            instrument_awards: vec![PipelineInstrumentAwardConfig {
+                instrument_id: "storage_rebate".into(),
+                atomic_units: AtomicUnits::from_raw(7),
+                descriptor: storage_rebate_descriptor(),
+            }],
+            include_index: true,
+            variant: None,
+        },
+        Some(PipelineCrashPoint::AfterInstrumentOperation),
+    )
+    .await;
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let crashed = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .expect_err("Settle crashes after the external leg");
+    assert_eq!(crashed.to_string(), INJECTED_PIPELINE_CRASH);
+    let leased = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    let legs = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert!(
+        !legs.is_empty()
+            && legs.iter().all(|leg| leg.operation_state == "complete"
+                && leg.credit_event_id.is_none()
+                && leg.result_ref_hash.is_some()),
+        "the leg paid with a receipt before the crash: {legs:?}"
+    );
+    service
+        .store()
+        .mark_failed(&leased, PIPELINE_GATE_DECISION_CONFLICT_LABEL)
+        .await
+        .expect("the refusal records");
+    let held = service
+        .store()
+        .get_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+    assert_eq!(held.state, PipelineRunState::AwaitingOperator, "{held:?}");
 }

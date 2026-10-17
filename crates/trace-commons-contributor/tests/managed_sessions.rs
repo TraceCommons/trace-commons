@@ -4,6 +4,51 @@ use trace_commons_contributor::{
     daemon::ipc::{DaemonShared, Request, handle_request},
 };
 
+// Each IPC launch test runs in a child with version-only executable fixtures on PATH.
+// This exercises discovery without requiring installed tools or changing the
+// parent test process environment while other tests are running.
+fn native_fixture_child(test: &str) -> bool {
+    if std::env::var("TRACE_MANAGED_TEST_CHILD").as_deref() == Ok(test) {
+        return false;
+    }
+    static BIN: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let bin = BIN.get_or_init(|| {
+        let bin = tempfile::tempdir().unwrap();
+        let source = bin.path().join("fixture.rs");
+        std::fs::write(&source, r#"fn main() {
+            if std::env::var("TRACE_MANAGED_FIXTURE_BAD_VERSION").as_deref() == Ok("true") { println!("0.0.0"); return; }
+            let exe = std::env::current_exe().unwrap();
+            let name = exe.file_stem().unwrap().to_str().unwrap();
+            println!("{}", match name { "claude" => "2.1.289", "codex" => "0.160.0", _ => "1.19.0" });
+        }"#).unwrap();
+        let status = std::process::Command::new("rustc")
+            .arg(&source).arg("-o").arg(bin.path().join(if cfg!(windows) { "fixture-native.exe" } else { "fixture-native" }))
+            .status().unwrap();
+        assert!(status.success());
+    for tool in ["claude", "codex", "opencode"] {
+        let path = bin.path().join(if cfg!(windows) {
+            format!("{tool}.exe")
+        } else {
+            tool.into()
+        });
+        std::fs::copy(bin.path().join(if cfg!(windows) { "fixture-native.exe" } else { "fixture-native" }), path).unwrap();
+    }
+        bin
+    });
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env("TRACE_MANAGED_TEST_CHILD", test)
+        .env(
+            "TRACE_MANAGED_FIXTURE_BAD_VERSION",
+            (test == "unsupported_version_refuses_ticket_and_preserves_account").to_string(),
+        )
+        .env("PATH", bin.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "fixture child failed: {test}");
+    true
+}
+
 fn call(daemon: &DaemonShared, method: &str, params: Value) -> Value {
     let response = handle_request(
         daemon,
@@ -19,6 +64,11 @@ fn call(daemon: &DaemonShared, method: &str, params: Value) -> Value {
 
 #[test]
 fn cli_preparation_is_visible_in_snapshot_and_duplicate_request_creates_one_session() {
+    if native_fixture_child(
+        "cli_preparation_is_visible_in_snapshot_and_duplicate_request_creates_one_session",
+    ) {
+        return;
+    }
     let home = tempfile::tempdir().unwrap();
     let daemon = DaemonShared::load(ConfigStore::open(home.path().to_path_buf()).unwrap()).unwrap();
     let account = call(
@@ -34,6 +84,24 @@ fn cli_preparation_is_visible_in_snapshot_and_duplicate_request_creates_one_sess
     assert_eq!(snapshot["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(snapshot["sessions"][0]["state"], "starting");
     assert_eq!(snapshot["sessions"][0]["account_label"], "Personal");
+    let map = call(&daemon, "tool_destinations", json!({}));
+    assert_eq!(
+        map["managed_sessions"],
+        json!([{
+            "id": prepared["session_id"], "tool": "claude", "connection": "subscription",
+            "provider": "anthropic", "model": null, "collection_state": "off", "state": "starting"
+        }])
+    );
+    assert_eq!(map["managed_copy"], snapshot["copy"]);
+    let opencode = map["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["tool"] == "opencode")
+        .unwrap();
+    assert_eq!(opencode["installed"], true);
+    assert_eq!(opencode["model_calls"]["to"], "unknown");
+    assert_ne!(opencode["sessions"]["watch"], "watched");
     assert!(
         !snapshot
             .to_string()
@@ -57,6 +125,11 @@ fn cli_preparation_is_visible_in_snapshot_and_duplicate_request_creates_one_sess
 
 #[test]
 fn ticket_is_single_use_wrong_helper_cannot_report_and_restart_retains_account() {
+    if native_fixture_child(
+        "ticket_is_single_use_wrong_helper_cannot_report_and_restart_retains_account",
+    ) {
+        return;
+    }
     let home = tempfile::tempdir().unwrap();
     let daemon = DaemonShared::load(ConfigStore::open(home.path().to_path_buf()).unwrap()).unwrap();
     let account = call(
@@ -130,6 +203,11 @@ fn ticket_is_single_use_wrong_helper_cannot_report_and_restart_retains_account()
 
 #[test]
 fn native_login_locks_its_profile_without_changing_other_accounts_or_defaults() {
+    if native_fixture_child(
+        "native_login_locks_its_profile_without_changing_other_accounts_or_defaults",
+    ) {
+        return;
+    }
     let home = tempfile::tempdir().unwrap();
     let daemon = DaemonShared::load(ConfigStore::open(home.path().to_path_buf()).unwrap()).unwrap();
     let a = call(
@@ -150,6 +228,10 @@ fn native_login_locks_its_profile_without_changing_other_accounts_or_defaults() 
     assert!(launch["ticket"].is_string());
     let snapshot = call(&daemon, "managed_snapshot", json!({}));
     assert_eq!(snapshot["sessions"][0]["purpose"], "login");
+    assert_eq!(
+        call(&daemon, "tool_destinations", json!({}))["managed_sessions"],
+        json!([])
+    );
     assert!(snapshot["defaults"].as_array().unwrap().is_empty());
     assert!(
         handle_request(
@@ -173,6 +255,9 @@ fn native_login_locks_its_profile_without_changing_other_accounts_or_defaults() 
 
 #[test]
 fn native_exit_receipt_reconciles_after_daemon_downtime() {
+    if native_fixture_child("native_exit_receipt_reconciles_after_daemon_downtime") {
+        return;
+    }
     use trace_commons_contributor::managed::sessions::{
         LifecycleReport, SessionState, persist_exit,
     };
@@ -239,6 +324,9 @@ fn native_shell_fixture_uses_the_shared_rust_copy() {
 
 #[test]
 fn dismissing_a_row_does_not_make_its_launch_request_replayable() {
+    if native_fixture_child("dismissing_a_row_does_not_make_its_launch_request_replayable") {
+        return;
+    }
     let home = tempfile::tempdir().unwrap();
     let daemon = DaemonShared::load(ConfigStore::open(home.path().into()).unwrap()).unwrap();
     let a = call(
@@ -270,4 +358,42 @@ fn dismissing_a_row_does_not_make_its_launch_request_replayable() {
         call(&daemon, "managed_snapshot", json!({}))["sessions"],
         json!([])
     );
+}
+
+#[test]
+fn unsupported_version_refuses_ticket_and_preserves_account() {
+    if native_fixture_child("unsupported_version_refuses_ticket_and_preserves_account") {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let daemon = DaemonShared::load(ConfigStore::open(home.path().to_path_buf()).unwrap()).unwrap();
+    let account = call(
+        &daemon,
+        "managed_account_add",
+        json!({"tool":"claude", "connection":"subscription", "label":"Personal"}),
+    );
+    for (method, params) in [
+        (
+            "managed_launch_prepare",
+            json!({"request_id":uuid::Uuid::new_v4(),"tool":"claude","connection":"subscription","account_id":account["id"],"cwd":home.path(),"expected_generation":0,"save_default":false}),
+        ),
+        (
+            "managed_account_reconnect",
+            json!({"account_id":account["id"]}),
+        ),
+    ] {
+        let result = handle_request(
+            &daemon,
+            &Request {
+                id: 1,
+                method: method.into(),
+                params,
+            },
+        );
+        assert_eq!(result.error.unwrap().code, "managed-unsupported-version");
+    }
+    let snapshot = call(&daemon, "managed_snapshot", json!({}));
+    assert_eq!(snapshot["sessions"], json!([]));
+    assert_eq!(snapshot["accounts"][0], account);
+    assert_eq!(snapshot["tools"][0]["installed"], true);
 }

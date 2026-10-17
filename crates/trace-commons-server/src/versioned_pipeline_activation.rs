@@ -2449,6 +2449,7 @@ mod tests {
             failed_invalidation_count: 0,
             incomplete_export_count: 0,
             suspended_policy_count: 0,
+            operator_held_run_count: 0,
             tenant_isolation_control_passed: true,
             audit_immutability_control_passed: true,
         };

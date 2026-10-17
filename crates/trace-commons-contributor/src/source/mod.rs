@@ -454,6 +454,20 @@ pub trait TraceSource: Send + Sync {
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>>;
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript>;
 
+    /// Discovery that opens no transcript, for the settlement estimate,
+    /// which must resolve a folder's Never mode before it reads any of that
+    /// folder's traces. A ref it returns carries a `cwd` only when the
+    /// source knows it without reading transcript bytes (a sidecar, a
+    /// directory name, a metadata row); otherwise `cwd` is `None` and the
+    /// caller treats the project as unknown.
+    ///
+    /// Fails closed: the default finds nothing, so a source whose
+    /// `discover` reads transcripts is never reached through here until it
+    /// says how to discover without doing so.
+    fn discover_unopened(&self) -> anyhow::Result<Vec<SessionRef>> {
+        Ok(Vec::new())
+    }
+
     /// Which session, if any, a changed filesystem path belongs to.
     ///
     /// Event-driven watching learns that *a path* moved and has to turn
@@ -929,6 +943,13 @@ impl SourceRoots {
     /// Whether this source has been asked about at all.
     pub fn is_declared(&self, name: &str) -> bool {
         self.declared.contains_key(name)
+    }
+
+    /// Whether the contributor declared this source `Off`: an explicit "do
+    /// not read", which every caller that widens the declared set (the
+    /// settlement estimate's conventional roots) must still honour.
+    pub fn is_off(&self, name: &str) -> bool {
+        matches!(self.declared.get(name), Some(SourceDeclaration::Off))
     }
 
     /// The trajectory scope this root set carries.

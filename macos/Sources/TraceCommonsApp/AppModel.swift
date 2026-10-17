@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
     /// The copy key of the last failed managed action (`ManagedSurface.errorKey`),
     /// never the daemon's code.
     @Published var managedErrorKey: String?
+    @Published var managedErrorTool: String?
     /// The last copy table the daemon sent, kept when a later read fails so
     /// the connecting and failure states still have their words.
     private var managedCopy: [String: String] = [:]
@@ -31,10 +32,20 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The terminal app managed sessions open in, by the id the daemon
+    /// offered in `capabilities.terminal_choices`. The daemon refuses any
+    /// other value; the snapshot is re-read after the write.
+    func setManagedTerminal(_ id: String) {
+        managedAction("set_managed_terminal", params: ["terminal": id])
+    }
+
     func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil) {
         guard let client, !managedBusy else { return }
         managedBusy = true
         managedErrorKey = nil
+        managedErrorTool = nil
+        let attemptedTool = params["tool"] as? String
+            ?? managedSnapshot?.accounts.first(where: { $0.id == (params["account_id"] as? String) })?.tool
         Task.detached(priority: .userInitiated) {
             let result = Result {
                 var response = try client.managedAction(method, params: params)
@@ -58,6 +69,7 @@ final class AppModel: ObservableObject {
                 if case .failure(let error) = result {
                     let failure = error as? DaemonClient.Failure
                     self.managedErrorKey = ManagedSurface.errorKey(code: failure?.code, message: failure?.message)
+                    self.managedErrorTool = attemptedTool
                 }
                 self.refreshManagedSessions()
             }
@@ -238,6 +250,10 @@ final class AppModel: ObservableObject {
     /// is also a reason this answer might have.
     @Published private(set) var armingOffer: ArmingOffer?
     @Published private(set) var consentScopes: [ConsentScope] = []
+    /// Whether missions are shown anywhere (`missions_enabled`); off until
+    /// the daemon says so, and off before its settings have arrived.
+    var missionsShown: Bool { daemonSettings?.missionsShown ?? false }
+
     @Published private(set) var daemonSettings: DaemonSettingsView? {
         // A settings write can change what leaves this machine -- inference
         // evidence adds or removes the prompt-and-reply line, a filter change
@@ -622,9 +638,10 @@ final class AppModel: ObservableObject {
     /// The ceremony this shell started, while it is still going.
     ///
     /// Kept because `browser_url` is served ONCE, by start, and no poll
-    /// re-serves it -- and because cancel requires the attempt id, which is
-    /// also only ever handed over here. Dropped when the ceremony leaves the
-    /// state that has something to cancel.
+    /// re-serves it -- and so a cancel can name the attempt this shell
+    /// started. Not required for one: the daemon accepts an unnamed cancel
+    /// and stops whatever sign-in it is running. Dropped when the ceremony
+    /// leaves the state that has something to cancel.
     @Published private(set) var credentialAttempt: CredentialAttempt?
 
     /// The attempt the first run's near.ai login is waiting on, kept apart

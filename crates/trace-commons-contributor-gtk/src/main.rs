@@ -74,6 +74,13 @@ fn main() -> anyhow::Result<()> {
             .map(Some)?,
         None => None,
     };
+    // The daemon's `missions_enabled` switch, read once from its settings
+    // file before any window, tray or accelerator exists: all of them list
+    // screens from `ui::screens()`, and the default launch window has no
+    // daemon to ask. Off unless the file says `true`; nothing is created.
+    ui::set_missions_shown(ui::read_missions_shown(
+        &dir.clone().unwrap_or_else(ui::peek_state_dir),
+    ));
 
     // The `x-scheme-handler/tracecommons` registration in the desktop entry
     // launches us with the URL as an argument, so an invite clicked in mail
@@ -155,7 +162,7 @@ fn connect_local_startup(
         let dir = dir.clone();
         let next_drivers = drivers.clone();
         let startup = startup.clone();
-        ui::insights::present_local(application, move || {
+        ui::insights::present_local(application, ui::missions_shown(), move || {
             let dir = match dir
                 .clone()
                 .map(Ok)

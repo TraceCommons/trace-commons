@@ -410,6 +410,18 @@ tc_handle*  tc_daemon_attach(const char* config_dir, char** err);
  */
 char*       tc_discover_sources(void);
 
+/* Installed coding tools [{tool, installed, install_url}] for Claude Code,
+ * Codex and OpenCode, and the shared managed-session copy. Read-only metadata
+ * discovery, no daemon or subprocess. No trace access or contribution consent
+ * is implied. tc_install_guides_json is {source slug: https url}, each coding
+ * tool's setup guide: the one table first run and managed sessions read.
+ * All return owned JSON; tc_string_free. Returns NULL on failure;
+ * tc_last_error describes the error.
+ */
+char*       tc_managed_tools_json(void);
+char*       tc_managed_copy_json(void);
+char*       tc_install_guides_json(void);
+
 /* Describe a folder the contributor has already named as their OpenCode
  * export directory, so a Customize screen can say "N sessions found" for
  * the folder they just picked rather than trusting the folder name alone.
@@ -2190,10 +2202,12 @@ char*       tc_insights_copy_json(void);
 char*       tc_nudge_copy_json(void);
 /* A Traces row's tags, worded by the core from the row's own list_pending
  * fields. entry_json is a borrowed UTF-8 JSON object carrying the entry's
- * mission_fit and credit_estimate as the daemon sent them. Returns an owned
- * JSON object with mission_fit, estimate_band, estimate_tier and
- * estimate_explainer, each present only when there is something true to
- * draw: the mission tag above zero, the estimate only while drawn is true.
+ * mission_fit and settlement_estimate as the daemon sent them (the band is
+ * inference dollars; the older credit_estimate points band is ignored).
+ * Returns an owned JSON object with mission_fit, estimate_band,
+ * estimate_tier and estimate_explainer, each present only when there is
+ * something true to draw: the mission tag above zero, the estimate only
+ * while drawn is true.
  * NULL, unreadable or mistyped input answers {}, which draws nothing. Free
  * with tc_string_free. Returns NULL only after a caught panic. DRAFT, NEEDS
  * APPROVAL. */

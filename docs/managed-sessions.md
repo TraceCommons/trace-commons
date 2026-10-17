@@ -30,6 +30,13 @@ near-ai sessions list
 
 CLI launches use the current terminal or multiplexer pane. All managed launches,
 including those initiated from the CLI, appear in the app's managed-session list.
+A session the app opened in Terminal can be shown (its tab brought to the
+front) and stopped from its row; a CLI launch cannot, because the app neither
+opened its window nor started its launcher. An ended session can be started
+again in the same folder with the same account while both still exist.
+Stop signals only the tool process the launcher supervises: SIGTERM, then
+SIGKILL after a bounded wait. Processes the tool itself started (a shell
+command, a dev server) are not signalled and can outlive it.
 Standard sessions and multiple managed accounts can run in parallel.
 
 For an API key, supply it through stdin using a secret-manager pipe, rather than
@@ -47,13 +54,43 @@ an explicit new selection before a CLI launch without `--account`.
 
 ## Availability and recovery
 
+The app checks for executable Claude Code, Codex and OpenCode installations
+using the same resolver as managed launches. This does not run the tool, scan
+its session store, or enable watching, importing or collection. **Install** opens
+the tool's official installation page; **Check again** refreshes availability.
+Removing a tool leaves its saved accounts and session history intact. The
+desktop screens do not offer a launch or sign-in for a tool the resolver cannot
+find. On an explicit launch or sign-in request, an executable the daemon finds
+is version-checked before a ticket is created, with a ten-second probe deadline;
+the helper resolves and checks the tool again where it runs, before starting
+it. A CLI launch is not refused because the daemon cannot see a tool that is on
+the launching terminal's PATH: the helper's check decides.
+
+The additive `managed_snapshot.tools` array contains `tool`, `installed` and
+`install_url`. The read-only `tc_managed_tools_json` FFI export returns that same
+array before daemon startup; `tc_managed_copy_json` provides its shared wording.
+`tool_destinations` includes `managed_copy` and a separate `managed_sessions`
+projection containing `id`, `tool`, `connection`, `provider`, `model`,
+`collection_state` and `state`. It excludes sign-in sessions, paths, account
+labels and native session identifiers. An unreadable registry yields null rather
+than an empty history. Collection states are `off`, `pending`, `collected` and
+`failed`; provider labels are `near_ai`, `anthropic` and `openai`. These session
+routes do not change the standard harness route or claim observed model calls.
+Map tool rows expose `installed` for the three managed tools and null for other
+tools whose executable availability is not checked.
+
+
 - Supported native adapter versions begin at Claude Code 2.1.289 (major 2) and
   Codex 0.160.0 (major 0). Older or unrecognized versions are refused before
   login, logout, or managed use.
-- App terminal adapters target Terminal on macOS, Windows Terminal when found,
-  and `x-terminal-emulator` on an unsandboxed Linux installation. The packaged
-  `near-ai` helper must be present. Flatpak host-terminal launching is unavailable;
-  it requires an explicit host bridge. No terminal-focus operation is advertised.
+- On Windows, discovery requires the native `.exe` on PATH. npm `.cmd` wrappers
+  are not executed by this resolver; an installed wrapper alone is unavailable.
+- App sessions open in the terminal chosen at Settings > Private AI > **Open
+  sessions in** (see "Terminal choice" below). The packaged `near-ai` helper
+  must be present. Flatpak host-terminal launching is unavailable; it requires
+  an explicit host bridge, so under Flatpak the picker offers nothing and is
+  not drawn. Show brings a session's Terminal tab to the front on macOS; a
+  session opened in another terminal app cannot be shown.
 - Each NEAR AI session owns an isolated IronWire proxy and key. It waits for
   NEAR's model catalogue and pins its own proxy to the first advertised model.
   It never changes the standard proxy or falls back to another provider/account.
@@ -73,6 +110,75 @@ No real subscription sign-in or provider-key validation is performed by the
 fixture test suite. Native sign-in and external-terminal behavior must also be
 smoke-tested on each release platform.
 
+## Terminal choice
+
+Decided in #1406 (design owner, 2026-10-14): the choice lives in Settings >
+Private AI on every shell, the Start buttons are unchanged, and Windows and
+Linux get the same choice as macOS, as an exception to the #1173 D13 freeze.
+
+**The test.** A terminal is offered only if it accepts both a command and a
+working directory from its scripting interface or command line, documented
+by its vendor. On Windows and Linux the command reaches it as an argv vector:
+the folder, the helper's path, the config folder and the ticket are each one
+argument and no shell parses them. On macOS the command is one escaped
+AppleScript string literal in a fixed template, and the helper starts the
+tool in the session's folder itself.
+
+The settings key is `managed_terminal`; a daemon refuses another platform's
+id. The default is what shipped before the choice: Terminal on macOS and
+Windows Terminal on Windows. Linux shipped `x-terminal-emulator`, which fails
+the test, so the Linux default is GNOME Terminal; on a computer without it a
+launch is refused with "{terminal} wasn't found on this computer. Choose
+another in Settings." until another is chosen.
+
+| Platform | Terminal | id | How the command and folder reach it | Evidence |
+| --- | --- | --- | --- | --- |
+| macOS | Terminal | `terminal` | AppleScript `do script`, addressed by bundle id `com.apple.Terminal` | the launch shipped before the choice |
+| macOS | Ghostty | `ghostty` | AppleScript `new surface configuration`, `command`, `wait after command` | Ghostty AppleScript dictionary |
+| macOS | iTerm2 | `iterm2` | AppleScript `create window with default profile command` | iTerm2 AppleScript dictionary |
+| Windows | Windows Terminal | `windows_terminal` | `wt.exe new-tab --title "NEAR AI" -d <folder> <helper> <args>` | `new-tab --startingDirectory, -d` and `commandline` ("Executable with optional arguments"), <https://learn.microsoft.com/en-us/windows/terminal/command-line-arguments> |
+| Linux | GNOME Terminal | `gnome_terminal` | `gnome-terminal --working-directory=<folder> -- <helper> <args>` | `--working-directory=DIRNAME` "Set the terminal's working directory"; `--` is what the deprecated `-x, --execute` entry ("interpret all subsequent options as a program and arguments") says to use instead (`-e` is deprecated too), gnome-terminal(1), <https://manpages.debian.org/testing/gnome-terminal/gnome-terminal.1.en.html> |
+| Linux | Konsole | `konsole` | `konsole --workdir <folder> --hold -e <helper> <args>` | `--workdir dir` "Open with dir as the initial working directory"; `-e` "will catch all following arguments ... and execute it as command"; `--hold` "Do not close the initial session automatically when it ends", <https://docs.kde.org/stable_kf6/en/konsole/konsole/command-line-options.html> |
+| Linux | Ghostty | `ghostty` | `ghostty --working-directory=<folder> --wait-after-command=true -e <helper> <args>` | "Every configuration key is a valid CLI flag", <https://ghostty.org/docs/config>; `working-directory`, `wait-after-command`, and `-e` sets `initial-command` and "Disables shell expansion since the input is expected to already be shell-expanded", <https://ghostty.org/docs/config/reference> |
+
+Windows Terminal reads `;` anywhere in its command line as the start of a new
+command (same page: "Commands provide the action, or list of actions separated
+by semicolons"). A launch whose folder, helper path or config folder holds a
+`;` is refused there rather than escaped.
+
+**Left out.**
+
+- `x-terminal-emulator` (Debian alternatives, the previous Linux
+  destination) and xterm: Debian Policy requires only `-e command` and
+  `-T title` of a terminal emulator, with no working-directory option
+  (<https://www.debian.org/doc/debian-policy/ch-customized-programs.html>),
+  so the alternative cannot be relied on to take one.
+
+**What this costs.** A Linux computer with none of GNOME Terminal, Konsole or
+Ghostty (an XFCE, Sway or i3 desktop, say) could launch through
+`x-terminal-emulator` before and cannot now: the picker offers nothing and
+is not drawn, and the managed-sessions screen shows its "unavailable" line
+with Launch off, until another terminal is added by the test above. The
+same holds on Windows without Windows Terminal, as it did before. On macOS
+Launch is never turned off this way, because Terminal is always there.
+- The Windows console host, through PowerShell or directly: `powershell.exe`
+  takes a command only as PowerShell source (`-Command`, or `-EncodedCommand`
+  for the same text in base64), so the folder would have to be quoted into a
+  script; `-WorkingDirectory` exists only in PowerShell 7 (`pwsh`), which is
+  not on every Windows computer. Starting the helper directly with
+  `CREATE_NEW_CONSOLE` passes the test on paper, but whether the new console
+  or the daemon's own standard handles reach the session depends on how the
+  daemon was started, and that cannot be checked without a Windows run. It
+  can be added once a Windows smoke test shows the session gets the console.
+  `cmd.exe` takes its command only as one string.
+- Other Linux terminals (kitty, Alacritty, WezTerm, foot, xfce4-terminal,
+  Tilix) were not evaluated in this change; each can be added once its
+  documented flags are checked against the test above.
+
+Every launch path except macOS Terminal still needs the release smoke test
+below on its platform: none of the Windows or Linux terminals is started by
+the test suite.
+
 ## OpenCode sessions
 
 OpenCode **1.19.0** is supported for managed launches using an OpenAI API key
@@ -90,8 +196,10 @@ Use an upstream model ID, without a provider prefix added by Trace Commons.
 For NEAR AI, use an ID advertised by that account's model catalogue. A model
 absent from the catalogue is refused; the route never substitutes the first
 model. Without `--collect-traces`, the native session remains local and no
-export is staged. The CLI is also the launch surface on Windows and Linux;
-this change does not extend the frozen desktop launch controls there.
+export is staged. The native macOS, Windows and GTK managed-session screens also offer
+OpenCode account setup, an explicit model and opt-in collection. The frozen
+Tauri controls are unchanged. Windows and GTK do not currently have a routing
+map; their managed rows show the selected account, model and collection state.
 
 Each launch owns a separate HOME/XDG profile beneath its saved account and
 uses OpenCode's pure mode. Project OpenCode configuration and external plugins
@@ -123,3 +231,23 @@ other versions fail closed. A local synthetic-model qualification covers
 import, exact-ID run, explicit model routing, export, validation and staging.
 It does not certify real provider credentials, NEAR AI receipts, or unattended
 end-to-end contribution without an invite.
+
+## Native shell visibility and map
+
+New setup and launch choices hide unavailable coding tools when at least one
+supported executable is installed. With none installed, the managed screens
+offer Claude Code, Codex and OpenCode installation instructions and Check again.
+Installation is user initiated. Existing accounts, imported sources and session
+history survive removal of a tool; unavailable accounts cannot launch.
+
+The macOS first-run tool screen uses the same read-only executable discovery
+before starting the daemon. Finding OpenCode does not grant source-watch consent
+or invent an export location. It explains that ordinary sessions need an export
+folder and managed sessions can opt into collection when launched.
+
+The macOS map includes managed provider/model and collection details. Separate
+managed route nodes describe session configuration, using still dashed arcs.
+Neither a running process nor a collected export is evidence of an answered
+model call, contribution, or global routing configuration. Sign-in-only sessions
+are excluded. An unreadable registry remains unknown, and older payloads remain
+readable without the added availability or managed-route fields.

@@ -32,7 +32,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use axum::routing::MethodRouter;
 
-use crate::{AppState, account_auth_middleware};
+use crate::ingest::app::{AppState, account_auth_middleware};
 
 /// Whether an unbound account's session may reach a route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

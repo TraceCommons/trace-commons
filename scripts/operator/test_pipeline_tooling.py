@@ -1327,11 +1327,11 @@ class HfCorpusTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 _ADMIN_URL = "postgres://trace@127.0.0.1:55431/postgres"
-_HARNESS = "tests::pipeline_corpus_pg_tests::pipeline_corpus_run"
-_PACKAGE_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_package_write"
-_ATTESTATION_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
-_KEY_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
-_INGEST_ARGS = ("-p", "trace-commons-server", "--bin", "trace-commons-ingest")
+_HARNESS = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_corpus_run"
+_PACKAGE_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_package_write"
+_ATTESTATION_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
+_KEY_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
+_INGEST_ARGS = ("-p", "trace-commons-server", "--lib")
 
 
 def _digest(data):
@@ -2252,8 +2252,8 @@ class PackageCommandTests(_CorpusRunCase):
 # Task 10: `pipeline.py restore-drill`.
 # ---------------------------------------------------------------------------
 
-_RESTORE_SEED = "tests::pipeline_restore_pg_tests::pipeline_restore_seed"
-_RESTORE_RESUME = "tests::pipeline_restore_pg_tests::pipeline_restore_resume"
+_RESTORE_SEED = "ingest::app::tests::pipeline_restore_pg_tests::pipeline_restore_seed"
+_RESTORE_RESUME = "ingest::app::tests::pipeline_restore_pg_tests::pipeline_restore_resume"
 _RESTORE_CHECK = "pipeline_restore_drill"
 
 
@@ -3037,7 +3037,7 @@ class RequiredCheckTests(unittest.TestCase):
             ),
             "pipeline_legacy_drain": (
                 checks._INGEST_BIN,
-                "tests::pipeline_activation_pg_tests::the_legacy_drain_report_counts_real_pending_work_and_reaches_zero",
+                "ingest::app::tests::pipeline_activation_pg_tests::the_legacy_drain_report_counts_real_pending_work_and_reaches_zero",
                 "pilot",
             ),
         }
@@ -6299,10 +6299,10 @@ class RemoteRestoreHarnessTests(_PromoteCase):
         )
         self.assertEqual(self.log[-1], ("environment_closed",))
         calls = self._cargo()
-        self.assertEqual(calls["remote_restore_seed"][3], "tests::pipeline_restore_pg_tests::pipeline_restore_seed")
+        self.assertEqual(calls["remote_restore_seed"][3], "ingest::app::tests::pipeline_restore_pg_tests::pipeline_restore_seed")
         self.assertEqual(calls["remote_restore_copy"][3], promote.REMOTE_RESTORE_RUN)
-        self.assertEqual(promote.REMOTE_RESTORE_RUN, "tests::pipeline_restore_pg_tests::pipeline_remote_restore_run")
-        self.assertEqual(calls["remote_restore_resume"][3], "tests::pipeline_restore_pg_tests::pipeline_restore_resume")
+        self.assertEqual(promote.REMOTE_RESTORE_RUN, "ingest::app::tests::pipeline_restore_pg_tests::pipeline_remote_restore_run")
+        self.assertEqual(calls["remote_restore_resume"][3], "ingest::app::tests::pipeline_restore_pg_tests::pipeline_restore_resume")
         for _, step, cargo_args, _, env, exact, ignored in calls.values():
             self.assertEqual(cargo_args, promote.PROMOTE_CARGO_ARGS, step)
             self.assertTrue(exact and ignored, step)
@@ -6617,7 +6617,7 @@ class PromoteAssembleTests(_PromoteCase):
 # The pipeline comparison: `pipeline.py compare`.
 # ---------------------------------------------------------------------------
 
-_COMPARE_HARNESS = "tests::pipeline_compare_pg_tests::pipeline_compare_run"
+_COMPARE_HARNESS = "ingest::app::tests::pipeline_compare_pg_tests::pipeline_compare_run"
 _COMPARE_LOCAL = "pipeline_comparison_local"
 _COMPARE_DIGEST_FIELDS = (
     "source_digest",

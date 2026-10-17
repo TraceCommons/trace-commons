@@ -27,6 +27,13 @@ struct PrivateAISection: View {
                let feed = model.daemonSettings?.insightsLedgerFeed {
                 GlassCard { ledgerFeed(feed) }
             }
+            // Which terminal app managed sessions open in: its own card,
+            // outside the standard-settings panels, because it changes
+            // only managed sessions. Drawn only when the daemon found an
+            // app to offer.
+            if let snapshot = model.managedSnapshot, !snapshot.terminalChoices.isEmpty {
+                GlassCard { ManagedTerminalPicker(snapshot: snapshot) }
+            }
             switch model.routeDisclosureState {
             case .shown(let disclosure):
                 GlassEyebrowCard(disclosure.copy.title) {
@@ -45,6 +52,8 @@ struct PrivateAISection: View {
             }
         }
         .onAppear { model.refreshRouteDisclosure() }
+        // The managed snapshot the terminal picker reads.
+        .task { model.refreshManagedSessions() }
         // The app's live client, re-attached whenever the daemon restarts
         // or start-up ends (`MonitorWindowView.Attachment`).
         .task(id: MonitorWindowView.Attachment(model)) {

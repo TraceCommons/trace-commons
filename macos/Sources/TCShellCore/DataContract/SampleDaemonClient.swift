@@ -209,6 +209,10 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try recordNudge("set_notifications_enabled \(on)")
     }
 
+    public func setSettlementEstimateEnabled(_ on: Bool) async throws {
+        try recordNudge("set_settings settlement_estimate_enabled \(on)")
+    }
+
     public func setNotifyKind(_ kind: String, on: Bool) async throws {
         try recordNudge("set_notify_kind \(kind) \(on)")
     }

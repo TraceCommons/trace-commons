@@ -75,9 +75,39 @@ cargo test -p trace-commons-server --test trace_corpus_storage_contract
 cargo test -p trace-commons-server --test trace_corpus_pg_store   # requires PostgreSQL
 ```
 
-The `trace-commons-ingest` bin's PostgreSQL tests self-skip without
-`TRACE_COMMONS_PG_TEST_DATABASE_URL`, and the `postgres-suites` job runs only
-named slices of them. To run the whole bin locally, use a fresh
+### Shared compile cache (recommended)
+
+Each worktree has its own `target/`, so a new worktree compiles the whole
+third-party dependency graph from scratch, and the copies add up: on one
+machine on 2026-10-15, sixteen worktree `target/` directories held 523 GB
+and filled the disk. Install sccache and point cargo at it in your
+user-level config:
+
+```bash
+brew install sccache        # or: cargo install sccache --locked
+```
+
+```toml
+# ~/.cargo/config.toml
+[build]
+rustc-wrapper = "sccache"
+```
+
+Worktrees then share compiled third-party crates. The workspace's own
+crates build incrementally under the dev profile, which sccache does not
+cache, so those still compile once per worktree. `sccache --show-stats`
+shows the hit rate, the cache location and its size limit (10 GiB by
+default; on macOS, raise it with `[cache.disk]` `size = <bytes>` in
+`~/Library/Application Support/Mozilla.sccache/config`). With the cache in
+place, deleting the `target/` of a worktree whose PR has merged is cheap.
+
+Never set `rustc-wrapper` in the repository's own `.cargo/config.toml`:
+CI runners do not install sccache, and every build there would fail.
+
+The ingest service's PostgreSQL tests (`ingest::app::`, in the library)
+self-skip without `TRACE_COMMONS_PG_TEST_DATABASE_URL`, and the
+`postgres-suites` job runs only named slices of them. To run all of them
+locally, use a fresh
 `admission_test_*` database on the literal host `127.0.0.1`, set the
 login-resolver URL (a LOGIN role that is a member of `trace_login_resolver`,
 see `docs/operator/login-resolver-role.md`), and run single-threaded, because
@@ -87,7 +117,7 @@ the tests share the `tenant-a` fixture tenant:
 createdb -h 127.0.0.1 admission_test_ingest_local
 TRACE_COMMONS_PG_TEST_DATABASE_URL=postgres://$USER@127.0.0.1:5432/admission_test_ingest_local \
 TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL=postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_ingest_local \
-cargo test -p trace-commons-server --bin trace-commons-ingest -- --test-threads=1
+cargo test -p trace-commons-server --lib ingest::app:: -- --test-threads=1
 ```
 
 Without the resolver URL, about 74 account, passkey and login tests fail with
@@ -109,6 +139,34 @@ Tauri app (`--manifest-path tauri-desktop/src-tauri/Cargo.toml`, plus
 `pnpm test` and `pnpm build` in `tauri-desktop/frontend`). The Tauri checks
 run in `.github/workflows/tauri-desktop.yml`.
 
+## Executing a multi-task plan
+
+When a plan's tasks are carried out one after another, test and check once,
+after the last task is written, not after each task. This overrides the
+global guidance to run each change's targeted test straight away. A full
+compile-and-test cycle of the server and contributor crates takes minutes,
+and paying it once per task made a nine-task plan take hours.
+
+- Each task still writes every test its plan step specifies, with the
+  assertions, as TDD would. Only running them is deferred.
+- Per task, run at most a plain `cargo check -p <crate> --all-targets` on
+  the crates it touched (add `--features` for a feature-gated module), so
+  the next task builds on code that compiles. No test runs, no clippy, no
+  `RUSTFLAGS=-D warnings`, no Swift suite, no PostgreSQL suites.
+- Do not report a task as passing. Report which tests it wrote and did not
+  run.
+- After the last task, run everything once: the commands in "Local
+  development", clippy, `cargo fmt --all -- --check`, the PostgreSQL suites
+  the plan touched, the FFI build followed by `swift test`, and the
+  separate GTK and Tauri workspaces if touched. Fix every failure against
+  the spec, never by weakening a test. A failure that also fails on `main`
+  is pre-existing: note it and leave it.
+- Reviews of the branch come after that run, so they read code that passes.
+
+This covers implementation inside one branch. It does not relax "never claim
+green from a partial run", and it does not apply to a single fix, where the
+targeted test still runs immediately.
+
 ## CI
 
 `.github/workflows/ci.yml` holds the server-side jobs and runs every one of
@@ -125,14 +183,18 @@ it touches a client path (its `paths:` filter). None of its jobs is a
 required status check, so a server-only PR never waits on a macOS or Windows
 runner, and a client regression surfaces on `main` after the merge.
 
-Every job that caches `target` ends with `./.github/actions/trim-cargo-cache`,
-which deletes linked test and bin executables and `incremental/` before
-actions/cache saves. The repository's caches were over GitHub's 10 GB
-ceiling and a main-written cache was evicted within minutes; a job that
-adds a `target` cache must end with that step too, or it re-creates the
-churn. Push-to-main runs are exempt from `cancel-in-progress` for the same
-reason: a cancelled job saves no cache, and merges to `main` land close
-together.
+A job that caches `target` restores with `actions/cache/restore@v5` and
+saves with `actions/cache/save@v5` on a push to `main` only, after
+`./.github/actions/trim-cargo-cache`, which deletes linked test and bin
+executables, `incremental/`, and the workspace's own `trace-commons-*`
+crates (checkout makes cargo rebuild those every run anyway). The
+repository's caches were over GitHub's 10 GB ceiling and a main-written
+cache was evicted within minutes: a pull request's cache is restorable by
+that pull request alone, so saving one only evicted `main`'s. A job that
+adds a `target` cache must follow the same shape, or it re-creates the
+churn, and the jobs in `clients.yml` keep no cache at all. Push-to-main
+runs are exempt from `cancel-in-progress` for the same reason: a cancelled
+job saves no cache, and merges to `main` land close together.
 
 Running is not the same as blocking. **Eleven** of the nineteen are required
 status checks on `main`, and only those block a merge -- `README.md` lists
@@ -279,6 +341,12 @@ When adding or changing user-facing UI text, follow
 preserved context, separate titles and accessibility names, and shared-copy
 review checks.
 
+**No new notices without explicit approval.** Do not add a banner, card,
+one-time message, interruption, notification, or a daemon status channel that
+feeds one, unless the owner has explicitly approved both the notice and its
+wording. A spec or design principle calling for one is not approval: ask.
+See rule 9 of the copy guide.
+
 ## Conventions specific to this repo
 
 - **Hash-only audit and logging.** Audit rows, error logs, and operational
@@ -316,8 +384,18 @@ review checks.
 - Drills (`/v1/admin/*-drill`) produce hash-only evidence and feed rollout-smoke
   required checks. When you add a drill, wire it into the smoke evidence path.
 - `crates/trace-commons-server/src/bin/trace-commons-ingest.rs` is tens of
-  thousands of lines of production code. Its test module, larger still, lives
-  in a sibling file via `#[cfg(test)] #[path =
+  thousands of lines of production code. Despite its path it is a library
+  module, `trace_commons_server::ingest::app`, declared by `#[path]` in
+  `src/ingest.rs`; the `trace-commons-ingest` binary is the thin
+  `src/bin/trace_commons_ingest_main.rs` over `trace_commons_server::ingest::run`,
+  so a build that registers its own Score policies can start the same service
+  (`IngestOptions::with_score_policies`). Its unit tests therefore run under
+  `--lib` with names prefixed `ingest::app::` (`cargo test -p
+  trace-commons-server --lib ingest::app::`); `--bin trace-commons-ingest`
+  runs none. Inside it and its `trace_commons_ingest_internal/` modules,
+  `crate::` is the library root, so a reference to the service's own items
+  is `crate::ingest::app::...` or `super::`. Its test module, larger still,
+  lives in a sibling file via `#[cfg(test)] #[path =
   "trace_commons_ingest_internal/tests.rs"] mod tests;`. Reuse this pattern if other binaries need the same split; do not
   inline the tests back.
 - Pilot-bootstrap loads JSONL session files. Parquet + arrow deps were
@@ -334,7 +412,9 @@ review checks.
 - Pilot-bootstrap loader streams JSONL session files; parquet support was
   removed. See `crates/trace-commons-server/src/bin/pilot_bootstrap/hf_dataset.rs`.
 - `trace-commons-ingest.rs` test module is extracted to
-  `trace_commons_ingest_internal/tests.rs` via `#[path = ...]`.
+  `trace_commons_ingest_internal/tests.rs` via `#[path = ...]`. The file is
+  compiled into the library (`ingest::app`), so its tests run under `--lib`;
+  a `--bin trace-commons-ingest <filter>` test run matches nothing and passes.
 - `cargo test -p <crate>` compiles none of a module behind a non-default
   feature, then reports a green run of the tests it did build. Measured on
   `main`: `-p trace-commons-attestation` runs 35 tests, `--features receipt`

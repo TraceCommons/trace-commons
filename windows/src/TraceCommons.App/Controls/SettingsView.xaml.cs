@@ -29,6 +29,7 @@ public sealed partial class SettingsView : UserControl
         LegacyOffer = legacyOffer ?? throw new ArgumentNullException(nameof(legacyOffer));
         InitializeComponent();
         LegacyOfferView.Offer = LegacyOffer;
+        ManagedTerminalHost.Content = new ManagedTerminalPicker(host);
 
         ViewModel = new PublicProfileViewModel(host);
         Settings = new ContributorSettingsViewModel(host);

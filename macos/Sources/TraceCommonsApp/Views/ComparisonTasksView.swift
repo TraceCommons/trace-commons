@@ -226,6 +226,13 @@ struct ComparisonTasksView: View {
         }
     }
 
+    /// An episode's line in the chooser: its member count, the members word
+    /// and when it was last edited. Static so a test can read the line the
+    /// view draws without reading pixels.
+    static func episodeChoiceLine(_ entry: EpisodeListEntry, copy: [String: String]) -> String {
+        "\(entry.episode.members.count) \(copy["episode_members"] ?? "") · \(InsightsDate.label(entry.episode.updated_at))"
+    }
+
     private func episodeChooser(selection: Binding<Set<String>>) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             ForEach(episodes) { entry in
@@ -234,7 +241,7 @@ struct ComparisonTasksView: View {
                     else { selection.wrappedValue.remove(entry.id) }
                 })) {
                     VStack(alignment: .leading) {
-                        Text("\(entry.episode.members.count) \(text("episode_members")) · \(InsightsDate.label(entry.episode.updated_at))")
+                        Text(Self.episodeChoiceLine(entry, copy: copy))
                         Text(entry.episode.manual_assessment.map { text("outcome_\($0.outcome)") }
                              ?? text("episode_unassessed")).insightsCaption()
                     }

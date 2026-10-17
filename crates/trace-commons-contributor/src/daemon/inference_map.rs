@@ -24,10 +24,11 @@
 //! text field, `model`: the model name as the proxy recorded it, up to 128
 //! characters of the characters a model id uses, else `unknown`. Never a
 //! prompt, a response, a body reference, a body digest, the provider's
-//! exchange identifier, a session id, a credential or a URL. Nothing here is
-//! logged. While the Insights ledger feed is on (the default; owner decision
-//! D3, settled 2026-10-09), each call also carries its four token counts as
-//! recorded.
+//! exchange identifier, a native session id, a credential or a URL. The
+//! separate managed-session projection includes its local registry ID.
+//! Nothing here is logged. While the Insights ledger feed is on (the default;
+//! owner decision D3, settled 2026-10-09), each call also carries its four
+//! token counts as recorded.
 //!
 //! # Every unknown is `unknown`
 //!
@@ -487,6 +488,23 @@ pub fn destinations(facts: &DestinationFacts) -> serde_json::Value {
     })
 }
 
+/// Managed sessions deliberately do not change the global harness route.
+/// Only fixed labels, a filtered model and the local managed session ID cross here.
+fn managed_session_projection(row: &crate::managed::sessions::SessionView) -> serde_json::Value {
+    use crate::managed::{ConnectionKind, ToolId};
+    let provider = match (row.connection, row.tool) {
+        (ConnectionKind::NearAi, _) => "near_ai",
+        (_, ToolId::Claude) => "anthropic",
+        (_, ToolId::Codex | ToolId::Opencode) => "openai",
+    };
+    serde_json::json!({
+        "id": row.id, "tool": row.tool, "connection": row.connection,
+        "provider": provider,
+        "model": row.model.as_deref().map(|model| model_label(Some(model))),
+        "collection_state": row.collection, "state": row.state,
+    })
+}
+
 /// `tool_destinations`.
 pub fn handle_destinations(shared: &DaemonShared, req: &Request) -> Response {
     let (roots, declarations, attested_bodies) = {
@@ -557,6 +575,46 @@ pub fn handle_destinations(shared: &DaemonShared, req: &Request) -> Response {
         folders,
     };
     let mut result = destinations(&facts);
+    let available = crate::managed::profiles::tools();
+    for tool in result["tools"].as_array_mut().expect("tools array") {
+        let managed_id = match tool["tool"].as_str() {
+            Some(crate::source::SOURCE_CLAUDE_CODE) => Some("claude"),
+            Some(crate::source::SOURCE_CODEX) => Some("codex"),
+            Some(crate::source::SOURCE_OPENCODE) => Some("opencode"),
+            _ => None,
+        };
+        tool["installed"] = managed_id
+            .and_then(|id| available.as_array()?.iter().find(|row| row["tool"] == id))
+            .map(|row| row["installed"].clone())
+            .unwrap_or(serde_json::Value::Null);
+    }
+    // An unreadable registry is unknown, not an assertion of no sessions.
+    let mut changed_revision = None;
+    let managed_sessions = shared
+        .managed
+        .lock()
+        .ok()
+        .and_then(|mut held| {
+            let service = held.as_mut().ok()?;
+            let before = service.sessions.revision();
+            let rows = service.sessions.views().ok();
+            let after = service.sessions.revision();
+            if before != after {
+                changed_revision = Some(after);
+            }
+            rows
+        })
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| row.purpose == crate::managed::sessions::LaunchPurpose::Coding)
+                .map(managed_session_projection)
+                .collect::<Vec<_>>()
+        });
+    if let Some(revision) = changed_revision {
+        shared.publish("managed_changed", serde_json::json!({"revision": revision}));
+    }
+    result["managed_sessions"] = serde_json::json!(managed_sessions);
+    result["managed_copy"] = crate::managed::copy::copy();
     result["ledger_readable"] = serde_json::json!(ledger_readable);
     let mut observed_destinations = Vec::new();
     if ledger_readable {

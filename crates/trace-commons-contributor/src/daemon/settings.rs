@@ -95,6 +95,11 @@ const DEFAULT_APPROVAL_HOLD_SECS: u64 = 10;
 /// decisions list.
 pub const DEFAULT_SUGGESTIONS_ENABLED: bool = true;
 
+/// Whether the settlement estimate ("Estimate what traces on this Mac are
+/// worth") is on for a settings file that never chose. On by default, per
+/// the settlement estimate design.
+pub const DEFAULT_SETTLEMENT_ESTIMATE_ENABLED: bool = true;
+
 /// "Notifications from Trace Commons", the master switch, for a settings
 /// file that never chose. DRAFT. Not an owner decision: on is today's
 /// behaviour, since the digest posts today with no switch at all.
@@ -123,6 +128,9 @@ pub const UPGRADE_NOTIFY_VERDICTS_LANDED: bool = false;
 /// `notify.weekly_recap` (N3). DRAFT, owner decision 1: U3 is held for the
 /// gamification ruling, and once ruled it is offered from the recap card.
 pub const DEFAULT_NOTIFY_WEEKLY_RECAP: bool = false;
+/// `notify.settlement_estimate` (N5). DRAFT, NEEDS APPROVAL: on by default,
+/// like the estimate switch it sits under.
+pub const DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE: bool = true;
 /// `notify.insights_tip` (N4). DRAFT, owner decision 25: Insights decides;
 /// the recommendation is off as a notification.
 pub const DEFAULT_NOTIFY_INSIGHTS_TIP: bool = false;
@@ -675,6 +683,27 @@ pub struct DaemonSettings {
     #[serde(default = "default_suggestions_enabled")]
     pub suggestions_enabled: bool,
 
+    /// The settlement estimate's switch: whether the daemon scans this
+    /// Mac's traces for an estimate and shows it anywhere. Defaults to
+    /// [`DEFAULT_SETTLEMENT_ESTIMATE_ENABLED`]; a settings file written
+    /// before this key existed loads with that default. Off stops any scan
+    /// in progress, hides every surface, and deletes the feature cache.
+    #[serde(default = "default_settlement_estimate_enabled")]
+    pub settlement_estimate_enabled: bool,
+
+    /// Whether missions are shown anywhere (owner decision 2026-10-16:
+    /// hidden for now). Off, the daemon does not fetch the activity-mission
+    /// catalogue, empties the one it holds, draws no `mission_fit` on
+    /// `status.nudge`, `list_pending` rows or the idle notification, and
+    /// refuses the mission IPC methods with `missions-disabled`. On restores
+    /// the behaviour that shipped before the switch existed, exactly.
+    ///
+    /// No shell offers a row for it: it is flipped only through
+    /// `set_settings`. `#[serde(default)]` so a settings file written before
+    /// this key existed loads with missions hidden.
+    #[serde(default)]
+    pub missions_enabled: bool,
+
     /// Nudge: "Notifications from Trace Commons", the master switch over
     /// the digest and every re-engagement kind. Defaults to
     /// [`DEFAULT_NOTIFICATIONS_ENABLED`]. The OS permission stays a separate,
@@ -692,6 +721,15 @@ pub struct DaemonSettings {
     /// the reverse.
     #[serde(default = "default_menu_bar_mark_enabled")]
     pub menu_bar_mark_enabled: bool,
+
+    /// The terminal app managed sessions open in, one of this platform's
+    /// (`managed::terminal::TerminalApp::offered`). A file written before
+    /// this key existed loads as the platform's default, the shipped
+    /// behaviour on macOS and Windows. A value this build does not know
+    /// loads as `Unrecognized`, which refuses a launch rather than becoming
+    /// the default (see `managed::terminal::TerminalSetting`).
+    #[serde(default)]
+    pub managed_terminal: crate::managed::terminal::TerminalSetting,
 
     /// Nudge: one switch per notification kind. Each governs both the
     /// sentence folded into a due digest and the standalone notification.
@@ -769,6 +807,9 @@ pub struct NotifyKinds {
     /// N4, Insights tips.
     #[serde(default)]
     pub insights_tip: bool,
+    /// N5, the settlement estimate.
+    #[serde(default = "default_notify_settlement_estimate")]
+    pub settlement_estimate: bool,
     /// Kind keys this build does not know, kept verbatim.
     #[serde(flatten)]
     pub other: BTreeMap<String, serde_json::Value>,
@@ -783,6 +824,7 @@ impl Default for NotifyKinds {
             verdicts_landed: DEFAULT_NOTIFY_VERDICTS_LANDED,
             weekly_recap: DEFAULT_NOTIFY_WEEKLY_RECAP,
             insights_tip: DEFAULT_NOTIFY_INSIGHTS_TIP,
+            settlement_estimate: DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE,
             other: BTreeMap::new(),
         }
     }
@@ -814,6 +856,7 @@ impl NotifyKinds {
             "verdicts_landed" => Some(&mut self.verdicts_landed),
             "weekly_recap" => Some(&mut self.weekly_recap),
             "insights_tip" => Some(&mut self.insights_tip),
+            "settlement_estimate" => Some(&mut self.settlement_estimate),
             _ => None,
         }
     }
@@ -825,6 +868,7 @@ impl NotifyKinds {
             "verdicts_landed" => Some(&self.verdicts_landed),
             "weekly_recap" => Some(&self.weekly_recap),
             "insights_tip" => Some(&self.insights_tip),
+            "settlement_estimate" => Some(&self.settlement_estimate),
             _ => None,
         }
     }
@@ -847,6 +891,10 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Option::<NotifyKinds>::deserialize(deserializer)?.unwrap_or_else(NotifyKinds::upgraded))
+}
+
+fn default_notify_settlement_estimate() -> bool {
+    DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE
 }
 
 fn default_notify_digest() -> bool {
@@ -1255,6 +1303,10 @@ fn default_suggestions_enabled() -> bool {
     DEFAULT_SUGGESTIONS_ENABLED
 }
 
+fn default_settlement_estimate_enabled() -> bool {
+    DEFAULT_SETTLEMENT_ESTIMATE_ENABLED
+}
+
 fn default_approval_hold_secs() -> u64 {
     DEFAULT_APPROVAL_HOLD_SECS
 }
@@ -1308,8 +1360,11 @@ impl Default for DaemonSettings {
             scrub_check: ScrubCheck::Automatic,
             scrub_check_defaulted_on_upgrade: false,
             suggestions_enabled: DEFAULT_SUGGESTIONS_ENABLED,
+            settlement_estimate_enabled: DEFAULT_SETTLEMENT_ESTIMATE_ENABLED,
+            missions_enabled: false,
             notifications_enabled: DEFAULT_NOTIFICATIONS_ENABLED,
             menu_bar_mark_enabled: DEFAULT_MENU_BAR_MARK_ENABLED,
+            managed_terminal: Default::default(),
             notify: NotifyKinds::default(),
             verdicts_offer_pending: false,
             idle_offer_pending: false,
@@ -1511,6 +1566,7 @@ impl DaemonSettings {
             insights_tip: self.notify.insights_tip,
             verdicts_landed: self.notify.verdicts_landed,
             weekly_recap: self.notify.weekly_recap,
+            settlement_estimate: self.notify.settlement_estimate,
             renderer,
         }
     }
@@ -1961,6 +2017,19 @@ pub fn apply_settings_object(
             "suggestions_enabled" => {
                 settings.suggestions_enabled = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
+            // The settlement estimate's switch. `set_settings` turns the
+            // scan and every surface off (deleting the feature cache) or
+            // back on (a full scan); see `daemon::settlement_estimate`.
+            "settlement_estimate_enabled" => {
+                settings.settlement_estimate_enabled =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // Missions on or off. No shell has a row for it; `set_settings`
+            // publishes `status_changed` on a change because `status.nudge`
+            // and `list_pending` carry `mission_fit` only while it is on.
+            "missions_enabled" => {
+                settings.missions_enabled = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
             // Nudge A2: the master notification switch and the news mark.
             // Also reachable as `set_notifications_enabled` and
             // `set_menu_bar_mark_enabled`, which write through here.
@@ -1971,6 +2040,17 @@ pub fn apply_settings_object(
             "menu_bar_mark_enabled" => {
                 settings.menu_bar_mark_enabled =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // The terminal app managed sessions open in. One of this
+            // platform's fixed ids; anything else, `null` included, is refused,
+            // never read as an app name or a command. Also reachable as
+            // `set_managed_terminal`, which writes through here.
+            "managed_terminal" => {
+                settings.managed_terminal = value
+                    .as_str()
+                    .and_then(crate::managed::terminal::TerminalApp::parse)
+                    .ok_or(ERR_SETTINGS_INVALID_VALUE)?
+                    .into();
             }
             // A partial object of kind switches; see `apply_notify_object`.
             // Also reachable as `set_notify_kind`.
@@ -2849,6 +2929,84 @@ mod tests {
         assert!(!s.suggestions_enabled, "a refused value changes nothing");
     }
 
+    /// Missions are hidden unless turned on through `set_settings`, including
+    /// for a settings file written before the switch existed. The switch
+    /// takes a boolean and nothing else.
+    #[test]
+    fn missions_default_off_and_take_only_a_boolean() {
+        assert!(!DaemonSettings::default().missions_enabled);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(v["missions_enabled"], false);
+        v.as_object_mut().unwrap().remove("missions_enabled");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(!settings.missions_enabled, "an absent switch is off");
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"missions_enabled": true})),
+            Ok(true)
+        );
+        assert!(s.missions_enabled);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"missions_enabled": "off"})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(s.missions_enabled, "a refused value changes nothing");
+        let round: DaemonSettings =
+            serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+        assert!(
+            round.missions_enabled,
+            "the switch survives a save and load"
+        );
+    }
+
+    /// The settlement estimate is on unless the person turns it off,
+    /// including for a settings file written before the switch existed, and
+    /// `set_settings` takes a boolean and nothing else. The change persists.
+    #[test]
+    fn settings_round_trip_the_estimate_switch() {
+        assert!(DaemonSettings::default().settlement_estimate_enabled);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(v["settlement_estimate_enabled"], true);
+        v.as_object_mut()
+            .unwrap()
+            .remove("settlement_estimate_enabled");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(
+            settings.settlement_estimate_enabled,
+            "an absent switch is on"
+        );
+
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"settlement_estimate_enabled": false})
+            ),
+            Ok(true)
+        );
+        assert!(!s.settlement_estimate_enabled);
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"settlement_estimate_enabled": "off"})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(
+            !s.settlement_estimate_enabled,
+            "a refused value changes nothing"
+        );
+        s.save(&store).unwrap();
+        assert!(
+            !DaemonSettings::load(&store)
+                .unwrap()
+                .settlement_estimate_enabled,
+            "off persists"
+        );
+    }
+
     /// Nudge A2: a new install (no settings file) gets the decision-3 and
     /// decision-7 defaults, the master and mark on, and no one-time offer.
     #[test]
@@ -2972,6 +3130,64 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&s).unwrap()["notify"]["future_kind"],
             true
+        );
+    }
+
+    /// The managed-session terminal takes one of this platform's ids and
+    /// nothing else; a stored value this build does not know loads as
+    /// unrecognized and stays so across a save, never becoming the default.
+    #[test]
+    fn the_managed_terminal_takes_only_this_platforms_ids() {
+        use crate::managed::terminal::{TerminalApp, TerminalSetting};
+        let mut s = DaemonSettings::default();
+        assert_eq!(s.managed_terminal, TerminalSetting::default());
+        for app in TerminalApp::offered().iter().rev() {
+            assert_eq!(
+                apply_settings_object(&mut s, &serde_json::json!({"managed_terminal": app.id()})),
+                Ok(true)
+            );
+            assert_eq!(s.managed_terminal, TerminalSetting::from(*app));
+        }
+        let mut bad = vec![
+            serde_json::json!({"managed_terminal": "Ghostty"}),
+            serde_json::json!({"managed_terminal": "unrecognized"}),
+            serde_json::json!({"managed_terminal": "/Applications/Warp.app"}),
+            serde_json::json!({"managed_terminal": "open -a Calculator"}),
+            serde_json::json!({"managed_terminal": null}),
+            serde_json::json!({"managed_terminal": 1}),
+        ];
+        // Another platform's app is refused here too.
+        bad.extend(
+            TerminalApp::ALL
+                .into_iter()
+                .filter(|app| !TerminalApp::offered().contains(app))
+                .map(|app| serde_json::json!({"managed_terminal": app.id()})),
+        );
+        for bad in bad {
+            assert_eq!(
+                apply_settings_object(&mut s.clone(), &bad),
+                Err(ERR_SETTINGS_INVALID_VALUE),
+                "{bad}"
+            );
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut stored = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(
+            stored["managed_terminal"],
+            TerminalSetting::default().app().unwrap().id()
+        );
+        stored["managed_terminal"] = serde_json::json!("wezterm");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&stored).unwrap())
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.managed_terminal, TerminalSetting::Unrecognized);
+        loaded.save(&store).unwrap();
+        assert_eq!(
+            DaemonSettings::load(&store).unwrap().managed_terminal,
+            TerminalSetting::Unrecognized
         );
     }
 

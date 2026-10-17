@@ -336,6 +336,10 @@ pub struct ProjectPolicy {
     pub arming_claims: BTreeMap<String, super::arming_wording::ArmingClaim>,
     /// Rewordings not yet shown to the contributor. See
     /// [`ArmingRewordNotice`].
+    ///
+    /// Owner decision 2026-10-16: no switch-on notice is raised; the list
+    /// stays on the wire and is always empty. A file written by an older
+    /// build is cleared on load.
     #[serde(default)]
     pub arming_rewordings: Vec<ArmingRewordNotice>,
     /// The id the next [`ArmingRewordNotice`] gets. Never reused.
@@ -1255,6 +1259,10 @@ impl ProjectPolicy {
         };
         let mut policy: Self =
             serde_json::from_slice(&body).context("parsing daemon project policy")?;
+        // Owner decision 2026-10-16: no switch-on notice is raised, so one
+        // an older build persisted is never reported. The next save writes
+        // the empty list.
+        policy.arming_rewordings.clear();
         // Migrate in memory on every load rather than rewriting the file
         // here: `load` has no business writing, and the next `save` -- which
         // every mutation already performs -- persists the v2 form. A file
@@ -1405,16 +1413,14 @@ impl ProjectPolicy {
         sweep
     }
 
-    /// K5 for the "Automatic" contribution override: leave a notice
+    /// K5 for the "Automatic" contribution override: move its recorded claim
     /// when the words in force (`in_force`, what the arming offer would say
-    /// now) no longer claim what the override was set under. It stays on;
-    /// the recorded claim moves to the one in force in the same save, so a
-    /// rewording is announced once. The notice is keyed by
-    /// [`OVERRIDE_ARMING_KEY`]. Returns whether one was left.
+    /// now) no longer claim what the override was set under. It stays on and
+    /// no notice is raised. Returns whether the claim moved.
     pub fn sweep_override_claim(
         &mut self,
         in_force: super::arming_wording::ArmingClaim,
-        now: DateTime<Utc>,
+        _now: DateTime<Utc>,
     ) -> bool {
         let Some(o) = self.contribution_override.as_mut() else {
             return false;
@@ -1431,19 +1437,9 @@ impl ProjectPolicy {
         if !was.narrowed_to(in_force) {
             return false;
         }
+        // Owner decision 2026-10-16: no switch-on notice is raised; the list
+        // stays on the wire and is always empty. Only the claim moves.
         o.claim = Some(in_force);
-        self.arming_rewordings
-            .retain(|n| n.project_key != OVERRIDE_ARMING_KEY || n.scrub_check_defaulted);
-        let id = self.next_arming_reword_id;
-        self.next_arming_reword_id = id.saturating_add(1);
-        self.arming_rewordings.push(ArmingRewordNotice {
-            id,
-            reworded_at: now,
-            project_key: OVERRIDE_ARMING_KEY.to_string(),
-            was,
-            now: in_force,
-            scrub_check_defaulted: false,
-        });
         true
     }
 
@@ -1475,19 +1471,18 @@ impl ProjectPolicy {
             })
     }
 
-    /// K5: leave a notice for every armed project whose words in force
-    /// (`current`, per project key) no longer claim what it was armed under.
+    /// K5: move the recorded claim of every armed project whose words in
+    /// force (`current`, per project key) no longer claim what it was armed
+    /// under. No notice is raised.
     ///
-    /// The project stays armed. Its recorded claim moves to the one in force
-    /// in the same save as the notice, so a rewording is announced exactly
-    /// once and a later narrowing is announced again. Only a narrowing is
-    /// announced (`ArmingClaim::narrowed_to`); a widening is not recorded,
-    /// so what the contributor was told stays the baseline. Returns the
-    /// labels of the projects reworded, for the audit.
+    /// The project stays armed. Only a narrowing is recorded
+    /// (`ArmingClaim::narrowed_to`); a widening is not, so what the
+    /// contributor was told stays the baseline. Returns the labels of the
+    /// projects reworded, for the audit.
     pub fn sweep_arming_claims(
         &mut self,
         current: impl Fn(&str) -> super::arming_wording::ArmingClaim,
-        now: DateTime<Utc>,
+        _now: DateTime<Utc>,
     ) -> Vec<String> {
         let mut reworded: Vec<(
             String,
@@ -1506,20 +1501,11 @@ impl ProjectPolicy {
             }
         }
         let mut labels = Vec::with_capacity(reworded.len());
-        for (key, label, was, in_force) in reworded {
-            self.arming_claims.insert(key.clone(), in_force);
-            self.arming_rewordings
-                .retain(|n| n.project_key != key || n.scrub_check_defaulted);
-            let id = self.next_arming_reword_id;
-            self.next_arming_reword_id = id.saturating_add(1);
-            self.arming_rewordings.push(ArmingRewordNotice {
-                id,
-                reworded_at: now,
-                project_key: key,
-                was,
-                now: in_force,
-                scrub_check_defaulted: false,
-            });
+        for (key, label, _was, in_force) in reworded {
+            // Owner decision 2026-10-16: no switch-on notice is raised; the
+            // list stays on the wire and is always empty. Only the claim
+            // moves.
+            self.arming_claims.insert(key, in_force);
             labels.push(label);
         }
         labels
@@ -1533,30 +1519,14 @@ impl ProjectPolicy {
         before - self.arming_rewordings.len()
     }
 
-    /// Announce changed hold behavior only for folders armed at upgrade.
-    /// The marker and notices are saved together by startup, before work.
-    pub fn record_scrub_check_upgrade(&mut self, automatic: bool, now: DateTime<Utc>) -> bool {
+    /// Record that the Scrub-check upgrade has been seen. No notice is
+    /// raised. The marker is saved by startup, before work.
+    pub fn record_scrub_check_upgrade(&mut self, _automatic: bool, _now: DateTime<Utc>) -> bool {
         if self.scrub_check_upgrade_recorded {
             return false;
         }
-        if automatic {
-            for (key, entry) in &self.projects {
-                if entry.mode != ProjectMode::AutoUpload || key == UNKNOWN_PROJECT_KEY {
-                    continue;
-                }
-                let claim = self.arming_claim(key);
-                let id = self.next_arming_reword_id;
-                self.next_arming_reword_id = id.saturating_add(1);
-                self.arming_rewordings.push(ArmingRewordNotice {
-                    id,
-                    reworded_at: now,
-                    project_key: key.clone(),
-                    was: claim,
-                    now: claim,
-                    scrub_check_defaulted: true,
-                });
-            }
-        }
+        // Owner decision 2026-10-16: no switch-on notice is raised; the list
+        // stays on the wire and is always empty. Only the marker is kept.
         self.scrub_check_upgrade_recorded = true;
         true
     }
@@ -2787,22 +2757,14 @@ mod tests {
     }
 
     #[test]
-    fn scrub_check_upgrade_is_once_only_and_keeps_other_notices() {
+    fn scrub_check_upgrade_is_once_only_and_raises_no_notice() {
         let now = t("2026-09-30T00:00:00Z");
         let mut p = armed_by_hand(&["/w/api"]);
         p.scrub_check_upgrade_recorded = false;
         assert!(p.record_scrub_check_upgrade(true, now));
-        assert_eq!(p.arming_rewordings.len(), 1);
-        let upgrade_id = p.arming_rewordings[0].id;
+        assert!(p.arming_rewordings.is_empty());
         p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
-        assert_eq!(p.arming_rewordings.len(), 2);
-        assert!(
-            p.arming_rewordings
-                .iter()
-                .any(|n| n.id == upgrade_id && n.scrub_check_defaulted)
-        );
-        p.acknowledge_arming_rewordings(&[upgrade_id]);
-        assert_eq!(p.arming_rewordings.len(), 1);
+        assert!(p.arming_rewordings.is_empty());
         assert!(!p.record_scrub_check_upgrade(true, now));
         p.set_mode("/w/api", ProjectMode::NotifyOnly, now).unwrap();
         assert!(p.arming_rewordings.is_empty());
@@ -2826,45 +2788,34 @@ mod tests {
     }
 
     /// K5: a folder armed under the old "will be scrubbed" wording, whose
-    /// wording in force is patterns-only, gets a notice and stays armed.
+    /// wording in force is patterns-only, has its claim moved and stays
+    /// armed. No notice is raised.
     #[test]
-    fn a_folder_armed_under_the_scrub_wording_is_told_when_it_is_reworded() {
+    fn a_folder_armed_under_the_scrub_wording_has_its_claim_moved_when_reworded() {
         let mut p = armed_by_hand(&["/w/api"]);
         let at = t("2026-09-27T01:00:00Z");
 
         let unchanged = p.sweep_arming_claims(|_| ArmingClaim::ModelScrubbed, at);
         assert!(unchanged.is_empty());
-        assert!(
-            p.arming_rewordings.is_empty(),
-            "nothing reworded, nothing to say"
-        );
+        assert!(p.arming_rewordings.is_empty());
 
         let reworded = p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, at);
         assert_eq!(reworded, vec!["api".to_string()]);
-        assert_eq!(p.arming_rewordings.len(), 1, "{:?}", p.arming_rewordings);
-        let n = &p.arming_rewordings[0];
-        assert_eq!(n.project_key, "/w/api");
-        assert_eq!(n.was, ArmingClaim::ModelScrubbed);
-        assert_eq!(n.now, ArmingClaim::PatternsOnly);
-        assert_eq!(n.reworded_at, at);
+        assert!(p.arming_rewordings.is_empty(), "{:?}", p.arming_rewordings);
+        assert_eq!(p.arming_claim("/w/api"), ArmingClaim::PatternsOnly);
         assert_eq!(p.resolve("/w/api"), ProjectMode::AutoUpload, "still armed");
     }
 
-    /// Announced once: the next pass under the same wording adds nothing,
-    /// and an acknowledged notice does not come back.
+    /// Reworded once: the next pass under the same wording finds nothing.
     #[test]
-    fn a_rewording_is_announced_once() {
+    fn a_rewording_is_recorded_once() {
         let mut p = armed_by_hand(&["/w/api"]);
         let at = t("2026-09-27T01:00:00Z");
-        p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, at);
-        assert_eq!(p.arming_rewordings.len(), 1);
-        let id = p.arming_rewordings[0].id;
-        assert!(
+        assert_eq!(
             p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, at)
-                .is_empty()
+                .len(),
+            1
         );
-        assert_eq!(p.arming_rewordings.len(), 1);
-        assert_eq!(p.acknowledge_arming_rewordings(&[id, 42]), 1);
         assert!(
             p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, at)
                 .is_empty()
@@ -2910,48 +2861,33 @@ mod tests {
         assert!(!p.record_arming_claim("/w/ask", ArmingClaim::ModelScrubbed));
     }
 
-    /// Setting the project's mode answers its notice, whether it is armed
-    /// again (under words recorded afresh) or switched to ask-first.
+    /// Setting the project's mode drops its recorded claim, whether it is
+    /// armed again (under words recorded afresh) or switched to ask-first.
     #[test]
-    fn setting_the_mode_answers_a_rewording() {
+    fn setting_the_mode_clears_the_recorded_claim() {
         let mut p = armed_by_hand(&["/w/api", "/w/web"]);
         let now = t("2026-09-27T01:00:00Z");
         p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
-        assert_eq!(p.arming_rewordings.len(), 2);
+        assert!(p.arming_rewordings.is_empty());
+        assert!(p.arming_claims.contains_key("/w/api"));
         p.set_mode("/w/api", ProjectMode::NotifyOnly, now).unwrap();
-        assert_eq!(p.arming_rewordings.len(), 1);
-        assert_eq!(p.arming_rewordings[0].project_key, "/w/web");
+        assert!(!p.arming_claims.contains_key("/w/api"));
+        assert!(p.arming_claims.contains_key("/w/web"));
         p.set_mode("/w/web", ProjectMode::AutoUpload, now).unwrap();
         assert!(p.arming_rewordings.is_empty());
     }
 
-    /// A void returns the folder to ask-first and says so; a rewording
-    /// notice saying it is still armed would then be false.
+    /// A void returns the folder to ask-first and takes its recorded claim.
     #[test]
-    fn a_void_takes_the_rewording_notice_with_it() {
+    fn a_void_takes_the_recorded_claim_with_it() {
         let mut p = armed_and_granted("https://ingest.invalid");
         let now = t("2026-09-27T01:00:00Z");
         p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
-        assert_eq!(p.arming_rewordings.len(), 1);
+        assert!(p.arming_rewordings.is_empty());
+        assert!(p.arming_claims.contains_key("/w/api"));
         p.sweep_grants(&grant_terms_with("https://elsewhere.invalid"), now);
         assert!(p.arming_rewordings.is_empty());
         assert!(!p.arming_claims.contains_key("/w/api"));
-    }
-
-    /// Ids are never reused across notices.
-    #[test]
-    fn a_later_rewording_never_reuses_an_acknowledged_id() {
-        let mut p = armed_by_hand(&["/w/api"]);
-        let now = t("2026-09-27T01:00:00Z");
-        p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
-        assert_eq!(p.arming_rewordings.len(), 1);
-        let first = p.arming_rewordings[0].id;
-        p.acknowledge_arming_rewordings(&[first]);
-        p.set_mode("/w/api", ProjectMode::AutoUpload, now).unwrap();
-        p.record_arming_claim("/w/api", ArmingClaim::ModelScrubbed);
-        p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, now);
-        assert_eq!(p.arming_rewordings.len(), 1);
-        assert_ne!(p.arming_rewordings[0].id, first);
     }
 
     /// A policy file written before rewordings existed loads with none,
@@ -3705,30 +3641,94 @@ mod tests {
     }
 
     /// K5 reaches the override too: armed under words that claimed a model
-    /// scrubs, it is told once when the words in force narrow, and stays on.
+    /// scrubs, its recorded claim moves once when the words in force narrow,
+    /// and it stays on. No notice is raised.
     #[test]
-    fn an_auto_override_is_told_when_its_words_narrow() {
+    fn an_auto_override_has_its_claim_moved_when_its_words_narrow() {
         use super::super::arming_wording::ArmingClaim;
         let mut p = ProjectPolicy::new();
         let at = t("2026-10-02T00:00:00Z");
         override_to(&mut p, ProjectMode::AutoUpload, at);
         assert!(!p.sweep_override_claim(ArmingClaim::ModelScrubbed, at));
-        assert!(p.arming_rewordings.is_empty());
         assert!(p.sweep_override_claim(ArmingClaim::PatternsOnly, at));
-        assert_eq!(p.arming_rewordings.len(), 1);
-        assert_eq!(p.arming_rewordings[0].project_key, OVERRIDE_ARMING_KEY);
-        assert_eq!(p.arming_rewordings[0].was, ArmingClaim::ModelScrubbed);
+        assert!(p.arming_rewordings.is_empty());
         assert!(
             !p.sweep_override_claim(ArmingClaim::PatternsOnly, at),
-            "told once"
+            "moved once"
         );
         assert_eq!(
             p.contribution_override.as_ref().map(|o| o.mode),
             Some(ProjectMode::AutoUpload),
             "a rewording leaves it on"
         );
-        // Clearing it answers the notice.
         p.clear_contribution_override();
         assert!(p.arming_rewordings.is_empty());
+    }
+
+    /// Owner decision 2026-10-16: narrowing a folder's claim raises no
+    /// notice, but the recorded claim still moves to the one in force.
+    #[test]
+    fn narrowing_a_folder_claim_raises_no_notice_but_records_it() {
+        let mut p = armed_by_hand(&["/w/api"]);
+        let at = t("2026-10-16T00:00:00Z");
+        assert_eq!(p.arming_claim("/w/api"), ArmingClaim::ModelScrubbed);
+        let reworded = p.sweep_arming_claims(|_| ArmingClaim::PatternsOnly, at);
+        assert_eq!(reworded, vec!["api".to_string()]);
+        assert!(p.arming_rewordings.is_empty(), "{:?}", p.arming_rewordings);
+        assert_eq!(p.arming_claim("/w/api"), ArmingClaim::PatternsOnly);
+        assert_eq!(p.resolve("/w/api"), ProjectMode::AutoUpload, "still armed");
+    }
+
+    /// The same for the contribution override.
+    #[test]
+    fn narrowing_the_override_claim_raises_no_notice_but_records_it() {
+        let mut p = ProjectPolicy::new();
+        let at = t("2026-10-16T00:00:00Z");
+        override_to(&mut p, ProjectMode::AutoUpload, at);
+        assert!(p.sweep_override_claim(ArmingClaim::PatternsOnly, at));
+        assert!(p.arming_rewordings.is_empty(), "{:?}", p.arming_rewordings);
+        assert_eq!(
+            p.contribution_override.as_ref().and_then(|o| o.claim),
+            Some(ArmingClaim::PatternsOnly)
+        );
+        assert!(!p.sweep_override_claim(ArmingClaim::PatternsOnly, at));
+    }
+
+    /// The Scrub-check upgrade is still recorded once, with no notice.
+    #[test]
+    fn the_scrub_check_upgrade_raises_no_notice_but_is_recorded() {
+        let mut p = armed_by_hand(&["/w/api"]);
+        p.scrub_check_upgrade_recorded = false;
+        assert!(p.record_scrub_check_upgrade(true, t("2026-10-16T00:00:00Z")));
+        assert!(p.arming_rewordings.is_empty(), "{:?}", p.arming_rewordings);
+        assert!(p.scrub_check_upgrade_recorded);
+        assert!(!p.record_scrub_check_upgrade(true, t("2026-10-16T00:00:00Z")));
+    }
+
+    /// A notice persisted by an older build is dropped on load, so a stale
+    /// one is never reported.
+    #[test]
+    fn a_persisted_rewording_notice_is_cleared_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let mut p = armed_by_hand(&["/w/api"]);
+        p.arming_rewordings.push(ArmingRewordNotice {
+            id: 7,
+            reworded_at: t("2026-10-01T00:00:00Z"),
+            project_key: "/w/api".to_string(),
+            was: ArmingClaim::ModelScrubbed,
+            now: ArmingClaim::PatternsOnly,
+            scrub_check_defaulted: false,
+        });
+        p.save(&store).unwrap();
+        let loaded = ProjectPolicy::load(&store).unwrap();
+        assert!(loaded.arming_rewordings.is_empty());
+        loaded.save(&store).unwrap();
+        let body = store
+            .read_daemon_file(DAEMON_PROJECTS_FILE)
+            .unwrap()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["arming_rewordings"], serde_json::json!([]));
     }
 }

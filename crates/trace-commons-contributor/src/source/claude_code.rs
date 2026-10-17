@@ -175,6 +175,95 @@ impl TraceSource for ClaudeCodeSource {
     }
 
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
+        self.discover_with(Peek::Cwd)
+    }
+
+    /// The same walk, with no `peek_cwd`: every ref's `cwd` is `None`. The
+    /// walk itself reads directories and file metadata only.
+    fn discover_unopened(&self) -> anyhow::Result<Vec<SessionRef>> {
+        self.discover_with(Peek::Nothing)
+    }
+
+    fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
+        load_group(&r.path, self.group_budget)
+    }
+
+    /// A changed path under a Claude Code root, mapped to the session that
+    /// covers it.
+    ///
+    /// A delegated transcript maps to its PARENT, not to itself. That is
+    /// the same group address `discover` emits and the queue keys on: a
+    /// subagent transcript is not a session, and offering one as its own
+    /// address would put back the 911-cards-for-69-conversations bug from
+    /// the other direction. The rule itself is not restated here --
+    /// `parent_session_for_member` inverts `subagents_dir_for`, the one
+    /// `group_members_for` reads forwards.
+    ///
+    /// Everything else under the root is `None`, and the exclusions matter
+    /// as much as the mappings: the project directory itself, a `CLAUDE.md`,
+    /// and anything under the private `memory/` directory all fail to be a
+    /// session here for the same reasons `discover` never collects them.
+    fn session_for_path(&self, path: &Path) -> Option<PathBuf> {
+        // Containment first: real file, really under the declared root, no
+        // `..` and no symlink in the chain. Refusing a symlinked member is
+        // at least as strict as `group_members_for`, which excludes one.
+        let path = real_file_within_root(&self.root, path)?;
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            return None;
+        }
+        if let Some(parent) = parent_session_for_member(&path) {
+            // The parent must itself be a real session file under the root.
+            // A `subagents/` directory whose `<uuid>.jsonl` is missing is an
+            // orphan, and `discover` refuses to offer those too.
+            let parent = real_file_within_root(&self.root, &parent)?;
+            return is_top_level_session_path(&self.root, &parent).then_some(parent);
+        }
+        is_top_level_session_path(&self.root, &path).then_some(path)
+    }
+
+    /// The group ref for whichever session a changed path belongs to.
+    ///
+    /// Two steps, neither of them new: `session_for_path` resolves the
+    /// address -- a member resolving to its parent -- and
+    /// `group_session_ref` describes it, which is the very function
+    /// `discover` builds its refs with. The scoped path and the full sweep
+    /// therefore cannot disagree about a session's size or group mtime.
+    ///
+    /// The cost is the point: this `lstat`s the members of ONE session's
+    /// `subagents/` directory, which is what `group_modified_at` is, rather
+    /// than every member of every session in the corpus.
+    fn session_at(&self, path: &Path) -> anyhow::Result<Option<SessionRef>> {
+        let Some(address) = self.session_for_path(path) else {
+            return Ok(None);
+        };
+        let discovery_project = address
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .and_then(discovery_project_label);
+        // A session deleted between the event and this lookup is an
+        // ordinary race, not a failure: `group_session_ref` returns `None`
+        // for a file that is no longer there, and that is `Ok(None)` here.
+        // The skip counter it keeps is a discovery-warning statistic and
+        // has nothing to say about a single lookup.
+        let mut ignored_skips = 0usize;
+        Ok(group_session_ref(
+            address,
+            discovery_project,
+            Peek::Cwd,
+            &mut ignored_skips,
+        ))
+    }
+}
+
+/// Whether discovery may open a session file to learn its cwd.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Peek {
+    Cwd,
+    Nothing,
+}
+
+impl ClaudeCodeSource {
+    fn discover_with(&self, peek: Peek) -> anyhow::Result<Vec<SessionRef>> {
         let mut sessions = Vec::new();
         let mut skipped = 0usize;
         let Some(project_dirs) = super::read_dir_for_discovery(&self.root)? else {
@@ -252,7 +341,7 @@ impl TraceSource for ClaudeCodeSource {
 
             for entry in &file_entries {
                 if let Some(session) =
-                    group_session_ref(entry.path(), discovery_project.clone(), &mut skipped)
+                    group_session_ref(entry.path(), discovery_project.clone(), peek, &mut skipped)
                 {
                     sessions.push(session);
                 }
@@ -265,75 +354,6 @@ impl TraceSource for ClaudeCodeSource {
             );
         }
         Ok(sessions)
-    }
-
-    fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
-        load_group(&r.path, self.group_budget)
-    }
-
-    /// A changed path under a Claude Code root, mapped to the session that
-    /// covers it.
-    ///
-    /// A delegated transcript maps to its PARENT, not to itself. That is
-    /// the same group address `discover` emits and the queue keys on: a
-    /// subagent transcript is not a session, and offering one as its own
-    /// address would put back the 911-cards-for-69-conversations bug from
-    /// the other direction. The rule itself is not restated here --
-    /// `parent_session_for_member` inverts `subagents_dir_for`, the one
-    /// `group_members_for` reads forwards.
-    ///
-    /// Everything else under the root is `None`, and the exclusions matter
-    /// as much as the mappings: the project directory itself, a `CLAUDE.md`,
-    /// and anything under the private `memory/` directory all fail to be a
-    /// session here for the same reasons `discover` never collects them.
-    fn session_for_path(&self, path: &Path) -> Option<PathBuf> {
-        // Containment first: real file, really under the declared root, no
-        // `..` and no symlink in the chain. Refusing a symlinked member is
-        // at least as strict as `group_members_for`, which excludes one.
-        let path = real_file_within_root(&self.root, path)?;
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            return None;
-        }
-        if let Some(parent) = parent_session_for_member(&path) {
-            // The parent must itself be a real session file under the root.
-            // A `subagents/` directory whose `<uuid>.jsonl` is missing is an
-            // orphan, and `discover` refuses to offer those too.
-            let parent = real_file_within_root(&self.root, &parent)?;
-            return is_top_level_session_path(&self.root, &parent).then_some(parent);
-        }
-        is_top_level_session_path(&self.root, &path).then_some(path)
-    }
-
-    /// The group ref for whichever session a changed path belongs to.
-    ///
-    /// Two steps, neither of them new: `session_for_path` resolves the
-    /// address -- a member resolving to its parent -- and
-    /// `group_session_ref` describes it, which is the very function
-    /// `discover` builds its refs with. The scoped path and the full sweep
-    /// therefore cannot disagree about a session's size or group mtime.
-    ///
-    /// The cost is the point: this `lstat`s the members of ONE session's
-    /// `subagents/` directory, which is what `group_modified_at` is, rather
-    /// than every member of every session in the corpus.
-    fn session_at(&self, path: &Path) -> anyhow::Result<Option<SessionRef>> {
-        let Some(address) = self.session_for_path(path) else {
-            return Ok(None);
-        };
-        let discovery_project = address
-            .parent()
-            .and_then(|dir| dir.file_name())
-            .and_then(discovery_project_label);
-        // A session deleted between the event and this lookup is an
-        // ordinary race, not a failure: `group_session_ref` returns `None`
-        // for a file that is no longer there, and that is `Ok(None)` here.
-        // The skip counter it keeps is a discovery-warning statistic and
-        // has nothing to say about a single lookup.
-        let mut ignored_skips = 0usize;
-        Ok(group_session_ref(
-            address,
-            discovery_project,
-            &mut ignored_skips,
-        ))
     }
 }
 
@@ -380,6 +400,7 @@ fn discovery_project_label(project_dir_name: &std::ffi::OsStr) -> Option<String>
 fn group_session_ref(
     path: PathBuf,
     discovery_project: Option<String>,
+    peek: Peek,
     skipped: &mut usize,
 ) -> Option<SessionRef> {
     if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
@@ -423,7 +444,10 @@ fn group_session_ref(
     // reads only the parent file, so a subagent transcript appearing beside
     // it changes `size_bytes` without changing the answer, and keying on the
     // group total would re-read the parent every time a member landed.
-    let cwd = peek_cwd_memoized(&path, metadata.len(), parent_modified);
+    let cwd = match peek {
+        Peek::Cwd => peek_cwd_memoized(&path, metadata.len(), parent_modified),
+        Peek::Nothing => None,
+    };
     Some(SessionRef {
         source: SOURCE_CLAUDE_CODE,
         // A native adapter is what it is; nothing to declare.

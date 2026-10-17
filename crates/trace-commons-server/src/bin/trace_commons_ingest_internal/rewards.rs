@@ -16,7 +16,7 @@ use trace_commons_server::mission_rewards::RewardError;
 use trace_commons_server::reward_participant::{RewardHistoryQuery, RewardReservationRequest};
 use uuid::Uuid;
 
-use crate::{
+use crate::ingest::app::{
     ACCOUNT_RATE_LIMITER, AccountRateLimiter, AppState, ConcurrencyGuard, api_error,
     client_ip_for_rate_limit, confirm_is_same_origin,
 };
@@ -40,8 +40,8 @@ impl IntoResponse for RewardHttpError {
     }
 }
 
-pub(crate) fn account_routes() -> crate::account_routes::AccountRoutes {
-    crate::account_routes::AccountRoutes::new()
+pub(crate) fn account_routes() -> crate::ingest::app::account_routes::AccountRoutes {
+    crate::ingest::app::account_routes::AccountRoutes::new()
         .get("/v1/account/rewards", history)
         .get(
             "/v1/account/reward-reservations/{reservation_id}",
@@ -56,8 +56,8 @@ pub(crate) fn account_routes() -> crate::account_routes::AccountRoutes {
 
 /// The reward routes' response headers, applied outside the auth middleware.
 pub(crate) fn protected(
-    routes: crate::account_routes::AuthenticatedAccountRoutes,
-) -> crate::account_routes::AuthenticatedAccountRoutes {
+    routes: crate::ingest::app::account_routes::AuthenticatedAccountRoutes,
+) -> crate::ingest::app::account_routes::AuthenticatedAccountRoutes {
     // Covers early authentication refusals as well as handler responses.
     routes.map_response(|response: Response| async move { protected_response(response) })
 }

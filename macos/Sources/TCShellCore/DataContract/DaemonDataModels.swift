@@ -220,6 +220,10 @@ extension DaemonData {
         /// only while a mission catalogue is live; `0` is a real answer, and
         /// absent is unknown, never 0.
         public let missionFit: Int?
+        /// This entry's inference-dollar band, on `list_pending` rows only.
+        /// Drawn only through the core's row tags (`NudgeEntryTags`). Absent
+        /// is unknown, never $0.
+        public let settlementEstimate: EntrySettlementEstimate?
 
         public var id: String { entryId }
 
@@ -260,6 +264,7 @@ extension DaemonData {
             case secondLookLines = "second_look_lines"
             case creditEstimate = "credit_estimate"
             case missionFit = "mission_fit"
+            case settlementEstimate = "settlement_estimate"
         }
 
         public var queueState: QueueStateLabel? { QueueStateLabel(rawValue: state) }
@@ -278,6 +283,49 @@ extension DaemonData {
         /// folder approve: the daemon's `held_for_review`. Manual Scrub check
         /// is not one of these.
         public var heldForReview: Bool { reasonLabel.map(ReasonLabel.needingAPerson.contains) ?? false }
+    }
+
+    /// `status.settlement_estimate`: what the traces on this Mac would settle
+    /// for, in inference dollars (micro-dollars on the wire), worked out on
+    /// this Mac. `text` is the core's finished line; a shell draws it as
+    /// given and never composes a figure.
+    public struct SettlementEstimate: Codable, Equatable, Hashable, Sendable {
+        public let lowUsdMicros: UInt64
+        public let highUsdMicros: UInt64
+        /// True when the rounded low end is $0: the line reads "up to".
+        public let upTo: Bool
+        public let known: Int
+        public let unknown: Int
+        public let tableVersion: String
+        public let pricingVersion: String?
+        public let estimatedAt: String
+        public let text: String
+
+        public enum CodingKeys: String, CodingKey, CaseIterable {
+            case lowUsdMicros = "low_usd_micros"
+            case highUsdMicros = "high_usd_micros"
+            case upTo = "up_to"
+            case known, unknown
+            case tableVersion = "table_version"
+            case pricingVersion = "pricing_version"
+            case estimatedAt = "estimated_at"
+            case text
+        }
+    }
+
+    /// A queue entry's `settlement_estimate`: a dollar band, never a single
+    /// number. `tier` is absent for a table without tiers worth naming.
+    public struct EntrySettlementEstimate: Codable, Equatable, Hashable, Sendable {
+        public let lowUsdMicros: UInt64
+        public let highUsdMicros: UInt64
+        public let tier: String?
+        public let drawn: Bool?
+
+        public enum CodingKeys: String, CodingKey, CaseIterable {
+            case lowUsdMicros = "low_usd_micros"
+            case highUsdMicros = "high_usd_micros"
+            case tier, drawn
+        }
     }
 
     /// A queue entry's `credit_estimate`: a band of displayed credit, never a
@@ -371,6 +419,11 @@ extension DaemonData {
         /// U4). `nil` while the kind is off or from an older daemon: no idle
         /// card or row, never 0.
         public let idleSessions: IdleSessions?
+        /// The machine-wide settlement estimate (`status.settlement_estimate`):
+        /// absent while there is nothing true to draw (switch off, no
+        /// drawable table, no known trace). Absent is never $0; `text` is
+        /// the core's finished line.
+        public let settlementEstimate: SettlementEstimate?
         public let nextDigestAt: Date?
         public let health: Health?
         public let dailyBudget: DailyBudget?
@@ -415,6 +468,7 @@ extension DaemonData {
             case unpurposedTraces = "unpurposed_traces"
             case nudge
             case idleSessions = "idle_sessions"
+            case settlementEstimate = "settlement_estimate"
             case nextDigestAt = "next_digest_at"
             case health
             case dailyBudget = "daily_budget"
@@ -866,6 +920,15 @@ extension DaemonData {
         /// open; on by default). The Insights window passes it to the core's
         /// `comparisons`; `nil` from a daemon that predates it.
         public let insightsRecapCardEnabled: Bool?
+        /// The settlement-estimate switch (on by default): off hides the
+        /// menu line, the mark, the notification and the row bands, and the
+        /// daemon stops reading traces for it. `nil` from a daemon that
+        /// predates it, never drawn as off.
+        public let settlementEstimateEnabled: Bool?
+        /// Whether missions are shown at all (owner decision 2026-10-16:
+        /// hidden for now, off by default). `nil` from a daemon that
+        /// predates it, which reads as off; only an exact `true` shows them.
+        public let missionsEnabled: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case quiescenceSecs = "quiescence_secs"
@@ -898,6 +961,8 @@ extension DaemonData {
             case insightsContextThreshold = "insights_context_threshold"
             case insightsCounterPass = "insights_counter_pass"
             case insightsRecapCardEnabled = "insights_recap_card_enabled"
+            case settlementEstimateEnabled = "settlement_estimate_enabled"
+            case missionsEnabled = "missions_enabled"
         }
 
         public var scrubCheckMode: ScrubCheckMode? { scrubCheck.flatMap(ScrubCheckMode.init(rawValue:)) }
@@ -911,6 +976,7 @@ extension DaemonData {
         public let verdictsLanded: Bool?
         public let weeklyRecap: Bool?
         public let insightsTip: Bool?
+        public let settlementEstimate: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case digest
@@ -918,6 +984,7 @@ extension DaemonData {
             case verdictsLanded = "verdicts_landed"
             case weeklyRecap = "weekly_recap"
             case insightsTip = "insights_tip"
+            case settlementEstimate = "settlement_estimate"
         }
     }
 
@@ -1311,15 +1378,42 @@ extension DaemonData {
         public let ledgerReadable: Bool?
         public let observedDestinations: [ObservedDestination]?
         public let hub: InferenceHub?
+        /// Explicit managed session configuration, not evidence of answered calls.
+        public var managedSessions: [ManagedMapSession]? = nil
+        public var managedCopy: [String: String]? = nil
 
         public enum CodingKeys: String, CodingKey {
             case folders, tools, hub
+            case managedSessions = "managed_sessions"
+            case managedCopy = "managed_copy"
             case privateAi = "private_ai"
             case sessionsRoute = "sessions_route"
             case windowHours = "window_hours"
             case unattributedCalls = "unattributed_calls"
             case ledgerReadable = "ledger_readable"
             case observedDestinations = "observed_destinations"
+        }
+    }
+
+    public struct ManagedMapSession: Codable, Equatable, Sendable, Identifiable {
+        public let id: String
+        public let tool: String
+        public let connection: String
+        public let provider: String
+        public let model: String?
+        public let collectionState: String
+        public let state: String
+        enum CodingKeys: String, CodingKey {
+            case id, tool, connection, provider, model, state
+            case collectionState = "collection_state"
+        }
+
+        public var source: String { tool == "claude" ? "claude-code" : tool }
+
+        public func detail(copy: [String: String]) -> String {
+            [copy["provider_" + provider], model,
+             copy[ManagedSurface.stateKey(state)], copy["collection_" + collectionState]]
+                .compactMap { $0 }.joined(separator: " · ")
         }
     }
 
@@ -1361,11 +1455,13 @@ extension DaemonData {
         public let modelCalls: ModelCallRoute?
         /// The map's per-tool node counts over `windowHours` (K14).
         public let counts: ToolCounts?
+        /// Nil on older daemons or when this tool has no executable probe.
+        public var installed: Bool? = nil
 
         public var id: String { tool }
 
         public enum CodingKeys: String, CodingKey {
-            case tool, name, sessions, counts
+            case tool, name, sessions, counts, installed
             case modelCalls = "model_calls"
         }
     }

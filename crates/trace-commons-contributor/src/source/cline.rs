@@ -176,6 +176,12 @@ impl TraceSource for ClineSource {
         SOURCE_CLINE
     }
 
+    /// Discovery reads directories, file metadata and each task's manifest
+    /// sidecar, never a messages document.
+    fn discover_unopened(&self) -> anyhow::Result<Vec<SessionRef>> {
+        self.discover()
+    }
+
     fn discover(&self) -> anyhow::Result<Vec<SessionRef>> {
         let mut sessions = Vec::new();
         let mut skipped = 0usize;

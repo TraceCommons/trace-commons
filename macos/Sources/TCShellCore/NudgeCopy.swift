@@ -34,6 +34,22 @@ public struct NudgeCopy: Equatable, Sendable {
         case notifyActionReviewIdle = "NOTIFY_ACTION_REVIEW_IDLE"
         case notifyActionSeeHistory = "NOTIFY_ACTION_SEE_HISTORY"
         case notifyActionNotNow = "NOTIFY_ACTION_NOT_NOW"
+        case estimateTotalLine = "ESTIMATE_TOTAL_LINE"
+        case estimateTotalLineUpTo = "ESTIMATE_TOTAL_LINE_UP_TO"
+        case estimateTotalLabel = "ESTIMATE_TOTAL_LABEL"
+        case estimateTotalAction = "ESTIMATE_TOTAL_ACTION"
+        case notifySettlementTitle = "NOTIFY_SETTLEMENT_TITLE"
+        case notifySettlementBody = "NOTIFY_SETTLEMENT_BODY"
+        case notifySettlementBodyUpTo = "NOTIFY_SETTLEMENT_BODY_UP_TO"
+        case notifySettlementBodyPricing = "NOTIFY_SETTLEMENT_BODY_PRICING"
+        case notifySettlementBodyPricingUpTo = "NOTIFY_SETTLEMENT_BODY_PRICING_UP_TO"
+        case notifySettlementActionReview = "NOTIFY_SETTLEMENT_ACTION_REVIEW"
+        case notifySettlementActionNotNow = "NOTIFY_SETTLEMENT_ACTION_NOT_NOW"
+        case markA11ySettlement = "MARK_A11Y_SETTLEMENT"
+        case markTooltipSettlement = "MARK_TOOLTIP_SETTLEMENT"
+        case settlementEstimateExplainer = "SETTLEMENT_ESTIMATE_EXPLAINER"
+        case settingSettlementEstimate = "SETTING_SETTLEMENT_ESTIMATE"
+        case settingSettlementEstimateHelp = "SETTING_SETTLEMENT_ESTIMATE_HELP"
     }
 
     public let table: [String: String]
@@ -59,7 +75,7 @@ public struct NudgeCopy: Equatable, Sendable {
 }
 
 /// A Traces row's tags, worded by the core from the row's own
-/// `mission_fit` and `credit_estimate` (`tc_nudge_entry_tags_json`). Each is
+/// `mission_fit` and `settlement_estimate` (`tc_nudge_entry_tags_json`). Each is
 /// present only when there is something true to draw: the mission tag above
 /// zero, the estimate only while the daemon says it is drawn.
 public struct NudgeEntryTags: Codable, Equatable, Sendable {
@@ -88,28 +104,36 @@ public struct NudgeEntryTags: Codable, Equatable, Sendable {
 
     public var isEmpty: Bool { self == NudgeEntryTags() }
 
+    /// These tags without the mission tag unless missions are shown.
+    public func showing(missions enabled: Bool) -> NudgeEntryTags {
+        var tags = self
+        if !enabled { tags.missionFit = nil }
+        return tags
+    }
+
     public static func decode(fromJSON json: String?) -> NudgeEntryTags? {
         guard let json else { return nil }
         return try? JSONDecoder().decode(NudgeEntryTags.self, from: Data(json.utf8))
     }
 
     /// What the core is asked about a row: its `mission_fit` and
-    /// `credit_estimate` as the daemon sent them, and nothing else about
+    /// `settlement_estimate` as the daemon sent them, and nothing else about
     /// it. Nil when the row carries neither, so nothing is asked.
     public static func input(for entry: DaemonData.QueueEntry) -> String? {
-        guard entry.missionFit != nil || entry.creditEstimate != nil else { return nil }
+        guard entry.missionFit != nil || entry.settlementEstimate != nil else { return nil }
         struct Input: Encodable {
             let missionFit: Int?
-            let creditEstimate: DaemonData.CreditEstimate?
+            let settlementEstimate: DaemonData.EntrySettlementEstimate?
 
             enum CodingKeys: String, CodingKey {
                 case missionFit = "mission_fit"
-                case creditEstimate = "credit_estimate"
+                case settlementEstimate = "settlement_estimate"
             }
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        guard let data = try? encoder.encode(Input(missionFit: entry.missionFit, creditEstimate: entry.creditEstimate))
+        guard let data = try? encoder.encode(
+            Input(missionFit: entry.missionFit, settlementEstimate: entry.settlementEstimate))
         else { return nil }
         return String(decoding: data, as: UTF8.self)
     }
@@ -128,6 +152,8 @@ public enum NudgeSettings {
         case notifications
         /// One `notify` kind.
         case notify(String)
+        /// The machine-wide settlement estimate (`settlement_estimate_enabled`).
+        case settlementEstimate
     }
 
     public struct Row: Equatable, Sendable {
@@ -185,6 +211,8 @@ public enum NudgeSettings {
         add(.suggestions, .settingSuggestions, help: copy[.settingSuggestionsHelp], value: settings.suggestionsEnabled)
         add(.menuBarMark, .settingMark, help: copy[.settingMarkHelp], value: settings.menuBarMarkEnabled,
             enabled: settings.suggestionsEnabled == true)
+        add(.settlementEstimate, .settingSettlementEstimate, help: copy[.settingSettlementEstimateHelp],
+            value: settings.settlementEstimateEnabled)
         add(.notifications, .settingNotifyMaster, help: nil, value: settings.notificationsEnabled)
         let master = settings.notificationsEnabled != false
         for kind in shownKinds {
@@ -279,6 +307,7 @@ public enum NudgeSettings {
         case .menuBarMark: try await client.setMenuBarMarkEnabled(on)
         case .notifications: try await client.setNotificationsEnabled(on)
         case .notify(let kind): try await client.setNotifyKind(kind, on: on)
+        case .settlementEstimate: try await client.setSettlementEstimateEnabled(on)
         }
     }
 }

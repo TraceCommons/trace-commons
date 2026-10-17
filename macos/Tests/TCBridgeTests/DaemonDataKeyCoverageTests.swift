@@ -46,6 +46,11 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             "token_storage.discard_label", "token_storage.discard_title", "token_storage.failure_line",
             "token_storage.lease_expires_at_unix", "token_storage.oldest_pending_seconds", "token_storage.renewal_failures", "token_storage.retained_bytes",
             "token_storage.scope_note", "token_storage.state_line", "token_storage.unsubmitted_reviews",
+            // The managed-session terminal: the picker reads it from the
+            // managed snapshot (`capabilities.terminal_current`), with the
+            // installed choices beside it, and writes it with
+            // `set_managed_terminal`.
+            "managed_terminal",
         ]
         return ["get_settings": settings, "set_settings": settings]
     }()
