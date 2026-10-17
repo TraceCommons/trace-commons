@@ -1,11 +1,16 @@
 //! Which NEAR AI model a managed session runs on.
 //!
-//! The session's proxy pins one model, so it must be chosen on purpose:
-//! NEAR AI lists its catalogue alphabetically, and the first entry is
-//! neither a sensible default for every tool nor always a chat model.
+//! The session's proxy pins the NEAR AI backend only, so a tool may ask
+//! for any model NEAR AI lists and is served that model. Each tool still
+//! starts on one default, and it must be chosen on purpose: NEAR AI lists
+//! its catalogue alphabetically, and the first entry is neither a sensible
+//! default for every tool nor always a chat model. Every model id a tool
+//! can send must be a listed chat model, or IronWire gives the request a
+//! substitute of the same tier: [`claude_env`] maps Claude Code's model
+//! aliases, `super::codex` lists the models for Codex, and OpenCode's
+//! config lists them for OpenCode.
 //!
-//! The rule, kept here so a later mode that pins only the backend can use
-//! the same default:
+//! The rule for the default:
 //!
 //! 1. Chat models only. NEAR AI describes each entry: an entry is kept when
 //!    its `input_modalities` include `text` and its `output_modalities` are
@@ -212,9 +217,9 @@ pub fn claude_env(default: &str, models: &[ChatModel]) -> Vec<(&'static str, Opt
     env
 }
 
-/// The model to pin: the chosen one when it is a chat model in the
-/// catalogue, the tool's default when none was chosen. Anything else is
-/// refused, never replaced with another model.
+/// The session's default model: the chosen one when it is a chat model in
+/// the catalogue, the tool's default when none was chosen. Anything else
+/// is refused, never replaced with another model.
 pub fn select(
     tool: ToolId,
     requested: Option<&str>,
@@ -250,7 +255,7 @@ mod tests {
     use serde_json::json;
 
     /// A cut of NEAR AI's live catalogue (2026-10-16), in its order, with
-    /// the rows that broke or would break the old first-entry pin.
+    /// the rows that broke or would break the old first-entry default.
     fn catalogue() -> serde_json::Value {
         let text = |id: &str| json!({"id": id, "name": id, "input_modalities": ["text"], "output_modalities": ["text"]});
         json!({"object": "list", "data": [

@@ -78,8 +78,9 @@ pub struct LaunchRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionView {
-    /// The model the session runs on: the one its request named, or, on
-    /// NEAR AI, the one its proxy pinned once that proxy has started.
+    /// The model the session starts on: the one its request named, or, on
+    /// NEAR AI, its proxy's default once that proxy has started. The tool
+    /// may switch to another listed model later; that is not recorded.
     /// None for a session that names no model and has no proxy.
     #[serde(default)]
     pub model: Option<String>,
@@ -165,7 +166,7 @@ pub enum CollectionState {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LifecycleReport {
-    /// The model the launcher's own proxy pinned, for a session on a saved
+    /// The default model of the launcher's own proxy, for a session on a saved
     /// NEAR AI key. Additive: absent from every other report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -518,7 +519,7 @@ impl SessionRegistry {
             .as_deref()
             .is_some_and(super::opencode::valid_model);
         if request.tool == ToolId::Opencode {
-            // On the NEAR AI sign-in the session's proxy pins its default
+            // On the NEAR AI sign-in the session's proxy names its default
             // model (`models::default_for`), so the request names none. A
             // saved key needs a model OpenCode can be told.
             let model_ok = match request.connection {
@@ -530,7 +531,7 @@ impl SessionRegistry {
                 return Err(ManagedError::InvalidRequest);
             }
         } else {
-            // A model can be named only where a NEAR AI proxy pins it; its
+            // A model can be named only where a NEAR AI proxy serves it; its
             // availability is checked when that proxy starts.
             let model_ok = request.model.is_none()
                 || (named
@@ -795,7 +796,7 @@ impl SessionRegistry {
         self.commit(next)
     }
 
-    /// Record the model a daemon-hosted proxy pinned for a session on the
+    /// Record the default model of a daemon-hosted proxy for a session on the
     /// NEAR AI sign-in, so its row can show it. A session that asked for a
     /// model keeps it: a different one is a conflict.
     pub fn record_model(&mut self, session_id: Uuid, model: &str) -> Result<(), ManagedError> {
@@ -911,8 +912,8 @@ mod tests {
     use super::*;
     use crate::managed::accounts::AccountStore;
 
-    /// OpenCode on the NEAR AI sign-in runs on the model the session's
-    /// proxy pins, so its request names none; one that names a model is
+    /// OpenCode on the NEAR AI sign-in starts on the session proxy's
+    /// default model, so its request names none; one that names a model is
     /// refused. A saved key still needs a valid model, and a subscription
     /// is still refused.
     #[test]
@@ -1068,11 +1069,11 @@ mod tests {
         }
     }
 
-    /// The row says which model the proxy pinned: the daemon records it
+    /// The row says which default model the proxy chose: the daemon records it
     /// for a sign-in session, the launcher reports it for a saved NEAR AI
     /// key. A model the request named is never replaced.
     #[test]
-    fn the_pinned_model_is_recorded_on_the_row() {
+    fn the_default_model_is_recorded_on_the_row() {
         let home = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
         let mut registry = SessionRegistry::open(&store).unwrap();

@@ -240,11 +240,11 @@ async fn run_native(
         .unwrap_or_else(|| format!("{}:{}", pid, uuid::Uuid::new_v4()));
     // A proxy this launcher started tells the daemon the default model,
     // so the row can show it.
-    let pinned = route
+    let default_model = route
         .as_ref()
         .map(|r: &super::route::ManagedRoute| r.default_model().to_owned());
     let report = |state, exit_code| LifecycleReport {
-        model: pinned.clone(),
+        model: default_model.clone(),
         collection: None,
         session_id: row.id,
         proof: context.proof.clone(),

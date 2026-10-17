@@ -12,8 +12,9 @@ const CLAUDE: Uuid = Uuid::from_u128(0x6e65_6172_2d61_4900_8000_0000_0000_0001);
 const CODEX: Uuid = Uuid::from_u128(0x6e65_6172_2d61_4900_8000_0000_0000_0002);
 const OPENCODE: Uuid = Uuid::from_u128(0x6e65_6172_2d61_4900_8000_0000_0000_0003);
 
-/// OpenCode runs on the model its session's proxy pins, as Claude Code and
-/// Codex do; the daemon tells its launcher that model with the port.
+/// OpenCode starts on its session proxy's default model, as Claude Code and
+/// Codex do; the daemon tells its launcher that model, and every model the
+/// proxy serves, with the port.
 pub const TOOLS: [ToolId; 3] = [ToolId::Claude, ToolId::Codex, ToolId::Opencode];
 
 /// The stable id of a tool's sign-in entry. Stable so the tool's isolated

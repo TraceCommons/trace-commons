@@ -91,19 +91,47 @@ tools whose executable availability is not checked.
   an explicit host bridge, so under Flatpak the picker offers nothing and is
   not drawn. Show brings a session's Terminal tab to the front on macOS; a
   session opened in another terminal app cannot be shown.
-- Each NEAR AI session owns an isolated IronWire proxy and key, pinned to one
-  model. It never changes the standard proxy or falls back to another
-  provider/account. The model is chosen from NEAR AI's catalogue
-  (`managed/models.rs`): chat models only (text in, text out only, minus
-  rerankers and the privacy filter), then the model the launch named, or the
-  tool's default -- the newest `anthropic/claude-sonnet-*` for Claude Code,
-  the newest `openai/gpt-*` for Codex (never a `mini`, `nano` or `lite`
-  variant), falling back to the vendor's first model and then the first chat
-  model; OpenCode on the sign-in takes the first chat model. A named model
-  NEAR AI does not list as a chat model starts nothing
-  (`managed-model-unavailable`). The session row shows the pinned model.
-  Claude Code and Codex name a model with `near-ai launch <tool> --model <id>`
-  or the macOS Launch sheet's model picker, for a saved NEAR AI account.
+- Each NEAR AI session owns an isolated IronWire proxy and key, pinned to the
+  NEAR AI backend only, never to a model. It never changes the standard proxy
+  or falls back to another provider/account. A request naming a model NEAR AI
+  lists is served as that model, so each tool's own model picker works; a
+  request naming an id NEAR AI does not list is given a listed model of the
+  same tier by IronWire's routing. The session's default model -- the one the
+  tool starts on -- is chosen from NEAR AI's catalogue (`managed/models.rs`):
+  chat models only (text in, text out only, minus rerankers and the privacy
+  filter), then the model the launch named, or the tool's default -- the
+  newest `anthropic/claude-sonnet-*` for Claude Code, the newest `openai/gpt-*`
+  for Codex (never a `mini`, `nano` or `lite` variant), falling back to the
+  vendor's first model and then the first chat model; OpenCode on the sign-in
+  takes the first chat model. A named model NEAR AI does not list as a chat
+  model starts nothing (`managed-model-unavailable`). The session row shows
+  the default model, not a model picked later inside the tool. Claude Code and
+  Codex name a default with `near-ai launch <tool> --model <id>` or the macOS
+  Launch sheet's model picker, for a saved NEAR AI account.
+- Every model id a tool can send is a listed NEAR AI chat model:
+  - Claude Code: `ANTHROPIC_MODEL` is the default. Each of
+    `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL` names the newest
+    listed `anthropic/claude-<family>-*` model, with
+    `ANTHROPIC_DEFAULT_<FAMILY>_MODEL_NAME` set to NEAR AI's display name when
+    it gives one; a family NEAR AI does not list names the default.
+    `ANTHROPIC_SMALL_FAST_MODEL` is the Haiku value. A default no alias names
+    is offered as `ANTHROPIC_CUSTOM_MODEL_OPTION` (and `_NAME`). The aliases'
+    `_DESCRIPTION` and `_SUPPORTED_CAPABILITIES` variables,
+    `ANTHROPIC_CUSTOM_MODEL_OPTION` when unused, and
+    `CLAUDE_CODE_SUBAGENT_MODEL` are removed from the inherited environment.
+  - Codex: `-c model_catalog_json="<file>"` names a catalog of every chat
+    model, the default first, and `-c model="<default>"`. The file is
+    private to the launcher (`managed-codex-catalogs/<session>.json` in its
+    state directory) and removed when the session ends. A model Codex ships
+    settings for (matched as Codex matches an id: longest slug prefix, then
+    the same after one `namespace/`) keeps those settings and prompt, read
+    from `codex debug models --bundled`; any other model gets basic settings
+    with the prompt of Codex's own first listed model. If that list cannot be
+    read, every entry is basic, with a one-line prompt.
+  - OpenCode: every chat model is listed under the `trace-managed` provider
+    (named by NEAR AI's display name or the id); `model` and `small_model`
+    are the default. Its profile is isolated, so the list never reaches the
+    person's own OpenCode settings.
 - A profile cannot be reconnected, have its key replaced, or be removed while a
   managed session or sign-in holds it. Multiple coding sessions may share the
   same account, but sign-in requires that account to be idle.
