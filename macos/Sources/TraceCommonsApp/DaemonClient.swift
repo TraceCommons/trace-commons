@@ -76,6 +76,12 @@ final class DaemonClient {
         try resultObject(method, params: params)
     }
 
+    /// NEAR AI's chat models and `tool`'s default, for the Launch sheet's
+    /// model picker.
+    func managedModelCatalogue(tool: String) throws -> ManagedModelCatalogue {
+        try call("managed_model_catalogue", params: ["tool": tool], as: ManagedModelCatalogue.self)
+    }
+
     // MARK: - Read
 
     func nativeWalletFlow(action: String, flowID: String, commons: String, account: String) throws -> NativeWalletView {
