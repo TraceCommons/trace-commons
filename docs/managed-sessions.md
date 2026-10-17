@@ -138,9 +138,14 @@ tools whose executable availability is not checked.
   call log is on with bodies off: `ledger.sqlite` in that home records each
   exchange's timings, facade and path, an opaque conversation hash, the
   client's session header, backend, requested and served model, token counts,
-  cost, status and an error label, never a request or response body. The
-  home, log included, is removed when the route shuts down. A launcher or
-  daemon that exits without shutting its routes down leaves the home behind.
+  cost, status and, for a call that failed, IronWire's error text. It stores
+  no request or response body, but the error text is not body-free: for an
+  error from NEAR AI it includes up to 600 characters of the provider's
+  error message, and a provider that rejects a request can quote the request
+  in that message. The status line does not read the log. The home, log
+  included, is private to the person (mode 0700 on Unix) and is removed when
+  the route shuts down. A launcher or daemon that exits without shutting its
+  routes down leaves the home behind.
 - Claude Code on a NEAR AI session shows IronWire's status line. It is
   launched with `--settings '{"statusLine":{"type":"command","command":
   "<this executable> statusline --home <route home>"}}'`. Command-line

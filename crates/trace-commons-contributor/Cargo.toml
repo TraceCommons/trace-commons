@@ -11,7 +11,9 @@ repository.workspace = true
 # Cloud credentials) to a plaintext file store inside the config directory,
 # and makes `OsSecretBackend::new` refuse. Integration tests link this crate
 # without `cfg(test)`, so without it every test that generated a device
-# identity wrote a real login-keychain item and left it there.
+# identity wrote a real login-keychain item and left it there. It also
+# exposes `ManagedRoute::start_against`, which starts a managed route against
+# a local fixture instead of NEAR AI, for `tests/managed_statusline.rs`.
 #
 # Enabled ONLY by the self dev-dependency below, which cargo activates for
 # `cargo test` and never for `cargo build`/`--release` of a shipped binary.

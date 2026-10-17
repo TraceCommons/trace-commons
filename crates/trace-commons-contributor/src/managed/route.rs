@@ -62,6 +62,22 @@ impl ManagedRoute {
         Self::start_at(store, id, key, near_ai_base_url(), tool, requested).await
     }
 
+    /// [`ManagedRoute::start`] against `base_url` instead of NEAR AI, for
+    /// integration tests, which run the built executable against a route
+    /// on a local fixture. Test builds only (`test-credential-store`).
+    #[cfg(feature = "test-credential-store")]
+    #[doc(hidden)]
+    pub async fn start_against(
+        store: &ConfigStore,
+        id: Uuid,
+        key: ApiKey,
+        base_url: &str,
+        tool: ToolId,
+        requested: Option<&str>,
+    ) -> Result<Self, ManagedError> {
+        Self::start_at(store, id, key, base_url, tool, requested).await
+    }
+
     async fn start_at(
         store: &ConfigStore,
         id: Uuid,
@@ -101,10 +117,14 @@ impl ManagedRoute {
         config
             .write_daemon_file(
                 "config.toml",
-                // The call log is on, for the status line's usage and for
-                // the person; bodies are off, so it records what each call
-                // was (models, tokens, timings, status), never what it said.
-                // It lives in this home and goes with it at shutdown.
+                // The call log is on, as the person's record of the session;
+                // the status line does not read it. Bodies are off, so a
+                // completed call is recorded as what it was (models, tokens,
+                // timings, status), never what it said. A refused call's
+                // error column holds IronWire's text for the error, which
+                // includes up to 600 characters of the provider's error
+                // message, and a provider can quote the request there. The
+                // log lives in this home and goes with it at shutdown.
                 format!(
                     r#"[capture]
 enabled = true
@@ -474,6 +494,103 @@ mod tests {
         let home = route.home().to_path_buf();
         route.shutdown().await;
         assert!(!home.exists());
+        server.abort();
+    }
+
+    /// The call log's error column is not body-free. A provider that
+    /// rejects a request and quotes it back in its error message has up to
+    /// 600 characters of that message (IronWire's `reason`) written to the
+    /// log, prompt text included; nothing past them, and no `bodies`
+    /// store. Pinned so that a change on either side is seen, and the docs
+    /// that state it are updated with it.
+    #[tokio::test]
+    async fn a_refused_call_logs_up_to_600_characters_of_the_providers_error() {
+        const HEAD: &str = "refusal-echo-head-8d1e4a";
+        const TAIL: &str = "refusal-echo-tail-3b7f02";
+        async fn refuse(Json(body): Json<Value>) -> (axum::http::StatusCode, Json<Value>) {
+            // The provider quotes the prompt back in its error message.
+            let prompt = body["messages"]
+                .as_array()
+                .and_then(|m| m.last())
+                .and_then(|m| m["content"].as_str())
+                .unwrap_or_default()
+                .to_owned();
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({"error":{"message":format!("invalid prompt: {prompt}")}})),
+            )
+        }
+        let models = json!({"data":[
+            {"id":"anthropic/claude-sonnet-5-5","input_modalities":["text"],"output_modalities":["text"]},
+        ]});
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(move || {
+                    let models = models.clone();
+                    async move { Json(models) }
+                }),
+            )
+            .route("/v1/chat/completions", post(refuse));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().into()).unwrap();
+        let route = ManagedRoute::start_at(
+            &store,
+            Uuid::new_v4(),
+            ApiKey::new("fixture-key".into()).unwrap(),
+            &endpoint,
+            ToolId::Claude,
+            None,
+        )
+        .await
+        .unwrap();
+        let prompt = format!("{HEAD}{}{TAIL}", "x".repeat(700));
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let result = client
+            .post(format!(
+                "http://127.0.0.1:{}/anthropic/v1/messages",
+                route.port()
+            ))
+            .header("anthropic-version", "2023-06-01")
+            .json(&json!({"model":"anthropic/claude-sonnet-5-5","max_tokens":16,"messages":[{"role":"user","content":prompt}]}))
+            .send()
+            .await
+            .unwrap();
+        assert!(result.status().is_client_error(), "{}", result.status());
+        let _ = result.bytes().await.unwrap();
+        let ledger = route.home().join("ledger.sqlite");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let errors = loop {
+            let errors: Vec<(i64, Option<String>)> = rusqlite::Connection::open_with_flags(
+                &ledger,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .and_then(|db| {
+                db.prepare("SELECT status, error FROM exchanges")?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect()
+            })
+            .unwrap_or_default();
+            if !errors.is_empty() {
+                break errors;
+            }
+            assert!(std::time::Instant::now() < deadline, "no call logged");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        let (status, error) = &errors[0];
+        assert_eq!(*status, 400);
+        let error = error.as_deref().expect("an error column");
+        assert!(error.contains(HEAD), "{error}");
+        assert!(!error.contains(TAIL), "{error}");
+        assert!(error.chars().count() <= 700, "{}", error.chars().count());
+        assert!(!route.home().join("bodies").exists());
+        route.shutdown().await;
         server.abort();
     }
 }
