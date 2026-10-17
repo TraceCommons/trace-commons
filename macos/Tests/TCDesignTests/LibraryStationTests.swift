@@ -1,0 +1,48 @@
+import CoreGraphics
+import simd
+import SwiftUI
+import XCTest
+
+@testable import TCDesign
+
+/// The Traces map's library station (owner, 2026-10-16): a mesh built
+/// round the NEAR AI mark, turned as a solid, never a flat picture.
+final class LibraryStationTests: XCTestCase {
+    /// The mark's outline is the brand path, flattened, at the asked
+    /// height, centred on the station's axis.
+    func test_theMarksOutlineIsTheBrandPathAtItsHeight() {
+        let outline = GlassLibraryStation.markOutline(height: 30)
+        XCTAssertGreaterThan(outline.count, 20)
+        let ys = outline.map(\.y), xs = outline.map(\.x)
+        XCTAssertEqual((ys.max() ?? 0) - (ys.min() ?? 0), 30, accuracy: 0.6)
+        XCTAssertEqual(((xs.max() ?? 0) + (xs.min() ?? 0)) / 2, 0, accuracy: 0.6)
+        XCTAssertEqual(((ys.max() ?? 0) + (ys.min() ?? 0)) / 2, 0, accuracy: 0.6)
+    }
+
+    /// The mesh has depth: the mark's two faces and its sides, a ring, and
+    /// parts on every side of the axis.
+    func test_theMeshIsASolidRoundTheMark() {
+        let mesh = GlassLibraryStation.mesh
+        XCTAssertEqual(mesh.filter(\.markCap).count, 2)
+        XCTAssertGreaterThan(mesh.filter { $0.mark && !$0.markCap }.count, 20, "the mark has no sides")
+        let points = mesh.flatMap(\.points)
+        let ys = points.map(\.y)
+        XCTAssertGreaterThan((ys.max() ?? 0) - (ys.min() ?? 0), 6, "the mesh is flat")
+        XCTAssertLessThan(points.map(\.x).min() ?? 0, -36)
+        XCTAssertGreaterThan(points.map(\.x).max() ?? 0, 36)
+        XCTAssertTrue(mesh.allSatisfy { $0.points.count >= 3 })
+    }
+
+    /// Turning is a rotation: it keeps every point's distance from the
+    /// centre, and a quarter turn moves the parts.
+    func test_turningKeepsTheStationsShape() {
+        for p in [SIMD3<Double>(36, 0, 0), SIMD3(0, 3.2, -15), SIMD3(-20, 1, 12)] {
+            for angle in [0.0, 0.6, 2.1] {
+                XCTAssertEqual(simd_length(GlassLibraryStation.turned(p, angle: angle)), simd_length(p), accuracy: 1e-9)
+            }
+        }
+        let p = SIMD3<Double>(36, 0, 0)
+        XCTAssertGreaterThan(
+            simd_distance(GlassLibraryStation.turned(p, angle: 0), GlassLibraryStation.turned(p, angle: .pi / 2)), 30)
+    }
+}
