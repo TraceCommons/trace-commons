@@ -273,4 +273,64 @@ final class ManagedSessionsTests: XCTestCase {
             ManagedSurface.caption(["Claude Code", "", "Subscription"], startedAt: nil, relative: { _ in "never" }),
             "Claude Code · Subscription")
     }
+
+    private static let modelCopy = [
+        "model_default": "Default: {model}", "model_default_unknown": "Default",
+    ]
+
+    /// The picker's first option names no model and says which one the
+    /// session will get; every NEAR AI chat model follows, in its order.
+    func testTheModelPickerOffersTheDefaultThenTheCatalogue() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"anthropic/claude-sonnet-5-5","name":"Claude Sonnet 5.5"},{"id":"openai/gpt-6.1-sol"}],"default":"anthropic/claude-sonnet-5-5"}"#.utf8))
+        XCTAssertEqual(catalogue.models.map(\.id), ["anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"])
+        XCTAssertEqual(catalogue.models.first?.name, "Claude Sonnet 5.5")
+        let options = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }
+        XCTAssertEqual(options.map(\.title), ["Default: anthropic/claude-sonnet-5-5", "anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"])
+        XCTAssertEqual(options.map(\.value), [ManagedSurface.defaultModel, "anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"])
+
+        // Before the catalogue arrives, or when NEAR AI could not be read:
+        // only the default, which needs no catalogue to launch.
+        XCTAssertEqual(ManagedSurface.modelOptions(nil) { Self.modelCopy[$0] ?? "" }.map(\.title), ["Default"])
+        let unnamed = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"x/y"}],"default":null}"#.utf8))
+        XCTAssertEqual(ManagedSurface.modelOptions(unnamed) { Self.modelCopy[$0] ?? "" }.map(\.title), ["Default", "x/y"])
+    }
+
+    /// Only Claude Code and Codex on a saved NEAR AI key choose a model in
+    /// the Launch sheet. OpenCode keeps its own model field.
+    func testOnlyClaudeAndCodexOnASavedNearAiKeyOfferTheModelPicker() {
+        XCTAssertTrue(ManagedSurface.offersModelChoice(tool: "claude", connection: "near_ai"))
+        XCTAssertTrue(ManagedSurface.offersModelChoice(tool: "codex", connection: "near_ai"))
+        XCTAssertFalse(ManagedSurface.offersModelChoice(tool: "opencode", connection: "near_ai"))
+        XCTAssertFalse(ManagedSurface.offersModelChoice(tool: "claude", connection: "subscription"))
+        XCTAssertFalse(ManagedSurface.offersModelChoice(tool: "codex", connection: "api_key"))
+        XCTAssertFalse(ManagedSurface.offersModelChoice(tool: "future_tool", connection: "near_ai"))
+    }
+
+    /// The Launch sheet's request names a model only where one was chosen
+    /// and the daemon accepts it; the default sends none.
+    func testLaunchParamsNameAModelOnlyWhereOneWasChosen() throws {
+        let account = { (tool: String, connection: String) in
+            ManagedAccount(id: "a", tool: tool, connection: connection, label: "Work", authState: "ready")
+        }
+        let params = { (account: ManagedAccount, model: String?) in
+            ManagedSurface.launchParams(account: account, cwd: "/p", requestID: "r", generation: 3, model: model, collectTraces: true)
+        }
+        let chosen = params(account("claude", "near_ai"), "openai/gpt-6.1-sol")
+        XCTAssertEqual(chosen["model"] as? String, "openai/gpt-6.1-sol")
+        XCTAssertNil(chosen["collect_traces"])
+        XCTAssertEqual(chosen["connection"] as? String, "near_ai")
+        XCTAssertEqual(chosen["expected_generation"] as? UInt64, 3)
+        XCTAssertEqual(chosen["cwd"] as? String, "/p")
+        XCTAssertNil(params(account("codex", "near_ai"), nil)["model"])
+        XCTAssertNil(params(account("codex", "near_ai"), ManagedSurface.defaultModel)["model"])
+        XCTAssertNil(params(account("claude", "subscription"), "openai/gpt-6.1-sol")["model"])
+        // OpenCode as before: its typed model, trimmed, and the collection opt-in.
+        let openCode = params(account("opencode", "api_key"), "  gpt-5 ")
+        XCTAssertEqual(openCode["model"] as? String, "gpt-5")
+        XCTAssertEqual(openCode["collect_traces"] as? Bool, true)
+    }
+
+    func testAnUnavailableModelHasItsOwnLine() {
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-model-unavailable", message: "managed-model-unavailable"), "model_unavailable")
+    }
 }

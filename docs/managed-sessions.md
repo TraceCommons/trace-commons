@@ -91,10 +91,19 @@ tools whose executable availability is not checked.
   an explicit host bridge, so under Flatpak the picker offers nothing and is
   not drawn. Show brings a session's Terminal tab to the front on macOS; a
   session opened in another terminal app cannot be shown.
-- Each NEAR AI session owns an isolated IronWire proxy and key. It waits for
-  NEAR's model catalogue and pins its own proxy to the first advertised model.
-  It never changes the standard proxy or falls back to another provider/account.
-  Model selection within that catalogue is a follow-up UI capability.
+- Each NEAR AI session owns an isolated IronWire proxy and key, pinned to one
+  model. It never changes the standard proxy or falls back to another
+  provider/account. The model is chosen from NEAR AI's catalogue
+  (`managed/models.rs`): chat models only (text in, text out only, minus
+  rerankers and the privacy filter), then the model the launch named, or the
+  tool's default -- the newest `anthropic/claude-sonnet-*` for Claude Code,
+  the newest `openai/gpt-*` for Codex (never a `mini`, `nano` or `lite`
+  variant), falling back to the vendor's first model and then the first chat
+  model; OpenCode on the sign-in takes the first chat model. A named model
+  NEAR AI does not list as a chat model starts nothing
+  (`managed-model-unavailable`). The session row shows the pinned model.
+  Claude Code and Codex name a model with `near-ai launch <tool> --model <id>`
+  or the macOS Launch sheet's model picker, for a saved NEAR AI account.
 - A profile cannot be reconnected, have its key replaced, or be removed while a
   managed session or sign-in holds it. Multiple coding sessions may share the
   same account, but sign-in requires that account to be idle.

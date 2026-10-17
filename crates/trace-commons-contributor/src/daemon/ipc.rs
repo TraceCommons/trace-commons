@@ -357,6 +357,7 @@ pub const METHODS: &[&str] = &[
     "managed_account_rename",
     "managed_account_set_key",
     "managed_account_verify",
+    "managed_model_catalogue",
     "account_bind",
     "account_binding",
     "account_session_status",
@@ -3476,6 +3477,10 @@ fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
 /// Labels are explicit because several methods share a label that cannot
 /// be derived from their names, including the onboarding and profile groups.
 const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
+    (
+        "managed_model_catalogue",
+        "managed-model-catalogue-requires-async",
+    ),
     ("inference_summary", "inference-summary-requires-async"),
     ("model_spend", "model-spend-requires-async"),
     ("set_private_ai", "private-ai-requires-async"),
@@ -3619,6 +3624,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "managed_account_set_key" => super::managed::handle(shared, req),
         "managed_account_verify" => super::managed::handle(shared, req),
         "managed_account_reconnect" => super::managed::handle(shared, req),
+        "managed_model_catalogue" => super::managed::handle(shared, req),
         "hello" => Response::ok(
             req.id,
             serde_json::json!({
@@ -13949,6 +13955,57 @@ mod tests {
                 .any(|a| a == "Bearer sk-route-fixture-key"),
             "the key reached NEAR AI through the proxy"
         );
+        // The row shows the model the session runs on.
+        let snapshot = handle_request_async(&s, &req("managed_snapshot", serde_json::json!({})))
+            .await
+            .result
+            .expect("snapshot");
+        let row = snapshot["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == context["session"]["id"])
+            .unwrap();
+        assert_eq!(row["model"], "fixture-model");
+        assert_eq!(context["session"]["model"], "fixture-model");
+
+        // The models a launch picker offers, with the tool's default.
+        let r = handle_request_async(
+            &s,
+            &req(
+                "managed_model_catalogue",
+                serde_json::json!({"tool":"codex"}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            r.result.expect("catalogue"),
+            serde_json::json!({"models":[{"id":"fixture-model"}],"default":"fixture-model"})
+        );
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({"tool":"claude","key":"sk-route-fixture-key"}),
+        ] {
+            let r = handle_request_async(&s, &req("managed_model_catalogue", params)).await;
+            assert_eq!(r.error.unwrap().message, "managed-invalid-request");
+        }
+        // A model NEAR AI does not list starts no proxy, and says why.
+        let mut named = launch("claude");
+        named["model"] = "anthropic/claude-sonnet-9".into();
+        let prepared = handle_request_async(&s, &req("managed_launch_prepare", named))
+            .await
+            .result
+            .expect("prepared");
+        let r = handle_request_async(
+            &s,
+            &req(
+                "managed_launch_redeem",
+                serde_json::json!({"session_id": prepared["session_id"], "ticket": prepared["ticket"]}),
+            ),
+        )
+        .await;
+        assert_eq!(r.error.unwrap().message, "managed-model-unavailable");
+        assert_eq!(routes(&s), 1);
 
         // The session runs, then exits: its proxy goes with it.
         let report = |state: &str, exit: Option<i32>| {
@@ -16818,7 +16875,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 60);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 61);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -17277,7 +17334,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 86, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 87, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
