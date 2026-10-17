@@ -61,43 +61,39 @@ public struct GlassLibraryStation: View {
     /// curves flattened, centred, scaled to `height` units and turned y-up.
     static func markOutline(height: Double) -> [SIMD2<Double>] {
         guard let path = SVGPathData.parse(GlassBrandMark.data) else { return [] }
-        var points: [CGPoint] = []
-        var current = CGPoint.zero
+        // Each step typed and small: the macOS 15 toolchain gives up on
+        // one long expression of point arithmetic here.
+        var points: [SIMD2<Double>] = []
+        var current = SIMD2<Double>.zero
         path.applyWithBlock { element in
-            let e = element.pointee
+            let e: CGPathElement = element.pointee
+            var curve: [SIMD2<Double>] = []
             switch e.type {
             case .moveToPoint, .addLineToPoint:
-                current = e.points[0]
+                current = vector(e.points[0])
                 points.append(current)
             case .addQuadCurveToPoint:
-                let c = e.points[0], end = e.points[1]
-                for step in 1...5 {
-                    let t = CGFloat(step) / 5, u = 1 - t
-                    points.append(CGPoint(x: u * u * current.x + 2 * u * t * c.x + t * t * end.x,
-                                          y: u * u * current.y + 2 * u * t * c.y + t * t * end.y))
-                }
-                current = end
+                curve = [current, vector(e.points[0]), vector(e.points[1])]
             case .addCurveToPoint:
-                let c1 = e.points[0], c2 = e.points[1], end = e.points[2]
-                for step in 1...5 {
-                    let t = CGFloat(step) / 5, u = 1 - t
-                    let a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t
-                    points.append(CGPoint(x: a * current.x + b * c1.x + c * c2.x + d * end.x,
-                                          y: a * current.y + b * c1.y + c * c2.y + d * end.y))
-                }
-                current = end
+                curve = [current, vector(e.points[0]), vector(e.points[1]), vector(e.points[2])]
             case .closeSubpath:
                 break
             @unknown default:
                 break
             }
+            guard let last = curve.last else { return }
+            for step in 1...5 {
+                points.append(bezier(curve, at: Double(step) / 5))
+            }
+            current = last
         }
         let box = GlassBrandMark.viewBox
-        let k = height / Double(box.height)
+        let k: Double = height / Double(box.height)
         let centre = SIMD2<Double>(Double(box.midX), Double(box.midY))
         var outline: [SIMD2<Double>] = []
         for point in points {
-            let q = SIMD2<Double>((Double(point.x) - centre.x) * k, -(Double(point.y) - centre.y) * k)
+            let offset: SIMD2<Double> = point - centre
+            let q = SIMD2<Double>(offset.x * k, -offset.y * k)
             if let last = outline.last, simd_distance(q, last) <= 0.05 { continue }
             outline.append(q)
         }
@@ -105,6 +101,26 @@ public struct GlassLibraryStation: View {
             outline.removeLast()
         }
         return outline
+    }
+
+    static func vector(_ point: CGPoint) -> SIMD2<Double> {
+        SIMD2<Double>(Double(point.x), Double(point.y))
+    }
+
+    /// The point `t` of the way along a Bezier curve given by its control
+    /// points (de Casteljau).
+    static func bezier(_ controls: [SIMD2<Double>], at t: Double) -> SIMD2<Double> {
+        var level = controls
+        while level.count > 1 {
+            var next: [SIMD2<Double>] = []
+            for index in 0 ..< level.count - 1 {
+                let a: SIMD2<Double> = level[index]
+                let b: SIMD2<Double> = level[index + 1]
+                next.append(a + (b - a) * t)
+            }
+            level = next
+        }
+        return level.first ?? .zero
     }
 
     static func build() -> [Face] {
@@ -244,7 +260,8 @@ public struct GlassLibraryStation: View {
                 if index == 0 { path.move(to: s) } else { path.addLine(to: s) }
             }
             path.closeSubpath()
-            let c = (face.color * face.shade + SIMD3(repeating: face.spec)) * dim
+            let shaded: SIMD3<Double> = face.color * face.shade + SIMD3<Double>(repeating: face.spec)
+            let c: SIMD3<Double> = shaded * dim
             let color = Color(red: min(1, c.x), green: min(1, c.y), blue: min(1, c.z))
             context.fill(path, with: .color(color))
             // The same colour round the edge closes the seams between faces.

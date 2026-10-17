@@ -40,6 +40,13 @@ struct MapToolPile: View {
         let height = stack.height(open: open) * s
         let width = (wide && !moving ? Stack.openWidth : Stack.width) * s
         let left = fit.point(stack.portLeft)
+        // Where the pointer counts as over the group: the card, or the
+        // details card too while a trace moves. Typed here, out of the
+        // view's expression, for the older type checker (macOS 15 CI).
+        let hitWidth: CGFloat = moving ? 252 : width
+        let hitHeight: CGFloat = moving ? max(height, 214) : height
+        let cardX: CGFloat = left.x - 9 + 126
+        let hitX: CGFloat = moving ? cardX : left.x + width / 2
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 26 * s, style: .continuous)
                 .fill(open && wide ? GlassTokens.Color.paneOpaque.color.opacity(0.92) : GlassTokens.Color.wellFill.color)
@@ -61,17 +68,15 @@ struct MapToolPile: View {
                     tag(node, index: index, open: open)
                 }
             }
-            // Where the pointer counts as over the group: the card, or the
-            // details card too while it is open.
             Color.clear
                 .contentShape(Rectangle())
-                .frame(width: moving ? 252 : width, height: moving ? max(height, 214) : height)
-                .position(x: moving ? left.x - 9 + 126 : left.x + width / 2, y: left.y)
+                .frame(width: hitWidth, height: hitHeight)
+                .position(x: hitX, y: left.y)
                 .onHover(perform: hover)
                 .accessibilityHidden(true)
             if moving, over, let run, let transfer = run.current(at: t) {
                 details(transfer, s: s)
-                    .position(x: left.x - 9 + 126, y: left.y)
+                    .position(x: cardX, y: left.y)
                     .transition(.scale(scale: 0.2, anchor: .leading).combined(with: .opacity))
             }
         }
@@ -92,6 +97,8 @@ struct MapToolPile: View {
         }
         let tint = tool.tint.color
         let side = Stack.coin * s
+        let runGlow: Color = contributing ? GlassTokens.Color.statusOn.color : GlassTokens.Color.purpleSoft.color
+        let glow: Color = grown ? runGlow.opacity(0.45) : .clear
         return ZStack {
             // The coin's edge below it, then an opaque face and its rim.
             Circle().fill(tint.opacity(0.45)).offset(y: 3 * s)
@@ -130,8 +137,7 @@ struct MapToolPile: View {
         .frame(width: side, height: side)
         .opacity(node.dashed ? 0.55 : node.dim)
         .scaleEffect(grown ? 1.3 : 1)
-        .shadow(color: grown ? (contributing ? GlassTokens.Color.statusOn.color : GlassTokens.Color.purpleSoft.color).opacity(0.45) : .clear,
-                radius: 9 * s)
+        .shadow(color: glow, radius: 9 * s)
         .zIndex(grown ? 100 : Double(count - index))
         .position(fit.point(stack.coinCenter(index, open: open)))
         .animation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.8), value: index)
@@ -148,6 +154,7 @@ struct MapToolPile: View {
         let s = fit.scale
         let centre = fit.point(stack.coinCenter(index, open: open))
         let line = node.dashed ? Self.words?.legendNotWatched : node.waiting.flatMap { Self.words?.coinWaiting($0) }
+        let shown: Double = node.dashed ? 0.55 : 1
         return VStack(alignment: .leading, spacing: 0) {
             Text(node.label)
                 .font(.system(size: max(9.5, 11 * s), weight: .semibold))
@@ -160,7 +167,7 @@ struct MapToolPile: View {
         }
         .lineLimit(1)
         .fixedSize()
-        .opacity(names ? (node.dashed ? 0.55 : 1) : 0)
+        .opacity(names ? shown : 0)
         .frame(width: 0, height: 0, alignment: .leading)
         .position(x: centre.x + 32 * s, y: centre.y)
         .allowsHitTesting(false)
@@ -333,18 +340,32 @@ enum MapTransferDrawing {
 
     static func folderArc(_ folder: String, in scene: FlowMapScene) -> FlowMapScene.Arc? {
         guard let node = scene.nodes.first(where: { $0.id == "folder:\(folder)" }) else { return nil }
-        return scene.arcs.first { abs($0.from.y - node.at.y) < 0.5 && abs($0.from.x - node.at.x - FlowMapScene.folderRadius - 1) < 0.5 }
+        let start = CGPoint(x: node.at.x + FlowMapScene.folderRadius + 1, y: node.at.y)
+        return scene.arcs.first { arc in
+            let dx: CGFloat = abs(arc.from.x - start.x)
+            let dy: CGFloat = abs(arc.from.y - start.y)
+            return dx < 0.5 && dy < 0.5
+        }
     }
 
     static func point(on arc: FlowMapScene.Arc, at t: Double) -> CGPoint {
-        let u = 1 - t
-        let a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t
-        return CGPoint(x: a * arc.from.x + b * arc.control1.x + c * arc.control2.x + d * arc.to.x,
-                       y: a * arc.from.y + b * arc.control1.y + c * arc.control2.y + d * arc.to.y)
+        // Small typed steps in one type: Swift 6.2 gives up on the sum of
+        // four mixed Double and CGFloat products written in one line.
+        let v = CGFloat(t)
+        let u: CGFloat = 1 - v
+        let a: CGFloat = u * u * u
+        let b: CGFloat = 3 * u * u * v
+        let c: CGFloat = 3 * u * v * v
+        let d: CGFloat = v * v * v
+        let near: CGPoint = CGPoint(x: a * arc.from.x + b * arc.control1.x, y: a * arc.from.y + b * arc.control1.y)
+        let far: CGPoint = CGPoint(x: c * arc.control2.x + d * arc.to.x, y: c * arc.control2.y + d * arc.to.y)
+        return CGPoint(x: near.x + far.x, y: near.y + far.y)
     }
 
     static func ease(_ t: Double) -> Double {
-        t < 0.5 ? 4 * t * t * t : 1 - pow(-2 * t + 2, 3) / 2
+        if t < 0.5 { return 4 * t * t * t }
+        let rest: Double = -2 * t + 2
+        return 1 - pow(rest, 3) / 2
     }
 
     // MARK: Orbs and pulses
@@ -363,8 +384,8 @@ enum MapTransferDrawing {
     }
 
     static func pulse(at centre: CGPoint, progress: Double, glow: Color, s: CGFloat, in context: inout GraphicsContext) {
-        let r = (6 + 38 * progress) * s
-        let alpha = progress < 0.2 ? progress / 0.2 * 0.95 : 0.95 * (1 - (progress - 0.2) / 0.8)
+        let r: CGFloat = (6 + 38 * CGFloat(progress)) * s
+        let alpha: Double = progress < 0.2 ? progress / 0.2 * 0.95 : 0.95 * (1 - (progress - 0.2) / 0.8)
         context.fill(Path(ellipseIn: CGRect(x: centre.x - r, y: centre.y - r, width: r * 2, height: r * 2)),
                      with: .radialGradient(Gradient(colors: [.white.opacity(alpha), glow.opacity(alpha * 0.75), glow.opacity(0)]),
                                            center: centre, startRadius: 0, endRadius: r))
@@ -459,10 +480,10 @@ enum MapTransferDrawing {
 
     static func smoke(at base: CGPoint, progress: Double, s: CGFloat, in context: inout GraphicsContext) {
         for (offset, delay) in [(CGFloat(0), 0.0), (CGFloat(-14), 0.15)] {
-            let p = max(0, progress - delay) / (1 - delay)
+            let p: Double = max(0, progress - delay) / (1 - delay)
             guard p > 0 else { continue }
-            let r = (6 + 30 * p) * s
-            let alpha = 0.5 * (1 - p)
+            let r: CGFloat = (6 + 30 * CGFloat(p)) * s
+            let alpha: Double = 0.5 * (1 - p)
             let centre = CGPoint(x: base.x + offset * s, y: base.y - 4 * s)
             context.fill(Path(ellipseIn: CGRect(x: centre.x - r, y: centre.y - r, width: r * 2, height: r * 2)),
                          with: .radialGradient(Gradient(colors: [Color(white: 0.86).opacity(alpha), Color(white: 0.66).opacity(0)]),
@@ -474,8 +495,8 @@ enum MapTransferDrawing {
     static func dock(at centre: CGPoint, since: Double, s: CGFloat, run: MapTransferRun, in context: inout GraphicsContext) {
         guard since >= 0 else { return }
         if since < 1.1 {
-            let p = since / 1.1
-            let r = (28 + 26 * p) * s
+            let p: Double = since / 1.1
+            let r: CGFloat = (28 + 26 * CGFloat(p)) * s
             context.stroke(Path(ellipseIn: CGRect(x: centre.x - r, y: centre.y - r, width: r * 2, height: r * 2)),
                            with: .color(GlassTokens.Color.blue.color.opacity(0.75 * (1 - p))), lineWidth: 3 * s)
         }
