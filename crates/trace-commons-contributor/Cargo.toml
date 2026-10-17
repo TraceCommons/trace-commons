@@ -584,7 +584,59 @@ keyring-core = "=1.0.0"
 # IronWire changes (`Exchange.proof`, `Capture::request` becoming a method,
 # `CaptureConfig.receipts`, `LedgerContext` non-exhaustive) touch nothing this
 # crate names.
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "b1bd24176b402aab1a990a0f62d094d7a97ce636" }
+#
+# ADVANCE TO 9a4c231b. Three commits in the range, verified with
+# `git log --oneline b1bd2417..9a4c231b`: #60 serves the model a client names
+# when its backend's provider lists it (exact-model routing, in
+# `ironwire_core::policy`), #61 moves the Claude Code status line out of the
+# `ironwire` binary into a library module and adds `StatusLine::Command`, and
+# #62 follows a home's `endpoint.json` pointer only when it names that home's
+# token file.
+#
+# COST. Zero new packages, measured. Upstream changed no manifest and no lock
+# in the range -- `git diff --stat b1bd2417..9a4c231b -- Cargo.toml Cargo.lock
+# '*/Cargo.toml'` is empty -- and the new `statusline` module uses only
+# dependencies `ironwire_proxy` already had (chrono, reqwest, serde_json,
+# tokio, ironwire_core, ironwire_update). All three locks (root, GTK, Tauri)
+# were re-resolved through `cargo metadata` rather than `cargo update`, and
+# each diff is exactly 22 changed lines, all of them the eleven `ironwire_*`
+# source strings: no other package moved and no edge was added. Lock entries
+# are 974 root, 559 GTK and 735 Tauri before and after; this crate's
+# `cargo tree -e normal` is 310 deduplicated names. `cargo deny check
+# licenses` passes default and --all-features.
+#
+# MSRV. Unmoved: upstream's root `rust-version` reads `1.96` at both revs.
+#
+# SURFACE. `ironwire_catalog` did not move one byte (`git diff --stat` on
+# `crates/ironwire_catalog` is empty), and neither did `ironwire_proxy`'s
+# `embed.rs` or `proof` -- the only `ironwire_proxy` modules this crate names.
+#   * `ironwire_proxy` GAINS `pub mod statusline` (`line_for_home`, `line`,
+#     `render`, `endpoint_for_home`, `client_model_from_stdin`, ...).
+#     Additive; nothing here calls it yet.
+#   * `ironwire_agents::tools::StatusLine` GAINS `Command(String)` and so
+#     LOSES `Copy`; `ConnectOptions` loses `Copy` with it. Both were already
+#     `#[non_exhaustive]`. This crate names neither -- grep for `StatusLine`
+#     and `ConnectOptions` across `crates/**/*.rs` returns zero -- so the
+#     loss breaks nothing. `harness` still plans through `plan_connect`, whose
+#     default stays `StatusLine::Offer`; the NOT REACHED note above still
+#     holds, and `StatusLine::Command` is the seam that would let this crate's
+#     own executable fill that slot instead.
+#   * #60 changes routing inside the embedded proxy: a pinned or chosen
+#     backend whose provider-listed catalogue names the requested model now
+#     serves that model rather than a tier substitute. That is a behaviour
+#     change on a contributor's machine, upstream's own, with no API surface
+#     here.
+#
+# FLATPAK. `cargo-sources.json` was edited rather than regenerated, as in the
+# last advance, and moves the same 14 lines: 2 full revisions (the git
+# source's `commit` and the vendored-sources `contents`) and 12 short-hash
+# lines (`flatpak-cargo/git/ironwire-b1bd241` -> `-9a4c231`). `grep -c
+# b1bd241` on the file is 0. The lock's package set is unchanged, which is
+# what makes editing equivalent to regenerating.
+#
+# The IronClaw note above still applies: the root and GTK locks still name
+# 6dccbfbcbddfdfb53c11d3876f94bf3e716b55f9.
+ironwire_proxy ={ git = "https://github.com/nearai/ironwire", rev = "9a4c231b89922a8645f7e2329b0329fb295a8902" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -598,8 +650,8 @@ ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "b1bd24176b
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "b1bd24176b402aab1a990a0f62d094d7a97ce636" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "b1bd24176b402aab1a990a0f62d094d7a97ce636" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "9a4c231b89922a8645f7e2329b0329fb295a8902" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "9a4c231b89922a8645f7e2329b0329fb295a8902" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
