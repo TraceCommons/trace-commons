@@ -27,10 +27,18 @@ struct InsightsView: View {
                     storeCopy: [String: String]? = TCInsights.copy(),
                     daemon: (any DaemonDataClient)? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
-        let service: InsightsModel.Service = { request in try await router.call(request) }
-        let weekReader: InsightsModel.WeekReader? = daemon.map { client in
+        var service: InsightsModel.Service = { request in try await router.call(request) }
+        var weekReader: InsightsModel.WeekReader? = daemon.map { client in
             { isoWeek in try await client.insightsWeek(isoWeek: isoWeek) }
         }
+        #if DEBUG
+        // A design review's sample week, in place of the daemon's week and
+        // the store's analytics answers (`InsightsSampleWeek`).
+        if InsightsSampleWeek.enabled {
+            service = InsightsSampleWeek.service(fallback: service)
+            weekReader = nil
+        }
+        #endif
         let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
             { _ = try await client.setInsightsRecapCard(false) }
         }
@@ -91,30 +99,30 @@ struct InsightsView: View {
     /// decision D5). The models open and close with the container, not with
     /// a tab.
     private var tabs: some View {
+        // The page is in the main pane, whose insets it shares: no inset of
+        // its own across, so its cards get the pane's whole 408pt.
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: GlassTokens.Space.s6) {
-                GlassSegmentedTabs(model.text("title"), selection: $tab, segments: [
-                    GlassSegment(model.text("analytics_tab_overview"), value: InsightsTab.overview),
-                    GlassSegment(model.text("analytics_tab_patterns"), value: InsightsTab.patterns),
-                    GlassSegment(model.text("analytics_tab_sessions"), value: InsightsTab.sessions),
-                    GlassSegment(model.text("analytics_tab_analyze"), value: InsightsTab.analyze),
-                ])
-                .frame(maxWidth: 480)
-                Spacer()
-            }
-            .padding(.horizontal, 24).padding(.top, 16)
+            GlassSegmentedTabs(model.text("title"), selection: $tab, segments: [
+                GlassSegment(model.text("analytics_tab_overview"), value: InsightsTab.overview),
+                GlassSegment(model.text("analytics_tab_patterns"), value: InsightsTab.patterns),
+                GlassSegment(model.text("analytics_tab_sessions"), value: InsightsTab.sessions),
+                GlassSegment(model.text("analytics_tab_analyze"), value: InsightsTab.analyze),
+            ])
+            .padding(.top, GlassTokens.Space.s4)
             switch tab {
             case .overview:
                 InsightsOverviewTab(
                     model: overviewModel, comparisons: comparisonsModel, copy: model.copy,
                     snapshots: model.snapshots,
                     notice: model.counterPassNoticeKey.map(model.text),
+                    patterns: patternsModel.shown,
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
                     turnOffRecap: turnOffRecapCard.map { turnOff in
                         { Task { try? await turnOff(); await model.loadWeek() } }
                     },
-                    showReads: { tab = .patterns })
+                    showReads: { tab = .patterns },
+                    showPatterns: { tab = .patterns })
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
                                     selectWeek: selectWeek)
@@ -129,6 +137,7 @@ struct InsightsView: View {
         .onAppear { overviewModel.open() }
         .onAppear { patternsModel.open() }
         .onAppear { sessionsModel.open(); sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id)) }
+        .onAppear { showSampleWeekIfAsked() }
         .onChange(of: comparisonTaskVersions) { _, _ in
             specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)
         }
@@ -147,6 +156,20 @@ struct InsightsView: View {
             model.close(); comparisonModel.close(); specificationModel.close(); overviewModel.close()
             patternsModel.close(); sessionsModel.close(); comparisonsModel.clear()
         }
+    }
+
+    /// Debug builds: the sample week as the daemon's week (feed T) and one
+    /// sample trace for Sessions, when `TRACE_COMMONS_INSIGHTS_SAMPLE=1`.
+    private func showSampleWeekIfAsked() {
+        #if DEBUG
+        guard InsightsSampleWeek.enabled,
+              let overview = try? InsightsSampleWeek.weekOverview,
+              let patterns = try? InsightsSampleWeek.weekPatterns else { return }
+        overviewModel.showCounter(overview)
+        patternsModel.showCounter(patterns)
+        comparisonsModel.load(counterWeeks: [], weekStart: InsightsSampleWeek.weekStart, recapCardEnabled: true)
+        if model.snapshots.isEmpty { sessionsModel.sync(snapshotIDs: ["sample"]) }
+        #endif
     }
 
     /// Put a week on screen in the feed showing: the daemon's for feed T,
@@ -170,103 +193,33 @@ struct InsightsView: View {
                               recapCardEnabled: week?.recapCardEnabled ?? false)
     }
 
-    /// The Analyze tab: the whole screen as it was before the tabs.
+    /// The Analyze tab: choosing and saving traces, and the saved-history
+    /// tools, each section on its own card under its title (owner,
+    /// 2026-10-15: between hairlines they ran together). What a section is
+    /// and what it keeps is behind its title's "i"; failures, a custom
+    /// store and what an action needs first stay on the page.
     private var content: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    if let location = Self.storeLocationLine(storeSelection, copy: storeCopy) {
-                        Text(location)
-                            .glassType(GlassTokens.TypeScale.caption).textSelection(.enabled)
-                    }
-                    Text(model.text("intro"))
-                    HStack {
-                        GlassSelect(model.text("source"), selection: $source, options: [
-                            GlassPickerOption(model.text("codex"), value: "codex"),
-                            GlassPickerOption(model.text("claude_code"), value: "claude_code"),
-                            GlassPickerOption(model.text("trajectory"), value: "trajectory"),
-                        ])
-                        Button(model.text("choose_file")) { choosingFile = true }
-                        // Short labels repeat on this screen; each is named in full
-                        // for VoiceOver, in the core's words.
-                        Button(model.text("refresh")) { model.refresh() }
-                            .accessibilityLabel(model.text("refresh_accessibility"))
-                        if model.busy { GlassSpinner() }
-                    }.disabled(model.busy)
-                    if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
-                    if !model.invalidatedEpisodeIDs.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(model.text("episode_invalidated_notice"))
-                            ForEach(model.invalidatedEpisodeIDs, id: \.self) { id in
-                                Text(id).insightsMono()
-                            }
-                        }.textSelection(.enabled)
-                    }
-                    Text(model.text("snapshot_notice"))
-                        .insightsNote()
-                    if model.loadingSummary {
-                        HStack(spacing: GlassTokens.Space.s4) {
-                            GlassSpinner()
-                            Text(model.text("summary_title")).insightsNote()
-                        }
-                    } else if let summaryError = model.summaryError {
-                        Text(summaryError).foregroundStyle(GlassStatus.outside.textColor)
-                    } else if let summary = model.summary {
-                        InsightsSummaryView(summary: summary, copy: model.copy, openSnapshot: model.explain)
-                            .disabled(model.busy)
-                    }
-                    InsightsRule()
+                VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
+                    analyzeSection
+                    summarySection
                     if let insight = model.selected {
-                        InsightDetail(insight: insight, copy: model.copy)
+                        detailSection(insight)
                             .id("insight-detail")
-                        HStack {
-                            if model.selectedIsSaved {
-                                Button(model.text("delete"), role: .destructive) { model.delete() }
-                                    .accessibilityLabel(model.text("delete_accessibility"))
-                                    .buttonStyle(GlassButtonStyle(.destructive, small: true))
-                            } else {
-                                VStack(alignment: .leading) {
-                                    Text(model.text("save_notice")).glassType(GlassTokens.TypeScale.caption)
-                                    Button(model.text("save")) { model.save() }
-                                        .accessibilityLabel(model.text("save_accessibility"))
-                                }
-                            }
-                        }.disabled(model.busy)
-                        if model.selectedIsSaved {
-                            assessment
-                            InsightEvidenceControls(model: model, insight: insight)
-                                .id(insight.id)
-                        } else {
-                            Text(model.text("link_saved_required")).glassType(GlassTokens.TypeScale.caption)
-                        }
                     }
-                    InsightsRule()
                     InsightsEpisodesView(model: model)
-                    InsightsRule()
+                        .insightsSection()
                     ComparisonTasksView(model: comparisonModel, episodes: model.episodes, copy: model.copy,
                                         openEpisode: model.openEpisode, openSnapshot: model.explain)
-                    InsightsRule()
+                        .insightsSection()
                     ComparisonSpecificationsView(model: specificationModel, copy: model.copy,
                                                  openTask: comparisonModel.select)
-                    InsightsRule()
+                        .insightsSection()
                     InsightCardsView(model: model)
-                    InsightsRule()
-                    Text(model.text("saved")).insightsHeading()
-                    if model.snapshots.isEmpty { Text(model.text("empty")) }
-                    ForEach(model.snapshots) { insight in
-                        Button { model.explain(insight.id) } label: {
-                            VStack(alignment: .leading) {
-                                Text(model.text(insight.source_format))
-                                Text(InsightsDate.label(insight.analyzed_at)).glassType(GlassTokens.TypeScale.caption)
-                                Text(insight.id).insightsMono().lineLimit(1)
-                            }.frame(maxWidth: .infinity, alignment: .leading).insightsRowCard()
-                        }
-                        .buttonStyle(GlassPressStyle())
-                        .disabled(model.busy)
-                    }
-                    Text(model.text("cancellation_notice"))
-                        .insightsCaption()
-                }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
+                        .insightsSection()
+                    savedSection
+                }.padding(.vertical, GlassTokens.Space.s7).frame(maxWidth: .infinity, alignment: .leading)
                 .insightsSurface()
             }
             .onChange(of: model.selected?.id) { _, id in
@@ -277,6 +230,117 @@ struct InsightsView: View {
             if case .success(let file) = result { model.analyze(file: file, source: source) }
         }
     }
+
+    /// Choose a trace file to analyze. What analysis is and keeps, and that
+    /// closing discards late results, are behind the title's "i".
+    private var analyzeSection: some View {
+        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+            InsightsSectionTitle(model.text("analytics_tab_analyze"), info: [
+                model.text("intro"), model.text("snapshot_notice"), model.text("cancellation_notice"),
+            ])
+            if let location = Self.storeLocationLine(storeSelection, copy: storeCopy) {
+                Text(location)
+                    .glassType(GlassTokens.TypeScale.caption).textSelection(.enabled)
+            }
+            HStack(spacing: GlassTokens.Space.s4) {
+                GlassSelect(model.text("source"), selection: $source, options: [
+                    GlassPickerOption(model.text("codex"), value: "codex"),
+                    GlassPickerOption(model.text("claude_code"), value: "claude_code"),
+                    GlassPickerOption(model.text("trajectory"), value: "trajectory"),
+                ])
+                .fixedSize()
+                Button(model.text("choose_file")) { choosingFile = true }
+                // Short labels repeat on this screen; each is named in full
+                // for VoiceOver, in the core's words.
+                Button(model.text("refresh")) { model.refresh() }
+                    .accessibilityLabel(model.text("refresh_accessibility"))
+                if model.busy { GlassSpinner() }
+            }.disabled(model.busy)
+            if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
+            if !model.invalidatedEpisodeIDs.isEmpty {
+                VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                    Text(model.text("episode_invalidated_notice"))
+                    ForEach(model.invalidatedEpisodeIDs, id: \.self) { id in
+                        Text(id).insightsMono()
+                    }
+                }.textSelection(.enabled)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .insightsSection()
+    }
+
+    /// The saved-history summary, its loading line, or its failure.
+    @ViewBuilder
+    private var summarySection: some View {
+        if model.loadingSummary {
+            HStack(spacing: GlassTokens.Space.s4) {
+                GlassSpinner()
+                Text(model.text("summary_title")).insightsNote()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .insightsSection()
+        } else if let summaryError = model.summaryError {
+            Text(summaryError).foregroundStyle(GlassStatus.outside.textColor)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .insightsSection()
+        } else if let summary = model.summary {
+            InsightsSummaryView(summary: summary, copy: model.copy, openSnapshot: model.explain)
+                .disabled(model.busy)
+                .insightsSection()
+        }
+    }
+
+    /// The trace on screen: its result, then saving or deleting it, its
+    /// assessment and its linked evidence.
+    private func detailSection(_ insight: LocalInsight) -> some View {
+        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+            InsightDetail(insight: insight, copy: model.copy)
+            HStack(spacing: GlassTokens.Space.s4) {
+                if model.selectedIsSaved {
+                    Button(model.text("delete"), role: .destructive) { model.delete() }
+                        .accessibilityLabel(model.text("delete_accessibility"))
+                        .buttonStyle(GlassButtonStyle(.destructive, small: true))
+                } else {
+                    Button(model.text("save")) { model.save() }
+                        .accessibilityLabel(model.text("save_accessibility"))
+                    // What saving keeps, beside the action.
+                    InsightsInfo(model.text("save"), [model.text("save_notice")])
+                }
+            }.disabled(model.busy)
+            if model.selectedIsSaved {
+                assessment
+                InsightEvidenceControls(model: model, insight: insight)
+                    .id(insight.id)
+            } else {
+                Text(model.text("link_saved_required")).insightsCaption()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .insightsSection()
+    }
+
+    /// Every saved trace, newest first; one opens its detail.
+    private var savedSection: some View {
+        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+            InsightsSectionTitle(model.text("saved"))
+            if model.snapshots.isEmpty { Text(model.text("empty")).insightsNote() }
+            ForEach(model.snapshots) { insight in
+                Button { model.explain(insight.id) } label: {
+                    VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                        Text(model.text(insight.source_format))
+                        Text(InsightsDate.label(insight.analyzed_at)).insightsCaption()
+                        Text(insight.id).insightsMono().lineLimit(1)
+                    }.frame(maxWidth: .infinity, alignment: .leading).insightsRowCard()
+                }
+                .buttonStyle(GlassPressStyle())
+                .disabled(model.busy)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .insightsSection()
+    }
+
     private func refusalMessage(_ refusal: InsightsStoreSelection.Refusal) -> String {
         switch refusal {
         case .duplicateOption: return storeCopy["insights_store_duplicate"] ?? ""
@@ -298,18 +362,22 @@ struct InsightsView: View {
                     detail.stale_reasons.map(\.rawValue).joined(separator: ",")].joined(separator: ":")
         }
     }
+    /// The user's own category and outcome; what they are, and that they
+    /// are not verified, behind the heading's "i".
     private var assessment: some View {
-        VStack(alignment: .leading) {
-            Text(model.text("assessment_notice"))
-            HStack {
+        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+            InsightsGroupHeading(model.text("assessment"), info: [model.text("assessment_notice")])
+            HStack(spacing: GlassTokens.Space.s4) {
                 GlassSelect(model.text("category"), selection: $model.assessmentCategory,
                             options: InsightsChoices.categories.map { GlassPickerOption(model.text("category_" + $0), value: $0) })
                 GlassSelect(model.text("outcome"), selection: $model.assessmentOutcome,
                             options: InsightsChoices.outcomes.map { GlassPickerOption(model.text("outcome_" + $0), value: $0) })
+            }
+            HStack(spacing: GlassTokens.Space.s4) {
                 Button(model.text("save_assessment")) { model.annotate(category: model.assessmentCategory, outcome: model.assessmentOutcome) }
                 Button(model.text("clear_assessment")) { model.clearAnnotation() }
-            }.disabled(model.busy)
-        }
+            }
+        }.disabled(model.busy)
     }
 }
 
@@ -318,34 +386,40 @@ struct InsightDetail: View {
     let copy: [String: String]
     private func text(_ key: String) -> String { copy[key] ?? "" }
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(text("result")).insightsTitle()
-            Text(InsightsDate.label(insight.analyzed_at))
-            Text(text("boundary_notice"))
-            Text("\(text("provider")): \(insight.report.provider.id) · \(insight.report.provider.version)")
-            Text("\(text("rubric")): \(insight.report.provider.rubric_version) · \(insight.report.provider.execution_mode)")
-            ForEach(insight.report.metrics) { metric in
-                VStack(alignment: .leading) {
-                    Text("\(text("metric_" + metric.id)): \(metric.value.map { $0.formatted() } ?? text("unknown"))")
-                    Text("\(text("coverage")): \(metric.coverage.observed.formatted()) / \(metric.coverage.total.formatted())")
-                        .insightsCaption()
+        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+            // What a result can and cannot say, behind the title's "i".
+            VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                InsightsSectionTitle(text("result"), info: [
+                    text("boundary_notice"), text("unknown_notice"), text("coverage_notice"),
+                ])
+                Text(InsightsDate.label(insight.analyzed_at)).insightsCaption()
+                Text("\(text("provider")): \(insight.report.provider.id) · \(insight.report.provider.version)").insightsCaption()
+                Text("\(text("rubric")): \(insight.report.provider.rubric_version) · \(insight.report.provider.execution_mode)")
+                    .insightsCaption()
+            }
+            VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                InsightsGroupHeading(text("summary_metrics"))
+                ForEach(insight.report.metrics) { metric in
+                    VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                        Text("\(text("metric_" + metric.id)): \(metric.value.map { $0.formatted() } ?? text("unknown"))")
+                        Text("\(text("coverage")): \(metric.coverage.observed.formatted()) / \(metric.coverage.total.formatted())")
+                            .insightsCaption()
+                    }
                 }
+                Text("\(text("cost")): \(text("unknown"))")
             }
             InsightModelSection(observations: insight.model_observations, copy: copy)
-            Text(text("unknown_notice"))
-            Text(text("coverage_notice"))
-            Text("\(text("cost")): \(text("unknown"))")
             if let assessment = insight.manual_annotation {
-                Text("\(text("assessment")): \(text("category_" + assessment.category)) / \(text("outcome_" + assessment.outcome))")
-                Text(text("assessment_notice")).glassType(GlassTokens.TypeScale.caption)
-                Text(InsightsDate.label(assessment.recorded_at)).glassType(GlassTokens.TypeScale.caption)
+                VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                    InsightsGroupHeading(text("assessment"), info: [text("assessment_notice")])
+                    Text("\(text("category_" + assessment.category)) / \(text("outcome_" + assessment.outcome))")
+                    Text(InsightsDate.label(assessment.recorded_at)).insightsCaption()
+                }
             }
-            VStack(alignment: .leading, spacing: 8) {
-                Text(text("evidence")).insightsHeading()
-                InsightsRule()
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(text("evidence_notice"))
-                    ForEach(insight.report.evidence) { evidence in
+            VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                InsightsGroupHeading(text("evidence"), info: [text("evidence_notice")])
+                ForEach(insight.report.evidence) { evidence in
+                    VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
                         Text("\(text("evidence")): \(evidence.id)").insightsMono()
                         Text("\(text("source_digest")): \(evidence.source_digest)").insightsMono().textSelection(.enabled)
                     }

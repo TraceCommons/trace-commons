@@ -441,14 +441,14 @@ public struct GlassConsentBlock: View {
 /// side are always the same height; a label too long for its half shrinks a
 /// little, then truncates, and never wraps.
 public struct GlassLegendCell: View {
-    private let status: GlassStatus
+    private let dot: Dot
     private let label: String
     private let value: String
 
     public init(_ label: String, value: String, status: GlassStatus) {
         self.label = label
         self.value = value
-        self.status = status
+        self.dot = .status(status)
     }
 
     /// How far a long label may shrink before it truncates.
@@ -457,7 +457,7 @@ public struct GlassLegendCell: View {
     public var body: some View {
         HStack(spacing: GlassTokens.Space.s4) {
             HStack(spacing: 7) {
-                GlassStatusDot(status, size: GlassTokens.Size.dotLarge, halo: true)
+                dotView
                 Text(label).foregroundStyle(GlassColor.textSecondary)
                     .lineLimit(1)
                     .minimumScaleFactor(Self.labelShrink)
@@ -473,6 +473,34 @@ public struct GlassLegendCell: View {
         .frame(height: GlassTokens.Size.controlLarge)
         .glassTier(.well)
         .accessibilityElement(children: .combine)
+    }
+
+    /// A chart's legend: the dot is the series' colour, and the value reads
+    /// out the total, or the bucket being read.
+    public init(_ label: String, value: String, series: GlassRGBA) {
+        self.label = label
+        self.value = value
+        self.dot = .series(series)
+    }
+
+    /// A status mark, or a chart series' colour (`chartSeries1`...).
+    private enum Dot {
+        case status(GlassStatus)
+        case series(GlassRGBA)
+    }
+
+    @ViewBuilder
+    private var dotView: some View {
+        switch dot {
+        case let .status(status):
+            GlassStatusDot(status, size: GlassTokens.Size.dotLarge, halo: true)
+        case let .series(color):
+            Circle()
+                .fill(color.color)
+                .frame(width: GlassTokens.Size.dotLarge, height: GlassTokens.Size.dotLarge)
+                .overlay { Circle().stroke(GlassColor.ink(0.08), lineWidth: 2).padding(-1) }
+                .accessibilityHidden(true)
+        }
     }
 }
 

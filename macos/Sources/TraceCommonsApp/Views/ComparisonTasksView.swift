@@ -14,10 +14,8 @@ struct ComparisonTasksView: View {
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(text("comparison_task_title")).insightsTitle()
-                Spacer()
+        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+            InsightsSectionTitle(title: text("comparison_task_title"), info: []) {
                 Button(text("comparison_task_list")) { model.refresh() }
                     .accessibilityLabel(text("comparison_task_list_accessibility"))
                 if model.busy { GlassSpinner() }
@@ -56,8 +54,8 @@ struct ComparisonTasksView: View {
     }
 
     private var listView: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(text("comparison_task_create_heading")).insightsHeading()
+        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+            InsightsGroupHeading(text("comparison_task_create_heading"))
             episodeChooser(selection: $model.createSelection)
             Button(text("comparison_task_create")) { model.create() }
                 .disabled(model.createSelection.isEmpty)
@@ -78,7 +76,7 @@ struct ComparisonTasksView: View {
     }
 
     private func detailView(_ detail: ComparisonTaskDetail) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
             HStack {
                 Button(text("comparison_task_back")) { model.closeDetail() }
                 Spacer()
@@ -189,7 +187,9 @@ struct ComparisonTasksView: View {
 
     private func contextEditor(_ detail: ComparisonTaskDetail) -> some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text(text("comparison_task_context_heading")).insightsHeading()
+            // Why the checkout is not read, behind the heading's "i".
+            InsightsGroupHeading(text("comparison_task_context_heading"),
+                                 info: [text("comparison_task_checkout_unavailable")])
             GlassSelect(text("comparison_task_project"), selection: $model.projectID,
                         options: model.knownProjectIDs.map { GlassPickerOption($0, value: $0) }
                             + (model.knownProjectIDs.contains(model.projectID)
@@ -209,7 +209,6 @@ struct ComparisonTasksView: View {
             GlassTextField(text("comparison_task_tool_policy_id"), text: $model.toolPolicyID)
             GlassTextField(text("comparison_task_tool_policy_version"), text: $model.toolPolicyVersion)
             GlassTextField(text("comparison_task_prompt_template_digest"), text: $model.promptTemplateDigest)
-            Text(text("comparison_task_checkout_unavailable")).insightsCaption()
             Button(text("comparison_task_set_context")) { model.saveContext() }
         }
     }

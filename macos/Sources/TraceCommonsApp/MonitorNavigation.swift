@@ -7,7 +7,6 @@ enum HomePage: String {
     case overview
     case history
     case missions
-    case insights
     case missionDrafts
 
     /// Whether this page is one of the two mission screens.
@@ -32,6 +31,8 @@ enum TracesPage: String {
 /// Where an outside caller wants the Monitor to go. Nothing here sends.
 enum MonitorDestination: Equatable, Sendable {
     case home(HomePage)
+    /// The Insights tab (2026-10-15: its own tab, no longer a Home page).
+    case insights
     case inference
     case traces(entryId: String?)
     /// Traces narrowed to the idle sessions a nudge named

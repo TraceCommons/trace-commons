@@ -427,7 +427,7 @@ final class MonitorNavigationTests: XCTestCase {
             (.inference, .monitor),
             (.home(.overview), .firstRun),
             (.home(.history), .firstRun),
-            (.home(.insights), .firstRun),
+            (.insights, .firstRun),
             (.traces(entryId: nil), .firstRun),
             (.traces(entryId: "entry-7"), .firstRun),
         ]

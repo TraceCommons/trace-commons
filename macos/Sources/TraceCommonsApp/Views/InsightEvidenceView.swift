@@ -8,8 +8,10 @@ struct InsightModelSection: View {
     let copy: [String: String]
     private func text(_ key: String) -> String { copy[key] ?? "" }
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(text("model_title")).insightsHeading()
+        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+            // That declared labels do not prove the serving model, behind
+            // the heading's "i".
+            InsightsGroupHeading(text("model_title"), info: [text("model_notice")])
             if let observations {
                 Text(observations.declared_models.isEmpty ? text("model_no_labels") : observations.declared_models.joined(separator: ", "))
                     .textSelection(.enabled)
@@ -21,7 +23,6 @@ struct InsightModelSection: View {
             } else {
                 Text(text("model_legacy"))
             }
-            Text(text("model_notice")).glassType(GlassTokens.TypeScale.caption)
         }
     }
 }
@@ -63,24 +64,29 @@ struct InsightEvidenceControls: View {
     }
     private func text(_ key: String) -> String { model.text(key) }
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(text("linked_evidence_title")).insightsHeading()
-            Text(text("link_notice")).glassType(GlassTokens.TypeScale.label.weight(.regular))
+        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+            // What a link is and is not, behind the heading's "i".
+            InsightsGroupHeading(text("linked_evidence_title"), info: [text("link_notice")])
             InsightsDisclosure(text("link_git")) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(text("link_git_notice")).glassType(GlassTokens.TypeScale.caption)
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                     GlassTextField(text("link_commit"), text: $commit, prompt: text("link_commit"), showsLabel: false)
                         .autocorrectionDisabled()
-                    Button(text("choose_repository"), action: chooseRepository)
-                        .disabled(!InsightEvidenceInput.isFullCommit(commit) || choosingRepository || choosingReport)
+                    HStack(spacing: GlassTokens.Space.s4) {
+                        Button(text("choose_repository"), action: chooseRepository)
+                            .disabled(!InsightEvidenceInput.isFullCommit(commit) || choosingRepository || choosingReport)
+                        InsightsInfo(text("link_git"), [text("link_git_notice")])
+                    }
                 }
             }
             InsightsDisclosure(text("link_test_report")) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(text("link_test_notice")).glassType(GlassTokens.TypeScale.caption)
-                    Text(text("test_report_format")).glassType(GlassTokens.TypeScale.caption).textSelection(.enabled)
-                    Button(text("choose_test_report"), action: chooseReport)
-                        .disabled(choosingRepository || choosingReport)
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                    // The accepted format stays on the page: it is copied.
+                    Text(text("test_report_format")).insightsCaption().textSelection(.enabled)
+                    HStack(spacing: GlassTokens.Space.s4) {
+                        Button(text("choose_test_report"), action: chooseReport)
+                            .disabled(choosingRepository || choosingReport)
+                        InsightsInfo(text("link_test_report"), [text("link_test_notice")])
+                    }
                 }
             }
             if (insight.outcome_links ?? []).isEmpty { Text(text("link_empty")) }
@@ -145,8 +151,7 @@ struct InsightOutcomeDetails: View {
             Text("\(text("link_recorded_at")): \(InsightsDate.label(link.linked_at))")
             switch link.evidence {
             case .gitCommit(let evidence):
-                Text(text("link_git_provenance")).insightsHeading()
-                Text(text("link_git_notice")).glassType(GlassTokens.TypeScale.label.weight(.regular))
+                InsightsGroupHeading(text("link_git_provenance"), info: [text("link_git_notice")])
                 Text("\(text("git_object")): \(evidence.object_id)").insightsMono()
                 Text("\(text("git_tree")): \(evidence.tree_id)").insightsMono()
                 Text("\(text("git_repository_digest")): \(evidence.repository_path_digest)").insightsMono()
@@ -155,8 +160,7 @@ struct InsightOutcomeDetails: View {
                 if evidence.parent_ids.isEmpty { Text(text("git_no_parents")) }
                 ForEach(evidence.parent_ids, id: \.self) { Text($0).insightsMono() }
             case .testReport(let evidence):
-                Text(text("link_test_provenance")).insightsHeading()
-                Text(text("link_test_notice")).glassType(GlassTokens.TypeScale.label.weight(.regular))
+                InsightsGroupHeading(text("link_test_provenance"), info: [text("link_test_notice")])
                 Text("\(text("test_runner")): \(evidence.runner)")
                 Text("\(text("test_passed")): \(evidence.passed.formatted())")
                 Text("\(text("test_failed")): \(evidence.failed.formatted())")

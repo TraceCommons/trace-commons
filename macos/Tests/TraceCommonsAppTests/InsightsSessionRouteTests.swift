@@ -336,7 +336,9 @@ final class InsightsSessionRouteTests: XCTestCase {
     func testTheOverviewDrawsTheColumnFromTheCoresWords() throws {
         let source = try InsightsGlassConventionsTests.text("Views/InsightsOverviewTab.swift")
         XCTAssertFalse(source.contains(".disabled(model.counter != nil)"))
-        XCTAssertTrue(source.contains(".disabled(!model.drills(inputs))"))
+        // A figure drills only when `drills` says so; one that does not is
+        // drawn plain, not as a disabled button.
+        XCTAssertTrue(source.contains("if model.drills(inputs) {"))
         XCTAssertTrue(source.contains("InsightsCounterSessionsView("))
         for key in ["analytics_drill_private", "analytics_route_measure_note"] {
             XCTAssertTrue(source.contains("\"\(key)\""), key)

@@ -44,7 +44,8 @@ final class MissionsHiddenTests: XCTestCase {
             XCTAssertEqual(page.shown(missions: false), .overview)
             XCTAssertEqual(page.shown(missions: true), page)
         }
-        for page in [HomePage.overview, .history, .insights] {
+        // Insights is its own tab now (2026-10-15), not a Home page.
+        for page in [HomePage.overview, .history] {
             XCTAssertFalse(page.isMission)
             XCTAssertEqual(page.shown(missions: false), page)
             XCTAssertEqual(page.shown(missions: true), page)

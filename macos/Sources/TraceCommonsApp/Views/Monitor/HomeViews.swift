@@ -36,6 +36,8 @@ struct HomeTabView: View {
     /// The Contributed tile: History, which lives on the Traces tab (owner,
     /// 2026-10-12).
     var openHistory: () -> Void = {}
+    /// The Insights card: switches the window to the Insights tab.
+    var openInsights: () -> Void = {}
     /// The hosted Insights and Mission drafts screens' inputs, from
     /// `TraceCommonsAppMain`.
     let insightsStoreSelection: InsightsStoreSelection
@@ -50,13 +52,16 @@ struct HomeTabView: View {
     /// `body` would otherwise repeat on every evaluation.
     private static let insightsCopy = TCInsights.copy()
 
+    /// Insights' heading, the core's: the Insights tab's name and its card
+    /// on Home. Nil until the core's copy has arrived.
+    static var insightsHeading: String? { HomeFormat.cardHeading(Self.insightsCopy?["title"]) }
+
     /// The breadcrumb word for a hosted page: the core's heading, or nil
     /// before its copy has arrived. Mission drafts is #1146's Missions, and
     /// its crumb says so; the drafts screen's own title is the core's
     /// (`missionDrafts.copy["title"]`), read by the screen.
     static func hostedHeading(_ page: Page, missionDrafts: MissionDraftsModel) -> String? {
         switch page {
-        case .insights: HomeFormat.cardHeading(Self.insightsCopy?["title"])
         case .missionDrafts: HomeFormat.cardHeading(MonitorWords.missions)
         case .overview, .history, .missions: nil
         }
@@ -71,10 +76,10 @@ struct HomeTabView: View {
             HomeOverview(
                 store: store, traces: traces, statusLabel: statusLabel, openTraces: openTraces,
                 openPrivateAI: openPrivateAI,
-                insightsHeading: Self.hostedHeading(.insights, missionDrafts: missionDrafts),
+                insightsHeading: Self.insightsHeading,
                 missionDrafts: missionDrafts, missionsEnabled: missionsEnabled,
                 openHistory: openHistory, openMissionDrafts: { page = .missionDrafts },
-                openInsights: { page = .insights }, openMissions: { page = .missions })
+                openInsights: openInsights, openMissions: { page = .missions })
         case .history:
             HistoryPage(store: store, statusLabel: statusLabel, selection: $selection, back: { page = .overview })
         case .missions:
@@ -82,8 +87,6 @@ struct HomeTabView: View {
         // The screens built outside the Monitor (R15: the legacy window
         // that held them is gone), hosted as Home pages under the shell's
         // breadcrumb.
-        case .insights:
-            InsightsView(storeSelection: insightsStoreSelection, daemon: store.client)
         case .missionDrafts:
             MissionDraftsView(model: missionDrafts)
         }

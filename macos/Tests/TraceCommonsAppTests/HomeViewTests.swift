@@ -27,7 +27,7 @@ final class HomeViewTests: XCTestCase {
             // History lives on Traces (owner, 2026-10-12); Home's way in is
             // the Contributed tile.
             "openHistory: openHistory, openMissionDrafts: { page = .missionDrafts }, ",
-            "openInsights: { page = .insights }, openMissions: { page = .missions })",
+            "openInsights: openInsights, openMissions: { page = .missions })",
         ] {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")
         }

@@ -90,7 +90,8 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
     @MainActor
     func testTheToggleShortcutDoesNotCollideWithADestination() {
         let tabs = MonitorWindowView.Tab.allCases.map(MonitorCommands.shortcut)
-        XCTAssertEqual(tabs, ["1", "2", "3"])
+        // Insights is the fourth tab (2026-10-15).
+        XCTAssertEqual(tabs, ["1", "2", "3", "4"])
         XCTAssertEqual(MonitorCommands.toggleModifiers, [.command, .shift])
         XCTAssertEqual(MonitorCommands.tabModifiers, [.command])
         XCTAssertFalse(
@@ -106,6 +107,7 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
         XCTAssertEqual(MonitorCommands.destination(.home), .home(.overview))
         XCTAssertEqual(MonitorCommands.destination(.inference), .inference)
         XCTAssertEqual(MonitorCommands.destination(.traces), .traces(entryId: nil))
+        XCTAssertEqual(MonitorCommands.destination(.insights), .insights)
         let main = try MonitorNavigationTests.text("TraceCommonsAppMain.swift")
         XCTAssertTrue(main.contains("Button(tab.title) { OpenMonitor.request(Self.destination(tab)) }"))
         XCTAssertTrue(main.contains(".commands {\n            MonitorCommands(model: model, navigation: navigation)\n        }"))
