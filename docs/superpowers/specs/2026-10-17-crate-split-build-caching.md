@@ -8,17 +8,22 @@ The question was whether splitting the large crates (`trace-commons-server`,
 `trace-commons-contributor`) would give sccache and cargo more units to
 reuse, so that an edit rebuilds less. We measured first (Appendix A), at
 `a5ebb90bc`. The three commits between that and `61570a3cc`, the base of
-this spec, do not touch `crates/trace-commons-server/src/bin`,
-`src/lib.rs` or the server `Cargo.toml`.
+this spec, do not touch `crates/trace-commons-server` at all. They do change
+`trace-commons-contributor` (14 files, about +1.85k lines net, in
+`managed/`), so contributor line counts differ by commit: 275,517 at
+`a5ebb90bc`, 277,240 at `61570a3cc`.
 
 The answer is narrower than the hypothesis:
 
 1. **A general crate split is not the main lever.** The dominant edit-loop
    cost is one unit, the server library's test harness
    (`cargo test -p trace-commons-server --lib`). It takes about 78 s wall and
-   156–250 s user CPU, and every server edit triggers it, including an edit
+   156–250 s user CPU (measured under heavy load, see Appendix A), and
+   every server edit triggers it, including an edit
    to `tests.rs` or to a module that ingest never touches. sccache never
-   caches it, because a test harness is a bin crate-type. Splitting the
+   caches it: cargo compiles the harness with `--test` and no
+   `--crate-type`, and sccache refuses that
+   (`CannotCache(crate-type, No crate-type passed)` in its log). Splitting the
    *rlib* into more crates does not shrink that unit. Only two things do:
    making the harness smaller, or making it incremental.
 2. **Incremental compilation is the largest win we measured.** It cuts the
@@ -57,12 +62,18 @@ about 78 s), because the harness is never in sccache.
 
 **Frontend against codegen** for that unit:
 
-- `cargo check --lib --profile test` takes 57–80 s user CPU.
-- `cargo test --lib --no-run` takes 156–250 s user CPU.
-- The frontend is therefore roughly a quarter to a third of the CPU, and
-  serial: about 45–65 s of a 68–80 s wall on a quiet machine.
-- Codegen runs in parallel across codegen units and adds roughly 15–30 s of
-  wall.
+- `cargo check --lib --profile test` takes 57–81 s user CPU, and 66–68 s
+  wall on its two least-loaded runs.
+- `cargo test --lib --no-run` takes 156–250 s user CPU. Those four runs were
+  at load averages of 23–223 on 16 cores, so the CPU figures are inflated
+  by contention and the walls (199–329 s) are not usable.
+- The check-to-test user-CPU ratio is 0.27–0.37: the frontend is a quarter
+  to a bit over a third of the CPU, and it is serial.
+- Comparing the check wall (66–68 s) with the single-unit harness walls of
+  scenarios 2a, 3 and 4a (75–80 s) suggests codegen and link add on the
+  order of 10 s of wall, because codegen runs in parallel across codegen
+  units. The two were not measured on the same quiet machine, so this split
+  is indicative only.
 - The serial frontend is the floor. Only less source (a smaller harness) or
   incremental reuse lowers it.
 
@@ -73,7 +84,10 @@ tests and 10 bins (4b), and by contributor tests through the dev-dependency
 `--bin` takes 4.1 s against 54.6 s. Here caching works as intended. The
 problem is that an ingest edit invalidates it.
 
-**sccache hit rates.** Cold dependency builds hit 93–97%. Edit scenarios hit
+**sccache hit rates.** Dependency builds that could reuse an earlier
+population hit 93–97% (1b: 394 of 422; 1c: 31 of 32). The first cold build
+in a fresh target directory (1a) and the incremental base build (7) hit 0%;
+why is not established (section 7, step 0). Edit scenarios hit
 about 0%, because the edited crate misses and the harness units cannot be
 cached. Raising the hit rate on edits would need fewer uncacheable units on
 the path, not more cacheable ones.
@@ -102,11 +116,11 @@ paths):
 | of which `tests.rs` | `trace_commons_ingest_internal/tests.rs` | 101,641 |
 | of which `tests/` | `trace_commons_ingest_internal/tests/` | 10,306 |
 | of which non-test-named | (route and runtime modules) | 16,084 |
-| Other bins and their modules | `src/bin/**` excluding ingest | 17,108 |
+| Other bins and their modules | `src/bin/**` excluding ingest and its 14-line `trace_commons_ingest_main.rs` | 17,108 |
 
 The harness compiles the first three rows, 392,922 lines. Ingest accounts
 for 258,828 of them (65.9%) and the library modules for 134,094 (34.1%). The
-library modules hold 1,171 `#[test]` / `#[tokio::test]` functions; ingest
+library modules hold about 1,170 `#[test]` / `#[tokio::test]` functions; ingest
 holds about 1,800, 1,321 of them in `tests.rs`.
 
 The rlib compiles the non-test parts: about 127k lines of library (134,094
@@ -151,6 +165,8 @@ Shares used:
 - Server rlib after the split: about 127k / 229.6k = 0.55 of the current
   rlib.
 - Ingest rlib: about 102.6k / 229.6k = 0.45.
+- "49 s" below is the server rlib's typical single-unit time, the middle of
+  its five readings (44, 46, 50.7, 52.9, 53.5 s).
 
 | Scenario | Today (measured) | After C (projected) | Arithmetic |
 |---|---|---|---|
@@ -161,9 +177,9 @@ Shares used:
 | 4c analogue. Ingest handler edit, contributor tests | 94.4 s | about 0 s | Contributor's server dev-dependency does not use ingest |
 | 4a. Server module edit, server `--lib` | 75.4 s | about 26 s | 0.34 × 75.4 |
 | 4a'. Server module edit, then ingest lib tests too | (included in 4a's 75.4 s) | about 78 s | Server rlib 0.55 × 49 ≈ 27, then ingest harness about 51. Roughly break-even; see below |
-| 4b. Server module edit, server `--no-run` | 64.0 s | about 42 s | rlib 44 → about 24 (0.55 ×), test units unchanged |
+| 4b. Server module edit, server `--no-run` | 64.0 s | about 44 s | rlib 44 → about 24 (0.55 ×), test units unchanged: 64.0 − 44 + 24 |
 | 4c. Server module edit, contributor tests | 94.4 s | about 73 s | Server rlib 46 → about 25 |
-| 6a. Protocol edit, server `--lib` | 99.0 s | about 54 s | 5.6 + 25.3 + 0.34 × 67.7 ≈ 23 |
+| 6a. Protocol edit, server `--lib` | 99.0 s | about 54 s | 5.6 + 25.3 + (0.34 × 67.7 ≈ 23) ≈ 54 |
 | 5. Contributor edit, contributor tests | 74.4 s | 74.4 s | Unaffected |
 
 **The case that gets no better.** Scenario 4a' is the one to watch. Today a
@@ -213,27 +229,51 @@ until it is re-measured.
   `AGPL-3.0-or-later` license itself, with no per-crate exception. Only its
   header comment, which names the three AGPL crates, is updated.
 - **Features:** the ingest crate forwards `near-ai-scorer`,
-  `local-gpu-models`, `near-attestation-collateral`, `gcs-client` and
-  `gcp-kms` to the server crate, as far as the app uses them.
+  `local-gpu-models`, `local-gpu-models-cuda`, `near-attestation-collateral`,
+  `gcs-client` and `gcp-kms` to the server crate, as far as the app uses
+  them.
 
 ### 5.2 What moves
 
 The files move under `crates/trace-commons-ingest/src/` **at the same
-relative depth**. Today `src/ingest.rs` declares `#[path =
-"bin/trace-commons-ingest.rs"] pub(crate) mod app;`. The new crate's
-`src/lib.rs` keeps exactly that declaration, with the files at
-`src/bin/trace-commons-ingest.rs` and `src/bin/trace_commons_ingest_internal/`.
-Every relative `#[path]` and `include_str!` inside the moved tree then
-resolves unchanged, and only the references that cross into the server crate
-change (section 5.3). The internal module layout and the `#[cfg(test)] #[path
-= "trace_commons_ingest_internal/tests.rs"] mod tests;` split also stay as
-they are. CLAUDE.md asks that the tests not be inlined back, and this keeps every
-private item private. Inside the app, `use super::*` and `crate::` paths keep
-resolving, because the app becomes the root of its own crate.
+relative depth and module path**. Today `src/ingest.rs` declares `#[path =
+"bin/trace-commons-ingest.rs"] pub(crate) mod app;`, and the server's
+`src/lib.rs` declares `pub mod ingest;`. The new crate keeps both levels:
+`src/ingest.rs` moves unchanged, and the new `src/lib.rs` is
+
+```rust
+pub mod ingest;
+pub use ingest::{IngestOptions, OPEN_BUILD_BIN_NAME, run};
+```
+
+with the files at `src/bin/trace-commons-ingest.rs` and
+`src/bin/trace_commons_ingest_internal/`. This layout matters because the
+app refers to itself by absolute path: the ingest tree has 44
+`crate::ingest::…` paths (`crate::ingest::app::account_routes::AccountRoutes`,
+`crate::ingest::app::tests::test_state`, `crate::ingest::IngestOptions::open_build`
+and others). With `ingest` kept as a module, all 44 resolve unchanged, and
+so does every test name: tests stay at `ingest::app::tests::…`, which CI
+filters and the operator pipeline tooling name exactly (section 5.4).
+Flattening `ingest.rs` into `lib.rs` would instead break all 44 paths and
+rename every test.
+
+Every relative `#[path]` and `include_str!` inside the moved tree also
+resolves unchanged except one (section 5.3). The internal module layout and
+the `#[cfg(test)] #[path = "trace_commons_ingest_internal/tests.rs"] mod
+tests;` split stay as they are. CLAUDE.md asks that the tests not be inlined
+back, and this keeps every private item private. `use super::*` inside the
+app is unaffected.
+
+The `crate::` paths that point into the server library do change. In code
+there is one: `use crate::versioned_pipeline_score_registry::ScorePolicyRegistry;`
+in `src/ingest.rs` becomes `trace_commons_server::…`. One intra-doc link,
+`crate::redaction_witness::config` in `near_provisioning.rs`, changes the
+same way. The app's other references to the library already use
+`trace_commons_server::` paths.
 
 | From (`crates/trace-commons-server/`) | To (`crates/trace-commons-ingest/`) |
 |---|---|
-| `src/ingest.rs` (`IngestOptions`, `run`, `OPEN_BUILD_BIN_NAME`) | `src/lib.rs` |
+| `src/ingest.rs` (`IngestOptions`, `run`, `OPEN_BUILD_BIN_NAME`) | `src/ingest.rs`, re-exported from a new `src/lib.rs` |
 | `src/bin/trace-commons-ingest.rs` | `src/bin/trace-commons-ingest.rs` (a library module via `#[path]`, as today) |
 | `src/bin/trace_commons_ingest_internal/**` | `src/bin/trace_commons_ingest_internal/**` |
 | `src/bin/trace_commons_ingest_main.rs` (the `trace-commons-ingest` `[[bin]]`) | `src/bin/trace_commons_ingest_main.rs` |
@@ -266,19 +306,19 @@ dependency unchanged.
   `write_routing_in` and `Answer`. They widen to `pub`, possibly
   `#[doc(hidden)]`. The compiler gives the exact list on the first
   `cargo check`.
-- **`include_str!` paths that cross the moved tree.**
-  - `tests.rs` line ~79056 reads `"../../trace_corpus_storage.rs"`, a server
-    library file.
-  - `tests.rs` line ~95912 reads `"../trace-commons-ingest.rs"`.
-  - The attestation fixtures near `tests.rs` lines 94795–95016 are also
-    included by relative path.
-  - `admission.rs` line 1474 reads its own source.
-  - `tests/step_up_page_tests.rs`, `step_up_page.rs` and
-    `near_provisioning.rs` include files that move with them.
-
-  Each relative path is rewritten in the move commit. One that points into
-  the server crate becomes `concat!(env!("CARGO_MANIFEST_DIR"),
-  "/../trace-commons-server/src/...")`.
+- **`include_str!` paths.** Of the eleven in the ingest tree, one breaks:
+  `tests.rs` line 79056 reads `"../../trace_corpus_storage.rs"`, a server
+  library file. It becomes `concat!(env!("CARGO_MANIFEST_DIR"),
+  "/../trace-commons-server/src/trace_corpus_storage.rs")`. The rest resolve
+  unchanged at the same depth:
+  - `tests.rs` lines 95912 and 98036 read `"../trace-commons-ingest.rs"`,
+    which moves with them.
+  - The four attestation fixtures near `tests.rs` lines 94795–95016 go up
+    four levels to `crates/` and into `trace-commons-attestation/`, which is
+    the same directory from the new crate.
+  - `admission.rs` line 1474 reads its own source; `step_up_page.rs`,
+    `near_provisioning.rs` and `tests/step_up_page_tests.rs` include
+    siblings that move with them.
 - **`tests/ingest_library_entry.rs` line 209** asserts the literal text
   `trace_commons_server::ingest::run(IngestOptions::open_build())` in the
   bin. It is updated to the new path.
@@ -341,8 +381,18 @@ dependency unchanged.
   - `legacy_and_pipeline_tenants_match_under_equivalent_configuration`
     (`pipeline_compare_pg_tests.rs`, `pipeline_http_pg_tests.rs`)
 
+  - `ingest::app::tests::admin_config_status_reports_gcs_provider_when_feature_enabled`
+    (the `--features gcs-client` step, ci.yml line 1133)
+
   `pipeline_upgrade` (`src/db/postgres/pipeline_upgrade_tests.rs`) stays on
   the server crate.
+- **The `--lib near_attestation` step** under
+  `--features near-attestation-collateral` (ci.yml line 1182) runs on the
+  server crate and stays there, but its comment (lines 1199–1201) records
+  that it also sweeps 11 ingest tests whose names contain `near_attestation`.
+  After the split those 11 drop out of that step silently. Add a second step,
+  `cargo test -p trace-commons-ingest --features near-attestation-collateral
+  --lib near_attestation`, and update the comment.
 - `cargo build -p trace-commons-server --bin trace-commons-ingest ...` (the
   near-ai-scorer and near-attestation-collateral builds, and the release
   build of the operator binaries) becomes `-p trace-commons-ingest`.
@@ -351,11 +401,31 @@ dependency unchanged.
   `rust-version` from metadata and needs no literal change.
 - Each of these is a **filter** that can silently match zero tests after
   the move. The PR must show each job's test count before and after, and a
-  zero is a failure (see the repository memory on absent signals).
+  zero is a failure: a step that ran no tests is not a pass.
 
-Operator tooling (`scripts/operator/*`) builds by package and bin name.
-Every `-p trace-commons-server --bin trace-commons-ingest` is listed and
-rewritten in the same PR. `docs/operator/local-ingest-verification.md`
+**Operator pipeline tooling.** `scripts/operator/pipeline.py` drives the
+`pipeline qualification and restore` CI job and the promotion runbook. It
+runs ingest tests by exact name through `pipeline_tooling/cargo.py`, which
+lists them with `cargo test <args> <name> -- --list --exact` first. The
+package is pinned in three places, each `("-p", "trace-commons-server",
+"--lib")`:
+
+- `INGEST_TEST_ARGS` in `pipeline.py` (seven harness names: corpus run,
+  package, attestation and signing-key writers, restore seed and resume,
+  compare run);
+- `_INGEST_BIN` in `pipeline_tooling/checks.py` (the HTTP and
+  legacy-drain checks);
+- the restore names in `pipeline_tooling/promote.py`, and the matching
+  expectations in `scripts/operator/test_pipeline_tooling.py`.
+
+Under the layout in section 5.2 the test names (`ingest::app::tests::…`)
+do not change; only the package does, to `-p trace-commons-ingest`. A missed
+one lists zero tests, so the PR shows a `pipeline.py qualify` run that
+reaches every harness. `comparison.py` and `corpus.py` run
+`trace-commons-pipeline-corpus-export`, which stays in the server crate.
+
+Every `-p trace-commons-server --bin trace-commons-ingest` in scripts and
+runbooks is likewise listed and rewritten in the same PR. `docs/operator/local-ingest-verification.md`
 references `trace_commons_server::ingest` and is updated too.
 
 ### 5.5 CI cache (trim-cargo-cache, 10 GB ceiling)
@@ -366,7 +436,9 @@ unchanged. `.github/actions/trim-cargo-cache` already deletes every linked
 test and bin executable, so the extra ingest harness binary is never saved.
 No new cache key is introduced, and only pushes to `main` save.
 
-The gain is in fingerprints. Today an ingest-only PR invalidates the server
+A full-workspace run, such as `cargo test (default features)` on a PR that
+touches the server library, compiles two smaller harnesses instead of one
+large one, so its cost is roughly neutral. The gain is in fingerprints. Today an ingest-only PR invalidates the server
 rlib and everything downstream of it. After the split, a restored `main`
 cache keeps the server rlib valid for such a PR. That matters only while
 `main`'s caches restore at all; the trim action's notes record that most
@@ -381,7 +453,8 @@ and report user CPU.
 1. **Debuginfo for workspace crates in test builds.** `[profile.test] debug
    = "line-tables-only"` (or `[profile.dev] debug = 1`). Today's workspace
    crates build with full debuginfo. Less debuginfo cuts codegen and link
-   work, which section 1 puts at roughly 15–30 s of wall. It costs local
+   work, which section 1 estimates at only about 10 s of wall per harness
+   (though roughly two thirds of its CPU). It costs local
    variable inspection in a debugger.
 2. **Linker.** macOS uses the default Apple `ld` (ld-prime). Link time was
    never isolated. The estimate is 1–4 s per executable. Measure with
@@ -416,7 +489,9 @@ later one.
   enables incremental for workspace members only, and third-party crates
   stay non-incremental.
 - sccache 0.18.0 refuses to run when `CARGO_INCREMENTAL=1` is set
-  explicitly. Unset worked in scenario 7.
+  explicitly (checked: `CARGO_INCREMENTAL=1 cargo check` fails with
+  "incremental compilation is prohibited: Unset CARGO_INCREMENTAL to
+  continue"). Unset worked in scenario 7.
 - With incremental on, sccache marks every workspace-crate compile
   non-cacheable ("incremental"), so those crates are not cached.
 - In scenario 7 the base build in a fresh target directory was 151.6 s with
@@ -424,9 +499,12 @@ later one.
   be a target-path component in the key. Check before relying on it.
 - `-D warnings` is unaffected, and CI keeps `CARGO_INCREMENTAL=0`. The cost
   is that local and CI artifacts differ, which is open question Q1.
-- Optionally commit `[profile.dev] incremental = true` with
-  `[profile.dev.package."*"] incremental = false`, instead of relying on the
-  environment.
+- Committing a profile setting does not help. `[profile.dev] incremental =
+  true` is already the default for workspace members, and the
+  `CARGO_INCREMENTAL` environment variable overrides the profile in both
+  directions: the local `CARGO_INCREMENTAL=0` turns it off, and CI's
+  `CARGO_INCREMENTAL: 0` (ci.yml line 50) keeps CI off whatever the profile
+  says. Step 0 is purely the local environment.
 
 **Step 1: profile experiments.** Run items 1 and 2 of section 6. Merge a
 profile change only if it beats its noise band.
@@ -464,7 +542,11 @@ Re-run the Appendix A scenarios with the same environment:
 - a machine with load average below the core count.
 
 Report user CPU as the gate and wall as context. Today's wall varied ±30%
-under load.
+under load, and today's user-CPU baselines (156–250 s) were also taken at
+load averages of 23–223, which inflates CPU through contention. **Re-take
+the baseline on the same quiet machine, at the pre-split commit, before
+measuring step 2**; the ratios in the table below apply to that re-taken
+baseline, not to the numbers printed here.
 
 ```bash
 # baseline harness (today) vs ingest harness (after step 2)
