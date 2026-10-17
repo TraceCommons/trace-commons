@@ -8,16 +8,19 @@ public extension EnvironmentValues {
 }
 
 /// The widths of the window's panes for one window width (spec, "Panes",
-/// as the owner revised it on #1241, and on 2026-10-08).
+/// as the owner revised it on #1241, on 2026-10-08, and on 2026-10-15).
 ///
-/// - The main pane is a fixed width (`mainWidth`). It never changes when
-///   the map or the inspector opens or closes.
-/// - The inspector is a fixed width, two thirds of the main pane's
+/// - The main pane opens at `mainWidth` and never goes below it. It never
+///   changes when the map or the inspector opens or closes.
+/// - The inspector is a fixed width, two thirds of the main pane's default
 ///   (`inspectorWidth`).
-/// - The map opens at its own width (`mapWidth`) and is the one pane that
-///   takes a resize of the window, never below `mapMinWidth`.
+/// - Without the map, the main pane takes a resize of the window, so the
+///   window can always be made wider (owner, 2026-10-15).
+/// - With the map, the map takes a resize first, down to `mapMinWidth`;
+///   past that the main pane gives up room, down to `mainWidth`, and takes
+///   it back first when the window widens again.
 /// - Opening a pane grows the window to the right by that pane and its gap;
-///   closing it shrinks the window by the same (`windowWidth(current:from:to:)`),
+///   closing it shrinks the window by the same (`windowWidth(current:from:to:main:)`),
 ///   so no other pane moves or changes width.
 /// - No window padding (#1146 `.tc-window--floating`), 10pt gaps; a hidden
 ///   pane reserves no space.
@@ -40,17 +43,20 @@ public struct GlassPaneLayout: Equatable, Sendable {
     /// 2026-10-08).
     public static var inspectorWidth: CGFloat { (mainWidth * 2 / 3).rounded() }
 
-    public init(windowWidth width: CGFloat, showsMap: Bool, showsInspector: Bool) {
-        let fixed = Self.fixedWidth(showsInspector: showsInspector)
+    /// `main` is the main pane's width the last time the window had no map
+    /// (the width the person dragged it to), which it keeps beside the map
+    /// while the window has room for the map at its minimum.
+    public init(windowWidth width: CGFloat, showsMap: Bool, showsInspector: Bool, main: CGFloat = mainWidth) {
+        let room = width - Self.othersWidth(showsInspector: showsInspector)
         self.inspector = showsInspector ? Self.inspectorWidth : nil
         self.mapGap = GlassTokens.Space.paneGap
         if showsMap {
-            self.main = Self.mainWidth
-            self.map = max(0, width - fixed - GlassTokens.Space.paneGap)
+            let shared = room - GlassTokens.Space.paneGap
+            self.main = min(max(main, Self.mainWidth), max(Self.mainWidth, shared - GlassTokens.Size.mapMinWidth))
+            self.map = max(0, shared - self.main)
         } else {
-            // Only a window wider than its panes (zoomed, or full screen)
-            // has room left over; the main pane takes it rather than a gap.
-            self.main = Self.mainWidth + max(0, width - fixed)
+            // Without the map, the main pane takes all the room there is.
+            self.main = max(Self.mainWidth, room)
             self.map = nil
         }
     }
@@ -69,7 +75,7 @@ public struct GlassPaneLayout: Equatable, Sendable {
     ///   edge reveals or covers it.
     public init(windowWidth width: CGFloat, transition: Transition) {
         let showsInspector = transition.from.inspector || transition.to.inspector
-        self.main = Self.mainWidth
+        self.main = transition.mainWidth
         self.inspector = showsInspector ? Self.inspectorWidth : nil
         let gap = GlassTokens.Space.paneGap
         switch (transition.from.map, transition.to.map) {
@@ -80,17 +86,22 @@ public struct GlassPaneLayout: Equatable, Sendable {
             self.map = nil
             self.mapGap = gap
         default:
-            let room = max(0, width - Self.fixedWidth(showsInspector: showsInspector))
+            let room = max(0, width - Self.othersWidth(showsInspector: showsInspector) - transition.mainWidth)
             self.mapGap = min(gap, room)
             self.map = room - self.mapGap
         }
     }
 
-    /// The window's width with the main pane and, when shown, the inspector:
-    /// everything except the map and its gap.
+    /// The window's width without the main pane, the map and the map's gap:
+    /// its padding and, when shown, the inspector and its gap.
+    static func othersWidth(showsInspector: Bool) -> CGFloat {
+        GlassTokens.Space.windowPadding * 2 + (showsInspector ? GlassTokens.Space.paneGap + inspectorWidth : 0)
+    }
+
+    /// The window's width with the main pane at its default and, when
+    /// shown, the inspector: everything except the map and its gap.
     static func fixedWidth(showsInspector: Bool) -> CGFloat {
-        GlassTokens.Space.windowPadding * 2 + mainWidth
-            + (showsInspector ? GlassTokens.Space.paneGap + inspectorWidth : 0)
+        othersWidth(showsInspector: showsInspector) + mainWidth
     }
 
     /// The window's width with every shown pane at its default width.
@@ -100,16 +111,11 @@ public struct GlassPaneLayout: Equatable, Sendable {
     }
 
     /// The narrowest the window may be for these panes: the map at its
-    /// minimum, every other pane at its fixed width.
+    /// minimum, every other pane at its fixed width. There is no widest: a
+    /// wider window gives the map, or without it the main pane, the room.
     public static func minimumWindowWidth(showsMap: Bool, showsInspector: Bool) -> CGFloat {
         fixedWidth(showsInspector: showsInspector)
             + (showsMap ? GlassTokens.Space.paneGap + GlassTokens.Size.mapMinWidth : 0)
-    }
-
-    /// The widest the window may be for these panes: without the map
-    /// nothing takes extra width, so the window is exactly its panes.
-    public static func maximumWindowWidth(showsMap: Bool, showsInspector: Bool) -> CGFloat {
-        showsMap ? .infinity : fixedWidth(showsInspector: showsInspector)
     }
 
     /// The window's limits while it moves between two compositions: wide
@@ -119,18 +125,20 @@ public struct GlassPaneLayout: Equatable, Sendable {
         let (a, b) = (transition.from, transition.to)
         let lower = min(minimumWindowWidth(showsMap: a.map, showsInspector: a.inspector),
                         minimumWindowWidth(showsMap: b.map, showsInspector: b.inspector))
-        let upper = max(maximumWindowWidth(showsMap: a.map, showsInspector: a.inspector),
-                        maximumWindowWidth(showsMap: b.map, showsInspector: b.inspector))
-        return lower...upper
+        return lower...CGFloat.infinity
     }
 
     /// The window's new width when panes open or close: the current width,
     /// plus each pane that opened (at its default width) and its gap, less
     /// each pane that closed (at the width it had) and its gap. The other
     /// panes keep their widths; the map keeps a width the person dragged it
-    /// to when the inspector opens or closes.
-    public static func windowWidth(current: CGFloat, from old: Visibility, to new: Visibility) -> CGFloat {
-        let before = GlassPaneLayout(windowWidth: current, showsMap: old.map, showsInspector: old.inspector)
+    /// to when the inspector opens or closes, and the main pane keeps one
+    /// whatever opens or closes. `main` is as `init(windowWidth:showsMap:showsInspector:main:)`
+    /// takes it.
+    public static func windowWidth(
+        current: CGFloat, from old: Visibility, to new: Visibility, main: CGFloat = mainWidth
+    ) -> CGFloat {
+        let before = GlassPaneLayout(windowWidth: current, showsMap: old.map, showsInspector: old.inspector, main: main)
         let gap = GlassTokens.Space.paneGap
         var width = current
         if old.map != new.map {
@@ -146,7 +154,7 @@ public struct GlassPaneLayout: Equatable, Sendable {
     /// where they are and the window grows or shrinks on its right. A window
     /// that would run off the screen's visible frame moves left only as far
     /// as it must; one wider than the screen is held to the screen, and the
-    /// map, the one flexible pane, takes the difference.
+    /// map takes the difference, then a main pane wider than its default.
     public static func windowFrame(_ frame: CGRect, width: CGFloat, visible: CGRect) -> CGRect {
         let width = min(width, visible.width)
         var x = frame.minX
@@ -183,11 +191,16 @@ public struct GlassPaneLayout: Equatable, Sendable {
         /// The map's width when the move began, which a map that stays
         /// keeps throughout.
         public let mapWidth: CGFloat?
+        /// The main pane's width when the move began, which it keeps
+        /// throughout.
+        public let mainWidth: CGFloat
 
-        public init(from: Visibility, to: Visibility, mapWidth: CGFloat?) {
+        public init(from: Visibility, to: Visibility, mapWidth: CGFloat?,
+                    mainWidth: CGFloat = GlassPaneLayout.mainWidth) {
             self.from = from
             self.to = to
             self.mapWidth = mapWidth
+            self.mainWidth = mainWidth
         }
     }
 
@@ -257,14 +270,15 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
     private var widthLimits: ClosedRange<CGFloat> {
         if let transition { return GlassPaneLayout.windowWidthLimits(transition) }
         return GlassPaneLayout.minimumWindowWidth(showsMap: presented.map, showsInspector: presented.inspector)
-            ... GlassPaneLayout.maximumWindowWidth(showsMap: presented.map, showsInspector: presented.inspector)
+            ... CGFloat.infinity
     }
 
     public var body: some View {
         GeometryReader { proxy in
             let layout = transition.map { GlassPaneLayout(windowWidth: proxy.size.width, transition: $0) }
                 ?? GlassPaneLayout(
-                    windowWidth: proxy.size.width, showsMap: presented.map, showsInspector: presented.inspector)
+                    windowWidth: proxy.size.width, showsMap: presented.map, showsInspector: presented.inspector,
+                    main: host.main)
             // Every pane is exactly the window's height and starts at its top
             // edge. A pane whose content outgrew the window used to make the
             // row taller than the window, and the row centred the others in
@@ -337,19 +351,28 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
             return
         }
         let current = host.width ?? window.frame.width
-        let width = GlassPaneLayout.windowWidth(current: current, from: old, to: new)
+        let before = GlassPaneLayout(
+            windowWidth: current, showsMap: old.map, showsInspector: old.inspector, main: host.main)
+        // The main pane keeps the width it has, whatever opens or closes.
+        host.main = before.main
+        let width = GlassPaneLayout.windowWidth(current: current, from: old, to: new, main: host.main)
         let visible = window.screen?.visibleFrame ?? CGRect(x: -1e6, y: -1e6, width: 2e6, height: 2e6)
         let frame = GlassPaneLayout.windowFrame(window.frame, width: width, visible: visible)
-        if reduceMotion || frame == window.frame {
+        // A window held to the screen squeezes the main pane to make room
+        // for the map; the move animates only a main pane that keeps its
+        // width, so a squeezed one changes at once.
+        let after = GlassPaneLayout(
+            windowWidth: frame.width, showsMap: new.map, showsInspector: new.inspector, main: host.main)
+        if reduceMotion || frame == window.frame || after.main != before.main {
             transition = nil
             presented = new
             if frame != window.frame { window.setFrame(frame, display: true) }
             return
         }
-        let before = GlassPaneLayout(windowWidth: current, showsMap: old.map, showsInspector: old.inspector)
         presented = old
         withAnimation(GlassMotion.curve(GlassTokens.Motion.standard)) {
-            transition = GlassPaneLayout.Transition(from: old, to: new, mapWidth: before.map)
+            transition = GlassPaneLayout.Transition(
+                from: old, to: new, mapWidth: before.map, mainWidth: before.main)
         }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = GlassTokens.Motion.standard
@@ -380,6 +403,9 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
 private final class GlassWindowHost {
     weak var window: NSWindow?
     var width: CGFloat?
+    /// The main pane's width when a pane last opened or closed: the width
+    /// it keeps beside the map (`GlassPaneLayout`'s `main`).
+    var main = GlassPaneLayout.mainWidth
     /// Counts moves, so a finished animation can tell it was overtaken.
     var move = 0
 }
