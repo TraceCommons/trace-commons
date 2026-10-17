@@ -527,10 +527,7 @@ impl TerminalSignals {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        codex_catalog_file, near_ai_route, opencode_route_command, opencode_sign_in_command,
-        stop_asked,
-    };
+    use super::{near_ai_route, opencode_route_command, opencode_sign_in_command, stop_asked};
     use crate::config::ConfigStore;
     use crate::managed::{
         ConnectionKind, ManagedError, ToolId, models::ChatModel, opencode::OpenCodeSession,
@@ -786,6 +783,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn codex_catalog_file_reads_the_installed_codex_list() {
+        use super::codex_catalog_file;
         use crate::managed::{codex::BASIC_INSTRUCTIONS, profiles::NativeProfiles};
         use std::os::unix::fs::PermissionsExt;
         let home = tempfile::tempdir().unwrap();
