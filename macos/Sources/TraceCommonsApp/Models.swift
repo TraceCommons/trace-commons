@@ -578,7 +578,7 @@ struct HistoryRecord: Decodable, Identifiable, Equatable {
 /// Which of the three withdrawal tiers the server applied.
 ///
 /// The wire names are the SERVER's, pinned in
-/// `crates/trace-commons-server/src/bin/trace-commons-ingest.rs`
+/// `crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs`
 /// (`TRACE_WITHDRAWAL_REACH_*`) and mirrored by `DistributionReach` in
 /// `crates/trace-commons-contributor/src/withdraw.rs`. The two sides were
 /// once written in parallel and did NOT agree -- the Rust client expected

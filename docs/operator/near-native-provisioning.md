@@ -196,7 +196,7 @@ TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL=postgresql://USER@127.0.0.1:PORT/TEST_DB
   cargo test -p trace-commons-server --test account_onboarding_pg
 cargo test -p trace-commons-server --lib account_onboarding
 cargo test -p trace-commons-contributor --lib daemon::account_onboarding
-cargo test -p trace-commons-server --lib ingest::app::near_provisioning::tests
+cargo test -p trace-commons-ingest --lib ingest::app::near_provisioning::tests
 ```
 
 The database test creates a restricted `tc_near_runtime` role in that disposable

@@ -13,18 +13,42 @@ repository.workspace = true
 # without `cfg(test)`, so without it every test that generated a device
 # identity wrote a real login-keychain item and left it there. It also
 # exposes `ManagedRoute::start_against`, which starts a managed route against
-# a local fixture instead of NEAR AI, for `tests/managed_statusline.rs`.
+# a local fixture instead of NEAR AI, for `tests/managed_statusline.rs`, and
+# the native-auth wire primitives for the separate client/server contract suite.
 #
-# Enabled ONLY by the self dev-dependency below, which cargo activates for
-# `cargo test` and never for `cargo build`/`--release` of a shipped binary.
-# Never enable it anywhere else. `tests/credential_store_isolation.rs` fails
-# if the wiring is lost.
-test-credential-store = []
+# Enabled ONLY by test dev-dependencies: the self dependency below and the
+# unpublished trace-commons-client-server-tests package. Never enable it for
+# `cargo build`/`--release` of a shipped binary.
+# `tests/credential_store_isolation.rs` fails if the wiring is lost.
+#
+# Forwarded to the Insights and platform crates, which now hold the digest-key
+# custody and the OS credential store. Under it the platform store refuses to
+# open from every build but that crate's own unit tests, so this crate's unit
+# tests no longer get the `cfg(test)` exemption they had while the store lived
+# here.
+# One line, so scripts/ci/check-release-credential-store.sh can permit this
+# exact definition.
+test-credential-store = ["trace-commons-contributor-insights/test-credential-store", "trace-commons-contributor-platform/test-credential-store"]
 
 [dependencies]
 trace-commons-protocol = { path = "../trace-commons-protocol", features = ["near-ai-privacy-filter"] }
 trace-commons-operator-client = { path = "../trace-commons-operator-client" }
 trace-commons-build-info = { path = "../trace-commons-build-info" }
+# The session parsers and routing overlay, split out so a daemon edit does
+# not recompile them. Re-exported as `source` and `routing`. A workspace crate
+# at this crate's version with no dependency this crate lacks, so it adds no
+# third-party package.
+trace-commons-contributor-sources = { path = "../trace-commons-contributor-sources" }
+# Local Insights, split out so a client edit elsewhere does not recompile it,
+# and the OS credential store and file primitives it shares with this crate.
+# Re-exported as `insights` and at the old `daemon::credential_store`,
+# `daemon::os_secret_store`, `config::write_atomic_0600`,
+# `evidence_import::open_import_file` and
+# `daemon::win_pipe::current_user_sid_string` paths. Workspace crates at this
+# crate's version with no dependency this crate lacks, so they add no
+# third-party package.
+trace-commons-contributor-insights = { path = "../trace-commons-contributor-insights" }
+trace-commons-contributor-platform = { path = "../trace-commons-contributor-platform" }
 # DCAP quote verification and EIP-191 signer recovery, for the redaction
 # witness: this client verifies an enclave's measurement BEFORE handing it a
 # raw session, and verifies the certificate it gets back before forwarding it.
@@ -700,11 +724,8 @@ windows-sys = { version = "0.61", features = [
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "=1.0.2", features = ["keychain", "protected"] }
-# Pinned to the exact version `apple-native-keyring-store` resolves, because
-# `storage_error` downcasts to this crate's `base::Error` to recover the
-# OSStatus. A different version is a different type and the downcast would
-# silently never match.
-security-framework = "=3.7.0"
+# `security-framework` moved to trace-commons-contributor-platform with
+# `os_secret_store`, whose `storage_error` is its only user here.
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = false, features = ["rt-tokio-crypto-rust"] }
@@ -729,18 +750,9 @@ sha3 = "0.10"
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["net"] }
 
-# Not on Windows: trace-commons-server's dependency chain reaches openssl-sys
-# via webauthn-rs -> webauthn-rs-core -> webauthn-attestation-ca -> openssl.
-# The CI Windows runner has OpenSSL headers but not the link libraries, so
-# `cargo test` (which builds dev-deps) panics there with "OpenSSL libdir ...
-# does not contain the required files to either statically or dynamically
-# link OpenSSL". This crate's own code never needs trace-commons-server; only
-# three cross-check tests in account_auth.rs and the e2e_enroll_and_submit
-# integration test use it, and both are gated `#[cfg(not(windows))]` /
-# `#![cfg(not(windows))]` to match. Do not move this back into unconditional
-# [dev-dependencies] without first fixing the openssl-sys link on Windows.
-[target.'cfg(not(windows))'.dev-dependencies]
-trace-commons-server = { path = "../trace-commons-server" }
+# Cross-contract tests live in trace-commons-client-server-tests. Keep the
+# server out of this crate's dev-dependencies too: otherwise even a filtered
+# client unit-test run must compile the server and its dependency tree.
 
 [[example]]
 name = "compute-package"

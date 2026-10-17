@@ -1,0 +1,75 @@
+[package]
+name = "trace-commons-ingest"
+# Keep the source-offer and health build version equal to the server's.
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "AGPL-3.0-or-later"
+repository.workspace = true
+autobins = false
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+base64 = "0.22"
+bs58 = "0.5"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+cookie = "0.18"
+deadpool-postgres = "0.14"
+dcap-qvl = { version = "0.6", default-features = false, features = ["std", "ring", "default-x509"] }
+dirs = "6"
+hex = "0.4"
+jsonwebtoken = "9"
+k256 = "0.13"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+ring = "0.17"
+# Collateral verification also enables aws-lc-rs transitively. Ingest installs
+# ring explicitly at startup rather than letting rustls guess its provider.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sha3 = "0.10"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
+tower-http = { version = "0.6", features = ["cors"] }
+trace-commons-attestation = { path = "../trace-commons-attestation", features = ["receipt"] }
+trace-commons-build-info = { path = "../trace-commons-build-info" }
+trace-commons-gate-api = { path = "../trace-commons-gate-api" }
+trace-commons-gate-enclave = { path = "../trace-commons-gate-enclave" }
+trace-commons-operator-client = { path = "../trace-commons-operator-client" }
+trace-commons-protocol = { path = "../trace-commons-protocol", features = ["near-ai-privacy-filter", "self-hosted-privacy-filter"] }
+trace-commons-server = { path = "../trace-commons-server" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+webauthn-rs = { version = "0.5", features = ["conditional-ui"] }
+zeroize = "1"
+
+[features]
+default = []
+gcs-client = ["trace-commons-server/gcs-client"]
+gcp-kms = ["trace-commons-server/gcp-kms"]
+local-gpu-models = ["trace-commons-server/local-gpu-models", "trace-commons-gate-enclave/local-gpu-models"]
+local-gpu-models-cuda = ["local-gpu-models", "trace-commons-server/local-gpu-models-cuda", "trace-commons-gate-enclave/local-gpu-models-cuda"]
+near-ai-scorer = ["trace-commons-server/near-ai-scorer", "trace-commons-gate-enclave/near-ai-scorer"]
+near-attestation-collateral = ["trace-commons-server/near-attestation-collateral", "trace-commons-attestation/collateral-client"]
+
+# The service at src/bin/trace-commons-ingest.rs remains a library module;
+# only this thin entry point is a binary.
+[[bin]]
+name = "trace-commons-ingest"
+path = "src/bin/trace_commons_ingest_main.rs"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+trace-commons-contributor = { path = "../trace-commons-contributor" }
+wiremock = "0.6"
+# Software passkeys for end-to-end enrollment/login tests, never shipped.
+webauthn-authenticator-rs = { version = "=0.5.5", default-features = false, features = ["softpasskey"] }

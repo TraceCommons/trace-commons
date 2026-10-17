@@ -3870,7 +3870,7 @@ commands:
 ```bash
 cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg -- \
   rollback_selects activation_requires
-cargo test -p trace-commons-server --lib -- --test-threads=1 \
+cargo test -p trace-commons-ingest --lib -- --test-threads=1 \
   containment_refuses_new_receipts the_legacy_drain_report_counts_real_pending_work_and_reaches_zero
 ```
 

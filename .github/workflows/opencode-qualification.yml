@@ -26,7 +26,7 @@ on:
   pull_request:
     paths:
       - "scripts/qualification/opencode-routing.py"
-      - "crates/trace-commons-contributor/src/source/opencode.rs"
+      - "crates/trace-commons-contributor-sources/src/source/opencode.rs"
       - "docs/superpowers/reports/2026-09-07-opencode-export-qualification.md"
       - ".github/workflows/opencode-qualification.yml"
 
@@ -46,7 +46,7 @@ jobs:
         id: pin
         run: |
           v=$(sed -n 's/^pub const QUALIFIED_VERSION: &str = "\(.*\)";$/\1/p' \
-            crates/trace-commons-contributor/src/source/opencode.rs | head -1)
+            crates/trace-commons-contributor-sources/src/source/opencode.rs | head -1)
           [ -n "$v" ] || { echo "could not read QUALIFIED_VERSION" >&2; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "qualifying against OpenCode $v"

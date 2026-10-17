@@ -11,7 +11,7 @@ const assert = require("node:assert/strict");
 
 const dir = path.resolve(
   __dirname,
-  "../../crates/trace-commons-server/src/bin/trace_commons_ingest_internal",
+  "../../crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal",
 );
 const source = fs.readFileSync(path.join(dir, "step_up_page.js"), "utf8");
 const rust = fs.readFileSync(path.join(dir, "step_up_page.rs"), "utf8");

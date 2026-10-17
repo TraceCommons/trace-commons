@@ -37,13 +37,19 @@ def _fake_hash(label):
 
 
 _SERVER_CRATE = "crates/trace-commons-server"
+_INGEST_CRATE = "crates/trace-commons-ingest"
 
 # The smallest tree the code revision accepts: a workspace manifest and the
-# server crate's manifest.
+# manifests of the two crates whose binaries are deployed.
 _MINIMAL_WORKSPACE = {
-    "Cargo.toml": '[workspace]\nmembers = ["crates/trace-commons-server"]\n',
+    "Cargo.toml": '[workspace]\nmembers = ["crates/trace-commons-server", "crates/trace-commons-ingest"]\n',
     f"{_SERVER_CRATE}/Cargo.toml": '[package]\nname = "trace-commons-server"\n',
     f"{_SERVER_CRATE}/src/lib.rs": "// server\n",
+    f"{_INGEST_CRATE}/Cargo.toml": (
+        '[package]\nname = "trace-commons-ingest"\n'
+        '[dependencies]\ntrace-commons-server = { path = "../trace-commons-server" }\n'
+    ),
+    f"{_INGEST_CRATE}/src/lib.rs": "// ingest\n",
 }
 
 
@@ -1331,7 +1337,7 @@ _HARNESS = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_corpus_run"
 _PACKAGE_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_package_write"
 _ATTESTATION_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
 _KEY_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
-_INGEST_ARGS = ("-p", "trace-commons-server", "--lib")
+_INGEST_ARGS = ("-p", "trace-commons-ingest", "--lib")
 
 
 def _digest(data):
@@ -2071,7 +2077,7 @@ class ProductionCorpusReportTests(unittest.TestCase):
 
     def test_production_blockers_agree_with_the_harness(self):
         source = (
-            environment.ROOT / "crates/trace-commons-server/src/bin/trace_commons_ingest_internal/pipeline_corpus_pg_tests.rs"
+            environment.ROOT / "crates/trace-commons-ingest/src/bin/trace_commons_ingest_internal/pipeline_corpus_pg_tests.rs"
         ).read_text()
         match = re.search(r"const PRODUCTION_HARNESS_BLOCKERS: \[&str; \d+\] = \[(.*?)\];", source, re.S)
         self.assertIsNotNone(match)
@@ -4786,11 +4792,12 @@ class CodeRevisionExcludeTests(unittest.TestCase):
 # the workspace table, on `dep-target` for one target, and builds with
 # `dep-build`; `dev-only` is only a dev-dependency, and `unrelated` (a
 # client crate) is not a dependency at all. The server includes one document
-# from `docs/`.
+# from `docs/`. The ingest crate depends on the server crate and on
+# `dep-ingest`, which the server does not reach.
 _SCOPE_WORKSPACE = {
     "Cargo.toml": (
         "[workspace]\n"
-        'members = ["crates/trace-commons-server", "crates/dep-a", "crates/unrelated"]\n'
+        'members = ["crates/trace-commons-server", "crates/trace-commons-ingest", "crates/dep-a", "crates/unrelated"]\n'
         "[workspace.dependencies]\n"
         'dep-ws = { path = "crates/dep-ws" }\n'
         'serde = "1"\n'
@@ -4820,6 +4827,17 @@ _SCOPE_WORKSPACE = {
         '// A message that names the macro is text: "include_str!(\\"../{file}\\")".\n'
     ),
     f"{_SERVER_CRATE}/tests/fixtures/pin.json": "{}\n",
+    f"{_INGEST_CRATE}/Cargo.toml": (
+        "[package]\n"
+        'name = "trace-commons-ingest"\n'
+        "[dependencies]\n"
+        'trace-commons-server = { path = "../trace-commons-server" }\n'
+        'dep-ingest = { path = "../dep-ingest" }\n'
+    ),
+    f"{_INGEST_CRATE}/src/lib.rs": "// ingest\n",
+    f"{_INGEST_CRATE}/src/bin/trace_commons_ingest_internal/tests.rs": "// ingest tests\n",
+    "crates/dep-ingest/Cargo.toml": '[package]\nname = "dep-ingest"\n',
+    "crates/dep-ingest/src/lib.rs": "// dep-ingest\n",
     "crates/dep-a/Cargo.toml": '[package]\nname = "dep-a"\n[dependencies]\ndep-a-inner = { path = "../dep-a-inner" }\n',
     "crates/dep-a/src/lib.rs": "// dep-a\n",
     "crates/dep-a-inner/Cargo.toml": '[package]\nname = "dep-a-inner"\n',
@@ -4929,6 +4947,10 @@ class CodeRevisionScopeTests(unittest.TestCase):
             f"{_SERVER_CRATE}/src/new_module.rs",
             f"{_SERVER_CRATE}/tests/fixtures/pin.json",
             f"{_SERVER_CRATE}/Cargo.toml",
+            f"{_INGEST_CRATE}/src/lib.rs",
+            f"{_INGEST_CRATE}/src/bin/trace_commons_ingest_internal/tests.rs",
+            f"{_INGEST_CRATE}/Cargo.toml",
+            "crates/dep-ingest/src/lib.rs",
             "crates/dep-a/src/lib.rs",
             "crates/dep-a-inner/src/lib.rs",
             "crates/dep-ws/src/lib.rs",
@@ -4962,6 +4984,10 @@ class CodeRevisionScopeTests(unittest.TestCase):
 
     def test_a_server_crate_without_a_manifest_is_refused(self):
         (self.repo / _SERVER_CRATE / "Cargo.toml").unlink()
+        self._refused("code_revision_manifest_missing")
+
+    def test_an_ingest_crate_without_a_manifest_is_refused(self):
+        (self.repo / _INGEST_CRATE / "Cargo.toml").unlink()
         self._refused("code_revision_manifest_missing")
 
     def test_a_path_dependency_without_a_manifest_is_refused(self):
@@ -5088,6 +5114,7 @@ class CodeRevisionRepositoryTests(unittest.TestCase):
                 "crates/trace-commons-build-info",
                 "crates/trace-commons-gate-api",
                 "crates/trace-commons-gate-enclave",
+                "crates/trace-commons-ingest",
                 "crates/trace-commons-operator-client",
                 "crates/trace-commons-protocol",
                 "crates/trace-commons-server",
@@ -5102,6 +5129,9 @@ class CodeRevisionRepositoryTests(unittest.TestCase):
             "tauri-desktop/",
             "community/",
             "crates/trace-commons-contributor/",
+            "crates/trace-commons-contributor-sources/",
+            "crates/trace-commons-contributor-insights/",
+            "crates/trace-commons-contributor-platform/",
             "crates/trace-commons-contributor-ffi/",
             "crates/trace-commons-contributor-gtk/",
             "crates/trace-commons-mark/",

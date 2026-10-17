@@ -1,0 +1,61 @@
+[package]
+name = "trace-commons-contributor-insights"
+# Released in lockstep with trace-commons-contributor, which re-exports this
+# crate's `insights` module at its old path.
+version = "0.19.0"
+edition.workspace = true
+rust-version.workspace = true
+# MIT OR Apache-2.0, like the contributor that embeds it. This crate must
+# never depend on an AGPL crate, nor on trace-commons-contributor (see
+# AGENTS.md, "The one rule").
+license.workspace = true
+repository.workspace = true
+description = "Private local Insights for the Trace Commons contributor"
+
+# Split out of trace-commons-contributor so client builds that edit the rest
+# of the contributor do not recompile Insights. Every dependency below repeats
+# the contributor's own declaration of it, so this crate adds no package and
+# no feature to the graph.
+#
+# Its fixtures stay in crates/trace-commons-contributor/fixtures/insights,
+# shared with the contributor's own tests; the unit tests here read them by
+# relative path.
+
+[features]
+# TEST-ONLY. Forwarded from trace-commons-contributor's
+# `test-credential-store`, and forwarded on to the platform crate. The digest
+# key custody then refuses to reach the OS keychain or write a key file, as it
+# already does in this crate's own `cfg(test)`. Never enable it for a shipped
+# build.
+test-credential-store = ["trace-commons-contributor-platform/test-credential-store"]
+
+[dependencies]
+trace-commons-protocol = { path = "../trace-commons-protocol" }
+trace-commons-contributor-platform = { path = "../trace-commons-contributor-platform" }
+trace-commons-contributor-sources = { path = "../trace-commons-contributor-sources" }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+hex = "0.4"
+ring = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+
+# The store's owner-only DACL and its file identity call Win32 directly.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+# Already in the contributor's dev graph (see its manifest); a fixed IANA zone
+# for the week-rollup DST tests.
+chrono-tz = "0.10"
+tempfile = "3"

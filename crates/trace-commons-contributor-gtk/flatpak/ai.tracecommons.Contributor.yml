@@ -15,7 +15,7 @@
 # The one constraint that shapes this file: a Flatpak-confined process
 # cannot read `~/.claude/projects` or `~/.codex/sessions` -- the daemon's
 # actual default session roots (see
-# `trace-commons-contributor/src/source/mod.rs`) -- without an explicit
+# `trace-commons-contributor-sources/src/source/mod.rs`) -- without an explicit
 # filesystem permission, and the whole point of Flatpak confinement is that
 # it must not get a blanket grant of `home` to do it. So `finish-args` below
 # names exactly those two directories, read-only, and nothing wider. The

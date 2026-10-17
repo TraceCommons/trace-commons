@@ -39,7 +39,7 @@ repeat `--check` for more than one):
   classifies routes, operations, adapters, tables, object namespaces,
   telemetry destinations, and roles.
 - **`runtime`** -- no database. The server-crate's own `versioned_pipeline`
-  unit tests, the `trace-commons-ingest` bin's `pipeline_runtime` tests, and
+  unit tests, the `trace-commons-ingest` crate's `pipeline_runtime` tests, and
   `scripts/operator/test_pipeline_tooling.py` (the tooling's own self-tests;
   a binding check like every other step in this group).
 - **`postgres`** -- one `Environment` (below), one scenario per step: pipeline
@@ -365,22 +365,27 @@ passed.
 - `pipeline.py revision` prints the code revision hash of the working tree: the
   `code_revision_hash` that every result of a run carries, and the value to give
   the build as `TRACE_COMMONS_BUILD_CODE_REVISION_HASH`. It hashes the path and
-  content of each file that can change what the server's binaries do or what
+  content of each file that can change what the deployed binaries do or what
   a qualification run finds (#1249), and of no other file:
-  - each crate that `crates/trace-commons-server` is built from: the server
-    crate itself and every crate that its `[dependencies]` and
-    `[build-dependencies]` tables (for any target, a `workspace = true` entry
-    included) reach by `path`, transitively, plus a crate that the workspace's
-    `[patch]` or `[replace]` tables substitute by `path`. The whole directory
-    of each: sources, `build.rs`, tests, and fixtures. Today these are the
-    server, `-attestation`, `-build-info`, `-gate-api`, `-gate-enclave`,
+  - each crate that `crates/trace-commons-server` or
+    `crates/trace-commons-ingest` is built from. The tooling walks both
+    roots (`CODE_REVISION_ROOT_CRATES`): the ingest crate depends on the
+    server crate but not the reverse, so the server's closure alone would
+    leave every ingest edit out of the revision. That is the two root crates
+    and every crate that their `[dependencies]` and `[build-dependencies]`
+    tables (for any target, a `workspace = true` entry included) reach by
+    `path`, transitively, plus a crate that the workspace's `[patch]` or
+    `[replace]` tables substitute by `path`. The whole directory of each:
+    sources, `build.rs`, tests, and fixtures. Today these are the server,
+    `-ingest`, `-attestation`, `-build-info`, `-gate-api`, `-gate-enclave`,
     `-operator-client`, and `-protocol` crates. A `[dev-dependencies]` table
-    is not followed, so the contributor crate (the server's one path
-    dev-dependency) is outside. That crate is compiled into the test
-    binaries a qualification run builds, but not into the server binaries
-    the revision identifies: a contributor change can change what a
-    qualification run finds (a compile failure, a journey test) and keep
-    the revision, and cannot change what the deployed server does;
+    is not followed, so the contributor crate (a path dev-dependency of
+    both roots) is outside, and so is `-contributor-sources`, which only it
+    reaches. Those crates are compiled into the test binaries a
+    qualification run builds, but not into the binaries the revision
+    identifies: a contributor change can change what a qualification run
+    finds (a compile failure, a journey test) and keep the revision, and
+    cannot change what the deployed server does;
   - each file that a Rust file of those crates includes from elsewhere in the
     tree (`include_str!`, `include_bytes!`, `include!`, or a `#[path]` or
     `#[cfg_attr(..., path = "...")]` module), and, transitively, each file
