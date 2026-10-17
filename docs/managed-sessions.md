@@ -132,6 +132,26 @@ tools whose executable availability is not checked.
     (named by NEAR AI's display name or the id); `model` and `small_model`
     are the default. Its profile is isolated, so the list never reaches the
     person's own OpenCode settings.
+- Each NEAR AI session's proxy has its own IronWire home,
+  `managed-routes/<session id>` in the state directory, whichever process
+  hosts it (the launcher for a saved key, the daemon for the sign-in). Its
+  call log is on with bodies off: `ledger.sqlite` in that home records each
+  exchange's timings, facade and path, an opaque conversation hash, the
+  client's session header, backend, requested and served model, token counts,
+  cost, status and an error label, never a request or response body. The
+  home, log included, is removed when the route shuts down. A launcher or
+  daemon that exits without shutting its routes down leaves the home behind.
+- Claude Code on a NEAR AI session shows IronWire's status line. It is
+  launched with `--settings '{"statusLine":{"type":"command","command":
+  "<this executable> statusline --home <route home>"}}'`. Command-line
+  settings take precedence over the profile's and a project's settings (only
+  managed policy settings override them), and nothing is written to disk.
+  The command is quoted for `/bin/sh` on Unix. On Windows it is written for
+  Git Bash, with forward slashes; it also works in PowerShell, which Claude
+  Code uses when it finds no Git Bash, only when neither path needs quoting.
+  `statusline` reads the route's `endpoint.json` and `control.token`, creates
+  nothing, and prints nothing and exits 0 on any failure, within IronWire's
+  400 ms budget.
 - A profile cannot be reconnected, have its key replaced, or be removed while a
   managed session or sign-in holds it. Multiple coding sessions may share the
   same account, but sign-in requires that account to be idle.

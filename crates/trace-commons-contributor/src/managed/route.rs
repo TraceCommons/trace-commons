@@ -36,6 +36,13 @@ pub(crate) fn near_ai_base_url() -> &'static str {
     "https://cloud-api.near.ai/v1"
 }
 
+/// The IronWire home of session `id`'s route: `<config dir>/managed-routes/
+/// <id>`, whichever process hosts it. The launcher of a sign-in session,
+/// whose route the daemon hosts, finds it here from the session id.
+pub fn home_for(store: &ConfigStore, id: Uuid) -> PathBuf {
+    store.dir().join("managed-routes").join(id.to_string())
+}
+
 /// How long a route waits for NEAR AI's catalogue and then for its proxy
 /// to serve the selected model.
 const READY_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
@@ -84,18 +91,23 @@ impl ManagedRoute {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         };
-        let root = store.dir().join("managed-routes");
-        super::profiles::private_directory(&root)?;
-        let home = root.join(id.to_string());
+        let home = home_for(store, id);
+        if let Some(root) = home.parent() {
+            super::profiles::private_directory(root)?;
+        }
         super::profiles::private_directory(&home)?;
         let config =
             ConfigStore::open(home.clone()).map_err(|_| ManagedError::StorageUnavailable)?;
         config
             .write_daemon_file(
                 "config.toml",
+                // The call log is on, for the status line's usage and for
+                // the person; bodies are off, so it records what each call
+                // was (models, tokens, timings, status), never what it said.
+                // It lives in this home and goes with it at shutdown.
                 format!(
                     r#"[capture]
-enabled = false
+enabled = true
 bodies = false
 [privacy]
 mode = "full"
@@ -168,6 +180,11 @@ base_url = {base_url}
             models,
             default_model: selected_model,
         })
+    }
+
+    /// This route's IronWire home ([`home_for`]).
+    pub fn home(&self) -> &std::path::Path {
+        &self.home
     }
 
     pub fn port(&self) -> u16 {
@@ -353,6 +370,110 @@ mod tests {
         a.shutdown().await;
         b.shutdown().await;
         c.shutdown().await;
+        server.abort();
+    }
+
+    /// A real route serves the `statusline` subcommand's line from its
+    /// home, which is where the launcher computes it, and its call log
+    /// records the exchange but never a request body.
+    #[tokio::test]
+    async fn a_route_serves_the_status_line_and_logs_calls_without_bodies() {
+        const MARKER: &str = "statusline-body-marker-5f2c9e";
+        async fn completion(Json(body): Json<Value>) -> Json<Value> {
+            assert!(body.to_string().contains(MARKER));
+            Json(
+                json!({"id":"fixture","object":"chat.completion","created":1,"model":"anthropic/claude-sonnet-5-5","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}),
+            )
+        }
+        let models = json!({"data":[
+            {"id":"anthropic/claude-sonnet-5-5","input_modalities":["text"],"output_modalities":["text"]},
+        ]});
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(move || {
+                    let models = models.clone();
+                    async move { Json(models) }
+                }),
+            )
+            .route("/v1/chat/completions", post(completion));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().into()).unwrap();
+        let id = Uuid::new_v4();
+        let route = ManagedRoute::start_at(
+            &store,
+            id,
+            ApiKey::new("fixture-key".into()).unwrap(),
+            &endpoint,
+            ToolId::Claude,
+            None,
+        )
+        .await
+        .unwrap();
+        // The launcher of a sign-in session computes the daemon's route
+        // home from the session id alone.
+        assert_eq!(route.home(), home_for(&store, id));
+        let line = crate::managed::statusline::line(&home_for(&store, id), None)
+            .await
+            .expect("a line from a running route");
+        assert!(line.starts_with("ironwire"), "{line}");
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let result = client
+            .post(format!(
+                "http://127.0.0.1:{}/anthropic/v1/messages",
+                route.port()
+            ))
+            .header("anthropic-version", "2023-06-01")
+            .json(&json!({"model":"anthropic/claude-sonnet-5-5","max_tokens":16,"messages":[{"role":"user","content":MARKER}]}))
+            .send()
+            .await
+            .unwrap();
+        assert!(result.status().is_success());
+        let _ = result.bytes().await.unwrap();
+        // The exchange is logged once the response is done; wait for it.
+        let ledger = route.home().join("ledger.sqlite");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let logged = |path: &std::path::Path| {
+            ["", "-wal"].iter().any(|suffix| {
+                let mut file = path.as_os_str().to_owned();
+                file.push(suffix);
+                std::fs::read(file).is_ok_and(|bytes| {
+                    bytes
+                        .windows(b"anthropic/claude-sonnet-5-5".len())
+                        .any(|w| w == b"anthropic/claude-sonnet-5-5")
+                })
+            })
+        };
+        while !logged(&ledger) {
+            assert!(std::time::Instant::now() < deadline, "no call logged");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        // No file anywhere under the home holds the request body.
+        let mut pending = vec![route.home().to_path_buf()];
+        let mut files = 0;
+        while let Some(path) = pending.pop() {
+            if path.is_dir() {
+                pending.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                files += 1;
+                assert!(
+                    !bytes.windows(MARKER.len()).any(|w| w == MARKER.as_bytes()),
+                    "{}",
+                    path.display()
+                );
+            }
+        }
+        assert!(files > 0);
+        assert!(!route.home().join("bodies").exists());
+        let home = route.home().to_path_buf();
+        route.shutdown().await;
+        assert!(!home.exists());
         server.abort();
     }
 }

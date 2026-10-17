@@ -129,7 +129,8 @@ keyring-core = "=1.0.0"
 # REACHED. #42 (`ConnectOptions`/`StatusLine`) is used: this daemon plans
 # Claude Code edits through `plan_connect_with` and `StatusLine::Decline`,
 # because the status line IronWire would install runs `<this executable>
-# statusline`, which this program does not implement.
+# statusline` with no route home, and this program's `statusline` serves
+# only a managed session's route, named by `--home`.
 # #37 also renames the control API's `if_unchanged` request field to
 # `as_previewed`; that is IronWire's HTTP surface, which nothing in this
 # repository calls (checked by grep across crates/, macos/ and windows/), so

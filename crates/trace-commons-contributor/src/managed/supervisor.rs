@@ -183,6 +183,9 @@ async fn run_native(
                     proxy.models(),
                     codex_catalog.as_ref().map(|file| file.path()),
                 )?;
+                if !login {
+                    status_line(&mut command, row.tool, proxy.home());
+                }
                 route = Some(proxy);
             }
             // The daemon holds the sign-in and hosts this session's proxy. This
@@ -200,6 +203,14 @@ async fn run_native(
                     models,
                     codex_catalog.as_ref().map(|file| file.path()),
                 )?;
+                // The daemon's route lives where every route does.
+                if !login {
+                    status_line(
+                        &mut command,
+                        row.tool,
+                        &super::route::home_for(store, row.id),
+                    );
+                }
             }
         }
     }
@@ -476,6 +487,27 @@ fn near_ai_route(
     Ok(())
 }
 
+/// For Claude Code, show the route's status line: `--settings` naming
+/// this executable's `statusline` for the route's IronWire home
+/// ([`super::statusline`]). Settings from the command line take precedence
+/// over the profile's and a project's, and nothing is written to disk.
+/// When this executable's path cannot be found or written, the session runs
+/// without a status line. Other tools have no status-line slot.
+fn status_line(command: &mut std::process::Command, tool: super::ToolId, home: &std::path::Path) {
+    if tool != super::ToolId::Claude {
+        return;
+    }
+    match super::statusline::settings(home) {
+        Some(settings) => {
+            command.arg("--settings").arg(settings);
+        }
+        None => tracing::warn!(
+            harness = "claude",
+            "managed session runs without a status line"
+        ),
+    }
+}
+
 /// Whether the daemon's answer to a running report asks for a stop. Only
 /// an explicit `true` does; anything else leaves the tool running.
 fn stop_asked(answer: &anyhow::Result<Value>) -> bool {
@@ -529,7 +561,7 @@ impl TerminalSignals {
 mod tests {
     use super::{
         codex_catalog_file, near_ai_route, opencode_route_command, opencode_sign_in_command,
-        stop_asked,
+        status_line, stop_asked,
     };
     use crate::config::ConfigStore;
     use crate::managed::{
@@ -601,6 +633,35 @@ mod tests {
         // Removed, not left to the person's shell.
         assert_eq!(env("CLAUDE_CODE_SUBAGENT_MODEL"), Some(None));
         assert_eq!(env("ANTHROPIC_CUSTOM_MODEL_OPTION"), Some(None));
+    }
+
+    /// Claude Code on a NEAR AI route, whoever hosts it, gets a status line
+    /// that runs this executable for the route's home; no other tool does.
+    #[test]
+    fn claude_on_a_route_shows_the_routes_status_line() {
+        let home = std::path::Path::new("/state dir/managed-routes/it's");
+        let mut command = std::process::Command::new("claude");
+        status_line(&mut command, ToolId::Claude, home);
+        let args: Vec<String> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.len(), 2, "{args:?}");
+        assert_eq!(args[0], "--settings");
+        let settings: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
+        let line = &settings["statusLine"];
+        assert_eq!(line["type"], "command");
+        let run = line["command"].as_str().unwrap();
+        assert!(
+            run.ends_with(r" statusline --home '/state dir/managed-routes/it'\''s'"),
+            "{run}"
+        );
+        assert_eq!(settings.as_object().unwrap().len(), 1);
+        for tool in [ToolId::Codex, ToolId::Opencode] {
+            let mut command = std::process::Command::new("tool");
+            status_line(&mut command, tool, home);
+            assert_eq!(command.get_args().count(), 0);
+        }
     }
 
     /// Codex on a NEAR AI route reads its model list from the session's
