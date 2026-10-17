@@ -667,11 +667,17 @@ pub fn commit(store: &PlanStore, plan_id: Uuid) -> Result<CommitView, &'static s
 ///   that port, so the base URL is not changed -- this never moves routing;
 /// - `statusLine` carries IronWire's `installedBy` marker, so a line the
 ///   contributor wrote is left alone;
+/// - its command does not run an executable named `ironwire`;
 /// - the planned edit is that one removal and nothing else.
 ///
-/// The marker names IronWire rather than a binary, so in a home shared with
-/// the `ironwire` CLI pointed at this same port, that CLI's line is taken
-/// out too; `ironwire connect claude` puts it back.
+/// The `ironwire` check exists because the marker names IronWire rather
+/// than a binary, and the `ironwire` CLI's own `ironwire statusline` works.
+/// A connect that declines takes that line out too, once, because the
+/// contributor asked for the edit; a sweep that runs on every daemon start
+/// must not, or it would undo `ironwire connect claude` each time. The
+/// daemon also passes only its own hosted listener's port, never a proxy the
+/// contributor declared and runs themselves -- see
+/// [`repair_stale_status_line`].
 ///
 /// The write goes through `tools::commit_if_unchanged`, the same as a
 /// committed plan, so the first edit keeps a backup and a file that changed
@@ -715,12 +721,18 @@ pub fn repair_claude_status_line(
         .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
         .and_then(serde_json::Value::as_str)
         == Some(our_url.as_str());
-    let status_line_is_ironwires = root
-        .get("statusLine")
+    let status_line = root.get("statusLine");
+    let status_line_is_ironwires = status_line
         .and_then(|line| line.get("installedBy"))
         .and_then(serde_json::Value::as_str)
         == Some("ironwire");
-    if !connected_here || !status_line_is_ironwires {
+    // A command that is missing or runs `ironwire` is not one this sweep
+    // removes.
+    let names_another_executable = status_line
+        .and_then(|line| line.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|command| !command_runs_ironwire(command));
+    if !connected_here || !status_line_is_ironwires || !names_another_executable {
         return Ok(false);
     }
 
@@ -745,25 +757,62 @@ pub fn repair_claude_status_line(
     Ok(true)
 }
 
-/// Run [`repair_claude_status_line`] for this daemon's destination, and log
-/// the result by label only.
+/// Whether a status-line command runs an executable named `ironwire`.
 ///
-/// Called by the supervisor once the destination is known, at start and
-/// after each change to Private AI's listener, so a contributor who was
-/// connected before the status-line decline is repaired without having to
-/// disconnect and reconnect.
-pub(crate) fn repair_stale_status_line(shared: &DaemonShared) {
-    match repair_claude_status_line(&catalog(), shared.destination_port()) {
-        Ok(true) => tracing::info!(
-            harness = "claude",
-            "removed a status line an earlier connect installed"
-        ),
-        Ok(false) => {}
-        Err(label) => tracing::warn!(
-            harness = "claude",
-            error = label,
-            "could not remove a status line an earlier connect installed"
-        ),
+/// IronWire writes `<executable> statusline` with the path unquoted, so the
+/// executable is everything before the trailing ` statusline` -- a path with
+/// spaces in it stays whole. A command without that suffix is judged by its
+/// first word. Named by file stem, so `ironwire`, `/usr/local/bin/ironwire`
+/// and `ironwire.exe` all count.
+fn command_runs_ironwire(command: &str) -> bool {
+    let command = command.trim();
+    let executable = command
+        .strip_suffix(" statusline")
+        .unwrap_or_else(|| command.split_whitespace().next().unwrap_or_default());
+    // Both separators, whatever this platform's are: the file may have been
+    // written on either.
+    let name = executable.rsplit(['/', '\\']).next().unwrap_or(executable);
+    let stem = name.strip_suffix(".exe").unwrap_or(name);
+    stem == "ironwire"
+}
+
+/// Run [`repair_claude_status_line`] for this daemon, and log the result by
+/// label only. Returns whether a status line was removed.
+///
+/// Called by the supervisor at start and after each change to Private AI's
+/// listener, so a contributor who was connected before the status-line
+/// decline is repaired without having to disconnect and reconnect.
+///
+/// Only the hosted listener's port, deliberately not
+/// [`DaemonShared::destination_port`]: its second source is a proxy the
+/// contributor declared and runs themselves, which is the `ironwire` CLI,
+/// whose status line works. The old connect could have written our
+/// executable against a declared port too, and that case is left for a
+/// disconnect and reconnect rather than risk the CLI's line.
+///
+/// Skipped under either dry run, which edits no contributor's files; a
+/// dry-run start leaves the line for the next normal one.
+pub(crate) fn repair_stale_status_line(shared: &DaemonShared, dry_run: bool) -> bool {
+    if dry_run || shared.dev_dry_run {
+        return false;
+    }
+    match repair_claude_status_line(&catalog(), shared.hosted_destination_port()) {
+        Ok(true) => {
+            tracing::info!(
+                harness = "claude",
+                "removed a status line an earlier connect installed"
+            );
+            true
+        }
+        Ok(false) => false,
+        Err(label) => {
+            tracing::warn!(
+                harness = "claude",
+                error = label,
+                "could not remove a status line an earlier connect installed"
+            );
+            false
+        }
     }
 }
 
@@ -1546,6 +1595,102 @@ mod tests {
             Ok(false)
         );
         assert_eq!(std::fs::read(&path).expect("read"), utf16);
+    }
+
+    /// The `ironwire` CLI's own status line works, and a sweep that ran on
+    /// every start would undo `ironwire connect claude` each time.
+    #[test]
+    fn repair_leaves_the_ironwire_clis_own_line_alone() {
+        for command in [
+            "ironwire statusline",
+            "/opt/homebrew/bin/ironwire statusline",
+            "C:\\Tools\\ironwire.exe statusline",
+        ] {
+            let body = serde_json::json!({
+                "statusLine": {"type": "command", "command": command, "installedBy": "ironwire"},
+                "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8463/anthropic"},
+            })
+            .to_string();
+            assert_repair_leaves_alone(&body, Some(8463));
+        }
+    }
+
+    /// The executable is everything before ` statusline`, so a path with a
+    /// space in it is judged whole, by its file stem.
+    #[test]
+    fn a_status_line_command_is_judged_by_its_executables_name() {
+        assert!(command_runs_ironwire("ironwire statusline"));
+        assert!(command_runs_ironwire("/usr/local/bin/ironwire statusline"));
+        assert!(command_runs_ironwire("C:\\bin\\ironwire.exe statusline"));
+        assert!(command_runs_ironwire("ironwire"));
+        assert!(!command_runs_ironwire("/old/app statusline"));
+        assert!(!command_runs_ironwire(
+            "/Applications/Trace Commons.app/Contents/MacOS/trace-commons statusline"
+        ));
+        assert!(!command_runs_ironwire("/opt/ironwire/bin/tc statusline"));
+        assert!(!command_runs_ironwire("/home/me/not-ironwire statusline"));
+    }
+
+    fn daemon_shared() -> DaemonShared {
+        let (dir, store) = crate::config::tests_support::temp_store();
+        // The store borrows the directory's path for the test's lifetime.
+        std::mem::forget(dir);
+        DaemonShared::load(store).expect("load")
+    }
+
+    /// The daemon-side entry point repairs the old connect's file when the
+    /// hosted listener is up on the port that file names. This is the call
+    /// the supervisor makes at start.
+    #[test]
+    fn the_daemon_repairs_the_old_connect_on_its_hosted_port() {
+        let shared = daemon_shared();
+        shared.set_private_inference_state_for_test(
+            crate::daemon::private_inference::PrivateInferenceState::Running { port: 8463 },
+        );
+        let (_dir, _guard, path) = claude_config(OLD_CONNECT_SETTINGS);
+        assert!(repair_stale_status_line(&shared, false));
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
+                .expect("settings stay valid JSON");
+        assert!(after.get("statusLine").is_none(), "{after}");
+        assert_eq!(
+            after["env"]["ANTHROPIC_BASE_URL"],
+            "http://127.0.0.1:8463/anthropic"
+        );
+    }
+
+    /// A proxy the contributor declared and runs themselves is not this
+    /// daemon's to sweep after, even on the same port.
+    #[test]
+    fn the_daemon_does_not_repair_against_a_declared_proxy() {
+        let shared = daemon_shared();
+        shared.settings.lock().expect("settings").ironwire =
+            Some(crate::daemon::settings::IronWireDeclaration::Watch {
+                port: 8463,
+                token_dir: None,
+            });
+        assert_eq!(shared.destination_port(), Some(8463));
+        let (_dir, _guard, path) = claude_config(OLD_CONNECT_SETTINGS);
+        assert!(!repair_stale_status_line(&shared, false));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            OLD_CONNECT_SETTINGS
+        );
+    }
+
+    /// A dry run edits no contributor's files.
+    #[test]
+    fn the_daemon_does_not_repair_under_a_dry_run() {
+        let shared = daemon_shared();
+        shared.set_private_inference_state_for_test(
+            crate::daemon::private_inference::PrivateInferenceState::Running { port: 8463 },
+        );
+        let (_dir, _guard, path) = claude_config(OLD_CONNECT_SETTINGS);
+        assert!(!repair_stale_status_line(&shared, true));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            OLD_CONNECT_SETTINGS
+        );
     }
 
     /// No settings file at all is nothing to repair, and none is created.

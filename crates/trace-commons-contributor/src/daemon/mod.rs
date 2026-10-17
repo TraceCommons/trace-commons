@@ -546,12 +546,9 @@ async fn supervise(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> 
 /// destination port is known -- see `harness::repair_claude_status_line`.
 ///
 /// After a reconcile, because that is what publishes the hosted listener's
-/// port. Skipped under either dry run: a dry run edits no contributor's files.
+/// port.
 fn repair_stale_status_line(shared: &ipc::DaemonShared, dry_run: bool) {
-    if dry_run || shared.dev_dry_run {
-        return;
-    }
-    run_blocking(|| harness::repair_stale_status_line(shared));
+    run_blocking(|| harness::repair_stale_status_line(shared, dry_run));
 }
 
 /// The periodic work: watch, expire, and decide about digests, until asked to

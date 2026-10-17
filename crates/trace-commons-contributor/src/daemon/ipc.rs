@@ -1927,6 +1927,32 @@ impl DaemonShared {
         held.ledger = Some(Arc::new(ledger));
     }
 
+    /// The port this daemon's own hosted listener bound, or `None` when it
+    /// is not up.
+    ///
+    /// The first of [`Self::destination_port`]'s two sources, on its own.
+    /// For a caller that must not act on a proxy the contributor declared
+    /// and runs themselves -- `harness::repair_stale_status_line`, which
+    /// would otherwise remove that proxy's working status line.
+    pub(crate) fn hosted_destination_port(&self) -> Option<u16> {
+        self.private_inference_state
+            .lock()
+            .expect("private inference state lock")
+            .port()
+    }
+
+    /// Set the hosted listener's state, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn set_private_inference_state_for_test(
+        &self,
+        state: super::private_inference::PrivateInferenceState,
+    ) {
+        *self
+            .private_inference_state
+            .lock()
+            .expect("private inference state lock") = state;
+    }
+
     /// The port a tool's config would be pointed at, or `None`.
     ///
     /// Two sources, in this order, and the order is the point:
@@ -1943,12 +1969,7 @@ impl DaemonShared {
     /// connect has no destination to write, and `harness_plan` refuses it by
     /// name rather than writing a guess into somebody's config file.
     pub(crate) fn destination_port(&self) -> Option<u16> {
-        if let Some(port) = self
-            .private_inference_state
-            .lock()
-            .expect("private inference state lock")
-            .port()
-        {
+        if let Some(port) = self.hosted_destination_port() {
             return Some(port);
         }
         self.settings
