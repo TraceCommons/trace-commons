@@ -536,9 +536,19 @@ pub(crate) fn run_blocking<R>(f: impl FnOnce() -> R) -> R {
 /// drainage after the host runtime has gone away.
 async fn supervise(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> {
     shared.reconcile_private_inference().await;
+    repair_stale_status_line(&shared, dry_run);
     let result = supervise_passes(&shared, dry_run).await;
     shared.stop_private_inference().await;
     result
+}
+
+/// Take out a Claude Code status line an earlier connect installed, once the
+/// destination port is known -- see `harness::repair_claude_status_line`.
+///
+/// After a reconcile, because that is what publishes the hosted listener's
+/// port.
+fn repair_stale_status_line(shared: &ipc::DaemonShared, dry_run: bool) {
+    run_blocking(|| harness::repair_stale_status_line(shared, dry_run));
 }
 
 /// The periodic work: watch, expire, and decide about digests, until asked to
@@ -587,6 +597,7 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
             }
             _ = shared.private_inference_changed.notified() => {
                 shared.reconcile_private_inference().await;
+                repair_stale_status_line(shared, dry_run);
             }
             _ = proxy_cleanup_tick.tick(), if shared.private_inference_is_stopping() => {
                 shared.reconcile_private_inference().await;
