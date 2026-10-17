@@ -1,6 +1,10 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#[path = "support/role_ddl_lock.rs"]
+mod role_ddl_lock;
+
+use role_ddl_lock::with_role_ddl_lock;
 use secrecy::SecretString;
 use std::sync::Arc;
 use std::time::Duration;
@@ -94,7 +98,7 @@ async fn account_invite_is_atomic_idempotent_and_rls_scoped() {
         .get()
         .await
         .unwrap();
-    admin.batch_execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tc_account_invite_runtime') THEN CREATE ROLE tc_account_invite_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$; GRANT trace_account_invite_runtime TO tc_account_invite_runtime;").await.unwrap();
+    admin.batch_execute(&with_role_ddl_lock("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tc_account_invite_runtime') THEN CREATE ROLE tc_account_invite_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$; GRANT trace_account_invite_runtime TO tc_account_invite_runtime;")).await.unwrap();
     let mut runtime_url = reqwest::Url::parse(&url).unwrap();
     runtime_url
         .set_username("tc_account_invite_runtime")
@@ -543,7 +547,7 @@ async fn one_shared_code_admits_many_accounts_up_to_max_uses() {
         .get()
         .await
         .unwrap();
-    admin.batch_execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tc_account_invite_runtime') THEN CREATE ROLE tc_account_invite_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$; GRANT trace_account_invite_runtime TO tc_account_invite_runtime;").await.unwrap();
+    admin.batch_execute(&with_role_ddl_lock("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tc_account_invite_runtime') THEN CREATE ROLE tc_account_invite_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$; GRANT trace_account_invite_runtime TO tc_account_invite_runtime;")).await.unwrap();
     let mut runtime_url = reqwest::Url::parse(&url).unwrap();
     runtime_url
         .set_username("tc_account_invite_runtime")

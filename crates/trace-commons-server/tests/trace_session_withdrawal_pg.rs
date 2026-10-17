@@ -1,8 +1,12 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#[path = "support/role_ddl_lock.rs"]
+mod role_ddl_lock;
+
 use std::collections::BTreeMap;
 
+use role_ddl_lock::with_role_ddl_lock;
 use secrecy::SecretString;
 use tokio_postgres::NoTls;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
@@ -127,8 +131,10 @@ async fn session_tables_have_forced_rls_and_mapping_outlives_content() {
         .await
         .expect("mapping needs no content row");
 
+    // The trailing BEGIN folds the lock and the grants into the transaction
+    // the ROLLBACK below ends, so the lock is held until then.
     client
-        .batch_execute(
+        .batch_execute(&with_role_ddl_lock(
             "DO $$ BEGIN
                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_z4_rls_probe') THEN
                     CREATE ROLE trace_z4_rls_probe NOLOGIN NOBYPASSRLS;
@@ -138,7 +144,7 @@ async fn session_tables_have_forced_rls_and_mapping_outlives_content() {
              GRANT SELECT ON trace_source_sessions, trace_submission_sessions TO trace_z4_rls_probe;
              BEGIN;
              SET ROLE trace_z4_rls_probe;",
-        )
+        ))
         .await
         .expect("use a non-bypass role for the RLS assertion");
     let invisible = client
@@ -908,12 +914,12 @@ async fn failed_backstop_audit_rolls_back_release_and_fresh_ref_retry_stays_acti
 async fn foreign_legacy_claim_cannot_poison_bulk_withdrawal() {
     let Some(url) = database_url() else { return };
     let client = migrated_client(&url).await;
-    client.batch_execute("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='trace_z4_claim_runtime') THEN CREATE ROLE trace_z4_claim_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
+    client.batch_execute(&with_role_ddl_lock("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='trace_z4_claim_runtime') THEN CREATE ROLE trace_z4_claim_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
         GRANT trace_account_admission_runtime TO trace_z4_claim_runtime;
         GRANT SELECT,INSERT,UPDATE ON trace_tenants,trace_submissions,trace_source_sessions,trace_submission_sessions TO trace_z4_claim_runtime;
         GRANT SELECT,INSERT ON trace_withdrawals TO trace_z4_claim_runtime;
         GRANT SELECT ON trace_export_manifest_items TO trace_z4_claim_runtime;
-        GRANT SELECT,UPDATE ON trace_token_bundles TO trace_z4_claim_runtime;").await.unwrap();
+        GRANT SELECT,UPDATE ON trace_token_bundles TO trace_z4_claim_runtime;")).await.unwrap();
     let mut runtime_url = reqwest::Url::parse(&url).unwrap();
     runtime_url.set_username("trace_z4_claim_runtime").unwrap();
     let backend = PgBackend::new(&database_config(runtime_url.as_str()))
@@ -1275,14 +1281,14 @@ async fn account_merge_carries_source_sessions_and_withdrawals_to_the_survivor()
     // nothing on the session tables: the carry-over runs through V78's
     // definer function, not the caller's rights.
     client
-        .batch_execute(
+        .batch_execute(&with_role_ddl_lock(
             "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_z4_merge_runtime') THEN CREATE ROLE trace_z4_merge_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
              GRANT SELECT,INSERT,UPDATE ON trace_tenants TO trace_z4_merge_runtime;
              GRANT SELECT,UPDATE ON trace_accounts,trace_account_merge_proposals,trace_account_principals,
                  trace_webauthn_credentials,trace_near_identities,trace_public_runs,trace_sessions TO trace_z4_merge_runtime;
              GRANT INSERT ON trace_account_audit TO trace_z4_merge_runtime;
              GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_z4_merge_runtime;",
-        )
+        ))
         .await
         .unwrap();
     let session_rights: bool = client

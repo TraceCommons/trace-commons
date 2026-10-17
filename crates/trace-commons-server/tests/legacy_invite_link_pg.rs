@@ -14,8 +14,12 @@
 //! which must name a database beginning `admission_test_legacy_invite_link`
 //! on the literal host 127.0.0.1.
 
+#[path = "support/role_ddl_lock.rs"]
+mod role_ddl_lock;
+
 use base64::Engine as _;
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
+use role_ddl_lock::with_role_ddl_lock;
 use secrecy::SecretString;
 use std::sync::Arc;
 use trace_commons_protocol::legacy_invite_link::{
@@ -263,11 +267,11 @@ async fn legacy_invite_link_and_coexistence_readiness() {
         .await
         .unwrap();
     admin
-        .batch_execute(
+        .batch_execute(&with_role_ddl_lock(
             "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tc_legacy_link_runtime')
              THEN CREATE ROLE tc_legacy_link_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
              GRANT trace_account_invite_runtime TO tc_legacy_link_runtime;",
-        )
+        ))
         .await
         .unwrap();
     let mut runtime_url = reqwest::Url::parse(&url).unwrap();
@@ -1137,11 +1141,11 @@ async fn the_attestation_function_holds_every_refusal_on_its_own() {
         .await
         .unwrap();
     admin
-        .batch_execute(
+        .batch_execute(&with_role_ddl_lock(
             "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tc_legacy_attest_runtime')
              THEN CREATE ROLE tc_legacy_attest_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
              GRANT trace_account_invite_runtime TO tc_legacy_attest_runtime;",
-        )
+        ))
         .await
         .unwrap();
     let mut runtime_url = reqwest::Url::parse(&url).unwrap();

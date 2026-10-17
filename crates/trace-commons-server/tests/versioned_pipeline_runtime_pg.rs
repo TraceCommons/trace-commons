@@ -7,6 +7,8 @@
 mod pilot_runtime_grants;
 #[path = "support/pilot_runtime_login.rs"]
 mod pilot_runtime_login;
+#[path = "support/role_ddl_lock.rs"]
+mod role_ddl_lock;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -106,6 +108,7 @@ use trace_commons_server::versioned_pipeline_qualification::{
 };
 
 use pilot_runtime_login::{migrate_like_the_pilot, provision_runtime_login};
+use role_ddl_lock::with_role_ddl_lock;
 
 /// The login every test here connects as. Its only privilege sources are
 /// membership in `trace_ingest_runtime`, the ingest runtime group V90 names,
@@ -28635,7 +28638,7 @@ async fn the_lost_follow_up_recovery_reads_no_submission_of_a_tenant_with_no_run
         .expect("runtime_backend read the same variable");
     let mut owner = owner_client().await;
     owner
-        .batch_execute(&format!(
+        .batch_execute(&with_role_ddl_lock(&format!(
             "DO $$ BEGIN
                  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RUNS_READER_LOGIN}') THEN
                      CREATE ROLE {RUNS_READER_LOGIN} LOGIN;
@@ -28643,7 +28646,7 @@ async fn the_lost_follow_up_recovery_reads_no_submission_of_a_tenant_with_no_run
              END $$;
              ALTER ROLE {RUNS_READER_LOGIN} LOGIN INHERIT NOSUPERUSER NOBYPASSRLS;
              GRANT SELECT ON pipeline_runs TO {RUNS_READER_LOGIN};"
-        ))
+        )))
         .await
         .expect("provision the login that reads only pipeline_runs");
     let mut reader_url = reqwest::Url::parse(&url).expect("parse test URL");
