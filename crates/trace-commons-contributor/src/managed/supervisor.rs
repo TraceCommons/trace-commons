@@ -216,7 +216,7 @@ async fn run_native(
     // so the row can show it.
     let pinned = route
         .as_ref()
-        .map(|r: &super::route::ManagedRoute| r.model().to_owned());
+        .map(|r: &super::route::ManagedRoute| r.default_model().to_owned());
     let report = |state, exit_code| LifecycleReport {
         model: pinned.clone(),
         collection: None,

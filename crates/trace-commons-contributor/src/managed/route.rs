@@ -7,12 +7,19 @@ use ironwire_proxy::embed::{
 use std::path::PathBuf;
 use uuid::Uuid;
 
+/// The route pins the NEAR AI backend only, never a model: a request that
+/// names a model NEAR AI lists is served as that model, so each tool's own
+/// model picker works. A request naming an id NEAR AI does not list is
+/// given a listed model of the same tier by IronWire's routing, so every
+/// launcher maps its tool's model names onto [`ManagedRoute::models`].
 pub struct ManagedRoute {
     proxy: EmbeddedProxy,
     home: PathBuf,
-    /// The NEAR AI model this route pinned: the requested one, or the
-    /// tool's default ([`super::models::select`]) when none was requested.
-    model: String,
+    /// NEAR AI's chat models, as read when the route started.
+    models: Vec<super::models::ChatModel>,
+    /// The model a tool starts on: the requested one, or the tool's
+    /// default ([`super::models::select`]) when none was requested.
+    default_model: String,
 }
 
 /// A test build's NEAR AI endpoint, so a daemon-level test can start a
@@ -34,10 +41,10 @@ pub(crate) fn near_ai_base_url() -> &'static str {
 const READY_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
 
 impl ManagedRoute {
-    /// Start a proxy for one session of `tool` and pin it to `requested`,
-    /// or to the tool's default model when none was requested. A requested
-    /// model NEAR AI does not list as a chat model starts nothing:
-    /// [`ManagedError::ModelUnavailable`].
+    /// Start a proxy for one session of `tool`, pinned to the NEAR AI
+    /// backend, whose default model is `requested`, or the tool's default
+    /// when none was requested. A requested model NEAR AI does not list as
+    /// a chat model starts nothing: [`ManagedError::ModelUnavailable`].
     pub async fn start(
         store: &ConfigStore,
         id: Uuid,
@@ -62,14 +69,15 @@ impl ManagedRoute {
             .build()
             .map_err(|_| ManagedError::LaunchUnknown)?;
         let deadline = tokio::time::Instant::now() + READY_WITHIN;
-        // Choose first: a model that cannot be pinned starts no proxy. An
+        // Choose first: a default that is not listed starts no proxy. An
         // empty catalogue is read again, as an unreadable one is.
-        let selected_model = loop {
+        let (models, selected_model) = loop {
             if let Some(models) = super::models::fetch(&client, base_url)
                 .await
                 .filter(|models| !models.is_empty())
             {
-                break super::models::select(tool, requested, &models)?;
+                let selected = super::models::select(tool, requested, &models)?;
+                break (models, selected);
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(ManagedError::SignInRequired);
@@ -112,7 +120,7 @@ base_url = {base_url}
             .await
             .map_err(|_| ManagedError::LaunchUnknown)?;
         // The proxy is ready, and its key accepted, once it serves the
-        // selected model.
+        // default model.
         let deadline = tokio::time::Instant::now() + READY_WITHIN;
         loop {
             let response = client
@@ -145,7 +153,9 @@ base_url = {base_url}
         let pinned = client
             .post(format!("http://127.0.0.1:{}/_ironwire/pin", proxy.port()))
             .bearer_auth(token.trim())
-            .json(&serde_json::json!({"backend":"nearai","model":selected_model}))
+            // The backend only: a model here would replace every model a
+            // tool asks for with this one.
+            .json(&serde_json::json!({"backend":"nearai"}))
             .send()
             .await
             .map_err(|_| ManagedError::LaunchUnknown)?;
@@ -155,7 +165,8 @@ base_url = {base_url}
         Ok(Self {
             proxy,
             home,
-            model: selected_model,
+            models,
+            default_model: selected_model,
         })
     }
 
@@ -163,10 +174,16 @@ base_url = {base_url}
         self.proxy.port()
     }
 
-    /// The model this route pinned, so a tool that must name one asks for
-    /// the model the proxy already serves.
-    pub fn model(&self) -> &str {
-        &self.model
+    /// The model a tool starts on. Not a pin: the tool may ask for any of
+    /// [`Self::models`].
+    pub fn default_model(&self) -> &str {
+        &self.default_model
+    }
+
+    /// NEAR AI's chat models, in its order, as read when the route started:
+    /// the ids a tool may name and have served as named.
+    pub fn models(&self) -> &[super::models::ChatModel] {
+        &self.models
     }
 
     pub async fn shutdown(self) {
@@ -207,7 +224,7 @@ mod tests {
         let chat =
             |id: &str| json!({"id":id,"input_modalities":["text"],"output_modalities":["text"]});
         // NEAR AI's order puts a non-chat model and an off-family chat
-        // model first: neither may be pinned unless asked for.
+        // model first: neither is a default unless asked for.
         let models = json!({"data":[
             {"id":"black-forest-labs/FLUX.2-klein-4B","input_modalities":["text"],"output_modalities":["image"]},
             chat("deepseek-ai/DeepSeek-V3.1"),
@@ -247,11 +264,11 @@ mod tests {
             .unwrap();
         let c = start("fixture-c", ToolId::Codex, None).await.unwrap();
         assert_ne!(a.port(), b.port());
-        // The model each route pinned: the tool's default when none is
+        // Each route's default model: the tool's default when none is
         // requested, never the first listed; the requested one otherwise.
-        assert_eq!(a.model(), "anthropic/claude-sonnet-5-5");
-        assert_eq!(b.model(), "selected-model");
-        assert_eq!(c.model(), "openai/gpt-6.1-sol");
+        assert_eq!(a.default_model(), "anthropic/claude-sonnet-5-5");
+        assert_eq!(b.default_model(), "selected-model");
+        assert_eq!(c.default_model(), "openai/gpt-6.1-sol");
         // A model NEAR AI does not list as a chat model starts nothing,
         // and says so at once rather than waiting out the sign-in check.
         for refused in ["black-forest-labs/FLUX.2-klein-4B", "no-such-model"] {
@@ -268,30 +285,71 @@ mod tests {
         let routes = store.dir().join("managed-routes");
         assert_eq!(std::fs::read_dir(&routes).unwrap().count(), 3);
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        for route in [&a, &b, &c] {
-            let result = client.post(format!("http://127.0.0.1:{}/anthropic/v1/messages", route.port()))
-                .header("anthropic-version", "2023-06-01")
-                .json(&json!({"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"Hello"}]}))
-                .send().await.unwrap();
-            assert!(
-                result.status().is_success(),
-                "{}",
-                result.text().await.unwrap()
-            );
+        // Each route sends three requests: its default model, another
+        // listed chat model, and an id NEAR AI does not list.
+        let chat_ids = [
+            "deepseek-ai/DeepSeek-V3.1",
+            "anthropic/claude-sonnet-5",
+            "anthropic/claude-sonnet-5-5",
+            "openai/gpt-6.1-sol",
+            "selected-model",
+        ];
+        for (route, other) in [
+            (&a, "openai/gpt-6.1-sol"),
+            (&b, "anthropic/claude-sonnet-5"),
+            (&c, "deepseek-ai/DeepSeek-V3.1"),
+        ] {
+            for model in [route.default_model(), other, "claude-sonnet-4-6"] {
+                let result = client.post(format!("http://127.0.0.1:{}/anthropic/v1/messages", route.port()))
+                    .header("anthropic-version", "2023-06-01")
+                    .json(&json!({"model":model,"max_tokens":16,"messages":[{"role":"user","content":"Hello"}]}))
+                    .send().await.unwrap();
+                assert!(
+                    result.status().is_success(),
+                    "{}",
+                    result.text().await.unwrap()
+                );
+            }
             let config = std::fs::read_to_string(route.home.join("config.toml")).unwrap();
             assert!(!config.contains("fixture-"));
+            let listed: Vec<&str> = route.models().iter().map(|m| m.id.as_str()).collect();
+            assert_eq!(listed, chat_ids);
         }
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 9, "{seen:?}");
+        let keys: Vec<&str> = seen.iter().map(|(key, _)| key.as_str()).collect();
         assert_eq!(
-            *seen.lock().unwrap(),
-            vec![
-                (
-                    "Bearer fixture-a".into(),
-                    "anthropic/claude-sonnet-5-5".into()
-                ),
-                ("Bearer fixture-b".into(), "selected-model".into()),
-                ("Bearer fixture-c".into(), "openai/gpt-6.1-sol".into()),
+            keys,
+            [
+                ["Bearer fixture-a"; 3],
+                ["Bearer fixture-b"; 3],
+                ["Bearer fixture-c"; 3]
+            ]
+            .concat()
+        );
+        let reached: Vec<&str> = seen.iter().map(|(_, model)| model.as_str()).collect();
+        // A listed model, the default or another, reaches NEAR AI as named:
+        // the pin names the backend only, so each tool's picker works.
+        assert_eq!(
+            [
+                reached[0], reached[1], reached[3], reached[4], reached[6], reached[7]
+            ],
+            [
+                "anthropic/claude-sonnet-5-5",
+                "openai/gpt-6.1-sol",
+                "selected-model",
+                "anthropic/claude-sonnet-5",
+                "openai/gpt-6.1-sol",
+                "deepseek-ai/DeepSeek-V3.1",
             ]
         );
+        // An unlisted id is not forwarded as is: IronWire picks a listed
+        // model of the request's tier in its place (against this fixture,
+        // `anthropic/claude-sonnet-5` on all three routes). Which one is
+        // IronWire's choice, so only "some listed model" is asserted.
+        for unlisted in [reached[2], reached[5], reached[8]] {
+            assert!(chat_ids.contains(&unlisted), "{unlisted}");
+        }
         a.shutdown().await;
         b.shutdown().await;
         c.shutdown().await;

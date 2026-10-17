@@ -139,12 +139,17 @@ pub struct LaunchContext {
     /// leaves the daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_port: Option<u16>,
-    /// The model that proxy pinned: the one the request named, or the
-    /// tool's default (`models::select`). Set with `route_port`; a launcher
-    /// that must name a model (OpenCode) names this one. Additive: an
+    /// The model the tool starts on: the one the request named, or the
+    /// tool's default (`models::select`). Not a pin: the proxy serves any
+    /// of `route_models` as named. Set with `route_port`. Additive: an
     /// older launcher ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_model: Option<String>,
+    /// NEAR AI's chat models, in its order, as that proxy read them: the
+    /// ids the launcher offers in the tool's own model picker. Set with
+    /// `route_port`. Additive: an older launcher ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_models: Option<Vec<super::models::ChatModel>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -707,6 +712,7 @@ impl SessionRegistry {
             proof,
             route_port: None,
             route_model: None,
+            route_models: None,
         })
     }
 

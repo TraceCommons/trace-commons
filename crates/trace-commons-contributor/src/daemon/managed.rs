@@ -633,11 +633,14 @@ async fn redeem_async(shared: &DaemonShared, request: &Request) -> Response {
     let result = with_service(shared, |service| match started {
         Ok(route) => {
             context.route_port = Some(route.port());
-            context.route_model = Some(route.model().to_owned());
-            // The row shows the model the session runs on. Only the row
+            context.route_model = Some(route.default_model().to_owned());
+            context.route_models = Some(route.models().to_vec());
+            // The row shows the model the session starts on. Only the row
             // misses it if this cannot be saved; the launch goes ahead.
-            let _ = service.sessions.record_model(p.session_id, route.model());
-            context.session.model = Some(route.model().to_owned());
+            let _ = service
+                .sessions
+                .record_model(p.session_id, route.default_model());
+            context.session.model = Some(route.default_model().to_owned());
             service.routes.insert(p.session_id, route);
             Ok(json!(context))
         }
@@ -1061,6 +1064,12 @@ mod tests {
         assert!(host);
         assert_eq!(context.route_port, None);
         assert_eq!(context.route_model, None);
+        assert_eq!(context.route_models, None);
+        // Absent, not null, until a route is started.
+        let wire = serde_json::to_value(&context).unwrap();
+        for field in ["route_port", "route_model", "route_models"] {
+            assert!(wire.get(field).is_none(), "{field}");
+        }
         assert_eq!(context.session.connection, ConnectionKind::NearAiSignIn);
         assert_eq!(context.session.account_label, "NEAR AI");
         assert!(service.take_routes(true).is_empty());

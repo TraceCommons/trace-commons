@@ -13880,7 +13880,10 @@ mod tests {
             if let Some(auth) = headers.get("authorization") {
                 seen.lock().unwrap().push(auth.to_str().unwrap().into());
             }
-            Json(serde_json::json!({"data":[{"id":"fixture-model"}]}))
+            Json(serde_json::json!({"data":[
+                {"id":"fixture-model"},
+                {"id":"fixture-other","name":"Fixture Other"},
+            ]}))
         }
         let seen: Seen = Default::default();
         let app = Router::new()
@@ -13943,6 +13946,15 @@ mod tests {
         // The model the proxy pinned, so a launcher that must name one
         // (OpenCode) names the same model Claude Code and Codex get.
         assert_eq!(context["route_model"], "fixture-model");
+        // Every chat model the proxy serves as named, so the launcher can
+        // offer them in the tool's own picker.
+        assert_eq!(
+            context["route_models"],
+            serde_json::json!([
+                {"id":"fixture-model"},
+                {"id":"fixture-other","name":"Fixture Other"},
+            ])
+        );
         assert!(
             !context.to_string().contains("sk-route-fixture-key"),
             "{context}"
@@ -13980,7 +13992,10 @@ mod tests {
         .await;
         assert_eq!(
             r.result.expect("catalogue"),
-            serde_json::json!({"models":[{"id":"fixture-model"}],"default":"fixture-model"})
+            serde_json::json!({
+                "models":[{"id":"fixture-model"},{"id":"fixture-other","name":"Fixture Other"}],
+                "default":"fixture-model",
+            })
         );
         for params in [
             serde_json::json!({}),
@@ -14083,6 +14098,7 @@ mod tests {
         let running = redeem("opencode").await;
         assert!(running["route_port"].as_u64().is_some_and(|port| port > 0));
         assert_eq!(running["route_model"], "fixture-model");
+        assert_eq!(running["route_models"][1]["id"], "fixture-other");
         assert!(
             !running.to_string().contains("sk-route-fixture-key"),
             "{running}"
