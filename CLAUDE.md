@@ -93,13 +93,38 @@ brew install sccache        # or: cargo install sccache --locked
 rustc-wrapper = "sccache"
 ```
 
-Worktrees then share compiled third-party crates. The workspace's own
-crates build incrementally under the dev profile, which sccache does not
-cache, so those still compile once per worktree. `sccache --show-stats`
-shows the hit rate, the cache location and its size limit (10 GiB by
-default; on macOS, raise it with `[cache.disk]` `size = <bytes>` in
-`~/Library/Application Support/Mozilla.sccache/config`). With the cache in
-place, deleting the `target/` of a worktree whose PR has merged is cheap.
+Worktrees then share compiled third-party crates. `sccache --show-stats`
+shows the hit rate, the cache location and its size limit.
+
+For agent and worktree builds (anything that is not an edit-rebuild loop at
+your own terminal), also do these three. Without them, most of a build
+misses the cache:
+
+- **Set `CARGO_INCREMENTAL=0`.** The dev profile builds the workspace's own
+  crates incrementally, and sccache refuses to cache an incremental
+  compile, so without this `trace-commons-contributor`, the server and the
+  ingest bin recompile in every worktree. CI sets the same variable.
+- **Set `RUSTFLAGS="-D warnings"` for every cargo command, clippy
+  included.** The flags are part of both sccache's key and cargo's
+  fingerprint, so alternating `-D warnings` (check, test) with no flags
+  (clippy) builds the dependency graph twice. CI sets the same value for
+  every job, clippy too, so this is also what CI runs.
+- **Raise the cache size limit.** The default is 10 GiB; on one machine
+  on 2026-10-17 the cache held 17 GiB against a 20 GiB limit, building this
+  repository's three Cargo workspaces (root, GTK, Tauri) and IronWire. 50 GiB
+  is a working size; on macOS set `[cache.disk]` `size = 53687091200` in
+  `~/Library/Application Support/Mozilla.sccache/config`, then
+  `sccache --stop-server`.
+
+For Claude Code, put the two variables in the `env` block of
+`~/.claude/settings.json` so every session and subagent gets them; for
+other agents, use their equivalent user-level environment. Keep them out of
+the repository's `.cargo/config.toml`, which would change every human's
+edit loop too. Binaries, test binaries and proc-macros are never cached
+whatever the settings, so linking still costs the same.
+
+With the cache in place, deleting the `target/` of a worktree whose PR has
+merged is cheap.
 
 Never set `rustc-wrapper` in the repository's own `.cargo/config.toml`:
 CI runners do not install sccache, and every build there would fail.
