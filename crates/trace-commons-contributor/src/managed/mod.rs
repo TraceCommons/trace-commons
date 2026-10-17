@@ -2,12 +2,14 @@
 
 pub mod accounts;
 pub mod cli;
+pub mod codex;
 pub mod models;
 pub mod opencode;
 pub mod profiles;
 pub mod secrets;
 pub mod sessions;
 pub mod signin;
+pub mod statusline;
 pub mod supervisor;
 
 use serde::{Deserialize, Serialize};

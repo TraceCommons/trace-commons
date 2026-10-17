@@ -196,7 +196,7 @@ public enum ManagedSurface {
     public static func connectionOptions(signedIn: Bool, tool: String = "claude") -> [String] {
         // OpenCode has no subscription flow. A saved NEAR AI connection for
         // it uses a pasted key and names its own model, even while signed
-        // in; the sign-in entry runs on the model its proxy pins.
+        // in; the sign-in entry starts on the default its proxy names.
         if tool == "opencode" { return ["api_key", "near_ai"] }
         return signedIn ? ["subscription", "api_key"] : ["subscription", "api_key", "near_ai"]
     }

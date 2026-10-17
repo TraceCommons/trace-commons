@@ -42,6 +42,15 @@ enum Command {
         #[command(subcommand)]
         action: crate::managed::cli::SessionCommand,
     },
+    /// Print the status line of a managed session's NEAR AI proxy, for
+    /// Claude Code's `statusLine` command. Prints nothing and succeeds on
+    /// any failure.
+    #[command(hide = true)]
+    Statusline {
+        /// The proxy's home: `<config dir>/managed-routes/<session id>`
+        #[arg(long)]
+        home: Option<PathBuf>,
+    },
     #[command(hide = true)]
     RedeemLaunch {
         #[arg(long)]
@@ -520,6 +529,12 @@ async fn async_main(cli: Cli, json: bool) -> std::process::ExitCode {
 }
 
 async fn dispatch(cli: Cli) -> anyhow::Result<()> {
+    // Before anything that opens or creates the config directory: this runs
+    // on every render of Claude Code's status line.
+    if let Command::Statusline { home } = &cli.command {
+        crate::managed::statusline::run(home.as_deref()).await;
+        return Ok(());
+    }
     if let Command::MissionDraft { file } = &cli.command {
         let review = crate::mission_draft::review_file(file)?;
         if cli.json {
@@ -632,7 +647,8 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::ImportPreview { .. }
         | Command::Insights(_)
         | Command::MissionDraft { .. }
-        | Command::MissionDrafts(_) => {
+        | Command::MissionDrafts(_)
+        | Command::Statusline { .. } => {
             anyhow::bail!("import-preview-dispatch-invalid")
         }
         Command::ImportAntigravity { project, all } => {
@@ -771,6 +787,33 @@ mod tests {
             std::iter::once("trace-commons-contributor").chain(args.iter().copied()),
         )
         .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    }
+
+    /// The status line touches no config directory and fails quietly: with
+    /// no proxy at the home, or no home at all, it prints nothing and
+    /// succeeds.
+    #[tokio::test]
+    async fn statusline_succeeds_quietly_without_a_proxy_or_a_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        let home = dir.path().join("managed-routes").join("absent");
+        let config_arg = config.to_str().unwrap();
+        for args in [
+            vec![
+                "--config-dir",
+                config_arg,
+                "statusline",
+                "--home",
+                home.to_str().unwrap(),
+            ],
+            vec!["--config-dir", config_arg, "--json", "statusline"],
+        ] {
+            let cli = parse(&args);
+            assert!(matches!(cli.command, Command::Statusline { .. }));
+            dispatch(cli).await.unwrap();
+        }
+        assert!(!config.exists());
+        assert!(!home.exists());
     }
 
     #[test]
