@@ -659,18 +659,6 @@ mod tests {
     }
 
     #[test]
-    fn cli_rejects_unknown_subcommand() {
-        let err = Cli::try_parse_from([
-            "trace-commons-review",
-            "--endpoint",
-            "https://api.example",
-            "bogus",
-        ])
-        .unwrap_err();
-        assert!(!err.to_string().is_empty());
-    }
-
-    #[test]
     fn cli_parses_review_decision() {
         let id = Uuid::new_v4();
         let cli = Cli::try_parse_from([

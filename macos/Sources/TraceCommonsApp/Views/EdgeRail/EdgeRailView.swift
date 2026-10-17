@@ -261,10 +261,12 @@ private struct EdgeRailPeekCard: View {
                     rollup?.creditPending, condition: HomeFormat.pendingCondition(credit)))
             }
             .fixedSize(horizontal: false, vertical: true)
-            headCard(
-                systemImage: HomeOverviewIcons.missions, title: MonitorWords.missions,
-                subtitle: words?.missionsSubtitle, promo: GlassPromoTreatment.stored,
-                destination: .home(.missionDrafts))
+            if model.missionsShown {
+                headCard(
+                    systemImage: HomeOverviewIcons.missions, title: MonitorWords.missions,
+                    subtitle: words?.missionsSubtitle, promo: GlassPromoTreatment.stored,
+                    destination: .home(.missionDrafts))
+            }
             headCard(
                 systemImage: HomeOverviewIcons.history, title: MonitorWords.history,
                 subtitle: words?.historyDescription, destination: .home(.history))

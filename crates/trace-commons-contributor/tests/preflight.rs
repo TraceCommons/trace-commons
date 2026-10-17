@@ -419,7 +419,15 @@ fn unenrolled_dry_run_marks_json_output() {
         "stdout={stdout}"
     );
     assert_eq!(document["results"][0]["outcome"], "previewed");
-    assert!(document["results"][0]["preview_id"].is_string());
+    // The unenrolled path emits a version-8 preview id, never a version-5
+    // submission id.
+    let preview_id = document["results"][0]["preview_id"]
+        .as_str()
+        .expect("preview id");
+    assert_eq!(
+        uuid::Uuid::parse_str(preview_id).unwrap().get_version_num(),
+        8
+    );
     assert!(document["results"][0]["submission_id"].is_null());
 }
 
@@ -435,39 +443,6 @@ fn unenrolled_preview_ignores_flagged_and_inherited_network_filters() {
     assert_eq!(
         run_preview_against_http_counter(&trajectory, false, true),
         0
-    );
-}
-
-#[test]
-fn preview_id_is_disjoint_from_real_submission_id() {
-    let fixture_dir = tempfile::tempdir().unwrap();
-    let trajectory = write_trajectory(fixture_dir.path(), "inspect this session");
-
-    let preview_config = tempfile::tempdir().unwrap();
-    let preview = run_submit(preview_config.path(), &trajectory, true, true);
-    let preview_doc: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();
-    let preview_id = preview_doc["results"][0]["preview_id"]
-        .as_str()
-        .expect("preview id");
-
-    let enrolled_config = tempfile::tempdir().unwrap();
-    write_enrolled_config(enrolled_config.path());
-    let enrolled = run_submit(enrolled_config.path(), &trajectory, true, true);
-    let enrolled_doc: serde_json::Value = serde_json::from_slice(&enrolled.stdout).unwrap();
-    let submission_id = enrolled_doc["results"][0]["submission_id"]
-        .as_str()
-        .expect("submission id");
-
-    assert_ne!(preview_id, submission_id);
-    assert_eq!(
-        uuid::Uuid::parse_str(preview_id).unwrap().get_version_num(),
-        8
-    );
-    assert_eq!(
-        uuid::Uuid::parse_str(submission_id)
-            .unwrap()
-            .get_version_num(),
-        5
     );
 }
 

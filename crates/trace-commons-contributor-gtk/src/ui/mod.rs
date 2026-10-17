@@ -26,6 +26,7 @@ pub mod roots;
 pub mod settings;
 pub(crate) mod shortcuts;
 pub mod style;
+mod terminal_choice;
 pub mod update;
 
 use std::cell::{Cell, RefCell};
@@ -71,7 +72,12 @@ const COLUMN_TIGHTEN: i32 = 680;
 /// never retyped: the word this surface may not say is "private", and the
 /// only way three shells keep saying the same true thing is by reading one
 /// definition. The stack name below it is internal and is read by nobody.
-pub(crate) const SCREENS: [(&str, &str, &str); 6] = [
+///
+/// This is the list that is always shown. The mission-drafts screen is
+/// appended by [`screens`] only while the daemon's `missions_enabled` switch
+/// is on, so the switcher, the tray menu and the accelerators, which all read
+/// [`screens`], hide it together.
+pub(crate) const BASE_SCREENS: [(&str, &str, &str); 5] = [
     ("insights", "Insights", "view-statistics-symbolic"),
     ("queue", "Queue", "view-list-symbolic"),
     ("history", "History", "document-open-recent-symbolic"),
@@ -81,8 +87,65 @@ pub(crate) const SCREENS: [(&str, &str, &str); 6] = [
         "network-transmit-receive-symbolic",
     ),
     ("settings", "Settings", "emblem-system-symbolic"),
-    ("mission-drafts", "Mission drafts", "document-edit-symbolic"),
 ];
+
+/// The stack name of the local mission-draft inbox.
+pub(crate) const MISSION_DRAFTS_SCREEN: (&str, &str, &str) =
+    ("mission-drafts", "Mission drafts", "document-edit-symbolic");
+
+/// Whether this process shows missions: the daemon's `missions_enabled`
+/// setting, read once at startup by `main` and fixed for the process. Off
+/// until [`set_missions_shown`] says otherwise, so a test or a caller that
+/// never reads the setting hides missions, which is the default.
+static MISSIONS_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record the startup reading of `missions_enabled`. Called before any
+/// window, tray or accelerator is built, because all three derive from
+/// [`screens`] and the tray's toggle row id is `screens().len()`.
+pub fn set_missions_shown(shown: bool) {
+    MISSIONS_SHOWN.store(shown, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn missions_shown() -> bool {
+    MISSIONS_SHOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `missions_enabled` as the daemon persisted it in `daemon-settings.json`
+/// under `dir`. Read from the file because the default launch window has no
+/// daemon to ask, and the full window is built before its first
+/// `get_settings` answer arrives. Anything unreadable, absent or not a
+/// boolean `true` is off, and nothing is created.
+pub fn read_missions_shown(dir: &std::path::Path) -> bool {
+    std::fs::read(dir.join(trace_commons_contributor::config::DAEMON_SETTINGS_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|value| value["missions_enabled"].as_bool() == Some(true))
+}
+
+/// The state directory without creating it, for the one startup read of
+/// the switch. Same order as `ConfigStore::resolve`: the environment, then
+/// the platform default, which on Linux is the XDG config directory.
+pub fn peek_state_dir() -> std::path::PathBuf {
+    match std::env::var("TRACE_COMMONS_CONTRIBUTOR_DIR") {
+        Ok(dir) => std::path::PathBuf::from(dir),
+        Err(_) => gtk::glib::user_config_dir().join("trace-commons"),
+    }
+}
+
+/// The screens in switcher order for a given switch position.
+pub(crate) fn screens_with(missions: bool) -> Vec<(&'static str, &'static str, &'static str)> {
+    let mut screens = BASE_SCREENS.to_vec();
+    if missions {
+        screens.push(MISSION_DRAFTS_SCREEN);
+    }
+    screens
+}
+
+/// The screens this process shows. The one list the switcher, the tray menu
+/// and the accelerators all read.
+pub(crate) fn screens() -> Vec<(&'static str, &'static str, &'static str)> {
+    screens_with(missions_shown())
+}
 
 /// The stack's name for the model-calls screen. Named once because the
 /// tray and every other shortcut into it has to spell it identically, and
@@ -294,16 +357,21 @@ impl App {
         // order, so a screen cannot be renamed in one place and not the
         // other.
         let insights = insights::InsightsView::new(&window);
-        let mission_drafts = mission_drafts::MissionDraftsView::new(&window);
-        let pages: [&gtk::Box; 6] = [
+        // Not constructed while missions are hidden; the code stays.
+        let mission_drafts =
+            missions_shown().then(|| mission_drafts::MissionDraftsView::new(&window));
+        let mut pages: Vec<&gtk::Box> = vec![
             &insights.root,
             &queue.root,
             &history.root,
             &private_inference.root,
             &settings.root,
-            &mission_drafts.root,
         ];
-        for ((name, label, icon_name), page) in SCREENS.into_iter().zip(pages) {
+        if let Some(view) = &mission_drafts {
+            pages.push(&view.root);
+        }
+        debug_assert_eq!(pages.len(), screens().len());
+        for ((name, label, icon_name), page) in screens().into_iter().zip(pages) {
             stack
                 .add_titled(page, Some(name), label)
                 .set_icon_name(Some(icon_name));
@@ -1652,7 +1720,7 @@ fn view_switcher(stack: &adw::ViewStack, queue_badge: &gtk::Label) -> gtk::Box {
     track.add_css_class("tc-switcher");
 
     let mut items: Vec<(&'static str, gtk::ToggleButton)> = Vec::new();
-    for (index, (name, label, icon_name)) in SCREENS.into_iter().enumerate() {
+    for (index, (name, label, icon_name)) in screens().into_iter().enumerate() {
         let content = gtk::Box::new(gtk::Orientation::Horizontal, style::space::XXS);
         // A real `GtkImage`, not a glyph: §6.6 turns the selected item's icon
         // green while its label stays ink, and style.css matches that on the
@@ -2119,8 +2187,9 @@ mod screen_tests {
     /// length itself, so the next screen has to grow both.
     #[test]
     fn every_screen_has_a_page() {
-        assert_eq!(SCREENS.len(), 6);
-        for (name, label, icon) in SCREENS {
+        assert_eq!(screens_with(false).len(), 5);
+        assert_eq!(screens_with(true).len(), 6);
+        for (name, label, icon) in screens_with(true) {
             assert!(!name.is_empty(), "a screen needs a stack name");
             assert!(!label.is_empty(), "a screen needs a switcher label");
             assert!(
@@ -2133,7 +2202,7 @@ mod screen_tests {
     /// The label is read from the shared copy module, never retyped here.
     #[test]
     fn the_private_ai_screen_takes_its_label_from_the_shared_copy() {
-        let (name, label, _) = SCREENS
+        let (name, label, _) = screens_with(false)
             .into_iter()
             .find(|(name, _, _)| *name == PRIVATE_INFERENCE_SCREEN)
             .expect("the Private AI screen is one of the switcher's items");
@@ -2143,7 +2212,7 @@ mod screen_tests {
 
     #[test]
     fn the_mission_drafts_screen_takes_its_label_from_shared_copy() {
-        let (_, label, _) = SCREENS
+        let (_, label, _) = screens_with(true)
             .into_iter()
             .find(|(name, _, _)| *name == "mission-drafts")
             .expect("the local mission inbox is one of the switcher's items");
@@ -2151,6 +2220,49 @@ mod screen_tests {
             label,
             trace_commons_contributor::mission_draft_service::ui_copy()["title"]
         );
+    }
+
+    /// Missions are hidden by default: no mission-drafts entry in the list
+    /// every navigation surface derives from, and the on position restores
+    /// it last, so no other accelerator renumbers.
+    #[test]
+    fn the_mission_drafts_screen_is_listed_only_while_missions_are_shown() {
+        assert!(!missions_shown(), "the process default is off");
+        assert!(
+            screens()
+                .iter()
+                .all(|(name, _, _)| *name != "mission-drafts"),
+            "a hidden mission screen must not be listed"
+        );
+        let off = screens_with(false);
+        let on = screens_with(true);
+        assert!(off.iter().all(|(name, _, _)| *name != "mission-drafts"));
+        assert_eq!(on.last().map(|s| s.0), Some("mission-drafts"));
+        assert_eq!(&on[..on.len() - 1], &off[..]);
+    }
+
+    /// The startup read: only a boolean `true` under `missions_enabled`
+    /// turns missions on; a missing file, a missing key and any other value
+    /// leave them off, and nothing is created.
+    #[test]
+    fn the_startup_reading_of_the_switch_defaults_to_off() {
+        let dir = std::env::temp_dir().join(format!("tc-missions-switch-{}", uuid::Uuid::new_v4()));
+        assert!(!read_missions_shown(&dir), "no directory");
+        assert!(!dir.exists(), "reading must not create the directory");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(trace_commons_contributor::config::DAEMON_SETTINGS_FILE);
+        for (body, expected) in [
+            ("{}", false),
+            (r#"{"missions_enabled":false}"#, false),
+            (r#"{"missions_enabled":"true"}"#, false),
+            (r#"{"missions_enabled":1}"#, false),
+            ("not json", false),
+            (r#"{"missions_enabled":true}"#, true),
+        ] {
+            std::fs::write(&file, body).unwrap();
+            assert_eq!(read_missions_shown(&dir), expected, "{body}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// No switcher label may PROMISE privacy.
@@ -2170,7 +2282,7 @@ mod screen_tests {
     /// disagree about what the rule is.
     #[test]
     fn no_switcher_label_promises_privacy() {
-        for (_, label, _) in SCREENS {
+        for (_, label, _) in screens_with(true) {
             let lowered = label
                 .replace(copy::PRIVATE_INFERENCE_DESTINATION, "")
                 .to_ascii_lowercase();

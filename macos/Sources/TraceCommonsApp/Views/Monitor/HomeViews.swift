@@ -40,6 +40,10 @@ struct HomeTabView: View {
     /// `TraceCommonsAppMain`.
     let insightsStoreSelection: InsightsStoreSelection
     let missionDrafts: MissionDraftsModel
+    /// Whether missions are shown (the daemon's `missions_enabled`). Off:
+    /// no Missions card, no catalogue card, no mission page, and the
+    /// drafts inbox is not read.
+    var missionsEnabled: Bool = false
 
     /// The core's Insights copy, read once: it is fixed for the life of the
     /// process, and reading it is a C ABI call and a JSON decode, which
@@ -62,13 +66,13 @@ struct HomeTabView: View {
         // History and Missions are reached from here and lead back here; the
         // breadcrumb that says so is the shell's, under the tabs
         // (`MonitorWindowView.breadcrumb`), as #1146 draws it.
-        switch page {
+        switch page.shown(missions: missionsEnabled) {
         case .overview:
             HomeOverview(
                 store: store, traces: traces, statusLabel: statusLabel, openTraces: openTraces,
                 openPrivateAI: openPrivateAI,
                 insightsHeading: Self.hostedHeading(.insights, missionDrafts: missionDrafts),
-                missionDrafts: missionDrafts,
+                missionDrafts: missionDrafts, missionsEnabled: missionsEnabled,
                 openHistory: openHistory, openMissionDrafts: { page = .missionDrafts },
                 openInsights: { page = .insights }, openMissions: { page = .missions })
         case .history:
@@ -109,6 +113,7 @@ private struct HomeOverview: View {
     /// and then its card is not drawn.
     let insightsHeading: String?
     let missionDrafts: MissionDraftsModel
+    let missionsEnabled: Bool
     let openHistory: () -> Void
     let openMissionDrafts: () -> Void
     let openInsights: () -> Void
@@ -168,14 +173,16 @@ private struct HomeOverview: View {
                 // Ron's Missions card, as a hero promotion (owner,
                 // 2026-10-12): the drafts' line under the subtitle, and
                 // Review drafts; no pill.
-                GlassHeroCard(
-                    gradient: GlassTokens.Gradient.heroMissions,
-                    title: MonitorWords.missions, subtitle: words?.missionsSubtitle,
-                    actionTitle: words?.missionsAction, action: openMissionDrafts
-                ) {
-                    GlassHeroSymbol(Self.missionsHeroSymbol)
-                } content: {
-                    drafts
+                if missionsEnabled {
+                    GlassHeroCard(
+                        gradient: GlassTokens.Gradient.heroMissions,
+                        title: MonitorWords.missions, subtitle: words?.missionsSubtitle,
+                        actionTitle: words?.missionsAction, action: openMissionDrafts
+                    ) {
+                        GlassHeroSymbol(Self.missionsHeroSymbol)
+                    } content: {
+                        drafts
+                    }
                 }
                 // What #1146 has no place for, after its cards: Insights,
                 // and the commons catalogue once the daemon answers it.
@@ -192,7 +199,7 @@ private struct HomeOverview: View {
                         HomeInsightsVisual(glance: freshGlance, words: words)
                     }
                 }
-                if store.missions != nil, let catalogue = words?.missionCatalogue {
+                if missionsEnabled, store.missions != nil, let catalogue = words?.missionCatalogue {
                     hostedCard(
                         systemImage: Self.catalogueIcon, title: catalogue,
                         subtitle: words?.catalogueSubtitle, action: openMissions)
@@ -200,7 +207,10 @@ private struct HomeOverview: View {
             }
         }
         .scrollIndicators(.never)
-        .task { missionDrafts.preview() }
+        .task(id: missionsEnabled) {
+            // Hidden missions read nothing: the drafts inbox stays on disk.
+            if missionsEnabled { missionDrafts.preview() }
+        }
     }
 
     /// The Home cards' icons, in the Private AI cards' place for them.
@@ -260,7 +270,9 @@ private struct HomeOverview: View {
     /// opens Private AI.
     private var stats: some View {
         let condition = HomeFormat.pendingCondition(freshCredit)
-        let uncontributed = HomeUncontributed(traces.tree.allSessions)
+        // A failed status read draws no dollar line rather than an old one.
+        let settlement = SummaryFacts.fresh(store.status, unless: store.failures["status"])?.settlementEstimate
+        let uncontributed = HomeUncontributed(traces.tree.allSessions, settlement: settlement)
         let delta = HomeFormat.creditDelta(store.creditTotals.delta(on: .now), words: words)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             // Two by two (owner, 2026-10-12): Waiting and Contributed, then
@@ -1326,16 +1338,24 @@ private struct HomeStatTile: View {
 /// sessions in the queue that have not gone, their size, and the credit the
 /// core estimates for them. Only estimates the core says to draw are added
 /// up; with none, no estimate is shown, never zero.
+///
+/// Dollars replace points (owner, 2026-10-16): when the daemon reports the
+/// machine-wide settlement estimate, its finished line is the detail, the
+/// same line the menu bar draws, and the points sum is not shown.
 struct HomeUncontributed: Equatable {
     let count: Int
     let bytes: Int64
     let low: Double?
     let high: Double?
+    /// The core's finished dollar line, or nil when there is none to draw.
+    let dollars: String?
 
     /// States that have left, or are leaving, this Mac.
     static let gone: Set<String> = ["uploading", "uploaded"]
 
-    init(_ sessions: [DaemonData.QueueEntry]) {
+    init(_ sessions: [DaemonData.QueueEntry], settlement: DaemonData.SettlementEstimate? = nil) {
+        let text = settlement?.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        dollars = (text?.isEmpty ?? true) ? nil : settlement?.text
         let waiting = sessions.filter { !Self.gone.contains($0.state) }
         count = waiting.count
         bytes = waiting.reduce(Int64(0)) { $0 + Int64($1.sizeBytes ?? 0) }
@@ -1351,8 +1371,11 @@ struct HomeUncontributed: Equatable {
                                  ["size": ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)])
     }
 
-    /// The estimate, under the count, when there is one.
+    /// The estimate, under the count, when there is one: the dollar line,
+    /// which covers every trace on this Mac and so needs no queued count,
+    /// else the points sum.
     func detail(_ words: MonitorHomeHistoryCopy?) -> String? {
+        if let dollars { return dollars }
         guard let words, count > 0, let low, let high else { return nil }
         return FirstRunCopy.fill(words.uncontributedEstimate,
                                  ["min": HomeFormat.points(low), "max": HomeFormat.points(high)])

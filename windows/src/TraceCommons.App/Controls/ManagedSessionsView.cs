@@ -21,6 +21,8 @@ public sealed class ManagedSessionsView : UserControl
     private ManagedSnapshot? _snapshot;
     private bool _busy;
     private bool _reading;
+    private bool _unsupportedVersion;
+    private string? _unsupportedTool;
     /// <summary>Begins the NEAR AI sign-in as the Private AI page does; null
     /// where this view is hosted without one.</summary>
     private readonly Func<Task>? _signIn;
@@ -46,6 +48,12 @@ public sealed class ManagedSessionsView : UserControl
     private async Task<JsonElement> CallAsync(string method, object parameters)
     {
         var response = await _host.CallAsync(method, JsonSerializer.Serialize(parameters));
+        if (response.Error?.Message == "managed-unsupported-version")
+        {
+            _unsupportedVersion = true;
+            var request = JsonSerializer.SerializeToElement(parameters);
+            _unsupportedTool = request.TryGetProperty("tool", out var tool) ? tool.GetString() : null;
+        }
         if (response.IsError) throw new Refused(response.Error!.Message);
         if (response.Result is null) throw new InvalidOperationException();
         return response.Result.Value.Clone();
@@ -97,8 +105,17 @@ public sealed class ManagedSessionsView : UserControl
         if (_busy) return;
         _busy = true;
         _error.Text = string.Empty;
+        _unsupportedVersion = false;
+        _unsupportedTool = null;
         try { await action(); }
-        catch (Refused refused) { _error.Text = T(ManagedSignIn.ErrorKey(refused.Code)); }
+        catch (Refused refused)
+        {
+            // `{terminal}` is the chosen terminal the daemon names.
+            _error.Text = ManagedSignIn.FillTerminal(
+                T(_unsupportedVersion ? "unsupported_version" : ManagedSignIn.ErrorKey(refused.Code)),
+                _snapshot?.Capabilities.TerminalDestination,
+                T("terminal"));
+        }
         catch { _error.Text = T("action_failed"); }
         finally { _busy = false; await RefreshAsync(); }
     }
@@ -129,6 +146,19 @@ public sealed class ManagedSessionsView : UserControl
                 install.Children.Add(new TextBlock { Text = T(tool.Tool), VerticalAlignment = VerticalAlignment.Center });
                 install.Children.Add(InstallButton(tool));
                 _root.Children.Add(install);
+            }
+        }
+        // After an unsupported-version refusal: the refused tool, with its
+        // setup guide to update from and the refresh glyph.
+        if (_unsupportedVersion)
+        {
+            foreach (var tool in _snapshot.VersionRecoveryTools(_unsupportedTool))
+            {
+                var recovery = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+                recovery.Children.Add(new TextBlock { Text = $"{T(tool.Tool)} · {T("unsupported_version")}", TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center });
+                recovery.Children.Add(Button("update", async () => { await Windows.System.Launcher.LaunchUriAsync(new Uri(tool.InstallUrl)); }));
+                recovery.Children.Add(RefreshGlyph());
+                _root.Children.Add(recovery);
             }
         }
         _root.Children.Add(new TextBlock { Text = _snapshot.Capabilities.TerminalDestination is string destination
@@ -169,6 +199,8 @@ public sealed class ManagedSessionsView : UserControl
         {
             var row = new StackPanel { Spacing = 4 };
             row.Children.Add(new TextBlock { Text = $"{(session.Purpose == "login" ? T("sign_in") : session.ProjectLabel)} · {T(session.Tool)} · {session.AccountLabel} · {T(session.Connection)} · {session.State}" });
+            if (session.Model is string model) row.Children.Add(new TextBlock { Text = $"{T("model")}: {model}" });
+            if (session.Tool == "opencode") row.Children.Add(new TextBlock { Text = T($"collection_{session.Collection}") });
             if (!session.HoldsAccount) row.Children.Add(Button("dismiss", async () => { await CallAsync("managed_session_dismiss", new { session_id = session.Id }); }));
             _rows.Children.Add(row);
         }
@@ -256,16 +288,34 @@ public sealed class ManagedSessionsView : UserControl
     {
         string[] tools = _snapshot?.SetupTools ?? [];
         if (tools.Length == 0) return;
-        string[] connections = ManagedSignIn.ConnectionOptions(_snapshot?.NearAiSignedIn == true);
+        bool signedIn = _snapshot?.NearAiSignedIn == true;
+        string[] connections = ManagedSnapshot.Connections(tools[0], signedIn);
         var tool = new ComboBox { Header = T("tool"), ItemsSource = tools.Select(T).ToArray(), SelectedIndex = 0 };
         var connection = new ComboBox { Header = T("connection"), ItemsSource = connections.Select(T).ToArray(), SelectedIndex = 0 };
         var label = new TextBox { Header = T("label") };
         var key = new PasswordBox { Header = T("api_key"), Visibility = Visibility.Collapsed };
-        connection.SelectionChanged += (_, _) => key.Visibility = connection.SelectedIndex == 0 ? Visibility.Collapsed : Visibility.Visible;
+        connection.SelectionChanged += (_, _) => key.Visibility = connection.SelectedIndex >= 0 && connection.SelectedIndex < connections.Length && connections[connection.SelectedIndex] == "subscription" ? Visibility.Collapsed : Visibility.Visible;
+        key.Visibility = connections[0] == "subscription" ? Visibility.Collapsed : Visibility.Visible;
+        var openCodeScope = new TextBlock { Text = T("opencode_scope"), TextWrapping = TextWrapping.Wrap, Visibility = tools[0] == "opencode" ? Visibility.Visible : Visibility.Collapsed };
+        tool.SelectionChanged += (_, _) => {
+            if (tool.SelectedIndex < 0) return;
+            openCodeScope.Visibility = tools[tool.SelectedIndex] == "opencode" ? Visibility.Visible : Visibility.Collapsed;
+            connections = ManagedSnapshot.Connections(tools[tool.SelectedIndex], signedIn);
+            connection.ItemsSource = connections.Select(T).ToArray(); connection.SelectedIndex = 0;
+            key.Visibility = connections[0] == "subscription" ? Visibility.Collapsed : Visibility.Visible;
+        };
         var form = new StackPanel { Spacing = 10 };
+        form.Children.Add(openCodeScope);
         form.Children.Add(tool); form.Children.Add(connection); form.Children.Add(label); form.Children.Add(key);
-        form.Children.Add(new TextBlock { Text = T("login_description"), TextWrapping = TextWrapping.Wrap });
+        var loginDescription = new TextBlock { Text = T("login_description"), TextWrapping = TextWrapping.Wrap };
+        void UpdateLoginDescription() => loginDescription.Visibility = connection.SelectedIndex >= 0 && connection.SelectedIndex < connections.Length && connections[connection.SelectedIndex] == "subscription" ? Visibility.Visible : Visibility.Collapsed;
+        connection.SelectionChanged += (_, _) => UpdateLoginDescription(); tool.SelectionChanged += (_, _) => UpdateLoginDescription(); UpdateLoginDescription();
+        form.Children.Add(loginDescription);
+        form.Children.Add(new TextBlock { Text = T("key_storage"), TextWrapping = TextWrapping.Wrap });
         var dialog = Dialog("save_title", form, "save");
+        void ValidateAccount() => dialog.IsPrimaryButtonEnabled = connection.SelectedIndex >= 0 && connection.SelectedIndex < connections.Length && !string.IsNullOrWhiteSpace(label.Text) && (connections[connection.SelectedIndex] == "subscription" ? _snapshot?.Capabilities.TerminalLaunch == true : !string.IsNullOrWhiteSpace(key.Password));
+        label.TextChanged += (_, _) => ValidateAccount(); key.PasswordChanged += (_, _) => ValidateAccount();
+        connection.SelectionChanged += (_, _) => ValidateAccount(); ValidateAccount();
         if (await dialog.ShowAsync() != ContentDialogResult.Primary || string.IsNullOrWhiteSpace(label.Text)) return;
         string kind = connections[connection.SelectedIndex];
         if (kind == "subscription" && _snapshot?.Capabilities.TerminalLaunch != true) throw new InvalidOperationException();
@@ -284,14 +334,28 @@ public sealed class ManagedSessionsView : UserControl
         var project = new TextBox { Header = T("project_placeholder") };
         var form = new StackPanel { Spacing = 10 };
         form.Children.Add(account); form.Children.Add(project);
+        var model = new TextBox { Header = T("model") };
+        var collect = new CheckBox { Content = T("collect_traces"), IsChecked = false };
+        var scope = new TextBlock { Text = T("opencode_scope") + " " + T("collection_scope"), TextWrapping = TextWrapping.Wrap };
+        void UpdateOpenCode() {
+            var visible = account.SelectedIndex >= 0 && accounts[account.SelectedIndex].Tool == "opencode" ? Visibility.Visible : Visibility.Collapsed;
+            model.Visibility = collect.Visibility = scope.Visibility = visible;
+            collect.IsChecked = false;
+        }
+        account.SelectionChanged += (_, _) => UpdateOpenCode();
+        UpdateOpenCode(); form.Children.Add(model); form.Children.Add(collect); form.Children.Add(scope);
         var choose = new Button { Content = T("choose_folder") };
         choose.Click += async (_, _) => {
             if (await PickFolderAsync() is string path) project.Text = path;
         };
         form.Children.Add(choose);
         form.Children.Add(new TextBlock { Text = T("launch_scope").Replace("{destination}", _snapshot.Capabilities.TerminalDestination ?? T("terminal")), TextWrapping = TextWrapping.Wrap });
-        if (await Dialog("launch_title", form, "launch_short").ShowAsync() != ContentDialogResult.Primary || string.IsNullOrWhiteSpace(project.Text)) return;
+        var launchDialog = Dialog("launch_title", form, "launch_short");
+        void ValidateLaunch() => launchDialog.IsPrimaryButtonEnabled = account.SelectedIndex >= 0 && !string.IsNullOrWhiteSpace(project.Text) && (accounts[account.SelectedIndex].Tool != "opencode" || !string.IsNullOrWhiteSpace(model.Text));
+        account.SelectionChanged += (_, _) => ValidateLaunch();
+        model.TextChanged += (_, _) => ValidateLaunch(); project.TextChanged += (_, _) => ValidateLaunch(); ValidateLaunch();
+        if (await launchDialog.ShowAsync() != ContentDialogResult.Primary || string.IsNullOrWhiteSpace(project.Text)) return;
         var selected = accounts[account.SelectedIndex];
-        await OpenAsync(await CallAsync("managed_launch_prepare", new { request_id = Guid.NewGuid(), purpose = "coding", tool = selected.Tool, connection = selected.Connection, account_id = selected.Id, cwd = project.Text, expected_generation = _snapshot.Generations.GetValueOrDefault(selected.Tool), save_default = false }));
+        await OpenAsync(await CallAsync("managed_launch_prepare", new { request_id = Guid.NewGuid(), purpose = "coding", tool = selected.Tool, connection = selected.Connection, account_id = selected.Id, cwd = project.Text, expected_generation = _snapshot.Generations.GetValueOrDefault(selected.Tool), save_default = false, model = selected.Tool == "opencode" ? model.Text.Trim() : null, collect_traces = selected.Tool == "opencode" && collect.IsChecked == true }));
     }
 }

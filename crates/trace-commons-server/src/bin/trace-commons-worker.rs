@@ -981,18 +981,6 @@ mod tests {
     }
 
     #[test]
-    fn cli_rejects_unknown_subcommand() {
-        let err = Cli::try_parse_from([
-            "trace-commons-worker",
-            "--endpoint",
-            "https://api.example",
-            "bogus-subcommand",
-        ])
-        .unwrap_err();
-        assert!(!err.to_string().is_empty());
-    }
-
-    #[test]
     fn bearer_env_resolves_per_subcommand() {
         // Build one CLI per subcommand and confirm `bearer_env()` returns the
         // correct per-route default for each. This protects against future

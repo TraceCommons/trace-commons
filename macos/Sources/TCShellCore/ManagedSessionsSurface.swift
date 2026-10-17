@@ -81,6 +81,17 @@ public enum ManagedSessionAction: Equatable, Sendable {
     case dismiss
 }
 
+/// A terminal app a managed session can open in, as the daemon names it:
+/// its wire id and the app's own name.
+public struct ManagedTerminalChoice: Decodable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public let name: String
+    public init(id: String, name: String) {
+        self.id = id
+        self.name = name
+    }
+}
+
 public struct ManagedToolAvailability: Decodable, Equatable, Identifiable, Sendable {
     public let tool: String
     public let installed: Bool
@@ -101,9 +112,16 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         /// Whether the daemon holds a NEAR AI sign-in. A bool, never the
         /// credential; absent from an older daemon, which reads as no.
         public let nearAiSignin: Bool?
+        /// The chosen terminal's id; nil from an older daemon, or for a
+        /// stored choice the daemon does not know.
+        public let terminalCurrent: String?
+        /// The terminal apps installed on this Mac; absent from an older
+        /// daemon.
+        public let terminalChoices: [ManagedTerminalChoice]?
         enum CodingKeys: String, CodingKey {
             case managedLaunch = "managed_launch", terminalLaunch = "terminal_launch", terminalDestination = "terminal_destination"
             case nearAiSignin = "near_ai_signin"
+            case terminalCurrent = "terminal_current", terminalChoices = "terminal_choices"
         }
     }
     public let tools: [ManagedToolAvailability]?
@@ -162,7 +180,9 @@ public enum ManagedSurface {
     }
 
     /// The tools a NEAR AI sign-in session can start, in the order shown.
-    public static let signInTools = ["claude", "codex"]
+    /// OpenCode's button also needs the daemon to report it installed
+    /// (`ManagedSnapshot.signInStartTools`).
+    public static let signInTools = ["claude", "codex", "opencode"]
 
     /// The Start button's key for a tool, or nil for a tool this shell
     /// does not know.
@@ -174,8 +194,9 @@ public enum ManagedSurface {
     /// sign-in entries already run on it, with no key. Signed out, a pasted
     /// key stays the fallback.
     public static func connectionOptions(signedIn: Bool, tool: String = "claude") -> [String] {
-        // OpenCode has no sign-in entry or subscription flow. Its NEAR AI
-        // connection always uses a pasted key, even while signed in.
+        // OpenCode has no subscription flow. A saved NEAR AI connection for
+        // it uses a pasted key and names its own model, even while signed
+        // in; the sign-in entry runs on the model its proxy pins.
         if tool == "opencode" { return ["api_key", "near_ai"] }
         return signedIn ? ["subscription", "api_key"] : ["subscription", "api_key", "near_ai"]
     }
@@ -212,12 +233,23 @@ public enum ManagedSurface {
     /// else is the general failure. A missing tool is said on its account
     /// row after the refresh that follows, where the tool can be named.
     public static func errorKey(code: String?, message: String?) -> String {
+        if code == "managed-unsupported-version" || message == "managed-unsupported-version" { return "unsupported_version" }
         let launchUnknown = ["launch-unknown", "managed-launch-unknown"]
         if launchUnknown.contains(code ?? "") || launchUnknown.contains(message ?? "") { return "launch_unknown" }
         // No NEAR AI sign-in: the line that asks for one.
         let signInNeeded = "managed-near-ai-sign-in-required"
         if code == signInNeeded || message == signInNeeded { return "sign_in_needed" }
+        // The chosen terminal app was not found: the line that says so
+        // and points at Settings.
+        let notFound = "managed-terminal-not-found"
+        if code == notFound || message == notFound { return "terminal_not_found" }
         return "action_failed"
+    }
+
+    /// A line with `{terminal}` filled from the terminal the daemon
+    /// reports; `fallback` (the core's "your terminal") when it reports none.
+    public static func fillTerminal(_ template: String, terminal: String?, fallback: String) -> String {
+        template.replacingOccurrences(of: "{terminal}", with: terminal ?? fallback)
     }
 }
 
@@ -263,6 +295,16 @@ public extension ManagedSurface {
 }
 
 public extension ManagedSnapshot {
+    /// A failed operation identifies its tool; old error payloads fall back
+    /// to installed tools, never an unrelated hardcoded provider.
+    func updateRecoveryTools(attemptedTool: String?) -> [ManagedToolAvailability] {
+        (tools ?? []).filter { availability in
+            guard ManagedSurface.toolKey(availability.tool) != nil else { return false }
+            if let attemptedTool { return availability.tool == attemptedTool }
+            return availability.installed
+        }
+    }
+
     var setupTools: [String] { ManagedSurface.setupTools(tools) }
     var needsToolInstallation: Bool {
         guard let tools else { return false }
@@ -292,16 +334,34 @@ public extension ManagedSnapshot {
     /// Whether the daemon holds a NEAR AI sign-in.
     var nearAiSignedIn: Bool { capabilities.nearAiSignin == true }
 
+    /// The terminal apps a picker offers: the installed ones, none from an
+    /// older daemon.
+    var terminalChoices: [ManagedTerminalChoice] { capabilities.terminalChoices ?? [] }
+
     /// The tool's NEAR AI sign-in entry, only while signed in.
     func signInEntry(_ tool: String) -> ManagedAccount? {
         guard nearAiSignedIn else { return nil }
         return signInAccounts?.first { $0.tool == tool && $0.connection == "near_ai_signin" }
     }
 
+    /// The tools the sign-in card offers a Start button for, in order: each
+    /// with a sign-in entry that can launch. OpenCode only while the
+    /// daemon's `tools` row says it is installed; an older daemon that
+    /// sends no `tools` offers no OpenCode button (fail closed), while
+    /// Claude Code and Codex keep `canLaunch`'s older-daemon reading.
+    var signInStartTools: [String] {
+        ManagedSurface.signInTools.filter { tool in
+            guard signInEntry(tool) != nil, canLaunch(tool: tool) else { return false }
+            guard tool == "opencode" else { return true }
+            return tools?.first { $0.tool == tool }?.installed == true
+        }
+    }
+
     /// The `managed_launch_prepare` request that starts `tool` on the NEAR
-    /// AI sign-in in `cwd`; nil without a sign-in entry for it.
+    /// AI sign-in in `cwd`; nil unless the card offers that tool's Start
+    /// button. It names no model: the session's proxy pins one.
     func signInLaunchParams(tool: String, cwd: String, requestID: String) -> [String: Any]? {
-        guard canLaunch(tool: tool), let entry = signInEntry(tool) else { return nil }
+        guard signInStartTools.contains(tool), let entry = signInEntry(tool) else { return nil }
         return [
             "request_id": requestID, "purpose": "coding", "tool": entry.tool,
             "connection": entry.connection, "account_id": entry.id, "cwd": cwd,

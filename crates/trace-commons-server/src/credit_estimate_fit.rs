@@ -13,13 +13,20 @@
 //! the bar is a one-tier table whose band is the held-out p10-p90: still
 //! true, and with no ranking effect.
 //!
-//! Pure: no storage, no network, no clock, no randomness. Rows carry features
-//! and labels only, never an id or content. Scores are computed with the
-//! protocol's own [`estimate_score`] so the fit and the device cannot differ.
+//! It also fits the v2 settlement table ([`fit_settlement_table`]): the same
+//! tiers, each priced as the mean settled `trace_credit` award, and a ratio
+//! band measured on random batches of the held-out part.
+//!
+//! Pure: no storage, no network, no clock, and no randomness the caller
+//! does not seed. Rows carry features and labels only, never an id or
+//! content. Scores are computed with the protocol's own [`estimate_score`]
+//! so the fit and the device cannot differ.
 
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
+use rand::SeedableRng as _;
+use rand::rngs::StdRng;
 use serde::Serialize;
 use trace_commons_protocol::local_credit_estimate::{
     BUILT_IN_ESTIMATE_BYTES_PER_TOKEN, BUILT_IN_ESTIMATE_CHUNK_CAP,
@@ -27,6 +34,10 @@ use trace_commons_protocol::local_credit_estimate::{
     ESTIMATE_MAX_DISPLAYED_CREDIT, ESTIMATE_MAX_TIERS, ESTIMATE_TABLE_SCHEMA_VERSION, EstimateBand,
     EstimateTerm, EstimateWeight, LOCAL_ESTIMATE_FEATURES_VERSION, LocalEstimateFeatures,
     LocalEstimateTable, estimate_score,
+};
+use trace_commons_protocol::settlement_estimate::{
+    AggregateBand, SETTLEMENT_INSTRUMENT_ID, SETTLEMENT_TABLE_SCHEMA_VERSION,
+    SettlementEstimateTable, SettlementTier,
 };
 
 use crate::rescore_distribution::MIN_ROWS_FOR_PERCENTILES;
@@ -312,17 +323,21 @@ fn usable<'a>(input: &'a EstimateFitInput, reference: &LocalEstimateTable) -> Op
     }
     let displayed = input.row.displayed_credit?;
     let features = &input.row.features;
-    if features.version != LOCAL_ESTIMATE_FEATURES_VERSION || features.content_bytes == 0 {
-        return None;
-    }
-    ESTIMATE_FIT_TERMS
-        .iter()
-        .all(|term| features.term_value(*term, reference).is_some())
-        .then(|| Scored {
-            features,
-            displayed,
-            tenant: &input.row.tenant_tag,
-        })
+    fit_terms_known(features, reference).then(|| Scored {
+        features,
+        displayed,
+        tenant: &input.row.tenant_tag,
+    })
+}
+
+/// Features the device could score under a fitted table: this features
+/// version, some content, and every fitted term known.
+fn fit_terms_known(features: &LocalEstimateFeatures, reference: &LocalEstimateTable) -> bool {
+    features.version == LOCAL_ESTIMATE_FEATURES_VERSION
+        && features.content_bytes > 0
+        && ESTIMATE_FIT_TERMS
+            .iter()
+            .all(|term| features.term_value(*term, reference).is_some())
 }
 
 /// The p10-p90 band of an ascending, non-empty slice of displayed credit,
@@ -360,9 +375,70 @@ fn fitted_candidate(
     reference: &LocalEstimateTable,
     report: &mut EstimateFitReport,
 ) -> Option<LocalEstimateTable> {
+    let placement = match place_tiers(fit, reference) {
+        Ok(placement) => placement,
+        Err(PlacementFailure::Check(check)) => {
+            report.failed_checks.push(check);
+            return None;
+        }
+        Err(PlacementFailure::Unsolved) => return None,
+        Err(PlacementFailure::OneTier { tiers_before_merge }) => {
+            report.tiers_before_merge = tiers_before_merge;
+            report.tiers = 1;
+            report.failed_checks.push("one_tier_after_floor");
+            return None;
+        }
+    };
+    report.tiers_before_merge = placement.tiers_before_merge;
+    let Placement {
+        mut table, scores, ..
+    } = placement;
+    report.tiers = table.cut_offs.len() + 1;
+    let ys: Vec<f64> = fit.iter().map(|s| s.displayed).collect();
+    let mut bands = Vec::with_capacity(table.cut_offs.len() + 1);
+    for tier in 0..=table.cut_offs.len() {
+        let mut in_tier: Vec<f64> = scores
+            .iter()
+            .zip(&ys)
+            .filter(|(score, _)| tier_of(**score, &table.cut_offs) == tier)
+            .map(|(_, y)| *y)
+            .collect();
+        in_tier.sort_by(f64::total_cmp);
+        bands.push(display_band(&in_tier));
+    }
+    table.bands = bands;
+    Some(table)
+}
+
+/// Weights and cut-offs placed on a fit window, before any band or mean is
+/// attached: `table` is the reference with `weights` and `cut_offs` set and
+/// no bands, and `scores` is each fit row's score under it, in order.
+struct Placement {
+    table: LocalEstimateTable,
+    scores: Vec<f64>,
+    tiers_before_merge: usize,
+}
+
+/// Why no multi-tier placement exists.
+enum PlacementFailure {
+    /// A named check failed (`fit_rows`, `weights_out_of_range`, `fit`).
+    Check(&'static str),
+    /// The normal equations did not solve.
+    Unsolved,
+    /// Every cut-off merged away under the E10 floor.
+    OneTier { tiers_before_merge: usize },
+}
+
+/// Fit weights by least squares of each row's `displayed` value on
+/// [`ESTIMATE_FIT_TERMS`], then cut tiers at the score quantiles and merge
+/// any tier under the E10 floor. Shared by the display fit and the
+/// settlement fit, so both place tiers the same way.
+fn place_tiers(
+    fit: &[Scored<'_>],
+    reference: &LocalEstimateTable,
+) -> Result<Placement, PlacementFailure> {
     if fit.len() < ESTIMATE_MIN_TIER_ROWS * 2 {
-        report.failed_checks.push("fit_rows");
-        return None;
+        return Err(PlacementFailure::Check("fit_rows"));
     }
     let ys: Vec<f64> = fit.iter().map(|s| s.displayed).collect();
     let xs: Vec<Vec<f64>> = fit
@@ -374,13 +450,12 @@ fn fitted_candidate(
                 .collect()
         })
         .collect();
-    let weights = least_squares(&xs, &ys)?;
+    let weights = least_squares(&xs, &ys).ok_or(PlacementFailure::Unsolved)?;
     if weights
         .iter()
         .any(|w| !w.is_finite() || w.abs() > ESTIMATE_MAX_ABS_WEIGHT)
     {
-        report.failed_checks.push("weights_out_of_range");
-        return None;
+        return Err(PlacementFailure::Check("weights_out_of_range"));
     }
     let mut table = reference.clone();
     table.weights = ESTIMATE_FIT_TERMS
@@ -398,8 +473,7 @@ fn fitted_candidate(
         .map(|s| estimate_score(s.features, &table).unwrap_or(f64::NAN))
         .collect();
     if scores.iter().any(|s| !s.is_finite()) {
-        report.failed_checks.push("fit");
-        return None;
+        return Err(PlacementFailure::Check("fit"));
     }
     let mut sorted = scores.clone();
     sorted.sort_by(f64::total_cmp);
@@ -408,27 +482,17 @@ fn fitted_candidate(
         .collect();
     cut_offs.dedup_by(|a, b| a <= b);
     cut_offs.retain(|cut| *cut > sorted[0]);
-    report.tiers_before_merge = cut_offs.len() + 1;
+    let tiers_before_merge = cut_offs.len() + 1;
     merge_under_floor(&mut cut_offs, &scores, fit);
-    report.tiers = cut_offs.len() + 1;
     if cut_offs.is_empty() {
-        report.failed_checks.push("one_tier_after_floor");
-        return None;
-    }
-    let mut bands = Vec::with_capacity(cut_offs.len() + 1);
-    for tier in 0..=cut_offs.len() {
-        let mut in_tier: Vec<f64> = scores
-            .iter()
-            .zip(&ys)
-            .filter(|(score, _)| tier_of(**score, &cut_offs) == tier)
-            .map(|(_, y)| *y)
-            .collect();
-        in_tier.sort_by(f64::total_cmp);
-        bands.push(display_band(&in_tier));
+        return Err(PlacementFailure::OneTier { tiers_before_merge });
     }
     table.cut_offs = cut_offs;
-    table.bands = bands;
-    Some(table)
+    Ok(Placement {
+        table,
+        scores,
+        tiers_before_merge,
+    })
 }
 
 /// Remove cut-offs until every tier has [`ESTIMATE_MIN_TIER_ROWS`] rows from
@@ -665,6 +729,257 @@ fn solve(mut a: Vec<Vec<f64>>) -> Option<Vec<f64>> {
         x[row] = (a[row][m] - tail) / a[row][row];
     }
     Some(x)
+}
+
+/// Random batches drawn from the evaluation split to measure how far a
+/// batch's settled total strays from its sum of tier means. Spec section 2.
+pub const SETTLEMENT_FIT_BATCHES: usize = 200;
+
+/// Traces per batch, or every evaluation row when there are fewer.
+pub const SETTLEMENT_FIT_BATCH_SIZE: usize = 20;
+
+/// Atomic units of `trace_credit` per credit in a fitted candidate: the
+/// pipeline's microcredit unit.
+pub const SETTLEMENT_FIT_ATOMIC_UNITS_PER_CREDIT: u64 = 1_000_000;
+
+/// `version` of every fitted candidate. The operator relabels the table
+/// when installing it.
+const SETTLEMENT_FIT_VERSION: &str = "fit";
+
+const MICROS: f64 = 1_000_000.0;
+
+/// One label-only settlement row, as the eval route returns it under
+/// `target=settlement`. Like [`EstimateEvalRow`]: no submission id, trace
+/// id, decision time or content, and a per-run tenant tag. The label is the
+/// run's settled `trace_credit` award in atomic units, 0 for a run settled
+/// with no award.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SettlementEvalRow {
+    pub features: LocalEstimateFeatures,
+    pub settled_atomic_units: u64,
+    pub tenant_tag: String,
+}
+
+/// A settlement row plus the decision time the split needs. The time never
+/// leaves the server.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettlementFitInput {
+    pub row: SettlementEvalRow,
+    pub decided_at: DateTime<Utc>,
+}
+
+/// What a settlement fit reports. Aggregates only.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SettlementFitReport {
+    /// Rows in the fit window / held out whose features the device could
+    /// score.
+    pub fit_rows: usize,
+    pub held_out_rows: usize,
+    /// Tiers after the E10 merge.
+    pub tiers: usize,
+    /// Batches drawn and traces per batch; 0 when none were drawn.
+    pub batches: usize,
+    pub batch_size: usize,
+    /// The seed the batch draw used, so a run can be repeated.
+    pub seed: u64,
+    /// `sum(actual) / sum(predicted)` over every held-out row.
+    pub bias_ratio: Option<f64>,
+    /// The candidate table, validated, with no dollar rate and no pricing
+    /// version: the operator adds both. Absent with `no_table_reason`.
+    pub table: Option<SettlementEstimateTable>,
+    pub no_table_reason: Option<&'static str>,
+}
+
+/// The rows of `window` the device could score, as [`Scored`] rows whose
+/// `displayed` value is the award in credits, beside the award in atomic
+/// units.
+fn scored_settlement<'a>(
+    window: &[&'a SettlementFitInput],
+    reference: &LocalEstimateTable,
+) -> (Vec<Scored<'a>>, Vec<u64>) {
+    window
+        .iter()
+        .filter(|input| fit_terms_known(&input.row.features, reference))
+        .map(|input| {
+            let award = input.row.settled_atomic_units;
+            (
+                Scored {
+                    features: &input.row.features,
+                    displayed: award as f64 / SETTLEMENT_FIT_ATOMIC_UNITS_PER_CREDIT as f64,
+                    tenant: &input.row.tenant_tag,
+                },
+                award,
+            )
+        })
+        .unzip()
+}
+
+/// Fit a settlement table: tiers placed as [`fit_estimate_table`] places
+/// them on the earlier part of the corpus, each tier's mean settled award
+/// (zeros included) and zero share from that part, and the aggregate band
+/// from seeded random batches of the later part. Spec section 2.
+#[must_use]
+pub fn fit_settlement_table(
+    inputs: &[SettlementFitInput],
+    seed: u64,
+    published_at: DateTime<Utc>,
+) -> SettlementFitReport {
+    let mut report = SettlementFitReport {
+        fit_rows: 0,
+        held_out_rows: 0,
+        tiers: 0,
+        batches: 0,
+        batch_size: 0,
+        seed,
+        bias_ratio: None,
+        table: None,
+        no_table_reason: None,
+    };
+    let mut ordered: Vec<&SettlementFitInput> = inputs.iter().collect();
+    ordered.sort_by_key(|input| input.decided_at);
+    if ordered.is_empty() {
+        report.no_table_reason = Some("no_labelled_rows");
+        return report;
+    }
+    let split = ((ordered.len() as f64) * ESTIMATE_FIT_TRAIN_SHARE).floor() as usize;
+    let (fit_window, held_window) = ordered.split_at(split);
+
+    // Least squares runs on credits, not atomic units: tiers are cut on the
+    // score, which scales with the labels, so the scale moves no row across
+    // a tier, and in credits the weights stay inside the validator's bound.
+    let reference = base_table(SETTLEMENT_FIT_VERSION.to_string());
+    let (fit, fit_awards) = scored_settlement(fit_window, &reference);
+    let (held, held_awards) = scored_settlement(held_window, &reference);
+    report.fit_rows = fit.len();
+    report.held_out_rows = held.len();
+    if held.len() < MIN_ROWS_FOR_PERCENTILES {
+        report.no_table_reason = Some("insufficient_held_out_rows");
+        return report;
+    }
+
+    let placement = match place_tiers(&fit, &reference) {
+        Ok(placement) => placement,
+        Err(failure) => {
+            report.no_table_reason = Some(match failure {
+                PlacementFailure::Check(check) => check,
+                PlacementFailure::Unsolved => "fit",
+                PlacementFailure::OneTier { .. } => {
+                    report.tiers = 1;
+                    "one_tier_after_floor"
+                }
+            });
+            return report;
+        }
+    };
+    let cut_offs = placement.table.cut_offs.clone();
+    let tier_count = cut_offs.len() + 1;
+    report.tiers = tier_count;
+
+    // Tier means count a run settled at zero as 0 (S5); the zero share is
+    // explanatory only.
+    let mut sums = vec![0u128; tier_count];
+    let mut rows = vec![0u128; tier_count];
+    let mut zeros = vec![0u128; tier_count];
+    for (score, award) in placement.scores.iter().zip(&fit_awards) {
+        let tier = tier_of(*score, &cut_offs);
+        sums[tier] += u128::from(*award);
+        rows[tier] += 1;
+        zeros[tier] += u128::from(*award == 0);
+    }
+    let mut tiers = Vec::with_capacity(tier_count);
+    for tier in 0..tier_count {
+        let count = rows[tier];
+        // An empty tier (none survives the E10 floor) has no mean: refused
+        // as not positive.
+        let mean = (sums[tier] + count / 2)
+            .checked_div(count)
+            .map_or(0, |mean| u64::try_from(mean).unwrap_or(u64::MAX));
+        if mean == 0 {
+            report.no_table_reason = Some("tier_mean_not_positive");
+            return report;
+        }
+        let share = (zeros[tier] * 1_000_000 + count / 2) / count;
+        tiers.push(SettlementTier {
+            mean_atomic_units: mean,
+            withheld_share_micros: u32::try_from(share).unwrap_or(u32::MAX),
+        });
+    }
+    let mut table = SettlementEstimateTable {
+        schema_version: SETTLEMENT_TABLE_SCHEMA_VERSION,
+        features_version: LOCAL_ESTIMATE_FEATURES_VERSION.to_string(),
+        version: SETTLEMENT_FIT_VERSION.to_string(),
+        pricing_version: None,
+        instrument_id: SETTLEMENT_INSTRUMENT_ID.to_string(),
+        atomic_units_per_credit: SETTLEMENT_FIT_ATOMIC_UNITS_PER_CREDIT,
+        usd_micros_per_credit: None,
+        published_at,
+        bytes_per_token: reference.bytes_per_token,
+        chunk_target_tokens: reference.chunk_target_tokens,
+        chunk_cap: reference.chunk_cap,
+        weights: placement.table.weights,
+        cut_offs,
+        tiers,
+        // Replaced below, once the batches are drawn.
+        aggregate_band: AggregateBand {
+            low_ratio_micros: 1,
+            high_ratio_micros: 1,
+        },
+        fit_rows: fit.len() as u64,
+    };
+
+    // Each held-out row's prediction is its tier mean, looked up the way
+    // the device looks it up.
+    let pairs: Vec<(u128, u128)> = held
+        .iter()
+        .zip(&held_awards)
+        .filter_map(|(scored, award)| {
+            table
+                .expected_atomic_units(scored.features)
+                .map(|predicted| (u128::from(*award), u128::from(predicted)))
+        })
+        .collect();
+    if pairs.len() < MIN_ROWS_FOR_PERCENTILES {
+        report.no_table_reason = Some("insufficient_held_out_rows");
+        return report;
+    }
+    let ratio = |(actual, predicted): (u128, u128)| actual as f64 / predicted as f64;
+    let total = pairs
+        .iter()
+        .fold((0u128, 0u128), |(a, p), (actual, predicted)| {
+            (a + actual, p + predicted)
+        });
+    report.bias_ratio = Some(ratio(total));
+
+    // Means are positive, so no batch has a predicted total of 0.
+    let batch_size = SETTLEMENT_FIT_BATCH_SIZE.min(pairs.len());
+    report.batches = SETTLEMENT_FIT_BATCHES;
+    report.batch_size = batch_size;
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut ratios: Vec<f64> = (0..SETTLEMENT_FIT_BATCHES)
+        .map(|_| {
+            let batch = rand::seq::index::sample(&mut rng, pairs.len(), batch_size);
+            ratio(batch.iter().fold((0u128, 0u128), |(a, p), index| {
+                (a + pairs[index].0, p + pairs[index].1)
+            }))
+        })
+        .collect();
+    ratios.sort_by(f64::total_cmp);
+    let micros = |r: f64| (r * MICROS).round().clamp(0.0, u64::MAX as f64) as u64;
+    let low = micros(quantile(&ratios, ESTIMATE_BAND_LOW_QUANTILE));
+    let high = micros(quantile(&ratios, ESTIMATE_BAND_HIGH_QUANTILE)).max(low);
+    if low == 0 {
+        report.no_table_reason = Some("aggregate_band_low_zero");
+        return report;
+    }
+    table.aggregate_band = AggregateBand {
+        low_ratio_micros: low,
+        high_ratio_micros: high,
+    };
+    match table.validate() {
+        Ok(()) => report.table = Some(table),
+        Err(_) => report.no_table_reason = Some("candidate_refused"),
+    }
+    report
 }
 
 #[cfg(test)]
@@ -977,5 +1292,153 @@ mod tests {
         table.validate().expect("emitted tables validate");
         assert_eq!(table.tier_count(), 1);
         assert_eq!(table.bands[0].low, ESTIMATE_DISPLAY_STEP);
+    }
+
+    /// Rows a settlement fit splits at: the same expression the fit uses.
+    fn settlement_split(n: usize) -> usize {
+        ((n as f64) * ESTIMATE_FIT_TRAIN_SHARE).floor() as usize
+    }
+
+    /// `n` settled rows, alternating by decision time between two
+    /// well-separated groups: small traces (a few hundred bytes) and large
+    /// ones (tens of thousands). Rows in a group share their features, so
+    /// the fitted weights cannot move a row across tiers. `award(i, large,
+    /// in_fit)` is the row's synthetic settled award in atomic units.
+    fn settlement_inputs(
+        n: usize,
+        award: impl Fn(usize, bool, bool) -> u64,
+    ) -> Vec<SettlementFitInput> {
+        let small = features(300, 3, 1);
+        let large = features(30_000, 3, 1);
+        let split = settlement_split(n);
+        (0..n)
+            .map(|i| {
+                let is_large = i % 2 == 1;
+                SettlementFitInput {
+                    row: SettlementEvalRow {
+                        features: if is_large {
+                            large.clone()
+                        } else {
+                            small.clone()
+                        },
+                        settled_atomic_units: award(i, is_large, i < split),
+                        tenant_tag: format!("t{}", i % 7),
+                    },
+                    decided_at: at(i),
+                }
+            })
+            .collect()
+    }
+
+    fn published() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 20, 0, 0, 0).unwrap()
+    }
+
+    /// Awards that vary within each group, so batches differ by draw.
+    fn varied_award(i: usize, large: bool, _in_fit: bool) -> u64 {
+        if large {
+            600_000 + (i as u64 * 104_729 % 17) * 30_000
+        } else {
+            100_000 + (i as u64 * 7_919 % 13) * 20_000
+        }
+    }
+
+    #[test]
+    fn settlement_fit_is_reproducible_from_a_seed() {
+        let inputs = settlement_inputs(200, varied_award);
+        let first = fit_settlement_table(&inputs, 7, published());
+        assert_eq!(first, fit_settlement_table(&inputs, 7, published()));
+        let table = first.table.clone().expect("a candidate");
+        assert_eq!(first.seed, 7);
+        assert_eq!(first.batches, SETTLEMENT_FIT_BATCHES);
+        assert_eq!(first.batch_size, SETTLEMENT_FIT_BATCH_SIZE);
+        assert_eq!(first.tiers, 2, "{first:#?}");
+        let other = fit_settlement_table(&inputs, 8, published());
+        assert_eq!(other.seed, 8);
+        let other_table = other.table.expect("a candidate");
+        assert_eq!(other_table.tiers, table.tiers);
+        assert_eq!(other_table.cut_offs, table.cut_offs);
+    }
+
+    #[test]
+    fn withheld_rows_count_zero_in_tier_means() {
+        // Half the small rows in the fit split settled at zero.
+        let inputs = settlement_inputs(200, |i, large, in_fit| match (large, in_fit) {
+            (true, _) => 800_000,
+            (false, true) if (i / 2) % 2 == 0 => 0,
+            (false, _) => 200_000,
+        });
+        let report = fit_settlement_table(&inputs, 0, published());
+        let table = report.table.expect("a candidate");
+        let small = &inputs[0].row.features;
+        let large = &inputs[1].row.features;
+        assert_eq!(table.tier_index(small), Some(0), "{table:#?}");
+        assert_eq!(table.tier_index(large), Some(1));
+        let fit_small: Vec<u64> = inputs[..settlement_split(200)]
+            .iter()
+            .filter(|input| input.row.features == *small)
+            .map(|input| input.row.settled_atomic_units)
+            .collect();
+        let zeros = fit_small.iter().filter(|award| **award == 0).count();
+        assert_eq!(zeros * 2, fit_small.len());
+        assert_eq!(
+            table.tiers[0].mean_atomic_units,
+            fit_small.iter().sum::<u64>() / fit_small.len() as u64
+        );
+        assert_eq!(table.tiers[0].mean_atomic_units, 100_000);
+        assert_eq!(table.tiers[0].withheld_share_micros, 500_000);
+        assert_eq!(table.tiers[1].mean_atomic_units, 800_000);
+        assert_eq!(table.tiers[1].withheld_share_micros, 0);
+    }
+
+    #[test]
+    fn the_bias_check_is_reported() {
+        // The evaluation split settles at three times the fit split.
+        let inputs = settlement_inputs(200, |_, large, in_fit| {
+            let base = if large { 800_000 } else { 200_000 };
+            if in_fit { base } else { base * 3 }
+        });
+        let report = fit_settlement_table(&inputs, 0, published());
+        let bias = report.bias_ratio.expect("a bias check");
+        assert!((bias - 3.0).abs() < 1e-9, "{bias}");
+        let table = report.table.expect("a candidate");
+        assert_eq!(table.aggregate_band.low_ratio_micros, 3_000_000);
+        assert_eq!(table.aggregate_band.high_ratio_micros, 3_000_000);
+    }
+
+    #[test]
+    fn the_candidate_has_no_rate_and_no_pricing_version_and_parses() {
+        let inputs = settlement_inputs(200, varied_award);
+        let report = fit_settlement_table(&inputs, 3, published());
+        let table = report.table.expect("a candidate");
+        assert_eq!(table.usd_micros_per_credit, None);
+        assert_eq!(table.pricing_version, None);
+        assert_eq!(
+            table.atomic_units_per_credit,
+            SETTLEMENT_FIT_ATOMIC_UNITS_PER_CREDIT
+        );
+        assert_eq!(table.published_at, published());
+        assert_eq!(table.fit_rows, report.fit_rows as u64);
+        assert!(!table.drawable_at(published()), "no rate, so not drawable");
+        let value = serde_json::to_value(&table).expect("serializes");
+        assert!(value.get("usd_micros_per_credit").is_none());
+        assert!(value.get("pricing_version").is_none());
+        assert_eq!(
+            SettlementEstimateTable::from_value(&value).expect("the client parser accepts it"),
+            table
+        );
+    }
+
+    #[test]
+    fn an_all_zero_eval_split_returns_no_table() {
+        let inputs = settlement_inputs(200, |_, large, in_fit| match (large, in_fit) {
+            (_, false) => 0,
+            (true, true) => 800_000,
+            (false, true) => 200_000,
+        });
+        let report = fit_settlement_table(&inputs, 0, published());
+        assert_eq!(report.table, None);
+        assert_eq!(report.no_table_reason, Some("aggregate_band_low_zero"));
+        assert_eq!(report.bias_ratio, Some(0.0));
     }
 }

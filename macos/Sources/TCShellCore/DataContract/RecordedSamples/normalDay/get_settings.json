@@ -24,7 +24,8 @@
     "idle_sessions": true,
     "verdicts_landed": true,
     "weekly_recap": false,
-    "insights_tip": false
+    "insights_tip": false,
+    "settlement_estimate": true
   },
   "opencode_source_mode": "unset",
   "claude_source_mode": "watch",
@@ -43,9 +44,12 @@
   "insights_context_threshold": null,
   "insights_counter_pass": false,
   "insights_recap_card_enabled": true,
+  "missions_enabled": false,
   "suggestions_enabled": true,
+  "settlement_estimate_enabled": true,
   "notifications_enabled": true,
   "menu_bar_mark_enabled": true,
+  "managed_terminal": "terminal",
   "near_ai_configured": false,
   "near_ai_inference_configured": false,
   "trajectory_source_mode": "unset",

@@ -104,6 +104,10 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         _ = try await call("set_notifications_enabled", params: ["on": on], as: DaemonData.NudgeAck.self)
     }
 
+    public func setSettlementEstimateEnabled(_ on: Bool) async throws {
+        _ = try await call("set_settings", params: ["settlement_estimate_enabled": on], as: DaemonData.NudgeAck.self)
+    }
+
     public func setNotifyKind(_ kind: String, on: Bool) async throws {
         _ = try await call("set_notify_kind", params: ["kind": kind, "on": on], as: DaemonData.NudgeAck.self)
     }

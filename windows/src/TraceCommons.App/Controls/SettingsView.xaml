@@ -486,6 +486,16 @@
                 </Border>
 
                 <!--
+                    Open sessions in (#1406): the terminal managed sessions
+                    open in, under Private AI as on macOS. Filled in code
+                    with ManagedTerminalPicker, which reads the label and the
+                    terminal names from the daemon and collapses itself when
+                    the daemon offers none. No string is typed here.
+                -->
+                <ContentControl x:Name="ManagedTerminalHost"
+                                HorizontalContentAlignment="Stretch" />
+
+                <!--
                     K11: where sessions go. The raw send, both enclaves, and
                     where the witness came from, above the witness card they
                     name. Every row is RouteDisclosureSurface's, which is the

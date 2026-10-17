@@ -6,6 +6,8 @@
 //! Sessions on the NEAR AI sign-in. Approved 2026-10-12:
 //! - `start_claude` "Start Claude Code"
 //! - `start_codex` "Start Codex"
+//! - `start_opencode` "Start OpenCode" -- Approved 2026-10-16. Shown only
+//!   while the snapshot's `tools` row for `opencode` says it is installed.
 //! - `sign_in_scope` "Uses your NEAR AI sign-in. Runs in {destination}, in the
 //!   folder you choose." Shells fill `{destination}` from
 //!   `capabilities.terminal_destination`, as for `launch_scope`, so Windows
@@ -16,6 +18,16 @@
 //!   sign-in.
 //! - `sign_in_near_ai_accessibility` "Sign in to NEAR AI" -- its accessible
 //!   name.
+//!
+//! The terminal choice, in Settings > Private AI on every shell. Approved by
+//! the design owner 2026-10-14 (#1406):
+//! - `terminal_choice` "Open sessions in" -- the Settings picker's label,
+//!   and its accessible name. Its options are the app names the snapshot
+//!   sends in `capabilities.terminal_choices`.
+//! - `terminal_not_found` "{terminal} wasn't found on this computer.
+//!   Choose another in Settings." The line a shell shows for the refusal
+//!   `managed-terminal-not-found` ("not found", never "not installed");
+//!   it fills `{terminal}` from `capabilities.terminal_destination`.
 //!
 //! A session row's actions (Ron, #1407, 2026-10-14):
 //! - `show` "Show" and `stop` "Stop" -- the row menu's items and the row's
@@ -45,10 +57,19 @@
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "Managed sessions",
+            "provider_openai": "OpenAI",
+            "provider_anthropic": "Anthropic",
+            "provider_near_ai": "NEAR AI",
+            "collection_off": "Trace collection off",
+            "map_scope": "Session routes; model calls are unverified.",
+            "collection_disabled": "Trace collection off",
+            "model_required": "Enter a model ID to launch OpenCode.",
             "tools_title": "Coding tools",
             "tools_empty": "Install a coding tool to get started.",
             "install": "Install",
             "tool_unavailable": "{tool} wasn't found on this computer.",
+            "unsupported_version": "This tool version is not supported. Install a supported version, then try again.",
+            "update": "Update",
             "description": "Start a session with a saved account. Your other sessions keep running.",
             "launch": "Launch",
             "launch_title": "Launch managed session",
@@ -122,10 +143,13 @@ pub fn copy() -> serde_json::Value {
             "auth_unavailable": "Unavailable",
             "start_claude": "Start Claude Code",
             "start_codex": "Start Codex",
+            "start_opencode": "Start OpenCode",
             "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
             "sign_in_needed": "Sign in to NEAR AI to start a session.",
             "sign_in_near_ai": "Sign in",
             "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
+            "terminal_choice": "Open sessions in",
+            "terminal_not_found": "{terminal} wasn't found on this computer. Choose another in Settings.",
             "show": "Show",
             "stop": "Stop",
             "stop_question": "Stop this session?",
@@ -170,6 +194,7 @@ mod tests {
         let copy = copy();
         assert_eq!(copy["start_claude"], "Start Claude Code");
         assert_eq!(copy["start_codex"], "Start Codex");
+        assert_eq!(copy["start_opencode"], "Start OpenCode");
         assert_eq!(
             copy["sign_in_scope"],
             "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose."
@@ -180,6 +205,17 @@ mod tests {
         );
         assert_eq!(copy["sign_in_near_ai"], "Sign in");
         assert_eq!(copy["sign_in_near_ai_accessibility"], "Sign in to NEAR AI");
+    }
+
+    /// The terminal choice reads these words, exactly as proposed.
+    #[test]
+    fn the_terminal_choice_has_its_words() {
+        let copy = copy();
+        assert_eq!(copy["terminal_choice"], "Open sessions in");
+        assert_eq!(
+            copy["terminal_not_found"],
+            "{terminal} wasn't found on this computer. Choose another in Settings."
+        );
     }
 
     /// Show, Stop and Start again on a session row read these words

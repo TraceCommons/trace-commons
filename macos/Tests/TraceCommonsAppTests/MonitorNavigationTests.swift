@@ -500,10 +500,21 @@ final class MonitorNavigationTests: XCTestCase {
         var page = HomeTabView.Page.overview
         var session: MonitorSelection?
         var inspector = false
+        var missions = false
         func land(_ destination: MonitorDestination) {
             MonitorWindowView.land(destination, tab: &tab, homePage: &page,
-                                   selection: &session, showsInspector: &inspector)
+                                   selection: &session, showsInspector: &inspector,
+                                   missionsEnabled: missions)
         }
+
+        // Missions are hidden by default (owner, 2026-10-16): a mission page
+        // lands on the overview. The shown case is below.
+        land(.home(.missions))
+        XCTAssertEqual(tab, .home)
+        XCTAssertEqual(page, .overview)
+        land(.home(.missionDrafts))
+        XCTAssertEqual(page, .overview)
+        missions = true
 
         land(.inference)
         XCTAssertEqual(tab, .inference)

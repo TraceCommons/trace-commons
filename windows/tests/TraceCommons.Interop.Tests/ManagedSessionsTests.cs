@@ -6,6 +6,46 @@ namespace TraceCommons.Interop.Tests;
 
 public sealed class ManagedSessionsTests
 {
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("codex")]
+    public void VersionRecoveryTargetsTheAttemptedTool(string attempted)
+    {
+        var snapshot = ManagedSnapshot.Parse("""
+        {"revision":1,"accounts":[],"sessions":[],"generations":{},"capabilities":{},"copy":{},"tools":[{"tool":"claude","installed":true,"install_url":"claude-docs"},{"tool":"codex","installed":true,"install_url":"codex-docs"},{"tool":"opencode","installed":false,"install_url":"opencode-docs"}]}
+        """)!;
+        Assert.Equal(attempted, Assert.Single(snapshot.VersionRecoveryTools(attempted)).Tool);
+        Assert.Equal(2, snapshot.VersionRecoveryTools(null).Length);
+    }
+
+    [Fact]
+    public void DiscoveryHidesAbsentToolsButPreservesLegacyUnknown()
+    {
+        var snapshot = ManagedSnapshot.Parse("""
+        {"revision":1,"accounts":[],"sessions":[],"generations":{},"capabilities":{},"copy":{},"tools":[{"tool":"claude","installed":false,"install_url":"https://code.claude.com/docs/en/setup"},{"tool":"opencode","installed":true,"install_url":"https://opencode.ai/docs/"}]}
+        """)!;
+        Assert.False(snapshot.CanLaunch("claude"));
+        Assert.Equal(new[] { "opencode" }, snapshot.SetupTools);
+        Assert.True((snapshot with { Tools = null }).CanLaunch("claude"));
+        Assert.Equal(3, (snapshot with { Tools = null }).SetupTools.Length);
+        Assert.Empty((snapshot with { Tools = new[] { new ManagedTool("claude", false, "") } }).SetupTools);
+    }
+
+    [Fact]
+    public void OpenCodeAcceptsOnlyKeyConnectionsAndPreservesCollectionState()
+    {
+        Assert.Equal(new[] { "api_key", "near_ai" }, ManagedSnapshot.Connections("opencode"));
+        Assert.Equal(new[] { "api_key", "near_ai" }, ManagedSnapshot.Connections("opencode", signedIn: true));
+        Assert.Equal(new[] { "subscription", "api_key" }, ManagedSnapshot.Connections("claude", signedIn: true));
+        Assert.Equal(new[] { "subscription", "api_key", "near_ai" }, ManagedSnapshot.Connections("codex"));
+        var snapshot = ManagedSnapshot.Parse("""
+        {"revision":1,"accounts":[],"sessions":[{"id":"s","tool":"opencode","connection":"near_ai","account_id":"a","account_label":"Work","project_label":"Project","state":"exited","purpose":"coding","model":"provider/model","collect_traces":false,"collection":"off"}],"generations":{},"capabilities":{},"copy":{}}
+        """)!;
+        Assert.Equal("provider/model", snapshot.Sessions[0].Model);
+        Assert.False(snapshot.Sessions[0].CollectTraces);
+        Assert.Equal("off", snapshot.Sessions[0].Collection);
+    }
+
     [Fact]
     public void FutureSessionStateKeepsItsAccountLocked()
     {
@@ -35,10 +75,11 @@ public sealed class ManagedSessionsTests
             Tools = [new("claude", false, "https://claude.ai/download"), new("codex", true, "https://developers.openai.com/codex/cli/"), new("opencode", true, "https://opencode.ai")],
             Accounts = [new("saved", "claude", "subscription", "Personal", "ready")]
         };
-        Assert.Equal(["codex"], snapshot.SetupTools);
+        Assert.Equal(["codex", "opencode"], snapshot.SetupTools);
         Assert.Null(snapshot.SignInEntry("claude"));
         Assert.NotNull(snapshot.SignInEntry("codex"));
-        Assert.False(snapshot.CanLaunch("opencode"));
+        // Windows launches OpenCode since #1418.
+        Assert.True(snapshot.CanLaunch("opencode"));
         Assert.Single(snapshot.Accounts);
         // A tool is installed: no install block (Ron, 2026-10-15).
         Assert.Empty(snapshot.InstallTools);
@@ -62,8 +103,8 @@ public sealed class ManagedSessionsTests
         Assert.False(snapshot.ToolMissing("claude"));
         Assert.True((snapshot with { Tools = [new("opencode", false, "c")] }).ToolMissing("opencode"));
         Assert.False(ManagedSnapshot.Parse(SignedIn)!.ToolMissing("opencode"));
-        // Launch and Reconnect stay out for OpenCode on this shell.
-        Assert.False(snapshot.CanLaunch("opencode"));
+        // OpenCode launches (#1418) but has no subscription to reconnect.
+        Assert.True(snapshot.CanLaunch("opencode"));
         Assert.False(snapshot.OffersReconnect(account));
     }
 
@@ -71,17 +112,17 @@ public sealed class ManagedSessionsTests
     public void EmptyInventoryAndOlderSnapshotsHaveDistinctBehavior()
     {
         var snapshot = ManagedSnapshot.Parse(SignedIn)!;
-        Assert.Equal(["claude", "codex"], snapshot.SetupTools);
+        Assert.Equal(["claude", "codex", "opencode"], snapshot.SetupTools);
         Assert.Empty((snapshot with { Tools = [] }).SetupTools);
         var decoded = ManagedSnapshot.Parse(SignedIn.Replace("\"revision\":1", "\"tools\":[{\"tool\":\"codex\",\"installed\":true,\"install_url\":\"https://example.test\"}],\"revision\":1"))!;
         Assert.Equal(["codex"], decoded.SetupTools);
         Assert.Equal("https://example.test", Assert.Single(decoded.Tools!).InstallUrl);
         var empty = snapshot with { Tools = [new("claude", false, "a"), new("codex", false, "b"), new("opencode", false, "c")] };
-        // Windows stays on Claude Code and Codex until it launches OpenCode.
-        Assert.Equal(["claude", "codex"], empty.InstallTools.Select(t => t.Tool));
+        // Windows launches OpenCode since #1418, so it is offered too.
+        Assert.Equal(["claude", "codex", "opencode"], empty.InstallTools.Select(t => t.Tool));
         Assert.Empty(empty.SetupTools);
         Assert.Empty(snapshot.InstallTools);
-        Assert.Empty((snapshot with { Tools = [new("opencode", true, "c")] }).SetupTools);
+        Assert.Equal(["opencode"], (snapshot with { Tools = [new("opencode", true, "c")] }).SetupTools);
     }
 
     private const string SignedIn = """
@@ -133,5 +174,41 @@ public sealed class ManagedSessionsTests
         Assert.Equal("sign_in_needed", ManagedSignIn.ErrorKey("managed-near-ai-sign-in-required"));
         Assert.Equal("action_failed", ManagedSignIn.ErrorKey("managed-conflict"));
         Assert.Equal("action_failed", ManagedSignIn.ErrorKey(null));
+        Assert.Equal("terminal_not_found", ManagedSignIn.ErrorKey("managed-terminal-not-found"));
+    }
+
+    [Fact]
+    public void SnapshotCarriesTheTerminalChoiceAndTheFoundTerminals()
+    {
+        var snapshot = ManagedSnapshot.Parse("""
+        {"revision":2,"accounts":[],"sessions":[],"generations":{},"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Windows Terminal","terminal_current":"windows_terminal","terminal_choices":[{"id":"windows_terminal","name":"Windows Terminal"}]},"copy":{"terminal_choice":"Open sessions in"}}
+        """);
+        Assert.NotNull(snapshot);
+        Assert.Equal("windows_terminal", snapshot.Capabilities.TerminalCurrent);
+        Assert.Equal(new[] { new ManagedTerminalChoice("windows_terminal", "Windows Terminal") }, snapshot.TerminalChoices);
+        Assert.Equal(0, snapshot.TerminalSelectedIndex);
+        Assert.Equal("Open sessions in", snapshot.Text("terminal_choice"));
+    }
+
+    [Fact]
+    public void AnOlderSnapshotOffersNoTerminalChoice()
+    {
+        var snapshot = ManagedSnapshot.Parse("""
+        {"revision":1,"accounts":[],"sessions":[],"generations":{},"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Windows Terminal"},"copy":{}}
+        """);
+        Assert.NotNull(snapshot);
+        Assert.Null(snapshot.Capabilities.TerminalCurrent);
+        Assert.Empty(snapshot.TerminalChoices);
+        Assert.Equal(-1, snapshot.TerminalSelectedIndex);
+    }
+
+    [Fact]
+    public void AMissingTerminalHasItsOwnLine()
+    {
+        const string line = "{terminal} wasn't found on this computer. Choose another in Settings.";
+        Assert.Equal("Windows Terminal wasn't found on this computer. Choose another in Settings.",
+            ManagedSignIn.FillTerminal(line, "Windows Terminal", "your terminal"));
+        Assert.Equal("your terminal wasn't found on this computer. Choose another in Settings.",
+            ManagedSignIn.FillTerminal(line, null, "your terminal"));
     }
 }

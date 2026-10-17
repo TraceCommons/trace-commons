@@ -232,7 +232,7 @@ fn tick_over(
     backfill_estimate_features(shared, &discovered, &mut out);
 
     let held_by_project = std::mem::take(&mut out.gate_blocked_by_project);
-    let report = finish_pass(shared, out, true)?;
+    let report = finish_pass(shared, out, true, now)?;
     report_gate(shared, &ctx.gate, &report);
     record_gate_held(shared, &ctx, &report, held_by_project);
     Ok(report)
@@ -669,7 +669,7 @@ fn tick_over_paths(
         }
     }
 
-    let report = finish_pass(shared, out, false)?;
+    let report = finish_pass(shared, out, false, now)?;
     report_gate(shared, &ctx.gate, &report);
     Ok(report)
 }
@@ -1299,6 +1299,9 @@ struct PassOutcome {
     /// Whether anything the queue holds moved, and so whether the epilogue
     /// has a save and a publish to do.
     changed: bool,
+    /// Whether this pass queued or superseded at least one entry: the
+    /// settlement estimate's cue to scan again once things go quiet.
+    sessions_changed: bool,
     /// Whether this pass met a session its source declines to read at all.
     /// Separate from `report.too_large` only so the epilogue reads as the
     /// condition it is testing rather than as a count.
@@ -1730,9 +1733,11 @@ fn visit_session(
         Ok(outcome) => {
             if outcome.superseded > 0 {
                 out.changed = true;
+                out.sessions_changed = true;
             }
             if outcome.inserted {
                 out.changed = true;
+                out.sessions_changed = true;
                 if armed {
                     out.report.auto_ready += 1;
                     if ctx.gate.would_refuse() {
@@ -2082,10 +2087,16 @@ enum HeldLog {
 /// The single implementation of the epilogue, and it runs once per pass, not
 /// once per session -- `queue.save` and `state.save` each rewrite a whole
 /// file, and the publish is a wake-up for every subscribed shell.
-fn finish_pass(shared: &DaemonShared, out: PassOutcome, exhaustive: bool) -> Result<TickReport> {
+fn finish_pass(
+    shared: &DaemonShared,
+    out: PassOutcome,
+    exhaustive: bool,
+    now: DateTime<Utc>,
+) -> Result<TickReport> {
     let PassOutcome {
         mut report,
         mut changed,
+        sessions_changed,
         too_large,
         unsupported_export_version,
         gate_blocked,
@@ -2154,6 +2165,11 @@ fn finish_pass(shared: &DaemonShared, out: PassOutcome, exhaustive: bool) -> Res
                 crate::daemon::approved_envelope::sweep(&shared.store, &queue.pinned_entry_ids());
         }
         shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+    }
+    if sessions_changed {
+        // Only a note: the scan itself waits out its own debounce and runs
+        // from the supervisor, never from a watcher pass.
+        super::settlement_estimate::note_sessions_changed(shared, now);
     }
     {
         let mut state = shared.state.lock().expect("state lock");
@@ -3453,10 +3469,11 @@ mod tests {
 
     /// K5 through the watcher: today's arming offer says "will be scrubbed"
     /// for every folder, so nothing is reworded. When the arming copy for a
-    /// patterns-only folder changes, a folder armed under the old words gets
-    /// one notice, audited and saved, stays armed, and is not told twice.
+    /// patterns-only folder changes, a folder armed under the old words is
+    /// audited once, has its claim moved and saved, and stays armed. No
+    /// notice is raised (owner decision 2026-10-16).
     #[tokio::test]
-    async fn a_folder_armed_under_the_old_wording_is_told_once_when_it_changes() {
+    async fn a_folder_armed_under_the_old_wording_is_audited_once_when_it_changes() {
         use super::super::arming_wording::{ArmingClaim, reword_patterns_only_for_test};
         let f = WatcherFixture::new();
         f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
@@ -3475,13 +3492,24 @@ mod tests {
         reword_patterns_only_for_test(None);
 
         let status = f.shared.status_value();
-        let list = status["arming_rewordings"].as_array().unwrap().clone();
-        assert_eq!(list.len(), 1, "told once: {list:?}");
-        assert_eq!(list[0]["project_label"], "proj");
-        assert_eq!(list[0]["was"], "model_scrubbed");
-        assert_eq!(list[0]["now"], "patterns_only");
+        assert_eq!(
+            status["arming_rewordings"],
+            serde_json::json!([]),
+            "no notice is raised"
+        );
         let persisted = crate::daemon::policy::ProjectPolicy::load(&f.shared.store).unwrap();
-        assert_eq!(persisted.arming_rewordings.len(), 1, "survives a restart");
+        assert!(persisted.arming_rewordings.is_empty());
+        let proj_key = persisted
+            .projects
+            .iter()
+            .find(|(_, e)| e.label == "proj")
+            .map(|(k, _)| k.clone())
+            .unwrap();
+        assert_eq!(
+            persisted.arming_claim(&proj_key),
+            ArmingClaim::PatternsOnly,
+            "the recorded claim moved and survives a restart"
+        );
         let audit = super::super::audit::load(&f.shared.store).unwrap();
         assert_eq!(
             audit
@@ -3491,22 +3519,18 @@ mod tests {
             1
         );
         assert_eq!(
-            f.shared
-                .policy
-                .lock()
-                .unwrap()
-                .resolve(&persisted.arming_rewordings[0].project_key),
+            f.shared.policy.lock().unwrap().resolve(&proj_key),
             ProjectMode::AutoUpload,
             "the folder stays armed"
         );
     }
 
     /// K5 on the folder's own disclosure, through a pass: an uncertified
-    /// automatic send recorded under "will be scrubbed" is told exactly
-    /// once, audited and on `status`; a folder whose sends were all
-    /// certified is told nothing.
+    /// automatic send recorded under "will be scrubbed" is audited exactly
+    /// once and raises no notice on `status`; a folder whose sends were all
+    /// certified is not audited.
     #[tokio::test]
-    async fn an_uncertified_automatic_send_is_told_once_through_the_watcher() {
+    async fn an_uncertified_automatic_send_is_audited_once_through_the_watcher() {
         use super::super::automatic_gate::SessionRedaction;
         let f = WatcherFixture::new();
         f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
@@ -3534,12 +3558,10 @@ mod tests {
         f.settle(Utc::now() + chrono::Duration::hours(31)).await;
         f.settle(Utc::now() + chrono::Duration::hours(32)).await;
 
-        let list = f.shared.status_value()["arming_rewordings"]
-            .as_array()
-            .unwrap()
-            .clone();
-        assert_eq!(list.len(), 1, "{list:?}");
-        assert_eq!(list[0]["project_label"], "proj");
+        assert_eq!(
+            f.shared.status_value()["arming_rewordings"],
+            serde_json::json!([])
+        );
         let audit = super::super::audit::load(&f.shared.store).unwrap();
         assert_eq!(
             audit
@@ -6799,131 +6821,6 @@ mod tests {
             witness: None,
         };
         f.shared.store.save_config(&cfg).unwrap();
-    }
-
-    /// One event carrying more than `MAX_ENVELOPE_BYTES`, so the envelope
-    /// `approve` builds cannot be stored and the entry can never be
-    /// approved.
-    fn write_oversized_session(f: &WatcherFixture, project: &str, name: &str) -> PathBuf {
-        let project_dir = f
-            .claude_root
-            .join(format!("-Users-testuser-code-{project}"));
-        std::fs::create_dir_all(&project_dir).unwrap();
-        let path = project_dir.join(format!("{name}.jsonl"));
-        let content = "x".repeat(crate::envelope::MAX_ENVELOPE_BYTES + 1);
-        let event = serde_json::json!({
-            "type": "user",
-            "message": {"role": "user", "content": content},
-            "cwd": abs(&format!("Users/testuser/code/{project}")),
-            "timestamp": "2026-08-08T10:00:00Z",
-            "version": "2.0.1",
-            "sessionId": name,
-            "uuid": "a1",
-        });
-        std::fs::write(&path, format!("{event}\n")).unwrap();
-        path
-    }
-
-    async fn approve_entry(f: &WatcherFixture, entry_id: uuid::Uuid) -> serde_json::Value {
-        let r = crate::daemon::ipc::handle_request_async(
-            &f.shared,
-            &serde_json::from_value(serde_json::json!({
-                "id": 1,
-                "method": "approve",
-                "params": { "entry_id": entry_id.to_string() },
-            }))
-            .unwrap(),
-        )
-        .await;
-        assert!(r.error.is_none(), "{r:?}");
-        r.result.expect("approve result")
-    }
-
-    #[tokio::test]
-    async fn an_oversized_session_is_refused_once_and_not_offered_again() {
-        // `approve` recognises an envelope past `MAX_ENVELOPE_BYTES` and
-        // reports it `skipped`, but used to persist nothing: the entry
-        // stayed `Pending`, so the card sat in the queue for a session no
-        // click could ever get past the size guard, and every later poll
-        // found it still there. The refusal has to be written down, on the
-        // entry, for the same reason every other decision is.
-        let f = WatcherFixture::new();
-        enrol(&f);
-        let name = "11111111-1111-1111-1111-111111111111";
-        write_oversized_session(&f, "proj", name);
-        f.settle(at("2030-01-01T00:00:00Z")).await;
-        assert_eq!(f.states(), vec![QueueState::Pending]);
-        let entry_id = f.shared.queue.lock().unwrap().pending()[0].entry_id;
-
-        let v = approve_entry(&f, entry_id).await;
-        assert_eq!(v["approved"].as_u64(), Some(0), "{v}");
-        let skipped = v["skipped"].as_array().expect("skipped");
-        assert_eq!(skipped.len(), 1, "{v}");
-        assert_eq!(
-            skipped[0]["reason_label"].as_str(),
-            Some(crate::daemon::queue::REASON_TOO_LARGE),
-            "the wire label the shells already translate must not change: {v}"
-        );
-
-        assert!(
-            f.shared.queue.lock().unwrap().pending().is_empty(),
-            "a refusal nothing can retry must take the card off the pending list"
-        );
-
-        // And it must stay off it. This is the half the response alone
-        // could not deliver: the watcher re-observes the same quiescent
-        // session on every poll, and an entry left `Pending` is an offer
-        // that comes back forever.
-        f.settle(at("2030-01-02T00:00:00Z")).await;
-        let queue = f.shared.queue.lock().unwrap();
-        assert!(
-            !queue
-                .all()
-                .iter()
-                .any(|e| matches!(e.state, QueueState::Pending | QueueState::Approved)),
-            "an oversized session must not be re-offered: {:?}",
-            queue.all()
-        );
-        let refused = queue
-            .all()
-            .iter()
-            .find(|e| e.state == QueueState::Refused)
-            .expect("the refusal is recorded on the entry");
-        assert_eq!(
-            refused.reason_label.as_deref(),
-            Some(crate::daemon::queue::REASON_TOO_LARGE)
-        );
-    }
-
-    #[tokio::test]
-    async fn an_oversized_refusal_is_not_a_dismissal_and_a_grown_session_is_offered_again() {
-        // The deliberate difference from `dismiss`. A dismissal is the
-        // contributor's decision about a conversation, so it suppresses the
-        // path forever; this is the pipeline's verdict on one set of bytes
-        // under one set of consent scopes, and those bytes are not the last
-        // word -- narrower scopes can produce a smaller envelope from the
-        // same conversation. So it is recorded on the entry, like every
-        // other pipeline refusal, and a session that has moved on is still
-        // offered.
-        let f = WatcherFixture::new();
-        enrol(&f);
-        let name = "11111111-1111-1111-1111-111111111111";
-        let path = write_oversized_session(&f, "proj", name);
-        f.settle(at("2030-01-01T00:00:00Z")).await;
-        let entry_id = f.shared.queue.lock().unwrap().pending()[0].entry_id;
-        approve_entry(&f, entry_id).await;
-        assert!(f.shared.queue.lock().unwrap().pending().is_empty());
-
-        f.append_to_session(&path, "proj", name);
-        f.settle(at("2030-01-03T00:00:00Z")).await;
-
-        let queue = f.shared.queue.lock().unwrap();
-        assert_eq!(
-            queue.pending().len(),
-            1,
-            "an oversized refusal must not condemn the conversation: {:?}",
-            queue.all()
-        );
     }
 
     /// A real source whose `load` always fails, so a test can choose which

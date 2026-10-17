@@ -585,7 +585,9 @@ struct TracesTreeView: View {
         // The core's tags for the row: a mission it fits, and its estimate
         // only while the daemon says to draw it.
         if let tags = store.rowTags[entry.entryId] {
-            NudgeRowTags(tags: tags)
+            // The mission tag is blanked while missions are hidden; the
+            // estimate keeps its own switch.
+            NudgeRowTags(tags: tags.showing(missions: model.missionsShown))
         }
     }
 

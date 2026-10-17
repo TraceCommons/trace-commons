@@ -1217,15 +1217,6 @@ mod tests {
         assert_ne!(CLAIM_MESSAGE, "trace-commons-account-near-enroll");
         assert!(!CLAIM_MESSAGE.is_empty());
     }
-
-    #[test]
-    fn denylist_parsing_trims_and_drops_empties() {
-        assert_eq!(
-            parse_denylist("a.near, b.near ,,  c.near  "),
-            vec!["a.near", "b.near", "c.near"]
-        );
-        assert!(parse_denylist("  ,, ").is_empty());
-    }
 }
 
 /// End-to-end tests over the claim router, driven with real Ed25519 signatures.

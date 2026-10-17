@@ -15,7 +15,7 @@ use crate::{
             SessionState, SessionView,
         },
         signin,
-        terminal::TerminalHandle,
+        terminal::{self, TerminalApp, TerminalHandle, TerminalSetting},
     },
 };
 use serde::Deserialize;
@@ -31,6 +31,12 @@ pub struct ManagedService {
     /// Proxies the daemon hosts for sessions on the NEAR AI sign-in, by
     /// session id. Only the daemon holds the sign-in credential.
     routes: std::collections::HashMap<Uuid, ManagedRoute>,
+    /// Which terminal apps are installed. A field so tests answer it
+    /// without asking the OS; asked through `installed_cache`.
+    installed_terminals: fn() -> Vec<TerminalApp>,
+    /// The last answer, reused for a short window so a snapshot does not
+    /// start a probe process each time a shell asks.
+    installed_cache: terminal::InstalledCache,
     /// Brings a session's window to the front. A field so tests can record
     /// the call rather than drive a real terminal.
     focus: fn(&TerminalHandle) -> Result<(), ManagedError>,
@@ -58,8 +64,18 @@ impl ManagedService {
             config_dir: store.dir().to_path_buf(),
             secrets: SecretStore::new(store),
             routes: std::collections::HashMap::new(),
+            installed_terminals: terminal::installed,
+            installed_cache: terminal::InstalledCache::default(),
             focus: crate::managed::terminal::focus,
         })
+    }
+
+    /// The installed terminal apps, from the cache when it is fresh and
+    /// holds `launching`.
+    fn installed_terminals(&mut self, launching: Option<TerminalApp>) -> Vec<TerminalApp> {
+        let probe = self.installed_terminals;
+        self.installed_cache
+            .get(std::time::Instant::now(), launching, probe)
     }
 
     /// The account a launch request names: the NEAR AI sign-in's entry
@@ -163,8 +179,14 @@ impl ManagedService {
             .ok_or(ManagedError::NotFound)
     }
 
-    /// `sign_in` says only whether the daemon holds a NEAR AI sign-in.
-    fn handle(&mut self, request: &Request, sign_in: bool) -> Result<Value, ManagedError> {
+    /// `sign_in` says only whether the daemon holds a NEAR AI sign-in;
+    /// `choice` is the terminal the settings name.
+    fn handle(
+        &mut self,
+        request: &Request,
+        sign_in: bool,
+        choice: TerminalSetting,
+    ) -> Result<Value, ManagedError> {
         match request.method.as_str() {
             "managed_snapshot" => {
                 let mut sessions = self.sessions.views()?;
@@ -181,8 +203,21 @@ impl ManagedService {
                 .collect::<Vec<_>>();
                 let defaults =
                     signin::defaults(saved, sign_in, |tool| self.accounts.generation(tool));
+                // The offered apps found here, for a shell's picker.
+                let choices: Vec<Value> = self
+                    .installed_terminals(None)
+                    .into_iter()
+                    .map(|app| json!({"id":app.id(),"name":app.name()}))
+                    .collect();
+                // Off macOS, with no offered terminal found there is nothing
+                // to choose and nothing to open: Launch stays off and the
+                // shells show their "unavailable" line, rather than a
+                // refusal pointing at a picker that is not drawn. macOS
+                // always has Terminal, so a failed probe never dims it.
+                let terminal_launch = terminal::launch_available()
+                    && (cfg!(target_os = "macos") || !choices.is_empty());
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":crate::managed::terminal::destination().is_some(),"terminal_destination":crate::managed::terminal::destination()}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"managed_launch":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
                 )
             }
             "managed_account_add" => {
@@ -221,6 +256,7 @@ impl ManagedService {
                 if p.save_default {
                     return Err(ManagedError::InvalidRequest);
                 }
+                verify_visible_version(&self.profiles, &account)?;
                 Ok(json!(self.sessions.prepare(p, &account)?))
             }
             "managed_terminal_launch" => {
@@ -231,11 +267,18 @@ impl ManagedService {
                     ticket: String,
                 }
                 let p: Params = parse(request)?;
-                self.sessions.validate_ticket(p.session_id, &p.ticket)?;
-                let window =
-                    crate::managed::terminal::launch(&self.config_dir, p.session_id, &p.ticket)?;
+                let cwd = self.sessions.launch_cwd(p.session_id, &p.ticket)?;
+                let installed = self.installed_terminals(choice.app());
+                let window = terminal::launch(
+                    choice,
+                    &installed,
+                    &self.config_dir,
+                    &cwd,
+                    p.session_id,
+                    &p.ticket,
+                )?;
                 self.sessions.opened_in_terminal(p.session_id, window)?;
-                Ok(json!({"opened":true,"destination":crate::managed::terminal::destination()}))
+                Ok(json!({"opened":true,"destination":terminal::destination(choice)}))
             }
             "managed_launch_redeem" => {
                 let p: RedeemParams = parse(request)?;
@@ -355,6 +398,7 @@ impl ManagedService {
                 if self.sessions.holds_profile(p.account_id) {
                     return Err(ManagedError::Conflict);
                 }
+                verify_visible_version(&self.profiles, &account)?;
                 let request = LaunchRequest {
                     model: None,
                     collect_traces: false,
@@ -413,6 +457,21 @@ fn sign_in_key(shared: &DaemonShared) -> Option<String> {
         .map(|c| c.key.clone())
 }
 
+/// The terminal the settings name, read per request like the sign-in.
+fn terminal_choice(shared: &DaemonShared) -> TerminalSetting {
+    shared
+        .settings
+        .lock()
+        .map(|s| s.managed_terminal)
+        .unwrap_or(TerminalSetting::Unrecognized)
+}
+
+/// The terminal choice changed: move the revision so every shell re-reads
+/// the snapshot, whose destination and picker follow it.
+pub fn terminal_changed(shared: &DaemonShared) {
+    let _ = with_service(shared, |service| service.sessions.changed());
+}
+
 fn sign_in_present(shared: &DaemonShared) -> bool {
     shared
         .settings
@@ -469,9 +528,10 @@ fn respond(request: &Request, result: Result<Value, Refusal>) -> Response {
 /// requests its shutdown; the asynchronous entry also awaits it.
 pub fn handle(shared: &DaemonShared, request: &Request) -> Response {
     let sign_in = sign_in_present(shared);
+    let choice = terminal_choice(shared);
     let mut ended = vec![];
     let result = with_service(shared, |service| {
-        let value = service.handle(request, sign_in);
+        let value = service.handle(request, sign_in, choice);
         ended = service.take_routes(false);
         value
     });
@@ -487,9 +547,10 @@ pub async fn handle_async(shared: &DaemonShared, request: &Request) -> Response 
         return redeem_async(shared, request).await;
     }
     let sign_in = sign_in_present(shared);
+    let choice = terminal_choice(shared);
     let mut ended = vec![];
     let result = with_service(shared, |service| {
-        let value = service.handle(request, sign_in);
+        let value = service.handle(request, sign_in, choice);
         ended = service.take_routes(false);
         value
     });
@@ -500,7 +561,8 @@ pub async fn handle_async(shared: &DaemonShared, request: &Request) -> Response 
 }
 
 /// The daemon reads the sign-in here, at launch time, and gives it only to
-/// the session's proxy. The launcher is told a loopback port, nothing else.
+/// the session's proxy. The launcher is told a loopback port and the model
+/// the proxy pinned, nothing else.
 async fn redeem_async(shared: &DaemonShared, request: &Request) -> Response {
     let p: RedeemParams = match parse(request) {
         Ok(p) => p,
@@ -531,6 +593,7 @@ async fn redeem_async(shared: &DaemonShared, request: &Request) -> Response {
     let result = with_service(shared, |service| match started {
         Ok(route) => {
             context.route_port = Some(route.port());
+            context.route_model = Some(route.model().to_owned());
             service.routes.insert(p.session_id, route);
             Ok(json!(context))
         }
@@ -587,6 +650,23 @@ pub async fn sweep(shared: &DaemonShared, now: chrono::DateTime<chrono::Utc>) {
     }
 }
 
+/// The check before a ticket is issued, against the executable this
+/// process can see. The tool runs where the helper runs: a CLI launch from
+/// a terminal whose PATH holds a tool the daemon cannot see is not refused
+/// here, because the helper resolves and version-checks it there before
+/// starting it (`supervisor::redeem_and_run`). One the daemon does find is
+/// checked now, so an unsupported version is refused before a ticket.
+fn verify_visible_version(
+    profiles: &NativeProfiles,
+    account: &AccountView,
+) -> Result<(), ManagedError> {
+    match find_native(account.tool) {
+        Ok(native) => profiles.verify_version(account, &native),
+        Err(ManagedError::ToolUnavailable) => Ok(()),
+        Err(other) => Err(other),
+    }
+}
+
 fn label(error: ManagedError) -> &'static str {
     match error {
         ManagedError::Conflict => "managed-conflict",
@@ -600,6 +680,7 @@ fn label(error: ManagedError) -> &'static str {
         ManagedError::DaemonUnavailable => "managed-daemon-unavailable",
         ManagedError::LaunchUnknown => "managed-launch-unknown",
         ManagedError::InvalidRequest => "managed-invalid-request",
+        ManagedError::TerminalNotFound => "managed-terminal-not-found",
     }
 }
 
@@ -611,7 +692,8 @@ mod tests {
     fn service() -> (tempfile::TempDir, ConfigStore, ManagedService) {
         let home = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
-        let service = ManagedService::open(&store).unwrap();
+        let mut service = ManagedService::open(&store).unwrap();
+        service.installed_terminals = || TerminalApp::offered().to_vec();
         (home, store, service)
     }
 
@@ -621,6 +703,16 @@ mod tests {
         params: Value,
         sign_in: bool,
     ) -> Result<Value, ManagedError> {
+        call_with(service, method, params, sign_in, TerminalSetting::default())
+    }
+
+    fn call_with(
+        service: &mut ManagedService,
+        method: &str,
+        params: Value,
+        sign_in: bool,
+        choice: TerminalSetting,
+    ) -> Result<Value, ManagedError> {
         service.handle(
             &Request {
                 id: 1,
@@ -628,6 +720,7 @@ mod tests {
                 params,
             },
             sign_in,
+            choice,
         )
     }
 
@@ -717,14 +810,14 @@ mod tests {
         let with = call(&mut service, "managed_snapshot", json!({}), true).unwrap();
         assert_eq!(with["capabilities"]["near_ai_signin"], true);
         let entries = with["sign_in_accounts"].as_array().unwrap();
-        assert_eq!(entries.len(), 2);
-        for (entry, tool) in entries.iter().zip(["claude", "codex"]) {
+        assert_eq!(entries.len(), 3);
+        for (entry, tool) in entries.iter().zip(["claude", "codex", "opencode"]) {
             assert_eq!(entry["tool"], tool);
             assert_eq!(entry["connection"], "near_ai_signin");
             assert_eq!(entry["auth_state"], "ready");
         }
         let defaults = with["defaults"].as_array().unwrap();
-        assert_eq!(defaults.len(), 2);
+        assert_eq!(defaults.len(), 3);
         assert!(defaults.iter().all(|d| d["connection"] == "near_ai_signin"));
         // Derived, not saved.
         assert_eq!(with["accounts"], json!([]));
@@ -747,13 +840,18 @@ mod tests {
         service.accounts.select(selection, Generation(0)).unwrap();
         let snapshot = call(&mut service, "managed_snapshot", json!({}), true).unwrap();
         let defaults = snapshot["defaults"].as_array().unwrap();
-        assert_eq!(defaults.len(), 2);
+        assert_eq!(defaults.len(), 3);
         let claude = defaults.iter().find(|d| d["tool"] == "claude").unwrap();
         assert_eq!(claude["account_id"], json!(saved.id));
         let codex = defaults.iter().find(|d| d["tool"] == "codex").unwrap();
         assert_eq!(
             codex["account_id"],
             json!(signin::account_id(ToolId::Codex))
+        );
+        let opencode = defaults.iter().find(|d| d["tool"] == "opencode").unwrap();
+        assert_eq!(
+            opencode["account_id"],
+            json!(signin::account_id(ToolId::Opencode))
         );
         // Signed out, the saved default stands alone.
         let snapshot = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
@@ -780,7 +878,7 @@ mod tests {
             )
             .unwrap();
         let snapshot = call(&mut service, "managed_snapshot", json!({}), true).unwrap();
-        assert_eq!(snapshot["sign_in_accounts"].as_array().unwrap().len(), 2);
+        assert_eq!(snapshot["sign_in_accounts"].as_array().unwrap().len(), 3);
         let defaults = snapshot["defaults"].as_array().unwrap();
         assert_eq!(defaults.len(), 3);
         let opencode = defaults.iter().find(|d| d["tool"] == "opencode").unwrap();
@@ -879,6 +977,30 @@ mod tests {
         );
     }
 
+    /// OpenCode starts on the sign-in like the others, with no model: the
+    /// proxy pins one at redeem. A request that names a model is refused.
+    #[test]
+    fn opencode_starts_on_the_sign_in_without_a_model() {
+        let (home, _store, mut service) = service();
+        let mut named = launch(ToolId::Opencode, home.path());
+        named["model"] = json!("gpt-5");
+        assert_eq!(
+            call(&mut service, "managed_launch_prepare", named, true),
+            Err(ManagedError::InvalidRequest)
+        );
+        let prepared = prepare(&mut service, ToolId::Opencode, home.path());
+        let (context, host) = service
+            .redeem(
+                prepared.session_id,
+                prepared.ticket.as_deref().unwrap(),
+                true,
+            )
+            .unwrap();
+        assert!(host);
+        assert_eq!(context.session.tool, ToolId::Opencode);
+        assert_eq!(context.session.model, None);
+    }
+
     #[test]
     fn a_signed_in_redeem_asks_its_caller_to_host_the_proxy() {
         let (home, _store, mut service) = service();
@@ -892,9 +1014,71 @@ mod tests {
             .unwrap();
         assert!(host);
         assert_eq!(context.route_port, None);
+        assert_eq!(context.route_model, None);
         assert_eq!(context.session.connection, ConnectionKind::NearAiSignIn);
         assert_eq!(context.session.account_label, "NEAR AI");
         assert!(service.take_routes(true).is_empty());
+    }
+
+    /// The snapshot names the chosen app and offers the installed ones, by
+    /// id and name; an unknown stored choice names none.
+    #[test]
+    fn the_snapshot_carries_the_terminal_choice_and_the_installed_apps() {
+        let (_home, _store, mut service) = service();
+        // This platform's last app, so the choice is not the default.
+        let chosen = *TerminalApp::offered().last().expect("an offered app");
+        let snapshot = call_with(
+            &mut service,
+            "managed_snapshot",
+            json!({}),
+            false,
+            TerminalSetting::from(chosen),
+        )
+        .unwrap();
+        let capabilities = &snapshot["capabilities"];
+        assert_eq!(capabilities["terminal_current"], chosen.id());
+        let offered: Vec<Value> = TerminalApp::offered()
+            .iter()
+            .map(|app| json!({"id":app.id(),"name":app.name()}))
+            .collect();
+        assert_eq!(capabilities["terminal_choices"], json!(offered));
+        // Named only where a helper ships beside the daemon; where one
+        // does, the name follows the choice.
+        if terminal::helper_path().is_ok() && terminal::launch_available() {
+            assert_eq!(capabilities["terminal_destination"], chosen.name());
+        }
+
+        let unknown = call_with(
+            &mut service,
+            "managed_snapshot",
+            json!({}),
+            false,
+            TerminalSetting::Unrecognized,
+        )
+        .unwrap();
+        assert_eq!(unknown["capabilities"]["terminal_current"], Value::Null);
+        assert_eq!(unknown["capabilities"]["terminal_destination"], Value::Null);
+    }
+
+    /// Off macOS, no offered terminal found means no Launch, rather than a
+    /// refusal pointing at a picker that is not drawn.
+    #[test]
+    fn no_terminal_found_turns_launch_off_except_on_macos() {
+        let (_home, _store, mut service) = service();
+        service.installed_terminals = Vec::new;
+        let snapshot = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
+        let capabilities = &snapshot["capabilities"];
+        assert_eq!(capabilities["terminal_choices"], json!([]));
+        let expected = cfg!(target_os = "macos") && terminal::launch_available();
+        assert_eq!(capabilities["terminal_launch"], expected);
+    }
+
+    #[test]
+    fn the_terminal_refusal_has_its_own_label() {
+        assert_eq!(
+            label(ManagedError::TerminalNotFound),
+            "managed-terminal-not-found"
+        );
     }
 
     static FOCUSED: std::sync::Mutex<Vec<TerminalHandle>> = std::sync::Mutex::new(vec![]);

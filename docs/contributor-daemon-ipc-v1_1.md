@@ -666,7 +666,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `managed_terminal` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -684,6 +684,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `nudge_opened` | `kind` (**required**: `idle_sessions`, `review_backlog` or `verdicts_landed`); `subject` (reserved, as above) | `opened: true` | sent only from the suggestion's own action, never for being shown; for `verdicts_landed` it acknowledges the news; local only; publishes `status_changed`; see "`status.nudge`" below |
 | `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
 | `set_menu_bar_mark_enabled` | `on` (**required**, boolean) | `menu_bar_mark_enabled` | the menu-bar news mark and halo switch; writes `menu_bar_mark_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
+| `set_managed_terminal` | `terminal` (**required**: one of this platform's ids -- macOS `terminal`, `ghostty`, `iterm2`; Windows `windows_terminal`; Linux `gnome_terminal`, `konsole`, `ghostty`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
 | `set_notifications_enabled` | `on` (**required**, boolean) | `notifications_enabled` | "Notifications from Trace Commons", the master switch; writes `notifications_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
 | `set_notify_kind` | `kind` (**required**: `digest`, `idle_sessions`, `verdicts_landed`, `weekly_recap` or `insights_tip`), `on` (**required**, boolean) | `kind`, `on` | one notification kind's switch; writes `notify.<kind>` through `set_settings`; answering `verdicts_landed` or `idle_sessions` ends that kind's one-time offer; publishes `status_changed` when it changes; see "Notification settings" below |
 | `subscribe` | `accepts[]` (optional: opt-in event names) | `subscribed: true`, plus `accepts[]` when the request carried `accepts`; then a `snapshot` event | see "Opt-in events" below |
@@ -4711,11 +4712,12 @@ Takes a JSON object whose top-level keys must come from
 `trajectory_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
 `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`,
-`notifications_enabled`, `menu_bar_mark_enabled`, `notify`,
+`settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`,
+`menu_bar_mark_enabled`, `notify`,
 `verdicts_offer_pending`, `idle_offer_pending`,
 `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`,
 `insights_context_threshold`, `insights_counter_pass`,
-`insights_recap_card_enabled` --
+`insights_recap_card_enabled`, `managed_terminal` --
 a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
@@ -4750,10 +4752,52 @@ row and the menu-bar mark -- on or off. It is the same setting `set_suggestions_
 and a change by either route publishes `status_changed`, because
 `status.nudge` reads it. See ["`status.nudge`"](#statusnudge).
 
+`settlement_estimate_enabled` (boolean, default `true`; a settings file
+written before the key existed loads `true`) is the settlement estimate's
+switch, "Estimate what traces on this Mac are worth". Off stops any scan in
+progress, deletes the estimate's feature cache, and drops
+`status.settlement_estimate`, publishing `settlement_estimate_changed` when
+it was present; on again starts a full scan. The estimate is made on this
+Mac and sends nothing about a trace anywhere. Any other JSON type is
+`bad_params` / `settings-invalid-value`.
+
+`missions_enabled` (boolean, default `false`; a settings file written
+before the key existed loads `false`) shows or hides missions (owner
+decision 2026-10-16: hidden for now). No shell offers a Settings row for it;
+it is set only through `set_settings`, and read back from `get_settings`.
+Off, the daemon does not fetch `GET /v1/activity-missions` and empties the
+catalogue it holds, so `status.nudge.mission_fit`,
+`status.idle_sessions.mission_fit`, `list_pending[].mission_fit` and the
+digest's idle mission clause are all absent; and `mission_catalogue`,
+`activity_missions_catalogue`, `activity_missions_status` and
+`mission_matches` are refused with `unavailable` / `missions-disabled`. The
+local mission-draft inbox is a C ABI function (`tc_mission_drafts_call`),
+not an IPC method, and does not consult the daemon; a shell hides it by
+this switch. On restores the
+behaviour from before the switch existed. A change publishes
+`status_changed`. Any other JSON type is `bad_params` /
+`settings-invalid-value`.
+
 `notifications_enabled`, `menu_bar_mark_enabled`, `notify`,
 `verdicts_offer_pending` and `idle_offer_pending` are the notification
 settings; see ["Notification settings"](#notification-settings) for their
 defaults and refusals.
+
+`managed_terminal` (string) is the terminal app a managed session opens
+in, one of this platform's ids and nothing else: on macOS `terminal`
+(the default), `ghostty` or `iterm2`; on Windows `windows_terminal` (the
+default); on Linux `gnome_terminal` (the default), `konsole` or
+`ghostty`. Another platform's id is refused like any other. Any other
+value, `null` included, is `bad_params` / `settings-invalid-value`; no app name, path or command is ever accepted. A
+settings file holding a value this build does not know loads it as
+unrecognized: `managed_snapshot` then reports no `terminal_current` and no
+`terminal_destination`, a launch is refused, and nothing falls back to
+the default. `set_managed_terminal` writes the same setting. The managed
+snapshot's `capabilities` carries `terminal_current` (the chosen id, or
+`null`), `terminal_choices` (`[{id, name}]` of the offered apps found on
+this computer; empty under Flatpak) and `terminal_destination` (the
+chosen app's name). A launch whose chosen app was not found is refused
+with `managed-terminal-not-found`.
 
 #### Notification settings
 
@@ -4770,8 +4814,9 @@ keeps them. `get_settings` reports them as stored.
   notification switch.
 - `notify` (object): one boolean per kind -- `digest` (N0, default `true`),
   `idle_sessions` (N1), `verdicts_landed` (N2), `weekly_recap` (N3, default
-  `false`, held for the gamification ruling) and `insights_tip` (N4, default
-  `false`, owner decision 25). One switch governs both the sentence folded
+  `false`, held for the gamification ruling), `insights_tip` (N4, default
+  `false`, owner decision 25) and `settlement_estimate` (N5, default `true`,
+  DRAFT, NEEDS APPROVAL). One switch governs both the sentence folded
   into a due digest and the standalone notification. Revision 2's
   `digest_enabled` is `notify.digest`; there is no `digest_extras_enabled`.
   A key this daemon does not know (a later kind written by a newer build)
@@ -7514,6 +7559,7 @@ relaxation of origin/CORS/CSP controls.
 | `managed_changed` | a saved model account or managed session changed (see `docs/managed-sessions.md`) | `{revision}` |
 | `usage_changed` | additive: the poll tick's ledger read added at least one call while the `insights_ledger_feed` setting is on | `{}` -- see below |
 | `history_changed` | the daemon's history poll found verdicts that are new against its own high-water mark (nudge S4); never on the silent first poll; always followed by `status_changed` | `{newly_accepted, newly_held, newly_final}` -- counts from that poll alone; see below |
+| `settlement_estimate_changed` | additive: `status.settlement_estimate` changed as a reader draws it -- its rounded band, its "up to" form, or the table or pricing it came from -- or it appeared or went away (a fetch that cleared the table, the `settlement_estimate_enabled` switch turned off). A re-scan that moves only the unrounded total publishes nothing; always followed by `status_changed` | `{}` |
 | `reengage_due` | **opt-in**: the attention arbiter chose one standalone re-engagement notification this tick; sent only to a subscriber that named it in `subscribe`'s `accepts` | `{kind, title, body, actions: [{id, label}]}` -- see "Re-engagement notifications" below |
 
 `inference_call_added` is published where the daemon already reads IronWire's

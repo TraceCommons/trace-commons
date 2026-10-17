@@ -17381,6 +17381,23 @@ fn encode_pipeline_artifact_bytes(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
     }))?)
 }
 
+/// The bytes inside a P1 wrapper, or `None` when `plaintext` is not one.
+/// For a reader that loads a submission's latest active envelope object,
+/// which is a bare envelope for a gate-path submission and this wrapper for
+/// one a pipeline run has stored. A wrapper that names the schema but does
+/// not decode is refused with the same safe label.
+pub fn pipeline_artifact_inner_bytes(plaintext: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(plaintext) else {
+        return Ok(None);
+    };
+    if value.get("schema").and_then(serde_json::Value::as_str)
+        != Some("trace_commons.pipeline_artifact_bytes.v1")
+    {
+        return Ok(None);
+    }
+    decode_pipeline_artifact_bytes(&value).map(Some)
+}
+
 /// Decodes the P1 wrapper back to the exact bytes it was built from. Refuses
 /// a wrong `schema` or a missing/invalid `bytes_base64` with a safe label,
 /// never a message built from the stored value.

@@ -110,4 +110,46 @@ final class NudgeNotificationTests: XCTestCase {
         XCTAssertEqual(Notifier.digestButtons(copy).map(\.label), ["Review", "Not now"])
         XCTAssertEqual(Notifier.digestButtons(nil), [])
     }
+
+
+    private static var settlement: DaemonData.ReengageDue {
+        DaemonData.ReengageDue(
+            kind: "settlement_estimate", title: "Estimate for traces on this Mac",
+            body: "About $3.50 to $9 of inference in traces on this Mac.",
+            actions: [.init(id: "review", label: "Review traces"), .init(id: "not_now", label: "Not now")])
+    }
+
+    func testSettlementNotificationPlansAndNotNowOnlyDismisses() async throws {
+        let plan = try XCTUnwrap(Notifier.plan(Self.settlement))
+        XCTAssertEqual(plan.buttons.map(\.label), ["Review traces", "Not now"])
+        XCTAssertEqual(plan.buttons.map(\.opensApp), [true, false])
+        XCTAssertEqual(plan.userInfo[Notifier.kindKey], "settlement_estimate")
+        // Its own category: it does not share the idle set's identifier.
+        XCTAssertNotEqual(plan.categoryIdentifier, try XCTUnwrap(Notifier.plan(Self.idle)).categoryIdentifier)
+        // Not now from the notification resolves to no intent, so no request.
+        XCTAssertNil(Notifier.nudgeIntent(
+            actionIdentifier: "trace-commons.nudge.not_now", userInfo: plan.userInfo))
+        XCTAssertEqual(
+            Notifier.nudgeIntent(actionIdentifier: "trace-commons.nudge.review", userInfo: plan.userInfo),
+            .review(.settlementEstimate))
+        // The in-app Not now and Review send nothing to the daemon.
+        let client = SampleDaemonClient(.normalDay)
+        for intent in [NudgeSurface.Intent.notNow(.settlementEstimate), .review(.settlementEstimate)] {
+            try await NudgeSurface.send(NudgeSurface.effect(intent), through: client)
+        }
+        XCTAssertEqual(client.nudgeCalls, [])
+        XCTAssertEqual(NudgeSurface.effect(.review(.settlementEstimate)).destination, .traces(idleOnly: false))
+        XCTAssertNil(NudgeSurface.effect(.notNow(.settlementEstimate)).destination)
+    }
+
+    func testLaunchRegistersTheSettlementButtonsUnderTheirOwnCategory() {
+        let copy = NudgeCopy(table: [
+            "NOTIFY_ACTION_REVIEW_IDLE": "Review", "NOTIFY_ACTION_NOT_NOW": "Not now",
+            "NOTIFY_SETTLEMENT_ACTION_REVIEW": "Review traces", "NOTIFY_SETTLEMENT_ACTION_NOT_NOW": "Not now",
+        ])
+        let launch = Notifier.launchCategories(copy)
+        let ids = launch.map(\.identifier)
+        XCTAssertEqual(Set(ids).count, ids.count)
+        XCTAssertEqual(launch.last?.buttons.map(\.label), ["Review traces", "Not now"])
+    }
 }

@@ -1704,6 +1704,11 @@ struct AppState {
     /// serves: the operator-installed one, validated at boot, else the
     /// protocol's built-in table. Never empty.
     credit_estimate_table: Arc<trace_commons_protocol::local_credit_estimate::LocalEstimateTable>,
+    /// The settlement table `GET /v1/credit-estimate/settlement-table`
+    /// serves: the operator-installed one, validated at boot. `None` when
+    /// none is installed; the route then answers 404. No built-in.
+    credit_settlement_table:
+        Option<Arc<trace_commons_protocol::settlement_estimate::SettlementEstimateTable>>,
     inference_connection_catalog:
         Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
@@ -5034,6 +5039,7 @@ impl AppState {
             inference_connection_catalog: Arc::new(inference_connection_routes::catalog_from_env()?),
             activity_missions_policy: activity_missions::policy_from_env()?,
             credit_estimate_table: credit_estimate::table_from_env()?,
+            credit_settlement_table: credit_estimate::settlement_table_from_env()?,
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -8638,6 +8644,12 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/credit-estimate/table",
             get(credit_estimate::table_handler),
+        )
+        // Same reason: the settlement table is public, non-personal data.
+        // 404 when the operator installed none.
+        .route(
+            trace_commons_protocol::settlement_estimate::SETTLEMENT_TABLE_PATH,
+            get(credit_estimate::settlement_table_handler),
         )
         .route(
             "/v1/traces",
@@ -62941,7 +62953,7 @@ fn visible_submission_records_scoped(
 // `list_account_trace_submissions_keyset`), so this function is not called on the
 // request path; it is retained as the executable reference for the predicate and
 // — crucially — to anchor the Hardening-C type-level surface separation, asserted
-// by the `compile_fail` doctests above and the runtime witness test. Hence the
+// by the `compile_fail` doctests above. Hence the
 // `#[allow(dead_code)]`: removing the function would drop the compile-fail
 // guarantee, not just an unused helper.
 #[allow(dead_code)]

@@ -803,6 +803,32 @@ where
             safe_kind: safe_kind.into(),
         }
     }
+
+    /// Decrypts a submission's stored envelope object for the passes that
+    /// read it back (perplexity re-score, dedup re-derivation, estimate
+    /// features): the same DEK unwrap and AEAD decrypt as `evaluate_trace`,
+    /// then the pipeline artifact wrapper removed when there is one. A
+    /// pipeline run stores its envelope inside that wrapper; a gate-path
+    /// submission stores it bare.
+    fn decrypt_stored_envelope(
+        &self,
+        tenant_ctx: &TenantCtx,
+        envelope_ciphertext: &[u8],
+        wrapped_dek: &WrappedDek,
+        object_kind: TraceArtifactKind,
+    ) -> anyhow::Result<Vec<u8>> {
+        let ciphertext = decode_envelope_ciphertext(envelope_ciphertext);
+        let ctx = KekContext {
+            tenant_storage_ref: tenant_ctx.tenant_storage_ref().to_string(),
+            artifact_kind: object_kind,
+        };
+        let dek = self.decryptor.unwrap_dek(wrapped_dek, &ctx)?;
+        let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
+        Ok(
+            crate::versioned_pipeline::pipeline_artifact_inner_bytes(&plaintext)?
+                .unwrap_or(plaintext),
+        )
+    }
 }
 
 impl EnclaveGateService<MockPerplexityScorer, MockEmbedder, MockVectorIndex> {
@@ -922,14 +948,14 @@ where
     ) -> anyhow::Result<PerplexityOnlyGateOutcome> {
         // Identical decrypt path to `evaluate_trace` — same DEK unwrap under the
         // canonical KEK context and the same AEAD decrypt — so the plaintext fed
-        // to the scorer is byte-identical to a full evaluation.
-        let ciphertext = decode_envelope_ciphertext(envelope_ciphertext);
-        let ctx = KekContext {
-            tenant_storage_ref: tenant_ctx.tenant_storage_ref().to_string(),
-            artifact_kind: object_kind.clone(),
-        };
-        let dek = self.decryptor.unwrap_dek(wrapped_dek, &ctx)?;
-        let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
+        // to the scorer is byte-identical to a full evaluation. A pipeline
+        // run's stored object is unwrapped to the envelope the pipeline scored.
+        let plaintext = self.decrypt_stored_envelope(
+            tenant_ctx,
+            envelope_ciphertext,
+            wrapped_dek,
+            object_kind,
+        )?;
 
         // Perplexity-only: chunk + score + aggregate with the SAME orchestrator
         // config, but no embedding, no nearest-neighbor query, no index insert.
@@ -953,14 +979,15 @@ where
         // Exactly what `evaluate_trace` does up to the hash: the same DEK
         // unwrap under the canonical KEK context, the same AEAD decrypt, the
         // same render. The orchestrator is not consulted at all -- no
-        // scoring, no embedding, no index read or write.
-        let ciphertext = decode_envelope_ciphertext(envelope_ciphertext);
-        let ctx = KekContext {
-            tenant_storage_ref: tenant_ctx.tenant_storage_ref().to_string(),
-            artifact_kind: object_kind.clone(),
-        };
-        let dek = self.decryptor.unwrap_dek(wrapped_dek, &ctx)?;
-        let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
+        // scoring, no embedding, no index read or write. A pipeline run's
+        // stored object is unwrapped, so the hash is over its envelope and
+        // not over the wrapper's base64.
+        let plaintext = self.decrypt_stored_envelope(
+            tenant_ctx,
+            envelope_ciphertext,
+            wrapped_dek,
+            object_kind,
+        )?;
         Ok(DedupSignalDerivation {
             simhash: algorithm.simhash(&dedup_canonical_text(&plaintext)) as i64,
             signal_version: dedup_signal_version_for(algorithm),
@@ -976,16 +1003,16 @@ where
     ) -> anyhow::Result<LocalEstimateFeatures> {
         // The decrypt `derive_dedup_signal` does; the orchestrator is not
         // consulted at all.
-        let ciphertext = decode_envelope_ciphertext(envelope_ciphertext);
-        let ctx = KekContext {
-            tenant_storage_ref: tenant_ctx.tenant_storage_ref().to_string(),
-            artifact_kind: object_kind.clone(),
-        };
-        let dek = self.decryptor.unwrap_dek(wrapped_dek, &ctx)?;
-        let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
-        // A parser error can quote the input, so it is replaced by a label.
+        let plaintext = self.decrypt_stored_envelope(
+            tenant_ctx,
+            envelope_ciphertext,
+            wrapped_dek,
+            object_kind,
+        )?;
+        // A parser error can quote the input, so it is replaced by a label
+        // built only from the schema side of the error.
         let envelope: TraceContributionEnvelope = serde_json::from_slice(&plaintext)
-            .map_err(|_| anyhow::anyhow!("EstimateFeaturesEnvelopeUnreadable"))?;
+            .map_err(|error| anyhow::anyhow!(estimate_envelope_unreadable_reason(&error)))?;
         Ok(LocalEstimateFeatures::from_envelope(&envelope))
     }
 
@@ -1023,6 +1050,81 @@ where
 
 /// If the bytes are valid base64, decode; otherwise treat them as raw.
 ///
+/// Prefix of every envelope parse failure from `derive_estimate_features`.
+/// Everything after it is built by [`estimate_envelope_unreadable_reason`]
+/// and is safe to log and return.
+pub const ESTIMATE_FEATURES_ENVELOPE_UNREADABLE: &str = "EstimateFeaturesEnvelopeUnreadable";
+
+/// The longest schema text a reason carries.
+const ESTIMATE_REASON_SCHEMA_TEXT_MAX: usize = 240;
+
+/// A content-free reason for an envelope that will not parse:
+/// `EstimateFeaturesEnvelopeUnreadable(<category>[ <kind>[ <schema text>]])`.
+///
+/// serde_json's message can quote the input (a found string, an unknown
+/// field or variant name), so only the schema side is kept: the name of a
+/// missing field, and the `expected ...` text, which serde writes from the
+/// type being parsed. The found value never appears.
+pub fn estimate_envelope_unreadable_reason(error: &serde_json::Error) -> String {
+    use serde_json::error::Category;
+    let category = match error.classify() {
+        Category::Io => "io",
+        Category::Syntax => "syntax",
+        Category::Data => "data",
+        Category::Eof => "eof",
+    };
+    if error.classify() != Category::Data {
+        return format!("{ESTIMATE_FEATURES_ENVELOPE_UNREADABLE}({category})");
+    }
+    let message = error.to_string();
+    // Drop serde's " at line N column M" suffix: a position, but not one
+    // that groups failures.
+    let message = match message.rfind(" at line ") {
+        Some(at) => &message[..at],
+        None => message.as_str(),
+    };
+    let schema_text = |text: &str| -> Option<String> {
+        let text = text.trim();
+        let safe = !text.is_empty()
+            && text
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || " _-`,.:".contains(c));
+        // ASCII only, so a byte cut is a character cut. A long field list
+        // is cut, not dropped: its head still names the type.
+        safe.then(|| text[..text.len().min(ESTIMATE_REASON_SCHEMA_TEXT_MAX)].to_string())
+    };
+    // serde writes the expected side last, after the found value.
+    let expected = message
+        .rfind(", expected ")
+        .and_then(|at| schema_text(&message[at + ", expected ".len()..]));
+    let detail = if let Some(rest) = message.strip_prefix("missing field ") {
+        // The field name comes from the type, not the input.
+        Some(match schema_text(rest) {
+            Some(name) => format!("missing_field {name}"),
+            None => "missing_field".to_string(),
+        })
+    } else {
+        [
+            ("unknown field ", "unknown_field"),
+            ("unknown variant ", "unknown_variant"),
+            ("invalid type: ", "invalid_type"),
+            ("invalid value: ", "invalid_value"),
+            ("invalid length ", "invalid_length"),
+            ("duplicate field ", "duplicate_field"),
+        ]
+        .iter()
+        .find(|(prefix, _)| message.starts_with(prefix))
+        .map(|(_, kind)| match &expected {
+            Some(expected) => format!("{kind} expected {expected}"),
+            None => (*kind).to_string(),
+        })
+    };
+    match detail {
+        Some(detail) => format!("{ESTIMATE_FEATURES_ENVELOPE_UNREADABLE}({category} {detail})"),
+        None => format!("{ESTIMATE_FEATURES_ENVELOPE_UNREADABLE}({category})"),
+    }
+}
+
 /// The artifact store persists ciphertext as base64, and the gate-worker route
 /// loads the artifact through `decrypt_artifact_json_with_kek` indirectly — by
 /// the time the gate worker hands us bytes, they may be either form depending
@@ -1054,6 +1156,78 @@ mod enclave_gate_service_tests {
     use crate::secrets::SecretsCrypto;
     use crate::trace_artifact_kek::{KekContext, LocalMasterKeyWrapper};
     use crate::trace_artifact_store::aead_encrypt_with_dek;
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct ReasonProbe {
+        kind: ReasonProbeKind,
+        count: u64,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum ReasonProbeKind {
+        Alpha,
+        Beta,
+    }
+
+    fn reason_for(json: &str) -> String {
+        let error = serde_json::from_str::<ReasonProbe>(json).expect_err("must not parse");
+        estimate_envelope_unreadable_reason(&error)
+    }
+
+    #[test]
+    fn an_unreadable_envelope_reason_names_the_schema_and_never_the_input() {
+        let cases = [
+            (
+                r#"{"kind":"alpha"}"#,
+                "EstimateFeaturesEnvelopeUnreadable(data missing_field `count`)",
+            ),
+            (
+                r#"{"kind":"SECRET_VARIANT","count":1}"#,
+                "EstimateFeaturesEnvelopeUnreadable(data unknown_variant expected `alpha` or `beta`)",
+            ),
+            (
+                r#"{"kind":"alpha","count":"SECRET text, expected nothing"}"#,
+                "EstimateFeaturesEnvelopeUnreadable(data invalid_type expected u64)",
+            ),
+            (
+                r#"{"kind":"alpha","count":1,"SECRET_FIELD":1}"#,
+                "EstimateFeaturesEnvelopeUnreadable(data unknown_field expected `kind` or `count`)",
+            ),
+            (
+                "not json SECRET",
+                "EstimateFeaturesEnvelopeUnreadable(syntax)",
+            ),
+            (
+                r#"{"kind":"alpha""#,
+                "EstimateFeaturesEnvelopeUnreadable(eof)",
+            ),
+        ];
+        for (json, want) in cases {
+            let reason = reason_for(json);
+            assert_eq!(reason, want, "{json}");
+            assert!(!reason.contains("SECRET"), "{reason}");
+            assert!(!reason.contains(" at line "), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_found_string_that_mimics_the_expected_text_is_not_reported() {
+        // The found value is quoted before serde's own ", expected ", so the
+        // last occurrence is serde's and the planted one is never read.
+        let error = serde_json::from_str::<ReasonProbe>(
+            r#"{"kind":"alpha","count":"a\"b, expected SECRET"}"#,
+        )
+        .expect_err("must not parse");
+        let reason = estimate_envelope_unreadable_reason(&error);
+        assert_eq!(
+            reason,
+            "EstimateFeaturesEnvelopeUnreadable(data invalid_type expected u64)"
+        );
+        assert!(!reason.contains("SECRET"), "{reason}");
+    }
 
     fn fixture_decryptor() -> Arc<dyn KmsKeyWrapper> {
         let crypto = SecretsCrypto::new(SecretString::new("a".repeat(32).into()))
@@ -1679,6 +1853,43 @@ mod enclave_gate_service_tests {
     /// The enclave path derives exactly what `evaluate_trace` stamps for the
     /// same envelope under v1, and the v2 value of the same render under v2,
     /// through the same decrypt path -- and touches no index.
+    /// The read-back passes (perplexity re-score and dedup re-derivation)
+    /// see a pipeline run's stored object as the envelope inside its
+    /// wrapper: a wrapped envelope scores and hashes exactly as the bare one.
+    #[test]
+    fn read_back_passes_see_through_the_pipeline_wrapper() {
+        use base64::Engine as _;
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
+        let tenant = TenantCtx::new("tenant-a");
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let plaintext = dedup_fixture_envelope("44444444-4444-4444-4444-444444444444");
+        let wrapper = serde_json::to_vec(&serde_json::json!({
+            "schema": "trace_commons.pipeline_artifact_bytes.v1",
+            "bytes_base64": base64::engine::general_purpose::STANDARD.encode(&plaintext),
+        }))
+        .unwrap();
+        let bare = aead_encrypt_with_dek(&dek, &plaintext).expect("encrypt bare");
+        let wrapped_object = aead_encrypt_with_dek(&dek, &wrapper).expect("encrypt wrapper");
+        let kind = || TraceArtifactKind::ContributionEnvelope;
+
+        let dedup = |ciphertext: &[u8]| {
+            svc.derive_dedup_signal(&tenant, ciphertext, &wrapped, kind(), DedupAlgorithm::V2)
+                .expect("dedup derivation")
+        };
+        assert_eq!(dedup(&wrapped_object), dedup(&bare));
+        assert_eq!(
+            dedup(&wrapped_object).simhash,
+            crate::dedup_simhash::trace_simhash_v2(&dedup_canonical_text(&plaintext)) as i64
+        );
+
+        let rescore = |ciphertext: &[u8]| {
+            svc.evaluate_trace_perplexity_only(&tenant, ciphertext, &wrapped, kind())
+                .expect("perplexity-only evaluation")
+        };
+        assert_eq!(rescore(&wrapped_object), rescore(&bare));
+    }
+
     #[test]
     fn enclave_derive_dedup_signal_matches_evaluate_trace_and_targets_either_algorithm() {
         let decryptor = fixture_decryptor();
@@ -1885,6 +2096,51 @@ mod enclave_gate_service_tests {
                 "got: {err}"
             );
         }
+    }
+
+    /// A pipeline run stores the envelope inside the pipeline artifact
+    /// wrapper. The features are the inner envelope's, the same as for the
+    /// bare envelope; a wrapper that does not decode is refused by label.
+    #[test]
+    fn enclave_derive_estimate_features_reads_through_the_pipeline_wrapper() {
+        use base64::Engine as _;
+        use trace_commons_protocol::trace_contribution::TraceContributionEventType as T;
+        let decryptor = fixture_decryptor();
+        let svc = EnclaveGateService::mock_with_decryptor(Arc::clone(&decryptor));
+        let tenant = TenantCtx::new("tenant-a");
+        let (dek, wrapped) = wrap_fixture_dek(decryptor.as_ref(), tenant.tenant_storage_ref());
+        let plaintext = estimate_fixture_envelope(&[
+            (T::UserMessage, "make the estimate test pass", None),
+            (T::ToolCall, "cat src/lib.rs", Some("bash")),
+        ]);
+        let derive = |bytes: &[u8]| {
+            let ciphertext = aead_encrypt_with_dek(&dek, bytes).expect("encrypt fixture");
+            svc.derive_estimate_features(
+                &tenant,
+                &ciphertext,
+                &wrapped,
+                TraceArtifactKind::ContributionEnvelope,
+            )
+        };
+        let bare = derive(&plaintext).expect("bare envelope");
+        let wrapper = serde_json::to_vec(&serde_json::json!({
+            "schema": "trace_commons.pipeline_artifact_bytes.v1",
+            "bytes_base64": base64::engine::general_purpose::STANDARD.encode(&plaintext),
+        }))
+        .unwrap();
+        assert_eq!(derive(&wrapper).expect("wrapped envelope"), bare);
+
+        let broken = serde_json::to_vec(&serde_json::json!({
+            "schema": "trace_commons.pipeline_artifact_bytes.v1",
+            "bytes_base64": "not base64 SECRET",
+        }))
+        .unwrap();
+        let message = format!("{:#}", derive(&broken).expect_err("broken wrapper"));
+        assert!(
+            message.contains("pipeline_artifact_wrapper_invalid"),
+            "{message}"
+        );
+        assert!(!message.contains("SECRET"), "{message}");
     }
 
     /// The enclave path decrypts inside the service and returns exactly the

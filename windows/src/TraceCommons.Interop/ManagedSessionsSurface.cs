@@ -14,21 +14,32 @@ public sealed record ManagedSession(
     [property: JsonPropertyName("account_id")] string AccountId,
     [property: JsonPropertyName("account_label")] string AccountLabel,
     [property: JsonPropertyName("project_label")] string ProjectLabel,
-    string State, string Purpose)
+    string State, string Purpose, string? Model = null,
+    [property: JsonPropertyName("collect_traces")] bool CollectTraces = false,
+    string Collection = "off")
 {
     [JsonIgnore] public bool HoldsAccount => State != "exited" && State != "failed";
 }
 
+/// <summary>A terminal a managed session can open in, as the daemon names
+/// it: its wire id and the app's own name.</summary>
+public sealed record ManagedTerminalChoice(string Id, string Name);
+public sealed record ManagedTool(string Tool, bool Installed,
+    [property: JsonPropertyName("install_url")] string InstallUrl);
+
 /// <param name="NearAiSignin">Whether the daemon holds a NEAR AI sign-in: a
 /// bool, never the credential. Absent from an older daemon, which reads as no.</param>
+/// <param name="TerminalCurrent">The chosen terminal's id; null from an older
+/// daemon, or for a stored choice the daemon does not know.</param>
+/// <param name="TerminalChoices">The terminals the daemon found on this
+/// computer; absent from an older daemon.</param>
 public sealed record ManagedCapabilities(
     [property: JsonPropertyName("managed_launch")] bool ManagedLaunch,
     [property: JsonPropertyName("terminal_launch")] bool TerminalLaunch,
     [property: JsonPropertyName("terminal_destination")] string? TerminalDestination,
-    [property: JsonPropertyName("near_ai_signin")] bool NearAiSignin = false);
-
-public sealed record ManagedTool(string Tool, bool Installed,
-    [property: JsonPropertyName("install_url")] string InstallUrl);
+    [property: JsonPropertyName("near_ai_signin")] bool NearAiSignin = false,
+    [property: JsonPropertyName("terminal_current")] string? TerminalCurrent = null,
+    [property: JsonPropertyName("terminal_choices")] ManagedTerminalChoice[]? TerminalChoices = null);
 
 /// <param name="SignInAccounts">One entry per tool, derived from the NEAR AI
 /// sign-in and never saved. Empty, or absent from an older daemon, without one.</param>
@@ -38,29 +49,51 @@ public sealed record ManagedSnapshot(
     Dictionary<string, string> Copy,
     [property: JsonPropertyName("sign_in_accounts")] ManagedAccount[]? SignInAccounts = null, ManagedTool[]? Tools = null)
 {
-    // Older snapshots retain their original two-tool surface. New inventories
+    /// <summary>The tools this shell launches, in the order the Add and
+    /// Launch dialogs offer them. OpenCode is one since #1418.</summary>
+    public static readonly string[] LaunchedTools = ["claude", "codex", "opencode"];
+    // Older snapshots retain every launched tool. New inventories
     // must positively report an installed managed tool.
-    public bool CanLaunch(string tool) => ManagedSignIn.Tools.Contains(tool) &&
+    public bool CanLaunch(string tool) => LaunchedTools.Contains(tool) &&
         (Tools is null || Tools.Any(t => t.Tool == tool && t.Installed));
-    public string[] SetupTools => ManagedSignIn.Tools.Where(CanLaunch).ToArray();
+    public string[] SetupTools => LaunchedTools.Where(CanLaunch).ToArray();
     /// <summary>The tools the install block offers: every tool this shell
     /// launches, and only while none is installed (Ron, 2026-10-15).</summary>
     public ManagedTool[] InstallTools => Tools is null || SetupTools.Length > 0 ? []
-        : Tools.Where(t => ManagedSignIn.Tools.Contains(t.Tool)).ToArray();
+        : Tools.Where(t => LaunchedTools.Contains(t.Tool)).ToArray();
     /// <summary>Whether the caption and Install belong on an account row: the
     /// inventory reports the tool missing. Keys on installation, not on
     /// launchability, so an installed OpenCode account is not "missing".</summary>
     public bool ToolMissing(string tool) =>
         Tools is not null && !Tools.Any(t => t.Tool == tool && t.Installed);
-    /// <summary>Reconnect is hidden, not disabled, while the tool is missing.</summary>
+    /// <summary>Reconnect is hidden, not disabled, while the tool is missing.
+    /// OpenCode has no subscription, so it never offers one.</summary>
     public bool OffersReconnect(ManagedAccount account) =>
-        account.Connection == "subscription" && CanLaunch(account.Tool);
+        account.Connection == "subscription" && ManagedSignIn.Tools.Contains(account.Tool) && CanLaunch(account.Tool);
     /// <summary><c>tool_unavailable</c> with <c>{tool}</c> filled with the tool's name.</summary>
     public string ToolUnavailable(string tool) => Text("tool_unavailable").Replace("{tool}", Text(tool));
+    /// <summary>The tools to offer an update for after an unsupported-version
+    /// refusal: the attempted tool, or every installed one for an old payload.</summary>
+    public ManagedTool[] VersionRecoveryTools(string? attempted) => (Tools ?? []).Where(t => t.Installed && (attempted is null || t.Tool == attempted)).ToArray();
+    /// <summary>Connections offered when adding an account. OpenCode has no
+    /// subscription and no NEAR AI sign-in entry, so it keeps its NEAR AI key;
+    /// Claude Code and Codex follow <see cref="ManagedSignIn.ConnectionOptions"/>.</summary>
+    public static string[] Connections(string tool, bool signedIn = false) =>
+        tool == "opencode" ? ["api_key", "near_ai"] : ManagedSignIn.ConnectionOptions(signedIn);
     public string Text(string key) => Copy.GetValueOrDefault(key, string.Empty);
 
     /// <summary>Whether the daemon holds a NEAR AI sign-in.</summary>
     [JsonIgnore] public bool NearAiSignedIn => Capabilities.NearAiSignin;
+
+    /// <summary>The terminals the Open sessions in picker offers: the ones
+    /// the daemon found, none from an older daemon.</summary>
+    [JsonIgnore] public ManagedTerminalChoice[] TerminalChoices => Capabilities.TerminalChoices ?? [];
+
+    /// <summary>The position of the current choice among
+    /// <see cref="TerminalChoices"/>, or -1 when it is not among them, so a
+    /// choice no longer found selects nothing rather than the first.</summary>
+    [JsonIgnore] public int TerminalSelectedIndex =>
+        System.Array.FindIndex(TerminalChoices, c => c.Id == Capabilities.TerminalCurrent);
 
     /// <summary>The tool's NEAR AI sign-in entry, only while signed in.</summary>
     public ManagedAccount? SignInEntry(string tool) => NearAiSignedIn && CanLaunch(tool)
@@ -111,7 +144,20 @@ public static class ManagedSignIn
         template.Replace("{destination}", destination ?? fallback);
 
     /// <summary>The line for a failed managed action: the sign-in prompt
-    /// when the daemon refused for want of a NEAR AI sign-in.</summary>
-    public static string ErrorKey(string? code) =>
-        code == "managed-near-ai-sign-in-required" ? "sign_in_needed" : "action_failed";
+    /// when the daemon refused for want of a NEAR AI sign-in, and the
+    /// not-found line when the chosen terminal was not found.</summary>
+    public static string ErrorKey(string? code) => code switch
+    {
+        "managed-near-ai-sign-in-required" => "sign_in_needed",
+        "managed-terminal-not-found" => "terminal_not_found",
+        _ => "action_failed",
+    };
+
+    /// <summary>
+    /// A line with <c>{terminal}</c> filled from the terminal the daemon
+    /// reports; <paramref name="fallback"/> (the core's "your terminal") when
+    /// it reports none.
+    /// </summary>
+    public static string FillTerminal(string template, string? terminal, string fallback) =>
+        template.Replace("{terminal}", terminal ?? fallback);
 }

@@ -15,12 +15,14 @@ import { NotFoundPage } from "./not-found-page";
 import { flowPaths, routePaths } from "./routes";
 
 export function AppRoutes({
+  missionsEnabled,
   requiresOnboarding,
   core,
   publicProfile,
   initialInvite,
   onOnboardingComplete,
 }: {
+  missionsEnabled: boolean;
   requiresOnboarding: boolean;
   core: ReturnType<typeof useCoreStatus>;
   publicProfile: ReturnType<typeof usePublicProfile>;
@@ -60,7 +62,13 @@ export function AppRoutes({
       />
       <Route
         path={routePaths["mission-drafts"]}
-        element={<MissionDraftsPage />}
+        element={
+          missionsEnabled ? (
+            <MissionDraftsPage />
+          ) : (
+            <Navigate to={routePaths.insights} replace />
+          )
+        }
       />
       <Route
         path={routePaths.profile}

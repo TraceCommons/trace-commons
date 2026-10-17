@@ -357,7 +357,6 @@ private struct Launcher: View {
 
     @MainActor
     private func launch() {
-        missionDrafts.loadCopy()
         OpenMonitor.handler = { destination, activate in
             if activate { NSApp.activate(ignoringOtherApps: true) }
             open(destination)

@@ -13,6 +13,36 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(snapshot.capabilities.terminalDestination, "Terminal")
     }
 
+    func testSnapshotCarriesTheTerminalChoiceAndTheInstalledApps() throws {
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":2,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Ghostty","terminal_current":"ghostty","terminal_choices":[{"id":"terminal","name":"Terminal"},{"id":"ghostty","name":"Ghostty"}]}}"#.utf8))
+        XCTAssertEqual(snapshot.capabilities.terminalDestination, "Ghostty")
+        XCTAssertEqual(snapshot.capabilities.terminalCurrent, "ghostty")
+        XCTAssertEqual(snapshot.terminalChoices, [ManagedTerminalChoice(id: "terminal", name: "Terminal"), ManagedTerminalChoice(id: "ghostty", name: "Ghostty")])
+    }
+
+    func testAnOlderSnapshotOffersNoTerminalChoice() throws {
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":1,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Terminal"}}"#.utf8))
+        XCTAssertNil(snapshot.capabilities.terminalCurrent)
+        XCTAssertEqual(snapshot.terminalChoices, [])
+    }
+
+    func testTheFixtureCarriesTheTerminalFields() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json")))
+        XCTAssertEqual(snapshot.capabilities.terminalCurrent, "terminal")
+        XCTAssertEqual(snapshot.terminalChoices.map(\.name), ["Terminal", "Ghostty"])
+        XCTAssertEqual(snapshot.copy?["terminal_choice"], "Open sessions in")
+    }
+
+    func testAMissingTerminalHasItsOwnLine() {
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-terminal-not-found", message: "managed-terminal-not-found"), "terminal_not_found")
+        let line = "{terminal} wasn't found on this computer. Choose another in Settings."
+        XCTAssertEqual(ManagedSurface.fillTerminal(line, terminal: "Ghostty", fallback: "your terminal"),
+                       "Ghostty wasn't found on this computer. Choose another in Settings.")
+        XCTAssertEqual(ManagedSurface.fillTerminal(line, terminal: nil, fallback: "your terminal"),
+                       "your terminal wasn't found on this computer. Choose another in Settings.")
+    }
+
     func testOpenCodeCollectionAndModelDecode() throws {
         let session = try JSONDecoder().decode(ManagedSession.self, from: Data(#"{"id":"s","tool":"opencode","connection":"api_key","account_id":"a","account_label":"Work","project_label":"Project","cwd":"/tmp","state":"exited","purpose":"coding","model":"gpt-5","collection":"failed"}"#.utf8))
         XCTAssertEqual(session.model, "gpt-5")
@@ -20,11 +50,57 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.toolKey("opencode"), "opencode")
     }
 
-    func testOpenCodeKeepsKeyConnectionsWithoutSignInLaunch() {
+    func testOpenCodeKeepsKeyConnectionsAndStartsOnTheSignIn() {
         XCTAssertEqual(ManagedSurface.connectionOptions(signedIn: true, tool: "opencode"), ["api_key", "near_ai"])
         XCTAssertEqual(ManagedSurface.connectionOptions(signedIn: false, tool: "opencode"), ["api_key", "near_ai"])
-        XCTAssertEqual(ManagedSurface.signInTools, ["claude", "codex"])
-        XCTAssertNil(ManagedSurface.startKey("opencode"))
+        XCTAssertEqual(ManagedSurface.signInTools, ["claude", "codex", "opencode"])
+        XCTAssertEqual(ManagedSurface.startKey("opencode"), "start_opencode")
+    }
+
+    /// A tools row as the daemon sends it.
+    private static func toolRow(_ tool: String, installed: Bool) -> String {
+        #"{"tool":""# + tool + #"","installed":"# + (installed ? "true" : "false") + #","install_url":"https://example.com/"# + tool + #""}"#
+    }
+
+    /// The sign-in snapshot with an OpenCode entry and the given `tools`
+    /// rows (no `tools` key at all when nil).
+    private static func signedInWithOpenCode(tools: [String]?, signedIn: Bool = true) -> String {
+        let entries = #""sign_in_accounts":[{"id":"c","tool":"claude","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready"},{"id":"x","tool":"codex","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready"},{"id":"o","tool":"opencode","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready"}]"#
+        let toolsField = tools.map { #","tools":["# + $0.joined(separator: ",") + "]" } ?? ""
+        return #"{"revision":1,"accounts":[],"# + entries + toolsField + #","defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"near_ai_signin":"# + (signedIn ? "true" : "false") + #","terminal_launch":true}}"#
+    }
+
+    /// Start OpenCode shows only while the daemon reports OpenCode
+    /// installed. No `tools` list (an older daemon), no opencode row, or a
+    /// row that says not installed shows no button and builds no launch;
+    /// Claude Code and Codex keep their older-daemon behaviour.
+    func testStartOpenCodeShowsOnlyWhenOpenCodeIsInstalled() throws {
+        func snapshot(_ tools: [String]?, signedIn: Bool = true) throws -> ManagedSnapshot {
+            try JSONDecoder().decode(ManagedSnapshot.self, from: Data(Self.signedInWithOpenCode(tools: tools, signedIn: signedIn).utf8))
+        }
+        let unknown = try snapshot(nil)
+        XCTAssertEqual(unknown.signInStartTools, ["claude", "codex"])
+        XCTAssertNil(unknown.signInLaunchParams(tool: "opencode", cwd: "/tmp", requestID: "r"))
+
+        let noRow = try snapshot([Self.toolRow("claude", installed: true), Self.toolRow("codex", installed: true)])
+        XCTAssertEqual(noRow.signInStartTools, ["claude", "codex"])
+        XCTAssertNil(noRow.signInLaunchParams(tool: "opencode", cwd: "/tmp", requestID: "r"))
+
+        let missing = try snapshot([Self.toolRow("claude", installed: true), Self.toolRow("codex", installed: true), Self.toolRow("opencode", installed: false)])
+        XCTAssertEqual(missing.signInStartTools, ["claude", "codex"])
+        XCTAssertNil(missing.signInLaunchParams(tool: "opencode", cwd: "/tmp", requestID: "r"))
+
+        let installed = try snapshot([Self.toolRow("claude", installed: false), Self.toolRow("codex", installed: true), Self.toolRow("opencode", installed: true)])
+        XCTAssertEqual(installed.signInStartTools, ["codex", "opencode"])
+        let params = try XCTUnwrap(installed.signInLaunchParams(tool: "opencode", cwd: "/tmp/p", requestID: "r"))
+        XCTAssertEqual(params["tool"] as? String, "opencode")
+        XCTAssertEqual(params["connection"] as? String, "near_ai_signin")
+        XCTAssertEqual(params["account_id"] as? String, "o")
+        // The session's proxy picks the model: the request names none.
+        XCTAssertNil(params["model"])
+
+        // Signed out, nothing to start, installed or not.
+        XCTAssertEqual(try snapshot([Self.toolRow("opencode", installed: true)], signedIn: false).signInStartTools, [])
     }
 
     func testSurfaceNeverPicksARawValueOrDaemonCode() {
@@ -88,6 +164,7 @@ final class ManagedSessionsTests: XCTestCase {
                        "Uses your NEAR AI sign-in. Runs in your terminal, in the folder you choose.")
         XCTAssertEqual(ManagedSurface.startKey("claude"), "start_claude")
         XCTAssertEqual(ManagedSurface.startKey("codex"), "start_codex")
+        XCTAssertEqual(ManagedSurface.startKey("opencode"), "start_opencode")
         XCTAssertNil(ManagedSurface.startKey("future_tool"))
         XCTAssertEqual(ManagedSurface.errorKey(code: "managed-near-ai-sign-in-required", message: "managed-near-ai-sign-in-required"), "sign_in_needed")
         // Signed in, the sheet does not offer a NEAR AI key: the sign-in

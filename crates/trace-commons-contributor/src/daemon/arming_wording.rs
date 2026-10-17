@@ -244,8 +244,9 @@ mod tests {
         p.record_automatic_redaction("/w/api", SessionRedaction::NotCertified);
         assert_eq!(sweep(&mut p), vec!["api".to_string()]);
         p.record_automatic_redaction("/w/api", SessionRedaction::NotCertified);
-        assert!(sweep(&mut p).is_empty(), "told once");
-        assert_eq!(p.arming_rewordings.len(), 1);
+        assert!(sweep(&mut p).is_empty(), "recorded once");
+        assert!(p.arming_rewordings.is_empty(), "no notice is raised");
+        assert_eq!(p.arming_claim("/w/api"), ArmingClaim::PatternsOnly);
     }
 
     #[test]
@@ -260,8 +261,9 @@ mod tests {
         assert!(p.arming_rewordings.is_empty());
     }
 
-    /// Re-arming answers the notice and starts the record again: nothing is
-    /// said until a new uncertified send, and then it is said once more.
+    /// Re-arming starts the record again: nothing is reworded until a new
+    /// uncertified send, and then it is reworded once more. No notice is
+    /// raised either time.
     #[test]
     fn a_rearm_resets_the_rewording() {
         use super::super::automatic_gate::SessionRedaction;
@@ -276,12 +278,12 @@ mod tests {
         )
         .unwrap();
         assert!(p.record_arming_claim("/w/api", ArmingClaim::ModelScrubbed));
-        assert!(p.arming_rewordings.is_empty(), "re-arming answers it");
+        assert!(p.arming_rewordings.is_empty());
         assert!(sweep(&mut p).is_empty(), "the record starts from nothing");
 
         p.record_automatic_redaction("/w/api", SessionRedaction::NotCertified);
         assert_eq!(sweep(&mut p).len(), 1);
-        assert_eq!(p.arming_rewordings.len(), 1);
+        assert!(p.arming_rewordings.is_empty());
     }
 
     #[test]

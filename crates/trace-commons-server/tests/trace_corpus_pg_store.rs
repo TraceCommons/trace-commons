@@ -1,9 +1,13 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#[path = "support/role_ddl_lock.rs"]
+mod role_ddl_lock;
+
 use std::collections::BTreeMap;
 
 use chrono::{SubsecRound, Utc};
+use role_ddl_lock::with_role_ddl_lock;
 use secrecy::SecretString;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::{
@@ -149,33 +153,22 @@ async fn gate_driver_backend() -> Option<PgBackend> {
 /// updated` -- surfacing as a bare `db error` in whichever test lost, on PRs
 /// that touch nothing here.
 ///
-/// The fix is the one `trace_corpus_pg_rls` uses for its role grants:
-/// serialise the DDL on a transaction-scoped advisory lock taken as the first
-/// statement of the same `batch_execute`, which runs as one implicit
-/// transaction, so the lock is released when the batch commits. Same key as
-/// that suite's `RLS_TEST_ROLE_DDL_LOCK_*`, so role DDL from either suite
-/// cannot interleave if they ever share a database concurrently.
+/// The fix is the one the PostgreSQL suites share for role DDL,
+/// `with_role_ddl_lock` (`support/role_ddl_lock.rs`): a transaction-scoped
+/// advisory lock taken as the first statement of the same `batch_execute`,
+/// released when the batch commits.
 async fn grant_gate_driver_login(admin: &PgBackend) -> Result<(), String> {
     admin
         .raw_pool_for_tests_and_diagnostics()
         .get()
         .await
         .map_err(|e| format!("get a connection: {e}"))?
-        .batch_execute(&format!(
-            "SELECT pg_advisory_xact_lock({TEST_ROLE_DDL_LOCK_CLASSID}, \
-                {TEST_ROLE_DDL_LOCK_OBJID});
-             ALTER ROLE {GATE_DRIVER_ROLE} LOGIN;"
-        ))
+        .batch_execute(&with_role_ddl_lock(&format!(
+            "ALTER ROLE {GATE_DRIVER_ROLE} LOGIN;"
+        )))
         .await
         .map_err(|e| format!("{e:?}"))
 }
-
-/// Advisory-lock key for test role DDL. Must equal `trace_corpus_pg_rls`'s
-/// `RLS_TEST_ROLE_DDL_LOCK_CLASSID` / `_OBJID`; the two-int form with its own
-/// classid cannot alias the one-arg `pg_advisory_xact_lock(hashtext(tenant))`
-/// the audit-chain append takes.
-const TEST_ROLE_DDL_LOCK_CLASSID: i32 = 0x726f_6c65u32 as i32; // "role"
-const TEST_ROLE_DDL_LOCK_OBJID: i32 = 0x7273_6c73u32 as i32; // "rsls"
 
 /// Concurrent callers of `grant_gate_driver_login` must all succeed.
 ///
