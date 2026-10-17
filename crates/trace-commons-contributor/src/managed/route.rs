@@ -62,9 +62,13 @@ impl ManagedRoute {
             .build()
             .map_err(|_| ManagedError::LaunchUnknown)?;
         let deadline = tokio::time::Instant::now() + READY_WITHIN;
-        // Choose first: a model that cannot be pinned starts no proxy.
+        // Choose first: a model that cannot be pinned starts no proxy. An
+        // empty catalogue is read again, as an unreadable one is.
         let selected_model = loop {
-            if let Some(models) = super::models::fetch(&client, base_url).await {
+            if let Some(models) = super::models::fetch(&client, base_url)
+                .await
+                .filter(|models| !models.is_empty())
+            {
                 break super::models::select(tool, requested, &models)?;
             }
             if tokio::time::Instant::now() >= deadline {
