@@ -126,10 +126,10 @@ keyring-core = "=1.0.0"
 #     for what is chosen and why, and for the `StartupProbes::Configured`
 #     rather than `Off` decision.
 #
-# NOT REACHED. #42 (`ConnectOptions`/`StatusLine`) is available and left at
-# `StatusLine::Offer`: this daemon plans Claude Code edits through
-# `plan_connect`, and the status line it installs names the `ironwire` binary,
-# not ours -- revisit if this crate ever becomes the executable in that slot.
+# REACHED. #42 (`ConnectOptions`/`StatusLine`) is used: this daemon plans
+# Claude Code edits through `plan_connect_with` and `StatusLine::Decline`,
+# because the status line IronWire would install runs `<this executable>
+# statusline`, which this program does not implement.
 # #37 also renames the control API's `if_unchanged` request field to
 # `as_previewed`; that is IronWire's HTTP surface, which nothing in this
 # repository calls (checked by grep across crates/, macos/ and windows/), so

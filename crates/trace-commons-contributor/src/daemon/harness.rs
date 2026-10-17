@@ -505,7 +505,17 @@ pub fn plan(
             let Some(port) = port else {
                 return Err(ERR_NO_DESTINATION);
             };
-            tools::plan_connect(tool_id, port, catalog)
+            // Never offer IronWire's status line. It would run
+            // `<this executable> statusline`, and this program has no such
+            // subcommand, so Claude Code would show a blank status line.
+            // Declining also removes one an earlier connect installed, and
+            // leaves one the contributor wrote alone.
+            tools::plan_connect_with(
+                tool_id,
+                port,
+                catalog,
+                tools::ConnectOptions::default().with_status_line(tools::StatusLine::Decline),
+            )
         }
         HarnessAction::Disconnect => tools::plan_disconnect(tool_id, catalog),
     };
@@ -1216,6 +1226,70 @@ mod tests {
         assert!(
             after.contains("https://their-own-choice.example"),
             "the contributor's own value was overwritten: {after}"
+        );
+    }
+
+    /// Connect Claude against `body` and return the settings file afterwards,
+    /// parsed.
+    fn connect_claude_and_read(body: Option<&str>) -> serde_json::Value {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        if let Some(body) = body {
+            std::fs::write(&path, body).expect("write");
+        }
+        let _guard = ClaudeConfigAt::at(dir.path());
+        let store = PlanStore::default();
+        let view = plan_claude(&store, HarnessAction::Connect);
+        let id = view.plan_id.expect("a connect plans");
+        commit(&store, id).expect("commit");
+        let after = std::fs::read_to_string(&path).expect("read");
+        serde_json::from_str(&after).expect("settings stay valid JSON")
+    }
+
+    /// Connecting writes the base URL and no status line.
+    ///
+    /// The status line IronWire offers runs `<this executable> statusline`,
+    /// and this program has no such subcommand, so Claude Code would show a
+    /// blank status line.
+    #[test]
+    fn connect_writes_the_base_url_and_no_status_line() {
+        let after = connect_claude_and_read(Some("{}"));
+        assert_eq!(
+            after["env"]["ANTHROPIC_BASE_URL"],
+            "http://127.0.0.1:8463/anthropic"
+        );
+        assert!(
+            after.get("statusLine").is_none(),
+            "a status line this program cannot serve was installed: {after}"
+        );
+    }
+
+    /// A status line installed by an earlier connect is taken out, because
+    /// the command it names cannot be served by this program.
+    #[test]
+    fn connect_removes_a_status_line_installed_by_ironwire() {
+        let after = connect_claude_and_read(Some(
+            r#"{"statusLine":{"type":"command","command":"/old/app statusline","installedBy":"ironwire"}}"#,
+        ));
+        assert!(
+            after.get("statusLine").is_none(),
+            "the stale status line was kept: {after}"
+        );
+        assert_eq!(
+            after["env"]["ANTHROPIC_BASE_URL"],
+            "http://127.0.0.1:8463/anthropic"
+        );
+    }
+
+    /// A status line the contributor wrote themselves is theirs.
+    #[test]
+    fn connect_leaves_a_user_written_status_line_alone() {
+        let after = connect_claude_and_read(Some(
+            r#"{"statusLine":{"type":"command","command":"my-own-line"}}"#,
+        ));
+        assert_eq!(
+            after["statusLine"],
+            serde_json::json!({"type":"command","command":"my-own-line"})
         );
     }
 
