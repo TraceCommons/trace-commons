@@ -141,6 +141,39 @@ final class ComponentContractTests: XCTestCase {
         }
     }
 
+    // MARK: Tab marks
+
+    /// A tab says its count and its state in one element, never a dot
+    /// beside a count (owner, 2026-10-16): a count takes its dot's tint, a
+    /// dot alone stays a dot, and no count is no mark.
+    func test_aTabDrawsOneMark() {
+        let both = GlassSegment("Traces", value: 1, badge: 120, dot: .ask)
+        XCTAssertEqual(both.mark, .count(.count(120), status: .ask))
+        let unknown = GlassSegment("Traces", value: 1, badgeValue: .unknown, dot: .ask)
+        XCTAssertEqual(unknown.mark, .count(.unknown, status: .ask))
+        XCTAssertEqual(GlassSegment("Traces", value: 1, badge: 3).mark, .count(.count(3), status: nil))
+        XCTAssertEqual(GlassSegment("Private AI", value: 2, dot: .outside).mark, .dot(.outside))
+        // Zero is no count: the dot alone.
+        XCTAssertEqual(GlassSegment("Traces", value: 1, badge: 0, dot: .ask).mark, .dot(.ask))
+        XCTAssertNil(GlassSegment("Home", value: 0).mark)
+        let navigation = (try? Dictionary(uniqueKeysWithValues: Self.componentSources())["Navigation.swift"]) ?? ""
+        XCTAssertFalse(navigation.contains("if let dot = segment.dot"), "a tab draws its dot beside its count again")
+    }
+
+    /// A tinted count is #1146's verdict pair, whose contrast is checked
+    /// with the status text colours on their own tints; a status with no
+    /// tint keeps the white count pill.
+    func test_aTintedCountIsTheVerdictPair() {
+        let c = GlassTokens.Color.self
+        XCTAssertTrue(GlassBadge.tinted(.ask) == (c.tintAsk, c.statusAskText))
+        XCTAssertTrue(GlassBadge.tinted(.on) == (c.tintOn, c.statusOnText))
+        XCTAssertTrue(GlassBadge.tinted(.outside) == (c.tintOutside, c.statusOutsideText))
+        for status in [GlassStatus.off, .shared, .kept, .inference] {
+            XCTAssertTrue(GlassBadge.tinted(status) == (c.badgeFillSubtle, c.textPrimary), "\(status)")
+        }
+        XCTAssertTrue(GlassBadge.tinted(nil) == (c.badgeFillSubtle, c.textPrimary))
+    }
+
     // MARK: Sources
 
     private static func componentSources() throws -> [(String, String)] {
