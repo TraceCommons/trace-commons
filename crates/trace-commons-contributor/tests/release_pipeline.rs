@@ -1437,6 +1437,25 @@ fn release_macos_legs_run_on_macos_26() {
     }
 }
 
+/// `hdiutil create -srcfolder` without `-size` sizes the image from its own
+/// estimate of the folder, and on 2026-10-16 that estimate came up short for
+/// app-v0.18.2: "hdiutil: create failed - No space left on device" while
+/// copying the app into the image. The DMG is sized explicitly from the
+/// app's measured size plus headroom.
+#[test]
+fn the_release_dmg_is_sized_explicitly() {
+    let script = read("macos/scripts/make-release-dmg.sh");
+    let create = script
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .find(|line| line.contains("hdiutil create"))
+        .expect("make-release-dmg.sh creates the DMG with hdiutil");
+    assert!(
+        create.contains("-size"),
+        "hdiutil create must be given an explicit -size: {create}"
+    );
+}
+
 /// macos-13 is a retired GitHub-hosted runner image. A job targeting a
 /// retired image label does not fail -- it queues forever, confirmed
 /// empirically against this exact matrix entry. x86_64-apple-darwin must be

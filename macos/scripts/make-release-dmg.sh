@@ -229,7 +229,14 @@ TC_REQUIRE_NATIVE_PASSKEYS=1 TC_VERIFY_STATIC_ONLY=1 \
 
 echo "--- packaging the DMG"
 rm -f "$DMG"
-hdiutil create -volname Near.ai -srcfolder "$APP" -ov -format UDZO "$DMG"
+# Sized explicitly: without -size, hdiutil sizes the image from its own
+# estimate of the folder, and for app-v0.18.2 that came up short ("No space
+# left on device" while copying the app in). The app's measured size plus a
+# quarter and 64 MB of headroom; UDZO compresses the result, so the headroom
+# costs nothing in the shipped DMG.
+APP_MB=$(du -sm "$APP" | awk '{print $1}')
+DMG_MB=$(( APP_MB + APP_MB / 4 + 64 ))
+hdiutil create -volname Near.ai -srcfolder "$APP" -size "${DMG_MB}m" -ov -format UDZO "$DMG"
 codesign --force --timestamp --sign "$MACOS_SIGNING_IDENTITY" "$DMG"
 
 echo "--- notarizing (this waits for Apple's verdict)"
