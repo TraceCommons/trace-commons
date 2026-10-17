@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod cli;
+pub mod codex;
 pub mod models;
 pub mod opencode;
 pub mod profiles;
