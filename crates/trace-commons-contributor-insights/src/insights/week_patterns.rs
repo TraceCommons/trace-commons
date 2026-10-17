@@ -747,10 +747,11 @@ mod tests {
         );
         let wire = serde_json::to_value(&week).unwrap();
         let row = wire["reread_files"][0].as_object().unwrap();
-        let fields: Vec<&str> = row.keys().map(String::as_str).collect();
+        let mut fields: Vec<&str> = row.keys().map(String::as_str).collect();
+        fields.sort_unstable();
         assert_eq!(
             fields,
-            ["letter", "ext", "reads", "after_shrink", "tokens"],
+            ["after_shrink", "ext", "letter", "reads", "tokens"],
             "no digest, path or name crosses"
         );
     }

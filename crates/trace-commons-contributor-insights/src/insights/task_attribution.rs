@@ -1297,24 +1297,34 @@ mod tests {
         encoded
     }
 
-    /// Rebuild every object in `value` with its keys inserted in reverse
-    /// sorted order.
-    ///
-    /// Under `preserve_order` this is observable in the serialized bytes;
-    /// under a `BTreeMap` it is a no-op, which is the condition
-    /// `trace_commons_protocol::canonical_json` documents.
-    fn reverse_key_order(value: &Value) -> Value {
+    /// Write reverse-sorted keys directly so the input bytes differ even
+    /// when serde_json::Map sorts keys instead of preserving insertion order.
+    fn reverse_key_order(value: &Value) -> String {
         match value {
             Value::Object(map) => {
-                let mut entries = map
-                    .iter()
-                    .map(|(key, entry)| (key.clone(), reverse_key_order(entry)))
+                let mut entries = map.iter().collect::<Vec<_>>();
+                entries.sort_by(|left, right| right.0.cmp(left.0));
+                let fields = entries
+                    .into_iter()
+                    .map(|(key, entry)| {
+                        format!(
+                            "{}:{}",
+                            serde_json::to_string(key).unwrap(),
+                            reverse_key_order(entry)
+                        )
+                    })
                     .collect::<Vec<_>>();
-                entries.sort_by(|left, right| right.0.cmp(&left.0));
-                Value::Object(entries.into_iter().collect())
+                format!("{{{}}}", fields.join(","))
             }
-            Value::Array(items) => Value::Array(items.iter().map(reverse_key_order).collect()),
-            other => other.clone(),
+            Value::Array(items) => format!(
+                "[{}]",
+                items
+                    .iter()
+                    .map(reverse_key_order)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            other => serde_json::to_string(other).unwrap(),
         }
     }
 
@@ -1351,10 +1361,17 @@ mod tests {
     #[test]
     fn recorded_configuration_digest_ignores_source_json_key_order() {
         let records = decode(RELEASE_ALPHA);
-        let reordered = records.iter().map(reverse_key_order).collect::<Vec<_>>();
+        let reordered = format!(
+            "{}\n",
+            records
+                .iter()
+                .map(reverse_key_order)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
         assert_ne!(
             encode(&records),
-            encode(&reordered),
+            reordered.as_bytes(),
             "the reordering must reach the serialized bytes for this test to mean anything"
         );
         let digest = |bytes: &[u8]| match classify_codex_task_attribution(
@@ -1373,7 +1390,7 @@ mod tests {
         };
         assert_eq!(
             digest(&encode(&records)),
-            digest(&encode(&reordered)),
+            digest(reordered.as_bytes()),
             "two turn_context records differing only in key order are one configuration"
         );
     }
