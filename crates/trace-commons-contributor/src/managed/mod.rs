@@ -9,6 +9,7 @@ pub mod profiles;
 pub mod secrets;
 pub mod sessions;
 pub mod signin;
+pub mod statusline;
 pub mod supervisor;
 
 use serde::{Deserialize, Serialize};

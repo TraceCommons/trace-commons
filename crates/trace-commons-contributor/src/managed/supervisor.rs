@@ -183,22 +183,23 @@ async fn run_native(
                     proxy.models(),
                     codex_catalog.as_ref().map(|file| file.path()),
                 )?;
+                if !login {
+                    status_line(&mut command, row.tool, proxy.home());
+                }
                 route = Some(proxy);
             }
             // The daemon holds the sign-in and hosts this session's proxy. This
             // process learns its port, default and models, never the
             // credential; without them, no run.
             ConnectionKind::NearAiSignIn => {
-                let (port, default, models) = sign_in_route(context)?;
-                codex_catalog =
-                    codex_catalog_file(store, &profiles, &account, &native, row, default, models)?;
-                near_ai_route(
+                codex_catalog = sign_in_route_command(
                     &mut command,
-                    row.tool,
-                    port,
-                    default,
-                    models,
-                    codex_catalog.as_ref().map(|file| file.path()),
+                    store,
+                    &profiles,
+                    &account,
+                    &native,
+                    context,
+                    login,
                 )?;
             }
         }
@@ -367,6 +368,39 @@ fn sign_in_route(
     ))
 }
 
+/// Claude Code or Codex on the NEAR AI sign-in: the daemon holds the
+/// sign-in and hosts this session's proxy, and says its port, default and
+/// models ([`sign_in_route`]). Points `command` at it, writes Codex's
+/// catalog, and, unless this is a sign-in, adds the status line for the
+/// daemon's route, whose home is where every route's is
+/// ([`super::route::home_for`]). Returns the catalog file, which lives
+/// as long as the session.
+fn sign_in_route_command(
+    command: &mut std::process::Command,
+    store: &ConfigStore,
+    profiles: &NativeProfiles,
+    account: &AccountView,
+    native: &std::path::Path,
+    context: &LaunchContext,
+    login: bool,
+) -> Result<Option<super::codex::CatalogFile>, ManagedError> {
+    let row = &context.session;
+    let (port, default, models) = sign_in_route(context)?;
+    let catalog = codex_catalog_file(store, profiles, account, native, row, default, models)?;
+    near_ai_route(
+        command,
+        row.tool,
+        port,
+        default,
+        models,
+        catalog.as_ref().map(|file| file.path()),
+    )?;
+    if !login {
+        status_line(command, row.tool, &super::route::home_for(store, row.id));
+    }
+    Ok(catalog)
+}
+
 /// For Codex, write the session's model catalog: every NEAR AI chat model,
 /// with Codex's own settings for the ones it knows. None for other tools.
 fn codex_catalog_file(
@@ -476,6 +510,27 @@ fn near_ai_route(
     Ok(())
 }
 
+/// For Claude Code, show the route's status line: `--settings` naming
+/// this executable's `statusline` for the route's IronWire home
+/// ([`super::statusline`]). Settings from the command line take precedence
+/// over the profile's and a project's, and nothing is written to disk.
+/// When this executable's path cannot be found or written, the session runs
+/// without a status line. Other tools have no status-line slot.
+fn status_line(command: &mut std::process::Command, tool: super::ToolId, home: &std::path::Path) {
+    if tool != super::ToolId::Claude {
+        return;
+    }
+    match super::statusline::settings(home) {
+        Some(settings) => {
+            command.arg("--settings").arg(settings);
+        }
+        None => tracing::warn!(
+            harness = "claude",
+            "managed session runs without a status line"
+        ),
+    }
+}
+
 /// Whether the daemon's answer to a running report asks for a stop. Only
 /// an explicit `true` does; anything else leaves the tool running.
 fn stop_asked(answer: &anyhow::Result<Value>) -> bool {
@@ -527,7 +582,10 @@ impl TerminalSignals {
 
 #[cfg(test)]
 mod tests {
-    use super::{near_ai_route, opencode_route_command, opencode_sign_in_command, stop_asked};
+    use super::{
+        near_ai_route, opencode_route_command, opencode_sign_in_command, sign_in_route_command,
+        status_line, stop_asked,
+    };
     use crate::config::ConfigStore;
     use crate::managed::{
         ConnectionKind, ManagedError, ToolId, models::ChatModel, opencode::OpenCodeSession,
@@ -598,6 +656,99 @@ mod tests {
         // Removed, not left to the person's shell.
         assert_eq!(env("CLAUDE_CODE_SUBAGENT_MODEL"), Some(None));
         assert_eq!(env("ANTHROPIC_CUSTOM_MODEL_OPTION"), Some(None));
+    }
+
+    /// Claude Code on a NEAR AI route, whoever hosts it, gets a status line
+    /// that runs this executable for the route's home; no other tool does.
+    #[test]
+    fn claude_on_a_route_shows_the_routes_status_line() {
+        let home = std::path::Path::new("/state dir/managed-routes/it's");
+        let mut command = std::process::Command::new("claude");
+        status_line(&mut command, ToolId::Claude, home);
+        let args: Vec<String> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.len(), 2, "{args:?}");
+        assert_eq!(args[0], "--settings");
+        let settings: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
+        let line = &settings["statusLine"];
+        assert_eq!(line["type"], "command");
+        let run = line["command"].as_str().unwrap();
+        assert!(
+            run.ends_with(r" statusline --home '/state dir/managed-routes/it'\''s'"),
+            "{run}"
+        );
+        assert_eq!(settings.as_object().unwrap().len(), 1);
+        for tool in [ToolId::Codex, ToolId::Opencode] {
+            let mut command = std::process::Command::new("tool");
+            status_line(&mut command, tool, home);
+            assert_eq!(command.get_args().count(), 0);
+        }
+    }
+
+    /// Claude Code on the NEAR AI sign-in: the daemon hosts the route, and
+    /// the launcher's status line names that route's home,
+    /// `<state dir>/managed-routes/<session id>`, worked out here from the
+    /// session id alone. A sign-in (`login`) gets no status line.
+    #[test]
+    fn claude_on_the_sign_in_shows_the_daemons_route_status_line() {
+        use crate::managed::profiles::NativeProfiles;
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().join("state")).unwrap();
+        let account = signin::entry(ToolId::Claude).unwrap();
+        let id = uuid::Uuid::new_v4();
+        let context: LaunchContext = serde_json::from_value(json!({
+            "session": {
+                "id": id, "tool": "claude", "connection": "near_ai_signin",
+                "account_id": account.id, "account_label": "NEAR AI",
+                "selection_generation": 0, "project_label": "p", "cwd": home.path(),
+                "started_at": "2026-10-16T00:00:00Z", "state": "starting",
+                "exit_code": null, "can_focus": false,
+            },
+            "proof": "p", "route_port": 4100,
+            "route_model": "anthropic/claude-sonnet-5-5",
+            "route_models": listed(),
+        }))
+        .unwrap();
+        let native = home.path().join("claude");
+        let expected = home
+            .path()
+            .join("state")
+            .join("managed-routes")
+            .join(id.to_string());
+        for login in [false, true] {
+            let mut command = std::process::Command::new("claude");
+            let catalog = sign_in_route_command(
+                &mut command,
+                &store,
+                &NativeProfiles::new(&store),
+                &account,
+                &native,
+                &context,
+                login,
+            )
+            .unwrap();
+            assert!(catalog.is_none());
+            assert_eq!(
+                env_of(&command, "ANTHROPIC_BASE_URL"),
+                Some(Some("http://127.0.0.1:4100/anthropic".into()))
+            );
+            let args: Vec<String> = command
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            if login {
+                assert!(args.is_empty(), "{args:?}");
+                continue;
+            }
+            assert_eq!(args.len(), 2, "{args:?}");
+            assert_eq!(args[0], "--settings");
+            assert_eq!(
+                Some(args[1].as_str()),
+                crate::managed::statusline::settings(&expected).as_deref()
+            );
+        }
     }
 
     /// Codex on a NEAR AI route reads its model list from the session's
