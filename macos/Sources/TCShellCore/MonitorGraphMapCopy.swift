@@ -87,6 +87,12 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
     public let connected: String
     public let connectedLine: String
     public let legendNotWatched: String
+    /// The folder pill's accessible names (`revealFolders(_:tool:)`), and
+    /// its text and name once every folder is drawn.
+    public let revealFoldersOne: String
+    public let revealFolders: String
+    public let foldFolders: String
+    public let foldFoldersLabel: String
     public let credential: String
     public let noneFound: String
 
@@ -115,6 +121,10 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
         case connected
         case connectedLine = "connected_line"
         case legendNotWatched = "legend_not_watched"
+        case revealFoldersOne = "reveal_folders_one"
+        case revealFolders = "reveal_folders"
+        case foldFolders = "fold_folders"
+        case foldFoldersLabel = "fold_folders_label"
         case credential
         case noneFound = "none_found"
     }
@@ -179,6 +189,18 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
             folderCounts, label: Self.counted(waiting, one: sessionsOne, many: sessions), count: contributed)
         let place = path.flatMap { $0.isEmpty ? nil : $0 + "." }
         return [place, ruleLine, counts].compactMap { $0 }.joined(separator: " ")
+    }
+
+    /// The "+N" pill's accessible name: how many folders the click draws,
+    /// and whose.
+    public func revealFolders(_ count: Int, tool: String) -> String {
+        (count == 1 ? revealFoldersOne : revealFolders.replacingOccurrences(of: "{count}", with: String(count)))
+            .replacingOccurrences(of: "{tool}", with: tool)
+    }
+
+    /// The fold-back pill's accessible name: whose folders it folds.
+    public func foldFolders(tool: String) -> String {
+        foldFoldersLabel.replacingOccurrences(of: "{tool}", with: tool)
     }
 
     /// The Private AI destination's card sentence and the line under its

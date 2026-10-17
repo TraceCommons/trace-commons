@@ -132,15 +132,35 @@ struct FlowMapScene: Equatable {
         var dim: Double = 1
     }
 
-    /// A count of folders not drawn under a tool, as "+N".
+    /// A count of tools not drawn in the Private AI map, as "+N".
     struct Overflow: Equatable {
         let at: CGPoint
         let count: Int
     }
 
+    /// The pill under a tool's folders (owner, 2026-10-15): "+N" while some
+    /// are not drawn, and a click draws the next `foldersRevealed` of them;
+    /// once a reveal has drawn them all, a pill that folds them back.
+    struct FolderReveal: Equatable {
+        /// The tool's id (`ToolNode.id`) and its name.
+        let tool: String
+        let toolName: String
+        /// The folder column on the pill's line: the pill ends where the
+        /// names do, left of the dots.
+        let at: CGPoint
+        /// The folders not drawn; 0 for the pill that folds them back.
+        let hidden: Int
+        /// Faded with its tool.
+        var dim: Double = 1
+
+        /// How many folders a click draws.
+        var next: Int { min(hidden, FlowMapScene.foldersRevealed) }
+    }
+
     var nodes: [Node] = []
     var arcs: [Arc] = []
     var overflows: [Overflow] = []
+    var reveals: [FolderReveal] = []
     /// The design space this scene is laid out in: #1146's 580×760 by
     /// default, or one shaped like the pane (`space(for:)`).
     var space: CGSize = FlowMapScene.size
@@ -205,11 +225,14 @@ struct FlowMapScene: Equatable {
         CGPoint(x: space.width * 0.84, y: band(space).lowerBound + space.height * 0.04)
     }
 
-    /// A folder line's least and most height, and the room left between
-    /// tools and under a "+N".
+    /// A folder line's least and most height, the room left between tools
+    /// and under a "+N" (a whole line, for its pill), and the least a tool
+    /// takes, in lines: its node and the name under it, so a tool with one
+    /// folder or none never meets the next at the least line height.
     static let folderStepRange: ClosedRange<CGFloat> = 22 ... 34
     static let toolGap: CGFloat = 0.9
-    static let overflowLine: CGFloat = 0.7
+    static let overflowLine: CGFloat = 1
+    static let toolLines: CGFloat = 1.3
 
     /// How many folders each tool shows: the most, up to `foldersShown`,
     /// that let every tool's folders fit the band at the least line
@@ -224,17 +247,54 @@ struct FlowMapScene: Equatable {
         return 1
     }
 
-    /// The lines a tool takes at `cap` folders: its folders (one at
-    /// least), a "+N" when some are not shown, and the gap after it.
-    static func units(_ tool: TracesTree.ToolNode, cap: Int) -> CGFloat {
-        CGFloat(max(1, min(tool.folders.count, cap))) + (tool.folders.count > cap ? overflowLine : 0) + toolGap
+    /// The lines a tool takes at `cap` folders, `revealed` more drawn by its
+    /// pill: its folders (`toolLines` at least), the pill when it has more
+    /// than `cap`, and the gap after it.
+    static func units(_ tool: TracesTree.ToolNode, cap: Int, revealed: Int = 0) -> CGFloat {
+        max(toolLines, CGFloat(shown(tool, cap: cap, revealed: revealed)))
+            + (tool.folders.count > cap ? overflowLine : 0) + toolGap
     }
 
-    static func units(_ tools: [TracesTree.ToolNode], cap: Int) -> CGFloat {
-        tools.reduce(0) { $0 + units($1, cap: cap) }
+    static func units(_ tools: [TracesTree.ToolNode], cap: Int, revealed: [String: Int] = [:]) -> CGFloat {
+        tools.reduce(0) { $0 + units($1, cap: cap, revealed: revealed[$1.id] ?? 0) }
     }
+
+    /// How many of a tool's folders are drawn: `cap`, and `revealed` more.
+    static func shown(_ tool: TracesTree.ToolNode, cap: Int, revealed: Int) -> Int {
+        min(tool.folders.count, cap + max(0, revealed))
+    }
+
     /// The most folders drawn beside one tool; the rest are counted.
     static let foldersShown = 6
+    /// A folder dot's radius.
+    static let folderRadius: CGFloat = 7
+    /// How many more folders one click of a tool's "+N" pill draws (owner,
+    /// 2026-10-15).
+    static let foldersRevealed = 6
+
+    /// The folders each tool's pill has drawn after a click on `reveal`:
+    /// the next few, or, from the pill that folds them back, none.
+    static func revealing(_ reveal: FolderReveal, in revealed: [String: Int]) -> [String: Int] {
+        var revealed = revealed
+        if reveal.hidden > 0 {
+            revealed[reveal.tool, default: 0] += reveal.next
+        } else {
+            revealed[reveal.tool] = nil
+        }
+        return revealed
+    }
+
+    /// The design space grown, with its shape kept, until the band holds
+    /// `units` lines at the least line height: folders a pill has drawn
+    /// past what fits zoom the map out rather than run off it.
+    static func space(_ space: CGSize, holding units: CGFloat) -> CGSize {
+        let band = band(space)
+        let length = band.upperBound - band.lowerBound
+        let needed = units * folderStepRange.lowerBound
+        guard length > 0, needed > length else { return space }
+        let factor = needed / length
+        return CGSize(width: space.width * factor, height: space.height * factor)
+    }
 
     /// What decides whether sessions move to the commons, as the core
     /// reports it. Anything unread is closed: a missing signal never draws
@@ -291,30 +351,35 @@ struct FlowMapScene: Equatable {
     ///
     /// `selectedTool` is the selection's tool: the others are faded, their
     /// library arcs most of all, and it is ringed (#1146 `TracesMap`).
+    /// `revealed` is how many folders past the cap each tool's pill has
+    /// drawn, by tool id (`revealing(_:in:)`).
     static func traces(
         _ tree: TracesTree, gate: CommonsGate, contributed: Contributions = .unread, selectedTool: String? = nil,
-        space: CGSize = FlowMapScene.size
+        revealed: [String: Int] = [:], space: CGSize = FlowMapScene.size
     ) -> FlowMapScene {
         var scene = FlowMapScene()
-        scene.space = space
         let tools = mapTools(tree)
+        // Each tool's room in the band is in proportion to the lines it
+        // takes, so a tool with many folders never crowds its neighbour,
+        // and the folders shown are as many as fit (`folderCap`), and as
+        // many more as a pill has drawn, the map zoomed out to hold them.
+        let cap = folderCap(tools.map(\.tool), band: band(space))
+        let space = Self.space(space, holding: units(tools.map(\.tool), cap: cap, revealed: revealed))
+        scene.space = space
         let hubPoint = hub(in: space)
         let libraryPoint = library(in: space)
         let folderX = folderX(space)
-        // Each tool's room in the band is in proportion to the lines it
-        // takes, so a tool with many folders never crowds its neighbour,
-        // and the folders shown are as many as fit (`folderCap`).
         let band = band(space)
-        let cap = folderCap(tools.map(\.tool), band: band)
+        let toolUnits = tools.map { units($0.tool, cap: cap, revealed: revealed[$0.tool.id] ?? 0) }
         let slots = stack(
-            tools.map { units($0.tool, cap: cap) }, in: band,
-            maxStep: folderStepRange.upperBound, minStep: folderStepRange.lowerBound)
-        let lineStep = slots.first.map { $0.room / units(tools[0].tool, cap: cap) } ?? folderStepRange.upperBound
+            toolUnits, in: band, maxStep: folderStepRange.upperBound, minStep: folderStepRange.lowerBound)
+        let lineStep = slots.first.map { $0.room / toolUnits[0] } ?? folderStepRange.upperBound
         var flowing = false
 
         for (index, (tool, watched)) in tools.enumerated() {
             // The tool on its folders' middle line, the gap after them.
-            let shownCount = CGFloat(max(1, min(tool.folders.count, cap)))
+            let drawn = shown(tool, cap: cap, revealed: revealed[tool.id] ?? 0)
+            let shownCount = CGFloat(max(1, drawn))
             let top = slots[index].y - slots[index].room / 2 + lineStep / 2
             let at = CGPoint(x: toolX(space), y: top + (shownCount - 1) * lineStep / 2)
             let folderGap = lineStep
@@ -338,7 +403,7 @@ struct FlowMapScene: Equatable {
                 from: at, control1: CGPoint(x: midX, y: at.y), control2: CGPoint(x: midX, y: hubPoint.y),
                 to: CGPoint(x: hubPoint.x - 16, y: hubPoint.y), style: .quiet, dim: toolDim))
 
-            let shown = Array(tool.folders.prefix(cap))
+            let shown = Array(tool.folders.prefix(drawn))
             for (folderIndex, folder) in shown.enumerated() {
                 let point = CGPoint(x: folderX, y: at.y + (CGFloat(folderIndex) - CGFloat(shown.count - 1) / 2) * folderGap)
                 let bend = (at.x + point.x) / 2
@@ -347,17 +412,16 @@ struct FlowMapScene: Equatable {
                     control2: CGPoint(x: bend, y: point.y), to: CGPoint(x: point.x + 8, y: point.y),
                     style: .quiet, dim: toolDim))
                 scene.nodes.append(Node(
-                    id: "folder:\(folder.id)", kind: .folder(folder.mode), at: point, radius: 7,
+                    id: "folder:\(folder.id)", kind: .folder(folder.mode), at: point, radius: folderRadius,
                     label: folder.label, detail: folderDetail(folder, contributed: contributed.folder(folder.id)),
                     dim: toolDim))
             }
-            if tool.folders.count > shown.count {
-                scene.overflows.append(Overflow(
-                    // Under the last name, in the names' column.
-                    at: CGPoint(
-                        x: folderX - 24,
-                        y: at.y + (CGFloat(shown.count - 1) / 2 + overflowLine + 0.15) * folderGap),
-                    count: tool.folders.count - shown.count))
+            if tool.folders.count > cap {
+                // A line under the last name, in the names' column.
+                scene.reveals.append(FolderReveal(
+                    tool: tool.id, toolName: tool.kind.displayName,
+                    at: CGPoint(x: folderX, y: at.y + (CGFloat(shown.count - 1) / 2 + overflowLine) * folderGap),
+                    hidden: tool.folders.count - shown.count, dim: toolDim))
             }
             scene.nodes.append(Node(
                 id: "tool:\(tool.id)", kind: .tool(TracesTreeView.glassTool(tool.kind), off: off), at: at, radius: 13,

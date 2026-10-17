@@ -865,6 +865,9 @@ private struct MonitorMapPane: View {
     /// A folder node clicked on the Traces map, by project id.
     let onSelectFolder: (String) -> Void
     @EnvironmentObject private var model: AppModel
+    /// How many folders past the cap each tool's pill has drawn on the
+    /// Traces map, by tool id.
+    @State private var revealedFolders: [String: Int] = [:]
 
     var body: some View {
         // The map is content, not chrome: its own field, so the selector,
@@ -901,12 +904,13 @@ private struct MonitorMapPane: View {
                 traces.tree,
                 gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations),
                 contributed: .init(history: history, failure: historyFailure), selectedTool: selectedTool,
-                space: space)
+                revealed: revealedFolders, space: space)
             FlowMapView(
                 scene: scene,
                 legend: [.autoUpload, .ask, .ignore], zoomable: true,
                 accessibilityName: FlowMapScene.words?.mapLabel ?? MonitorWindowView.Tab.traces.title, state: tracesState,
-                focus: scene.focusPoint(tool: focusTool), onSelectFolder: onSelectFolder)
+                focus: scene.focusPoint(tool: focusTool), onSelectFolder: onSelectFolder,
+                onReveal: { revealedFolders = FlowMapScene.revealing($0, in: revealedFolders) })
         case .privateAI:
             // The one tool list, while this window's client has read it and
             // the core still answers; otherwise nothing is drawn as current.

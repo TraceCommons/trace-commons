@@ -255,7 +255,68 @@ final class FlowMapSceneTests: XCTestCase {
         let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: folders)], unplaced: [])
         let scene = FlowMapScene.traces(tree, gate: .init(state: .loading))
         XCTAssertEqual(scene.nodes.filter { if case .folder = $0.kind { true } else { false } }.count, FlowMapScene.foldersShown)
-        XCTAssertEqual(scene.overflows.map(\.count), [3])
+        XCTAssertEqual(scene.reveals.map(\.hidden), [3])
+        XCTAssertEqual(scene.reveals.map(\.next), [3])
+    }
+
+    /// The "+N" pill draws the next six folders a click, until every one is
+    /// drawn; then it folds them back (owner, 2026-10-15).
+    func test_theFolderPillRevealsSixMoreThenFoldsBack() throws {
+        let folders = (0 ..< 20).map {
+            TracesTree.FolderNode(id: "f\($0)", label: "f\($0)", mode: .ask, sessions: [])
+        }
+        let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: folders)], unplaced: [])
+        func drawn(_ scene: FlowMapScene) -> Int {
+            scene.nodes.filter { if case .folder = $0.kind { true } else { false } }.count
+        }
+        var revealed: [String: Int] = [:]
+        var expected: [(drawn: Int, hidden: Int)] = [(6, 14), (12, 8), (18, 2), (20, 0)]
+        while let step = expected.first {
+            expected.removeFirst()
+            let scene = FlowMapScene.traces(tree, gate: .init(state: .ready), revealed: revealed)
+            let reveal = try XCTUnwrap(scene.reveals.first)
+            XCTAssertEqual(drawn(scene), step.drawn, "\(revealed)")
+            XCTAssertEqual(reveal.hidden, step.hidden, "\(revealed)")
+            XCTAssertEqual(drawn(scene) + reveal.hidden, folders.count)
+            // Every folder drawn sits in the band, however many there are.
+            let band = FlowMapScene.band(scene.space)
+            for node in scene.nodes where node.id.hasPrefix("folder:") {
+                XCTAssertTrue(band.contains(node.at.y), "\(node.id) off the band with \(revealed)")
+            }
+            XCTAssertTrue(band.contains(reveal.at.y), "the pill is off the band with \(revealed)")
+            revealed = FlowMapScene.revealing(reveal, in: revealed)
+        }
+        // The fold-back pill returns the tool to the first six.
+        XCTAssertEqual(revealed, [:])
+        let folded = FlowMapScene.traces(tree, gate: .init(state: .ready), revealed: revealed)
+        XCTAssertEqual(drawn(folded), FlowMapScene.foldersShown)
+        XCTAssertEqual(folded.space, FlowMapScene.size)
+    }
+
+    /// Folders a pill drew past what the band holds zoom the map out: the
+    /// design space grows, its shape kept, and the line height holds.
+    func test_revealedFoldersPastTheBandZoomTheMapOut() {
+        let folders = (0 ..< 40).map {
+            TracesTree.FolderNode(id: "f\($0)", label: "f\($0)", mode: .ask, sessions: [])
+        }
+        let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: folders)], unplaced: [])
+        let scene = FlowMapScene.traces(tree, gate: .init(state: .ready), revealed: [SourceKind.claudeCode.rawValue: 34])
+        XCTAssertGreaterThan(scene.space.height, FlowMapScene.size.height)
+        XCTAssertEqual(scene.space.width / scene.space.height, FlowMapScene.size.width / FlowMapScene.size.height,
+                       accuracy: 0.0001)
+        let ys = scene.nodes.filter { $0.id.hasPrefix("folder:") }.map(\.at.y).sorted()
+        XCTAssertEqual(ys.count, 40)
+        let tightest = zip(ys, ys.dropFirst()).map { $1 - $0 }.min() ?? 0
+        XCTAssertGreaterThanOrEqual(tightest, FlowMapScene.folderStepRange.lowerBound - 0.5)
+    }
+
+    /// The pill's accessible names say how many it draws and whose.
+    func test_theFolderPillIsNamed() throws {
+        let words = try XCTUnwrap(FlowMapScene.words)
+        XCTAssertEqual(words.revealFolders(6, tool: "Claude Code"), "Show 6 more Claude Code folders")
+        XCTAssertEqual(words.revealFolders(1, tool: "Codex"), "Show 1 more Codex folder")
+        XCTAssertEqual(words.foldFolders, "Show fewer")
+        XCTAssertEqual(words.foldFolders(tool: "Codex"), "Show fewer Codex folders")
     }
 
     /// P13: a tool that has contributed is joined to the commons by a

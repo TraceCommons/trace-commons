@@ -1045,6 +1045,16 @@ pub struct MonitorFlowMapCopy {
     /// dashed. "Not watched", without "Tool" (owner, 2026-10-12). DRAFT,
     /// NEEDS APPROVAL.
     pub legend_not_watched: &'static str,
+    /// The "+N" pill under a tool's folders draws the next few of them
+    /// (owner, 2026-10-15). Its visible text is the count alone; these are
+    /// its accessible names, `{count}` the folders the click draws and
+    /// `{tool}` the tool's name. DRAFT, NEEDS APPROVAL.
+    pub reveal_folders_one: &'static str,
+    pub reveal_folders: &'static str,
+    /// Once every folder is drawn, the pill folds them back: its visible
+    /// text, then its accessible name. DRAFT, NEEDS APPROVAL.
+    pub fold_folders: &'static str,
+    pub fold_folders_label: &'static str,
     /// The Private AI destination's label: the credential the tools'
     /// calls are answered with.
     pub credential: &'static str,
@@ -1473,6 +1483,10 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             connected: "{label} connected.",
             connected_line: "{label} connected",
             legend_not_watched: "Not watched",
+            reveal_folders_one: "Show 1 more {tool} folder",
+            reveal_folders: "Show {count} more {tool} folders",
+            fold_folders: "Show fewer",
+            fold_folders_label: "Show fewer {tool} folders",
             credential: "NEAR AI credential",
             none_found: "No configured tools found.",
         },
@@ -1916,6 +1930,15 @@ mod tests {
         }
         assert!(map.hub.contains("{label}") && map.hub.contains("{count}"));
         assert!(map.library.starts_with("{label} contributed"));
+        // The folder pill's names say whose folders, and the reveal how
+        // many; its singular is its own line.
+        assert!(map.reveal_folders.contains("{count}") && map.reveal_folders.contains("{tool}"));
+        assert!(
+            !map.reveal_folders_one.contains("{count}")
+                && map.reveal_folders_one.contains("{tool}")
+        );
+        assert!(map.fold_folders_label.contains("{tool}"));
+        assert!(!map.fold_folders.contains('{'));
         // Ron's exact words (2026-10-07, after the #1273 review).
         assert_eq!(
             map.hub,

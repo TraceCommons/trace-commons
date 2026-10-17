@@ -25,6 +25,8 @@ struct FlowMapView: View {
     /// A folder node was clicked: its project id, so the window selects the
     /// folder in the tree and shows it in the inspector (owner, 2026-10-09).
     var onSelectFolder: ((String) -> Void)? = nil
+    /// A tool's folder pill was clicked (`FlowMapScene.revealing(_:in:)`).
+    var onReveal: ((FlowMapScene.FolderReveal) -> Void)? = nil
 
     @State private var zoom: CGFloat = 1
     @State private var hovered: String?
@@ -52,6 +54,10 @@ struct FlowMapView: View {
 
                 ForEach(scene.nodes) { node in
                     target(node, fit: fit)
+                }
+
+                ForEach(scene.reveals, id: \.tool) { reveal in
+                    revealPill(reveal, fit: fit)
                 }
 
                 if let id = selection, let node = scene.nodes.first(where: { $0.id == id }) {
@@ -351,6 +357,44 @@ struct FlowMapView: View {
         .accessibilityValue(node.detail)
         .accessibilityAddTraits(pinned == node.id ? .isSelected : [])
         .position(fit.point(node.at))
+    }
+
+    /// A tool's folder pill (owner, 2026-10-15): "+N" draws the next few of
+    /// its folders, and once they are all drawn, the core's fold-back word
+    /// folds them away again. Its trailing edge sits where the folder names
+    /// end, on the line under the last one. It is a glass control pill in
+    /// the names' own type, so it scales with the map and fits one folder
+    /// line however tightly the lines are packed. Without the core's words
+    /// only the count, a figure, is drawn.
+    @ViewBuilder
+    private func revealPill(_ reveal: FlowMapScene.FolderReveal, fit: FlowMapGeometry) -> some View {
+        let words = FlowMapScene.words
+        let folds = reveal.hidden == 0
+        if let text = folds ? words?.foldFolders : "+\(reveal.hidden)" {
+            let name = folds
+                ? words?.foldFolders(tool: reveal.toolName) : words?.revealFolders(reveal.next, tool: reveal.toolName)
+            let unit = max(fit.scale, Self.labelFloor)
+            let size = Self.labelType(scale: fit.scale).labelSize
+            let column = fit.point(reveal.at)
+            let end = column.x - FlowMapScene.folderRadius * fit.scale - 6 * unit
+            Button { onReveal?(reveal) } label: {
+                Text(text)
+                    .font(.system(size: size, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .padding(.horizontal, 8 * unit)
+                    .frame(height: size + 8 * unit)
+                    .glassSurface(.control, hover: GlassTokens.Color.controlHover)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(GlassPressStyle())
+            .fixedSize()
+            .opacity(reveal.dim)
+            .help(name ?? text)
+            .accessibilityLabel(name ?? text)
+            .frame(width: 0, height: 0, alignment: .trailing)
+            .position(x: end, y: column.y)
+        }
     }
 
     private func card(_ node: FlowMapScene.Node, fit: FlowMapGeometry, in size: CGSize) -> some View {
