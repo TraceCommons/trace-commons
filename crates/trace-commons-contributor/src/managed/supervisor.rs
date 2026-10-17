@@ -118,11 +118,11 @@ async fn run_native(
                     Some(model),
                 )
                 .await?;
-                command = session.command_with_models(
+                command = opencode_route_command(
+                    &session,
+                    proxy.port(),
                     proxy.default_model(),
                     proxy.models(),
-                    &format!("http://127.0.0.1:{}/openai/v1", proxy.port()),
-                    "managed-local-session",
                 )?;
                 route = Some(proxy);
             }
@@ -395,6 +395,18 @@ fn opencode_sign_in_command(
     context: &LaunchContext,
 ) -> Result<std::process::Command, ManagedError> {
     let (port, default, models) = sign_in_route(context)?;
+    opencode_route_command(session, port, default, models)
+}
+
+/// OpenCode on a session's local NEAR AI proxy, the launcher's own (a
+/// saved key) or the daemon's (the sign-in): it starts on `default` and
+/// offers every model in `models`, with a placeholder key.
+fn opencode_route_command(
+    session: &super::opencode::OpenCodeSession,
+    port: u16,
+    default: &str,
+    models: &[super::models::ChatModel],
+) -> Result<std::process::Command, ManagedError> {
     session.command_with_models(
         default,
         models,
@@ -515,7 +527,10 @@ impl TerminalSignals {
 
 #[cfg(test)]
 mod tests {
-    use super::{near_ai_route, opencode_sign_in_command, stop_asked};
+    use super::{
+        codex_catalog_file, near_ai_route, opencode_route_command, opencode_sign_in_command,
+        stop_asked,
+    };
     use crate::config::ConfigStore;
     use crate::managed::{
         ConnectionKind, ManagedError, ToolId, models::ChatModel, opencode::OpenCodeSession,
@@ -727,6 +742,100 @@ mod tests {
             .err(),
             Some(ManagedError::InvalidRequest)
         );
+    }
+
+    /// OpenCode on a saved NEAR AI key runs against the launcher's own
+    /// proxy through the same command as the sign-in: every model the
+    /// proxy lists is in OpenCode's picker, not only the default.
+    #[test]
+    fn opencode_on_a_saved_key_route_offers_every_listed_model() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let native = home.path().join("opencode");
+        std::fs::write(&native, b"never executed").unwrap();
+        let account = signin::entry(ToolId::Opencode).unwrap();
+        let session =
+            OpenCodeSession::new(&store, &account, &native, uuid::Uuid::new_v4(), home.path())
+                .unwrap();
+        let command =
+            opencode_route_command(&session, 4321, "anthropic/claude-sonnet-5-5", &listed())
+                .unwrap();
+        let content = command
+            .get_envs()
+            .find(|(key, _)| *key == "OPENCODE_CONFIG_CONTENT")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(config["model"], "trace-managed/anthropic/claude-sonnet-5-5");
+        assert_eq!(
+            config["provider"]["trace-managed"]["models"],
+            json!({
+                "deepseek-ai/DeepSeek-V3.1": {"name": "deepseek-ai/DeepSeek-V3.1"},
+                "anthropic/claude-sonnet-5-5": {"name": "Claude Sonnet 5.5"},
+            })
+        );
+        assert_eq!(
+            config["provider"]["trace-managed"]["options"]["baseURL"],
+            "http://127.0.0.1:4321/openai/v1"
+        );
+    }
+
+    /// Codex's catalog takes the prompt from the installed Codex's own
+    /// list (`debug models --bundled`), not the basic one-line prompt.
+    #[cfg(unix)]
+    #[test]
+    fn codex_catalog_file_reads_the_installed_codex_list() {
+        use crate::managed::{codex::BASIC_INSTRUCTIONS, profiles::NativeProfiles};
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().join("state")).unwrap();
+        let cwd = home.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        // Answers only the bundled-list read; anything else fails.
+        let native = home.path().join("codex");
+        std::fs::write(
+            &native,
+            concat!(
+                "#!/bin/sh\n",
+                "[ \"$*\" = \"debug models --bundled\" ] || exit 1\n",
+                "printf '%s' '{\"models\":[{\"slug\":\"gpt-stub\",",
+                "\"visibility\":\"list\",\"priority\":1,",
+                "\"base_instructions\":\"Stub prompt.\"}]}'\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let account = signin::entry(ToolId::Codex).unwrap();
+        let row: crate::managed::sessions::SessionView = serde_json::from_value(json!({
+            "id": uuid::Uuid::new_v4(), "tool": "codex", "connection": "near_ai_signin",
+            "account_id": account.id, "account_label": "NEAR AI",
+            "selection_generation": 0, "project_label": "p", "cwd": cwd,
+            "started_at": "2026-10-16T00:00:00Z", "state": "starting",
+            "exit_code": null, "can_focus": false,
+        }))
+        .unwrap();
+        let file = codex_catalog_file(
+            &store,
+            &NativeProfiles::new(&store),
+            &account,
+            &native,
+            &row,
+            "anthropic/claude-sonnet-5-5",
+            &listed(),
+        )
+        .unwrap()
+        .unwrap();
+        let catalog: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(file.path()).unwrap()).unwrap();
+        let prompts: Vec<&str> = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["base_instructions"].as_str().unwrap())
+            .collect();
+        assert_eq!(prompts, ["Stub prompt.", "Stub prompt."]);
+        assert_ne!(prompts[0], BASIC_INSTRUCTIONS);
     }
 
     /// Only the daemon's explicit `stop: true` stops the tool. A missing
