@@ -164,7 +164,14 @@ has the details and the final run's command list.
 Install sccache and set `rustc-wrapper = "sccache"` under `[build]` in your
 user-level `~/.cargo/config.toml`, never the repository's, so worktrees
 share compiled third-party crates instead of each rebuilding them into its
-own `target/`. `CLAUDE.md` ("Shared compile cache") has the details.
+own `target/`. For agent and worktree builds, also set `CARGO_INCREMENTAL=0`
+(sccache never caches an incremental compile, which is how the workspace's
+own crates build by default) and use `RUSTFLAGS="-D warnings"` for every
+cargo command, clippy included (the flags are part of the cache key, and CI
+sets both for every job), in your agent's user-level environment, not the
+repository's config. Raise sccache's size limit to about 50 GiB; the 10 GiB
+default is too small for this workspace. `CLAUDE.md` ("Shared compile
+cache") has the details.
 
 ## Everything else
 
