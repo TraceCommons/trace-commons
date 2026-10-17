@@ -1,5 +1,5 @@
 import { RouteDisclosureUnreadableLine } from "../../../components/route-disclosure";
-import { Spinner } from "../../../components/ui/spinner";
+import { Spinner } from "../../../design-system";
 import { routeDisclosureView } from "../../../lib/tauri/route-disclosure";
 import {
   useCertificateDetail,
@@ -30,7 +30,7 @@ export function SessionSendDisclosure({
     // As macOS: a spinner while still being read, and the core's line --
     // or, if even that failed to load, the glyph alone -- once unreadable.
     if (routeDisclosureView(disclosure, core) === "loading") {
-      return <Spinner className="size-3" />;
+      return <Spinner />;
     }
     return (
       <RouteDisclosureUnreadableLine
@@ -41,8 +41,8 @@ export function SessionSendDisclosure({
   }
   const { facts, copy } = disclosure.data;
   return (
-    <section className="grid gap-2 border border-border px-3.5 py-3 text-[11px] leading-[1.55]">
-      <span className="font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+    <section className="grid gap-2 border border-tc-hairline px-3.5 py-3 text-[11px] leading-[1.55]">
+      <span className="tc-eyebrow">
         {copy.session.heading}
       </span>
       <dl className="m-0 grid gap-1">
@@ -58,16 +58,16 @@ export function SessionSendDisclosure({
       </dl>
       {facts.route === "witness" && <p className="m-0">{copy.route}</p>}
       {certificate.data && (
-        <div className="grid gap-1 rounded-md border border-border p-3">
+        <div className="tc-card tc-card--quiet grid gap-1">
           <strong>{certificate.data.copy.heading}</strong>
           <dl className="m-0 grid gap-1 font-mono text-[11px]">
-            <dt className="text-muted-foreground">
+            <dt className="text-tc-secondary">
               {certificate.data.copy.measurement_label}
             </dt>
             <dd className="m-0 break-all">
               {certificate.data.detail.witness_measurement}
             </dd>
-            <dt className="text-muted-foreground">
+            <dt className="text-tc-secondary">
               {certificate.data.copy.signer_label}
             </dt>
             <dd className="m-0 break-all">{certificate.data.detail.signer}</dd>

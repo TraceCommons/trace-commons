@@ -161,6 +161,24 @@ export async function pickDirectory(
   return value;
 }
 
+/** A glass element's rect in CSS pixels from the webview, and its radius. */
+export type GlassRegion = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  radius: number;
+};
+
+/**
+ * Put native glass under these regions, replacing the last set. Resolves
+ * true when this platform draws native glass (macOS), false when the shell
+ * should keep painting its own pane fills.
+ */
+export async function setGlassRegions(regions: GlassRegion[]): Promise<boolean> {
+  return (await invokeTauri("set_glass_regions", { regions })) === true;
+}
+
 export function openExternalUrl(url: string) {
   return invokeTauriVoid("open_external_url", { url });
 }

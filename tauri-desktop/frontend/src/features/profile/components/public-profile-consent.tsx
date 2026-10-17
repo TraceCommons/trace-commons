@@ -3,10 +3,8 @@ import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { ResponsiveOverlay } from "../../../components/responsive-overlay";
 import { FormFieldError } from "../../../components/form-field-error";
-import { Alert, AlertDescription } from "../../../components/ui/alert";
-import { Button } from "../../../components/ui/button";
-import { Checkbox } from "../../../components/ui/checkbox";
 import { type ProfileConsentValues, profileConsentSchema } from "../forms";
+import { ButtonPrimary, Checkbox, GlassButton } from "@/design-system";
 
 type PublicProfileConsentProps = {
   open: boolean;
@@ -48,16 +46,16 @@ export function PublicProfileConsent({
       description="Public attribution changes identity metadata only. It grants no use of trace data."
       footer={
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <Button type="button" variant="outline" onClick={onCancel} disabled={busy}>
+          <GlassButton type="button" onClick={onCancel} disabled={busy}>
             Not now
-          </Button>
-          <Button
+          </GlassButton>
+          <ButtonPrimary size="sm"
             type="submit"
             form="public-profile-consent-form"
             disabled={busy || !handle.trim()}
           >
             {busy ? "Going public…" : "Go public"}
-          </Button>
+          </ButtonPrimary>
         </div>
       }
     >
@@ -66,20 +64,20 @@ export function PublicProfileConsent({
         className="grid gap-4 pb-2"
         onSubmit={form.handleSubmit(() => onConfirm())}
       >
-        <div className="grid gap-4 rounded-lg border p-4 sm:grid-cols-2">
+        <div className="tc-card tc-card--quiet grid gap-4 sm:grid-cols-2">
           <section className="grid gap-2">
-            <h3 className="font-heading text-base font-medium">What gets published</h3>
-            <p className="text-sm text-muted-foreground">
+            <h3>What gets published</h3>
+            <p className="text-sm text-tc-secondary">
               Your handle, aggregate counts, public date, and bio if provided.
             </p>
-            <code className="rounded-md bg-muted px-2 py-1 text-xs">
+            <code className="tc-card tc-card--quiet text-xs">
               {handle.trim() || "handle not set"}
               {bio.trim() ? ` · ${bio.trim().length} bio chars` : ""}
             </code>
           </section>
           <section className="grid gap-2">
-            <h3 className="font-heading text-base font-medium">What never does</h3>
-            <p className="text-sm text-muted-foreground">
+            <h3>What never does</h3>
+            <p className="text-sm text-tc-secondary">
               Traces, trace contents, per-trace data, or anything about traces
               you did not send.
             </p>
@@ -87,7 +85,7 @@ export function PublicProfileConsent({
         </div>
         <label
           htmlFor="profile-consent-acknowledged"
-          className="flex items-start gap-3 rounded-lg border bg-muted/40 p-3 text-sm"
+          className="tc-card tc-card--quiet flex items-start gap-3 text-sm"
         >
           <Checkbox
             id="profile-consent-acknowledged"
@@ -97,7 +95,7 @@ export function PublicProfileConsent({
             aria-describedby={
               acknowledgedError ? "profile-consent-error" : undefined
             }
-            onCheckedChange={(checked) =>
+            onChange={(checked) =>
               form.setValue("acknowledged", checked === true, {
                 shouldDirty: true,
                 shouldValidate: true,
@@ -111,11 +109,11 @@ export function PublicProfileConsent({
         </label>
         <FormFieldError id="profile-consent-error" message={acknowledgedError} />
         {error && (
-          <Alert variant="destructive">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
+          <p className="tc-alert m-0" role="alert">
+            {error}
+          </p>
         )}
-        <p className="m-0 text-xs text-muted-foreground">
+        <p className="m-0 text-xs text-tc-secondary">
           Nothing is pre-checked. Go public stays off until acknowledgement is
           enabled.
         </p>

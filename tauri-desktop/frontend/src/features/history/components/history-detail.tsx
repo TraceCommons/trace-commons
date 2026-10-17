@@ -9,45 +9,45 @@ export function HistoryDetailView({
 }) {
   if (state === "loading")
     return (
-      <section className="rounded-2xl border border-border bg-card/80 mt-4 p-[26px]">
-        <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+      <section className="tc-card mt-2.5">
+        <p className="mt-3 mb-1 tc-body tc-text-tertiary">
           Reading owned trace detail…
         </p>
       </section>
     );
   if (state === "error")
     return (
-      <section className="rounded-2xl border border-border bg-card/80 mt-4 p-[26px]">
-        <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+      <section className="tc-card mt-2.5">
+        <p className="mt-3 mb-1 tc-body tc-text-tertiary">
           Detail unavailable. Account session may be required.
         </p>
       </section>
     );
   if (!detail) return null;
   return (
-    <section className="rounded-2xl border border-border bg-card/80 mt-4 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card mt-2.5">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             SESSION DETAIL
           </span>
           <h2>{detail.contribution_status ?? "Contribution"}</h2>
         </div>
-        <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start">
+        <span className="tc-chip tc-chip--glass self-start">
           Account-gated
         </span>
       </div>
       {detail.content_unavailable ? (
-        <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+        <p className="m-0 tc-caption tc-text-tertiary">
           Content is unavailable from server. Metadata and bounded evidence
           remain visible.
         </p>
       ) : (
-        <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+        <p className="m-0 tc-caption tc-text-tertiary">
           {detail.task ?? "No task description supplied."}
         </p>
       )}
-      <div className="my-5 flex flex-wrap gap-x-[26px] gap-y-2 text-[11px] text-muted-foreground">
+      <div className="my-2.5 flex flex-wrap gap-x-4 gap-y-1.5 tc-caption tc-text-tertiary">
         <span>
           <b>Outcome</b>
           {outcomeLabel(detail.task_success)}
@@ -66,8 +66,8 @@ export function HistoryDetailView({
         </span>
       </div>
       {detail.permitted_uses.length > 0 && (
-        <div className="mt-5 border-t border-border pt-4">
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        <div className="mt-5 border-t border-tc-hairline pt-4">
+          <span className="mb-1.5 block tc-eyebrow">
             PERMITTED USES
           </span>
           <p>
@@ -78,21 +78,21 @@ export function HistoryDetailView({
         </div>
       )}
       {detail.human_correction && (
-        <div className="mt-5 border-t border-border pt-4">
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        <div className="mt-5 border-t border-tc-hairline pt-4">
+          <span className="mb-1.5 block tc-eyebrow">
             DECISIVE CORRECTION
           </span>
           <p>{detail.human_correction}</p>
         </div>
       )}
       {detail.evidence.length > 0 && (
-        <div className="mt-6 border-t border-border pt-5">
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+        <div className="mt-3 pt-3 tc-hairline-top">
+          <span className="mb-1.5 block tc-eyebrow">
             BOUNDED EVIDENCE
           </span>
           {detail.evidence.map((item) => (
             <div
-              className="grid grid-cols-[150px_minmax(0,1fr)] gap-3 border-t border-border py-[9px] text-[11px] text-muted-foreground"
+              className="grid grid-cols-[150px_minmax(0,1fr)] gap-3 tc-hairline-top py-2 tc-caption tc-text-tertiary"
               key={item.event_id}
             >
               <span>{item.kind}</span>
@@ -102,7 +102,7 @@ export function HistoryDetailView({
         </div>
       )}
       {detail.publication && (
-        <p className="mt-[15px] text-[11px] leading-[1.5] text-primary">
+        <p className="mt-2 tc-caption tc-text-accent">
           Published page: {detail.publication.title}
         </p>
       )}

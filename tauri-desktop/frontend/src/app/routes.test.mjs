@@ -1,16 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isNavigablePath, visibleNavItems } from "./routes.ts";
+import { isNavigablePath, visibleMonitorView } from "./routes.ts";
 
-test("the Mission drafts row is hidden while missions are off", () => {
-  const ids = visibleNavItems(false).map((item) => item.id);
-  assert.ok(!ids.includes("mission-drafts"));
-  assert.ok(ids.includes("insights") && ids.includes("settings"));
+test("the Missions view is unreachable while missions are off", () => {
+  assert.equal(visibleMonitorView("/mission-drafts", false), "home");
+  assert.equal(visibleMonitorView("/history", false), "history");
 });
 
-test("the Mission drafts row returns when missions are on", () => {
-  const ids = visibleNavItems(true).map((item) => item.id);
-  assert.ok(ids.includes("mission-drafts"));
+test("the Missions view returns when missions are on", () => {
+  assert.equal(visibleMonitorView("/mission-drafts", true), "missions");
 });
 
 test("a desktop event cannot open Mission drafts while missions are off", () => {

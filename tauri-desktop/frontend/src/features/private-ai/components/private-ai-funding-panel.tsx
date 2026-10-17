@@ -1,5 +1,5 @@
-import { Button } from "@/components/ui/button";
 import type { usePrivateAi } from "../hooks/use-private-ai";
+import { GlassButton, TertiaryLink } from "@/design-system";
 
 type PrivateAiController = ReturnType<typeof usePrivateAi>;
 
@@ -11,60 +11,57 @@ export function PrivateAiFundingPanel({
   const funding = privateAi.funding;
   const verifiedFundingUrl = privateAi.verifiedFundingUrl;
   return (
-    <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card mb-2.5">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             CLOUD BILLING
           </span>
           <h2>Manage credits</h2>
         </div>
-        <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+        <TertiaryLink
           type="button"
           onClick={() => void privateAi.refreshFunding()}
           disabled={privateAi.busy}
         >
           Refresh account
-        </Button>
+        </TertiaryLink>
       </div>
       {funding ? (
         <>
           <p>{funding.message}</p>
           {funding.organizationName && (
-            <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+            <p className="m-0 tc-caption tc-text-tertiary">
               Organization: {funding.organizationName}
             </p>
           )}
           {funding.browserUrl && !verifiedFundingUrl && (
-            <Button
-              className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+            <GlassButton
               type="button"
               onClick={() => void privateAi.verifyFunding()}
               disabled={privateAi.busy}
             >
               Verify current account
-            </Button>
+            </GlassButton>
           )}
           {verifiedFundingUrl && (
-            <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
-              <Button
-                className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+            <p className="m-0 tc-caption tc-text-tertiary">
+              <TertiaryLink
                 type="button"
                 onClick={() => void privateAi.openBrowser(verifiedFundingUrl)}
                 disabled={privateAi.busy}
               >
                 Open verified billing
-              </Button>
+              </TertiaryLink>
             </p>
           )}
         </>
       ) : (
-        <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+        <p className="mt-3 mb-1 tc-body tc-text-tertiary">
           Account destination not read.
         </p>
       )}
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         Billing URL is released only after Rust verifies current organization
         and connection revision. This app never chooses a payer.
       </p>

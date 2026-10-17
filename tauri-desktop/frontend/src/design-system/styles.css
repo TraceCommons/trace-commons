@@ -1,0 +1,9 @@
+/* Trace Commons · WYSIWYG glass design system.
+   Tokens first, then the component classes that consume them. Components
+   read tokens as var(--tc-*) and never restate a literal. */
+@import "./tokens/colors.css";
+@import "./tokens/materials.css";
+@import "./tokens/typography.css";
+@import "./tokens/spacing.css";
+@import "./tokens/components.css";
+@import "./glass.css";

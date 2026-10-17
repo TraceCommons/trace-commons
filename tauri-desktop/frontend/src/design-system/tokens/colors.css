@@ -1,0 +1,33 @@
+/* Trace Commons · WYSIWYG glass · colour tokens (dark, vibrant-on-glass) */
+:root {
+  /* Brand */
+  --tc-purple: #6d14f3;
+  --tc-purple-soft: #8a3dff;
+  --tc-purple-text: #c9b3ff;
+  --tc-blue: #3a7bd5;
+
+  /* Text on glass (vibrancy tiers) */
+  --tc-text-primary: #f2f2f4;
+  --tc-text-secondary: #c9c9d0;
+  --tc-text-tertiary: #b4b4bc;
+  --tc-text-on-accent: #ffffff;
+  --tc-text-on-status: #0c0c0e;
+
+  /* Status · semantic (glyph + label only, never fills) */
+  --tc-status-on: #3ddc84; /* watching · share automatically · automatic · always on */
+  --tc-status-ask: #f5c142; /* ask me · worth a second look */
+  --tc-status-off: #a9a9b0; /* never · not used */
+  --tc-status-outside: #ff6b6b; /* leaves for an outside model, no proof */
+
+  /* Data */
+  --tc-data-shared: #8a3dff;
+  --tc-data-kept: #3a7bd5;
+  --tc-data-inference: #a78bfa;
+
+  /* Backdrop (the scene glass sits over) */
+  --tc-scene-base: #0f1219;
+  --tc-scene-warm: #1d2430;
+  --tc-scene-glow-1: #3f6a8a;
+  --tc-scene-glow-2: #6a3f7a;
+  --tc-scene-glow-3: #2f6b5a;
+}

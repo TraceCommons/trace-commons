@@ -1,3 +1,5 @@
+import { Notice } from "@/design-system";
+
 type CenteredNoticeProps = {
   title: string;
   body: string;
@@ -10,10 +12,12 @@ export function CenteredNotice({
   tone = "neutral",
 }: CenteredNoticeProps) {
   return (
-    <Alert variant={tone === "error" ? "destructive" : "default"} className="my-6">
-      <AlertTitle>{title}</AlertTitle>
-      <AlertDescription>{body}</AlertDescription>
-    </Alert>
+    <Notice
+      tone={tone === "error" ? "outside" : "off"}
+      title={title}
+      className="my-6"
+    >
+      {body}
+    </Notice>
   );
 }
-import { Alert, AlertDescription, AlertTitle } from "./ui/alert";

@@ -12,17 +12,17 @@ export function CommunityPanel({ standing }: { standing: CommunityStanding }) {
       })
     : "date unavailable";
   return (
-    <section className="mb-4 border-2 border-foreground bg-primary/10 p-6">
+    <section className="tc-card tc-card--quiet mb-4">
       <div className="flex items-start justify-between gap-4">
         <div>
           <span>COMMUNITY</span>
           <h2>Public standing</h2>
         </div>
-        <span className="grid h-[34px] w-[34px] place-items-center bg-primary text-[11px] font-extrabold text-primary-foreground">
+        <span className="grid h-[34px] w-[34px] place-items-center bg-tc-purple text-[11px] font-extrabold text-tc-on-accent">
           TC
         </span>
       </div>
-      <div className="mt-[22px] grid grid-cols-4 border-y border-primary/30">
+      <div className="mt-[22px] grid grid-cols-4 border-y border-tc-purple/30">
         <div>
           <span>Rank</span>
           <strong>{standing.rank === null ? "—" : `#${standing.rank}`}</strong>

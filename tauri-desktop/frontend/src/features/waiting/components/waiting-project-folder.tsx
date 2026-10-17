@@ -1,8 +1,8 @@
-import { Button } from "@/components/ui/button";
 import type { WaitingEntry } from "../types";
 import { useEligibilityGroupCopy } from "../../../lib/tauri/use-contributor-copy";
 import { IgnoreProjectControl } from "./ignore-project-control";
 import { SubmitAllAsControl } from "./submit-all-as-control";
+import { GlassButton } from "@/design-system";
 export function WaitingProjectFolder({
   projectId,
   label,
@@ -30,16 +30,13 @@ export function WaitingProjectFolder({
 }) {
   const eligibility = useEligibilityGroupCopy(entries);
   return (
-    <article className="flex items-center justify-between gap-[18px] rounded-xl border border-border bg-background p-4">
-      <Button
-        className="flex min-w-0 items-center gap-3 border-0 bg-transparent p-0 text-left text-foreground"
+    <article className="tc-card tc-card--quiet flex min-w-0 flex-col items-stretch gap-2.5">
+      <button
+        className="flex min-w-0 border-0 bg-transparent p-0 text-left text-[var(--tc-text-primary)]"
         type="button"
         onClick={() => onOpen(projectId)}
       >
-        <span className="grid h-[38px] w-[38px] place-items-center rounded-[9px] bg-primary text-[12px] font-extrabold text-primary-foreground">
-          {label.slice(0, 1).toUpperCase()}
-        </span>
-        <span>
+        <span className="min-w-0 break-words">
           <strong>{label}</strong>
           {path && <small>{path}</small>}
           <small>{count} waiting traces</small>
@@ -56,12 +53,11 @@ export function WaitingProjectFolder({
             <small>Eligibility unavailable. Review traces individually.</small>
           )}
         </span>
-      </Button>
-      <div className="flex flex-wrap items-center justify-end gap-2.5">
+      </button>
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         {eligibility.data?.can_contribute === true && (
           <>
-            <Button
-              className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+            <GlassButton
               type="button"
               onClick={() => onSubmitAll(projectId)}
               disabled={busy}
@@ -69,7 +65,7 @@ export function WaitingProjectFolder({
               {busy
                 ? "Submitting…"
                 : `Submit all eligible (${eligibility.data.eligible_count})`}
-            </Button>
+            </GlassButton>
             <SubmitAllAsControl
               eligibleCount={eligibility.data.eligible_count}
               busy={busy}
@@ -85,9 +81,7 @@ export function WaitingProjectFolder({
           onIgnore={onIgnore}
         />
         {message && (
-          <span className="mt-[15px] text-[11px] leading-[1.5] text-primary">
-            {message}
-          </span>
+          <span className="w-full tc-caption tc-text-accent">{message}</span>
         )}
       </div>
     </article>

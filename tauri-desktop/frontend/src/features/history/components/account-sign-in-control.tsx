@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { GlassButton, TertiaryLink } from "@/design-system";
 
 export function AccountSignInControl({
   checking,
@@ -21,7 +21,7 @@ export function AccountSignInControl({
 }) {
   if (checking) {
     return (
-      <span className="text-xs text-muted-foreground" role="status">
+      <span className="text-xs text-tc-secondary" role="status">
         Checking account session…
       </span>
     );
@@ -29,32 +29,30 @@ export function AccountSignInControl({
 
   return (
     <div className="grid justify-items-end gap-1.5">
-      <Button
+      <GlassButton
         type="button"
-        variant="outline"
         onClick={onSignIn}
         disabled={!canSignIn || pending || !onSignIn}
       >
         {pending ? "Waiting for sign-in…" : "Sign in to withdraw"}
-      </Button>
+      </GlassButton>
       {pending && (
-        <span className="max-w-64 text-right text-xs text-muted-foreground" role="status">
+        <span className="max-w-64 text-right text-xs text-tc-secondary" role="status">
           Complete sign-in in your browser. This may take up to five minutes.
         </span>
       )}
       {pending && signInUrlAvailable && (
-        <Button
+        <TertiaryLink
           type="button"
-          variant="link"
           className="h-auto p-0 text-xs"
           onClick={onOpenFallback}
           disabled={openingFallback || !onOpenFallback}
         >
           {openingFallback ? "Opening sign-in page…" : "Open sign-in page again"}
-        </Button>
+        </TertiaryLink>
       )}
       {error && (
-        <span className="max-w-64 text-right text-xs text-destructive" role="alert">
+        <span className="max-w-64 text-right text-xs text-tc-outside" role="alert">
           {error}
         </span>
       )}

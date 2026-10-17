@@ -9,12 +9,12 @@ export function CertificatePanel({
 }) {
   const certified = entries.filter((entry) => entry.holds_certificate === true);
   return (
-    <section className="mb-4 grid gap-2.5 rounded-xl border border-chart-4/30 bg-chart-4/10 p-[22px_26px]">
+    <section className="tc-card tc-card--quiet mb-4 grid gap-2.5 border-tc-ask/30">
       <div>
         <h2>{copy?.list_title ?? "Witness certificates"}</h2>
       </div>
       {certified.length > 0 ? (
-        <div className="mt-1 grid gap-3 border-t border-chart-4/20 pt-3">
+        <div className="mt-1 grid gap-3 border-t border-tc-ask/20 pt-3">
           {certified.map((entry) => (
             <div key={entry.entry_id} className="grid gap-1">
               <strong>{entry.project_label}</strong>

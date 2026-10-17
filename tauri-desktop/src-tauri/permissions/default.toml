@@ -1,6 +1,7 @@
 [default]
 description = "Trace Commons commands available to the main desktop window."
 permissions = [
+  "allow-set-glass-regions",
   "allow-core-status",
   "allow-queue-outcome-line",
   "allow-attestation-copy",
