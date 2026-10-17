@@ -8,6 +8,10 @@
 //! them; run them locally against a real PostgreSQL too, because with the
 //! variable unset every test here returns early and the run still prints ok.
 
+#[path = "support/role_ddl_lock.rs"]
+mod role_ddl_lock;
+
+use role_ddl_lock::with_role_ddl_lock;
 use secrecy::SecretString;
 use trace_commons_server::config::{DatabaseConfig, SslMode};
 use trace_commons_server::db::{Database, postgres::PgBackend};
@@ -82,7 +86,7 @@ async fn invite_lookup_policy_confines_reads_to_the_presented_hash() {
     // GRANT is per-database, so it has to be (re)applied against whatever
     // database the run points at, not just the first one it ever ran on.
     if let Err(error) = client
-        .batch_execute(
+        .batch_execute(&with_role_ddl_lock(
             "DO $$ BEGIN
                  IF NOT EXISTS (
                      SELECT 1 FROM pg_roles
@@ -91,7 +95,7 @@ async fn invite_lookup_policy_confines_reads_to_the_presented_hash() {
                      CREATE ROLE trace_invite_registry_test_reader NOLOGIN NOBYPASSRLS;
                  END IF;
              END $$;",
-        )
+        ))
         .await
     {
         if error.code() == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE) {
@@ -101,11 +105,11 @@ async fn invite_lookup_policy_confines_reads_to_the_presented_hash() {
         panic!("create NOBYPASSRLS reader fixture role: {error}");
     }
     client
-        .batch_execute(
+        .batch_execute(&with_role_ddl_lock(
             "GRANT USAGE ON SCHEMA public TO trace_invite_registry_test_reader;
              GRANT SELECT ON onboarding_invite_grants
                  TO trace_invite_registry_test_reader;",
-        )
+        ))
         .await
         .expect("grant access to the NOBYPASSRLS reader fixture role");
 
@@ -1593,7 +1597,7 @@ mod lookup_route {
         {
             let client = admin.trace_pool_for_test().get().await.unwrap();
             client
-                .batch_execute(&format!(
+                .batch_execute(&with_role_ddl_lock(&format!(
                     "DO $$ BEGIN
                          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{REGISTRY_LOGIN}')
                          THEN CREATE ROLE {REGISTRY_LOGIN} LOGIN NOSUPERUSER NOBYPASSRLS; END IF;
@@ -1603,7 +1607,7 @@ mod lookup_route {
                      GRANT trace_invite_registry TO {REGISTRY_LOGIN};
                      GRANT USAGE ON SCHEMA public TO {OUTSIDER_LOGIN};
                      GRANT SELECT ON onboarding_invite_grants TO {OUTSIDER_LOGIN};"
-                ))
+                )))
                 .await
                 .expect("provision the registry and control logins");
         }
