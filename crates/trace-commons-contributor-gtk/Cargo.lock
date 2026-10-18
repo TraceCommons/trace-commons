@@ -4850,7 +4850,6 @@ dependencies = [
  "reqwest 0.12.28",
  "ring",
  "rusqlite",
- "security-framework",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4861,6 +4860,9 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "trace-commons-attestation",
  "trace-commons-build-info",
+ "trace-commons-contributor-insights",
+ "trace-commons-contributor-platform",
+ "trace-commons-contributor-sources",
  "trace-commons-operator-client",
  "trace-commons-protocol",
  "tracing",
@@ -4892,6 +4894,61 @@ dependencies = [
  "trace-commons-protocol",
  "uuid",
  "zbus",
+]
+
+[[package]]
+name = "trace-commons-contributor-insights"
+version = "0.19.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs",
+ "hex",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "trace-commons-contributor-platform",
+ "trace-commons-contributor-sources",
+ "trace-commons-protocol",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "trace-commons-contributor-platform"
+version = "0.19.0"
+dependencies = [
+ "anyhow",
+ "apple-native-keyring-store",
+ "keyring-core",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "uuid",
+ "windows-native-keyring-store",
+ "windows-sys 0.61.2",
+ "zbus-secret-service-keyring-store",
+]
+
+[[package]]
+name = "trace-commons-contributor-sources"
+version = "0.19.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs",
+ "hex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "trace-commons-protocol",
+ "tracing",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

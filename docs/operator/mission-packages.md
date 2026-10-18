@@ -53,7 +53,7 @@ Use a fresh disposable loopback PostgreSQL database named `reward_test_*` throug
 
 ```sh
 cargo test -p trace-commons-server --test mission_publication_pg -- --ignored --test-threads=1
-cargo test -p trace-commons-server --lib \
+cargo test -p trace-commons-ingest --lib \
   public_mission_catalog_http_is_bounded_anonymous_and_side_effect_free -- --ignored --test-threads=1
 cargo test -p trace-commons-contributor --lib mission_catalog::tests
 cargo test -p trace-commons-contributor --lib mission_attempt

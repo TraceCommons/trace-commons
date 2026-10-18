@@ -160,7 +160,7 @@ mod tests {
 
     /// The server's submission-status wire values, from
     /// `TraceCorpusStatus::as_str` in
-    /// `crates/trace-commons-server/src/bin/trace-commons-ingest.rs` and
+    /// `crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs` and
     /// `TraceCorpusStatus` in `crates/trace-commons-server/src/trace_corpus_storage.rs`.
     /// Copied, not imported: this crate is MIT/Apache and may not depend on
     /// the AGPL server, not even for a test (`license_boundary.rs`).

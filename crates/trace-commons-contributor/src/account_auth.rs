@@ -28,32 +28,24 @@
 //! string: every error below is a fixed label, like every other boundary in
 //! this crate.
 
-use std::time::Duration;
-
 use anyhow::{Context, Result, bail};
-use base64::Engine;
 use chrono::{DateTime, Utc};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use trace_commons_operator_client::Client;
 
 use crate::config::{ACCOUNT_SESSION_FILE, ConfigStore, ContributorConfig, config_allowlist};
 
-/// The loopback path the server accepts, and the ONLY one it accepts. Pinned
-/// here and cross-checked against the server's own constant by
-/// `constants_match_the_server` below.
-pub const NATIVE_REDIRECT_PATH: &str = "/trace-commons/native-auth/callback";
+#[cfg(feature = "test-credential-store")]
+#[doc(hidden)]
+pub mod wire;
+#[cfg(not(feature = "test-credential-store"))]
+mod wire;
 
-/// PKCE method. The server refuses `plain`.
-const CODE_CHALLENGE_METHOD: &str = "S256";
-
-/// How long to wait for the human to finish in their browser. Matches the
-/// server's pending-request TTL, so the listener never outlives the flow it is
-/// serving.
-const LOOPBACK_WAIT: Duration = Duration::from_secs(5 * 60);
+pub use wire::NATIVE_REDIRECT_PATH;
+use wire::{CODE_CHALLENGE_METHOD, LOOPBACK_WAIT, challenge_for_verifier, generate_verifier};
 
 /// Cap on the bytes read from the loopback connection before giving up. A
 /// browser's GET of a short callback URL is well under this; the cap stops a
@@ -210,19 +202,6 @@ struct TokenExchangeResponse {
     access_token: String,
     expires_in_secs: i64,
     account_id: String,
-}
-
-/// A 43-character PKCE verifier: 32 CSPRNG bytes, unpadded base64url, which is
-/// exactly RFC 7636's minimum length and its unreserved alphabet.
-fn generate_verifier() -> Result<String> {
-    let mut bytes = [0u8; 32];
-    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes)
-        .map_err(|_| anyhow::anyhow!("could not generate a sign-in verifier"))?;
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
-}
-
-fn challenge_for_verifier(verifier: &str) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
 /// The two native endpoints take NO credential — one parks a PKCE challenge,
@@ -546,50 +525,6 @@ mod tests {
                 "login_path = {login_path:?}"
             );
         }
-    }
-
-    /// The client's copy of the wire constants must equal the server's. Both
-    /// are in this workspace, and `trace-commons-server` is a dev-dependency
-    /// here, so this is a real cross-check rather than two hand-maintained
-    /// copies that can drift.
-    ///
-    /// Non-Windows only: `trace-commons-server` is not a dev-dependency on
-    /// Windows (see its Cargo.toml comment) because its dependency chain
-    /// reaches openssl-sys, which is unusable on the CI Windows runner.
-    #[cfg(not(windows))]
-    #[test]
-    fn constants_match_the_server() {
-        use trace_commons_server::account_native_auth as server;
-        assert_eq!(NATIVE_REDIRECT_PATH, server::NATIVE_REDIRECT_PATH);
-        assert_eq!(CODE_CHALLENGE_METHOD, server::NATIVE_CODE_CHALLENGE_METHOD);
-        assert_eq!(
-            LOOPBACK_WAIT.as_secs(),
-            server::NATIVE_AUTH_REQUEST_TTL.as_secs(),
-            "the listener must not outlive the server's pending request"
-        );
-    }
-
-    /// The verifier this client generates must satisfy the server's own
-    /// well-formedness check, and the challenge must be the one the server
-    /// derives.
-    #[cfg(not(windows))]
-    #[test]
-    fn generated_pkce_satisfies_the_server() {
-        use trace_commons_server::account_native_auth as server;
-        let verifier = generate_verifier().expect("verifier");
-        assert!(server::verifier_is_wellformed(&verifier));
-        let challenge = challenge_for_verifier(&verifier);
-        assert!(server::challenge_is_wellformed(&challenge));
-        assert_eq!(challenge, server::challenge_for_verifier(&verifier));
-    }
-
-    /// The redirect this client registers must be one the server accepts.
-    #[cfg(not(windows))]
-    #[test]
-    fn the_registered_redirect_is_one_the_server_accepts() {
-        use trace_commons_server::account_native_auth as server;
-        let uri = format!("http://127.0.0.1:49152{NATIVE_REDIRECT_PATH}");
-        assert!(server::validate_loopback_redirect_uri(&uri).is_some());
     }
 
     #[tokio::test]

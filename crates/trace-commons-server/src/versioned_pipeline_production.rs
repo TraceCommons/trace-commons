@@ -711,7 +711,7 @@ pub struct ProductionPipelineInputs {
     pub components: Arc<PipelineGateComponents>,
     /// The Score policy factories the service can bind
     /// (`PipelineServiceBuilder::with_score_policies`): what the ingest
-    /// library entry was started with (`trace_commons_server::ingest`),
+    /// library entry was started with (`trace_commons_ingest::run`),
     /// empty in the open build.
     pub score_policies: crate::versioned_pipeline_score_registry::ScorePolicyRegistry,
 }

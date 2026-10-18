@@ -268,7 +268,7 @@ will be different and are the correct values.
 ## DB-backed `trace-commons-ingest` tests flake under parallel `cargo test`
 
 **Symptom:** Running the ingest service's PostgreSQL tests
-(`cargo test -p trace-commons-server --lib ingest::app::`) with
+(`cargo test -p trace-commons-ingest --lib`) with
 the default thread pool intermittently fails with
 `too many outstanding login links` (HTTP 429) or
 `invalid or expired account session` (HTTP 401) — even though the same
@@ -285,7 +285,7 @@ flakes).
 **Fix:** Run the DB-backed ingest suite **single-threaded**:
 
 ```sh
-cargo test -p trace-commons-server --lib ingest::app:: -- --test-threads=1
+cargo test -p trace-commons-ingest --lib -- --test-threads=1
 ```
 
 CI runs this suite serially for the same reason. The

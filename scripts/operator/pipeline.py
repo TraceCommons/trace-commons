@@ -101,8 +101,9 @@ def _with_harness_assembly(evidence, assembly):
 
 
 # The ingest test binary hosts the shared app in-process (P4-D3): `run` and
-# `package` start one exact ignored test in it.
-INGEST_TEST_ARGS = ("-p", "trace-commons-server", "--lib")
+# `package` start one exact ignored test in it. The app is the
+# `trace-commons-ingest` crate's library (`ingest::app`).
+INGEST_TEST_ARGS = ("-p", "trace-commons-ingest", "--lib")
 CORPUS_HARNESS = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_corpus_run"
 PACKAGE_WRITER = "ingest::app::tests::pipeline_corpus_pg_tests::pipeline_package_write"
 # `qualify --signing-key` and `keygen` (P5-D13): the signing step and the key

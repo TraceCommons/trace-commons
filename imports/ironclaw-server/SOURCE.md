@@ -6,6 +6,8 @@ This repository was initially extracted from the Ironclaw `gecko-pass` worktree.
 - Source branch: `gecko-pass`
 - Extracted server binaries:
   - `src/bin/trace_commons_ingest.rs` -> `crates/trace-commons-server/src/bin/trace-commons-ingest.rs`
+    (since moved to `crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs`,
+    in the AGPL `trace-commons-ingest` crate)
   - `src/bin/trace_commons_upload_claim_issuer.rs` -> `crates/trace-commons-server/src/bin/trace-commons-upload-claim-issuer.rs`
 - Extracted database schema:
   - `migrations/V26__trace_commons_schema.sql` -> `migrations/V1__trace_commons_schema.sql`

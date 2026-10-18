@@ -129,7 +129,16 @@ def _invoke_psql(command, *, env, input_text):
     return result
 
 
-# What the code revision covers besides the server crate's dependency
+# The crates whose binaries are deployed, and so whose dependency closure the
+# code revision covers (#1249): the server crate (the issuer and the operator
+# binaries) and the ingest crate, which holds the ingest service and its
+# binary since it was extracted from the server crate. The ingest crate
+# depends on the server crate, but the server crate does not depend on it,
+# so the server's closure alone would leave every ingest edit out of the
+# revision.
+CODE_REVISION_ROOT_CRATES = ("crates/trace-commons-server", "crates/trace-commons-ingest")
+
+# What the code revision covers besides those crates' dependency
 # closure (#1249). Each entry is a file, or a directory and everything under
 # it, relative to the repository root; an entry that does not exist covers
 # nothing until it does.
@@ -145,7 +154,6 @@ def _invoke_psql(command, *, env, input_text):
 #   top-level `.gitignore`, which the self-test reads and which decides the
 #   files listed here (`CodeRevisionRepositoryTests` checks that every input
 #   the tooling names is covered).
-CODE_REVISION_ROOT_CRATE = "crates/trace-commons-server"
 CODE_REVISION_COVERED = (
     "Cargo.toml",
     "Cargo.lock",
@@ -240,15 +248,15 @@ def _path_dependencies(manifest, crate, workspace_dependencies):
 
 
 def _code_revision_crates(root):
-    """The crate directories the server's binaries are built from: the
-    server crate and, transitively, every crate its build dependency tables
-    reach by `path` (a workspace-inherited one included), plus any crate the
-    workspace's `[patch]` or `[replace]` tables substitute by `path`. Sorted,
-    relative to `root`. A crate without a readable `Cargo.toml` is refused
-    (`code_revision_manifest_missing`)."""
+    """The crate directories the deployed binaries are built from: the
+    crates of `CODE_REVISION_ROOT_CRATES` and, transitively, every crate
+    their build dependency tables reach by `path` (a workspace-inherited one
+    included), plus any crate the workspace's `[patch]` or `[replace]` tables
+    substitute by `path`. Sorted, relative to `root`. A crate without a
+    readable `Cargo.toml` is refused (`code_revision_manifest_missing`)."""
     workspace = _read_manifest(root, "Cargo.toml")
     workspace_dependencies = workspace.get("workspace", {}).get("dependencies", {})
-    pending = [CODE_REVISION_ROOT_CRATE]
+    pending = list(CODE_REVISION_ROOT_CRATES)
     for source in workspace.get("patch", {}).values():
         pending.extend(
             _tree_relative(".", spec["path"])

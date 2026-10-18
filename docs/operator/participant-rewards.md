@@ -80,7 +80,7 @@ Use separate disposable loopback databases named `reward_test_*`. The selected i
 
 ```sh
 cargo test -p trace-commons-server --test reward_participant_pg -- --ignored --test-threads=1
-cargo test -p trace-commons-server --lib \
+cargo test -p trace-commons-ingest --lib \
   reward_participant_http_contract -- --ignored --test-threads=1
 ```
 

@@ -55,7 +55,7 @@ const REQUEST_TIMEOUT_SECS: u64 = 30;
 // The server's wire shape.
 //
 // A deliberately partial mirror of `CommunitySnapshotContents` in
-// `crates/trace-commons-server/src/bin/trace-commons-ingest.rs`: only the
+// `crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs`: only the
 // fields this daemon reduces are named, so a field added to the snapshot
 // cannot break the poll.
 // ---------------------------------------------------------------------------

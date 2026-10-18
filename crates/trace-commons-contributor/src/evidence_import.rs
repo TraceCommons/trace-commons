@@ -184,67 +184,10 @@ pub fn read_import(path: &std::path::Path) -> Result<PreparedImport> {
     PreparedImport::parse(&bytes)
 }
 
-pub(crate) fn open_import_file(path: &std::path::Path) -> Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // O_NONBLOCK | O_NOFOLLOW, spelled per-ABI rather than through `libc`,
-        // which is not a direct dependency of this permissive crate and is not
-        // worth becoming one for two constants. The consequence is deliberate
-        // and is the safe direction: a target whose ABI is not enumerated here
-        // gets no open at all, not an open with the wrong flags. Adding a
-        // target means adding its pair, and the symlink and FIFO tests below
-        // are what prove a pair is right. Today that leaves Linux on 32-bit
-        // arm, riscv64 and s390x, and every non-Linux non-macOS unix, without
-        // local import; they refuse by name rather than silently losing the
-        // confinement the flags provide.
-        let flags = if cfg!(target_os = "macos") {
-            0x4 | 0x100
-        } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-            0x800 | 0x20000
-        } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-            0x800 | 0x8000
-        } else {
-            return Err(anyhow!("import-platform-unsupported"));
-        };
-        options.custom_flags(flags);
-    }
-    #[cfg(windows)]
-    {
-        use std::path::{Component, Prefix};
-        // Refuse device/pipe and network namespaces before CreateFile can
-        // connect or block. Ordinary drive paths (including verbatim disk
-        // paths) and relative local paths retain regular-file validation.
-        if let Some(Component::Prefix(prefix)) = path.components().next()
-            && !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
-        {
-            return Err(anyhow!("import-file-namespace-unsupported"));
-        }
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
-    }
-    #[cfg(not(any(unix, windows)))]
-    return Err(anyhow!("import-platform-unsupported"));
-    let file = options
-        .open(path)
-        .map_err(|_| anyhow!("import-file-unreadable"))?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if file
-            .metadata()
-            .map_err(|_| anyhow!("import-file-unreadable"))?
-            .file_attributes()
-            & 0x400
-            != 0
-        {
-            return Err(anyhow!("import-file-not-regular"));
-        }
-    }
-    Ok(file)
-}
+/// The no-follow, nonblocking opener every local import goes through. It
+/// lives in the platform crate, which the Insights store shares, and is
+/// re-exported at its old path.
+pub(crate) use trace_commons_contributor_platform::local_files::open_import_file;
 
 #[cfg(test)]
 mod tests {

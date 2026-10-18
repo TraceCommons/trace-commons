@@ -51,7 +51,7 @@ def check(reader, script, report, harness):
 def main():
     root = Path(__file__).resolve().parents[2]
     version = check(
-        (root / "crates/trace-commons-contributor/src/source/opencode.rs").read_text(),
+        (root / "crates/trace-commons-contributor-sources/src/source/opencode.rs").read_text(),
         (root / "scripts/qualification/opencode-routing.py").read_text(),
         (root / "docs/superpowers/reports/2026-09-07-opencode-export-qualification.md").read_text(),
         (root / "crates/trace-commons-contributor/src/daemon/harness.rs").read_text(),
