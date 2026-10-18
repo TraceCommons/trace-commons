@@ -505,7 +505,21 @@ pub fn plan(
             let Some(port) = port else {
                 return Err(ERR_NO_DESTINATION);
             };
-            tools::plan_connect(tool_id, port, catalog)
+            // Never offer IronWire's status line. It would run
+            // `<this executable> statusline`, and this program has no such
+            // subcommand, so Claude Code would show a blank status line.
+            // Declining also removes one an earlier connect installed, and
+            // leaves one the contributor wrote alone -- but only on a file
+            // that reaches this line, which a tool already connected to us
+            // does not: it is refused as `Noop` above. The file an earlier
+            // connect left is that state, and `repair_claude_status_line`
+            // is what cleans it up.
+            tools::plan_connect_with(
+                tool_id,
+                port,
+                catalog,
+                tools::ConnectOptions::default().with_status_line(tools::StatusLine::Decline),
+            )
         }
         HarnessAction::Disconnect => tools::plan_disconnect(tool_id, catalog),
     };
@@ -630,6 +644,176 @@ pub fn commit(store: &PlanStore, plan_id: Uuid) -> Result<CommitView, &'static s
         path: held.planned.path.clone(),
         backup_path,
     })
+}
+
+/// Take out the status line an earlier connect installed in Claude Code's
+/// settings, on a machine that is already connected.
+///
+/// [`plan`] declines the status line, but only a connect reaches that code,
+/// and a tool already pointed at us is refused as `Noop` before planning.
+/// Every contributor who connected Claude Code before the decline existed is
+/// in exactly that state, with a status line naming `<this executable>
+/// statusline` -- a subcommand this program does not have -- and the
+/// connect control hidden because the row is connected. This is the path
+/// that reaches them.
+///
+/// It is narrower than a connect on purpose, because it writes without a
+/// preview. It acts only when all of these hold, and otherwise leaves the
+/// file untouched:
+///
+/// - there is a destination port;
+/// - the file reads as UTF-8 and parses as JSON;
+/// - `env.ANTHROPIC_BASE_URL` is exactly the URL a connect would write for
+///   that port, so the base URL is not changed -- this never moves routing;
+/// - `statusLine` carries IronWire's `installedBy` marker, so a line the
+///   contributor wrote is left alone;
+/// - its command does not run an executable named `ironwire`;
+/// - the planned edit is that one removal and nothing else.
+///
+/// The `ironwire` check exists because the marker names IronWire rather
+/// than a binary, and the `ironwire` CLI's own `ironwire statusline` works.
+/// A connect that declines takes that line out too, once, because the
+/// contributor asked for the edit; a sweep that runs on every daemon start
+/// must not, or it would undo `ironwire connect claude` each time. The
+/// daemon also passes only its own hosted listener's port, never a proxy the
+/// contributor declared and runs themselves -- see
+/// [`repair_stale_status_line`].
+///
+/// The write goes through `tools::commit_if_unchanged`, the same as a
+/// committed plan, so the first edit keeps a backup and a file that changed
+/// since it was read is not overwritten.
+///
+/// Returns whether a status line was removed.
+///
+/// # Errors
+///
+/// [`ERR_CONFIG_CHANGED`] when the file moved between the read and the
+/// write; [`ERR_COMMIT_FAILED`] when the write itself failed.
+pub fn repair_claude_status_line(
+    catalog: &Catalog,
+    port: Option<u16>,
+) -> Result<bool, &'static str> {
+    const TOOL: &str = "claude";
+    let Some(port) = port else {
+        return Ok(false);
+    };
+    let Some(path) = tools::all(catalog)
+        .into_iter()
+        .find(|t| t.id == TOOL)
+        .and_then(|t| t.config_path)
+    else {
+        return Ok(false);
+    };
+    // Absent, unreadable or not UTF-8: not ours to touch, the same rule
+    // `plan` applies before upstream is asked.
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Ok(false);
+    };
+    // The exact string a connect writes for this port. Exact, not "points
+    // at us": upstream rewrites a base URL that is ours on another port, and
+    // that is a routing change this unpreviewed write must never make.
+    let our_url = format!("http://127.0.0.1:{port}/anthropic");
+    let connected_here = root
+        .get("env")
+        .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+        .and_then(serde_json::Value::as_str)
+        == Some(our_url.as_str());
+    let status_line = root.get("statusLine");
+    let status_line_is_ironwires = status_line
+        .and_then(|line| line.get("installedBy"))
+        .and_then(serde_json::Value::as_str)
+        == Some("ironwire");
+    // A command that is missing or runs `ironwire` is not one this sweep
+    // removes.
+    let names_another_executable = status_line
+        .and_then(|line| line.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|command| !command_runs_ironwire(command));
+    if !connected_here || !status_line_is_ironwires || !names_another_executable {
+        return Ok(false);
+    }
+
+    let Ok(planned) = tools::plan_connect_with(
+        TOOL,
+        port,
+        catalog,
+        tools::ConnectOptions::default().with_status_line(tools::StatusLine::Decline),
+    ) else {
+        return Ok(false);
+    };
+    // Fail closed: the one change this may make is the status line's
+    // removal. Anything more -- a second change, or a slot reported as
+    // occupied -- is a connect, and a connect is shown before it is made.
+    if planned.changes.len() != 1 || !planned.occupied.is_empty() || !planned.skipped.is_empty() {
+        return Ok(false);
+    }
+    tools::commit_if_unchanged(&planned).map_err(|error| match error {
+        tools::CommitError::Changed => ERR_CONFIG_CHANGED,
+        tools::CommitError::Io(_) => ERR_COMMIT_FAILED,
+    })?;
+    Ok(true)
+}
+
+/// Whether a status-line command runs an executable named `ironwire`.
+///
+/// IronWire writes `<executable> statusline` with the path unquoted, so the
+/// executable is everything before the trailing ` statusline` -- a path with
+/// spaces in it stays whole. A command without that suffix is judged by its
+/// first word. Named by file stem, so `ironwire`, `/usr/local/bin/ironwire`
+/// and `ironwire.exe` all count.
+fn command_runs_ironwire(command: &str) -> bool {
+    let command = command.trim();
+    let executable = command
+        .strip_suffix(" statusline")
+        .unwrap_or_else(|| command.split_whitespace().next().unwrap_or_default());
+    // Both separators, whatever this platform's are: the file may have been
+    // written on either.
+    let name = executable.rsplit(['/', '\\']).next().unwrap_or(executable);
+    let stem = name.strip_suffix(".exe").unwrap_or(name);
+    stem == "ironwire"
+}
+
+/// Run [`repair_claude_status_line`] for this daemon, and log the result by
+/// label only. Returns whether a status line was removed.
+///
+/// Called by the supervisor at start and after each change to Private AI's
+/// listener, so a contributor who was connected before the status-line
+/// decline is repaired without having to disconnect and reconnect.
+///
+/// Only the hosted listener's port, deliberately not
+/// [`DaemonShared::destination_port`]: its second source is a proxy the
+/// contributor declared and runs themselves, which is the `ironwire` CLI,
+/// whose status line works. The old connect could have written our
+/// executable against a declared port too, and that case is left for a
+/// disconnect and reconnect rather than risk the CLI's line.
+///
+/// Skipped under either dry run, which edits no contributor's files; a
+/// dry-run start leaves the line for the next normal one.
+pub(crate) fn repair_stale_status_line(shared: &DaemonShared, dry_run: bool) -> bool {
+    if dry_run || shared.dev_dry_run {
+        return false;
+    }
+    match repair_claude_status_line(&catalog(), shared.hosted_destination_port()) {
+        Ok(true) => {
+            tracing::info!(
+                harness = "claude",
+                "removed a status line an earlier connect installed"
+            );
+            true
+        }
+        Ok(false) => false,
+        Err(label) => {
+            tracing::warn!(
+                harness = "claude",
+                error = label,
+                "could not remove a status line an earlier connect installed"
+            );
+            false
+        }
+    }
 }
 
 /// `Tool` names the field `wired`; this crate says `connected` everywhere a
@@ -1217,6 +1401,308 @@ mod tests {
             after.contains("https://their-own-choice.example"),
             "the contributor's own value was overwritten: {after}"
         );
+    }
+
+    /// Connect Claude against `body` and return the settings file afterwards,
+    /// parsed.
+    fn connect_claude_and_read(body: Option<&str>) -> serde_json::Value {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        if let Some(body) = body {
+            std::fs::write(&path, body).expect("write");
+        }
+        let _guard = ClaudeConfigAt::at(dir.path());
+        let store = PlanStore::default();
+        let view = plan_claude(&store, HarnessAction::Connect);
+        let id = view.plan_id.expect("a connect plans");
+        commit(&store, id).expect("commit");
+        let after = std::fs::read_to_string(&path).expect("read");
+        serde_json::from_str(&after).expect("settings stay valid JSON")
+    }
+
+    /// Connecting writes the base URL and no status line.
+    ///
+    /// The status line IronWire offers runs `<this executable> statusline`,
+    /// and this program has no such subcommand, so Claude Code would show a
+    /// blank status line.
+    #[test]
+    fn connect_writes_the_base_url_and_no_status_line() {
+        let after = connect_claude_and_read(Some("{}"));
+        assert_eq!(
+            after["env"]["ANTHROPIC_BASE_URL"],
+            "http://127.0.0.1:8463/anthropic"
+        );
+        assert!(
+            after.get("statusLine").is_none(),
+            "a status line this program cannot serve was installed: {after}"
+        );
+    }
+
+    /// A connect that reaches the planner takes out a status line an earlier
+    /// connect installed, because the command it names cannot be served by
+    /// this program.
+    ///
+    /// The fixture has no base URL, so Claude Code is not connected and the
+    /// connect is planned: the shape after the `env` line was removed by
+    /// hand. The state the old connect actually left, with both slots, never
+    /// reaches the planner -- see
+    /// `connect_on_a_file_the_old_connect_wrote_is_refused_as_noop` and the
+    /// `repair_*` tests, which cover that one.
+    #[test]
+    fn connect_removes_a_status_line_installed_by_ironwire() {
+        let after = connect_claude_and_read(Some(
+            r#"{"statusLine":{"type":"command","command":"/old/app statusline","installedBy":"ironwire"}}"#,
+        ));
+        assert!(
+            after.get("statusLine").is_none(),
+            "the stale status line was kept: {after}"
+        );
+        assert_eq!(
+            after["env"]["ANTHROPIC_BASE_URL"],
+            "http://127.0.0.1:8463/anthropic"
+        );
+    }
+
+    /// A status line the contributor wrote themselves is theirs.
+    #[test]
+    fn connect_leaves_a_user_written_status_line_alone() {
+        let after = connect_claude_and_read(Some(
+            r#"{"statusLine":{"type":"command","command":"my-own-line"}}"#,
+        ));
+        assert_eq!(
+            after["statusLine"],
+            serde_json::json!({"type":"command","command":"my-own-line"})
+        );
+    }
+
+    /// What the connect before the status-line decline wrote: our base URL
+    /// and IronWire's status line, both at once, plus a key of the
+    /// contributor's own.
+    const OLD_CONNECT_SETTINGS: &str = r#"{"model":"opus","statusLine":{"type":"command","command":"/old/app statusline","installedBy":"ironwire"},"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8463/anthropic"}}"#;
+
+    /// The connect path cannot clean up after the old connect, because the
+    /// file it left is connected and a connect on a connected tool is refused
+    /// before anything is planned. Pinned so the repair below is not
+    /// mistaken for redundant.
+    #[test]
+    fn connect_on_a_file_the_old_connect_wrote_is_refused_as_noop() {
+        let (_dir, _guard, path) = claude_config(OLD_CONNECT_SETTINGS);
+        let view = plan_claude(&PlanStore::default(), HarnessAction::Connect);
+        assert_eq!(view.outcome, PlanOutcome::Noop);
+        assert!(view.plan_id.is_none());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            OLD_CONNECT_SETTINGS
+        );
+    }
+
+    /// The repair takes out the old connect's status line and changes
+    /// nothing else: the base URL and the contributor's own key survive.
+    #[test]
+    fn repair_removes_the_status_line_the_old_connect_installed() {
+        let (_dir, _guard, path) = claude_config(OLD_CONNECT_SETTINGS);
+        assert_eq!(
+            repair_claude_status_line(&Catalog::default(), Some(8463)),
+            Ok(true)
+        );
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
+                .expect("settings stay valid JSON");
+        assert!(
+            after.get("statusLine").is_none(),
+            "the stale status line was kept: {after}"
+        );
+        assert_eq!(
+            after["env"]["ANTHROPIC_BASE_URL"],
+            "http://127.0.0.1:8463/anthropic"
+        );
+        assert_eq!(after["model"], "opus");
+        // Once repaired the file is connected and has nothing left to
+        // remove, so a second pass is a no-op.
+        let repaired = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(
+            repair_claude_status_line(&Catalog::default(), Some(8463)),
+            Ok(false)
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), repaired);
+    }
+
+    /// Run the repair against `body` on port 8463 or `port`, and assert it
+    /// neither reports a removal nor touches a byte of the file.
+    fn assert_repair_leaves_alone(body: &str, port: Option<u16>) {
+        let (_dir, _guard, path) = claude_config(body);
+        assert_eq!(
+            repair_claude_status_line(&Catalog::default(), port),
+            Ok(false)
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), body);
+    }
+
+    /// A status line the contributor wrote is not ours to remove, even on a
+    /// file that is connected to us.
+    #[test]
+    fn repair_leaves_a_user_written_status_line_alone() {
+        assert_repair_leaves_alone(
+            r#"{"statusLine":{"type":"command","command":"my-own-line"},"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8463/anthropic"}}"#,
+            Some(8463),
+        );
+    }
+
+    /// A file pointed at a port this daemon is not using is not repaired:
+    /// planning it would also rewrite the base URL, and the repair must
+    /// never move routing without a preview.
+    #[test]
+    fn repair_leaves_a_file_on_another_port_alone() {
+        assert_repair_leaves_alone(
+            r#"{"statusLine":{"type":"command","command":"/old/app statusline","installedBy":"ironwire"},"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:9999/anthropic"}}"#,
+            Some(8463),
+        );
+    }
+
+    /// A file that is not connected to us at all -- no base URL, or one of
+    /// the contributor's own -- is left for a connect to decide about.
+    #[test]
+    fn repair_leaves_an_unconnected_file_alone() {
+        assert_repair_leaves_alone(
+            r#"{"statusLine":{"type":"command","command":"/old/app statusline","installedBy":"ironwire"}}"#,
+            Some(8463),
+        );
+        assert_repair_leaves_alone(
+            r#"{"statusLine":{"type":"command","command":"/old/app statusline","installedBy":"ironwire"},"env":{"ANTHROPIC_BASE_URL":"https://proxy.example/anthropic"}}"#,
+            Some(8463),
+        );
+    }
+
+    /// No destination, no repair: there is no port to say the file is ours.
+    #[test]
+    fn repair_without_a_destination_does_nothing() {
+        assert_repair_leaves_alone(OLD_CONNECT_SETTINGS, None);
+    }
+
+    /// A file that is not JSON, or not UTF-8, is never rewritten.
+    #[test]
+    fn repair_leaves_an_unreadable_file_alone() {
+        assert_repair_leaves_alone("{ not json", Some(8463));
+
+        let (_dir, _guard, path) = claude_config("");
+        let utf16: Vec<u8> = OLD_CONNECT_SETTINGS
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        std::fs::write(&path, &utf16).expect("write");
+        assert_eq!(
+            repair_claude_status_line(&Catalog::default(), Some(8463)),
+            Ok(false)
+        );
+        assert_eq!(std::fs::read(&path).expect("read"), utf16);
+    }
+
+    /// The `ironwire` CLI's own status line works, and a sweep that ran on
+    /// every start would undo `ironwire connect claude` each time.
+    #[test]
+    fn repair_leaves_the_ironwire_clis_own_line_alone() {
+        for command in [
+            "ironwire statusline",
+            "/opt/homebrew/bin/ironwire statusline",
+            "C:\\Tools\\ironwire.exe statusline",
+        ] {
+            let body = serde_json::json!({
+                "statusLine": {"type": "command", "command": command, "installedBy": "ironwire"},
+                "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8463/anthropic"},
+            })
+            .to_string();
+            assert_repair_leaves_alone(&body, Some(8463));
+        }
+    }
+
+    /// The executable is everything before ` statusline`, so a path with a
+    /// space in it is judged whole, by its file stem.
+    #[test]
+    fn a_status_line_command_is_judged_by_its_executables_name() {
+        assert!(command_runs_ironwire("ironwire statusline"));
+        assert!(command_runs_ironwire("/usr/local/bin/ironwire statusline"));
+        assert!(command_runs_ironwire("C:\\bin\\ironwire.exe statusline"));
+        assert!(command_runs_ironwire("ironwire"));
+        assert!(!command_runs_ironwire("/old/app statusline"));
+        assert!(!command_runs_ironwire(
+            "/Applications/Trace Commons.app/Contents/MacOS/trace-commons statusline"
+        ));
+        assert!(!command_runs_ironwire("/opt/ironwire/bin/tc statusline"));
+        assert!(!command_runs_ironwire("/home/me/not-ironwire statusline"));
+    }
+
+    fn daemon_shared() -> DaemonShared {
+        let (dir, store) = crate::config::tests_support::temp_store();
+        // The store borrows the directory's path for the test's lifetime.
+        std::mem::forget(dir);
+        DaemonShared::load(store).expect("load")
+    }
+
+    /// The daemon-side entry point repairs the old connect's file when the
+    /// hosted listener is up on the port that file names. This is the call
+    /// the supervisor makes at start.
+    #[test]
+    fn the_daemon_repairs_the_old_connect_on_its_hosted_port() {
+        let shared = daemon_shared();
+        shared.set_private_inference_state_for_test(
+            crate::daemon::private_inference::PrivateInferenceState::Running { port: 8463 },
+        );
+        let (_dir, _guard, path) = claude_config(OLD_CONNECT_SETTINGS);
+        assert!(repair_stale_status_line(&shared, false));
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
+                .expect("settings stay valid JSON");
+        assert!(after.get("statusLine").is_none(), "{after}");
+        assert_eq!(
+            after["env"]["ANTHROPIC_BASE_URL"],
+            "http://127.0.0.1:8463/anthropic"
+        );
+    }
+
+    /// A proxy the contributor declared and runs themselves is not this
+    /// daemon's to sweep after, even on the same port.
+    #[test]
+    fn the_daemon_does_not_repair_against_a_declared_proxy() {
+        let shared = daemon_shared();
+        shared.settings.lock().expect("settings").ironwire =
+            Some(crate::daemon::settings::IronWireDeclaration::Watch {
+                port: 8463,
+                token_dir: None,
+            });
+        assert_eq!(shared.destination_port(), Some(8463));
+        let (_dir, _guard, path) = claude_config(OLD_CONNECT_SETTINGS);
+        assert!(!repair_stale_status_line(&shared, false));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            OLD_CONNECT_SETTINGS
+        );
+    }
+
+    /// A dry run edits no contributor's files.
+    #[test]
+    fn the_daemon_does_not_repair_under_a_dry_run() {
+        let shared = daemon_shared();
+        shared.set_private_inference_state_for_test(
+            crate::daemon::private_inference::PrivateInferenceState::Running { port: 8463 },
+        );
+        let (_dir, _guard, path) = claude_config(OLD_CONNECT_SETTINGS);
+        assert!(!repair_stale_status_line(&shared, true));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            OLD_CONNECT_SETTINGS
+        );
+    }
+
+    /// No settings file at all is nothing to repair, and none is created.
+    #[test]
+    fn repair_with_no_settings_file_creates_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = ClaudeConfigAt::at(dir.path());
+        assert_eq!(
+            repair_claude_status_line(&Catalog::default(), Some(8463)),
+            Ok(false)
+        );
+        assert!(!dir.path().join("settings.json").exists());
     }
 
     /// Serializes the tests that point Codex's config somewhere.

@@ -23,7 +23,6 @@ bech32 = "0.11"
 borsh = { version = "1", features = ["derive"] }
 bs58 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
-cookie = "0.18"
 clap = { version = "4", features = ["derive", "env"] }
 deadpool-postgres = "0.14"
 # Quote verification itself moved to `trace-commons-attestation`, which is
@@ -40,7 +39,6 @@ dcap-qvl = { version = "0.6", default-features = false, features = [
     "default-x509",
 ] }
 dotenvy = "0.15"
-dirs = "6"
 hex = "0.4"
 hkdf = "0.12"
 jsonwebtoken = "9"
@@ -48,14 +46,6 @@ k256 = "0.13"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
-# rustls is already in the tree transitively. It is a DIRECT dependency here for
-# one reason: with the `near-attestation-collateral` feature, two crypto
-# providers end up compiled in -- ours via `reqwest`'s `rustls-tls-native-roots`
-# (ring), and `dcap-qvl/report`'s via `reqwest`'s `rustls` (aws-lc-rs). Feature
-# unification is additive, so neither can be removed by de-selecting. rustls
-# then refuses to guess and panics at the first TLS use. main() installs `ring`
-# explicitly; see the call there. Adds no new lockfile entry.
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
 ripemd = "0.1"
 secrecy = { version = "0.10", features = ["serde"] }
 zeroize = "1"
@@ -134,15 +124,6 @@ near-ai-scorer = ["trace-commons-gate-enclave/near-ai-scorer"]
 # is not the alternative: FMSPC extraction and CRL handling are exactly what
 # `dcap-qvl` gets right.
 near-attestation-collateral = ["trace-commons-attestation/collateral-client"]
-
-# The ingest binary is a thin `main` over the library's entry point
-# (`trace_commons_server::ingest`). `src/bin/trace-commons-ingest.rs` is the
-# service itself, compiled into the library as `ingest::app`; declaring the
-# binary here under the same name keeps Cargo from also discovering that
-# file as a binary.
-[[bin]]
-name = "trace-commons-ingest"
-path = "src/bin/trace_commons_ingest_main.rs"
 
 [[bin]]
 name = "trace-commons-gate-calibrate"

@@ -10,6 +10,7 @@ Server components -- GNU Affero General Public License v3.0 or later
 - crates/trace-commons-server
 - crates/trace-commons-gate-api
 - crates/trace-commons-gate-enclave
+- crates/trace-commons-ingest
 
 These are licensed under the GNU Affero General Public License, version 3 or
 (at your option) any later version, in LICENSE-AGPL.
@@ -25,11 +26,15 @@ Client and protocol components -- MIT OR Apache-2.0
 
 - crates/trace-commons-protocol
 - crates/trace-commons-contributor
+- crates/trace-commons-contributor-sources
+- crates/trace-commons-contributor-insights
+- crates/trace-commons-contributor-platform
 - crates/trace-commons-contributor-ffi
 - crates/trace-commons-contributor-gtk
 - crates/trace-commons-operator-client
 - crates/trace-commons-mark
 - crates/trace-commons-build-info
+- crates/trace-commons-client-server-tests (unpublished, tests only)
 
 These are licensed under either of:
 
@@ -50,10 +55,11 @@ available on their own terms.
 The dependency never runs the other way. No client or protocol crate links an
 AGPL-licensed crate in a shipped build, and none may be made to; this is
 enforced by a test, crates/trace-commons-server/tests/license_boundary.rs.
-`trace-commons-contributor` does take a test-only dev-dependency on
-`trace-commons-server` on non-Windows targets. Dev-dependencies are not part of
-any published artifact, so that edge conveys no combined work and imposes no
-AGPL obligation on the contributor crate.
+The unpublished `trace-commons-client-server-tests` package takes a test-only
+dev-dependency on `trace-commons-server` on non-Windows targets. The contributor
+itself has no server dependency, even for tests. Dev-dependencies are not part
+of any published artifact and impose no AGPL obligation on the contributor
+crate.
 
 Contributions made before this split remain available under the MIT and
 Apache-2.0 terms that applied when they were published.

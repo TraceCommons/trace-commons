@@ -357,6 +357,7 @@ pub const METHODS: &[&str] = &[
     "managed_account_rename",
     "managed_account_set_key",
     "managed_account_verify",
+    "managed_model_catalogue",
     "account_bind",
     "account_binding",
     "account_session_status",
@@ -1927,6 +1928,32 @@ impl DaemonShared {
         held.ledger = Some(Arc::new(ledger));
     }
 
+    /// The port this daemon's own hosted listener bound, or `None` when it
+    /// is not up.
+    ///
+    /// The first of [`Self::destination_port`]'s two sources, on its own.
+    /// For a caller that must not act on a proxy the contributor declared
+    /// and runs themselves -- `harness::repair_stale_status_line`, which
+    /// would otherwise remove that proxy's working status line.
+    pub(crate) fn hosted_destination_port(&self) -> Option<u16> {
+        self.private_inference_state
+            .lock()
+            .expect("private inference state lock")
+            .port()
+    }
+
+    /// Set the hosted listener's state, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn set_private_inference_state_for_test(
+        &self,
+        state: super::private_inference::PrivateInferenceState,
+    ) {
+        *self
+            .private_inference_state
+            .lock()
+            .expect("private inference state lock") = state;
+    }
+
     /// The port a tool's config would be pointed at, or `None`.
     ///
     /// Two sources, in this order, and the order is the point:
@@ -1943,12 +1970,7 @@ impl DaemonShared {
     /// connect has no destination to write, and `harness_plan` refuses it by
     /// name rather than writing a guess into somebody's config file.
     pub(crate) fn destination_port(&self) -> Option<u16> {
-        if let Some(port) = self
-            .private_inference_state
-            .lock()
-            .expect("private inference state lock")
-            .port()
-        {
+        if let Some(port) = self.hosted_destination_port() {
             return Some(port);
         }
         self.settings
@@ -3455,6 +3477,10 @@ fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
 /// Labels are explicit because several methods share a label that cannot
 /// be derived from their names, including the onboarding and profile groups.
 const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
+    (
+        "managed_model_catalogue",
+        "managed-model-catalogue-requires-async",
+    ),
     ("inference_summary", "inference-summary-requires-async"),
     ("model_spend", "model-spend-requires-async"),
     ("set_private_ai", "private-ai-requires-async"),
@@ -3598,6 +3624,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "managed_account_set_key" => super::managed::handle(shared, req),
         "managed_account_verify" => super::managed::handle(shared, req),
         "managed_account_reconnect" => super::managed::handle(shared, req),
+        "managed_model_catalogue" => super::managed::handle(shared, req),
         "hello" => Response::ok(
             req.id,
             serde_json::json!({
@@ -13853,7 +13880,10 @@ mod tests {
             if let Some(auth) = headers.get("authorization") {
                 seen.lock().unwrap().push(auth.to_str().unwrap().into());
             }
-            Json(serde_json::json!({"data":[{"id":"fixture-model"}]}))
+            Json(serde_json::json!({"data":[
+                {"id":"fixture-model"},
+                {"id":"fixture-other","name":"Fixture Other"},
+            ]}))
         }
         let seen: Seen = Default::default();
         let app = Router::new()
@@ -13916,6 +13946,15 @@ mod tests {
         // The model the proxy pinned, so a launcher that must name one
         // (OpenCode) names the same model Claude Code and Codex get.
         assert_eq!(context["route_model"], "fixture-model");
+        // Every chat model the proxy serves as named, so the launcher can
+        // offer them in the tool's own picker.
+        assert_eq!(
+            context["route_models"],
+            serde_json::json!([
+                {"id":"fixture-model"},
+                {"id":"fixture-other","name":"Fixture Other"},
+            ])
+        );
         assert!(
             !context.to_string().contains("sk-route-fixture-key"),
             "{context}"
@@ -13928,6 +13967,60 @@ mod tests {
                 .any(|a| a == "Bearer sk-route-fixture-key"),
             "the key reached NEAR AI through the proxy"
         );
+        // The row shows the model the session runs on.
+        let snapshot = handle_request_async(&s, &req("managed_snapshot", serde_json::json!({})))
+            .await
+            .result
+            .expect("snapshot");
+        let row = snapshot["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == context["session"]["id"])
+            .unwrap();
+        assert_eq!(row["model"], "fixture-model");
+        assert_eq!(context["session"]["model"], "fixture-model");
+
+        // The models a launch picker offers, with the tool's default.
+        let r = handle_request_async(
+            &s,
+            &req(
+                "managed_model_catalogue",
+                serde_json::json!({"tool":"codex"}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            r.result.expect("catalogue"),
+            serde_json::json!({
+                "models":[{"id":"fixture-model"},{"id":"fixture-other","name":"Fixture Other"}],
+                "default":"fixture-model",
+            })
+        );
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({"tool":"claude","key":"sk-route-fixture-key"}),
+        ] {
+            let r = handle_request_async(&s, &req("managed_model_catalogue", params)).await;
+            assert_eq!(r.error.unwrap().message, "managed-invalid-request");
+        }
+        // A model NEAR AI does not list starts no proxy, and says why.
+        let mut named = launch("claude");
+        named["model"] = "anthropic/claude-sonnet-9".into();
+        let prepared = handle_request_async(&s, &req("managed_launch_prepare", named))
+            .await
+            .result
+            .expect("prepared");
+        let r = handle_request_async(
+            &s,
+            &req(
+                "managed_launch_redeem",
+                serde_json::json!({"session_id": prepared["session_id"], "ticket": prepared["ticket"]}),
+            ),
+        )
+        .await;
+        assert_eq!(r.error.unwrap().message, "managed-model-unavailable");
+        assert_eq!(routes(&s), 1);
 
         // The session runs, then exits: its proxy goes with it.
         let report = |state: &str, exit: Option<i32>| {
@@ -14005,6 +14098,7 @@ mod tests {
         let running = redeem("opencode").await;
         assert!(running["route_port"].as_u64().is_some_and(|port| port > 0));
         assert_eq!(running["route_model"], "fixture-model");
+        assert_eq!(running["route_models"][1]["id"], "fixture-other");
         assert!(
             !running.to_string().contains("sk-route-fixture-key"),
             "{running}"
@@ -16797,7 +16891,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 60);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 61);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -17256,7 +17350,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 86, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 87, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

@@ -40,7 +40,11 @@ pub(crate) mod cloud_credential_test_support;
 pub mod commons_credit;
 pub mod community;
 pub mod contribution_eligibility;
-pub(crate) mod credential_store;
+/// Moved to the platform crate, which the Insights crate shares; re-exported
+/// here at its old path.
+pub(crate) mod credential_store {
+    pub(crate) use trace_commons_contributor_platform::credential_store::*;
+}
 pub mod eligibility;
 pub mod enroll;
 pub mod grant_terms;
@@ -69,10 +73,13 @@ pub mod nudge;
 pub(crate) mod reengage;
 #[cfg(feature = "test-credential-store")]
 pub(crate) mod test_credential_store;
-// Under `test-credential-store` (test builds only) nothing outside the manual
-// round-trip tests constructs the OS store, by design.
-#[cfg_attr(all(feature = "test-credential-store", not(test)), allow(dead_code))]
-pub(crate) mod os_secret_store;
+/// Moved, with its manual round-trip tests, to the platform crate, which the
+/// Insights crate shares; re-exported here at its old path. Under
+/// `test-credential-store` (test builds only) every constructor there
+/// refuses, including from this crate's own unit tests.
+pub(crate) mod os_secret_store {
+    pub(crate) use trace_commons_contributor_platform::os_secret_store::*;
+}
 pub mod past_sessions;
 pub mod policy;
 pub mod preview;
@@ -536,9 +543,19 @@ pub(crate) fn run_blocking<R>(f: impl FnOnce() -> R) -> R {
 /// drainage after the host runtime has gone away.
 async fn supervise(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> {
     shared.reconcile_private_inference().await;
+    repair_stale_status_line(&shared, dry_run);
     let result = supervise_passes(&shared, dry_run).await;
     shared.stop_private_inference().await;
     result
+}
+
+/// Take out a Claude Code status line an earlier connect installed, once the
+/// destination port is known -- see `harness::repair_claude_status_line`.
+///
+/// After a reconcile, because that is what publishes the hosted listener's
+/// port.
+fn repair_stale_status_line(shared: &ipc::DaemonShared, dry_run: bool) {
+    run_blocking(|| harness::repair_stale_status_line(shared, dry_run));
 }
 
 /// The periodic work: watch, expire, and decide about digests, until asked to
@@ -587,6 +604,7 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
             }
             _ = shared.private_inference_changed.notified() => {
                 shared.reconcile_private_inference().await;
+                repair_stale_status_line(shared, dry_run);
             }
             _ = proxy_cleanup_tick.tick(), if shared.private_inference_is_stopping() => {
                 shared.reconcile_private_inference().await;

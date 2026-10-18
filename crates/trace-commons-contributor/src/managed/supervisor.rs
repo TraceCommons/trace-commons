@@ -28,6 +28,7 @@ pub async fn redeem_and_run(store: &ConfigStore, prepared: PreparedLaunch) -> an
     .await;
     if result.is_err() && !spawned {
         let report = LifecycleReport {
+            model: None,
             collection: context
                 .session
                 .collect_traces
@@ -84,10 +85,12 @@ async fn run_native(
         &row.cwd,
     )?;
     let mut route = None;
+    // Removed when this function returns, however it returns.
+    let mut codex_catalog: Option<super::codex::CatalogFile> = None;
     let opencode = if row.tool == super::ToolId::Opencode {
         let session =
             super::opencode::OpenCodeSession::new(store, &account, &native, row.id, &row.cwd)?;
-        // A saved key names its model; the sign-in's proxy has pinned one.
+        // A saved key names its model; the sign-in's proxy names a default.
         let model = || row.model.as_deref().ok_or(ManagedError::InvalidRequest);
         session.prepare()?;
         match row.connection {
@@ -107,17 +110,19 @@ async fn run_native(
             }
             ConnectionKind::NearAi => {
                 let model = model()?;
-                let proxy = super::route::ManagedRoute::start_selected(
+                let proxy = super::route::ManagedRoute::start(
                     store,
                     row.id,
                     SecretStore::new(store).get(account.id)?,
+                    row.tool,
                     Some(model),
                 )
                 .await?;
-                command = session.command(
-                    model,
-                    &format!("http://127.0.0.1:{}/openai/v1", proxy.port()),
-                    "managed-local-session",
+                command = opencode_route_command(
+                    &session,
+                    proxy.port(),
+                    proxy.default_model(),
+                    proxy.models(),
                 )?;
                 route = Some(proxy);
             }
@@ -157,18 +162,44 @@ async fn run_native(
                     store,
                     row.id,
                     SecretStore::new(store).get(account.id)?,
+                    row.tool,
+                    row.model.as_deref(),
                 )
                 .await?;
-                near_ai_route(&mut command, row.tool, proxy.port())?;
-                route = Some(proxy);
-            }
-            // The daemon holds the sign-in and hosts this session's proxy. This
-            // process learns its port and never the credential; no port, no run.
-            ConnectionKind::NearAiSignIn => {
+                codex_catalog = codex_catalog_file(
+                    store,
+                    &profiles,
+                    &account,
+                    &native,
+                    row,
+                    proxy.default_model(),
+                    proxy.models(),
+                )?;
                 near_ai_route(
                     &mut command,
                     row.tool,
-                    context.route_port.ok_or(ManagedError::LaunchUnknown)?,
+                    proxy.port(),
+                    proxy.default_model(),
+                    proxy.models(),
+                    codex_catalog.as_ref().map(|file| file.path()),
+                )?;
+                if !login {
+                    status_line(&mut command, row.tool, proxy.home());
+                }
+                route = Some(proxy);
+            }
+            // The daemon holds the sign-in and hosts this session's proxy. This
+            // process learns its port, default and models, never the
+            // credential; without them, no run.
+            ConnectionKind::NearAiSignIn => {
+                codex_catalog = sign_in_route_command(
+                    &mut command,
+                    store,
+                    &profiles,
+                    &account,
+                    &native,
+                    context,
+                    login,
                 )?;
             }
         }
@@ -208,7 +239,13 @@ async fn run_native(
         .process(sysinfo::Pid::from_u32(pid))
         .map(|p| format!("{}:{}", pid, p.start_time()))
         .unwrap_or_else(|| format!("{}:{}", pid, uuid::Uuid::new_v4()));
+    // A proxy this launcher started tells the daemon the default model,
+    // so the row can show it.
+    let default_model = route
+        .as_ref()
+        .map(|r: &super::route::ManagedRoute| r.default_model().to_owned());
     let report = |state, exit_code| LifecycleReport {
+        model: default_model.clone(),
         collection: None,
         session_id: row.id,
         proof: context.proof.clone(),
@@ -302,6 +339,7 @@ async fn run_native(
     if let Some(route) = route {
         route.shutdown().await;
     }
+    drop(codex_catalog);
     if login {
         let _: anyhow::Result<Value> = call(
             store,
@@ -312,31 +350,117 @@ async fn run_native(
     Ok(code)
 }
 
+/// The daemon-hosted proxy a sign-in session runs on: its loopback port,
+/// default model and NEAR AI's chat models. Without all three, no run.
+fn sign_in_route(
+    context: &LaunchContext,
+) -> Result<(u16, &str, &[super::models::ChatModel]), ManagedError> {
+    Ok((
+        context.route_port.ok_or(ManagedError::LaunchUnknown)?,
+        context
+            .route_model
+            .as_deref()
+            .ok_or(ManagedError::LaunchUnknown)?,
+        context
+            .route_models
+            .as_deref()
+            .ok_or(ManagedError::LaunchUnknown)?,
+    ))
+}
+
+/// Claude Code or Codex on the NEAR AI sign-in: the daemon holds the
+/// sign-in and hosts this session's proxy, and says its port, default and
+/// models ([`sign_in_route`]). Points `command` at it, writes Codex's
+/// catalog, and, unless this is a sign-in, adds the status line for the
+/// daemon's route, whose home is where every route's is
+/// ([`super::route::home_for`]). Returns the catalog file, which lives
+/// as long as the session.
+fn sign_in_route_command(
+    command: &mut std::process::Command,
+    store: &ConfigStore,
+    profiles: &NativeProfiles,
+    account: &AccountView,
+    native: &std::path::Path,
+    context: &LaunchContext,
+    login: bool,
+) -> Result<Option<super::codex::CatalogFile>, ManagedError> {
+    let row = &context.session;
+    let (port, default, models) = sign_in_route(context)?;
+    let catalog = codex_catalog_file(store, profiles, account, native, row, default, models)?;
+    near_ai_route(
+        command,
+        row.tool,
+        port,
+        default,
+        models,
+        catalog.as_ref().map(|file| file.path()),
+    )?;
+    if !login {
+        status_line(command, row.tool, &super::route::home_for(store, row.id));
+    }
+    Ok(catalog)
+}
+
+/// For Codex, write the session's model catalog: every NEAR AI chat model,
+/// with Codex's own settings for the ones it knows. None for other tools.
+fn codex_catalog_file(
+    store: &ConfigStore,
+    profiles: &NativeProfiles,
+    account: &AccountView,
+    native: &std::path::Path,
+    row: &super::sessions::SessionView,
+    default: &str,
+    models: &[super::models::ChatModel],
+) -> Result<Option<super::codex::CatalogFile>, ManagedError> {
+    if row.tool != super::ToolId::Codex {
+        return Ok(None);
+    }
+    let mut read = profiles.command(account, native, NativeAction::Run, &row.cwd)?;
+    read.args(["debug", "models", "--bundled"]);
+    let catalog = super::codex::catalog(default, models, super::codex::bundled(read).as_ref());
+    super::codex::CatalogFile::write(store, row.id, &catalog).map(Some)
+}
+
 /// OpenCode on the NEAR AI sign-in: the daemon hosts this session's proxy
-/// and says its loopback port and the model it pinned. This process never
-/// sees the credential; without the port or the model, no run.
+/// and says its loopback port, default model and models. This process
+/// never sees the credential; without all three, no run.
 fn opencode_sign_in_command(
     session: &super::opencode::OpenCodeSession,
     context: &LaunchContext,
 ) -> Result<std::process::Command, ManagedError> {
-    let port = context.route_port.ok_or(ManagedError::LaunchUnknown)?;
-    let model = context
-        .route_model
-        .as_deref()
-        .ok_or(ManagedError::LaunchUnknown)?;
-    session.command(
-        model,
+    let (port, default, models) = sign_in_route(context)?;
+    opencode_route_command(session, port, default, models)
+}
+
+/// OpenCode on a session's local NEAR AI proxy, the launcher's own (a
+/// saved key) or the daemon's (the sign-in): it starts on `default` and
+/// offers every model in `models`, with a placeholder key.
+fn opencode_route_command(
+    session: &super::opencode::OpenCodeSession,
+    port: u16,
+    default: &str,
+    models: &[super::models::ChatModel],
+) -> Result<std::process::Command, ManagedError> {
+    session.command_with_models(
+        default,
+        models,
         &format!("http://127.0.0.1:{port}/openai/v1"),
         "managed-local-session",
     )
 }
 
 /// Point the tool at a session's local NEAR AI proxy. The tool gets the
-/// loopback URL and a placeholder token, never a credential.
+/// loopback URL and a placeholder token, never a credential, starts on
+/// `default`, and can name only models in `models`: the proxy serves a
+/// listed model as named and gives an unlisted id a substitute. Codex
+/// reads its list from `codex_catalog` ([`super::codex`]).
 fn near_ai_route(
     command: &mut std::process::Command,
     tool: super::ToolId,
     port: u16,
+    default: &str,
+    models: &[super::models::ChatModel],
+    codex_catalog: Option<&std::path::Path>,
 ) -> Result<(), ManagedError> {
     let base = format!("http://127.0.0.1:{port}");
     match tool {
@@ -345,6 +469,12 @@ fn near_ai_route(
             command
                 .env("ANTHROPIC_BASE_URL", format!("{base}/anthropic"))
                 .env("ANTHROPIC_AUTH_TOKEN", "managed-local-session");
+            for (name, value) in super::models::claude_env(default, models) {
+                match value {
+                    Some(value) => command.env(name, value),
+                    None => command.env_remove(name),
+                };
+            }
         }
         super::ToolId::Codex => {
             command
@@ -365,9 +495,40 @@ fn near_ai_route(
                     "-c",
                     "model_providers.near_ai_managed.wire_api=\"responses\"",
                 ]);
+            let catalog = codex_catalog
+                .and_then(|path| path.to_str())
+                .ok_or(ManagedError::InvalidRequest)?;
+            // TOML strings, quoted as the config loader reads them.
+            let quoted = |value: &str| toml::Value::String(value.into()).to_string();
+            command
+                .arg("-c")
+                .arg(format!("model_catalog_json={}", quoted(catalog)))
+                .arg("-c")
+                .arg(format!("model={}", quoted(default)));
         }
     }
     Ok(())
+}
+
+/// For Claude Code, show the route's status line: `--settings` naming
+/// this executable's `statusline` for the route's IronWire home
+/// ([`super::statusline`]). Settings from the command line take precedence
+/// over the profile's and a project's, and nothing is written to disk.
+/// When this executable's path cannot be found or written, the session runs
+/// without a status line. Other tools have no status-line slot.
+fn status_line(command: &mut std::process::Command, tool: super::ToolId, home: &std::path::Path) {
+    if tool != super::ToolId::Claude {
+        return;
+    }
+    match super::statusline::settings(home) {
+        Some(settings) => {
+            command.arg("--settings").arg(settings);
+        }
+        None => tracing::warn!(
+            harness = "claude",
+            "managed session runs without a status line"
+        ),
+    }
 }
 
 /// Whether the daemon's answer to a running report asks for a stop. Only
@@ -421,19 +582,224 @@ impl TerminalSignals {
 
 #[cfg(test)]
 mod tests {
-    use super::{opencode_sign_in_command, stop_asked};
+    use super::{
+        near_ai_route, opencode_route_command, opencode_sign_in_command, sign_in_route_command,
+        status_line, stop_asked,
+    };
     use crate::config::ConfigStore;
     use crate::managed::{
-        ConnectionKind, ManagedError, ToolId, opencode::OpenCodeSession, sessions::LaunchContext,
-        signin,
+        ConnectionKind, ManagedError, ToolId, models::ChatModel, opencode::OpenCodeSession,
+        sessions::LaunchContext, signin,
     };
     use serde_json::json;
 
-    /// OpenCode on the NEAR AI sign-in runs against the daemon's proxy for
-    /// this session, on the model that proxy pinned, with a placeholder
-    /// key. Without the port or the model there is no command: no run.
+    fn env_of(command: &std::process::Command, name: &str) -> Option<Option<String>> {
+        command
+            .get_envs()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    fn listed() -> Vec<ChatModel> {
+        vec![
+            ChatModel {
+                id: "deepseek-ai/DeepSeek-V3.1".into(),
+                name: None,
+            },
+            ChatModel {
+                id: "anthropic/claude-sonnet-5-5".into(),
+                name: Some("Claude Sonnet 5.5".into()),
+            },
+        ]
+    }
+
+    /// Claude Code on a NEAR AI route starts on the default, and each of
+    /// its aliases names a model NEAR AI lists; a variable that could name
+    /// another id is removed.
     #[test]
-    fn opencode_on_the_sign_in_uses_the_route_port_and_model_or_does_not_run() {
+    fn claude_on_a_route_names_only_listed_models() {
+        let mut command = std::process::Command::new("claude");
+        near_ai_route(
+            &mut command,
+            ToolId::Claude,
+            4321,
+            "deepseek-ai/DeepSeek-V3.1",
+            &listed(),
+            None,
+        )
+        .unwrap();
+        let env = |name| env_of(&command, name);
+        assert_eq!(
+            env("ANTHROPIC_BASE_URL"),
+            Some(Some("http://127.0.0.1:4321/anthropic".into()))
+        );
+        assert_eq!(
+            env("ANTHROPIC_MODEL"),
+            Some(Some("deepseek-ai/DeepSeek-V3.1".into()))
+        );
+        assert_eq!(
+            env("ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            Some(Some("anthropic/claude-sonnet-5-5".into()))
+        );
+        assert_eq!(
+            env("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"),
+            Some(Some("Claude Sonnet 5.5".into()))
+        );
+        assert_eq!(
+            env("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some(Some("deepseek-ai/DeepSeek-V3.1".into()))
+        );
+        assert_eq!(
+            env("ANTHROPIC_SMALL_FAST_MODEL"),
+            Some(Some("deepseek-ai/DeepSeek-V3.1".into()))
+        );
+        // Removed, not left to the person's shell.
+        assert_eq!(env("CLAUDE_CODE_SUBAGENT_MODEL"), Some(None));
+        assert_eq!(env("ANTHROPIC_CUSTOM_MODEL_OPTION"), Some(None));
+    }
+
+    /// Claude Code on a NEAR AI route, whoever hosts it, gets a status line
+    /// that runs this executable for the route's home; no other tool does.
+    #[test]
+    fn claude_on_a_route_shows_the_routes_status_line() {
+        let home = std::path::Path::new("/state dir/managed-routes/it's");
+        let mut command = std::process::Command::new("claude");
+        status_line(&mut command, ToolId::Claude, home);
+        let args: Vec<String> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.len(), 2, "{args:?}");
+        assert_eq!(args[0], "--settings");
+        let settings: serde_json::Value = serde_json::from_str(&args[1]).unwrap();
+        let line = &settings["statusLine"];
+        assert_eq!(line["type"], "command");
+        let run = line["command"].as_str().unwrap();
+        assert!(
+            run.ends_with(r" statusline --home '/state dir/managed-routes/it'\''s'"),
+            "{run}"
+        );
+        assert_eq!(settings.as_object().unwrap().len(), 1);
+        for tool in [ToolId::Codex, ToolId::Opencode] {
+            let mut command = std::process::Command::new("tool");
+            status_line(&mut command, tool, home);
+            assert_eq!(command.get_args().count(), 0);
+        }
+    }
+
+    /// Claude Code on the NEAR AI sign-in: the daemon hosts the route, and
+    /// the launcher's status line names that route's home,
+    /// `<state dir>/managed-routes/<session id>`, worked out here from the
+    /// session id alone. A sign-in (`login`) gets no status line.
+    #[test]
+    fn claude_on_the_sign_in_shows_the_daemons_route_status_line() {
+        use crate::managed::profiles::NativeProfiles;
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().join("state")).unwrap();
+        let account = signin::entry(ToolId::Claude).unwrap();
+        let id = uuid::Uuid::new_v4();
+        let context: LaunchContext = serde_json::from_value(json!({
+            "session": {
+                "id": id, "tool": "claude", "connection": "near_ai_signin",
+                "account_id": account.id, "account_label": "NEAR AI",
+                "selection_generation": 0, "project_label": "p", "cwd": home.path(),
+                "started_at": "2026-10-16T00:00:00Z", "state": "starting",
+                "exit_code": null, "can_focus": false,
+            },
+            "proof": "p", "route_port": 4100,
+            "route_model": "anthropic/claude-sonnet-5-5",
+            "route_models": listed(),
+        }))
+        .unwrap();
+        let native = home.path().join("claude");
+        let expected = home
+            .path()
+            .join("state")
+            .join("managed-routes")
+            .join(id.to_string());
+        for login in [false, true] {
+            let mut command = std::process::Command::new("claude");
+            let catalog = sign_in_route_command(
+                &mut command,
+                &store,
+                &NativeProfiles::new(&store),
+                &account,
+                &native,
+                &context,
+                login,
+            )
+            .unwrap();
+            assert!(catalog.is_none());
+            assert_eq!(
+                env_of(&command, "ANTHROPIC_BASE_URL"),
+                Some(Some("http://127.0.0.1:4100/anthropic".into()))
+            );
+            let args: Vec<String> = command
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            if login {
+                assert!(args.is_empty(), "{args:?}");
+                continue;
+            }
+            assert_eq!(args.len(), 2, "{args:?}");
+            assert_eq!(args[0], "--settings");
+            assert_eq!(
+                Some(args[1].as_str()),
+                crate::managed::statusline::settings(&expected).as_deref()
+            );
+        }
+    }
+
+    /// Codex on a NEAR AI route reads its model list from the session's
+    /// catalog file and starts on the default; without the file, no run.
+    #[test]
+    fn codex_on_a_route_uses_the_catalog_file_and_the_default() {
+        let path = std::path::Path::new("/state dir/managed-codex-catalogs/s.json");
+        let mut command = std::process::Command::new("codex");
+        near_ai_route(
+            &mut command,
+            ToolId::Codex,
+            4321,
+            "anthropic/claude-sonnet-5-5",
+            &listed(),
+            Some(path),
+        )
+        .unwrap();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let value = |key: &str| {
+            args.windows(2)
+                .find(|pair| pair[0] == "-c" && pair[1].starts_with(&format!("{key}=")))
+                .map(|pair| pair[1][key.len() + 1..].to_owned())
+        };
+        assert_eq!(
+            value("model_catalog_json").as_deref(),
+            Some("\"/state dir/managed-codex-catalogs/s.json\"")
+        );
+        assert_eq!(
+            value("model").as_deref(),
+            Some("\"anthropic/claude-sonnet-5-5\"")
+        );
+        assert_eq!(
+            value("model_providers.near_ai_managed.base_url").as_deref(),
+            Some("\"http://127.0.0.1:4321/openai/v1\"")
+        );
+        let mut command = std::process::Command::new("codex");
+        assert_eq!(
+            near_ai_route(&mut command, ToolId::Codex, 4321, "x/a", &listed(), None).err(),
+            Some(ManagedError::InvalidRequest)
+        );
+    }
+
+    /// OpenCode on the NEAR AI sign-in runs against the daemon's proxy for
+    /// this session, starting on its default model and offering every
+    /// model it lists, with a placeholder key. Without the port, the
+    /// default or the list there is no command: no run.
+    #[test]
+    fn opencode_on_the_sign_in_uses_the_route_port_and_models_or_does_not_run() {
         let home = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
         let native = home.path().join("opencode");
@@ -441,7 +807,10 @@ mod tests {
         let account = signin::entry(ToolId::Opencode).unwrap();
         let id = uuid::Uuid::new_v4();
         let session = OpenCodeSession::new(&store, &account, &native, id, home.path()).unwrap();
-        let context = |port: Option<u16>, model: Option<&str>| -> LaunchContext {
+        let context = |port: Option<u16>,
+                       model: Option<&str>,
+                       models: Option<Vec<ChatModel>>|
+         -> LaunchContext {
             serde_json::from_value(json!({
                 "session": {
                     "id": id, "tool": "opencode", "connection": "near_ai_signin",
@@ -453,16 +822,21 @@ mod tests {
                 "proof": "proof",
                 "route_port": port,
                 "route_model": model,
+                "route_models": models,
             }))
             .unwrap()
         };
         let command = opencode_sign_in_command(
             &session,
-            &context(Some(4321), Some("deepseek-ai/DeepSeek-V3.1")),
+            &context(
+                Some(4321),
+                Some("deepseek-ai/DeepSeek-V3.1"),
+                Some(listed()),
+            ),
         )
         .unwrap();
         assert_eq!(
-            context(None, None).session.connection,
+            context(None, None, None).session.connection,
             ConnectionKind::NearAiSignIn
         );
         let env = |name: &str| {
@@ -476,6 +850,17 @@ mod tests {
             serde_json::from_str(&env("OPENCODE_CONFIG_CONTENT").unwrap()).unwrap();
         assert_eq!(config["model"], "trace-managed/deepseek-ai/DeepSeek-V3.1");
         assert_eq!(
+            config["small_model"],
+            "trace-managed/deepseek-ai/DeepSeek-V3.1"
+        );
+        assert_eq!(
+            config["provider"]["trace-managed"]["models"],
+            json!({
+                "deepseek-ai/DeepSeek-V3.1": {"name": "deepseek-ai/DeepSeek-V3.1"},
+                "anthropic/claude-sonnet-5-5": {"name": "Claude Sonnet 5.5"},
+            })
+        );
+        assert_eq!(
             config["provider"]["trace-managed"]["options"]["baseURL"],
             "http://127.0.0.1:4321/openai/v1"
         );
@@ -483,17 +868,123 @@ mod tests {
             env("TRACE_COMMONS_OPENCODE_KEY").as_deref(),
             Some("managed-local-session")
         );
-        for (port, model) in [
-            (None, Some("deepseek-ai/DeepSeek-V3.1")),
-            (Some(4321), None),
-            (None, None),
+        for (port, model, models) in [
+            (None, Some("deepseek-ai/DeepSeek-V3.1"), Some(listed())),
+            (Some(4321), None, Some(listed())),
+            (Some(4321), Some("deepseek-ai/DeepSeek-V3.1"), None),
+            (None, None, None),
         ] {
+            let missing = models.is_none();
             assert_eq!(
-                opencode_sign_in_command(&session, &context(port, model)).err(),
+                opencode_sign_in_command(&session, &context(port, model, models)).err(),
                 Some(ManagedError::LaunchUnknown),
-                "{port:?} {model:?}"
+                "{port:?} {model:?} {missing}"
             );
         }
+        // A default the list does not hold is refused, not added.
+        assert_eq!(
+            opencode_sign_in_command(
+                &session,
+                &context(Some(4321), Some("other/model"), Some(listed()))
+            )
+            .err(),
+            Some(ManagedError::InvalidRequest)
+        );
+    }
+
+    /// OpenCode on a saved NEAR AI key runs against the launcher's own
+    /// proxy through the same command as the sign-in: every model the
+    /// proxy lists is in OpenCode's picker, not only the default.
+    #[test]
+    fn opencode_on_a_saved_key_route_offers_every_listed_model() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let native = home.path().join("opencode");
+        std::fs::write(&native, b"never executed").unwrap();
+        let account = signin::entry(ToolId::Opencode).unwrap();
+        let session =
+            OpenCodeSession::new(&store, &account, &native, uuid::Uuid::new_v4(), home.path())
+                .unwrap();
+        let command =
+            opencode_route_command(&session, 4321, "anthropic/claude-sonnet-5-5", &listed())
+                .unwrap();
+        let content = command
+            .get_envs()
+            .find(|(key, _)| *key == "OPENCODE_CONFIG_CONTENT")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap();
+        let config: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(config["model"], "trace-managed/anthropic/claude-sonnet-5-5");
+        assert_eq!(
+            config["provider"]["trace-managed"]["models"],
+            json!({
+                "deepseek-ai/DeepSeek-V3.1": {"name": "deepseek-ai/DeepSeek-V3.1"},
+                "anthropic/claude-sonnet-5-5": {"name": "Claude Sonnet 5.5"},
+            })
+        );
+        assert_eq!(
+            config["provider"]["trace-managed"]["options"]["baseURL"],
+            "http://127.0.0.1:4321/openai/v1"
+        );
+    }
+
+    /// Codex's catalog takes the prompt from the installed Codex's own
+    /// list (`debug models --bundled`), not the basic one-line prompt.
+    #[cfg(unix)]
+    #[test]
+    fn codex_catalog_file_reads_the_installed_codex_list() {
+        use super::codex_catalog_file;
+        use crate::managed::{codex::BASIC_INSTRUCTIONS, profiles::NativeProfiles};
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().join("state")).unwrap();
+        let cwd = home.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        // Answers only the bundled-list read; anything else fails.
+        let native = home.path().join("codex");
+        std::fs::write(
+            &native,
+            concat!(
+                "#!/bin/sh\n",
+                "[ \"$*\" = \"debug models --bundled\" ] || exit 1\n",
+                "printf '%s' '{\"models\":[{\"slug\":\"gpt-stub\",",
+                "\"visibility\":\"list\",\"priority\":1,",
+                "\"base_instructions\":\"Stub prompt.\"}]}'\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let account = signin::entry(ToolId::Codex).unwrap();
+        let row: crate::managed::sessions::SessionView = serde_json::from_value(json!({
+            "id": uuid::Uuid::new_v4(), "tool": "codex", "connection": "near_ai_signin",
+            "account_id": account.id, "account_label": "NEAR AI",
+            "selection_generation": 0, "project_label": "p", "cwd": cwd,
+            "started_at": "2026-10-16T00:00:00Z", "state": "starting",
+            "exit_code": null, "can_focus": false,
+        }))
+        .unwrap();
+        let file = codex_catalog_file(
+            &store,
+            &NativeProfiles::new(&store),
+            &account,
+            &native,
+            &row,
+            "anthropic/claude-sonnet-5-5",
+            &listed(),
+        )
+        .unwrap()
+        .unwrap();
+        let catalog: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(file.path()).unwrap()).unwrap();
+        let prompts: Vec<&str> = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["base_instructions"].as_str().unwrap())
+            .collect();
+        assert_eq!(prompts, ["Stub prompt.", "Stub prompt."]);
+        assert_ne!(prompts[0], BASIC_INSTRUCTIONS);
     }
 
     /// Only the daemon's explicit `stop: true` stops the tool. A missing

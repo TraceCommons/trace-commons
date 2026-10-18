@@ -196,7 +196,7 @@ public enum ManagedSurface {
     public static func connectionOptions(signedIn: Bool, tool: String = "claude") -> [String] {
         // OpenCode has no subscription flow. A saved NEAR AI connection for
         // it uses a pasted key and names its own model, even while signed
-        // in; the sign-in entry runs on the model its proxy pins.
+        // in; the sign-in entry starts on the default its proxy names.
         if tool == "opencode" { return ["api_key", "near_ai"] }
         return signedIn ? ["subscription", "api_key"] : ["subscription", "api_key", "near_ai"]
     }
@@ -243,6 +243,9 @@ public enum ManagedSurface {
         // and points at Settings.
         let notFound = "managed-terminal-not-found"
         if code == notFound || message == notFound { return "terminal_not_found" }
+        // A named model NEAR AI does not offer: the line that says so.
+        let modelUnavailable = "managed-model-unavailable"
+        if code == modelUnavailable || message == modelUnavailable { return "model_unavailable" }
         return "action_failed"
     }
 
@@ -291,6 +294,72 @@ public extension ManagedSurface {
     /// relative format when the daemon sent one.
     static func caption(_ parts: [String], startedAt: Date?, relative: (Date) -> String = Format.when) -> String {
         (parts + [startedAt.map(relative)].compactMap { $0 }).filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+}
+
+/// A NEAR AI chat model a launch can name, from `managed_model_catalogue`.
+public struct ManagedModel: Decodable, Equatable, Identifiable, Sendable {
+    public let id: String
+    /// NEAR AI's display name; absent when it gives none.
+    public let name: String?
+}
+
+/// `managed_model_catalogue`'s answer: NEAR AI's chat models in its order,
+/// and the one the tool gets when a launch names none.
+public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
+    public let models: [ManagedModel]
+    public let `default`: String?
+}
+
+/// One entry in the Launch sheet's model picker.
+public struct ManagedModelOption: Equatable, Sendable {
+    public let title: String
+    public let value: String
+}
+
+/// Choosing the model of a NEAR AI session in the Launch sheet.
+public extension ManagedSurface {
+    /// The picker value that names no model: the session takes the tool's
+    /// default. Never a model id, which is never empty.
+    static let defaultModel = ""
+
+    /// Whether the Launch sheet offers a model picker for this account:
+    /// Claude Code and Codex on a saved NEAR AI key, whose proxy pins the
+    /// model. OpenCode keeps its own model field.
+    static func offersModelChoice(tool: String, connection: String) -> Bool {
+        ["claude", "codex"].contains(tool) && connection == "near_ai"
+    }
+
+    /// The picker's options: the default first, which names the model it
+    /// will be when the catalogue says, then each chat model. With no
+    /// catalogue, only the default.
+    static func modelOptions(_ catalogue: ManagedModelCatalogue?, copy: (String) -> String) -> [ManagedModelOption] {
+        let first = catalogue?.default.map { copy("model_default").replacingOccurrences(of: "{model}", with: $0) }
+            ?? copy("model_default_unknown")
+        return [ManagedModelOption(title: first, value: defaultModel)]
+            + (catalogue?.models ?? []).map { ManagedModelOption(title: $0.id, value: $0.id) }
+    }
+
+    /// The Launch sheet's `managed_launch_prepare` request. A model is sent
+    /// only where one was chosen: OpenCode's typed model with its
+    /// collection opt-in, or a picked model where `offersModelChoice`.
+    static func launchParams(
+        account: ManagedAccount, cwd: String, requestID: String, generation: UInt64,
+        model: String?, collectTraces: Bool
+    ) -> [String: Any] {
+        var params: [String: Any] = [
+            "request_id": requestID, "purpose": "coding", "tool": account.tool,
+            "connection": account.connection, "account_id": account.id, "cwd": cwd,
+            "expected_generation": generation, "save_default": false,
+        ]
+        if account.tool == "opencode" {
+            params["model"] = (model ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            params["collect_traces"] = collectTraces
+        } else if offersModelChoice(tool: account.tool, connection: account.connection),
+                  let model, model != defaultModel {
+            params["model"] = model
+        }
+        return params
     }
 }
 

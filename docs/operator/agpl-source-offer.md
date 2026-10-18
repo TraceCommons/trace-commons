@@ -2,8 +2,8 @@
 
 ## Why this endpoint exists
 
-`trace-commons-server`, `trace-commons-gate-api`, and
-`trace-commons-gate-enclave` are licensed AGPL-3.0-or-later. Section 13 of that
+`trace-commons-server`, `trace-commons-gate-api`, `trace-commons-gate-enclave`,
+and `trace-commons-ingest` are licensed AGPL-3.0-or-later. Section 13 of that
 license says that if you run a **modified** version and let others interact with
 it over a network, you must offer those users the Corresponding Source.
 
@@ -35,7 +35,9 @@ does not conflict with the hash-only logging convention.
 
 `build_commit` is the point of it. A user exercising section 13 needs the source
 of the *version they are talking to*, and `build_version` does not move when a
-deploy does — the same reason `/health` reports the commit.
+deploy does — the same reason `/health` reports the commit. `build_version` is
+the `trace-commons-ingest` crate's version, which is kept equal to the server
+crate's.
 
 ## Operator obligations
 
@@ -47,7 +49,7 @@ going unnoticed.
 
 **If you deploy a modified build, you must point it at your own source.**
 `TRACE_COMMONS_SOURCE_URL` is a constant in
-`crates/trace-commons-server/src/bin/trace-commons-ingest.rs`, not an
+`crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs`, not an
 environment variable — deliberately, because section 13 obliges the operator of
 a *modified* version, and anyone modifying the binary is already editing it. A
 knob would only let an unmodified deploy point somewhere wrong. Change the

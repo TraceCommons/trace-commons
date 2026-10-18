@@ -18,6 +18,10 @@
 //! audit rows are hash-only / label-only (no principal_refs, public_keys, or
 //! account uuids in metadata).
 
+#[path = "support/role_ddl_lock.rs"]
+mod role_ddl_lock;
+
+use role_ddl_lock::with_role_ddl_lock;
 use secrecy::SecretString;
 use tokio_postgres::types::ToSql;
 use trace_commons_protocol::public_run::{PublicRunEvidenceDraft, PublicRunReusePermission};
@@ -1000,17 +1004,14 @@ async fn restricted_merge_backend(backend: &PgBackend) -> PgBackend {
         // One transaction under an advisory lock: the suite runs in parallel,
         // and concurrent GRANTs on one table fail with "tuple concurrently
         // updated" (and concurrent CREATE ROLE with a duplicate key).
-        .batch_execute(
-            "BEGIN;
-             SELECT pg_advisory_xact_lock(hashtextextended('account_merge_pg restricted login', 0));
-             DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_trust_merge_runtime') THEN CREATE ROLE trace_trust_merge_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
+        .batch_execute(&with_role_ddl_lock(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_trust_merge_runtime') THEN CREATE ROLE trace_trust_merge_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
              GRANT SELECT,INSERT,UPDATE ON trace_tenants TO trace_trust_merge_runtime;
              GRANT SELECT,UPDATE ON trace_accounts,trace_account_merge_proposals,trace_account_principals,
                  trace_webauthn_credentials,trace_near_identities,trace_public_runs,trace_sessions TO trace_trust_merge_runtime;
              GRANT INSERT ON trace_account_audit TO trace_trust_merge_runtime;
-             GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_trust_merge_runtime;
-             COMMIT;",
-        )
+             GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_trust_merge_runtime;",
+        ))
         .await
         .expect("provision restricted merge login");
     let trust_rights: bool = client

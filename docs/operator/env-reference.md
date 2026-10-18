@@ -1,7 +1,7 @@
 # `TRACE_COMMONS_*` Environment Variable Reference
 
 Every env var the `trace-commons-ingest` binary reads, grouped by surface. The
-master list is `grep '^const TRACE_COMMONS_' crates/trace-commons-server/src/bin/trace-commons-ingest.rs`.
+master list is `grep '^const TRACE_COMMONS_' crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs`.
 If you change a default in code, update this table.
 
 The binary parses constants at boot; values that fail to parse refuse the
@@ -588,6 +588,6 @@ These aren't env vars but they gate which envs even matter at runtime.
 Production build command:
 
 ```sh
-cargo build --release -p trace-commons-server \
+cargo build --release -p trace-commons-server -p trace-commons-ingest \
   --features gcs-client,gcp-kms,local-gpu-models-cuda
 ```

@@ -26,7 +26,7 @@ namespace TraceCommons.App.ViewModels;
 /// </para>
 /// <para>
 /// <b>Why there is no Windows-specific path logic here.</b>
-/// <c>crates/trace-commons-contributor/src/source/discovery.rs</c> is
+/// <c>crates/trace-commons-contributor-sources/src/source/discovery.rs</c> is
 /// platform-neutral by construction -- <c>dirs::home_dir()</c> plus an
 /// injected environment lookup, with no <c>cfg(windows)</c> branch -- so this
 /// client shares the one implementation rather than carrying a transcription

@@ -31,7 +31,10 @@ pub mod health_copy;
 pub mod history_copy;
 pub mod identity;
 pub mod inference_connection;
-pub mod insights;
+// Insights lives in the `trace-commons-contributor-insights` crate, so client
+// builds that edit the rest of this crate do not recompile it; re-exported at
+// its old path.
+pub use trace_commons_contributor_insights::insights;
 pub mod install_guides;
 pub mod issuer_client;
 pub mod managed;

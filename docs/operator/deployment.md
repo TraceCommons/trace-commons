@@ -91,7 +91,7 @@ constraint until Ubuntu 24.04 (or a newer base) is the operator default.
 On a build host with CUDA available:
 
 ```sh
-cargo build --release -p trace-commons-server \
+cargo build --release -p trace-commons-server -p trace-commons-ingest \
   --features gcs-client,gcp-kms,local-gpu-models-cuda
 ```
 
@@ -387,7 +387,7 @@ Pilot builds must include the `near-ai-privacy-filter` Cargo feature to enable
 the hosted backend:
 
 ```sh
-cargo build --release -p trace-commons-server \
+cargo build --release -p trace-commons-server -p trace-commons-ingest \
   --features gcs-client,gcp-kms,local-gpu-models-cuda,near-ai-privacy-filter
 ```
 
