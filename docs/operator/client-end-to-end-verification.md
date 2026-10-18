@@ -91,7 +91,8 @@ every project they have ever worked on.
 
 Exactly one thing keeps that material out of collection: the `.jsonl`
 extension filter at
-`crates/trace-commons-contributor/src/source/claude_code.rs:242`.
+`crates/trace-commons-contributor-sources/src/source/claude_code.rs`
+(`ClaudeCodeSource::discover_with`).
 
 ```rust
 .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
@@ -354,7 +355,7 @@ Mandatory, and its results are recorded whether or not anything was found.
 1. **Withdraw every verification submission** through the client's own
    `withdraw`, backed by
    `/v1/account/traces/{submission_id}/withdraw`
-   (`crates/trace-commons-server/src/bin/trace-commons-ingest.rs:6897-6900`),
+   (`crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs:6897-6900`),
    with `/v1/account/traces` (`:6888`) enumerating what remains. Through the
    contributor path rather than an admin purge, deliberately: cleanup then
    exercises the withdrawal promise instead of verifying around it.

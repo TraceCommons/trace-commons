@@ -95,7 +95,9 @@ jobs:
       # The updater and `--version` both use CARGO_PKG_VERSION, not the tag.
       # Refuse a tag that would publish correctly named assets containing a
       # binary which identifies itself as another version. The FFI library is
-      # shipped with the desktop apps and follows the same core release line.
+      # shipped with the desktop apps and follows the same core release line,
+      # and the session-parser crate the contributor re-exports is released
+      # in lockstep with it.
       - name: Confirm the tag matches the contributor package versions
         if: github.event_name == 'push'
         shell: bash
@@ -104,6 +106,9 @@ jobs:
           TAG_VERSION="${GITHUB_REF_NAME#contributor-v}"
           for manifest in \
             crates/trace-commons-contributor/Cargo.toml \
+            crates/trace-commons-contributor-sources/Cargo.toml \
+            crates/trace-commons-contributor-insights/Cargo.toml \
+            crates/trace-commons-contributor-platform/Cargo.toml \
             crates/trace-commons-contributor-ffi/Cargo.toml
           do
             PACKAGE_VERSION="$(awk -F '"' '/^version = "/ { print $2; exit }' "$manifest")"

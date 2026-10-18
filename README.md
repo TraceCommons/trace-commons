@@ -120,9 +120,19 @@ crates/
 │                                (feature `near-ai-scorer`).
 ├── trace-commons-contributor/   Contributor-facing CLI: login, list, submit, status,
 │                                whoami, logout, mint-grant. See its own README.
-└── trace-commons-server/        All hosted binaries.
+├── trace-commons-contributor-sources/  Session-store parsers and routing overlay,
+│                                re-exported by the contributor at
+│                                `trace_commons_contributor::{source, routing}`.
+├── trace-commons-contributor-insights/  Private local Insights, re-exported at
+│                                `trace_commons_contributor::insights`.
+├── trace-commons-contributor-platform/  Shared OS credentials and local files.
+├── trace-commons-client-server-tests/  Unpublished cross-contract test package;
+│                                client-only tests do not build the server.
+├── trace-commons-ingest/        Hosted ingest / review / admin / worker API
+│                                (`trace-commons-ingest` binary; embed via
+│                                `trace_commons_ingest::run`).
+└── trace-commons-server/        Server library and the other hosted binaries.
     └── src/bin/
-        ├── trace-commons-ingest                 Hosted ingest / review / admin / worker API.
         ├── trace-commons-upload-claim-issuer    EdDSA/Ed25519 upload-claim issuer.
         ├── trace-commons-gate-calibrate         Offline calibration + model bake-off.
         ├── trace-commons-pilot-bootstrap        HF agent-traces load generator for pilot.
@@ -144,9 +154,12 @@ docs/
 # Minimum: default-features build + tests (no GPU, no external scoring)
 cargo check -p trace-commons-server --bins
 cargo test  -p trace-commons-server
+cargo check -p trace-commons-ingest --bins
+cargo test  -p trace-commons-ingest
 
 # With the NEAR AI scoring backend (pilot configuration)
 cargo check -p trace-commons-server --bins --features near-ai-scorer
+cargo check -p trace-commons-ingest --bins --features near-ai-scorer
 
 # With local CUDA scoring (mistralrs; needs CUDA toolchain for the cuda subfeature)
 cargo check -p trace-commons-server --bins --features local-gpu-models
@@ -158,7 +171,9 @@ fail the build. To catch what CI catches before pushing:
 ```bash
 RUSTFLAGS='-D warnings' cargo check -p trace-commons-server --bins
 RUSTFLAGS='-D warnings' cargo test  -p trace-commons-server --no-run
-cargo clippy -p trace-commons-server --all-targets -- \
+RUSTFLAGS='-D warnings' cargo check -p trace-commons-ingest --bins
+RUSTFLAGS='-D warnings' cargo test  -p trace-commons-ingest --no-run
+cargo clippy -p trace-commons-server -p trace-commons-ingest --all-targets -- \
   -D warnings \
   -A clippy::type_complexity -A clippy::collapsible_if \
   -A clippy::manual_option_as_slice -A clippy::useless_vec \
@@ -426,7 +441,7 @@ other content. Pass `--no-reasoning` to exclude it from a submission.
 ```bash
 TRACE_COMMONS_TENANT_TOKENS='tenant-a:dev-token-a;expires_at=2027-01-01T00:00:00Z' \
 TRACE_COMMONS_BIND='127.0.0.1:3907' \
-cargo run --bin trace-commons-ingest
+cargo run -p trace-commons-ingest --bin trace-commons-ingest
 ```
 
 This runs the dev profile against the local-encrypted artifact store and
@@ -531,7 +546,8 @@ they live inline in `docs/`:
 TraceCommons is licensed in two parts, split along the client/server seam.
 
 **Server components — AGPL-3.0-or-later** (`LICENSE-AGPL`):
-`trace-commons-server`, `trace-commons-gate-api`, `trace-commons-gate-enclave`.
+`trace-commons-server`, `trace-commons-gate-api`, `trace-commons-gate-enclave`,
+`trace-commons-ingest`.
 
 These are normally operated as a network service, so section 13 applies: run a
 modified version and let others reach it over a network, and you owe those
@@ -541,9 +557,11 @@ from. If you deploy a modified build, point that constant at your own source.
 
 **Client and protocol components — MIT OR Apache-2.0** (`LICENSE-MIT`,
 `LICENSE-APACHE`): `trace-commons-protocol`, `trace-commons-contributor`,
-`trace-commons-contributor-ffi`, `trace-commons-contributor-gtk`,
-`trace-commons-operator-client`, `trace-commons-mark`,
-`trace-commons-build-info`.
+`trace-commons-contributor-sources`, `trace-commons-contributor-insights`,
+`trace-commons-contributor-platform`, `trace-commons-contributor-ffi`,
+`trace-commons-contributor-gtk`, `trace-commons-operator-client`,
+`trace-commons-mark`, `trace-commons-build-info`, and the unpublished
+`trace-commons-client-server-tests` test package.
 
 These stay permissive on purpose. The contributor CLI, the desktop apps, and
 the envelope protocol are meant to be embedded in proprietary agent harnesses —

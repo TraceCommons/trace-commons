@@ -284,6 +284,7 @@ fn native_exit_receipt_reconciles_after_daemon_downtime() {
     persist_exit(
         &store,
         &LifecycleReport {
+            model: None,
             collection: None,
             session_id: serde_json::from_value(p["session_id"].clone()).unwrap(),
             proof: context["proof"].as_str().unwrap().into(),

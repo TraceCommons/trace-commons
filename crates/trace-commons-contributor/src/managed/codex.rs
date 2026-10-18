@@ -1,0 +1,353 @@
+//! Codex's model list for a managed NEAR AI session.
+//!
+//! The session's proxy serves any model NEAR AI lists as named, so Codex is
+//! given a model catalog (`-c model_catalog_json=<file>`) naming every
+//! NEAR AI chat model, the session's default first. Codex 0.163.0 takes
+//! that catalog as the whole list: its picker offers those models only,
+//! and it fetches no other list.
+//!
+//! A catalog entry also carries the settings and prompt Codex runs a model
+//! with. Without a catalog Codex finds those in the list it ships with,
+//! matching a NEAR AI id such as `openai/gpt-6.1-sol` to its own
+//! `gpt-6.1-sol`. To keep that, the launcher reads the shipped list
+//! (`codex debug models --bundled`) and a model Codex matches keeps its
+//! shipped entry under the NEAR AI id. Any other model gets basic
+//! settings with the prompt of Codex's own first listed model.
+use super::{ManagedError, models::ChatModel};
+use crate::config::ConfigStore;
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
+use uuid::Uuid;
+
+/// The prompt every entry carries when Codex's own list could not be read.
+pub const BASIC_INSTRUCTIONS: &str = "You are a coding agent.";
+
+/// Where the launcher keeps each session's catalog. The launcher owns it:
+/// a sign-in session's proxy home belongs to the daemon.
+pub const CATALOGS: &str = "managed-codex-catalogs";
+
+/// Codex's model catalog for a session: every NEAR AI chat model, the
+/// default first, each shown in the picker under NEAR AI's display name
+/// or its id. `bundled` is Codex's own list (`codex debug models
+/// --bundled`); without it, or in another shape, every entry is basic.
+pub fn catalog(default: &str, models: &[ChatModel], bundled: Option<&Value>) -> Value {
+    let shipped: &[Value] = bundled
+        .and_then(|b| b["models"].as_array())
+        .filter(|list| list.iter().all(|m| m["slug"].is_string()))
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    // The prompt of Codex's own first listed model, as it would use for a
+    // model it does not know.
+    let prompt = shipped
+        .iter()
+        .filter(|m| m["visibility"] == "list")
+        .filter(|m| {
+            m["base_instructions"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+        })
+        .min_by_key(|m| m["priority"].as_i64().unwrap_or(i64::MAX))
+        .and_then(|m| m["base_instructions"].as_str())
+        .unwrap_or(BASIC_INSTRUCTIONS);
+    let ordered = models
+        .iter()
+        .filter(|m| m.id == default)
+        .take(1)
+        .chain(models.iter().filter(|m| m.id != default));
+    let entries: Vec<Value> = ordered
+        .enumerate()
+        .map(|(index, model)| {
+            let display = model.name.as_deref().unwrap_or(&model.id);
+            let mut entry = match known(&model.id, shipped) {
+                Some(entry) => {
+                    let mut entry = entry.clone();
+                    // Both name another model or a ChatGPT offer.
+                    entry["upgrade"] = Value::Null;
+                    entry["availability_nux"] = Value::Null;
+                    entry
+                }
+                None => json!({
+                    "supported_reasoning_levels": [],
+                    "shell_type": "shell_command",
+                    "support_verbosity": false,
+                    "truncation_policy": {"mode": "bytes", "limit": 10000},
+                    "experimental_supported_tools": [],
+                    "base_instructions": prompt,
+                    "upgrade": null,
+                }),
+            };
+            entry["slug"] = json!(model.id);
+            entry["display_name"] = json!(display);
+            entry["visibility"] = json!("list");
+            entry["supported_in_api"] = json!(true);
+            entry["priority"] = json!(index + 1);
+            entry
+        })
+        .collect();
+    json!({ "models": entries })
+}
+
+/// The shipped entry Codex would use for `id`: the longest slug `id`
+/// starts with, then the same after one `namespace/` (Codex 0.163.0,
+/// `construct_model_info_from_candidates`).
+fn known<'a>(id: &str, shipped: &'a [Value]) -> Option<&'a Value> {
+    let longest = |name: &str| {
+        shipped
+            .iter()
+            .filter_map(|m| Some((m["slug"].as_str()?, m)))
+            .filter(|(slug, _)| name.starts_with(slug))
+            .max_by_key(|(slug, _)| slug.len())
+            .map(|(_, m)| m)
+    };
+    longest(id).or_else(|| {
+        let (namespace, suffix) = id.split_once('/')?;
+        let simple = !namespace.is_empty()
+            && namespace
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        (simple && !suffix.contains('/'))
+            .then(|| longest(suffix))
+            .flatten()
+    })
+}
+
+/// Codex's own model list, read from the installed binary with `command`
+/// (the profile's Codex, with `debug models --bundled` appended). None
+/// when it cannot be read: the catalog is then basic, never refused.
+pub fn bundled(command: std::process::Command) -> Option<Value> {
+    let output = super::profiles::bounded_output_limit(command, 16 * 1024 * 1024).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+/// A session's catalog file, removed when dropped: when the session ends,
+/// and on any early return before the tool starts.
+pub struct CatalogFile {
+    path: PathBuf,
+}
+
+impl CatalogFile {
+    /// Write `catalog` for session `id` under the launcher's own state.
+    pub fn write(store: &ConfigStore, id: Uuid, catalog: &Value) -> Result<Self, ManagedError> {
+        let root = store.dir().join(CATALOGS);
+        super::profiles::private_directory(&root)?;
+        let name = format!("{id}.json");
+        let body = serde_json::to_vec(catalog).map_err(|_| ManagedError::InvalidRequest)?;
+        ConfigStore::open(root.clone())
+            .and_then(|dir| dir.write_daemon_file(&name, &body))
+            .map_err(|_| ManagedError::StorageUnavailable)?;
+        Ok(Self {
+            path: root.join(name),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for CatalogFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The fields Codex 0.163.0 requires of every catalog entry.
+    const REQUIRED: &[&str] = &[
+        "slug",
+        "display_name",
+        "supported_reasoning_levels",
+        "shell_type",
+        "visibility",
+        "supported_in_api",
+        "priority",
+        "support_verbosity",
+        "truncation_policy",
+        "experimental_supported_tools",
+        "base_instructions",
+    ];
+
+    fn chat(id: &str, name: Option<&str>) -> ChatModel {
+        ChatModel {
+            id: id.into(),
+            name: name.map(Into::into),
+        }
+    }
+
+    /// A cut of `codex debug models --bundled` (0.163.0): two listed
+    /// entries and a hidden one, prompts shortened.
+    fn bundled() -> Value {
+        let entry = |slug: &str, priority: u32, visibility: &str, prompt: &str| {
+            json!({
+                "slug": slug, "display_name": slug.to_uppercase(),
+                "description": "Bundled.", "default_reasoning_level": "low",
+                "supported_reasoning_levels": [{"effort": "low", "description": "Fast"}],
+                "shell_type": "unified_exec", "visibility": visibility,
+                "supported_in_api": true, "priority": priority,
+                "availability_nux": {"message": "Try it."},
+                "upgrade": {"model": "gpt-6-sol", "migration_markdown": "Meet GPT-6 Sol"},
+                "support_verbosity": true,
+                "truncation_policy": {"mode": "tokens", "limit": 10000},
+                "experimental_supported_tools": ["clock"],
+                "base_instructions": prompt,
+                "model_messages": {"instructions_template": prompt},
+            })
+        };
+        json!({"models": [
+            entry("gpt-6-astra", 2, "list", "You are Codex (astra)."),
+            entry("gpt-6.1-sol", 1, "list", "You are Codex (sol)."),
+            entry("gpt-5.5", 13, "list", "You are Codex (5.5)."),
+            entry("codex-auto-review", 0, "hide", "Review."),
+        ]})
+    }
+
+    fn slugs(catalog: &Value) -> Vec<&str> {
+        catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["slug"].as_str().unwrap())
+            .collect()
+    }
+
+    /// Every NEAR AI chat model is listed once, the default first, each
+    /// with every field Codex requires, shown in the picker and ordered.
+    #[test]
+    fn every_chat_model_is_listed_default_first_with_the_required_fields() {
+        let models = [
+            chat("anthropic/claude-sonnet-5-5", Some("Claude Sonnet 5.5")),
+            chat("openai/gpt-6.1-sol", None),
+            chat("openai/gpt-5.5-pro", Some("GPT-5.5 Pro")),
+            chat("z-ai/glm-5.3-flash", None),
+        ];
+        for bundled in [Some(bundled()), None] {
+            let catalog = catalog("openai/gpt-6.1-sol", &models, bundled.as_ref());
+            assert_eq!(
+                slugs(&catalog),
+                [
+                    "openai/gpt-6.1-sol",
+                    "anthropic/claude-sonnet-5-5",
+                    "openai/gpt-5.5-pro",
+                    "z-ai/glm-5.3-flash",
+                ]
+            );
+            for (index, entry) in catalog["models"].as_array().unwrap().iter().enumerate() {
+                for field in REQUIRED {
+                    assert!(entry.get(field).is_some(), "{field} in {entry}");
+                }
+                assert_eq!(entry["visibility"], "list");
+                assert_eq!(entry["supported_in_api"], true);
+                assert_eq!(entry["priority"], index as u64 + 1);
+                assert!(
+                    entry["base_instructions"]
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty())
+                );
+                // No entry points Codex at a model NEAR AI does not list.
+                assert!(entry["upgrade"].is_null(), "{entry}");
+            }
+            let names: Vec<&str> = catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["display_name"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "openai/gpt-6.1-sol",
+                    "Claude Sonnet 5.5",
+                    "GPT-5.5 Pro",
+                    "z-ai/glm-5.3-flash"
+                ]
+            );
+        }
+    }
+
+    /// A model Codex knows keeps Codex's own settings and prompt, as it
+    /// would without a catalog; any other model gets the basic settings
+    /// with Codex's default prompt; without Codex's list, a short prompt.
+    #[test]
+    fn known_models_keep_codex_settings_and_others_get_its_default_prompt() {
+        let models = [
+            chat("openai/gpt-6.1-sol", None),
+            chat("openai/gpt-5.5-pro", None),
+            chat("anthropic/claude-sonnet-5-5", None),
+            chat("gpt-6-astra", None),
+        ];
+        let bundled = bundled();
+        let catalog = catalog("openai/gpt-6.1-sol", &models, Some(&bundled));
+        let entry = |slug: &str| {
+            catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["slug"] == slug)
+                .unwrap()
+                .clone()
+        };
+        // Namespaced id, Codex's own slug after the namespace.
+        let sol = entry("openai/gpt-6.1-sol");
+        assert_eq!(sol["base_instructions"], "You are Codex (sol).");
+        assert_eq!(sol["shell_type"], "unified_exec");
+        assert_eq!(
+            sol["model_messages"]["instructions_template"],
+            "You are Codex (sol)."
+        );
+        assert!(sol["availability_nux"].is_null());
+        // Longest prefix, as Codex matches it.
+        assert_eq!(
+            entry("openai/gpt-5.5-pro")["base_instructions"],
+            "You are Codex (5.5)."
+        );
+        assert_eq!(
+            entry("gpt-6-astra")["base_instructions"],
+            "You are Codex (astra)."
+        );
+        // Unknown to Codex: basic settings, the prompt of Codex's own
+        // first listed model.
+        let claude = entry("anthropic/claude-sonnet-5-5");
+        assert_eq!(claude["base_instructions"], "You are Codex (sol).");
+        assert_eq!(claude["shell_type"], "shell_command");
+        assert_eq!(claude["supported_reasoning_levels"], json!([]));
+        assert!(claude.get("model_messages").is_none());
+        // Without Codex's list every entry is basic.
+        let plain = super::catalog("openai/gpt-6.1-sol", &models, None);
+        assert_eq!(plain["models"][0]["shell_type"], "shell_command");
+        assert_eq!(plain["models"][0]["base_instructions"], BASIC_INSTRUCTIONS);
+        // A list that is not Codex's shape counts as none.
+        let odd = super::catalog("openai/gpt-6.1-sol", &models, Some(&json!({"models": "x"})));
+        assert_eq!(odd, plain);
+    }
+
+    /// The catalog file lives under the launcher's own state, readable by
+    /// its owner only, and is gone once the session drops it.
+    #[test]
+    fn the_catalog_file_is_private_and_removed_when_dropped() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().into()).unwrap();
+        let id = Uuid::new_v4();
+        let value = catalog("x/a", &[chat("x/a", None)], None);
+        let file = CatalogFile::write(&store, id, &value).unwrap();
+        let path = file.path().to_owned();
+        assert!(path.is_absolute());
+        assert_eq!(path, store.dir().join(CATALOGS).join(format!("{id}.json")));
+        let read: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(read, value);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{mode:o}");
+        }
+        drop(file);
+        assert!(!path.exists());
+    }
+}

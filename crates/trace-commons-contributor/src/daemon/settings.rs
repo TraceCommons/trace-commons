@@ -969,44 +969,11 @@ impl Default for DigestSchedule {
 
 /// What the contributor said about one agent's session store.
 ///
-/// The tri-state this replaces was `Option<PathBuf>`, where `None` had to
-/// carry both "never asked" and "I don't use this agent" -- and the daemon
-/// resolved that ambiguity by watching the real `~/.claude` or `~/.codex`
-/// (`crate::source::all_sources`). So the one answer a privacy-conscious
-/// contributor is most likely to give was the one answer that silently
-/// scanned their work.
-///
-/// Serialized tagged rather than as a bare string, so `off` can never be
-/// mistaken for a path and a future third state has somewhere to go:
-///
-/// ```json
-/// "claude_source": { "mode": "watch", "path": "/Users/x/.claude/projects" }
-/// "codex_source":  { "mode": "off" }
-/// ```
-///
-/// Deliberately NOT a sentinel path (an empty directory, a temp dir, "/dev/null").
-/// A sentinel that is a real filesystem location is a lie every later reader
-/// has to decode, and it stops being true the moment somebody creates that
-/// directory.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum SourceDeclaration {
-    /// Watch this directory. The contributor chose it.
-    Watch { path: PathBuf },
-    /// The contributor said they do not use this agent. Nothing is watched
-    /// for it, and there is no fallback.
-    Off,
-}
-
-impl SourceDeclaration {
-    /// The directory to watch, or `None` when the source is off.
-    pub fn path(&self) -> Option<&std::path::Path> {
-        match self {
-            SourceDeclaration::Watch { path } => Some(path.as_path()),
-            SourceDeclaration::Off => None,
-        }
-    }
-}
+/// Defined in the sources crate beside `SourceRoots`, which is keyed on it,
+/// and re-exported here so settings code and serialized settings keep the
+/// same type at the same path. See its own documentation for the tri-state
+/// and the serialized form.
+pub use crate::source::SourceDeclaration;
 
 /// What the contributor said about a local inference proxy.
 ///

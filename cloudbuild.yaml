@@ -93,7 +93,10 @@ steps:
         # panics at the first TLS use. main() installs ring explicitly for this
         # reason; see the install_default call near the top of
         # trace-commons-ingest.rs and the guard that warns if it is absent.
-        cargo build --release --bin trace-commons-ingest \
+        #
+        # The ingest binary lives in the trace-commons-ingest crate, which
+        # forwards these features to the server library it depends on.
+        cargo build --release -p trace-commons-ingest --bin trace-commons-ingest \
           --features gcs-client,gcp-kms,near-ai-scorer,near-attestation-collateral
         # Reuses the deps compiled above; the issuer takes no features.
         cargo build --release --bin trace-commons-upload-claim-issuer

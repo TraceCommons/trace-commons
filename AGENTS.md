@@ -25,8 +25,9 @@ Copyright (C) 2026 K&Z Partners LLC.
 - `crates/trace-commons-server`
 - `crates/trace-commons-gate-api`
 - `crates/trace-commons-gate-enclave`
+- `crates/trace-commons-ingest`
 
-Every `.rs` file in these three crates begins with:
+Every `.rs` file in these four crates begins with:
 
 ```rust
 // Copyright (C) 2026 K&Z Partners LLC
@@ -41,12 +42,16 @@ attribute is legal Rust.
 
 - `crates/trace-commons-protocol`
 - `crates/trace-commons-contributor`
+- `crates/trace-commons-contributor-sources`
+- `crates/trace-commons-contributor-insights`
+- `crates/trace-commons-contributor-platform`
 - `crates/trace-commons-contributor-ffi`
 - `crates/trace-commons-contributor-gtk`
 - `crates/trace-commons-operator-client`
 - `crates/trace-commons-mark`
 - `crates/trace-commons-build-info`
 - `crates/trace-commons-attestation`
+- `crates/trace-commons-client-server-tests` (unpublished, tests only)
 - `tauri-desktop/src-tauri` (`trace-commons-tauri-desktop`, a separate Cargo
   workspace)
 
@@ -59,10 +64,11 @@ to files in these crates.
 
 **Permissive code may flow into the AGPL crates. Never the reverse.**
 
-Do not add `trace-commons-server`, `trace-commons-gate-api`, or
-`trace-commons-gate-enclave` to the dependencies of any permissive crate — not
-even to reuse a single trait or type. Doing so silently makes a shipped client
-copyleft, and nothing about the build will tell you.
+Do not add `trace-commons-server`, `trace-commons-gate-api`,
+`trace-commons-gate-enclave`, or `trace-commons-ingest` to the dependencies of
+any permissive crate — not even to reuse a single trait or type. Doing so
+silently makes a shipped client copyleft, and nothing about the build will tell
+you.
 
 If you need a type on both sides, put it in `trace-commons-protocol` (or another
 permissive crate) and let the AGPL side depend on it. That is the direction the
@@ -75,13 +81,15 @@ defeats the check entirely.
 
 Test-only `dev-dependencies` across the boundary are permitted, because they
 never reach a published artifact. The existing set is pinned in that same test
-file (`trace-commons-contributor` takes one on `trace-commons-server` under
-`cfg(not(windows))`). Adding a new one requires updating that list on purpose.
+file (`trace-commons-client-server-tests` takes one on `trace-commons-server`
+under `cfg(not(windows))`). Keep that edge out of the contributor itself, so
+client-only tests never compile the server. Adding a new one requires updating
+that list on purpose.
 
 ### Inbound contributions are MIT/Apache, outbound is AGPL
 
 Contributions arrive under `MIT OR Apache-2.0` — including contributions to the
-three AGPL crates. Recipients of those crates still get them under AGPL; only
+four AGPL crates. Recipients of those crates still get them under AGPL; only
 the inbound direction is permissive, so the project keeps the ability to
 relicense what it distributes.
 
@@ -143,7 +151,7 @@ before you add them.
 
 ### Checklist before claiming a change is done
 
-- New `.rs` files in the three AGPL crates carry the header.
+- New `.rs` files in the four AGPL crates carry the header.
 - No permissive crate gained a dependency on an AGPL crate.
 - `cargo test -p trace-commons-server --test license_boundary` passes, without
   editing the test's expected sets.
@@ -164,7 +172,14 @@ has the details and the final run's command list.
 Install sccache and set `rustc-wrapper = "sccache"` under `[build]` in your
 user-level `~/.cargo/config.toml`, never the repository's, so worktrees
 share compiled third-party crates instead of each rebuilding them into its
-own `target/`. `CLAUDE.md` ("Shared compile cache") has the details.
+own `target/`. For agent and worktree builds, also set `CARGO_INCREMENTAL=0`
+(sccache never caches an incremental compile, which is how the workspace's
+own crates build by default) and use `RUSTFLAGS="-D warnings"` for every
+cargo command, clippy included (the flags are part of the cache key, and CI
+sets both for every job), in your agent's user-level environment, not the
+repository's config. Raise sccache's size limit to about 50 GiB; the 10 GiB
+default is too small for this workspace. `CLAUDE.md` ("Shared compile
+cache") has the details.
 
 ## Everything else
 

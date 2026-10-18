@@ -173,7 +173,7 @@ def build_inventory() -> dict[str, object]:
     # Standalone `trace-commons-server` has one hosted binary with routes;
     # the upstream port also read a `trace-commons-pipeline-local` binary
     # that does not exist in this tree.
-    components = ("crates/trace-commons-server/src/bin/trace-commons-ingest.rs",)
+    components = ("crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs",)
     routes: list[dict[str, object]] = []
     unknown_routes: list[str] = []
     for component in components:
