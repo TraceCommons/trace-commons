@@ -8,40 +8,42 @@ struct InsightsEpisodesView: View {
     @State private var deleteConfirmation: InsightsModel.EpisodeConfirmation?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(model.text("episode_title")).insightsTitle()
-                Spacer()
+        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+            // What a group is and is not, behind the title's "i".
+            InsightsSectionTitle(title: model.text("episode_title"), info: [model.text("episode_scope")]) {
                 Button(model.text("refresh")) { model.refreshEpisodes() }
                     .accessibilityLabel(model.text("episode_refresh_accessibility"))
                 if model.episodeBusy { GlassSpinner() }
             }
-            Text(model.text("episode_scope")).insightsNote()
-            if let notice = model.episodeNotice { Text(notice).foregroundStyle(GlassStatus.on.textColor) }
-            if let error = model.episodeError { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
+            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+                if let notice = model.episodeNotice { Text(notice).foregroundStyle(GlassStatus.on.textColor) }
+                if let error = model.episodeError { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
 
-            if let detail = model.episodeDetail {
-                detailView(detail)
-            } else {
-                createView
-                InsightsRule()
-                Text(model.text("episode_saved")).insightsHeading()
-                if model.episodes.isEmpty { Text(model.text("episode_empty")) }
-                ForEach(model.episodes) { entry in
-                    Button { model.openEpisode(entry.id) } label: {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(entry.id).insightsMono().lineLimit(1)
-                            Text("\(model.text("episode_members")): \(entry.episode.members.count)")
-                                .glassType(GlassTokens.TypeScale.caption)
-                            Text(entry.overlapping_episode_ids.isEmpty
-                                 ? model.text("episode_no_overlap")
-                                 : "\(model.text("episode_overlaps")): \(entry.overlapping_episode_ids.count)")
-                                .insightsCaption()
-                        }.frame(maxWidth: .infinity, alignment: .leading).insightsRowCard()
+                if let detail = model.episodeDetail {
+                    detailView(detail)
+                } else {
+                    createView
+                    VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                        InsightsGroupHeading(model.text("episode_saved"))
+                        if model.episodes.isEmpty { Text(model.text("episode_empty")).insightsNote() }
+                        ForEach(model.episodes) { entry in
+                            Button { model.openEpisode(entry.id) } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(entry.id).insightsMono().lineLimit(1)
+                                    Text("\(model.text("episode_members")): \(entry.episode.members.count)")
+                                        .glassType(GlassTokens.TypeScale.caption)
+                                    Text(entry.overlapping_episode_ids.isEmpty
+                                         ? model.text("episode_no_overlap")
+                                         : "\(model.text("episode_overlaps")): \(entry.overlapping_episode_ids.count)")
+                                        .insightsCaption()
+                                }.frame(maxWidth: .infinity, alignment: .leading).insightsRowCard()
+                            }
+                            .buttonStyle(GlassPressStyle())
+                        }
                     }
-                    .buttonStyle(GlassPressStyle())
                 }
             }
+            .insightsCardBody()
         }
         .disabled(model.episodeBusy)
         .insightsSurface()
@@ -73,9 +75,8 @@ struct InsightsEpisodesView: View {
     }
 
     private var createView: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(model.text("episode_create")).insightsHeading()
-            Text(model.text("episode_create_notice")).insightsCaption()
+        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+            InsightsGroupHeading(model.text("episode_create"), info: [model.text("episode_create_notice")])
             snapshotChooser(selection: $model.episodeCreateSelection)
             Button(model.text("episode_create")) { model.createEpisode() }
                 .disabled(model.episodeCreateSelection.isEmpty)
@@ -83,7 +84,7 @@ struct InsightsEpisodesView: View {
     }
 
     private func detailView(_ detail: EpisodeDetail) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
             HStack {
                 Button(model.text("episode_saved")) { model.closeEpisode() }
                 Spacer()
@@ -101,14 +102,14 @@ struct InsightsEpisodesView: View {
                 Text("\(model.text("episode_resolved")): \(InsightsDate.label(detail.resolved_at))")
             }.glassType(GlassTokens.TypeScale.caption).textSelection(.enabled)
 
-            Text(model.text("episode_overlap_notice")).insightsCaption()
             if detail.episode.members.flatMap({ member in
                 detail.overlap.first(where: { $0.snapshot_id == member.snapshot_id })?.episode_ids ?? []
             }).isEmpty {
                 Text(model.text("episode_no_overlap"))
             }
 
-            Text(model.text("episode_member_evidence")).insightsHeading()
+            // What an overlap means, behind the heading's "i".
+            InsightsGroupHeading(model.text("episode_member_evidence"), info: [model.text("episode_overlap_notice")])
             ForEach(detail.members) { member in
                 VStack(alignment: .leading, spacing: 5) {
                     Button { model.explain(member.id) } label: {
@@ -130,14 +131,18 @@ struct InsightsEpisodesView: View {
             if !model.episodeEditingMembers {
                 Button(model.text("episode_edit_members")) { model.beginEpisodeMemberEdit() }
             } else {
-                Text(model.text("episode_edit_members_notice")).insightsCaption()
                 snapshotChooser(selection: $model.episodeEditSelection)
-                Button(model.text("episode_save_members")) { model.saveEpisodeMembers() }
+                HStack(spacing: GlassTokens.Space.s4) {
+                    Button(model.text("episode_save_members")) { model.saveEpisodeMembers() }
+                    // What saving members does, beside the action.
+                    InsightsInfo(model.text("episode_save_members"), [model.text("episode_edit_members_notice")])
+                }
             }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text(model.text("episode_assessment")).insightsHeading()
-                Text(model.text("episode_assessment_notice_short")).insightsCaption()
+            VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                InsightsGroupHeading(model.text("episode_assessment"), info: [
+                    model.text("episode_assessment_notice_short"), model.text("episode_assessment_notice"),
+                ])
                 if detail.episode.manual_assessment == nil { Text(model.text("episode_unassessed")) }
                 HStack {
                     GlassSelect(model.text("category"), selection: $model.episodeCategory,
@@ -154,7 +159,6 @@ struct InsightsEpisodesView: View {
                         }
                     }
                 }
-                Text(model.text("episode_assessment_notice")).insightsCaption()
             }
         }
     }

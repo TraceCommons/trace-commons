@@ -40,8 +40,8 @@ shell's current UTC offset. Claude Code and Codex tokens are separate lines
 and are never summed; Codex is the change between its first and last
 counters. A session without usage counters is counted as unknown, never as
 zero, and the coverage line says how many. Week-to-week figures ("vs last
-week", "Your best week") need watched-folder counting and read as a dash
-here. By model keeps the core's fixed order (alphabetical, unknown last); By
+week", "Your best week") need watched-folder counting and are left out
+here; the feed line says so. By model keeps the core's fixed order (alphabetical, unknown last); By
 project is not available for analyzed files. Every word is the core's
 `ui_copy()` analytics table, marked DRAFT pending approval; every figure is
 the core's. Advice, what-if estimates and costs are not shown.
@@ -56,7 +56,7 @@ from result size; long context is counted input. The figures overlap and do
 not add up to the week's tokens. Only Claude Code sessions record tool calls,
 so a week with Codex sessions says how many sessions the figures cover. The
 re-read table names files only by a letter and the extension; no path is
-stored or shown. Week-to-week change reads as a dash here.
+stored or shown. Week-to-week change is left out here.
 
 Sessions reads `session_drill` for one saved snapshot, the newest unless you
 pick another. The header gives the date, harness, turns, tokens and the time
@@ -87,6 +87,38 @@ screen; "Hide" clears the daemon's `insights_recap_card_enabled`, the
 card's only switch. Goals and "Not useful" are stored as rule IDs and Monday
 dates only. Feed T sessions carry no reference, so its cards do not drill
 down to sessions.
+
+Insights is the main window's fourth tab (Cmd-4; 2026-10-15, before that
+a Home page, and Home's Insights card now switches to the tab). It draws in
+the main pane: 440pt at the window's default width, 408pt inside the
+pane's insets. Every
+tab is laid out for that width (direction B, 2026-10-15): one column of
+cards, and a second only when the pane is wider than about 690pt. Overview
+puts the week and the Sessions figure on one row, then one card per harness
+(Claude Code and Codex are never summed): tokens and cache share side by
+side, and Claude Code's days stacked on the chart surface, read out in the
+legend under the pointer. Codex records whole-trace totals, so its card says
+so instead of drawing days. Charts plot on `chartSurface` in `chartSeries1`
+to `chartSeries4` (the Near AI OS chart tokens), each 3:1 or more on it. A
+figure that does not drill is drawn plain. Drill-down rows are two lines,
+not a table. Every tab keeps one type and spacing scale
+(`InsightsLayout`): each section is a card under a title at the card-title
+step, groups inside it open with a body-strong heading, and explanatory
+notices sit behind an "i" (`InsightsInfo`, named with the core's "More about
+{title}") beside what they explain; status, failures, prerequisites and an
+irreversible consequence stay on the page. `InsightsPaneWidthRenderTests` renders each tab at 408pt from
+the sample week; set `TC_INSIGHTS_RENDER_DIR` (and `TC_GLASS_THEME=flat`) to
+keep the PNGs.
+
+A dev build is ad-hoc signed, so it cannot read the team keychain access
+group that holds the Insights digest keys: its watched-folder counting
+answers `key_unavailable` and it cannot save an analysis, and every tab is
+empty. For a design review, a Debug build launched with
+`TRACE_COMMONS_INSIGHTS_SAMPLE=1` draws Insights from `InsightsSampleWeek`, a
+fixed watched-folder week with goals, the lever, the weekly summary and one
+trace for Sessions. Only the analytics answers are sampled; a goal, lever or
+summary write is answered and kept nowhere. A release build never reads the
+variable.
 
 Local operations run off the UI thread. Closing or leaving the screen discards
 late results; a save or deletion already started can still finish. Reopening

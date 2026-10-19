@@ -6,21 +6,25 @@ struct InsightCardsView: View {
     @Bindable var model: InsightsModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(model.text("card_title")).insightsTitle()
-            Text(model.text("card_selection_notice"))
-                .insightsNote()
-            selection
-            HStack {
-                Button(model.text("card_update")) { model.generateCards() }
-                if model.cardBusy { GlassSpinner() }
+        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+            // What the cards answer from, behind the title's "i".
+            InsightsSectionTitle(model.text("card_title"), info: [model.text("card_selection_notice")])
+            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+                selection
+                HStack {
+                    Button(model.text("card_update")) { model.generateCards() }
+                    if model.cardBusy { GlassSpinner() }
+                }
+                if let error = model.cardError { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
+                if let result = model.cardResult {
+                    VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                        Text("\(model.text("provider")): \(result.provider.id) · \(result.provider.rubric_version)")
+                            .insightsCaption()
+                        ForEach(result.cards) { card in cardView(card) }
+                    }
+                }
             }
-            if let error = model.cardError { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
-            if let result = model.cardResult {
-                Text("\(model.text("provider")): \(result.provider.id) · \(result.provider.rubric_version)")
-                    .insightsCaption()
-                ForEach(result.cards) { card in cardView(card) }
-            }
+            .insightsCardBody()
         }
     }
 
@@ -48,9 +52,11 @@ struct InsightCardsView: View {
     }
 
     private func cardView(_ card: InsightQuestionCard) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+            // What the card cannot say, behind its heading's "i".
             HStack {
-                Text(model.text(card.question.copyKey)).insightsHeading()
+                InsightsGroupHeading(model.text(card.question.copyKey),
+                                     info: card.limitations.map { model.text("card_limitation_\($0)") })
                 Spacer()
                 Text(model.text("card_state_\(card.state.rawValue)"))
                     .insightsCaption()
@@ -68,10 +74,6 @@ struct InsightCardsView: View {
                     Text("\(model.text("card_coverage_\(coverage.unit)")): \(coverage.observed) / \(coverage.eligible)")
                         .insightsCaption()
                 }
-            }
-            ForEach(card.limitations, id: \.self) { limitation in
-                Text(model.text("card_limitation_\(limitation)"))
-                    .insightsCaption()
             }
             if card.rows_omitted {
                 Text(model.text("card_more_models")).insightsCaption()

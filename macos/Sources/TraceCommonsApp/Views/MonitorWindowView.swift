@@ -21,6 +21,9 @@ struct MonitorWindowView: View {
         case home = "Home"
         case inference = "Inference"
         case traces = "Traces"
+        /// Insights' own tab (2026-10-15), no longer a Home page. Last, so
+        /// the first three keep their shortcuts.
+        case insights = "Insights"
 
         /// The raw value is an identity (scene storage restores the tab by
         /// it); `title` is the word shown, from the core's shell table.
@@ -32,6 +35,7 @@ struct MonitorWindowView: View {
             case .home: shell.tabHome
             case .inference: shell.tabInference
             case .traces: shell.tabTraces
+            case .insights: HomeTabView.insightsHeading ?? ""
             }
         }
 
@@ -242,8 +246,11 @@ struct MonitorWindowView: View {
                             tab = .traces
                             tracesPage = .history
                         },
+                        openInsights: { tab = .insights },
                         insightsStoreSelection: insightsStoreSelection, missionDrafts: missionDrafts,
                         missionsEnabled: model.missionsShown)
+                case .insights:
+                    InsightsView(storeSelection: insightsStoreSelection, daemon: home.client)
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).
@@ -480,7 +487,7 @@ struct MonitorWindowView: View {
         switch shown {
         case .traces: true
         case .home: homePage == .history
-        case .inference: false
+        case .inference, .insights: false
         }
     }
 
@@ -531,7 +538,7 @@ struct MonitorWindowView: View {
         switch picked {
         case .inference: .privateAI
         case .traces: .traces
-        case .home: nil
+        case .home, .insights: nil
         }
     }
 
@@ -565,7 +572,7 @@ struct MonitorWindowView: View {
         case .missions:
             return [GlassCrumb(Tab.home.title, action: back)]
                 + (MonitorWords.table.map { [GlassCrumb($0.homeHistory.missionCatalogue)] } ?? [])
-        case .insights, .missionDrafts:
+        case .missionDrafts:
             return [GlassCrumb(Tab.home.title, action: back)] + (hosted(homePage).map { [GlassCrumb($0)] } ?? [])
         }
     }
@@ -596,6 +603,8 @@ struct MonitorWindowView: View {
             // A mission page falls back to the overview while missions are
             // hidden.
             homePage = page.shown(missions: missionsEnabled)
+        case .insights:
+            tab = .insights
         case .inference:
             // The account is on the main pane (Ron's #1146), and the
             // inspector stays closed on Inference (owner, 2026-10-09).
