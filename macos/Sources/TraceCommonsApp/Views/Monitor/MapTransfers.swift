@@ -4,10 +4,11 @@ import Foundation
 import TCShellCore
 
 /// A trace the Traces map shows moving (owner, 2026-10-16): one that began
-/// to leave this Mac for the commons, or one kept here. Built only from
-/// what the core reported (`MapTransferDetector`), never from a guess.
+/// to leave this Mac for the commons, or one kept here; or one the person
+/// dismissed, which only its card shows (owner, 2026-10-19). Built only
+/// from what the core reported (`MapTransferDetector`), never from a guess.
 struct MapTransfer: Equatable, Identifiable {
-    enum Action: Equatable { case contribute, keep }
+    enum Action: Equatable { case contribute, keep, dismiss }
 
     /// The History row or the queue entry.
     let id: String
@@ -15,9 +16,12 @@ struct MapTransfer: Equatable, Identifiable {
     let folder: String
     let tool: String
     let action: Action
-    /// The time the details card gives: when a contribution was sent, or
-    /// when a kept trace started; nil when unrecorded.
+    /// The time the card gives: when a contribution was sent, or when a
+    /// kept or dismissed trace started; nil when unrecorded.
     var at: Date? = nil
+    /// The folder's name as the core gave it, for the card; nil when it
+    /// gave none, and the card then looks the folder up on the map.
+    var folderLabel: String? = nil
 }
 
 /// Finds transfers between two reads. `list_pending` lists only what
@@ -38,7 +42,8 @@ enum MapTransferDetector {
             .compactMap { row -> MapTransfer? in
                 guard !seen.contains(row.submissionId), let sent = row.submittedAt, sent > newest,
                       let folder = row.projectId, let tool = row.source else { return nil }
-                return MapTransfer(id: row.submissionId, folder: folder, tool: tool, action: .contribute, at: sent)
+                return MapTransfer(id: row.submissionId, folder: folder, tool: tool, action: .contribute, at: sent,
+                                   folderLabel: row.projectLabel)
             }
             .sorted { ($0.at ?? .distantPast) < ($1.at ?? .distantPast) }
     }
@@ -46,9 +51,20 @@ enum MapTransferDetector {
     /// The entry the window has just kept; nil when it is not among
     /// `sessions` to be found.
     static func kept(_ entryId: String?, in sessions: [DaemonData.QueueEntry]) -> MapTransfer? {
+        decided(entryId, .keep, in: sessions)
+    }
+
+    /// The entry the window has just dismissed, likewise.
+    static func dismissed(_ entryId: String?, in sessions: [DaemonData.QueueEntry]) -> MapTransfer? {
+        decided(entryId, .dismiss, in: sessions)
+    }
+
+    private static func decided(
+        _ entryId: String?, _ action: MapTransfer.Action, in sessions: [DaemonData.QueueEntry]
+    ) -> MapTransfer? {
         guard let entryId, let entry = sessions.first(where: { $0.entryId == entryId }) else { return nil }
         return MapTransfer(id: entry.entryId, folder: entry.projectId, tool: entry.source,
-                           action: .keep, at: entry.startedAt)
+                           action: action, at: entry.startedAt, folderLabel: entry.projectLabel)
     }
 }
 
@@ -203,25 +219,43 @@ struct MapTransferRun: Equatable {
 
 /// Plays the runs the window hands it, one at a time (owner, 2026-10-16):
 /// what arrives while a run plays waits for the next, and a run is all of
-/// one action. Under Reduce Motion nothing is played; the counts the map
-/// draws change at once.
+/// one action. `shown` is the trace the cards describe (owner, 2026-10-19:
+/// at the foot of the Traces map and at the top of the Traces tab): each
+/// trace of a run as it sets off, held `hold` seconds past the run's end,
+/// or a dismissed trace for `hold` seconds. Under Reduce Motion the runs
+/// still play, so the cards still show; the map draws them still.
 @MainActor
 final class MapTransferPlayer: ObservableObject {
     @Published private(set) var run: MapTransferRun?
+    @Published private(set) var shown: MapTransfer?
     private var queue: [MapTransfer] = []
     private var played = Set<String>()
     private var timer: Task<Void, Never>?
-    var reduceMotion = false
+    private var showing: Task<Void, Never>?
     /// The map's style for the runs still to play; one already playing
     /// keeps its own.
     var style: TracesMapStyle = .launch
 
+    /// How long a card stays after its run ends, or after a dismissal.
+    static let hold: Double = 5
+
     func enqueue(_ transfers: [MapTransfer]) {
-        guard !reduceMotion else { return }
-        let fresh = transfers.filter { played.insert($0.id).inserted }
+        let fresh = transfers.filter { $0.action != .dismiss && played.insert($0.id).inserted }
         guard !fresh.isEmpty else { return }
         queue += fresh
         if run == nil { next() }
+    }
+
+    /// A dismissed trace: nothing moves on the map, its card shows.
+    func announce(_ transfer: MapTransfer) {
+        guard played.insert(transfer.id).inserted else { return }
+        shown = transfer
+        showing?.cancel()
+        showing = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.hold))
+            guard !Task.isCancelled else { return }
+            self?.shown = nil
+        }
     }
 
     private func next() {
@@ -233,11 +267,30 @@ final class MapTransferPlayer: ObservableObject {
         queue.removeFirst(batch.count)
         let run = MapTransferRun(transfers: Array(batch), start: .now, style: style)
         self.run = run
+        feature(run)
         timer?.cancel()
         timer = Task { [weak self] in
             try? await Task.sleep(for: .seconds(run.end))
             guard !Task.isCancelled else { return }
             self?.next()
+        }
+    }
+
+    /// Shows each trace of `run` as it sets off, then holds the last.
+    private func feature(_ run: MapTransferRun) {
+        shown = run.transfers.first
+        showing?.cancel()
+        showing = Task { [weak self] in
+            for (index, transfer) in run.transfers.enumerated().dropFirst() {
+                let wait: Double = Double(index) * MapTransferRun.step - Date().timeIntervalSince(run.start)
+                if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+                guard !Task.isCancelled else { return }
+                self?.shown = transfer
+            }
+            let rest: Double = run.end + Self.hold - Date().timeIntervalSince(run.start)
+            if rest > 0 { try? await Task.sleep(for: .seconds(rest)) }
+            guard !Task.isCancelled else { return }
+            self?.shown = nil
         }
     }
 }

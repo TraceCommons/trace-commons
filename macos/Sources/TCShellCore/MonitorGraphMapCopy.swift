@@ -102,10 +102,12 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
     /// group (`transferNote(contributing:tool:)`).
     public let transferContributing: String
     public let transferKeeping: String
+    public let transferDismissed: String
     public let transferTrace: String
     public let memoryStays: String
     public let transferContributeNote: String
     public let transferKeepNote: String
+    public let transferDismissNote: String
     /// The tools' own memory files, named where known (`memoryFiles(_:)`).
     public let memoryClaudeCode: String
     public let memoryCodex: String
@@ -159,10 +161,12 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
         case legendMemory = "legend_memory"
         case transferContributing = "transfer_contributing"
         case transferKeeping = "transfer_keeping"
+        case transferDismissed = "transfer_dismissed"
         case transferTrace = "transfer_trace"
         case memoryStays = "memory_stays"
         case transferContributeNote = "transfer_contribute_note"
         case transferKeepNote = "transfer_keep_note"
+        case transferDismissNote = "transfer_dismiss_note"
         case memoryClaudeCode = "memory_claude_code"
         case memoryCodex = "memory_codex"
         case memoryOpencode = "memory_opencode"

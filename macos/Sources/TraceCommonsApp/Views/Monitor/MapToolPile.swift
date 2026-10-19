@@ -7,14 +7,13 @@ import TCShellCore
 /// the pointer the pile opens to its full column first, then the card
 /// widens to show each tool's name and what waits from it, and leaving
 /// reverses that. While a trace is moving through the map the card keeps
-/// its size, so no line moves under it, and the pointer there shows that
-/// trace's details instead. Coins shuffle and grow in either state.
+/// its size, so no line moves under it. Coins shuffle and grow in either
+/// state. The moving trace's details are a card of their own, never under
+/// the pointer (`TraceTransferCard`, owner, 2026-10-19).
 ///
 /// Only the card itself is under the pointer for this (owner, 2026-10-19):
 /// the map hands the pile where the pointer is, and the pile tests it
-/// against its own card. The trace's details also show while the pointer
-/// is on that trace's folder or its line (`overTrace`), and they stay
-/// while it is over the details themselves.
+/// against its own card.
 struct MapToolPile: View {
     let stack: FlowMapScene.ToolStack
     let nodes: [FlowMapScene.Node]
@@ -22,20 +21,11 @@ struct MapToolPile: View {
     let run: MapTransferRun?
     /// Seconds into `run`.
     let t: Double
-    /// A folder's label, by its id, for the details card.
-    let folderLabel: (String) -> String?
     /// The pointer on the map, in the map's own coordinates; nil off it.
     var pointer: CGPoint? = nil
-    /// Whether the pointer is on the moving trace's folder or its line.
-    var overTrace = false
     /// Whether the transfer is a contribution, for its colours.
     var contributing: Bool { run?.action != .keep }
 
-    /// The details card's width, and how far left of the pile it starts.
-    static let detailsWidth: CGFloat = 252
-    static let detailsLead: CGFloat = 9
-
-    @State private var detailsOpen = false
     @State private var tall = false
     @State private var wide = false
     @State private var names = false
@@ -56,11 +46,8 @@ struct MapToolPile: View {
         let left = fit.point(stack.portLeft)
         // Typed here, out of the view's expression, for the older type
         // checker (macOS 15 CI).
-        let cardX: CGFloat = left.x - Self.detailsLead + Self.detailsWidth / 2
         let card = CGRect(x: left.x, y: left.y - height / 2, width: width, height: height)
         let overCard: Bool = pointer.map { card.contains($0) } ?? false
-        let overDetails: Bool = detailsOpen && (pointer.map { Self.detailsArea(left: left, height: height).contains($0) } ?? false)
-        let wantsDetails: Bool = moving && (overCard || overTrace || overDetails)
         // An open card is opaque: nothing under it shows through.
         let fill: Color = open && wide ? GlassTokens.Color.paneOpaque.color : GlassTokens.Color.wellFill.color
         ZStack(alignment: .topLeading) {
@@ -94,24 +81,8 @@ struct MapToolPile: View {
                 .accessibilityHidden(true)
                 .zIndex(500)
             }
-            if moving, detailsOpen, let run, let transfer = run.current(at: t) {
-                details(transfer, s: s)
-                    .position(x: cardX, y: left.y)
-                    .transition(.scale(scale: 0.2, anchor: .leading).combined(with: .opacity))
-                    .zIndex(1000)
-            }
         }
         .onChange(of: overCard) { _, inside in hover(inside) }
-        .onChange(of: wantsDetails) { _, wants in
-            withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.86)) { detailsOpen = wants }
-        }
-    }
-
-    /// Where the details card covers, beside the pile: the pointer may
-    /// rest on it once it is open.
-    static func detailsArea(left: CGPoint, height: CGFloat) -> CGRect {
-        let tall: CGFloat = max(height, 214)
-        return CGRect(x: left.x - detailsLead, y: left.y - tall / 2, width: detailsWidth, height: tall)
     }
 
     // MARK: Coins
@@ -233,81 +204,6 @@ struct MapToolPile: View {
                 withAnimation(motion ? .spring(response: 0.34, dampingFraction: 0.86) : nil) { tall = false }
             }
         }
-    }
-
-    // MARK: Details
-
-    /// The trace moving through the group, under the pointer (owner,
-    /// 2026-10-16): the tool, whether it is contributed or kept, the trace,
-    /// and the tool's memory, which does not move.
-    @ViewBuilder
-    private func details(_ transfer: MapTransfer, s: CGFloat) -> some View {
-        if let words = Self.words {
-            let tool = SourceKind(rawValue: transfer.tool)
-            let name = tool?.displayName ?? transfer.tool
-            let glass = tool.map(TracesTreeView.glassTool) ?? .other(initials: FlowMapScene.initials(transfer.tool))
-            let contributing = transfer.action == .contribute
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 10) {
-                    ZStack {
-                        Circle().fill(GlassTokens.Color.paneOpaque.color)
-                        Circle().strokeBorder(glass.tint.color, lineWidth: 2)
-                        if let logo = glass.logo {
-                            GlassToolLogoShape(logo).fill(glass.tint.color).frame(width: 14, height: 14)
-                        } else {
-                            Text(glass.initials).font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .foregroundStyle(glass.tint.color)
-                        }
-                    }
-                    .frame(width: 30, height: 30)
-                    Text(name).glassType(GlassTokens.TypeScale.bodyStrong).foregroundStyle(GlassColor.textPrimary)
-                    Spacer(minLength: 0)
-                    GlassTag(contributing ? words.transferContributing : words.transferKeeping,
-                             tone: contributing ? .on : .neutral)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(words.transferTrace.uppercased())
-                        .glassType(GlassTokens.TypeScale.eyebrow)
-                        .foregroundStyle(GlassColor.textTertiary)
-                    Text(traceLine(transfer))
-                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                        .foregroundStyle(GlassColor.textPrimary)
-                }
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "lock")
-                        .font(.system(size: 11))
-                        .foregroundStyle(GlassColor.textPrimary)
-                    VStack(alignment: .leading, spacing: 2) {
-                        if let files = words.memoryFiles(transfer.tool) {
-                            Text(files).glassType(GlassTokens.TypeScale.mono).foregroundStyle(GlassColor.textPrimary)
-                        }
-                        Text(words.memoryStays)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
-                    }
-                }
-                .padding(.vertical, 8)
-                .padding(.horizontal, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(GlassTokens.Color.wellFill.color))
-                Text(words.transferNote(contributing: contributing, tool: name))
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(14)
-            .frame(width: 252, alignment: .leading)
-            .glassSurface(.nodeCard, floating: true)
-            .allowsHitTesting(false)
-            .accessibilityElement(children: .combine)
-        }
-    }
-
-    /// The trace's folder and, when recorded, its time (`MapTransfer.at`).
-    private func traceLine(_ transfer: MapTransfer) -> String {
-        let folder = folderLabel(transfer.folder) ?? transfer.folder
-        guard let at = transfer.at else { return folder }
-        return folder + " \u{00B7} " + at.formatted(date: .abbreviated, time: .shortened)
     }
 }
 
@@ -599,6 +495,9 @@ enum MapTransferDrawing {
                 ? words.collected(arrived, of: run.transfers.count) : nil
         case .keep:
             line = arrived == run.transfers.count ? words.keptHere(arrived) : nil
+        case .dismiss:
+            // A dismissal never plays on the map; only its card shows.
+            line = nil
         }
         guard let line else { return }
         let s = fit.scale

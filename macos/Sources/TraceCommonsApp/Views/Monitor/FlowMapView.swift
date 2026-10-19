@@ -29,6 +29,9 @@ struct FlowMapView: View {
     var onReveal: ((FlowMapScene.FolderReveal) -> Void)? = nil
     /// The traces moving across the Traces map now (`MapTransferPlayer`).
     var transferRun: MapTransferRun? = nil
+    /// The trace the card at the map's foot describes
+    /// (`MapTransferPlayer.shown`); nil for none.
+    var transferShown: MapTransfer? = nil
     /// The Traces map's style: the rocket and station, or the laptop and
     /// the library orb (`TracesMapStyle`, Settings, General).
     var mapStyle: TracesMapStyle = .launch
@@ -48,6 +51,10 @@ struct FlowMapView: View {
 
     static let zoomRange: ClosedRange<CGFloat> = 0.6 ... 2
     static let zoomStep: CGFloat = 0.25
+
+    /// The run the map draws: none under Reduce Motion, where the map
+    /// stays still and only the card says what is happening.
+    private var motion: MapTransferRun? { reduceMotion ? nil : transferRun }
 
     var body: some View {
         GeometryReader { proxy in
@@ -71,14 +78,14 @@ struct FlowMapView: View {
                 // What moves, under the tool group, so its card and the
                 // trace's details cover it.
                 if scene.stack != nil {
-                    TimelineView(.animation(minimumInterval: 1 / 60, paused: transferRun == nil)) { timeline in
-                        let t = transferRun.map { timeline.date.timeIntervalSince($0.start) } ?? 0
+                    TimelineView(.animation(minimumInterval: 1 / 60, paused: motion == nil)) { timeline in
+                        let t = motion.map { timeline.date.timeIntervalSince($0.start) } ?? 0
                         Canvas { context, _ in
-                            if let run = transferRun {
+                            if let run = motion {
                                 MapTransferDrawing.draw(in: &context, scene: scene, run: run, t: t, fit: fit)
                             }
                             // Between contributions the rocket stands on the pad.
-                            if mapStyle == .launch, transferRun?.action != .contribute {
+                            if mapStyle == .launch, motion?.action != .contribute {
                                 MapTransferDrawing.restingRocket(scene: scene, fit: fit, in: &context)
                             }
                         }
@@ -98,19 +105,16 @@ struct FlowMapView: View {
                 // The tool group over the targets: its open card keeps the
                 // pointer even where it covers the pad.
                 if let stack = scene.stack {
-                    TimelineView(.animation(minimumInterval: 1 / 60, paused: transferRun == nil)) { timeline in
-                        let t = transferRun.map { timeline.date.timeIntervalSince($0.start) } ?? 0
+                    TimelineView(.animation(minimumInterval: 1 / 60, paused: motion == nil)) { timeline in
+                        let t = motion.map { timeline.date.timeIntervalSince($0.start) } ?? 0
                         MapToolPile(
                             stack: stack, nodes: scene.nodes.filter { $0.id.hasPrefix("tool:") }, fit: fit,
-                            run: transferRun, t: t,
-                            folderLabel: { id in scene.nodes.first { $0.id == "folder:\(id)" }?.label },
-                            pointer: pointer,
-                            overTrace: Self.pointer(pointer, onTraceOf: transferRun, at: t, in: scene, fit: fit))
+                            run: motion, t: t, pointer: pointer)
                             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
                     }
                 }
 
-                if let id = selection, let node = scene.nodes.first(where: { $0.id == id }), !tracePlaying(in: id) {
+                if let id = selection, let node = scene.nodes.first(where: { $0.id == id }) {
                     card(node, fit: fit, in: proxy.size)
                 }
             }
@@ -127,6 +131,20 @@ struct FlowMapView: View {
             .overlay(alignment: .bottomTrailing) {
                 if zoomable { zoomControls.padding(GlassTokens.Space.mapOverlayInset) }
             }
+            // The trace being contributed, kept or dismissed, above the
+            // legend and the zoom (owner, 2026-10-19).
+            .overlay(alignment: .bottom) {
+                if scene.stack != nil, let shown = transferShown {
+                    TraceTransferCard(
+                        transfer: shown, folderLabel: scene.nodes.first { $0.id == "folder:" + shown.folder }?.label)
+                        .frame(maxWidth: Self.transferCardWidth)
+                        .padding(.horizontal, GlassTokens.Space.mapOverlayInset)
+                        .padding(.bottom, GlassTokens.Space.mapOverlayInset + Self.legendReserve)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .id(shown.id)
+                }
+            }
+            .animation(reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 0.86), value: transferShown)
             // The legend stays at the window's foot, whatever the map's
             // zoom or focus (owner, 2026-10-12): it is not drawn in the
             // map's own space, which scales and moves.
@@ -163,46 +181,10 @@ struct FlowMapView: View {
     /// The station's frame on the rocket map, in design units.
     static let stationSize = CGSize(width: 150, height: 130)
 
-    /// Whether `point` is on the moving trace's folder or its line: there
-    /// the trace's details show, as over the tool group (owner, 2026-10-19).
-    static func pointer(
-        _ point: CGPoint?, onTraceOf run: MapTransferRun?, at t: Double, in scene: FlowMapScene, fit: FlowMapGeometry
-    ) -> Bool {
-        guard let point, let run, run.moving(at: t), let transfer = run.current(at: t) else { return false }
-        if let node = scene.nodes.first(where: { $0.id == "folder:" + transfer.folder }) {
-            let centre = fit.point(node.at)
-            let reach: CGFloat = (FlowMapScene.folderRadius + 6) * fit.scale
-            if hypot(point.x - centre.x, point.y - centre.y) <= reach { return true }
-        }
-        guard let arc = MapTransferDrawing.folderArc(transfer.folder, in: scene) else { return false }
-        let samples = 32
-        var previous = fit.point(arc.from)
-        for step in 1 ... samples {
-            let next = fit.point(MapTransferDrawing.point(on: arc, at: Double(step) / Double(samples)))
-            if distance(from: point, toSegment: previous, next) <= 6 { return true }
-            previous = next
-        }
-        return false
-    }
-
-    /// How far `point` is from the segment `a` to `b`.
-    static func distance(from point: CGPoint, toSegment a: CGPoint, _ b: CGPoint) -> CGFloat {
-        let dx: CGFloat = b.x - a.x
-        let dy: CGFloat = b.y - a.y
-        let length: CGFloat = dx * dx + dy * dy
-        guard length > 0 else { return hypot(point.x - a.x, point.y - a.y) }
-        let along: CGFloat = ((point.x - a.x) * dx + (point.y - a.y) * dy) / length
-        let u: CGFloat = min(1, max(0, along))
-        return hypot(point.x - (a.x + u * dx), point.y - (a.y + u * dy))
-    }
-
-    /// Whether a trace from the folder `id` is moving through the map now:
-    /// its own card then gives way to the trace's details.
-    private func tracePlaying(in id: String) -> Bool {
-        guard scene.stack != nil, let run = transferRun, id.hasPrefix("folder:") else { return false }
-        return run.moving(at: Date().timeIntervalSince(run.start))
-            && run.transfers.contains { "folder:" + $0.folder == id }
-    }
+    /// The transfer card's widest, and the room kept under it for the
+    /// legend and the zoom.
+    static let transferCardWidth: CGFloat = 460
+    static let legendReserve: CGFloat = 44
 
     // MARK: Drawing
 

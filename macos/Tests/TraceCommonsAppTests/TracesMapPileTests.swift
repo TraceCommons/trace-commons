@@ -192,40 +192,6 @@ final class TracesMapPileTests: XCTestCase {
         }
     }
 
-    /// The trace's details show over its folder's dot or its line while it
-    /// moves, and nowhere else on the map.
-    func test_theTracesFolderAndLineShowItsDetails() throws {
-        let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: [folder("a"), folder("b")])],
-                              unplaced: [])
-        let scene = FlowMapScene.traces(tree, gate: .init(state: .ready))
-        let fit = FlowMapGeometry(size: FlowMapScene.size, zoom: 1, focus: nil, space: scene.space)
-        let run = MapTransferRun(transfers: [MapTransfer(id: "1", folder: "a", tool: "claude-code", action: .contribute)],
-                                 start: .now)
-        let t = 0.2
-        let dot = try XCTUnwrap(scene.nodes.first { $0.id == "folder:a" }).at
-        let arc = try XCTUnwrap(MapTransferDrawing.folderArc("a", in: scene))
-        let onLine = fit.point(MapTransferDrawing.point(on: arc, at: 0.5))
-        let other = fit.point(try XCTUnwrap(scene.nodes.first { $0.id == "folder:b" }).at)
-        XCTAssertTrue(FlowMapView.pointer(fit.point(dot), onTraceOf: run, at: t, in: scene, fit: fit))
-        XCTAssertTrue(FlowMapView.pointer(CGPoint(x: onLine.x, y: onLine.y + 3), onTraceOf: run, at: t, in: scene, fit: fit))
-        XCTAssertFalse(FlowMapView.pointer(other, onTraceOf: run, at: t, in: scene, fit: fit), "another folder")
-        XCTAssertFalse(FlowMapView.pointer(CGPoint(x: 5, y: 5), onTraceOf: run, at: t, in: scene, fit: fit))
-        XCTAssertFalse(FlowMapView.pointer(fit.point(dot), onTraceOf: run, at: run.end, in: scene, fit: fit),
-                       "nothing is moving")
-        XCTAssertFalse(FlowMapView.pointer(nil, onTraceOf: run, at: t, in: scene, fit: fit))
-        XCTAssertEqual(FlowMapView.distance(from: CGPoint(x: 5, y: 4), toSegment: .zero, CGPoint(x: 10, y: 0)), 4)
-    }
-
-    /// The details card covers the pile and runs right of it.
-    func test_theDetailsCardSitsOverThePile() {
-        let left = CGPoint(x: 100, y: 200)
-        let area = MapToolPile.detailsArea(left: left, height: 80)
-        XCTAssertEqual(area.minX, left.x - MapToolPile.detailsLead)
-        XCTAssertEqual(area.width, MapToolPile.detailsWidth)
-        XCTAssertEqual(area.midY, left.y)
-        XCTAssertGreaterThanOrEqual(area.height, 214)
-    }
-
     /// The rocket is the default; turning it off is kept as the standard
     /// map, and the window and Settings read the same key.
     func test_theMapStyleIsAShellPreference() throws {
@@ -283,21 +249,73 @@ final class TracesMapPileTests: XCTestCase {
     }
 
     /// The player plays one action at a time, never the same trace twice,
-    /// and nothing under Reduce Motion.
-    func test_thePlayerBatchesByActionAndSkipsUnderReduceMotion() {
+    /// and shows each run's first trace on its cards at once; under Reduce
+    /// Motion it still plays, so the cards still show.
+    func test_thePlayerBatchesByActionAndShowsTheTrace() {
         let player = MapTransferPlayer()
         let one = MapTransfer(id: "1", folder: "f", tool: "codex", action: .contribute)
         let two = MapTransfer(id: "2", folder: "f", tool: "codex", action: .contribute)
         let keep = MapTransfer(id: "3", folder: "f", tool: "codex", action: .keep)
         player.enqueue([one, two, keep])
         XCTAssertEqual(player.run?.transfers.map(\.id), ["1", "2"])
+        XCTAssertEqual(player.shown, one)
         player.enqueue([one])
         XCTAssertEqual(player.run?.transfers.map(\.id), ["1", "2"], "a trace plays once")
+        player.style = .standard
+        XCTAssertEqual(player.run?.style, .launch, "a run playing keeps its style")
+    }
 
-        let still = MapTransferPlayer()
-        still.reduceMotion = true
-        still.enqueue([one])
-        XCTAssertNil(still.run)
+    /// A dismissal moves nothing on the map: it is never a run, and its
+    /// card shows at once.
+    func test_aDismissalOnlyShowsItsCard() {
+        let player = MapTransferPlayer()
+        let gone = MapTransfer(id: "9", folder: "f", tool: "codex", action: .dismiss)
+        player.enqueue([gone])
+        XCTAssertNil(player.run)
+        player.announce(gone)
+        XCTAssertEqual(player.shown, gone)
+        XCTAssertNil(player.run)
+    }
+
+    /// The card says what is happening to the trace in the core's words:
+    /// contributed, kept or dismissed, each with its own note.
+    func test_theCardSaysWhatIsHappening() throws {
+        let words = try XCTUnwrap(FlowMapScene.words)
+        let contribute = TraceTransferCard.state(.contribute, tool: "Codex", words: words)
+        XCTAssertEqual(contribute.tag, words.transferContributing)
+        XCTAssertEqual(contribute.tone, .on)
+        XCTAssertTrue(contribute.note.contains("Codex"))
+        XCTAssertEqual(TraceTransferCard.state(.keep, tool: "Codex", words: words).note, words.transferKeepNote)
+        let dismissed = TraceTransferCard.state(.dismiss, tool: "Codex", words: words)
+        XCTAssertEqual(dismissed.tag, "Dismissed")
+        XCTAssertEqual(dismissed.note, words.transferDismissNote)
+        let card = TraceTransferCard(
+            transfer: MapTransfer(id: "1", folder: "p1", tool: "codex", action: .keep, folderLabel: "payments"),
+            folderLabel: "ignored")
+        XCTAssertEqual(card.traceLine, "payments", "the core's folder name first")
+        XCTAssertEqual(TraceTransferCard(transfer: MapTransfer(id: "1", folder: "p1", tool: "codex", action: .keep),
+                                         folderLabel: "from the map").traceLine, "from the map")
+    }
+
+    /// The window's last dismissal is found among the traces it was listed
+    /// with, as a keep is.
+    func test_aDismissalIsFoundAmongTheListedTraces() throws {
+        let listed = [try entry(1, "p1", source: "codex")]
+        let gone = try XCTUnwrap(MapTransferDetector.dismissed(listed[0].entryId, in: listed))
+        XCTAssertEqual(gone.action, .dismiss)
+        XCTAssertEqual(gone.folderLabel, "p1")
+        XCTAssertNil(MapTransferDetector.dismissed("missing", in: listed))
+    }
+
+    /// The store records the entry it last dismissed, for its card.
+    func test_theStoreRecordsADismissal() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let id = try XCTUnwrap(store.tree.allSessions.first?.entryId)
+        XCTAssertNil(store.lastDismissed)
+        await store.perform(.dismiss, on: id)
+        XCTAssertNil(store.actionError?.error)
+        XCTAssertEqual(store.lastDismissed, id)
     }
 
     // MARK: Words
@@ -318,17 +336,23 @@ final class TracesMapPileTests: XCTestCase {
         XCTAssertNil(words.memoryFiles("something-new"))
         XCTAssertEqual(words.legendMemory, "Memory stays on this Mac")
         XCTAssertEqual(words.styleTitle, "Traces map")
-        XCTAssertEqual(words.styleToggle, "Rocket and space station")
-        XCTAssertFalse(words.styleCaption.isEmpty)
+        XCTAssertEqual(words.styleToggle, "Rocket mode")
+        XCTAssertEqual(words.styleCaption, "GUI change only. Contributions fly to the library (space station) by rocket animation.")
     }
 
-    /// The window feeds the map what History gained and what it kept, and
-    /// hands the run to the map.
-    func test_theWindowFeedsTheMapItsTransfers() throws {
-        let window = try TracesInspectorHostTests.text("Views/MonitorWindowView.swift")
+    /// The window feeds its player what History gained, kept and
+    /// dismissed, and hands it to the map and the Traces tab, so both
+    /// cards show the same trace.
+    func test_theWindowFeedsTheMapAndTheTabItsTransfers() throws {
+        let feed = try TracesInspectorHostTests.text("Views/Monitor/MapTransferFeed.swift")
         for needle in ["MapTransferDetector.contributions(from: old, to: new)",
-                       "MapTransferDetector.kept(kept, in: traces.tree.allSessions + listedBefore)",
-                       "transferRun: transfers.run"] {
+                       "MapTransferDetector.kept(kept, in: listed)",
+                       "MapTransferDetector.dismissed(dismissed, in: listed)"] {
+            XCTAssertTrue(feed.contains(needle), needle)
+        }
+        let window = try TracesInspectorHostTests.text("Views/MonitorWindowView.swift")
+        for needle in ["MapTransferFeed(player: transfers", "transfers: transfers",
+                       "transferRun: transfers.run, transferShown: transfers.shown", "transferShown: transfers.shown)"] {
             XCTAssertTrue(window.contains(needle), needle)
         }
     }

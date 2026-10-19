@@ -1063,17 +1063,19 @@ pub struct MonitorFlowMapCopy {
     /// The legend's item for the lock on each coin: a tool's memory files
     /// are never collected. DRAFT, NEEDS APPROVAL.
     pub legend_memory: &'static str,
-    /// The card under the pointer while a trace is moving through the tool
-    /// group: whether it is being contributed or kept, the heading over
-    /// the trace, what happens to the tool's memory, and a note on the
-    /// memory text inside the trace, `{tool}` the tool's name. DRAFT, NEEDS
-    /// APPROVAL.
+    /// The trace's card, at the foot of the Traces map and at the top of
+    /// the Traces tab, while a trace is contributed or kept and after one
+    /// is dismissed (owner, 2026-10-19): what is happening to it, the
+    /// heading over the trace, what happens to the tool's memory, and a
+    /// note, `{tool}` the tool's name. DRAFT, NEEDS APPROVAL.
     pub transfer_contributing: &'static str,
     pub transfer_keeping: &'static str,
+    pub transfer_dismissed: &'static str,
     pub transfer_trace: &'static str,
     pub memory_stays: &'static str,
     pub transfer_contribute_note: &'static str,
     pub transfer_keep_note: &'static str,
+    pub transfer_dismiss_note: &'static str,
     /// The tools' own memory files, which stay on this Mac: named on that
     /// card for the tools whose files are known. DRAFT, NEEDS APPROVAL.
     pub memory_claude_code: &'static str,
@@ -1091,7 +1093,7 @@ pub struct MonitorFlowMapCopy {
     /// 2026-10-19): on, a contribution flies by rocket from a launch pad
     /// to a space station; off, this Mac is a laptop and the library an
     /// orb the traces rise to. Its card's title, the switch, and what it
-    /// does. DRAFT, NEEDS APPROVAL.
+    /// does, in the owner's words (2026-10-19).
     pub style_title: &'static str,
     pub style_toggle: &'static str,
     pub style_caption: &'static str,
@@ -1532,11 +1534,13 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             legend_memory: "Memory stays on this Mac",
             transfer_contributing: "Contributing",
             transfer_keeping: "Keeping",
+            transfer_dismissed: "Dismissed",
             transfer_trace: "Trace",
             memory_stays: "Memory files stay on this Mac.",
             transfer_contribute_note: "What {tool} read from its memory is part of the trace, \
                 and is scrubbed with it before it leaves.",
             transfer_keep_note: "The trace stays on this Mac with its memory. Nothing is sent.",
+            transfer_dismiss_note: "Removed from the traces waiting for you. Nothing was sent.",
             memory_claude_code: "CLAUDE.md, memory/",
             memory_codex: "AGENTS.md",
             memory_opencode: "AGENTS.md",
@@ -1546,8 +1550,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             kept_here_one: "Kept on this Mac",
             kept_here: "{count} kept on this Mac",
             style_title: "Traces map",
-            style_toggle: "Rocket and space station",
-            style_caption: "Contributions fly to the library by rocket. Turn this off to show this Mac as a laptop and the library as an orb.",
+            style_toggle: "Rocket mode",
+            style_caption: "GUI change only. Contributions fly to the library (space station) by rocket animation.",
             credential: "NEAR AI credential",
             none_found: "No configured tools found.",
         },
@@ -2000,6 +2004,7 @@ mod tests {
         // hole at all.
         assert!(map.coin_waiting.contains("{count}"));
         assert!(map.transfer_contribute_note.contains("{tool}"));
+        assert!(!map.transfer_dismissed.is_empty() && !map.transfer_dismiss_note.contains('{'));
         assert!(map.collected.contains("{count}") && map.collected.contains("{total}"));
         assert!(map.kept_here.contains("{count}") && !map.kept_here_one.contains('{'));
         for line in [map.style_title, map.style_toggle, map.style_caption] {

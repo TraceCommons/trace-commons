@@ -25,6 +25,10 @@ struct TracesTreeView: View {
     /// Opens History on the Traces tab, from the button beside the order
     /// control (owner, 2026-10-12).
     var openHistory: (() -> Void)? = nil
+    /// The trace being contributed, kept or dismissed, whose card shows
+    /// above the folders (owner, 2026-10-19, `MapTransferPlayer.shown`).
+    var transferShown: MapTransfer? = nil
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// The folders opened: every folder starts collapsed (#1146
     /// `traces-workspace.tsx`, `expanded = []`), and one opens when a
@@ -85,6 +89,14 @@ struct TracesTreeView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            // Under the tab bar, above the folders: the trace moving now,
+            // or just kept or dismissed; it goes a few seconds after.
+            if let shown = transferShown {
+                TraceTransferCard(
+                    transfer: shown, folderLabel: store.tree.allFolders.first { $0.id == shown.folder }?.label)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .id(shown.id)
+            }
             if let sample = store.sample, let words = store.words {
                 // Debug builds draw sample data here; say so, and say when
                 // the set asked for was not one.
@@ -138,6 +150,7 @@ struct TracesTreeView: View {
             if let pending = confirming { confirmation(pending) }
         }
         .glassModal(item: $dismissing) { dismissModal($0) }
+        .animation(reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 0.86), value: transferShown)
     }
 
     /// The folders the idle filter opens: every folder it lists.

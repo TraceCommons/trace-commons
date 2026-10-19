@@ -155,6 +155,9 @@ final class TracesStore {
     private(set) var acting: Set<String> = []
     /// The session last kept on this Mac, while its undo is offered.
     private(set) var lastKept: String?
+    /// The entry the window last dismissed, for its card on the Traces
+    /// map and tab (`MapTransferFeed`); nil until one is.
+    private(set) var lastDismissed: String?
     /// The last review action the core refused, by entry id.
     private(set) var actionError: (entryId: String, error: DaemonDataError)?
 
@@ -615,6 +618,7 @@ final class TracesStore {
                 try await client.dismiss(entryId: entryId)
                 guard mine == attachment else { return }
                 lastKept = nil
+                lastDismissed = entryId
             }
         } catch {
             guard mine == attachment else { return }
