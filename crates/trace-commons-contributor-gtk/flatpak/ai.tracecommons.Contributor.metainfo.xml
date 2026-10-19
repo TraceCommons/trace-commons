@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.20.0" date="2026-10-19">
+      <description>
+        <p>Switching a folder to Automatic also sends the traces already waiting in it.</p>
+      </description>
+    </release>
     <release version="0.19.0" date="2026-10-17">
       <description>
         <p>Sessions on your NEAR AI account start on a model chosen for each tool, and the model picker inside Claude Code, Codex and OpenCode lists NEAR AI's chat models.</p>
