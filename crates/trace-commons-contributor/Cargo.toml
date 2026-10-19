@@ -663,7 +663,37 @@ keyring-core = "=1.0.0"
 #
 # The IronClaw note above still applies: the root and GTK locks still name
 # 6dccbfbcbddfdfb53c11d3876f94bf3e716b55f9.
-ironwire_proxy ={ git = "https://github.com/nearai/ironwire", rev = "9a4c231b89922a8645f7e2329b0329fb295a8902" }
+#
+# ADVANCE TO bfb5e071. One commit in the range, verified with the GitHub
+# compare API (`9a4c231b...bfb5e071`, ahead_by 1): nearai/ironwire#63 treats
+# a prompt cache as warm only once a turn has warmed it. Before it, a
+# cache-control breakpoint alone counted as a warm cache, and Claude Code puts
+# one on its system prompt on every request, so the embedded proxy refused
+# every Claude Code turn to a backend without prompt caching. A contributor
+# whose only backend was NEAR AI got `503 ... nearai: cannot preserve this
+# request (WouldDiscardLargePromptCache)` on their first message.
+#
+# COST. Zero new packages. The range touches two files,
+# `crates/ironwire_core/src/policy.rs` and `docs/PROTOCOL.md`, and no manifest
+# or lock. All three locks (root, GTK, Tauri) were re-resolved through `cargo
+# metadata`; each diff is exactly 22 changed lines, all of them the eleven
+# `ironwire_*` source strings. Lock entries are 979 root, 562 GTK and 738
+# Tauri before and after. `cargo deny check licenses` passes default and
+# --all-features.
+#
+# MSRV. Unmoved: no manifest changed in the range.
+#
+# SURFACE. None. The change is private to `ironwire_core::policy::Policy`
+# (a new private `cache_is_warm`); no public item moved. It is a routing
+# behaviour change inside the embedded proxy only: a conversation with a warm
+# cache on a caching backend is still kept from moving to one without.
+#
+# FLATPAK. `cargo-sources.json` was edited rather than regenerated, as in the
+# last two advances, and moves the same 14 lines: 2 full revisions and 12
+# short-hash lines (`flatpak-cargo/git/ironwire-9a4c231` -> `-bfb5e07`).
+# `grep -c 9a4c231` on the file is 0. The lock's package set is unchanged,
+# which is what makes editing equivalent to regenerating.
+ironwire_proxy ={ git = "https://github.com/nearai/ironwire", rev = "bfb5e0718716bd61998491ca2d83e1313bf7388d" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -677,8 +707,8 @@ ironwire_proxy ={ git = "https://github.com/nearai/ironwire", rev = "9a4c231b899
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "9a4c231b89922a8645f7e2329b0329fb295a8902" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "9a4c231b89922a8645f7e2329b0329fb295a8902" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "bfb5e0718716bd61998491ca2d83e1313bf7388d" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "bfb5e0718716bd61998491ca2d83e1313bf7388d" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
