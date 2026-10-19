@@ -293,8 +293,8 @@ pub struct MonitorTreeCopy {
     /// The folder row menu's Ignore item. Approved 2026-10-08 (button rule).
     pub ignore_folder: &'static str,
     /// The folder row menu's accessible name, now that it holds the
-    /// contribution rule as well as Ignore (owner, 2026-10-19). DRAFT,
-    /// NEEDS APPROVAL.
+    /// contribution rule as well as Ignore. Approved by the owner
+    /// 2026-10-19.
     pub folder_menu: &'static str,
     /// The folder and tool switches' accessible names.
     pub watch_folder: &'static str,
