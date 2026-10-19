@@ -9,6 +9,12 @@ import TCShellCore
 /// reverses that. While a trace is moving through the map the card keeps
 /// its size, so no line moves under it, and the pointer there shows that
 /// trace's details instead. Coins shuffle and grow in either state.
+///
+/// Only the card itself is under the pointer for this (owner, 2026-10-19):
+/// the map hands the pile where the pointer is, and the pile tests it
+/// against its own card. The trace's details also show while the pointer
+/// is on that trace's folder or its line (`overTrace`), and they stay
+/// while it is over the details themselves.
 struct MapToolPile: View {
     let stack: FlowMapScene.ToolStack
     let nodes: [FlowMapScene.Node]
@@ -18,10 +24,18 @@ struct MapToolPile: View {
     let t: Double
     /// A folder's label, by its id, for the details card.
     let folderLabel: (String) -> String?
+    /// The pointer on the map, in the map's own coordinates; nil off it.
+    var pointer: CGPoint? = nil
+    /// Whether the pointer is on the moving trace's folder or its line.
+    var overTrace = false
     /// Whether the transfer is a contribution, for its colours.
     var contributing: Bool { run?.action != .keep }
 
-    @State private var over = false
+    /// The details card's width, and how far left of the pile it starts.
+    static let detailsWidth: CGFloat = 252
+    static let detailsLead: CGFloat = 9
+
+    @State private var detailsOpen = false
     @State private var tall = false
     @State private var wide = false
     @State private var names = false
@@ -40,16 +54,18 @@ struct MapToolPile: View {
         let height = stack.height(open: open) * s
         let width = (wide && !moving ? Stack.openWidth : Stack.width) * s
         let left = fit.point(stack.portLeft)
-        // Where the pointer counts as over the group: the card, or the
-        // details card too while a trace moves. Typed here, out of the
-        // view's expression, for the older type checker (macOS 15 CI).
-        let hitWidth: CGFloat = moving ? 252 : width
-        let hitHeight: CGFloat = moving ? max(height, 214) : height
-        let cardX: CGFloat = left.x - 9 + 126
-        let hitX: CGFloat = moving ? cardX : left.x + width / 2
+        // Typed here, out of the view's expression, for the older type
+        // checker (macOS 15 CI).
+        let cardX: CGFloat = left.x - Self.detailsLead + Self.detailsWidth / 2
+        let card = CGRect(x: left.x, y: left.y - height / 2, width: width, height: height)
+        let overCard: Bool = pointer.map { card.contains($0) } ?? false
+        let overDetails: Bool = detailsOpen && (pointer.map { Self.detailsArea(left: left, height: height).contains($0) } ?? false)
+        let wantsDetails: Bool = moving && (overCard || overTrace || overDetails)
+        // An open card is opaque: nothing under it shows through.
+        let fill: Color = open && wide ? GlassTokens.Color.paneOpaque.color : GlassTokens.Color.wellFill.color
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 26 * s, style: .continuous)
-                .fill(open && wide ? GlassTokens.Color.paneOpaque.color.opacity(0.92) : GlassTokens.Color.wellFill.color)
+                .fill(fill)
                 .frame(width: width, height: height)
                 .position(x: left.x + width / 2, y: left.y)
                 .accessibilityHidden(true)
@@ -68,18 +84,34 @@ struct MapToolPile: View {
                     tag(node, index: index, open: open)
                 }
             }
-            Color.clear
-                .contentShape(Rectangle())
-                .frame(width: hitWidth, height: hitHeight)
-                .position(x: hitX, y: left.y)
-                .onHover(perform: hover)
+            // The light round a coin's rim: over the coins, under the
+            // details.
+            if let run, !orbits.isEmpty {
+                Canvas { context, _ in
+                    MapTransferDrawing.rimLights(in: &context, stack: stack, run: run, t: t, fit: fit)
+                }
+                .allowsHitTesting(false)
                 .accessibilityHidden(true)
-            if moving, over, let run, let transfer = run.current(at: t) {
+                .zIndex(500)
+            }
+            if moving, detailsOpen, let run, let transfer = run.current(at: t) {
                 details(transfer, s: s)
                     .position(x: cardX, y: left.y)
                     .transition(.scale(scale: 0.2, anchor: .leading).combined(with: .opacity))
+                    .zIndex(1000)
             }
         }
+        .onChange(of: overCard) { _, inside in hover(inside) }
+        .onChange(of: wantsDetails) { _, wants in
+            withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.86)) { detailsOpen = wants }
+        }
+    }
+
+    /// Where the details card covers, beside the pile: the pointer may
+    /// rest on it once it is open.
+    static func detailsArea(left: CGPoint, height: CGFloat) -> CGRect {
+        let tall: CGFloat = max(height, 214)
+        return CGRect(x: left.x - detailsLead, y: left.y - tall / 2, width: detailsWidth, height: tall)
     }
 
     // MARK: Coins
@@ -178,7 +210,6 @@ struct MapToolPile: View {
     // MARK: Hover
 
     private func hover(_ inside: Bool) {
-        over = inside
         staging?.cancel()
         let motion = !reduceMotion
         if inside {
@@ -281,12 +312,22 @@ struct MapToolPile: View {
 }
 
 /// What a run of transfers looks like at a moment (owner, 2026-10-16),
-/// drawn over the map: the traces as glowing orbs on the lines, the light
-/// round a coin's rim, the pulse as each vanishes at the pad, the rocket
-/// on the pad, its lift-off and flight to the library's station, and the
-/// lines under the pad.
+/// drawn on the map under the tool group, so its card and the details
+/// cover it: the traces as glowing orbs on the lines, the pulse as each
+/// vanishes at the pad, the rocket on the pad, its lift-off and flight to
+/// the library's station, and the lines under the pad. The light round a
+/// coin's rim is drawn with the pile, over its coins (`rimLights`).
+///
+/// On the standard map (owner, 2026-10-19) each contributed trace goes
+/// into the laptop and rises from its screen to the library's orb, which
+/// takes it in with a pulse; there is no rocket.
 enum MapTransferDrawing {
     private typealias Stack = FlowMapScene.ToolStack
+
+    /// The library orb's frame on the standard map, in design units, and
+    /// the sphere's radius inside it.
+    static let orbFrame: CGFloat = 104
+    static var orbRadius: CGFloat { orbFrame / 2 * (1 - GlassLibraryOrb.inset) }
 
     static func draw(
         in context: inout GraphicsContext, scene: FlowMapScene, run: MapTransferRun, t: Double, fit: FlowMapGeometry
@@ -298,31 +339,28 @@ enum MapTransferDrawing {
         let hub = scene.nodes.first { $0.id == "hub" }?.at ?? FlowMapScene.hubPoint
         let library = scene.nodes.first { $0.id == "library" }?.at ?? FlowMapScene.libraryPoint
         let outArc = scene.arcs.last { $0.from == stack.portRight }
-        let order = run.order(stack.tools, at: t)
         let rocketRest = CGPoint(x: hub.x, y: hub.y - 5 - rocketLength / 2)
-        let pulseAt = contributing ? rocketRest : hub
+        let screen = CGPoint(x: hub.x, y: hub.y - FlowMapView.laptopScreenTop)
+        let orbBase = CGPoint(x: library.x, y: library.y + orbRadius)
+        let pulseAt: CGPoint = run.rises ? library : (contributing ? rocketRest : hub)
 
         for (index, transfer) in run.transfers.enumerated() {
             switch run.leg(index, at: t) {
-            case .waiting:
+            case .waiting, .orbit:
                 break
             case .inbound(let p):
                 if let arc = folderArc(transfer.folder, in: scene) {
                     orb(at: fit.point(point(on: arc, at: ease(p))), glow: glow, s: s, in: &context)
                 }
-            case .orbit(let p):
-                guard let index = order.firstIndex(of: "tool:" + transfer.tool) else { break }
-                let centre = fit.point(stack.coinCenter(index, open: false))
-                // From the coin's base, counter-clockwise: up its right side,
-                // over the top and down the left (owner, 2026-10-16).
-                let r = Stack.coin / 2 * 1.3 * s
-                let angle = 2 * Double.pi * p
-                let light = CGPoint(x: centre.x + r * CGFloat(sin(angle)), y: centre.y + r * CGFloat(cos(angle)))
-                orb(at: light, glow: glow, s: s * 0.75, in: &context)
             case .outbound(let p):
                 if let arc = outArc {
                     orb(at: fit.point(point(on: arc, at: ease(p))), glow: glow, s: s, in: &context)
                 }
+            case .ascent(let p):
+                if p < 0.3 {
+                    pulse(at: fit.point(screen), progress: p / 0.3, glow: glow, s: s * 0.6, in: &context)
+                }
+                rise(from: screen, to: orbBase, progress: p, glow: glow, fit: fit, in: &context)
             case .arrived(let since):
                 if since < MapTransferRun.pulse {
                     pulse(at: fit.point(pulseAt), progress: since / MapTransferRun.pulse, glow: glow, s: s, in: &context)
@@ -330,10 +368,51 @@ enum MapTransferDrawing {
             }
         }
 
-        if contributing {
+        if contributing, run.style == .launch {
             rocket(run: run, t: t, from: rocketRest, to: library, s: s, fit: fit, in: &context)
         }
+        if run.rises {
+            dock(at: fit.point(library), since: t - run.allArrived, s: s, run: run, in: &context)
+        }
         lineUnderPad(run: run, t: t, hub: hub, fit: fit, in: &context)
+    }
+
+    /// The light going once round the rim of each coin a trace is in,
+    /// counter-clockwise from its base: up its right side, over the top
+    /// and down the left (owner, 2026-10-16).
+    static func rimLights(
+        in context: inout GraphicsContext, stack: FlowMapScene.ToolStack, run: MapTransferRun, t: Double,
+        fit: FlowMapGeometry
+    ) {
+        let s = fit.scale
+        let glow = run.action == .contribute ? GlassTokens.Color.statusOn.color : GlassTokens.Color.purpleSoft.color
+        let order = run.order(stack.tools, at: t)
+        for (id, p) in run.orbits(at: t) {
+            guard let index = order.firstIndex(of: id) else { continue }
+            let centre = fit.point(stack.coinCenter(index, open: false))
+            let r: CGFloat = Stack.coin / 2 * 1.3 * s
+            let angle: Double = 2 * Double.pi * p
+            let light = CGPoint(x: centre.x + r * CGFloat(sin(angle)), y: centre.y + r * CGFloat(cos(angle)))
+            orb(at: light, glow: glow, s: s * 0.75, in: &context)
+        }
+    }
+
+    /// A trace rising from the laptop's screen to the orb's base: slowly
+    /// away, then faster, with a short fading trail.
+    static func rise(
+        from start: CGPoint, to end: CGPoint, progress: Double, glow: Color, fit: FlowMapGeometry,
+        in context: inout GraphicsContext
+    ) {
+        let s = fit.scale
+        for step in (0 ... 3).reversed() {
+            let lag: Double = Double(step) * 0.045
+            let along: CGFloat = CGFloat(pow(max(0, progress - lag), 1.7))
+            let at = CGPoint(x: start.x + (end.x - start.x) * along, y: start.y + (end.y - start.y) * along)
+            var layer = context
+            layer.opacity = 1 - Double(step) * 0.28
+            let size: CGFloat = s * (1 - CGFloat(step) * 0.18)
+            orb(at: fit.point(at), glow: glow, s: size, in: &layer)
+        }
     }
 
     // MARK: Paths
@@ -516,7 +595,7 @@ enum MapTransferDrawing {
         let line: String?
         switch run.action {
         case .contribute:
-            line = run.transfers.count > 1 && arrived > 0 && t < run.liftOff
+            line = run.style == .launch && run.transfers.count > 1 && arrived > 0 && t < run.liftOff
                 ? words.collected(arrived, of: run.transfers.count) : nil
         case .keep:
             line = arrived == run.transfers.count ? words.keptHere(arrived) : nil

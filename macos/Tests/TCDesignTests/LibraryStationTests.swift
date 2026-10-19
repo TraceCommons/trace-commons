@@ -33,6 +33,20 @@ final class LibraryStationTests: XCTestCase {
         XCTAssertTrue(mesh.allSatisfy { $0.points.count >= 3 })
     }
 
+    /// The standard map's orb: its meridians turn, each between edge-on
+    /// and full width, half of them on the near side, and its sphere
+    /// leaves room for the glow.
+    func test_theOrbsMeridiansTurn() {
+        let rest = GlassLibraryOrb.meridianWidths(angle: 0)
+        let turned = GlassLibraryOrb.meridianWidths(angle: 0.5)
+        XCTAssertEqual(rest.count, 6)
+        XCTAssertTrue(rest.allSatisfy { (0 ... 1).contains($0.width) })
+        XCTAssertNotEqual(rest.map(\.width), turned.map(\.width))
+        XCTAssertEqual(GlassLibraryOrb.radius(in: CGSize(width: 104, height: 104)), 52 * (1 - GlassLibraryOrb.inset),
+                       accuracy: 0.0001)
+        XCTAssertLessThan(GlassLibraryOrb.radius(in: CGSize(width: 104, height: 80)), 40)
+    }
+
     /// Turning is a rotation: it keeps every point's distance from the
     /// centre, and a quarter turn moves the parts.
     func test_turningKeepsTheStationsShape() {

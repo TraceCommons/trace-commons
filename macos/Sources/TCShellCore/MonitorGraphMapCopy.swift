@@ -117,6 +117,11 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
     public let collected: String
     public let keptHereOne: String
     public let keptHere: String
+    /// The Traces map's style switch in Settings, General: its card's
+    /// title, the switch, and what it does.
+    public let styleTitle: String
+    public let styleToggle: String
+    public let styleCaption: String
     public let credential: String
     public let noneFound: String
 
@@ -166,6 +171,9 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
         case collected
         case keptHereOne = "kept_here_one"
         case keptHere = "kept_here"
+        case styleTitle = "style_title"
+        case styleToggle = "style_toggle"
+        case styleCaption = "style_caption"
         case credential
         case noneFound = "none_found"
     }

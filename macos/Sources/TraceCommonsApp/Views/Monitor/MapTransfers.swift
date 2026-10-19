@@ -61,11 +61,16 @@ enum MapTransferDetector {
 /// pulse of light. A contribution's rocket lifts off only once every trace
 /// has arrived: slowly, then faster, to the library's station.
 ///
+/// On the standard map (`TracesMapStyle.standard`, owner, 2026-10-19) there
+/// is no rocket: each contributed trace goes into the laptop and rises on
+/// its own from the laptop's screen to the library's orb.
+///
 /// Everything here is a function of the seconds since the run began, so
 /// the map draws any moment of it and the timings are tested.
 struct MapTransferRun: Equatable {
     let transfers: [MapTransfer]
     let start: Date
+    var style: TracesMapStyle = .launch
 
     /// The seconds between traces setting off, and each leg's length.
     static let step = 1.05
@@ -79,6 +84,9 @@ struct MapTransferRun: Equatable {
     static let keptLinger = 1.6
     /// The pulse a trace gives off as it vanishes at the pad.
     static let pulse = 0.9
+    /// A contributed trace's rise from the laptop to the orb, on the
+    /// standard map.
+    static let ascent = 1.1
 
     var action: MapTransfer.Action { transfers.first?.action ?? .contribute }
 
@@ -91,9 +99,15 @@ struct MapTransferRun: Equatable {
         case orbit(Double)
         /// Riding the line out to the pad, 0...1.
         case outbound(Double)
-        /// Gone into the rocket or the pad, this many seconds ago.
+        /// Rising from the laptop to the library's orb, 0...1 (the
+        /// standard map's contributions only).
+        case ascent(Double)
+        /// Gone into the rocket, the pad or the orb, this many seconds ago.
         case arrived(Double)
     }
+
+    /// Whether each contributed trace rises to the orb on its own.
+    var rises: Bool { style == .standard && action == .contribute }
 
     func leg(_ index: Int, at t: Double) -> Leg {
         var local = t - Double(index) * Self.step
@@ -103,23 +117,30 @@ struct MapTransferRun: Equatable {
         if local < Self.orbit { return .orbit(local / Self.orbit) }
         local -= Self.orbit
         if local < Self.outbound { return .outbound(local / Self.outbound) }
-        return .arrived(local - Self.outbound)
+        local -= Self.outbound
+        if rises {
+            if local < Self.ascent { return .ascent(local / Self.ascent) }
+            local -= Self.ascent
+        }
+        return .arrived(local)
     }
 
-    /// When the last trace reaches the pad.
+    /// When the last trace reaches the pad, or on the standard map the orb.
     var allArrived: Double {
-        Double(max(transfers.count - 1, 0)) * Self.step + Self.inbound + Self.orbit + Self.outbound
+        let legs: Double = Self.inbound + Self.orbit + Self.outbound + (rises ? Self.ascent : 0)
+        return Double(max(transfers.count - 1, 0)) * Self.step + legs
     }
 
-    /// When the rocket lifts off (a contribution's run only).
+    /// When the rocket lifts off (a contribution's run on the launch map).
     var liftOff: Double { allArrived + Self.settle }
 
     /// When the run is over.
     var end: Double {
-        action == .contribute ? liftOff + Self.flight + Self.linger : allArrived + Self.keptLinger
+        guard action == .contribute else { return allArrived + Self.keptLinger }
+        return rises ? allArrived + Self.linger : liftOff + Self.flight + Self.linger
     }
 
-    /// How many traces have reached the pad by `t`.
+    /// How many traces have arrived by `t`.
     func arrived(at t: Double) -> Int {
         transfers.indices.filter { if case .arrived = leg($0, at: t) { true } else { false } }.count
     }
@@ -162,9 +183,10 @@ struct MapTransferRun: Equatable {
     func moving(at t: Double) -> Bool { arrived(at: t) < transfers.count }
 
     /// How far the rocket has flown, 0...1, or nil while it waits on the
-    /// pad (a contribution's run) or there is no rocket (a kept run).
+    /// pad (a contribution's run) or there is no rocket (a kept run, or the
+    /// standard map).
     func flight(at t: Double) -> Double? {
-        guard action == .contribute, t >= liftOff else { return nil }
+        guard action == .contribute, !rises, t >= liftOff else { return nil }
         return min(1, (t - liftOff) / Self.flight)
     }
 
@@ -190,6 +212,9 @@ final class MapTransferPlayer: ObservableObject {
     private var played = Set<String>()
     private var timer: Task<Void, Never>?
     var reduceMotion = false
+    /// The map's style for the runs still to play; one already playing
+    /// keeps its own.
+    var style: TracesMapStyle = .launch
 
     func enqueue(_ transfers: [MapTransfer]) {
         guard !reduceMotion else { return }
@@ -206,7 +231,7 @@ final class MapTransferPlayer: ObservableObject {
         }
         let batch = queue.prefix { $0.action == first.action }
         queue.removeFirst(batch.count)
-        let run = MapTransferRun(transfers: Array(batch), start: .now)
+        let run = MapTransferRun(transfers: Array(batch), start: .now, style: style)
         self.run = run
         timer?.cancel()
         timer = Task { [weak self] in

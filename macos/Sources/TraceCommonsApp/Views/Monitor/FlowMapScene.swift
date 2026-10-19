@@ -220,16 +220,20 @@ struct FlowMapScene: Equatable {
 
     /// The columns, left to right (owner, 2026-10-16): the folders (their
     /// names to the left of their dots, so the column sits far enough in
-    /// for a 14-character name), the tool group, this computer's launch
-    /// pad, and the library's station above it.
+    /// for a 14-character name), the tool group, this computer (a launch
+    /// pad or a laptop), and the library (a station or an orb) above it.
     static func folderX(_ space: CGSize) -> CGFloat { max(124, space.width * 0.3) }
     static func toolX(_ space: CGSize) -> CGFloat { space.width * 0.5 }
     static func hub(in space: CGSize) -> CGPoint {
         let band = band(space)
         return CGPoint(x: space.width * 0.72, y: (band.lowerBound + band.upperBound) / 2)
     }
+    /// The library sits straight above this computer (owner, 2026-10-19),
+    /// so the rocket climbs, or a trace rises, straight up to it; both are
+    /// worked out from the same space, so they stay in line as the pane
+    /// changes.
     static func library(in space: CGSize) -> CGPoint {
-        CGPoint(x: space.width * 0.84, y: band(space).lowerBound + space.height * 0.04)
+        CGPoint(x: hub(in: space).x, y: band(space).lowerBound + space.height * 0.04)
     }
 
     /// A folder line's least and most height.

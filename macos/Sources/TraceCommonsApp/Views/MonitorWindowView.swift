@@ -884,6 +884,11 @@ private struct MonitorMapPane: View {
     /// there once the reload has dropped it.
     @State private var listedBefore: [DaemonData.QueueEntry] = []
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The Traces map's rocket and station, or the laptop and orb
+    /// (`TracesMapStyle`, Settings, General); it changes at once.
+    @AppStorage(TracesMapStyle.key) private var mapRocket = true
+
+    private var mapStyle: TracesMapStyle { mapRocket ? .launch : .standard }
 
     var body: some View {
         // The map is content, not chrome: its own field, so the selector,
@@ -901,8 +906,12 @@ private struct MonitorMapPane: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             }
         }
-        .onAppear { transfers.reduceMotion = reduceMotion }
+        .onAppear {
+            transfers.reduceMotion = reduceMotion
+            transfers.style = mapStyle
+        }
         .onChange(of: reduceMotion) { _, reduce in transfers.reduceMotion = reduce }
+        .onChange(of: mapRocket) { _, _ in transfers.style = mapStyle }
         .onChange(of: history) { old, new in
             transfers.enqueue(MapTransferDetector.contributions(from: old, to: new))
         }
@@ -969,7 +978,7 @@ private struct MonitorMapPane: View {
                 accessibilityName: FlowMapScene.words?.mapLabel ?? MonitorWindowView.Tab.traces.title, state: tracesState,
                 focus: scene.focusPoint(tool: focusTool), onSelectFolder: onSelectFolder,
                 onReveal: { revealedFolders = FlowMapScene.revealing($0, in: revealedFolders) },
-                transferRun: transfers.run)
+                transferRun: transfers.run, mapStyle: mapStyle)
         case .privateAI:
             // The one tool list, while this window's client has read it and
             // the core still answers; otherwise nothing is drawn as current.

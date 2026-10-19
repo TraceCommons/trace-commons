@@ -1087,6 +1087,14 @@ pub struct MonitorFlowMapCopy {
     pub collected: &'static str,
     pub kept_here_one: &'static str,
     pub kept_here: &'static str,
+    /// The Traces map's style switch in Settings, General (owner,
+    /// 2026-10-19): on, a contribution flies by rocket from a launch pad
+    /// to a space station; off, this Mac is a laptop and the library an
+    /// orb the traces rise to. Its card's title, the switch, and what it
+    /// does. DRAFT, NEEDS APPROVAL.
+    pub style_title: &'static str,
+    pub style_toggle: &'static str,
+    pub style_caption: &'static str,
     /// The Private AI destination's label: the credential the tools'
     /// calls are answered with.
     pub credential: &'static str,
@@ -1537,6 +1545,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             collected: "Collected {count} of {total}",
             kept_here_one: "Kept on this Mac",
             kept_here: "{count} kept on this Mac",
+            style_title: "Traces map",
+            style_toggle: "Rocket and space station",
+            style_caption: "Contributions fly to the library by rocket. Turn this off to show this Mac as a laptop and the library as an orb.",
             credential: "NEAR AI credential",
             none_found: "No configured tools found.",
         },
@@ -1991,6 +2002,9 @@ mod tests {
         assert!(map.transfer_contribute_note.contains("{tool}"));
         assert!(map.collected.contains("{count}") && map.collected.contains("{total}"));
         assert!(map.kept_here.contains("{count}") && !map.kept_here_one.contains('{'));
+        for line in [map.style_title, map.style_toggle, map.style_caption] {
+            assert!(!line.is_empty() && !line.contains('{'), "{line}");
+        }
         for memory in [
             map.memory_claude_code,
             map.memory_codex,

@@ -29,10 +29,16 @@ struct FlowMapView: View {
     var onReveal: ((FlowMapScene.FolderReveal) -> Void)? = nil
     /// The traces moving across the Traces map now (`MapTransferPlayer`).
     var transferRun: MapTransferRun? = nil
+    /// The Traces map's style: the rocket and station, or the laptop and
+    /// the library orb (`TracesMapStyle`, Settings, General).
+    var mapStyle: TracesMapStyle = .launch
 
     @State private var zoom: CGFloat = 1
     @State private var hovered: String?
     @State private var pinned: String?
+    /// Where the pointer is on the map, for the tool group's own hit tests
+    /// (owner, 2026-10-19: the pile opens only over its card).
+    @State private var pointer: CGPoint?
     /// The node keyboard focus is on (Full Keyboard Access). It selects the
     /// node as a hover does, so a keyboard user sees the same ring and card
     /// a pointer gets; the system focus ring stays on the button itself.
@@ -54,37 +60,30 @@ struct FlowMapView: View {
                 }
                 .accessibilityHidden(true)
 
-                // The Traces map's library is a station, its tools a pile of
-                // coins, and what moves is drawn over both (owner,
-                // 2026-10-16).
+                // The Traces map's library: the station, or on the standard
+                // map the orb (owner, 2026-10-16 and 2026-10-19).
                 if scene.stack != nil, let library = scene.nodes.first(where: { $0.id == "library" }),
                    case .library(let active) = library.kind {
-                    GlassLibraryStation(lit: active)
-                        .frame(width: 150 * fit.scale, height: 130 * fit.scale)
+                    libraryArt(lit: active, style: mapStyle, scale: fit.scale)
                         .position(fit.point(library.at))
                         .allowsHitTesting(false)
                 }
-                if let stack = scene.stack {
+                // What moves, under the tool group, so its card and the
+                // trace's details cover it.
+                if scene.stack != nil {
                     TimelineView(.animation(minimumInterval: 1 / 60, paused: transferRun == nil)) { timeline in
                         let t = transferRun.map { timeline.date.timeIntervalSince($0.start) } ?? 0
-                        ZStack(alignment: .topLeading) {
-                            MapToolPile(
-                                stack: stack, nodes: scene.nodes.filter { $0.id.hasPrefix("tool:") }, fit: fit,
-                                run: transferRun, t: t,
-                                folderLabel: { id in scene.nodes.first { $0.id == "folder:\(id)" }?.label })
-                            Canvas { context, _ in
-                                if let run = transferRun {
-                                    MapTransferDrawing.draw(in: &context, scene: scene, run: run, t: t, fit: fit)
-                                }
-                                // Between contributions the rocket stands on the pad.
-                                if transferRun?.action != .contribute {
-                                    MapTransferDrawing.restingRocket(scene: scene, fit: fit, in: &context)
-                                }
+                        Canvas { context, _ in
+                            if let run = transferRun {
+                                MapTransferDrawing.draw(in: &context, scene: scene, run: run, t: t, fit: fit)
                             }
-                            .allowsHitTesting(false)
-                            .accessibilityHidden(true)
+                            // Between contributions the rocket stands on the pad.
+                            if mapStyle == .launch, transferRun?.action != .contribute {
+                                MapTransferDrawing.restingRocket(scene: scene, fit: fit, in: &context)
+                            }
                         }
-                        .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
                     }
                 }
 
@@ -96,12 +95,33 @@ struct FlowMapView: View {
                     revealPill(reveal, fit: fit)
                 }
 
-                if let id = selection, let node = scene.nodes.first(where: { $0.id == id }) {
+                // The tool group over the targets: its open card keeps the
+                // pointer even where it covers the pad.
+                if let stack = scene.stack {
+                    TimelineView(.animation(minimumInterval: 1 / 60, paused: transferRun == nil)) { timeline in
+                        let t = transferRun.map { timeline.date.timeIntervalSince($0.start) } ?? 0
+                        MapToolPile(
+                            stack: stack, nodes: scene.nodes.filter { $0.id.hasPrefix("tool:") }, fit: fit,
+                            run: transferRun, t: t,
+                            folderLabel: { id in scene.nodes.first { $0.id == "folder:\(id)" }?.label },
+                            pointer: pointer,
+                            overTrace: Self.pointer(pointer, onTraceOf: transferRun, at: t, in: scene, fit: fit))
+                            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+                    }
+                }
+
+                if let id = selection, let node = scene.nodes.first(where: { $0.id == id }), !tracePlaying(in: id) {
                     card(node, fit: fit, in: proxy.size)
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
             .contentShape(Rectangle())
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location): pointer = location
+                case .ended: pointer = nil
+                }
+            }
             // A click on the field, not a node, lets go of the pinned card.
             .onTapGesture { pinned = nil }
             .overlay(alignment: .bottomTrailing) {
@@ -124,6 +144,64 @@ struct FlowMapView: View {
             if let pinned, !scene.nodes.contains(where: { $0.id == pinned }) { self.pinned = nil }
             if let focused, !scene.nodes.contains(where: { $0.id == focused }) { self.focused = nil }
         }
+    }
+
+    /// The library on the Traces map, at the map's scale: the station on
+    /// the rocket map, the orb on the standard one.
+    @ViewBuilder
+    private func libraryArt(lit: Bool, style: TracesMapStyle, scale: CGFloat) -> some View {
+        switch style {
+        case .launch:
+            GlassLibraryStation(lit: lit)
+                .frame(width: Self.stationSize.width * scale, height: Self.stationSize.height * scale)
+        case .standard:
+            GlassLibraryOrb(lit: lit)
+                .frame(width: MapTransferDrawing.orbFrame * scale, height: MapTransferDrawing.orbFrame * scale)
+        }
+    }
+
+    /// The station's frame on the rocket map, in design units.
+    static let stationSize = CGSize(width: 150, height: 130)
+
+    /// Whether `point` is on the moving trace's folder or its line: there
+    /// the trace's details show, as over the tool group (owner, 2026-10-19).
+    static func pointer(
+        _ point: CGPoint?, onTraceOf run: MapTransferRun?, at t: Double, in scene: FlowMapScene, fit: FlowMapGeometry
+    ) -> Bool {
+        guard let point, let run, run.moving(at: t), let transfer = run.current(at: t) else { return false }
+        if let node = scene.nodes.first(where: { $0.id == "folder:" + transfer.folder }) {
+            let centre = fit.point(node.at)
+            let reach: CGFloat = (FlowMapScene.folderRadius + 6) * fit.scale
+            if hypot(point.x - centre.x, point.y - centre.y) <= reach { return true }
+        }
+        guard let arc = MapTransferDrawing.folderArc(transfer.folder, in: scene) else { return false }
+        let samples = 32
+        var previous = fit.point(arc.from)
+        for step in 1 ... samples {
+            let next = fit.point(MapTransferDrawing.point(on: arc, at: Double(step) / Double(samples)))
+            if distance(from: point, toSegment: previous, next) <= 6 { return true }
+            previous = next
+        }
+        return false
+    }
+
+    /// How far `point` is from the segment `a` to `b`.
+    static func distance(from point: CGPoint, toSegment a: CGPoint, _ b: CGPoint) -> CGFloat {
+        let dx: CGFloat = b.x - a.x
+        let dy: CGFloat = b.y - a.y
+        let length: CGFloat = dx * dx + dy * dy
+        guard length > 0 else { return hypot(point.x - a.x, point.y - a.y) }
+        let along: CGFloat = ((point.x - a.x) * dx + (point.y - a.y) * dy) / length
+        let u: CGFloat = min(1, max(0, along))
+        return hypot(point.x - (a.x + u * dx), point.y - (a.y + u * dy))
+    }
+
+    /// Whether a trace from the folder `id` is moving through the map now:
+    /// its own card then gives way to the trace's details.
+    private func tracePlaying(in id: String) -> Bool {
+        guard scene.stack != nil, let run = transferRun, id.hasPrefix("folder:") else { return false }
+        return run.moving(at: Date().timeIntervalSince(run.start))
+            && run.transfers.contains { "folder:" + $0.folder == id }
     }
 
     // MARK: Drawing
@@ -192,7 +270,10 @@ struct FlowMapView: View {
 
         switch node.kind {
         case .hub where traces:
-            Self.drawPad(at: centre, scale: fit.scale, in: &layer)
+            switch mapStyle {
+            case .launch: Self.drawPad(at: centre, scale: fit.scale, in: &layer)
+            case .standard: Self.drawLaptop(at: centre, scale: fit.scale, in: &layer)
+            }
         case .hub:
             layer.fill(disc, with: .color(GlassTokens.Color.statusOff.color))
             ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassColor.ink(0.25), scale: fit.scale)
@@ -277,6 +358,33 @@ struct FlowMapView: View {
     /// This computer as a launch pad (owner, 2026-10-16): a slab on a base,
     /// with a service tower beside it; the line out lands on its left edge
     /// (`FlowMapScene.padHalfWidth`) and the rocket stands on it.
+    /// How far above this computer's point the laptop's screen rises: a
+    /// contributed trace sets off upward from there on the standard map.
+    static let laptopScreenTop: CGFloat = 36
+
+    /// This computer as a laptop on the standard map (owner, 2026-10-19):
+    /// its deck as wide as the pad, so the line out lands on its left edge,
+    /// and its screen open above it.
+    static func drawLaptop(at centre: CGPoint, scale s: CGFloat, in context: inout GraphicsContext) {
+        let half: CGFloat = FlowMapScene.padHalfWidth * s
+        let steel: Color = GlassTokens.Color.statusOff.color
+        let deck = Path(roundedRect: CGRect(x: centre.x - half, y: centre.y - 3 * s, width: half * 2, height: 6 * s),
+                        cornerRadius: 3 * s)
+        context.fill(deck, with: .color(steel))
+        let notch = Path(roundedRect: CGRect(x: centre.x - 7 * s, y: centre.y - 3 * s, width: 14 * s, height: 2 * s),
+                         cornerRadius: 1 * s)
+        context.fill(notch, with: .color(GlassTokens.Color.mapNodeOff.color))
+        let top: CGFloat = centre.y - laptopScreenTop * s
+        let lid = CGRect(x: centre.x - 25 * s, y: top, width: 50 * s, height: (laptopScreenTop - 4) * s)
+        context.fill(Path(roundedRect: lid, cornerRadius: 3.5 * s), with: .color(steel.opacity(0.85)))
+        let display: CGRect = lid.insetBy(dx: 2.5 * s, dy: 2.5 * s)
+        let deep: Color = GlassTokens.Gradient.heroCampaign.stops.first?.color.color ?? GlassTokens.Color.blue.color
+        let bright: Color = GlassTokens.Gradient.heroCampaign.stops.last?.color.color ?? GlassTokens.Color.blue.color
+        context.fill(Path(roundedRect: display, cornerRadius: 2 * s), with: .linearGradient(
+            Gradient(colors: [bright.opacity(0.9), deep]),
+            startPoint: CGPoint(x: display.minX, y: display.minY), endPoint: CGPoint(x: display.maxX, y: display.maxY)))
+    }
+
     static func drawPad(at centre: CGPoint, scale s: CGFloat, in context: inout GraphicsContext) {
         let half = FlowMapScene.padHalfWidth * s
         let slab = Path(roundedRect: CGRect(x: centre.x - half, y: centre.y - 5 * s, width: half * 2, height: 10 * s),

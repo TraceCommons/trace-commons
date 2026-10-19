@@ -160,6 +160,92 @@ final class TracesMapPileTests: XCTestCase {
         XCTAssertNil(run.current(at: run.allArrived))
     }
 
+    /// On the standard map each contributed trace rises from the laptop to
+    /// the orb on its own: no rocket, no gathering, and a kept trace still
+    /// ends at this computer.
+    func test_theStandardMapRaisesEachTraceToTheOrb() {
+        var run = run(2)
+        run.style = .standard
+        XCTAssertTrue(run.rises)
+        let rising = MapTransferRun.inbound + MapTransferRun.orbit + MapTransferRun.outbound + 0.1
+        guard case .ascent = run.leg(0, at: rising) else { return XCTFail("the trace rises from the laptop") }
+        XCTAssertEqual(run.allArrived, MapTransferRun.step + rising - 0.1 + MapTransferRun.ascent, accuracy: 0.0001)
+        XCTAssertNil(run.flight(at: run.end), "the standard map has no rocket")
+        XCTAssertEqual(run.end, run.allArrived + MapTransferRun.linger, accuracy: 0.0001)
+        var kept = self.run(1, .keep)
+        kept.style = .standard
+        XCTAssertFalse(kept.rises)
+        guard case .arrived = kept.leg(0, at: rising) else { return XCTFail("a kept trace ends at this computer") }
+    }
+
+    /// The library sits straight above this computer in every pane shape,
+    /// clear of the pad's tower and the rocket on it.
+    func test_theLibraryStaysAboveThisComputer() {
+        for pane in FlowMapLoadTests.panes + [CGSize(width: 1200, height: 600)] {
+            let space = FlowMapScene.space(for: pane)
+            let hub = FlowMapScene.hub(in: space)
+            let library = FlowMapScene.library(in: space)
+            XCTAssertEqual(library.x, hub.x, "\(pane)")
+            let stationFoot = library.y + FlowMapView.stationSize.height / 2
+            XCTAssertLessThan(stationFoot, hub.y - 55, "the station meets the pad's tower at \(pane)")
+            XCTAssertLessThan(library.y + MapTransferDrawing.orbRadius, hub.y - FlowMapView.laptopScreenTop, "\(pane)")
+        }
+    }
+
+    /// The trace's details show over its folder's dot or its line while it
+    /// moves, and nowhere else on the map.
+    func test_theTracesFolderAndLineShowItsDetails() throws {
+        let tree = TracesTree(tools: [.init(kind: .claudeCode, mode: .watch, folders: [folder("a"), folder("b")])],
+                              unplaced: [])
+        let scene = FlowMapScene.traces(tree, gate: .init(state: .ready))
+        let fit = FlowMapGeometry(size: FlowMapScene.size, zoom: 1, focus: nil, space: scene.space)
+        let run = MapTransferRun(transfers: [MapTransfer(id: "1", folder: "a", tool: "claude-code", action: .contribute)],
+                                 start: .now)
+        let t = 0.2
+        let dot = try XCTUnwrap(scene.nodes.first { $0.id == "folder:a" }).at
+        let arc = try XCTUnwrap(MapTransferDrawing.folderArc("a", in: scene))
+        let onLine = fit.point(MapTransferDrawing.point(on: arc, at: 0.5))
+        let other = fit.point(try XCTUnwrap(scene.nodes.first { $0.id == "folder:b" }).at)
+        XCTAssertTrue(FlowMapView.pointer(fit.point(dot), onTraceOf: run, at: t, in: scene, fit: fit))
+        XCTAssertTrue(FlowMapView.pointer(CGPoint(x: onLine.x, y: onLine.y + 3), onTraceOf: run, at: t, in: scene, fit: fit))
+        XCTAssertFalse(FlowMapView.pointer(other, onTraceOf: run, at: t, in: scene, fit: fit), "another folder")
+        XCTAssertFalse(FlowMapView.pointer(CGPoint(x: 5, y: 5), onTraceOf: run, at: t, in: scene, fit: fit))
+        XCTAssertFalse(FlowMapView.pointer(fit.point(dot), onTraceOf: run, at: run.end, in: scene, fit: fit),
+                       "nothing is moving")
+        XCTAssertFalse(FlowMapView.pointer(nil, onTraceOf: run, at: t, in: scene, fit: fit))
+        XCTAssertEqual(FlowMapView.distance(from: CGPoint(x: 5, y: 4), toSegment: .zero, CGPoint(x: 10, y: 0)), 4)
+    }
+
+    /// The details card covers the pile and runs right of it.
+    func test_theDetailsCardSitsOverThePile() {
+        let left = CGPoint(x: 100, y: 200)
+        let area = MapToolPile.detailsArea(left: left, height: 80)
+        XCTAssertEqual(area.minX, left.x - MapToolPile.detailsLead)
+        XCTAssertEqual(area.width, MapToolPile.detailsWidth)
+        XCTAssertEqual(area.midY, left.y)
+        XCTAssertGreaterThanOrEqual(area.height, 214)
+    }
+
+    /// The rocket is the default; turning it off is kept as the standard
+    /// map, and the window and Settings read the same key.
+    func test_theMapStyleIsAShellPreference() throws {
+        let suite = "TracesMapPileTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(TracesMapStyle.stored(defaults), .launch)
+        TracesMapStyle.set(.standard, defaults)
+        XCTAssertEqual(TracesMapStyle.stored(defaults), .standard)
+        TracesMapStyle.set(.launch, defaults)
+        XCTAssertEqual(TracesMapStyle.stored(defaults), .launch)
+        let window = try TracesInspectorHostTests.text("Views/MonitorWindowView.swift")
+        let settings = try TracesInspectorHostTests.text("Views/Settings/GeneralSection.swift")
+        for source in [window, settings] {
+            XCTAssertTrue(source.contains("@AppStorage(TracesMapStyle.key)"))
+        }
+        XCTAssertTrue(window.contains("mapStyle: mapStyle"))
+        XCTAssertTrue(settings.contains("words.styleToggle"))
+    }
+
     // MARK: Finding transfers
 
     /// A row History gained, sent after everything the last read held, is
@@ -231,6 +317,9 @@ final class TracesMapPileTests: XCTestCase {
         XCTAssertEqual(words.memoryFiles("gemini-cli"), "GEMINI.md")
         XCTAssertNil(words.memoryFiles("something-new"))
         XCTAssertEqual(words.legendMemory, "Memory stays on this Mac")
+        XCTAssertEqual(words.styleTitle, "Traces map")
+        XCTAssertEqual(words.styleToggle, "Rocket and space station")
+        XCTAssertFalse(words.styleCaption.isEmpty)
     }
 
     /// The window feeds the map what History gained and what it kept, and
