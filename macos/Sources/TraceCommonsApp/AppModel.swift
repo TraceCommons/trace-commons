@@ -694,6 +694,28 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Whether billing has opened in the browser during this run.
+    ///
+    /// Set only when the browser accepted the page. A payment made there
+    /// reaches the account through the service's own webhook, which nothing
+    /// here hears about, so from then on the app coming forward is the cue to
+    /// read the balance again. The daemon stops serving a figure from before
+    /// the click, so the read is a fresh one.
+    private(set) var billingOpened = false
+
+    func noteBillingOpened() {
+        billingOpened = true
+    }
+
+    /// Re-read the balance when the app comes forward, once billing has been
+    /// opened. Answers whether a read was asked for.
+    @discardableResult
+    func refreshBalanceOnActivation() -> Bool {
+        guard billingOpened else { return false }
+        refreshNearAiBalance()
+        return true
+    }
+
     func nearAiFunding(expected: FundingDestination?) async -> FundingStatus? {
         guard let client, !credentialBusy else { return nil }
         let result = await Task.detached(priority: .userInitiated) {

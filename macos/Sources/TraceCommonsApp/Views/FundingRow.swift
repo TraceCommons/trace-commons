@@ -190,6 +190,9 @@ struct FundingRow: View {
                 let accepted = await withCheckedContinuation { continuation in
                     openURL(url) { continuation.resume(returning: $0) }
                 }
+                // Before the staleness check below: the browser opened whether
+                // or not this row is still on screen.
+                if accepted { model.noteBillingOpened() }
                 guard !Task.isCancelled, isCurrent(ticket, sessionState: sessionState) else { return }
                 if !accepted { status = nil }
             } else {

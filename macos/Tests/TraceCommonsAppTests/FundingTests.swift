@@ -467,6 +467,34 @@ final class FundingTests: XCTestCase {
     }
 
     @MainActor
+    func testOpeningBillingMakesTheAppReReadTheBalanceWhenItComesForward() async throws {
+        let view = try HostedFunding()
+        defer { view.close() }
+        try await prime(view)
+        XCTAssertFalse(view.model.refreshBalanceOnActivation(), "Nothing to re-read before billing opens")
+
+        // A browser that refused the page did not take anyone to billing.
+        view.acceptOpen = false
+        try await click(view, reply: ready(), bound: true)
+        XCTAssertEqual(view.opened.count, 1)
+        XCTAssertFalse(view.model.refreshBalanceOnActivation(), "A refused open is not billing")
+
+        view.acceptOpen = true
+        try await click(view, reply: ready(), bound: false)
+        try await click(view, reply: ready(), bound: true)
+        XCTAssertEqual(view.opened.count, 2)
+
+        let balanceReads = { view.daemon.calls.filter { $0.method == "near_ai_balance" }.count }
+        let before = balanceReads()
+        XCTAssertTrue(view.model.refreshBalanceOnActivation(), "Coming back from billing re-reads")
+        let deadline = Date().addingTimeInterval(2)
+        while balanceReads() == before, Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(balanceReads(), before + 1, "Exactly one balance read reaches the daemon")
+    }
+
+    @MainActor
     private func prime(_ view: HostedFunding) async throws {
         let entered = expectation(description: "Visible row reads its account")
         _ = view.daemon.enqueue(try response(ready()), entered: entered)

@@ -190,6 +190,11 @@ pub async fn read(
     if !organization.is_active {
         return FundingReport::NoOrganization;
     }
+    // A bound click is the one that hands the browser its destination: from
+    // here a payment may land, and the balance must not answer from before it.
+    if expected.is_some() {
+        super::balance::note_billing_opened(shared.store.dir());
+    }
     FundingReport::Ready {
         organization_id: organization.id,
         organization_name: organization.name,
@@ -619,6 +624,38 @@ mod tests {
             FundingReport::Ready { .. }
         ));
         assert_eq!(*cloud.state.rotations.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn only_a_verified_click_marks_billing_as_opened() {
+        use crate::daemon::nearai_credential::balance::billing_opened_at;
+        let fixture = Fixture::new();
+        fixture.install(Some(key()), true);
+        let cloud = Cloud::normal(&fixture).await;
+        let dir = fixture.shared.store.dir();
+
+        // Showing the card is not going to billing.
+        assert!(matches!(
+            fixture.read(&cloud, json!({})).await,
+            FundingReport::Ready { .. }
+        ));
+        assert!(billing_opened_at(dir).is_none());
+
+        // A click bound to a destination that no longer matches opens nothing.
+        let mut stale = expected(&key());
+        stale["expected_connection_revision"] = json!("0".repeat(64));
+        assert!(matches!(
+            fixture.read(&cloud, stale).await,
+            FundingReport::Changed
+        ));
+        assert!(billing_opened_at(dir).is_none());
+
+        // The click that hands back the browser destination does.
+        assert!(matches!(
+            fixture.read(&cloud, expected(&key())).await,
+            FundingReport::Ready { .. }
+        ));
+        assert!(billing_opened_at(dir).is_some());
     }
 
     #[tokio::test]

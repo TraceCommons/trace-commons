@@ -387,7 +387,9 @@ private struct Launcher: View {
 
         // The re-engagement declaration follows whether a notification can
         // be posted: re-read once the prompt is answered, and whenever the
-        // app comes forward, since System Settings may have changed it.
+        // app comes forward, since System Settings may have changed it. The
+        // balance is re-read on the same cue once billing has been opened,
+        // since a payment may have landed while the browser was in front.
         Notifier.shared.onAuthorizationAnswered = {
             Task { @MainActor in await model.refreshReengageDeclaration() }
         }
@@ -396,7 +398,10 @@ private struct Launcher: View {
             object: nil,
             queue: .main
         ) { _ in
-            Task { @MainActor in await model.refreshReengageDeclaration() }
+            Task { @MainActor in
+                model.refreshBalanceOnActivation()
+                await model.refreshReengageDeclaration()
+            }
         }
 
         NotificationCenter.default.addObserver(
