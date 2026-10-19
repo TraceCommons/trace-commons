@@ -49,6 +49,8 @@ struct TracesTreeView: View {
     /// The folder whose Submit all as is open, from its row's split
     /// button (owner, 2026-10-19).
     @State private var verdictFolder: TracesTree.FolderNode?
+    /// The folder whose Submit split button's menu is open.
+    @State private var submitMenu: String?
     /// The session whose row menu (Dismiss session) is open.
     @State private var sessionMenu: String?
     /// The session whose Dismiss confirmation is open (Ron's
@@ -558,7 +560,10 @@ struct TracesTreeView: View {
             onToggleExpand: { toggle(folder.id) },
             onSelect: { selection = Self.toggled(.folder(projectID: folder.id), current: selection) },
             onSubmit: submits && !busy ? { Task { await store.contributeFolder(folder, verdict: nil) } } : nil,
-            onMenu: menu ? { folderMenu = folderMenu == folder.id ? nil : folder.id } : nil
+            onMenu: menu ? {
+                submitMenu = nil
+                folderMenu = folderMenu == folder.id ? nil : folder.id
+            } : nil
         )
         .help(submits ? Self.submitHelp(offer.withheldLine, words: words) : "")
         .disabled(store.writing.contains(folder.id))
@@ -577,9 +582,18 @@ struct TracesTreeView: View {
                         request(folder, .ignore)
                     },
                     onDismiss: { folderMenu = nil })
+            } else if split, submitMenu == folder.id, let outcome {
+                TracesSubmitMenu(
+                    label: outcome.submitAllAs, tip: outcome.submitAllAsTooltip,
+                    onPick: {
+                        submitMenu = nil
+                        verdictFolder = folder
+                    },
+                    onDismiss: { submitMenu = nil })
+                    .offset(TracesSubmitMenu.offset)
             }
         }
-        .zIndex(folderMenu == folder.id ? 1 : 0)
+        .zIndex(folderMenu == folder.id || submitMenu == folder.id ? 1 : 0)
         .id(Self.rowID(.folder(projectID: folder.id)))
         .accessibilityFocused($spoken, equals: Self.rowID(.folder(projectID: folder.id)))
         // The withheld line is drawn once: the tab's notice may already say
@@ -600,11 +614,14 @@ struct TracesTreeView: View {
     @ViewBuilder
     private func splitSubmit(_ folder: TracesTree.FolderNode, title: String, busy: Bool) -> some View {
         if let outcome = store.disclosure?.outcome {
-            GlassSplitButton(title, menuLabel: outcome.submitAllAs) {
+            GlassSplitButton(
+                title, menuLabel: outcome.submitAllAs, menuOpen: submitMenu == folder.id,
+                onMenu: {
+                    folderMenu = nil
+                    submitMenu = submitMenu == folder.id ? nil : folder.id
+                }
+            ) {
                 Task { await store.contributeFolder(folder, verdict: nil) }
-            } menu: {
-                Button(outcome.submitAllAs) { verdictFolder = folder }
-                    .help(outcome.submitAllAsTooltip)
             }
             .disabled(busy)
         }
@@ -907,10 +924,53 @@ enum QueueEntryBridge {
 /// and the core's label, floating under the row's kebab (38 down, 6 in from
 /// the right) over the rows below it, never pushing them down. Escape
 /// closes it, as the menus do.
+/// The glass menu panel the Traces tab's own menus share (owner,
+/// 2026-10-19): a folder row's "..." menu and the Submit split buttons'
+/// chevron, so they look alike. Opaque under its glass, so the rows it
+/// floats over never show through it; Escape closes it.
+struct TracesMenuPanel<Content: View>: View {
+    let onDismiss: () -> Void
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) { content }
+            .padding(GlassTokens.Space.s5)
+            .glassSurface(.menu, floating: true)
+            .background(RoundedRectangle(cornerRadius: GlassTier.menu.radius, style: .continuous)
+                .fill(GlassTokens.Color.paneOpaque.color))
+            .fixedSize()
+            .onExitCommand(perform: onDismiss)
+    }
+}
+
+/// One item in a `TracesMenuPanel`: its glyph and the core's words.
+struct TracesMenuItem: View {
+    let systemImage: String
+    let label: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: GlassTokens.Space.s3) {
+                Image(systemName: systemImage)
+                    .glassGlyph(11, weight: .semibold)
+                    .accessibilityHidden(true)
+                Text(label)
+                    .glassType(GlassTokens.TypeScale.label)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(GlassColor.textPrimary)
+            .padding(.horizontal, GlassTokens.Space.s4)
+            .frame(height: GlassTokens.Size.control)
+            .glassHover(GlassTokens.Color.controlHover, in: Capsule())
+        }
+        .buttonStyle(GlassPressStyle())
+    }
+}
+
 /// A folder row's menu (owner, 2026-10-19): its contribution rule, as the
 /// Folder inspector's picker in the core's names, then Ignore. It floats
-/// over the rows below the row, as the session row's menu pill does, and
-/// Escape closes it.
+/// over the rows below the row, as the session row's menu pill does.
 struct TracesFolderMenu: View {
     let folder: TracesTree.FolderNode
     /// The core's "Contribution rule": the picker's heading and its name.
@@ -922,7 +982,7 @@ struct TracesFolderMenu: View {
     let onDismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+        TracesMenuPanel(onDismiss: onDismiss) {
             if let mode = folder.mode, !folder.offerableModes.isEmpty {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                     Text(ruleTitle)
@@ -941,32 +1001,31 @@ struct TracesFolderMenu: View {
                 }
             }
             if let ignoreLabel {
-                Button(action: onIgnore) {
-                    HStack(spacing: GlassTokens.Space.s3) {
-                        Image(systemName: "nosign")
-                            .glassGlyph(11, weight: .semibold)
-                            .accessibilityHidden(true)
-                        Text(ignoreLabel)
-                            .glassType(GlassTokens.TypeScale.label)
-                            .lineLimit(1)
-                    }
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .padding(.horizontal, GlassTokens.Space.s4)
-                    .frame(height: GlassTokens.Size.control)
-                    .glassHover(GlassTokens.Color.controlHover, in: Capsule())
-                }
-                .buttonStyle(GlassPressStyle())
+                TracesMenuItem(systemImage: "nosign", label: ignoreLabel, action: onIgnore)
             }
         }
-        .padding(GlassTokens.Space.s5)
-        .glassSurface(.menu, floating: true)
-        // Opaque under its glass: the rows it floats over never show
-        // through it.
-        .background(RoundedRectangle(cornerRadius: GlassTier.menu.radius, style: .continuous)
-            .fill(GlassTokens.Color.paneOpaque.color))
-        .fixedSize()
-        .onExitCommand(perform: onDismiss)
         .offset(TracesRowMenuPill.offset)
+    }
+}
+
+/// The Submit split button's menu (owner, 2026-10-19), in the "..." menu's
+/// look: Submit all as, which opens the outcome modal.
+struct TracesSubmitMenu: View {
+    /// The core's "Submit all as" and its tip.
+    let label: String
+    let tip: String
+    let onPick: () -> Void
+    let onDismiss: () -> Void
+
+    /// Where it sits under a folder row: under the split button's chevron,
+    /// which ends left of the row menu's column.
+    static let offset = CGSize(width: -36, height: 38)
+
+    var body: some View {
+        TracesMenuPanel(onDismiss: onDismiss) {
+            TracesMenuItem(systemImage: "checklist", label: label, action: onPick)
+                .help(tip)
+        }
     }
 }
 

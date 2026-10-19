@@ -651,11 +651,17 @@ public struct GlassIconMenu<Value: Hashable>: View {
 /// left, and a chevron on the right that opens a menu of variants of it.
 /// The inline glass button's box, split by a hairline. The chevron is
 /// named by `menuLabel` for assistive tech; the action by its title.
+///
+/// With `onMenu`, the chevron opens the caller's own menu panel instead of
+/// a system menu (owner, 2026-10-19: in the glass menus' look), and
+/// `menuOpen` turns it while that panel is open.
 public struct GlassSplitButton<MenuContent: View>: View {
     private let title: String
     private let menuLabel: String
     private let action: () -> Void
     private let menu: MenuContent
+    private let onMenu: (() -> Void)?
+    private let menuOpen: Bool
 
     public init(
         _ title: String, menuLabel: String, action: @escaping () -> Void,
@@ -665,6 +671,18 @@ public struct GlassSplitButton<MenuContent: View>: View {
         self.menuLabel = menuLabel
         self.action = action
         self.menu = menu()
+        self.onMenu = nil
+        self.menuOpen = false
+    }
+
+    fileprivate init(_ title: String, menuLabel: String, menuOpen: Bool, onMenu: @escaping () -> Void,
+                     action: @escaping () -> Void, menu: MenuContent) {
+        self.title = title
+        self.menuLabel = menuLabel
+        self.action = action
+        self.menu = menu
+        self.onMenu = onMenu
+        self.menuOpen = menuOpen
     }
 
     public var body: some View {
@@ -684,26 +702,51 @@ public struct GlassSplitButton<MenuContent: View>: View {
                 .frame(width: 1)
                 .padding(.vertical, 6)
                 .accessibilityHidden(true)
-            Menu {
-                menu
-            } label: {
-                GlassGlyphView(.chevronDown)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .padding(.leading, GlassTokens.Space.s3)
-                    .padding(.trailing, GlassTokens.Space.s4)
-                    .frame(minHeight: metrics.minHeight)
-                    .contentShape(Rectangle())
+            if let onMenu {
+                Button(action: onMenu) {
+                    chevron(minHeight: metrics.minHeight)
+                        .rotationEffect(.degrees(menuOpen ? 180 : 0))
+                }
+                .buttonStyle(GlassPressStyle())
+                .fixedSize()
+                .accessibilityLabel(menuLabel)
+            } else {
+                Menu {
+                    menu
+                } label: {
+                    chevron(minHeight: metrics.minHeight)
+                }
+                .menuStyle(.button)
+                .buttonStyle(GlassPressStyle())
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .accessibilityLabel(menuLabel)
             }
-            .menuStyle(.button)
-            .buttonStyle(GlassPressStyle())
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .accessibilityLabel(menuLabel)
         }
         .glassType(metrics.type)
         .foregroundStyle(GlassColor.textPrimary)
         .glassSurface(.control)
         .fixedSize()
+    }
+
+    private func chevron(minHeight: CGFloat?) -> some View {
+        GlassGlyphView(.chevronDown)
+            .foregroundStyle(GlassColor.textSecondary)
+            .padding(.leading, GlassTokens.Space.s3)
+            .padding(.trailing, GlassTokens.Space.s4)
+            .frame(minHeight: minHeight)
+            .contentShape(Rectangle())
+    }
+}
+
+extension GlassSplitButton where MenuContent == EmptyView {
+    /// A split button whose chevron calls `onMenu`, for a menu panel the
+    /// caller draws; `menuOpen` says whether it is open.
+    public init(
+        _ title: String, menuLabel: String, menuOpen: Bool, onMenu: @escaping () -> Void,
+        action: @escaping () -> Void
+    ) {
+        self.init(title, menuLabel: menuLabel, menuOpen: menuOpen, onMenu: onMenu, action: action, menu: EmptyView())
     }
 }
 

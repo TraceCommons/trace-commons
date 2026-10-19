@@ -263,9 +263,9 @@ struct FlowMapView: View {
             layer.fill(disc, with: .color(GlassTokens.Color.statusOff.color))
             ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassColor.ink(0.25), scale: fit.scale)
         case .library where traces:
-            // The station's name and count show only under the pointer
-            // (owner, 2026-10-16); the card says them too.
-            guard selected else { return }
+            // No name under the station or the orb, even under the pointer
+            // (owner, 2026-10-19): its hover card says it.
+            return
         case .library(let active):
             layer.fill(disc, with: .color(active ? GlassTokens.Color.blue.color : GlassTokens.Color.mapNodeOff.color))
             if active { ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassTokens.Color.blue.color.opacity(0.35), scale: fit.scale) }

@@ -30,6 +30,9 @@ struct FolderInspector: View {
     @State private var confirming: TracesTreeView.Confirmation?
     /// Whether Submit all as's modal is open.
     @State private var choosingVerdict = false
+    /// Whether the Submit split button's menu is open (owner, 2026-10-19:
+    /// the Traces tab's menu panel, not a system menu).
+    @State private var submitMenuOpen = false
 
     var body: some View {
         if let words = store.words {
@@ -149,13 +152,26 @@ struct FolderInspector: View {
                 let title = store.submittingFolder == folder.id
                     ? words.tree.submitting : Self.submitAllTitle(offer.count, words: words)
                 if submits, let outcome = store.disclosure?.outcome {
-                    GlassSplitButton(title, menuLabel: outcome.submitAllAs) {
+                    GlassSplitButton(
+                        title, menuLabel: outcome.submitAllAs, menuOpen: submitMenuOpen,
+                        onMenu: { submitMenuOpen.toggle() }
+                    ) {
                         Task { await store.contributeFolder(folder, verdict: nil) }
-                    } menu: {
-                        Button(outcome.submitAllAs) { choosingVerdict = true }
-                            .help(outcome.submitAllAsTooltip)
                     }
                     .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
+                    .overlay(alignment: .topTrailing) {
+                        if submitMenuOpen {
+                            TracesSubmitMenu(
+                                label: outcome.submitAllAs, tip: outcome.submitAllAsTooltip,
+                                onPick: {
+                                    submitMenuOpen = false
+                                    choosingVerdict = true
+                                },
+                                onDismiss: { submitMenuOpen = false })
+                                .offset(y: GlassTokens.Size.controlLarge + GlassTokens.Space.s2)
+                        }
+                    }
+                    .zIndex(submitMenuOpen ? 1 : 0)
                 } else if submits {
                     Button(title) { Task { await store.contributeFolder(folder, verdict: nil) } }
                         .buttonStyle(GlassButtonStyle(.glass))
@@ -169,6 +185,8 @@ struct FolderInspector: View {
             }
             .lineLimit(1)
             .disabled(busy)
+            // Its menu floats over what follows the buttons.
+            .zIndex(submitMenuOpen ? 1 : 0)
             // A refused write, under the buttons it is about.
             if let refused = store.writeErrors[folder.id] {
                 GlassAlert(words.line(for: refused))

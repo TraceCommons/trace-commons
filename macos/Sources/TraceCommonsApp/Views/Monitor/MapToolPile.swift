@@ -133,9 +133,6 @@ struct MapToolPile: View {
                     .background(Circle().fill(GlassTokens.Color.paneOpaque.color))
                     .offset(x: side / 2 + 1 * s, y: 0)
             }
-            if node.ringed {
-                Circle().stroke(GlassColor.ink(0.35), lineWidth: 3 * s).padding(-4 * s)
-            }
         }
         .frame(width: side, height: side)
         .opacity(node.dashed ? 0.55 : node.dim)
