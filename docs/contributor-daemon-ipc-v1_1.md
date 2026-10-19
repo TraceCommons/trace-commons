@@ -6377,6 +6377,13 @@ shape rather than a bare number:
   A stale balance presented as current is worse than no balance; the daemon
   will not serve a cached figure older than a minute, and returns a failure
   state rather than the last good number when a read fails.
+- **Opening billing shortens the cache.** When a `near_ai_funding` call bound
+  to a displayed destination answers `ready` -- the click that sends the
+  contributor to billing -- the daemon stops serving any figure it read
+  before that click, and for the next 30 minutes holds a fresh figure for 5
+  seconds instead of a minute. A payment lands through the service's own
+  webhook, which nothing here hears about, so this is what lets a client's
+  next read show it. Forgetting the account ends the window.
 
 The units are the service's own: fixed scale 9 (nano-dollars) and USD,
 carried on the wire rather than assumed, and not rounded by the daemon.
@@ -7967,7 +7974,8 @@ means known zero and never serves the last successful amount after a failed read
 The balance and model-spend reads share the existing session rotation lock,
 conservative access-token reuse, single 401 retry, and stored-connection completion
 check. A forgotten or replaced account cannot receive an in-flight old account's
-cost report. Successful readings have the same 60-second cache policy as balance.
+cost report. Successful readings are cached for 60 seconds. Unlike balance, the
+cache is not shortened after billing opens: a payment does not change spend.
 The synchronous dispatcher returns `model-spend-requires-async`; socket and local
 CLI callers use the asynchronous dispatcher.
 
