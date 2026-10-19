@@ -4,7 +4,7 @@ import SwiftUI
 /// An sRGB colour with alpha, as the token source states it: its dark
 /// appearance value, and its light appearance value where the two differ.
 /// `color` follows the person's system appearance (light or dark) by itself.
-public struct GlassRGBA: Sendable, Equatable {
+public struct GlassRGBA: Sendable, Hashable {
     /// The dark appearance value.
     public let rgb: UInt32
     public let alpha: Double
@@ -51,7 +51,16 @@ public struct GlassRGBA: Sendable, Equatable {
     }
 
     /// The colour as a system dynamic colour: resolved per appearance.
+    ///
+    /// One instance per value, made once: views read token colours in
+    /// every body and every `Canvas` frame, and a new closure-backed
+    /// `NSColor` each time is an allocation per read and a colour SwiftUI
+    /// cannot see is the same as the last one.
     var dynamicNSColor: NSColor {
+        GlassColorCache.shared.dynamic(self) { $0.makeDynamicNSColor() }
+    }
+
+    func makeDynamicNSColor() -> NSColor {
         let dark = nsColor
         let light = self.light.nsColor
         return NSColor(name: nil) { appearance in
@@ -60,8 +69,13 @@ public struct GlassRGBA: Sendable, Equatable {
     }
 
     /// Whether an appearance is a light one (aqua, or its high-contrast and
-    /// vibrant variants).
+    /// vibrant variants). Asked on every resolve of every dynamic token
+    /// colour, so the answer is kept per appearance name.
     static func isLight(_ appearance: NSAppearance) -> Bool {
+        GlassColorCache.shared.isLight(appearance.name) { _ in resolveIsLight(appearance) }
+    }
+
+    static func resolveIsLight(_ appearance: NSAppearance) -> Bool {
         let match = appearance.bestMatch(from: [
             .darkAqua, .vibrantDark, .accessibilityHighContrastDarkAqua, .accessibilityHighContrastVibrantDark,
             .aqua, .vibrantLight, .accessibilityHighContrastAqua, .accessibilityHighContrastVibrantLight,
@@ -101,12 +115,66 @@ public struct GlassRGBA: Sendable, Equatable {
     /// Whether an appearance is one of the system's Increase Contrast
     /// variants.
     static func isHighContrast(_ appearance: NSAppearance) -> Bool {
+        GlassColorCache.shared.isHighContrast(appearance.name) { _ in resolveIsHighContrast(appearance) }
+    }
+
+    static func resolveIsHighContrast(_ appearance: NSAppearance) -> Bool {
         let match = appearance.bestMatch(from: [
             .accessibilityHighContrastDarkAqua, .accessibilityHighContrastAqua,
             .accessibilityHighContrastVibrantDark, .accessibilityHighContrastVibrantLight,
             .darkAqua, .aqua, .vibrantDark, .vibrantLight,
         ])
         return match?.rawValue.contains("HighContrast") == true
+    }
+}
+
+/// What `GlassRGBA` resolves once and keeps: the dynamic colour for each
+/// value, and whether each appearance (by name, which is all `bestMatch`
+/// reads) is light or high contrast. Bounded: a value made at an
+/// arbitrary alpha is kept too, so past `limit` entries the colours are
+/// let go and made again on demand.
+final class GlassColorCache: @unchecked Sendable {
+    static let shared = GlassColorCache()
+    static let limit = 1024
+
+    private let lock = NSLock()
+    private var colours: [GlassRGBA: NSColor] = [:]
+    private var light: [NSAppearance.Name: Bool] = [:]
+    private var highContrast: [NSAppearance.Name: Bool] = [:]
+
+    func dynamic(_ value: GlassRGBA, make: (GlassRGBA) -> NSColor) -> NSColor {
+        lock.lock()
+        defer { lock.unlock() }
+        if let colour = colours[value] { return colour }
+        if colours.count >= Self.limit { colours.removeAll(keepingCapacity: true) }
+        let colour = make(value)
+        colours[value] = colour
+        return colour
+    }
+
+    func isLight(_ name: NSAppearance.Name, resolve: (NSAppearance.Name) -> Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if let answer = light[name] { return answer }
+        let answer = resolve(name)
+        light[name] = answer
+        return answer
+    }
+
+    func isHighContrast(_ name: NSAppearance.Name, resolve: (NSAppearance.Name) -> Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if let answer = highContrast[name] { return answer }
+        let answer = resolve(name)
+        highContrast[name] = answer
+        return answer
+    }
+
+    /// The number of colours kept (tests).
+    var colourCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return colours.count
     }
 }
 

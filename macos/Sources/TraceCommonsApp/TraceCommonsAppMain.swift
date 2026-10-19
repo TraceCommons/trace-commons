@@ -86,6 +86,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
                 .tint(GlassTokens.Color.purpleSoft.color)
                 // No focus ring drawn round controls (owner, 2026-10-11).
                 .focusEffectDisabled()
+                // Animations hold still while the window cannot be seen.
+                .glassAnimationVisibility()
         } label: {
             Launcher(model: model, compute: compute, navigation: navigation,
                      appDelegate: appDelegate, missionDrafts: missionDrafts, menuPanel: menuPanel)
@@ -108,6 +110,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
                 .tint(GlassTokens.Color.purpleSoft.color)
                 // No focus ring drawn round controls (owner, 2026-10-11).
                 .focusEffectDisabled()
+                // Animations hold still while the window cannot be seen.
+                .glassAnimationVisibility()
         }
         .windowResizability(.contentSize)
         #endif
@@ -121,6 +125,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
                 .tint(GlassTokens.Color.purpleSoft.color)
                 // No focus ring drawn round controls (owner, 2026-10-11).
                 .focusEffectDisabled()
+                // Animations hold still while the window cannot be seen.
+                .glassAnimationVisibility()
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 860, height: 760)
@@ -135,6 +141,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
                 .tint(GlassTokens.Color.purpleSoft.color)
                 // No focus ring drawn round controls (owner, 2026-10-11).
                 .focusEffectDisabled()
+                // Animations hold still while the window cannot be seen.
+                .glassAnimationVisibility()
         }
         .defaultSize(width: GlassTokens.Size.modalWidth, height: 640)
         .windowResizability(.contentMinSize)
@@ -189,6 +197,8 @@ struct MonitorScene: Scene {
                 .tint(GlassTokens.Color.purpleSoft.color)
                 // No focus ring drawn round controls (owner, 2026-10-11).
                 .focusEffectDisabled()
+                // Animations hold still while the window cannot be seen.
+                .glassAnimationVisibility()
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,

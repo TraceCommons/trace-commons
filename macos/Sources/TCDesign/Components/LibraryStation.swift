@@ -14,31 +14,56 @@ import SwiftUI
 ///
 /// `lit` is false while nothing has been contributed: the station is drawn
 /// dimmer, as the old library disc was drawn off.
+///
+/// `date`, when given, is the moment to draw: a caller that already runs a
+/// timeline (the flow map) passes its own, so one timeline drives the
+/// whole map. With none the station runs its own, at `frameInterval`, and
+/// only while its window can be seen (`GlassAnimationTimeline`).
 public struct GlassLibraryStation: View {
     private let lit: Bool
+    private let date: Date?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    public init(lit: Bool = true) {
+    public init(lit: Bool = true, date: Date? = nil) {
         self.lit = lit
+        self.date = date
     }
 
     /// One turn of the station.
     public static let turnSeconds: Double = 26
     /// The angle the station rests at, and starts from.
     static let restAngle: Double = 0.6
+    /// The station's own frame rate: one turn in 26 seconds moves the
+    /// solar arrays' tips about a point a frame at 20 frames a second.
+    public static let frameInterval: Double = 1 / 20
 
     public var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 30, paused: reduceMotion)) { timeline in
-            Canvas { context, size in
-                let seconds = timeline.date.timeIntervalSinceReferenceDate
-                let angle = reduceMotion
-                    ? Self.restAngle
-                    : Self.restAngle + seconds.truncatingRemainder(dividingBy: Self.turnSeconds) / Self.turnSeconds * 2 * .pi
-                Self.draw(in: &context, size: size, angle: angle, lit: lit)
+        Group {
+            if let date {
+                frame(at: date)
+            } else {
+                GlassAnimationTimeline(minimumInterval: Self.frameInterval, paused: reduceMotion) { date in
+                    frame(at: date)
+                }
             }
         }
         .shadow(color: Self.brandBlue.opacity(lit ? 0.35 : 0.12), radius: 6)
         .accessibilityHidden(true)
+    }
+
+    /// The station's angle at `seconds` past the reference date.
+    static func angle(at seconds: Double, reduceMotion: Bool) -> Double {
+        reduceMotion
+            ? restAngle
+            : restAngle + seconds.truncatingRemainder(dividingBy: turnSeconds) / turnSeconds * 2 * .pi
+    }
+
+    private func frame(at date: Date) -> some View {
+        let angle = Self.angle(at: date.timeIntervalSinceReferenceDate, reduceMotion: reduceMotion)
+        let lit = lit
+        return Canvas { context, size in
+            Self.draw(in: &context, size: size, angle: angle, lit: lit)
+        }
     }
 
     // MARK: Mesh
@@ -200,11 +225,20 @@ public struct GlassLibraryStation: View {
     /// A point of the mesh turned by `angle` about the station's axis, then
     /// tilted and leaned.
     static func turned(_ p: SIMD3<Double>, angle: Double) -> SIMD3<Double> {
-        let cy = cos(angle), sy = sin(angle)
+        turned(p, cy: cos(angle), sy: sin(angle))
+    }
+
+    /// The tilt's and the lean's cosines and sines, worked out once rather
+    /// than for every corner of every face on every frame.
+    static let cx = cos(tilt), sx = sin(tilt)
+    static let cz = cos(lean), sz = sin(lean)
+
+    /// `turned(_:angle:)` with the angle's cosine and sine given, so a
+    /// frame works them out once for the whole mesh. The same arithmetic in
+    /// the same order: the result is identical.
+    static func turned(_ p: SIMD3<Double>, cy: Double, sy: Double) -> SIMD3<Double> {
         let x = p.x * cy + p.z * sy, z = -p.x * sy + p.z * cy, y = p.y
-        let cx = cos(tilt), sx = sin(tilt)
         let y2 = y * cx - z * sx, z2 = y * sx + z * cx
-        let cz = cos(lean), sz = sin(lean)
         return SIMD3(x * cz - y2 * sz, x * sz + y2 * cz, z2)
     }
 
@@ -225,8 +259,9 @@ public struct GlassLibraryStation: View {
         var drawn: [Drawn] = []
         drawn.reserveCapacity(mesh.count)
         var markNear = -Double.infinity, markFar = Double.infinity
+        let cy = cos(angle), sy = sin(angle)
         for face in mesh {
-            let q = face.points.map { turned($0, angle: angle) }
+            let q = face.points.map { turned($0, cy: cy, sy: sy) }
             guard q.count >= 3 else { continue }
             var n = simd_cross(q[1] - q[0], q[2] - q[0])
             let length = simd_length(n)

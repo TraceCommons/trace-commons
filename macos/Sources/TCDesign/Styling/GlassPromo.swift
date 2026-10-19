@@ -165,12 +165,12 @@ private struct GlassPromoLight: View {
     var body: some View {
         switch treatment {
         case .aurora:
-            TimelineView(.animation(minimumInterval: 1 / 30, paused: still)) { context in
-                aurora(at: still ? 0 : context.date.timeIntervalSinceReferenceDate)
+            GlassAnimationTimeline(minimumInterval: 1 / 30, paused: still) { date in
+                aurora(at: still ? 0 : date.timeIntervalSinceReferenceDate)
             }
         case .shimmer:
-            TimelineView(.animation(minimumInterval: 1 / 60, paused: still)) { context in
-                shimmer(at: still ? nil : context.date.timeIntervalSinceReferenceDate)
+            GlassAnimationTimeline(minimumInterval: 1 / 60, paused: still) { date in
+                shimmer(at: still ? nil : date.timeIntervalSinceReferenceDate)
             }
         case .spotlight:
             spotlight
@@ -264,8 +264,8 @@ private struct GlassPromoEdge: View {
     var body: some View {
         switch treatment {
         case .glowBorder:
-            TimelineView(.animation(minimumInterval: 1 / 30, paused: still)) { context in
-                let turn = still ? 0 : (context.date.timeIntervalSinceReferenceDate / 8).truncatingRemainder(dividingBy: 1)
+            GlassAnimationTimeline(minimumInterval: 1 / 30, paused: still) { date in
+                let turn = still ? 0 : (date.timeIntervalSinceReferenceDate / 8).truncatingRemainder(dividingBy: 1)
                 let gradient = AngularGradient(colors: Self.ring, center: .center, angle: .degrees(turn * 360))
                 ZStack {
                     shape.strokeBorder(gradient, lineWidth: 1.5)

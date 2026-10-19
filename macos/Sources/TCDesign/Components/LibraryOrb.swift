@@ -8,12 +8,18 @@ import SwiftUI
 /// The sphere fills the frame less `inset` on each side, so the glow has
 /// room; Reduce Motion holds it still. `lit` is false while nothing has
 /// been contributed, and the orb is drawn dimmer.
+///
+/// `date`, when given, is the moment to draw, from a caller's own timeline
+/// (the flow map); with none the orb runs its own at `frameInterval`, only
+/// while its window can be seen (`GlassAnimationTimeline`).
 public struct GlassLibraryOrb: View {
     private let lit: Bool
+    private let date: Date?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    public init(lit: Bool = true) {
+    public init(lit: Bool = true, date: Date? = nil) {
         self.lit = lit
+        self.date = date
     }
 
     /// One turn of the meridians.
@@ -25,18 +31,31 @@ public struct GlassLibraryOrb: View {
     /// The meridians drawn, and the axis's lean.
     static let meridians = 6
     static let lean: Double = -14 * Double.pi / 180
+    /// The orb's own frame rate, as the station's.
+    public static let frameInterval: Double = GlassLibraryStation.frameInterval
 
     public var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 30, paused: reduceMotion)) { timeline in
-            Canvas { context, size in
-                let seconds: Double = timeline.date.timeIntervalSinceReferenceDate
-                let turn: Double = seconds.truncatingRemainder(dividingBy: Self.turnSeconds) / Self.turnSeconds
-                let angle: Double = reduceMotion ? Self.restAngle : Self.restAngle + turn * 2 * .pi
-                Self.draw(in: &context, size: size, angle: angle, lit: lit)
+        Group {
+            if let date {
+                frame(at: date)
+            } else {
+                GlassAnimationTimeline(minimumInterval: Self.frameInterval, paused: reduceMotion) { date in
+                    frame(at: date)
+                }
             }
         }
         .shadow(color: GlassLibraryStation.brandBlue.opacity(lit ? 0.5 : 0.15), radius: 10)
         .accessibilityHidden(true)
+    }
+
+    private func frame(at date: Date) -> some View {
+        let seconds: Double = date.timeIntervalSinceReferenceDate
+        let turn: Double = seconds.truncatingRemainder(dividingBy: Self.turnSeconds) / Self.turnSeconds
+        let angle: Double = reduceMotion ? Self.restAngle : Self.restAngle + turn * 2 * .pi
+        let lit = lit
+        return Canvas { context, size in
+            Self.draw(in: &context, size: size, angle: angle, lit: lit)
+        }
     }
 
     /// Each meridian's half-width as a share of the radius at `angle`, and
