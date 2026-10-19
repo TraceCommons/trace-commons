@@ -61,8 +61,6 @@ pub const DEFAULT_CALLS_LIMIT: usize = 50;
 /// The most rows one page may carry. A larger ask is refused, not capped, so
 /// a caller that pages by the size it asked for never skips rows.
 pub const MAX_CALLS_LIMIT: usize = 200;
-/// The longest model name passed through as recorded.
-const MAX_MODEL_LABEL_CHARS: usize = 128;
 
 pub const PARTY_COMMONS: &str = "commons";
 pub const PARTY_WITNESS: &str = "witness";
@@ -722,27 +720,10 @@ pub fn session_marks(
 
 /// A recorded model name, or `unknown` when it is not shaped like one.
 ///
-/// Free text from a proxy the contributor can patch, passed through as
-/// recorded only when it is at most 128 characters of the characters a model
-/// id uses and names no URL; anything else is `unknown`. It is the one value
-/// on this surface that is not a fixed label.
-#[must_use]
-pub fn model_label(recorded: Option<&str>) -> String {
-    let Some(name) = recorded else {
-        return UNKNOWN.to_string();
-    };
-    let shaped = !name.is_empty()
-        && name.chars().count() <= MAX_MODEL_LABEL_CHARS
-        && !name.contains("://")
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/' | '@'));
-    if shaped {
-        name.to_string()
-    } else {
-        UNKNOWN.to_string()
-    }
-}
+/// Defined beside `RoutedExchange` in the sources crate, so the Insights
+/// ledger series applies the same rule, and re-exported here at its old
+/// path. Its `unknown` is [`UNKNOWN`]; a test below holds the two equal.
+pub use crate::routing::model_label;
 
 /// The protocol family label, or `unknown`.
 fn family_label(facade: &str) -> &'static str {

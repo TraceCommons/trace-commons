@@ -577,11 +577,21 @@ struct ManagedLaunchSheet: View {
     @EnvironmentObject private var model: AppModel
     @State private var accountID = ""
     @State private var selectedModel = ""
+    /// The model picked for Claude Code or Codex on a saved NEAR AI key;
+    /// `ManagedSurface.defaultModel` lets the session take the tool's default.
+    @State private var pickedModel = ManagedSurface.defaultModel
+    /// NEAR AI's chat models for `catalogueTool`; nil until read, or when
+    /// they could not be.
+    @State private var catalogue: ManagedModelCatalogue?
+    @State private var catalogueTool: String?
     @State private var collectTraces = false
     private var isOpenCode: Bool { model.managedSnapshot?.accounts.first(where: { $0.id == accountID })?.tool == "opencode" }
     @State private var project: URL?
     private var selectedAccount: ManagedAccount? { model.managedSnapshot?.accounts.first { $0.id == accountID } }
     private var toolAvailable: Bool { selectedAccount.map { model.managedSnapshot?.canLaunch(tool: $0.tool) == true } ?? false }
+    private var offersModelChoice: Bool {
+        selectedAccount.map { ManagedSurface.offersModelChoice(tool: $0.tool, connection: $0.connection) } ?? false
+    }
 
     init(onClose: @escaping () -> Void, accountID: String = "") {
         self.onClose = onClose
@@ -629,6 +639,15 @@ struct ManagedLaunchSheet: View {
                         ManagedInstallLink(tool: availability, copy: model.managedText, labelKey: "update", includeToolName: true)
                     }
                 }
+                if offersModelChoice {
+                    ManagedField(label: model.managedText("model_choice")) {
+                        GlassPicker(
+                            model.managedText("model_choice"),
+                            selection: Binding(get: { pickedModel }, set: { pickedModel = $0 ?? ManagedSurface.defaultModel }),
+                            options: ManagedSurface.modelOptions(catalogue, copy: model.managedText).map { GlassPickerOption($0.title, value: $0.value) },
+                            placeholder: model.managedText("model_default_unknown"))
+                    }
+                }
                 if isOpenCode {
                     GlassTextField(model.managedText("model"), text: $selectedModel)
                     ManagedNote(text: model.managedText("opencode_scope"))
@@ -651,17 +670,32 @@ struct ManagedLaunchSheet: View {
                 ManagedNote(text: model.managedText("launch_scope").replacingOccurrences(of: "{destination}", with: model.managedSnapshot?.capabilities.terminalDestination ?? model.managedText("terminal")))
             }
         }
+        .onAppear(perform: loadModels)
+        .onChange(of: accountID) { _, _ in loadModels() }
     }
 
     private func launch() {
         guard toolAvailable, !model.managedBusy, let snapshot = model.managedSnapshot, let account = snapshot.accounts.first(where: { $0.id == accountID }), let project else { return }
-        var params: [String: Any] = ["request_id": UUID().uuidString, "purpose": "coding", "tool": account.tool, "connection": account.connection, "account_id": account.id, "cwd": project.path, "expected_generation": snapshot.generations[account.tool] ?? 0, "save_default": false]
-        if account.tool == "opencode" {
-            params["model"] = selectedModel.trimmingCharacters(in: .whitespacesAndNewlines)
-            params["collect_traces"] = collectTraces
-        }
+        let params = ManagedSurface.launchParams(
+            account: account, cwd: project.path, requestID: UUID().uuidString,
+            generation: snapshot.generations[account.tool] ?? 0,
+            model: account.tool == "opencode" ? selectedModel : pickedModel, collectTraces: collectTraces)
         model.managedAction("managed_launch_prepare", params: params, openTerminal: true)
         onClose()
+    }
+
+    /// Read the picker's models for the chosen account's tool, once per
+    /// tool. A different account starts again from the default.
+    private func loadModels() {
+        guard let account = selectedAccount, offersModelChoice else { return }
+        let tool = account.tool
+        guard catalogueTool != tool else { return }
+        catalogueTool = tool
+        catalogue = nil
+        pickedModel = ManagedSurface.defaultModel
+        model.managedModelCatalogue(tool: tool) { result in
+            if catalogueTool == tool { catalogue = result }
+        }
     }
 }
 

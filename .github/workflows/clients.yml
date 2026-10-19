@@ -34,7 +34,11 @@ on:
       - "scripts/ci/tests/test_native_passkey_entitlements.py"
       # The fixture test also reads the Tauri app's entitlements.
       - "tauri-desktop/src-tauri/entitlements.plist"
+      - "crates/trace-commons-client-server-tests/**"
       - "crates/trace-commons-contributor/**"
+      - "crates/trace-commons-contributor-sources/**"
+      - "crates/trace-commons-contributor-insights/**"
+      - "crates/trace-commons-contributor-platform/**"
       - "crates/trace-commons-contributor-ffi/**"
       - "crates/trace-commons-contributor-gtk/**"
       - "crates/trace-commons-protocol/**"
@@ -88,10 +92,22 @@ jobs:
       #
       # They use the in-memory test registry; the only real-store calls are
       # reads of references that were never stored.
+      #
+      # Parsers, Insights, and OS credential/file primitives now have separate
+      # crates. Keep all of their old contributor-lib coverage, including the
+      # macOS-only os_secret_store tests in the platform crate.
       - name: Contributor lib tests on macOS
         run: |
           cargo test -p trace-commons-contributor --lib
+          cargo test -p trace-commons-contributor-sources --lib
+          cargo test -p trace-commons-contributor-insights --lib
+          cargo test -p trace-commons-contributor-platform --lib
           cargo test -p trace-commons-contributor-ffi --test credential_store_self_check
+      # These three tests used to be part of the contributor's lib harness.
+      # Keep their macOS coverage without making every client test build the server.
+      - name: Native auth client/server contracts on macOS
+        run: |
+          cargo test -p trace-commons-client-server-tests --test contracts native_auth::
       # The release job is the only thing that runs the entitlement verifier
       # for real, so a bug in the script itself would first show on release
       # day. This runs its static checks against ad-hoc-signed fixtures.
@@ -207,13 +223,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # RUSTFLAGS=-D warnings comes from the workflow-level env, so an
       # unused import behind a cfg gate fails here the way it would in the
-      # unix jobs.
+      # unix jobs. trace-commons-contributor-sources holds the session
+      # parsers (and so the %USERPROFILE% discovery) split out of the
+      # contributor, so its tests run here too.
       - name: Test the contributor and FFI crates
-        run: cargo test -p trace-commons-contributor -p trace-commons-contributor-ffi
+        run: cargo test -p trace-commons-contributor -p trace-commons-contributor-sources -p trace-commons-contributor-insights -p trace-commons-contributor-platform -p trace-commons-contributor-ffi
       - name: Verify real Windows Credential Manager storage
-        run: cargo test -p trace-commons-contributor --lib real_os_round_trip_removes_only_its_synthetic_entry -- --ignored
+        run: cargo test -p trace-commons-contributor-platform --lib real_os_round_trip_removes_only_its_synthetic_entry -- --ignored
       - name: Verify real Commons Windows Credential Manager storage
-        run: cargo test -p trace-commons-contributor --lib real_commons_os_round_trip -- --ignored
+        run: cargo test -p trace-commons-contributor-platform --lib real_commons_os_round_trip -- --ignored
 
   windows-update-conformance:
     name: windows update conformance

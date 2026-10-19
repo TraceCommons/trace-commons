@@ -14,7 +14,7 @@ ROOT = HERE.parents[1]
 class GuardTests(unittest.TestCase):
     def setUp(self):
         self.inputs = [
-            (ROOT / "crates/trace-commons-contributor/src/source/opencode.rs").read_text(),
+            (ROOT / "crates/trace-commons-contributor-sources/src/source/opencode.rs").read_text(),
             (HERE / "opencode-routing.py").read_text(),
             (ROOT / "docs/superpowers/reports/2026-09-07-opencode-export-qualification.md").read_text(),
             (ROOT / "crates/trace-commons-contributor/src/daemon/harness.rs").read_text(),

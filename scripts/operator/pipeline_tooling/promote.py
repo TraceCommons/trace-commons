@@ -70,7 +70,7 @@ from .results import (
 # pilot's feature set (spec B-D1), so the signing step and the restore
 # harness run on the build the deployment runs.
 PROMOTE_FEATURES = ("--features", "near-ai-scorer,gcs-client,gcp-kms")
-PROMOTE_CARGO_ARGS = ("-p", "trace-commons-server", "--lib", *PROMOTE_FEATURES)
+PROMOTE_CARGO_ARGS = ("-p", "trace-commons-ingest", "--lib", *PROMOTE_FEATURES)
 
 PROMOTE_RUN_SCHEMA = "trace_commons.pipeline_promote_run.v1"
 PROMOTE_RUN_FILE = "promote-run.json"

@@ -32,6 +32,17 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// NEAR AI's chat models for `tool`'s Launch sheet picker; nil when
+    /// they could not be read, which leaves only the default to choose.
+    /// No error is shown: launching on the default needs no catalogue.
+    func managedModelCatalogue(tool: String, done: @escaping @MainActor (ManagedModelCatalogue?) -> Void) {
+        guard let client else { return done(nil) }
+        Task.detached(priority: .userInitiated) {
+            let catalogue = try? client.managedModelCatalogue(tool: tool)
+            await MainActor.run { done(catalogue) }
+        }
+    }
+
     /// The terminal app managed sessions open in, by the id the daemon
     /// offered in `capabilities.terminal_choices`. The daemon refuses any
     /// other value; the snapshot is re-read after the write.

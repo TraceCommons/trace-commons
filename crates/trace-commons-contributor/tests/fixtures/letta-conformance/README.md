@@ -9,7 +9,8 @@ filename carries the expectation:
 
 `<expected>` is either `ok` or one of the parser's documented rejection
 reasons. `letta_conformance_corpus_matches_expected_outcomes` in
-`src/source/trajectory.rs` parses every file and asserts the outcome matches,
+`crates/trace-commons-contributor-sources/src/source/trajectory.rs` (which
+reads this directory in place) parses every file and asserts the outcome matches,
 and separately asserts that every documented rejection reason has at least one
 fixture. Adding a case is dropping in a file; no Rust changes.
 

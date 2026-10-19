@@ -132,18 +132,44 @@ impl OpenCodeSession {
         Ok(())
     }
 
+    /// Run on `model`, the only model offered.
     pub fn command(&self, model: &str, base_url: &str, key: &str) -> Result<Command, ManagedError> {
-        if !valid_model(model) {
+        let only = [super::models::ChatModel {
+            id: model.to_owned(),
+            name: None,
+        }];
+        self.command_with_models(model, &only, base_url, key)
+    }
+
+    /// Run on `default`, offering every model in `models` (which must hold
+    /// it) in OpenCode's own picker, each under its display name or id.
+    /// The profile is isolated, so the list never reaches the person's own
+    /// OpenCode settings.
+    pub fn command_with_models(
+        &self,
+        default: &str,
+        models: &[super::models::ChatModel],
+        base_url: &str,
+        key: &str,
+    ) -> Result<Command, ManagedError> {
+        if !models.iter().any(|m| m.id == default) || !models.iter().all(|m| valid_model(&m.id)) {
             return Err(ManagedError::InvalidRequest);
         }
         let mut command = self.base_command()?;
-        let selected = format!("trace-managed/{model}");
+        let selected = format!("trace-managed/{default}");
+        let listed: serde_json::Map<String, serde_json::Value> = models
+            .iter()
+            .map(|m| {
+                let name = m.name.as_deref().unwrap_or(&m.id);
+                (m.id.clone(), json!({ "name": name }))
+            })
+            .collect();
         let config = json!({
             "model":selected,"small_model":selected,"share":"disabled",
             "enabled_providers":["trace-managed"],
             "provider":{"trace-managed":{"npm":"@ai-sdk/openai-compatible","name":"Managed connection",
                 "options":{"baseURL":base_url,"apiKey":"{env:TRACE_COMMONS_OPENCODE_KEY}"},
-                "models":{model:{"name":model}}
+                "models":listed
             }}
         });
         command

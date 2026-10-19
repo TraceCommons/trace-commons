@@ -90,14 +90,14 @@ Optional / posture:
 ## Build the binaries on the host
 
 ```
-cargo build --release --bin trace-commons-ingest \
+cargo build --release -p trace-commons-ingest --bin trace-commons-ingest \
   --features gcs-client,gcp-kms,near-ai-scorer,near-attestation-collateral
 cargo build --release --bin trace-commons-upload-claim-issuer
 ```
 
 Pitfalls:
 
-- A plain `cargo build --release --bin trace-commons-ingest` (no features)
+- A plain `cargo build --release -p trace-commons-ingest --bin trace-commons-ingest` (no features)
   produces a 28 MB binary with the GCS + KMS providers stubbed out. The
   startup validation then reports
   `object_store=trace_commons_service_owned_remote_disabled` and refuses

@@ -54,6 +54,18 @@
 //!   `{destination}` from `capabilities.terminal_destination`, as for
 //!   `sign_in_scope`. Its title is the Start button's own label, and its
 //!   buttons are `cancel` and `choose_folder`.
+//!
+//! Choosing the model of a NEAR AI session. Proposed 2026-10-16, not yet
+//! approved:
+//! - `model_choice` "Model" -- the Launch sheet's model picker label and
+//!   accessible name, for Claude Code and Codex on a saved NEAR AI account.
+//! - `model_default` "Default: {model}" -- the picker's first option, which
+//!   names no model and lets the session take the tool's default. Shells
+//!   fill `{model}` from `managed_model_catalogue`'s `default`; without one
+//!   they show `model_default_unknown` "Default".
+//! - `model_unavailable` "That model isn't available on NEAR AI. Choose
+//!   another." The line a shell shows for the refusal
+//!   `managed-model-unavailable`.
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "Managed sessions",
@@ -106,6 +118,10 @@ pub fn copy() -> serde_json::Value {
             "codex": "Codex",
             "opencode": "OpenCode",
             "model": "Model ID",
+            "model_choice": "Model",
+            "model_default": "Default: {model}",
+            "model_default_unknown": "Default",
+            "model_unavailable": "That model isn't available on NEAR AI. Choose another.",
             "collect_traces": "Collect this session",
             "opencode_scope": "Uses only the selected key and model in an isolated profile. Project OpenCode settings and plugins are disabled. API key means an OpenAI key; NEAR AI uses a NEAR AI key.",
             "collection_scope": "Collects this session when OpenCode exits, under your existing review and contribution settings. Other sessions created inside OpenCode are not collected.",

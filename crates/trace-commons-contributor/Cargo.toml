@@ -1,6 +1,6 @@
 [package]
 name = "trace-commons-contributor"
-version = "0.18.3"
+version = "0.19.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,18 +11,44 @@ repository.workspace = true
 # Cloud credentials) to a plaintext file store inside the config directory,
 # and makes `OsSecretBackend::new` refuse. Integration tests link this crate
 # without `cfg(test)`, so without it every test that generated a device
-# identity wrote a real login-keychain item and left it there.
+# identity wrote a real login-keychain item and left it there. It also
+# exposes `ManagedRoute::start_against`, which starts a managed route against
+# a local fixture instead of NEAR AI, for `tests/managed_statusline.rs`, and
+# the native-auth wire primitives for the separate client/server contract suite.
 #
-# Enabled ONLY by the self dev-dependency below, which cargo activates for
-# `cargo test` and never for `cargo build`/`--release` of a shipped binary.
-# Never enable it anywhere else. `tests/credential_store_isolation.rs` fails
-# if the wiring is lost.
-test-credential-store = []
+# Enabled ONLY by test dev-dependencies: the self dependency below and the
+# unpublished trace-commons-client-server-tests package. Never enable it for
+# `cargo build`/`--release` of a shipped binary.
+# `tests/credential_store_isolation.rs` fails if the wiring is lost.
+#
+# Forwarded to the Insights and platform crates, which now hold the digest-key
+# custody and the OS credential store. Under it the platform store refuses to
+# open from every build but that crate's own unit tests, so this crate's unit
+# tests no longer get the `cfg(test)` exemption they had while the store lived
+# here.
+# One line, so scripts/ci/check-release-credential-store.sh can permit this
+# exact definition.
+test-credential-store = ["trace-commons-contributor-insights/test-credential-store", "trace-commons-contributor-platform/test-credential-store"]
 
 [dependencies]
 trace-commons-protocol = { path = "../trace-commons-protocol", features = ["near-ai-privacy-filter"] }
 trace-commons-operator-client = { path = "../trace-commons-operator-client" }
 trace-commons-build-info = { path = "../trace-commons-build-info" }
+# The session parsers and routing overlay, split out so a daemon edit does
+# not recompile them. Re-exported as `source` and `routing`. A workspace crate
+# at this crate's version with no dependency this crate lacks, so it adds no
+# third-party package.
+trace-commons-contributor-sources = { path = "../trace-commons-contributor-sources" }
+# Local Insights, split out so a client edit elsewhere does not recompile it,
+# and the OS credential store and file primitives it shares with this crate.
+# Re-exported as `insights` and at the old `daemon::credential_store`,
+# `daemon::os_secret_store`, `config::write_atomic_0600`,
+# `evidence_import::open_import_file` and
+# `daemon::win_pipe::current_user_sid_string` paths. Workspace crates at this
+# crate's version with no dependency this crate lacks, so they add no
+# third-party package.
+trace-commons-contributor-insights = { path = "../trace-commons-contributor-insights" }
+trace-commons-contributor-platform = { path = "../trace-commons-contributor-platform" }
 # DCAP quote verification and EIP-191 signer recovery, for the redaction
 # witness: this client verifies an enclave's measurement BEFORE handing it a
 # raw session, and verifies the certificate it gets back before forwarding it.
@@ -126,10 +152,11 @@ keyring-core = "=1.0.0"
 #     for what is chosen and why, and for the `StartupProbes::Configured`
 #     rather than `Off` decision.
 #
-# NOT REACHED. #42 (`ConnectOptions`/`StatusLine`) is available and left at
-# `StatusLine::Offer`: this daemon plans Claude Code edits through
-# `plan_connect`, and the status line it installs names the `ironwire` binary,
-# not ours -- revisit if this crate ever becomes the executable in that slot.
+# REACHED. #42 (`ConnectOptions`/`StatusLine`) is used: this daemon plans
+# Claude Code edits through `plan_connect_with` and `StatusLine::Decline`,
+# because the status line IronWire would install runs `<this executable>
+# statusline` with no route home, and this program's `statusline` serves
+# only a managed session's route, named by `--home`.
 # #37 also renames the control API's `if_unchanged` request field to
 # `as_previewed`; that is IronWire's HTTP surface, which nothing in this
 # repository calls (checked by grep across crates/, macos/ and windows/), so
@@ -584,7 +611,59 @@ keyring-core = "=1.0.0"
 # IronWire changes (`Exchange.proof`, `Capture::request` becoming a method,
 # `CaptureConfig.receipts`, `LedgerContext` non-exhaustive) touch nothing this
 # crate names.
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "b1bd24176b402aab1a990a0f62d094d7a97ce636" }
+#
+# ADVANCE TO 9a4c231b. Three commits in the range, verified with
+# `git log --oneline b1bd2417..9a4c231b`: #60 serves the model a client names
+# when its backend's provider lists it (exact-model routing, in
+# `ironwire_core::policy`), #61 moves the Claude Code status line out of the
+# `ironwire` binary into a library module and adds `StatusLine::Command`, and
+# #62 follows a home's `endpoint.json` pointer only when it names that home's
+# token file.
+#
+# COST. Zero new packages, measured. Upstream changed no manifest and no lock
+# in the range -- `git diff --stat b1bd2417..9a4c231b -- Cargo.toml Cargo.lock
+# '*/Cargo.toml'` is empty -- and the new `statusline` module uses only
+# dependencies `ironwire_proxy` already had (chrono, reqwest, serde_json,
+# tokio, ironwire_core, ironwire_update). All three locks (root, GTK, Tauri)
+# were re-resolved through `cargo metadata` rather than `cargo update`, and
+# each diff is exactly 22 changed lines, all of them the eleven `ironwire_*`
+# source strings: no other package moved and no edge was added. Lock entries
+# are 974 root, 559 GTK and 735 Tauri before and after; this crate's
+# `cargo tree -e normal` is 310 deduplicated names. `cargo deny check
+# licenses` passes default and --all-features.
+#
+# MSRV. Unmoved: upstream's root `rust-version` reads `1.96` at both revs.
+#
+# SURFACE. `ironwire_catalog` did not move one byte (`git diff --stat` on
+# `crates/ironwire_catalog` is empty), and neither did `ironwire_proxy`'s
+# `embed.rs` or `proof` -- the only `ironwire_proxy` modules this crate names.
+#   * `ironwire_proxy` GAINS `pub mod statusline` (`line_for_home`, `line`,
+#     `render`, `endpoint_for_home`, `client_model_from_stdin`, ...).
+#     Additive; nothing here calls it yet.
+#   * `ironwire_agents::tools::StatusLine` GAINS `Command(String)` and so
+#     LOSES `Copy`; `ConnectOptions` loses `Copy` with it. Both were already
+#     `#[non_exhaustive]`. This crate names neither -- grep for `StatusLine`
+#     and `ConnectOptions` across `crates/**/*.rs` returns zero -- so the
+#     loss breaks nothing. `harness` still plans through `plan_connect`, whose
+#     default stays `StatusLine::Offer`; the NOT REACHED note above still
+#     holds, and `StatusLine::Command` is the seam that would let this crate's
+#     own executable fill that slot instead.
+#   * #60 changes routing inside the embedded proxy: a pinned or chosen
+#     backend whose provider-listed catalogue names the requested model now
+#     serves that model rather than a tier substitute. That is a behaviour
+#     change on a contributor's machine, upstream's own, with no API surface
+#     here.
+#
+# FLATPAK. `cargo-sources.json` was edited rather than regenerated, as in the
+# last advance, and moves the same 14 lines: 2 full revisions (the git
+# source's `commit` and the vendored-sources `contents`) and 12 short-hash
+# lines (`flatpak-cargo/git/ironwire-b1bd241` -> `-9a4c231`). `grep -c
+# b1bd241` on the file is 0. The lock's package set is unchanged, which is
+# what makes editing equivalent to regenerating.
+#
+# The IronClaw note above still applies: the root and GTK locks still name
+# 6dccbfbcbddfdfb53c11d3876f94bf3e716b55f9.
+ironwire_proxy ={ git = "https://github.com/nearai/ironwire", rev = "9a4c231b89922a8645f7e2329b0329fb295a8902" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -598,8 +677,8 @@ ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "b1bd24176b
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "b1bd24176b402aab1a990a0f62d094d7a97ce636" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "b1bd24176b402aab1a990a0f62d094d7a97ce636" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "9a4c231b89922a8645f7e2329b0329fb295a8902" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "9a4c231b89922a8645f7e2329b0329fb295a8902" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
@@ -645,11 +724,8 @@ windows-sys = { version = "0.61", features = [
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "=1.0.2", features = ["keychain", "protected"] }
-# Pinned to the exact version `apple-native-keyring-store` resolves, because
-# `storage_error` downcasts to this crate's `base::Error` to recover the
-# OSStatus. A different version is a different type and the downcast would
-# silently never match.
-security-framework = "=3.7.0"
+# `security-framework` moved to trace-commons-contributor-platform with
+# `os_secret_store`, whose `storage_error` is its only user here.
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = false, features = ["rt-tokio-crypto-rust"] }
@@ -674,18 +750,9 @@ sha3 = "0.10"
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["net"] }
 
-# Not on Windows: trace-commons-server's dependency chain reaches openssl-sys
-# via webauthn-rs -> webauthn-rs-core -> webauthn-attestation-ca -> openssl.
-# The CI Windows runner has OpenSSL headers but not the link libraries, so
-# `cargo test` (which builds dev-deps) panics there with "OpenSSL libdir ...
-# does not contain the required files to either statically or dynamically
-# link OpenSSL". This crate's own code never needs trace-commons-server; only
-# three cross-check tests in account_auth.rs and the e2e_enroll_and_submit
-# integration test use it, and both are gated `#[cfg(not(windows))]` /
-# `#![cfg(not(windows))]` to match. Do not move this back into unconditional
-# [dev-dependencies] without first fixing the openssl-sys link on Windows.
-[target.'cfg(not(windows))'.dev-dependencies]
-trace-commons-server = { path = "../trace-commons-server" }
+# Cross-contract tests live in trace-commons-client-server-tests. Keep the
+# server out of this crate's dev-dependencies too: otherwise even a filtered
+# client unit-test run must compile the server and its dependency tree.
 
 [[example]]
 name = "compute-package"

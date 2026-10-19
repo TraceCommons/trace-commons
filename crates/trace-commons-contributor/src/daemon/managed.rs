@@ -7,8 +7,9 @@ use crate::{
         AccountId, AccountView, AuthState, ConnectionKind, Generation, ManagedError, Selection,
         ToolId,
         accounts::AccountStore,
+        models,
         profiles::{NativeProfiles, find_native},
-        route::ManagedRoute,
+        route::{ManagedRoute, near_ai_base_url},
         secrets::{ApiKey, SecretStore},
         sessions::{
             LaunchContext, LaunchPurpose, LaunchRequest, LifecycleReport, SessionRegistry,
@@ -546,6 +547,9 @@ pub async fn handle_async(shared: &DaemonShared, request: &Request) -> Response 
     if request.method == "managed_launch_redeem" {
         return redeem_async(shared, request).await;
     }
+    if request.method == "managed_model_catalogue" {
+        return model_catalogue(request).await;
+    }
     let sign_in = sign_in_present(shared);
     let choice = terminal_choice(shared);
     let mut ended = vec![];
@@ -557,6 +561,36 @@ pub async fn handle_async(shared: &DaemonShared, request: &Request) -> Response 
     for route in ended {
         route.shutdown().await;
     }
+    respond(request, result)
+}
+
+/// The NEAR AI chat models a launch can name, and the one `tool` gets
+/// when it names none (`managed::models`). The catalogue is public: no
+/// key is read or sent. Answers `{"models":[{"id","name"?}],"default"}`.
+async fn model_catalogue(request: &Request) -> Response {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        tool: ToolId,
+    }
+    let p: Params = match parse(request) {
+        Ok(p) => p,
+        Err(error) => return respond(request, Err(error.into())),
+    };
+    let Ok(client) = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    else {
+        return respond(request, Err(ManagedError::ModelUnavailable.into()));
+    };
+    let result = match models::fetch(&client, near_ai_base_url()).await {
+        Some(models) if !models.is_empty() => {
+            let default = models::default_for(p.tool, &models).map(|m| m.id.clone());
+            Ok(json!({"models":models,"default":default}))
+        }
+        _ => Err(ManagedError::ModelUnavailable.into()),
+    };
     respond(request, result)
 }
 
@@ -581,25 +615,39 @@ async fn redeem_async(shared: &DaemonShared, request: &Request) -> Response {
     }
     // No lock is held across the start: it waits on the network.
     let started = match key.map(ApiKey::new) {
-        Some(Ok(key)) => ManagedRoute::start(&shared.store, p.session_id, key)
-            .await
-            .map_err(|error| match error {
-                // The proxy reached no model with the sign-in.
-                ManagedError::SignInRequired => ManagedError::NearAiSignInRequired,
-                other => other,
-            }),
+        Some(Ok(key)) => ManagedRoute::start(
+            &shared.store,
+            p.session_id,
+            key,
+            context.session.tool,
+            context.session.model.as_deref(),
+        )
+        .await
+        .map_err(|error| match error {
+            // The proxy reached no model with the sign-in.
+            ManagedError::SignInRequired => ManagedError::NearAiSignInRequired,
+            other => other,
+        }),
         _ => Err(ManagedError::NearAiSignInRequired),
     };
     let result = with_service(shared, |service| match started {
         Ok(route) => {
             context.route_port = Some(route.port());
-            context.route_model = Some(route.model().to_owned());
+            context.route_model = Some(route.default_model().to_owned());
+            context.route_models = Some(route.models().to_vec());
+            // The row shows the model the session starts on. Only the row
+            // misses it if this cannot be saved; the launch goes ahead.
+            let _ = service
+                .sessions
+                .record_model(p.session_id, route.default_model());
+            context.session.model = Some(route.default_model().to_owned());
             service.routes.insert(p.session_id, route);
             Ok(json!(context))
         }
         Err(error) => {
             // Nothing will run: say so now, not after a heartbeat gap.
             let _ = service.sessions.report(LifecycleReport {
+                model: None,
                 collection: None,
                 session_id: p.session_id,
                 proof: context.proof.clone(),
@@ -681,6 +729,7 @@ fn label(error: ManagedError) -> &'static str {
         ManagedError::LaunchUnknown => "managed-launch-unknown",
         ManagedError::InvalidRequest => "managed-invalid-request",
         ManagedError::TerminalNotFound => "managed-terminal-not-found",
+        ManagedError::ModelUnavailable => "managed-model-unavailable",
     }
 }
 
@@ -1015,6 +1064,12 @@ mod tests {
         assert!(host);
         assert_eq!(context.route_port, None);
         assert_eq!(context.route_model, None);
+        assert_eq!(context.route_models, None);
+        // Absent, not null, until a route is started.
+        let wire = serde_json::to_value(&context).unwrap();
+        for field in ["route_port", "route_model", "route_models"] {
+            assert!(wire.get(field).is_none(), "{field}");
+        }
         assert_eq!(context.session.connection, ConnectionKind::NearAiSignIn);
         assert_eq!(context.session.account_label, "NEAR AI");
         assert!(service.take_routes(true).is_empty());

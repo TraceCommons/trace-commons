@@ -553,7 +553,7 @@ What a passing report does not show:
   which compares a query with each stored vector, in memory. The two gate
   services of `main` with a real scorer, `enclave_local_gpu` and
   `enclave_near_ai`, use `UsearchVectorIndex`
-  (`crates/trace-commons-server/src/bin/trace-commons-ingest.rs`). The
+  (`crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs`). The
   report says nothing about that index.
 - **Not the configuration of a deployed server.** The harness builds the
   baseline state in code, and it does not start the server through the
@@ -564,7 +564,7 @@ What a passing report does not show:
   (insert threshold 50,000 micros, chunk target 2,048 tokens, chunk maximum
   3,072 tokens, chunk cap 16, chunk minimum 64 tokens). Two values are not
   the default values of `main`
-  (`crates/trace-commons-server/src/bin/trace-commons-ingest.rs`):
+  (`crates/trace-commons-ingest/src/bin/trace-commons-ingest.rs`):
   - The credit for novelty is 2.5 credits on the two sides, so that the
     credit branch gets evidence. The default of `main` is 0
     (`DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`).
