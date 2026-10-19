@@ -1227,6 +1227,10 @@ pub struct MonitorShellCopy {
     /// or queued here only.
     pub connection_ready: &'static str,
     pub connection_local_only: &'static str,
+    /// The expander a popover notice folds its explanations behind (owner,
+    /// 2026-10-19: a notice's info strings collapse into a toggle).
+    /// Approved 2026-10-19.
+    pub notice_details: &'static str,
 }
 
 /// Ron's #1146 Home and History words that carry their structure
@@ -1489,6 +1493,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             watcher_caption: "Pausing stops contribution processing. It does not delete queued traces or change consent.",
             connection_ready: "Ready",
             connection_local_only: "Local only",
+            notice_details: "Details",
         },
         traces_graph: MonitorTracesGraphCopy {
             zoom_out: "Zoom out",

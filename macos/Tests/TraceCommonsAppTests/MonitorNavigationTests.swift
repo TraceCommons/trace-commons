@@ -663,8 +663,9 @@ final class MonitorNavigationTests: XCTestCase {
     }
 
     /// While onboarding is required the Monitor draws the notices, the
-    /// signed-out notice (whose button routes to first run) and a tab strip
-    /// of Inference alone (R-38): Home and Traces act on consent that has
+    /// signed-out notice (whose button routes to first run; a popover notice
+    /// over the tab since 2026-10-19) and a tab strip of Inference alone
+    /// (R-38): Home and Traces act on consent that has
     /// not been given. Every tab switch and the inspector draw the shown
     /// tab, so a restored Home or Traces never reaches the screen; the
     /// inspector admits the Private AI one alone. Before the core has said
@@ -672,7 +673,18 @@ final class MonitorNavigationTests: XCTestCase {
     /// as "signed out": the pane waits and the inspector draws nothing.
     func test_onlyInferenceIsDrawnWhileOnboardingIsRequired() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains("MonitorWords.signedOut"))
+        let notices = try Self.text("Views/Monitor/MonitorNotices.swift")
+        XCTAssertTrue(notices.contains("""
+                case .signedOut:
+                    items.append(GlassPopoverItem(id: "signed-out") {
+                        GlassPopoverNotice(title: MonitorWords.signedOut) {
+        """), "onboarding owed is a notice over the tab")
+        XCTAssertTrue(notices.contains("Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }"))
+        XCTAssertTrue(notices.contains("""
+                switch MonitorGate.of(
+                    startup: model.startup, onboardingKnown: model.onboardingKnown,
+                    requiresOnboarding: model.requiresOnboarding)
+        """), "the notices read the window's gate")
         XCTAssertTrue(window.contains("""
             private var gate: MonitorGate {
                 MonitorGate.of(
@@ -680,19 +692,9 @@ final class MonitorNavigationTests: XCTestCase {
                     requiresOnboarding: model.requiresOnboarding)
             }
         """), "the gate is the core's startup and onboarding state")
+        XCTAssertFalse(window.contains("ShellNotices()"), "the notices push the tabs down again")
         XCTAssertTrue(window.contains("""
-                            ShellNotices()
                             if gate != .awaiting {
-                                switch gate {
-                                case .down(let sentence):
-                                    StartupRefusedBanner(sentence: sentence)
-                                case .signedOut:
-                                    GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
-                                        Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
-                                    }
-                                case .awaiting, .open:
-                                    EmptyView()
-                                }
                                 GlassRuleTabs(
                                     MonitorWords.table?.shell.tabsLabel ?? "",
                                     selection: Binding(
@@ -861,9 +863,12 @@ final class MonitorNavigationTests: XCTestCase {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(firstRun.contains("struct StartupRefusedBanner: View"))
         XCTAssertEqual(firstRun.components(separatedBy: "StartupRefusedBanner(sentence: sentence)").count - 1, 1)
-        // The Monitor's pane, and Settings (Ron's modal over it, #1241 Task 10).
+        // The Monitor's notices over its tab (owner, 2026-10-19), and
+        // Settings (Ron's modal over it, #1241 Task 10).
         let modal = try Self.text("Views/Monitor/SettingsModal.swift")
-        XCTAssertEqual(window.components(separatedBy: "StartupRefusedBanner(sentence: sentence)").count - 1, 1)
+        let notices = try Self.text("Views/Monitor/MonitorNotices.swift")
+        XCTAssertEqual(window.components(separatedBy: "StartupRefusedBanner(").count - 1, 0)
+        XCTAssertEqual(notices.components(separatedBy: "StartupRefusedBanner(sentence: sentence, popover: true)").count - 1, 1)
         XCTAssertEqual(modal.components(separatedBy: "StartupRefusedBanner(sentence: sentence)").count - 1, 1)
         XCTAssertEqual((firstRun + window).components(separatedBy: "GlassHealthBanner(").count - 1, 1)
     }

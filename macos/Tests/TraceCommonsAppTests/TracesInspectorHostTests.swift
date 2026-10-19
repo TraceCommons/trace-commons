@@ -8,9 +8,9 @@ import TCDesign
 
 /// Ron's inspector host (#1146, Task 3 of the #1241 port): the selection's
 /// inspector on Home, Traces and History; Inference keeps its own. The
-/// health banners and the prompts are drawn above the Traces tree (owner,
-/// 2026-10-07). The inspector opens itself when something it must show
-/// appears, and never closes itself.
+/// health banners and the prompts are popover notices over the tab they
+/// belong to (owner, 2026-10-19, `MonitorNotices`). The inspector opens
+/// itself when something it must show appears, and never closes itself.
 @MainActor
 final class TracesInspectorHostTests: XCTestCase {
     static func text(_ rel: String) throws -> String {
@@ -49,19 +49,18 @@ final class TracesInspectorHostTests: XCTestCase {
         XCTAssertFalse(hostSource.contains("case .session(let entryID)"), "never an entry picked by the raw selection")
     }
 
-    /// Review Focus 4, off the Traces tab: Home and History still offer a
-    /// session's Contribute and Keep (the kept Traces selection's card), so
-    /// the health banners and the prompts are drawn above it there, outside
-    /// the choice of what the inspector shows. Selecting a session on
-    /// Traces and switching to Home never hides an undo, an offer or a core
-    /// that is down. On Traces they are above the tree, not repeated here.
+    /// Review Focus 4, off the Traces tab: only Home's History page,
+    /// restored from before History moved to Traces, still draws the
+    /// health banners and the prompts in its inspector, above the
+    /// selection's card and outside the choice of what the inspector shows.
+    /// Traces (its tree and its History page) and Inference draw them as
+    /// popover notices over the tab (owner, 2026-10-19), never here.
     func test_healthBannersStayVisibleWithASessionSelected() throws {
-        XCTAssertFalse(MonitorWindowView.promptsInInspector(.traces), "Traces draws them above the tree")
-        // History on Traces has no tree, so they go to the inspector, as on
-        // Home (owner, 2026-10-12: History moved to Traces).
-        XCTAssertTrue(MonitorWindowView.promptsInInspector(.traces, tracesPage: .history))
+        XCTAssertFalse(MonitorWindowView.promptsInInspector(.traces), "Traces draws them over the tab")
+        XCTAssertFalse(MonitorWindowView.promptsInInspector(.traces, tracesPage: .history),
+                       "Traces' History draws them over the tab")
         XCTAssertTrue(MonitorWindowView.promptsInInspector(.home))
-        XCTAssertFalse(MonitorWindowView.promptsInInspector(.inference), "Inference draws them atop its page")
+        XCTAssertFalse(MonitorWindowView.promptsInInspector(.inference), "Inference draws them over the tab")
         let host = try Self.inspectorColumn()
         let guarded = try XCTUnwrap(host.range(of: "if Self.promptsInInspector(shownTab, tracesPage: tracesPage) {"))
         let header = try XCTUnwrap(host.range(of: "InspectorPromptsHeader(traces: traces)"))
@@ -86,85 +85,119 @@ final class TracesInspectorHostTests: XCTestCase {
                       "the queue-full banner names the configured limit")
     }
 
-    /// Every arm of the window's inspector switch draws the prompts where
-    /// it is not beside the Traces tree: Inference above its own inspector
-    /// (Ron's shell mounts `WaitingPrompts` there), Home and History above
-    /// the host. So any tab that offers Contribute also offers its Undo,
-    /// and the Private AI offer is on Inference.
-    func test_everyPageWithoutTheTreeDrawsThePrompts() throws {
+    /// Each tab draws its own notices (owner, 2026-10-19): Traces the
+    /// undos, the core's health, the consent notices, the arming offer, the
+    /// nudges and the first-contribution note; Private AI the offer to route
+    /// AI requests through NEAR AI and the NEAR AI sign-in; every tab what
+    /// is about the app or the account, and a failed action. Neither Home's
+    /// page nor Inference's draws a prompt inline any more.
+    func test_everyTabDrawsItsOwnNotices() throws {
         let host = try Self.inspectorColumn()
-        XCTAssertTrue(host.contains("InspectorPromptsHeader(traces: traces)"), "History skips the prompts")
-        // Home's page and Inference's page, where the inspector stays
-        // closed, draw them at their top.
+        XCTAssertTrue(host.contains("InspectorPromptsHeader(traces: traces)"), "Home's History skips the prompts")
         let inference = try Self.text("Views/Monitor/InferenceViews.swift")
-        XCTAssertEqual(inference.components(separatedBy: "InspectorPrompts(store: traces)").count - 1, 1,
-                       "Inference skips the prompts")
+        XCTAssertFalse(inference.contains("InspectorPrompts("), "Inference draws the prompts inline again")
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        XCTAssertEqual(home.components(separatedBy: "InspectorPromptsHeader(traces: traces)").count - 1, 1,
-                       "Home skips the prompts")
+        XCTAssertFalse(home.contains("InspectorPromptsHeader("), "Home draws the prompts inline again")
+        XCTAssertFalse(home.contains("NudgeGlassCard("), "History draws its verdict news inline again")
+
+        let notices = try Self.text("Views/Monitor/MonitorNotices.swift")
+        func member(_ opening: String) throws -> String {
+            let start = try XCTUnwrap(notices.range(of: opening), opening)
+            let end = notices.range(of: "\n    // MARK: ", range: start.upperBound..<notices.endIndex)?.lowerBound
+                ?? notices.range(of: "\n    private ", range: start.upperBound..<notices.endIndex)?.lowerBound
+                ?? notices.endIndex
+            return String(notices[start.lowerBound..<end])
+        }
+        let traces = try member("    private var tracesOffers: [GlassPopoverItem] {")
+            + member("    private var tracesNow: [GlassPopoverItem] {")
+            + member("    private var consentItems: [GlassPopoverItem] {")
+            + member("    private var undoItems: [GlassPopoverItem] {")
+            + member("    private var approvalUndo: GlassPopoverItem? {")
+        for needle in ["model.undo", "traces.lastContributed", "traces.lastContributedFolder", "traces.lastKept",
+                       "model.armingOffer", "TracesHealth.banners(", "traces.nudgeCard", "offerItems(.traces)",
+                       "model.status.grantVoids", "model.status.armingRewordings", "model.gateHeldNotice",
+                       "model.witnessCopy?.onboarding", "traces.folderNotice"] {
+            XCTAssertTrue(traces.contains(needle), "the Traces notices lack \(needle)")
+        }
+        let privateAI = try member("    private var privateAIItems: [GlassPopoverItem] {")
+        for needle in ["model.showsPrivateInferenceOffer", "!snapshot.nearAiSignedIn", "model.managedText(\"sign_in_needed\")"] {
+            XCTAssertTrue(privateAI.contains(needle), "the Private AI notices lack \(needle)")
+        }
+        XCTAssertFalse(traces.contains("model.showsPrivateInferenceOffer"), "Traces offers Private AI again")
+        let everywhere = try member("    private var appItems: [GlassPopoverItem] {")
+            + member("    private var actionItems: [GlassPopoverItem] {")
+        for needle in ["model.isAttachedDaemon", "model.firstRunNotice", "model.legacyMigrationNotice",
+                       "model.showsLegacyMigrationOfferCard", "model.lastActionNotice", "model.lastActionError",
+                       "StartupRefusedBanner(sentence: sentence, popover: true)", "MonitorWords.signedOut"] {
+            XCTAssertTrue(everywhere.contains(needle), "every tab's notices lack \(needle)")
+        }
+        let history = try member("    private var historyOffers: [GlassPopoverItem] {")
+        XCTAssertTrue(history.contains("offerItems(.history)"))
+        XCTAssertTrue(history.contains("home.verdictsCard"))
     }
 
-    /// V5 and V6 of the #1146 delta: the undos, the offers and the
-    /// first-contribution note are drawn above the Traces tree, under the
-    /// health banners, and in the inspector only off the Traces tab. R-LAYOUT-1: with a tree, they
-    /// sit on a shelf above it that is capped at a share of the pane and
-    /// scrolls inside itself, so however tall they are the tree keeps rows
-    /// on screen and nothing is pushed out of the window; no branch draws
-    /// them outside a scroll.
-    func test_offersUndoAndHealthSitAboveTheTree() throws {
+    /// The notices float over the top of the tab, under the tab bar, and
+    /// push nothing down (owner, 2026-10-19): the tree draws none of them,
+    /// and starts at the tab's top. In the stack, what waits on an answer
+    /// is behind what is happening now: the offers, then the consent
+    /// notices and the core's health, then the undos, a failed action, and
+    /// in front the traces moving now.
+    func test_noticesFloatOverTheTabAndPushNothing() throws {
         let tree = try Self.text("Views/Monitor/TracesViews.swift")
         let treeView = try XCTUnwrap(tree.range(of: "struct TracesTreeView"))
         let slot = try XCTUnwrap(tree.range(of: "struct PreviewSlot"))
         let body = String(tree[treeView.lowerBound..<slot.lowerBound])
-        let banners = try XCTUnwrap(body.range(of: "TracesHealth.banners("))
-        let prompts = try XCTUnwrap(body.range(of: "InspectorPrompts(store: store)"))
-        XCTAssertLessThan(banners.lowerBound, prompts.lowerBound, "the banners come first")
-        XCTAssertEqual(body.components(separatedBy: "InspectorPrompts(").count - 1, 1)
-        // With a tree, the prompts sit on the capped shelf, before the tree.
-        let shelf = try XCTUnwrap(body.range(of: "PromptsShelf(cap: Self.promptsCap(paneHeight: pane.size.height)) {\n"))
-        let afterShelf = try XCTUnwrap(body.range(of: "prompts\n", range: shelf.upperBound..<body.endIndex))
-        let treeUse = try XCTUnwrap(body.range(of: "tree\n", range: afterShelf.upperBound..<body.endIndex))
-        XCTAssertLessThan(afterShelf.lowerBound, treeUse.lowerBound, "the prompts precede the tree")
-        let scroll = try XCTUnwrap(body.range(of: "ScrollViewReader { proxy in"))
-        let folders = try XCTUnwrap(body.range(of: "ForEach(store.shownTree.folders)", range: scroll.upperBound..<body.endIndex))
-        XCTAssertNil(body.range(of: "prompts\n", range: scroll.upperBound..<folders.lowerBound),
-                     "the prompts are inside the tree's scroll again, where they can fill it")
-        // Every use of the prompts in the view body is inside a ScrollView.
-        let viewBody = try XCTUnwrap(body.range(of: "var body: some View {"))
-        let bodyEnd = try XCTUnwrap(body.range(of: "/// A mode change's confirmation"))
-        let drawn = String(body[viewBody.upperBound..<bodyEnd.lowerBound])
-        let uses = drawn.components(separatedBy: "\n").filter { $0.trimmingCharacters(in: .whitespaces) == "prompts" }
-        XCTAssertEqual(uses.count, 3, "the loading, empty and tree branches each draw the prompts")
-        XCTAssertEqual(drawn.components(separatedBy: "ScrollView {").count - 1, 3,
-                       "the loading and empty branches scroll the prompts, and the tree scrolls")
-        let shelfType = try XCTUnwrap(tree.range(of: "struct PromptsShelf"))
-        XCTAssertTrue(tree[shelfType.lowerBound...].contains("ScrollView {"), "the shelf scrolls its prompts")
-        XCTAssertFalse(body.contains("            InspectorPrompts(store: store)\n            if store.phase"),
-                       "the prompts are drawn above the tree's scroll again")
-        XCTAssertTrue(body.contains("maxQueueEntries: model.daemonSettings?.maxQueueEntries"),
-                      "the queue-full banner names the configured limit")
-        // The inspector draws them only where the tree is not shown: once,
-        // under the guard that limits them to Home (History).
+        for gone in ["TracesHealth.banners(", "InspectorPrompts(", "PromptsShelf", "NudgeGlassCard(",
+                     "TraceTransferStack", "GlassPopoverStack"] {
+            XCTAssertFalse(body.contains(gone), "the tree draws \(gone) again")
+        }
+        XCTAssertFalse(tree.contains("struct PromptsShelf"), "a shelf would push the tree down")
+
         let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("""
+                            content()
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                                .overlay(alignment: .top) { notices() }
+                                .padding(.top, Self.contentTop)
+        """), "the notices float over the tab's content, inside its insets")
+        XCTAssertFalse(window.contains("ShellNotices()"), "the notices push the tabs down again")
         XCTAssertEqual(window.components(separatedBy: "InspectorPrompts(").count - 1, 0)
         XCTAssertEqual(window.components(separatedBy: "InspectorPromptsHeader(").count - 1, 1)
+
+        let notices = try Self.text("Views/Monitor/MonitorNotices.swift")
+        let items = try XCTUnwrap(notices.range(of: "    private var items: [GlassPopoverItem] {"))
+        let itemsEnd = try XCTUnwrap(notices.range(of: "\n    }\n", range: items.upperBound..<notices.endIndex))
+        let order = String(notices[items.upperBound..<itemsEnd.lowerBound])
+        XCTAssertTrue(order.contains("items += tracesOffers + tracesNow"))
+        XCTAssertTrue(order.contains("items += tracesOffers + historyOffers + tracesNow"))
+        let actions = try XCTUnwrap(order.range(of: "items += actionItems"))
+        let transfers = try XCTUnwrap(order.range(of: "TraceTransferCard.items("))
+        XCTAssertLessThan(actions.lowerBound, transfers.lowerBound, "the traces moving now are in front")
+        let now = try XCTUnwrap(notices.range(of: "    private var tracesNow: [GlassPopoverItem] {"))
+        let nowBody = String(notices[now.upperBound...].prefix(2500))
+        let health = try XCTUnwrap(nowBody.range(of: "TracesHealth.banners("))
+        let undos = try XCTUnwrap(nowBody.range(of: "items += undoItems"))
+        XCTAssertLessThan(health.lowerBound, undos.lowerBound, "an undo is behind the core's health")
+        XCTAssertTrue(nowBody.contains("maxQueueEntries: model.daemonSettings?.maxQueueEntries"),
+                      "the queue-full banner names the configured limit")
+        // The core's health has no X: it goes when its cause does.
+        let healthItem = String(nowBody[health.lowerBound...].prefix(700))
+        XCTAssertTrue(healthItem.contains("GlassPopoverNotice(title: banner.title) {"))
     }
 
-    /// R-LAYOUT-1, round 2: the prompts shelf never takes more than its
-    /// share of the pane, so the tree always keeps rows on screen, and an
-    /// empty shelf takes no room.
-    func test_promptsShelfLeavesTheTreeRows() {
-        let pane: CGFloat = 600
-        let cap = TracesTreeView.promptsCap(paneHeight: pane)
-        XCTAssertEqual(cap, pane * TracesTreeView.promptsShare, accuracy: 0.001)
-        XCTAssertLessThanOrEqual(TracesTreeView.promptsShare, 0.5, "the tree keeps at least half the pane")
-        // A tall offer plus the first-contribution note is clamped to the cap.
-        XCTAssertEqual(PromptsShelf<EmptyView>.shelfHeight(content: 900, cap: cap), cap)
-        XCTAssertGreaterThanOrEqual(pane - PromptsShelf<EmptyView>.shelfHeight(content: 900, cap: cap), 300)
-        // A short notice is drawn at its own height, and nothing takes none.
-        XCTAssertEqual(PromptsShelf<EmptyView>.shelfHeight(content: 40, cap: cap), 40)
-        XCTAssertEqual(PromptsShelf<EmptyView>.shelfHeight(content: 0, cap: cap), 0)
-        XCTAssertEqual(TracesTreeView.promptsCap(paneHeight: -10), 0)
+    /// A card closed with its X stays closed until the window opens again;
+    /// every other card is drawn, in its order. Each tab's page picks its
+    /// notices.
+    func test_closedNoticesStayClosedAndEachPageHasItsPlace() {
+        let items = ["a", "b", "c"].map { id in GlassPopoverItem(id: id) { EmptyView() } }
+        XCTAssertEqual(MonitorNotices.shown(items, closed: ["b"]).map(\.id), ["a", "c"])
+        XCTAssertEqual(MonitorNotices.shown(items, closed: []).map(\.id), ["a", "b", "c"])
+        XCTAssertEqual(MonitorNotices.place(.traces, tracesPage: .tree), .traces)
+        XCTAssertEqual(MonitorNotices.place(.traces, tracesPage: .history), .history)
+        XCTAssertEqual(MonitorNotices.place(.inference, tracesPage: .tree), .privateAI)
+        XCTAssertEqual(MonitorNotices.place(.home, tracesPage: .history), .home)
+        XCTAssertEqual(MonitorNotices.place(.home, tracesPage: .tree, homePage: .history), .homeHistory)
+        XCTAssertEqual(MonitorNotices.place(.insights, tracesPage: .tree), .insights)
     }
 
     /// An undo appearing is a new demand, and a new demand opens the
@@ -233,9 +266,9 @@ final class TracesInspectorHostTests: XCTestCase {
         return String(window[inspector.upperBound..<end.lowerBound])
     }
 
-    /// The inspector stays closed on Inference (owner, 2026-10-09): its
-    /// Private AI summary heads the tab's main pane, and the inspector
-    /// column draws nothing of Inference's.
+    /// The inspector stays closed on Inference (owner, 2026-10-09): the
+    /// Private AI switch heads the tab's main pane (owner, 2026-10-19), and
+    /// the inspector column draws nothing of Inference's.
     func test_inferenceHasNoInspector() throws {
         XCTAssertFalse(MonitorWindowView.inspectorAvailable(.inference, homePage: .overview))
         let pane = try Self.inspectorColumn()
@@ -246,7 +279,8 @@ final class TracesInspectorHostTests: XCTestCase {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertFalse(window.contains("PrivateAIInspectorView("))
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
-        XCTAssertEqual(views.components(separatedBy: "PrivateAIInspectorView(store: store)").count - 1, 1)
+        XCTAssertEqual(views.components(separatedBy: "PrivateAIToggleRow(store: store)").count - 1, 1)
+        XCTAssertFalse(views.contains("PrivateAIInspectorView(store: store)"), "the status row is drawn beside the switch")
     }
 
     /// The column draws the host; an opened History row shows in

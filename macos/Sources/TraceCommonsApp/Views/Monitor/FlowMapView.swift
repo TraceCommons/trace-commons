@@ -130,33 +130,44 @@ struct FlowMapView: View {
             }
             // A click on the field, not a node, lets go of the pinned card.
             .onTapGesture { pinned = nil }
-            .overlay(alignment: .bottomTrailing) {
-                if zoomable { zoomControls.padding(GlassTokens.Space.mapOverlayInset) }
-            }
-            // The traces being contributed, kept or dismissed, floating
-            // above the legend and the zoom, stacked as they follow one
-            // another (owner, 2026-10-19).
+            // The map's foot, fixed whatever its zoom or focus (owner,
+            // 2026-10-12): the trace's card above, then the legend and the
+            // zoom on one row. The legend wraps onto a second line before it
+            // would run under the zoom (owner, 2026-10-19: they overlapped
+            // in a narrow map), and the card always sits above both.
             .overlay(alignment: .bottom) {
-                if scene.stack != nil, !transferCards.isEmpty {
-                    TraceTransferStack(
-                        cards: transferCards, anchor: .bottom,
-                        folderLabel: { transfer in scene.nodes.first { $0.id == "folder:" + transfer.folder }?.label },
-                        onClose: onCloseTransfer)
-                        .frame(maxWidth: Self.transferCardWidth)
-                        .padding(.horizontal, GlassTokens.Space.mapOverlayInset)
-                        .padding(.bottom, GlassTokens.Space.mapOverlayInset + Self.legendReserve)
-                        .transition(.opacity)
+                VStack(spacing: GlassTokens.Space.s4) {
+                    // The traces being contributed, kept or dismissed,
+                    // stacked as they follow one another (owner,
+                    // 2026-10-19), only while another tab than Traces is
+                    // shown: Traces shows them over its own list.
+                    if scene.stack != nil, !transferCards.isEmpty {
+                        GlassPopoverStack(
+                            TraceTransferCard.items(
+                                transferCards,
+                                folderLabel: { transfer in
+                                    scene.nodes.first { $0.id == "folder:" + transfer.folder }?.label
+                                },
+                                onClose: onCloseTransfer),
+                            anchor: .bottom)
+                            .frame(maxWidth: Self.transferCardWidth)
+                            .transition(.opacity)
+                    }
+                    if !legend.isEmpty || zoomable {
+                        HStack(alignment: .bottom, spacing: GlassTokens.Space.s6) {
+                            if !legend.isEmpty {
+                                // Offered the row's width before the spacer,
+                                // so it wraps only where it must.
+                                legendView
+                                    .layoutPriority(1)
+                                    .accessibilityHidden(true)
+                            }
+                            Spacer(minLength: 0)
+                            if zoomable { zoomControls.fixedSize() }
+                        }
+                    }
                 }
-            }
-            // The legend stays at the window's foot, whatever the map's
-            // zoom or focus (owner, 2026-10-12): it is not drawn in the
-            // map's own space, which scales and moves.
-            .overlay(alignment: .bottomLeading) {
-                if !legend.isEmpty {
-                    legendView
-                        .padding(GlassTokens.Space.mapOverlayInset)
-                        .accessibilityHidden(true)
-                }
+                .padding(GlassTokens.Space.mapOverlayInset)
             }
         }
         .accessibilityElement(children: .contain)
@@ -184,10 +195,8 @@ struct FlowMapView: View {
     /// The station's frame on the rocket map, in design units.
     static let stationSize = CGSize(width: 150, height: 130)
 
-    /// The transfer card's widest, and the room kept under it for the
-    /// legend and the zoom.
+    /// The transfer card's widest.
     static let transferCardWidth: CGFloat = 460
-    static let legendReserve: CGFloat = 44
 
     // MARK: Drawing
 
@@ -447,9 +456,10 @@ struct FlowMapView: View {
     }
 
     /// The rule legend, then #1146's last item: a tool that is not watched,
-    /// a dashed ring. Fixed in size, at the map's foot.
+    /// a dashed ring. At the map's foot, each item whole, wrapping onto
+    /// another line where the row would not fit beside the zoom.
     private var legendView: some View {
-        HStack(spacing: GlassTokens.Space.s5) {
+        HistoryFilterFlow(spacing: GlassTokens.Space.s5) {
             ForEach(legend, id: \.self) { mode in
                 let rule = Self.rule(mode)
                 legendItem(ProjectCopy.modeChoiceLabel(mode)) {
@@ -469,7 +479,6 @@ struct FlowMapView: View {
                 }
             }
         }
-        .fixedSize()
     }
 
     private func legendItem(_ word: String, @ViewBuilder dot: () -> some View) -> some View {
@@ -478,7 +487,9 @@ struct FlowMapView: View {
             Text(word)
                 .glassType(GlassTokens.TypeScale.micro.weight(.regular))
                 .foregroundStyle(GlassColor.textTertiary)
+                .lineLimit(1)
         }
+        .fixedSize()
     }
 
     /// A folder's name on the map: at most `labelLimit` characters, the

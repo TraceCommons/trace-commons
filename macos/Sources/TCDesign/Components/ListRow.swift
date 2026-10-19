@@ -101,6 +101,11 @@ public struct GlassListRow: View {
     /// 4.5:1 (owner ruling, 2026-10-07: hold the WCAG floors).
     static let selectedSubInk = selectedInk
 
+    /// The disclosure chevron's click target: as tall as the row, and wider
+    /// than its 16pt column by the row's 8pt leading inset and most of the
+    /// 8pt gap after it, centred on the glyph so the glyph does not move.
+    static let chevronTarget = CGSize(width: 28, height: GlassTokens.Size.listRow)
+
     /// The watch switch's column, kept on every row (#1146 `38px`).
     static let watchColumn: CGFloat = GlassTokens.Size.watchSwitchWidth
 
@@ -137,6 +142,12 @@ public struct GlassListRow: View {
                             .foregroundStyle(selected ? Self.selectedInk.color : GlassTokens.Color.statusOff.color)
                             .rotationEffect(.degrees(expanded ? 90 : 0))
                             .glassPressedFill()
+                            // The target is the row's height and reaches into
+                            // the row's leading inset and the gap before the
+                            // tile (owner, 2026-10-19: the 10pt glyph alone was
+                            // hard to hit). The glyph stays where it was drawn.
+                            .frame(width: Self.chevronTarget.width, height: Self.chevronTarget.height)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(GlassPressStyle())
                     // A native disclosure for assistive tech, so the system

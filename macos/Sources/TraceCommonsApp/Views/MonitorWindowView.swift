@@ -178,6 +178,9 @@ struct MonitorWindowView: View {
     /// describe, at the map's foot and the Traces tab's top (owner,
     /// 2026-10-19), fed by `MapTransferFeed`.
     @StateObject private var transfers = MapTransferPlayer()
+    /// The popover notices closed with their X until this window opens
+    /// again (`MonitorNotices`).
+    @State private var closedNotices: Set<String> = []
 
     var body: some View {
         GlassThreePane(
@@ -221,8 +224,7 @@ struct MonitorWindowView: View {
                             onReview: { entryId in
                                 Self.select(.session(entryID: entryId), selection: &selection, showsInspector: &showsInspector)
                             },
-                            openHistory: { tracesPage = .history },
-                            transferCards: transfers.cards, onCloseTransfer: { transfers.close($0) })
+                            openHistory: { tracesPage = .history })
                     case .history:
                         // Opening a row shows its details in the inspector,
                         // and opens it (Ron's inspector auto-open).
@@ -235,7 +237,7 @@ struct MonitorWindowView: View {
                             back: { tracesPage = .tree })
                     }
                 case .inference:
-                    InferenceTabView(store: inference, traces: traces) {
+                    InferenceTabView(store: inference) {
                         navigation.requestSettings(at: .privateAI)
                         openWindow(id: WindowID.settings)
                     }
@@ -283,6 +285,17 @@ struct MonitorWindowView: View {
                         }
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+            } notices: {
+                // Every notice, as popover notices over the top of the tab
+                // they belong to (owner, 2026-10-19). The traces moving now
+                // are Traces' while it is shown; the map carries them only
+                // while another tab is.
+                MonitorNotices(
+                    place: MonitorNotices.place(
+                        shownTab, tracesPage: tracesPage, homePage: homePage.shown(missions: model.missionsShown)),
+                    traces: traces, home: home,
+                    transferCards: transfers.cards, onCloseTransfer: { transfers.close($0) },
+                    closed: $closedNotices)
             }
         } map: {
             MonitorMapPane(
@@ -302,7 +315,8 @@ struct MonitorWindowView: View {
                     selection = .folder(projectID: projectID)
                     showsInspector = true
                 },
-                transfers: transfers)
+                transfers: transfers,
+                showsTransferCards: shownTab != .traces)
         } inspector: {
             // The whole column scrolls as one, prompts and selection together:
             // unscrolled, a column taller than the window grew the inspector
@@ -476,14 +490,13 @@ struct MonitorWindowView: View {
     }
 
     /// Whether the inspector draws the prompts (and, beside the host, the
-    /// health banners): on Home, where only History opens it and still
-    /// offers the Traces selection's Contribute, so its Undo and the core's
-    /// health must be there too. Traces draws them above its tree, and
-    /// Inference, whose inspector stays closed, at the top of its page.
-    /// History on Traces is drawn like Home's was: no tree, so the prompts
-    /// go to the inspector (owner, 2026-10-12: History moved to Traces).
+    /// health banners): only on Home's History, restored from before
+    /// History moved to Traces, where it still offers the Traces
+    /// selection's Contribute. Everywhere else they are popover notices
+    /// over the tab they belong to (owner, 2026-10-19, `MonitorNotices`):
+    /// Traces' tree and its History page alike.
     static func promptsInInspector(_ tab: Tab, tracesPage: TracesPage = .tree) -> Bool {
-        tab == .home || (tab == .traces && tracesPage == .history)
+        tab == .home
     }
 
     /// Whether History is the page on screen: on Traces now, or on Home
@@ -687,7 +700,7 @@ struct MonitorWindowView: View {
 /// button on the top row (#1146 `monitor-toolbar.tsx`), then the tabs, the
 /// breadcrumb for Home's pages, the tab's screen and, on Traces, the graph
 /// footer. The tabs' screens are R6 (Traces), R8 (Inference) and R9 (Home).
-private struct MonitorMainPane<Content: View, Footer: View>: View {
+private struct MonitorMainPane<Content: View, Footer: View, Notices: View>: View {
     @Binding var tab: MonitorWindowView.Tab
     let inferenceDot: GlassStatus?
     let inferenceDescription: String?
@@ -707,6 +720,9 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
     let onSettings: () -> Void
     @ViewBuilder let content: () -> Content
     @ViewBuilder let footer: () -> Footer
+    /// The shown tab's popover notices, floating over its top under the
+    /// tab bar and pushing nothing down (`MonitorNotices`).
+    @ViewBuilder let notices: () -> Notices
     @State private var viewMenu = false
     @EnvironmentObject private var model: AppModel
     /// Half the unified title bar's 52pt height.
@@ -717,6 +733,12 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
     /// The Settings button's gap from the toolbar capsule: #1146's `gap-2`
     /// plus `ml-1.5`.
     static var settingsGap: CGFloat { GlassTokens.Space.s4 + GlassTokens.Space.s3 }
+
+    /// The gap from the tab bar's rule to the top of every tab's first
+    /// card or control (owner, 2026-10-19: Home and Insights are the spec,
+    /// and every other tab matches them). The pane owns it, so no tab adds
+    /// a top inset of its own.
+    static var contentTop: CGFloat { GlassTokens.Space.s8 }
 
     /// The tab's own insets in the pane: the inspector's side inset for
     /// every tab (owner, 2026-10-10, `MonitorWindowView.mainInset`). The
@@ -787,22 +809,11 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                         }
                     }
                     .zIndex(1)
-                    // The same notices the main window puts above everything,
-                    // here in the pane that is always shown, so a void or a gate
-                    // hold during monitor use is told whatever the map and the
-                    // inspector are doing.
-                    ShellNotices()
+                    // The notices that sat here above the tabs (the shell's
+                    // consent and account notices, a refused start, onboarding
+                    // owed) are popover notices over the tab now (owner,
+                    // 2026-10-19, `MonitorNotices`), so the tabs never move.
                     if gate != .awaiting {
-                        switch gate {
-                        case .down(let sentence):
-                            StartupRefusedBanner(sentence: sentence)
-                        case .signedOut:
-                            GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
-                                Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
-                            }
-                        case .awaiting, .open:
-                            EmptyView()
-                        }
                         GlassRuleTabs(
                             MonitorWords.table?.shell.tabsLabel ?? "",
                             selection: Binding(
@@ -827,8 +838,8 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .padding(GlassTokens.Space.panePadding)
                 } else {
-                    // 8pt under the tabs and under the breadcrumb (#1146
-                    // `mb-2`, `pb-2`).
+                    // 8pt under the tabs to the breadcrumb (#1146 `mb-2`),
+                    // and `contentTop` under it or the tabs to the tab.
                     if let breadcrumb {
                         // Back names Home's trail by the core's "Back to
                         // Home"; Traces' History trail by its first crumb.
@@ -842,7 +853,8 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                     }
                     content()
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                        .padding(.top, GlassTokens.Space.s4)
+                        .overlay(alignment: .top) { notices() }
+                        .padding(.top, Self.contentTop)
                         .padding(Self.contentInsets(shown))
                     // Full bleed under the tree (#1146 `GraphFooter`).
                     footer()
@@ -903,6 +915,11 @@ private struct MonitorMapPane: View {
     /// The window's transfer player (`MapTransferFeed`): the traces moving
     /// across the Traces map, and the one its card describes.
     @ObservedObject var transfers: MapTransferPlayer
+    /// Whether the map carries the traces' cards: only while another tab
+    /// than Traces is shown (owner, 2026-10-19). Traces shows them over
+    /// its own list, and with the map hidden too the system's notifications
+    /// are what tell (the digest counts what was contributed).
+    var showsTransferCards = true
     /// The Traces map's rocket and station, or the laptop and orb
     /// (`TracesMapStyle`, Settings, General); it changes at once.
     @AppStorage(TracesMapStyle.key) private var mapRocket = true
@@ -951,7 +968,7 @@ private struct MonitorMapPane: View {
                 accessibilityName: FlowMapScene.words?.mapLabel ?? MonitorWindowView.Tab.traces.title, state: tracesState,
                 focus: scene.focusPoint(tool: focusTool), onSelectFolder: onSelectFolder,
                 onReveal: { revealedFolders = FlowMapScene.revealing($0, in: revealedFolders) },
-                transferRun: transfers.run, transferCards: transfers.cards,
+                transferRun: transfers.run, transferCards: showsTransferCards ? transfers.cards : [],
                 onCloseTransfer: { transfers.close($0) }, mapStyle: mapStyle)
         case .privateAI:
             // The one tool list, while this window's client has read it and

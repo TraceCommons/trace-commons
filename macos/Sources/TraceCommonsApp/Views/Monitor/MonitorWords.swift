@@ -26,4 +26,7 @@ enum MonitorWords {
     static var models: String { table?.models ?? "" }
     static var priced: String { table?.priced ?? "" }
     static var unknown: String { table?.unknown ?? "" }
+    /// A popover notice's X and its Details expander.
+    static var close: String { table?.close ?? "" }
+    static var noticeDetails: String { table?.shell.noticeDetails ?? "" }
 }

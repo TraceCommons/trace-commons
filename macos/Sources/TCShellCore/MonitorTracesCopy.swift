@@ -613,6 +613,9 @@ public struct MonitorShellCopy: MonitorWordTable {
     public let watcherCaption: String
     public let connectionReady: String
     public let connectionLocalOnly: String
+    /// The expander a popover notice folds its explanations behind (owner,
+    /// 2026-10-19). Approved 2026-10-19.
+    public let noticeDetails: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case showGraph = "show_graph"
@@ -667,6 +670,7 @@ public struct MonitorShellCopy: MonitorWordTable {
         case watcherCaption = "watcher_caption"
         case connectionReady = "connection_ready"
         case connectionLocalOnly = "connection_local_only"
+        case noticeDetails = "notice_details"
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }

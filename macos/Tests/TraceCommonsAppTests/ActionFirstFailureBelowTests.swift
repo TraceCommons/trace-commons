@@ -35,8 +35,12 @@ final class ActionFirstFailureBelowTests: XCTestCase {
     /// a link and the decline is.
     func test_theActionComesFirstAndTheDeclineIsALink() throws {
         let sites: [(file: String, opening: String, accept: String, decline: String)] = [
-            ("Views/Settings/NudgeSettingsSection.swift", "struct NudgeOfferCard: View {",
+            ("Views/Monitor/MonitorNotices.swift", "    private func offerItems(",
              "Button(offer.accept)", "Button(offer.decline)"),
+            ("Views/Monitor/MonitorNotices.swift", "    private var privateAIItems: [GlassPopoverItem] {",
+             "Button(copy.offerAccept)", "Button(copy.offerDecline)"),
+            ("Views/Monitor/MonitorNotices.swift", "private struct ArmingOfferPopover: View {",
+             "Button(copy.confirm) { confirming = true }", "Button(copy.decline, action: onDecline)"),
             ("Views/Monitor/TracesOffers.swift", "struct PrivateAIOfferGlassCard: View {",
              "Button(copy.offerAccept, action: onAccept)", "Button(copy.offerDecline, action: onDecline)"),
             ("Views/Monitor/TracesOffers.swift", "struct ArmingOfferGlassCard: View {",
@@ -91,8 +95,6 @@ final class ActionFirstFailureBelowTests: XCTestCase {
 
         // (file, declaration, the last button of the row, the failure line)
         let sites: [(file: String, opening: String, button: String, failure: String)] = [
-            ("Views/Settings/NudgeSettingsSection.swift", "struct NudgeOfferCard: View {",
-             "Button(offer.decline)", "GlassAlert(line)"),
             ("Views/Monitor/ToolFolderInspectors.swift", "private func decisions(",
              "Button(copy.button)", "GlassAlert(words.line(for: refused))"),
             ("Views/ShellNotices.swift", "struct GrantVoidNoticeCard: View {",
@@ -117,6 +119,18 @@ final class ActionFirstFailureBelowTests: XCTestCase {
             XCTAssertFalse(body.contains("GlassNotice(tone: .outside"),
                            "\(site.file) \(site.opening): a failure is boxed again")
         }
+        // A popover notice draws its refusal under its buttons (owner,
+        // 2026-10-19: every notice is one), and the one-time offers hand
+        // it theirs.
+        let popover = try String(
+            contentsOf: GlassSurfaceRulesTests.root.deletingLastPathComponent()
+                .appendingPathComponent("TCDesign/Components/PopoverNotice.swift"),
+            encoding: .utf8)
+        let actions = try XCTUnwrap(popover.range(of: "HStack(spacing: GlassTokens.Space.s4) { actions }"))
+        let refused = try XCTUnwrap(popover.range(of: "GlassAlert(refusal)"))
+        XCTAssertLessThan(actions.lowerBound, refused.lowerBound, "the popover's failure is drawn above its buttons")
+        let offers = try Self.declaration("    private func offerItems(", in: try Self.text("Views/Monitor/MonitorNotices.swift"))
+        XCTAssertTrue(offers.contains("refusal: offers.refusedOfferKind == offer.kind"))
         // The notices' own refusal label is gone with its box.
         XCTAssertFalse(try Self.text("Views/ShellNotices.swift").contains("NoticeRefusal"))
         // TracesRefusal itself says the line with GlassAlert.

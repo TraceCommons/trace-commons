@@ -108,7 +108,8 @@ struct InsightsView: View {
                 GlassSegment(model.text("analytics_tab_sessions"), value: InsightsTab.sessions),
                 GlassSegment(model.text("analytics_tab_analyze"), value: InsightsTab.analyze),
             ])
-            .padding(.top, GlassTokens.Space.s4)
+            // No top inset of its own: the main pane's `contentTop` is the
+            // gap under the tab bar on every tab (owner, 2026-10-19).
             switch tab {
             case .overview:
                 InsightsOverviewTab(

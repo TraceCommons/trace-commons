@@ -83,6 +83,8 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/Monitor/SessionReviewCard.swift",
         // Settings as Ron's modal over the Monitor (#1146, Task 10 of #1241).
         "Views/Monitor/SettingsModal.swift",
+        // Every notice as a popover over its tab (owner, 2026-10-19).
+        "Views/Monitor/MonitorNotices.swift",
     ]
 
     static func text(_ rel: String) throws -> String {

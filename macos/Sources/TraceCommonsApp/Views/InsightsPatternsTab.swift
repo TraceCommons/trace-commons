@@ -59,20 +59,21 @@ struct InsightsPatternsTab: View {
         }
     }
 
+    /// The week's scope on the left, on a card of its own, and the week
+    /// picker on the right (owner, 2026-10-19), then the coverage line.
     private func header(_ patterns: InsightsWeekPatterns) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
-                InsightsWeekSelect(weekStart: patterns.week_start, weeks: patterns.weeks, copy: copy,
-                                   select: selectWeek)
-                Spacer(minLength: GlassTokens.Space.s4)
                 // Only Claude Code records tool calls: the figures cover its
                 // traces when another harness is in the week.
                 if let line = InsightsPatternsWords.claudeOnlyLine(patterns, copy: copy) {
-                    HStack(spacing: GlassTokens.Space.s3) {
-                        InsightsHarnessTile(source: "claude_code")
-                        Text(line).insightsCaption().fixedSize(horizontal: false, vertical: true)
-                    }
+                    InsightsScopeCard(source: "claude_code", line: line)
+                } else {
+                    Spacer(minLength: 0)
                 }
+                InsightsWeekSelect(weekStart: patterns.week_start, weeks: patterns.weeks, copy: copy,
+                                   select: selectWeek)
+                    .fixedSize()
             }
             // How the patterns are found, that they overlap, and which feed
             // this is: behind the coverage line's "i".

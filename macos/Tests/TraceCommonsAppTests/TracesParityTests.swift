@@ -86,20 +86,19 @@ final class TracesParityTests: XCTestCase {
         XCTAssertEqual(lines.dropFirst().first?.title, DailyBudgetCopy.title)
     }
 
-    /// The banners are drawn above the Traces tree (owner, 2026-10-07:
-    /// offers, undo and health above the tree, an accepted difference from
-    /// #1146), before the prompts, the spinner and the tree; the inspector
-    /// host draws none.
+    /// The banners are popover notices over the Traces tab (owner,
+    /// 2026-10-19: every notice floats over its tab), in front of the
+    /// offers and behind the undos; the tree and the inspector host draw
+    /// none.
     func test_theTreeDrawsTheBannersAboveEverything() throws {
-        let tree = try Self.text("Views/Monitor/TracesViews.swift")
-        let treeView = try XCTUnwrap(tree.range(of: "struct TracesTreeView"))
-        let slot = try XCTUnwrap(tree.range(of: "struct PreviewSlot"))
-        let body = String(tree[treeView.lowerBound..<slot.lowerBound])
+        let notices = try Self.text("Views/Monitor/MonitorNotices.swift")
+        let start = try XCTUnwrap(notices.range(of: "    private var tracesNow: [GlassPopoverItem] {"))
+        let body = String(notices[start.lowerBound...].prefix(2500))
         XCTAssertTrue(body.contains("TracesHealth.banners("))
         XCTAssertTrue(body.contains("maxQueueEntries: model.daemonSettings?.maxQueueEntries)"),
                       "the queue-full banner names the configured limit, as the main window does")
-        XCTAssertTrue(body.contains("GlassHealthBanner(banner:"))
-        XCTAssertFalse(body.contains("ForEach(store.safeguards"), "safeguards are drawn through the fail-closed banners")
+        XCTAssertTrue(body.contains("GlassNoticeMark(banner.tone)"))
+        XCTAssertFalse(body.contains("ForEach(traces.safeguards"), "safeguards are drawn through the fail-closed banners")
         XCTAssertTrue(body.contains("coreDown: TracesHealth.coreDownLine,"))
         let banner = try Self.text("Views/Monitor/TracesHealth.swift")
         XCTAssertTrue(banner.contains("GlassNotice(tone: banner.tone, title: banner.title.isEmpty ? nil : banner.title)"),
@@ -107,14 +106,19 @@ final class TracesParityTests: XCTestCase {
         XCTAssertFalse(banner.contains("Button("), "the Traces tab's banners carry no action")
         XCTAssertTrue(banner.contains("TCCoreCopy.healthCopyJSON(reachable: false"))
         let banners = try XCTUnwrap(body.range(of: "TracesHealth.banners("))
-        let prompts = try XCTUnwrap(body.range(of: "InspectorPrompts(store: store)"))
-        XCTAssertLessThan(banners.lowerBound, prompts.lowerBound, "the banners precede the prompts")
-        // #1146: "Reading local queue…" while loading, not a spinner, and
-        // drawn after the prompts in the same scroll.
-        let loading = try XCTUnwrap(body.range(of: "if store.phase == .loading && isEmpty {"))
-        let reading = try XCTUnwrap(body.range(of: "store.words?.tree.readingQueue"))
-        let drawn = try XCTUnwrap(body.range(of: "prompts", range: loading.upperBound..<reading.lowerBound))
-        XCTAssertLessThan(drawn.lowerBound, reading.lowerBound, "the prompts precede the loading line and the tree")
+        let undos = try XCTUnwrap(body.range(of: "items += undoItems"))
+        XCTAssertLessThan(banners.lowerBound, undos.lowerBound, "the banners sit behind the undos")
+        // #1146: "Reading local queue…" while loading, not a spinner; the
+        // tree draws no banner or prompt of its own.
+        let tree = try Self.text("Views/Monitor/TracesViews.swift")
+        let treeView = try XCTUnwrap(tree.range(of: "struct TracesTreeView"))
+        let slot = try XCTUnwrap(tree.range(of: "struct PreviewSlot"))
+        let treeBody = String(tree[treeView.lowerBound..<slot.lowerBound])
+        let loading = try XCTUnwrap(treeBody.range(of: "if store.phase == .loading && isEmpty {"))
+        let reading = try XCTUnwrap(treeBody.range(of: "store.words?.tree.readingQueue"))
+        XCTAssertLessThan(loading.lowerBound, reading.lowerBound)
+        XCTAssertFalse(treeBody.contains("TracesHealth.banners("), "the tree draws the banners inline again")
+        XCTAssertFalse(treeBody.contains("InspectorPrompts("), "the tree draws the prompts inline again")
         let host = try TracesInspectorHostTests.hostBody()
         XCTAssertFalse(host.contains("TracesHealth.banners("), "the inspector repeats the banners")
         XCTAssertFalse(host.contains("InspectorPrompts("), "the inspector repeats the prompts")

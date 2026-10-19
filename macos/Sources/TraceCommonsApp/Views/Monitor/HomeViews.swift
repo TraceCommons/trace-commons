@@ -164,11 +164,9 @@ private struct HomeOverview: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                // The inspector stays closed on Home (owner, 2026-10-08), so
-                // the core's health, the undos, the offers and the
-                // first-contribution note head the page, as they head the
-                // Traces tree.
-                InspectorPromptsHeader(traces: traces)
+                // The core's health, the undos, the offers and the
+                // first-contribution note are the Traces tab's popover
+                // notices (owner, 2026-10-19, `MonitorNotices`), not Home's.
                 // No Watching card (owner, 2026-10-12): the tiles lead.
                 stats
                 // The NEAR AI campaign, under the tiles (owner, 2026-10-12).
@@ -451,16 +449,9 @@ private struct HistoryPage: View {
                 if let failure = store.failures["history_rollup"] {
                     GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
                 }
-                // Verdict news, in the daemon's words. See history
-                // acknowledges it; this page is already the history.
-                if let card = store.verdictsCard {
-                    NudgeGlassCard(
-                        card: card, busy: store.nudgeBusy,
-                        refusal: store.nudgeError.flatMap { MonitorWords.table?.line(for: $0) }
-                    ) { intent in Task { await store.perform(intent) } }
-                }
-                // The one-time offer to turn verdict notifications on.
-                NudgeOfferCards(place: .history)
+                // Verdict news and the one-time offer to turn verdict
+                // notifications on are popover notices over this page
+                // (owner, 2026-10-19, `MonitorNotices`).
                 HistoryStats(store: store)
                 HistoryCommunityCard(store: store)
                 GlassCard {
