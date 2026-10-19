@@ -30,6 +30,9 @@ public struct GlassSpinner: View {
         label.isEmpty && !standalone
     }
 
+    /// The spinner's frame rate.
+    static let frameInterval: Double = 1 / 60
+
     /// The arc's turn, in degrees, at `time`: a full turn per
     /// `motion.spin`, and none under Reduce Motion.
     static func angle(at time: TimeInterval, reduceMotion: Bool) -> Double {
@@ -39,14 +42,17 @@ public struct GlassSpinner: View {
     }
 
     public var body: some View {
-        TimelineView(.animation(paused: reduceMotion)) { context in
+        // At most 60 frames a second (it had no cap, so 120 on a ProMotion
+        // display): the 12pt arc's tip moves under a point between frames at 60.
+        // Held still while its window cannot be seen.
+        GlassAnimationTimeline(minimumInterval: Self.frameInterval, paused: reduceMotion) { date in
             ZStack {
                 Circle()
                     .stroke(GlassColor.ink(0.18), lineWidth: GlassTokens.Size.spinnerStroke)
                 Circle()
                     .trim(from: 0, to: 0.25)
                     .stroke(GlassColor.textSecondary, style: StrokeStyle(lineWidth: GlassTokens.Size.spinnerStroke, lineCap: .round))
-                    .rotationEffect(.degrees(Self.angle(at: context.date.timeIntervalSinceReferenceDate, reduceMotion: reduceMotion)))
+                    .rotationEffect(.degrees(Self.angle(at: date.timeIntervalSinceReferenceDate, reduceMotion: reduceMotion)))
             }
             .padding(GlassTokens.Size.spinnerStroke / 2)
         }

@@ -50,6 +50,7 @@ struct FlowMapView: View {
     @FocusState private var focused: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.colorScheme) private var colorScheme
 
     static let zoomRange: ClosedRange<CGFloat> = 0.6 ... 2
     static let zoomStep: CGFloat = 0.25
@@ -61,27 +62,44 @@ struct FlowMapView: View {
     var body: some View {
         GeometryReader { proxy in
             let fit = FlowMapGeometry(size: proxy.size, zoom: zoom, focus: focus, space: scene.space)
+            let library = libraryOnMap
+            let resting = Self.restingMotion(
+                reduceMotion: reduceMotion, flows: scene.flows, healthy: state.isHealthy, library: library != nil)
             ZStack(alignment: .topLeading) {
-                TimelineView(.animation(minimumInterval: 1 / 30, paused: reduceMotion || !scene.flows || !state.isHealthy)) { timeline in
-                    Canvas { context, _ in
-                        draw(in: &context, fit: fit, phase: reduceMotion ? 0 : timeline.date.timeIntervalSinceReferenceDate * 18)
-                    }
-                }
-                .accessibilityHidden(true)
+                // One timeline for everything on the map that moves at
+                // rest: the arcs' dashes and the library. Only what moves
+                // is redrawn on a tick: the arcs (a few strokes) and the
+                // library; the nodes, their names and logos are drawn once
+                // per change, on the canvas between them.
+                GlassAnimationTimeline(minimumInterval: resting.interval, paused: resting.paused) { date in
+                    ZStack(alignment: .topLeading) {
+                        Canvas { context, _ in
+                            drawArcs(in: &context, fit: fit, phase: reduceMotion ? 0 : date.timeIntervalSinceReferenceDate * 18)
+                        }
+                        .accessibilityHidden(true)
 
-                // The Traces map's library: the station, or on the standard
-                // map the orb (owner, 2026-10-16 and 2026-10-19).
-                if scene.stack != nil, let library = scene.nodes.first(where: { $0.id == "library" }),
-                   case .library(let active) = library.kind {
-                    libraryArt(lit: active, style: mapStyle, scale: fit.scale)
-                        .position(fit.point(library.at))
-                        .allowsHitTesting(false)
+                        FlowMapStillLayer(key: stillKey(fit: fit)) { context in
+                            drawStill(in: &context, fit: fit)
+                        }
+                        .equatable()
+                        .accessibilityHidden(true)
+
+                        // The Traces map's library: the station, or on the
+                        // standard map the orb (owner, 2026-10-16 and
+                        // 2026-10-19).
+                        if let library, case .library(let active) = library.kind {
+                            libraryArt(lit: active, style: mapStyle, scale: fit.scale, date: date)
+                                .position(fit.point(library.at))
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
                 }
                 // What moves, under the tool group, so its card and the
                 // trace's details cover it.
                 if scene.stack != nil {
-                    TimelineView(.animation(minimumInterval: 1 / 60, paused: motion == nil)) { timeline in
-                        let t = motion.map { timeline.date.timeIntervalSince($0.start) } ?? 0
+                    GlassAnimationTimeline(minimumInterval: 1 / 60, paused: motion == nil) { date in
+                        let t = motion.map { date.timeIntervalSince($0.start) } ?? 0
                         Canvas { context, _ in
                             if let run = motion {
                                 MapTransferDrawing.draw(in: &context, scene: scene, run: run, t: t, fit: fit)
@@ -107,8 +125,8 @@ struct FlowMapView: View {
                 // The tool group over the targets: its open card keeps the
                 // pointer even where it covers the pad.
                 if let stack = scene.stack {
-                    TimelineView(.animation(minimumInterval: 1 / 60, paused: motion == nil)) { timeline in
-                        let t = motion.map { timeline.date.timeIntervalSince($0.start) } ?? 0
+                    GlassAnimationTimeline(minimumInterval: 1 / 60, paused: motion == nil) { date in
+                        let t = motion.map { date.timeIntervalSince($0.start) } ?? 0
                         MapToolPile(
                             stack: stack, nodes: scene.nodes.filter { $0.id.hasPrefix("tool:") }, fit: fit,
                             run: motion, t: t, pointer: pointer)
@@ -169,16 +187,42 @@ struct FlowMapView: View {
 
     /// The library on the Traces map, at the map's scale: the station on
     /// the rocket map, the orb on the standard one.
+    /// It turns with the map's own timeline (`date`), not one of its own.
     @ViewBuilder
-    private func libraryArt(lit: Bool, style: TracesMapStyle, scale: CGFloat) -> some View {
+    private func libraryArt(lit: Bool, style: TracesMapStyle, scale: CGFloat, date: Date) -> some View {
         switch style {
         case .launch:
-            GlassLibraryStation(lit: lit)
+            GlassLibraryStation(lit: lit, date: date)
                 .frame(width: Self.stationSize.width * scale, height: Self.stationSize.height * scale)
         case .standard:
-            GlassLibraryOrb(lit: lit)
+            GlassLibraryOrb(lit: lit, date: date)
                 .frame(width: MapTransferDrawing.orbFrame * scale, height: MapTransferDrawing.orbFrame * scale)
         }
+    }
+
+    /// The library node the Traces map draws as the station or the orb;
+    /// none on the other maps, which draw it as a disc.
+    private var libraryOnMap: FlowMapScene.Node? {
+        guard scene.stack != nil else { return nil }
+        return scene.nodes.first(where: { $0.id == "library" })
+    }
+
+    /// How the map's resting timeline runs: at 30 frames a second while
+    /// arcs carry moving dashes (as before), at the library's own rate
+    /// while only the library turns, and not at all when nothing moves or
+    /// under Reduce Motion.
+    static func restingMotion(reduceMotion: Bool, flows: Bool, healthy: Bool, library: Bool)
+        -> (interval: Double, paused: Bool) {
+        let dashes = !reduceMotion && flows && healthy
+        let turns = !reduceMotion && library
+        return (dashes ? 1 / 30 : GlassLibraryStation.frameInterval, !(dashes || turns))
+    }
+
+    /// What the still layer is drawn from: when none of it changes, the
+    /// nodes, names and logos are not drawn again.
+    private func stillKey(fit: FlowMapGeometry) -> FlowMapStillKey {
+        FlowMapStillKey(scene: scene, fit: fit, selection: selection, mapStyle: mapStyle,
+                        colorScheme: colorScheme, contrast: contrast)
     }
 
     /// The station's frame on the rocket map, in design units.
@@ -191,7 +235,9 @@ struct FlowMapView: View {
 
     // MARK: Drawing
 
-    private func draw(in context: inout GraphicsContext, fit: FlowMapGeometry, phase: Double) {
+    /// The arcs, under everything else; the only part of the map drawn
+    /// again on each tick of its timeline.
+    private func drawArcs(in context: inout GraphicsContext, fit: FlowMapGeometry, phase: Double) {
         for arc in scene.arcs {
             var path = Path()
             path.move(to: fit.point(arc.from))
@@ -225,7 +271,11 @@ struct FlowMapView: View {
                                                   dash: [4 * fit.scale, 8 * fit.scale], dashPhase: -phase * fit.scale))
             }
         }
+    }
 
+    /// The nodes and the overflow counts, over the arcs: drawn only when
+    /// `stillKey` changes.
+    private func drawStill(in context: inout GraphicsContext, fit: FlowMapGeometry) {
         for node in scene.nodes {
             drawNode(node, in: &context, fit: fit)
         }
@@ -235,7 +285,6 @@ struct FlowMapView: View {
                 Text("+\(overflow.count)").font(GlassTokens.TypeScale.micro.font).foregroundStyle(GlassColor.textTertiary),
                 at: fit.point(overflow.at))
         }
-
     }
 
     private func drawNode(_ node: FlowMapScene.Node, in context: inout GraphicsContext, fit: FlowMapGeometry) {
@@ -601,10 +650,42 @@ struct FlowMapView: View {
     }
 }
 
+/// Everything the map's still layer (nodes, names, logos, overflow counts)
+/// is drawn from. Equal keys draw the same picture.
+struct FlowMapStillKey: Equatable {
+    let scene: FlowMapScene
+    let fit: FlowMapGeometry
+    let selection: String?
+    let mapStyle: TracesMapStyle
+    let colorScheme: ColorScheme
+    let contrast: ColorSchemeContrast
+}
+
+/// A canvas drawn again only when its key changes. The map's timeline
+/// re-evaluates the views inside it on every tick; compared by key, this
+/// one keeps its last drawing instead of drawing every node again.
+struct FlowMapStillLayer<Key: Equatable>: View, Equatable {
+    let key: Key
+    let draw: (inout GraphicsContext) -> Void
+
+    init(key: Key, draw: @escaping (inout GraphicsContext) -> Void) {
+        self.key = key
+        self.draw = draw
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.key == rhs.key
+    }
+
+    var body: some View {
+        Canvas { context, _ in draw(&context) }
+    }
+}
+
 /// The design space (580×760) fitted into the field, centred, and zoomed
 /// about the centre; or, with a focus, scaled 1.6× about that point as
 /// #1146's camera is (`cameraFor`).
-struct FlowMapGeometry {
+struct FlowMapGeometry: Equatable {
     let scale: CGFloat
     let origin: CGPoint
 
