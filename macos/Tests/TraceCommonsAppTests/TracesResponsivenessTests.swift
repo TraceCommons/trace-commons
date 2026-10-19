@@ -111,6 +111,17 @@ final class TracesResponsivenessTests: XCTestCase {
         XCTAssertTrue(cleared.searchOpened.isEmpty)
     }
 
+    /// Clearing a search never hides the session the person selected
+    /// inside a folder the search opened.
+    func test_clearingASearchKeepsTheSelectedSessionsFolderOpen() {
+        let typed = TracesTreeView.searchExpansion(
+            query: "m", matched: ["a", "b"], expanded: [], searchOpened: [])
+        let cleared = TracesTreeView.searchExpansion(
+            query: "", matched: [], expanded: typed.expanded, searchOpened: typed.searchOpened, keep: "a")
+        XCTAssertEqual(cleared.expanded, ["a"])
+        XCTAssertTrue(cleared.searchOpened.isEmpty)
+    }
+
     func test_aBlankSearchOpensNothing() {
         let blank = TracesTreeView.searchExpansion(
             query: "   ", matched: ["a"], expanded: ["c"], searchOpened: [])
@@ -118,14 +129,16 @@ final class TracesResponsivenessTests: XCTestCase {
         XCTAssertTrue(blank.searchOpened.isEmpty)
     }
 
-    /// The tree is drawn lazily, so a long list builds only what is on
-    /// screen.
-    func test_theTreeIsDrawnLazily() throws {
+    /// The tree stays an eager `VStack`: row menus float over later rows
+    /// by `zIndex`, which a `LazyVStack` does not honour between its
+    /// children, and `scrollTo` and VoiceOver focus reach rows a lazy stack
+    /// has not built. Rows are cheap now that their lines come from the read.
+    func test_theTreeIsAnEagerStack() throws {
         let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
         let tree = try XCTUnwrap(source.range(of: "private var tree: some View {"))
         let folders = try XCTUnwrap(source.range(of: "ForEach(store.shownTree.folders)", range: tree.upperBound..<source.endIndex))
         let body = source[tree.upperBound..<folders.lowerBound]
-        XCTAssertTrue(body.contains("LazyVStack("))
-        XCTAssertFalse(body.contains(" VStack("))
+        XCTAssertTrue(body.contains("VStack(spacing: 2)"))
+        XCTAssertFalse(body.contains("LazyVStack("))
     }
 }

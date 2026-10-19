@@ -638,7 +638,11 @@ final class TracesStore {
             let statusRead = await status
             let routes = await destinations
             guard mine == generation else { return }
-            tree = derived.tree
+            // "Show ignored folders" may have changed while the tree was
+            // built off the main thread; draw what the menu now says.
+            tree = showsIgnored == options.showsIgnored
+                ? derived.tree
+                : Self.build(read, showsIgnored: showsIgnored, keepsOrder: keepsOrder, idleOnly: idleOnly)
             rowTags = derived.tags
             rowLines = derived.lines
             lastRead = read

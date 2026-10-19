@@ -183,11 +183,15 @@ struct TracesTreeView: View {
     /// empty search closes exactly those, and leaves the rest as they were.
     /// Before this, every folder a search ever matched stayed open, and a
     /// one-letter search matches nearly all of them.
+    ///
+    /// `keep` is the selected session's folder: clearing never closes it,
+    /// so the selection is never hidden by the search going.
     static func searchExpansion(
-        query: String, matched: [String], expanded: Set<String>, searchOpened: Set<String>
+        query: String, matched: [String], expanded: Set<String>, searchOpened: Set<String>,
+        keep: String? = nil
     ) -> (expanded: Set<String>, searchOpened: Set<String>) {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return (expanded.subtracting(searchOpened), [])
+            return (expanded.subtracting(searchOpened.subtracting([keep].compactMap { $0 })), [])
         }
         let opened = Set(matched).subtracting(expanded)
         return (expanded.union(matched), searchOpened.union(opened))
@@ -211,9 +215,7 @@ struct TracesTreeView: View {
     private var tree: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                // Lazy: only the rows on screen are built. Every open
-                // folder's sessions used to be built on every change.
-                LazyVStack(spacing: 2) {
+                VStack(spacing: 2) {
                     // The search narrows what is drawn, never the read.
                     ForEach(store.shownTree.folders) { folderRows($0) }
                     if store.shownTree.folders.isEmpty, let none = store.words?.tree.searchNone {
@@ -253,7 +255,8 @@ struct TracesTreeView: View {
         .onChange(of: store.appliedSearch) { _, query in
             (expanded, searchOpened) = Self.searchExpansion(
                 query: query, matched: store.shownTree.folders.map(\.id),
-                expanded: expanded, searchOpened: searchOpened)
+                expanded: expanded, searchOpened: searchOpened,
+                keep: selection.flatMap { Self.folder(of: $0, in: store.tree) })
         }
         // #1146's tree name.
         .accessibilityLabel(store.words?.tree.treeLabel ?? "")
