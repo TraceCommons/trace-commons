@@ -849,6 +849,33 @@ pub struct GateHeld {
 }
 
 /// Everything the daemon's loops and its IPC server share.
+///
+/// # Lock order
+///
+/// Where one of these locks is taken while another is held, the earlier one
+/// in this list is always held first:
+///
+/// 1. `pass_lock`, `inference_connection_lock`
+/// 2. `policy`
+/// 3. `queue`
+/// 4. `health`
+/// 5. `state`
+/// 6. the credential coordination locks, `storage` then `commit`
+///    (`nearai_credential::session::coordination`)
+/// 7. `settings`
+/// 8. `private_inference_stop_task`, `private_inference_state`,
+///    `private_inference_endpoint`, then `routing`
+///
+/// Every other mutex here is a leaf: nothing is locked while it is held.
+///
+/// Taking an earlier lock while a later one is held deadlocks against the
+/// many paths that take them the right way round, and with one IPC handler
+/// stuck every request behind it queues up too. When a later lock is needed
+/// first, collect what it gives, release it, and lock in order. Watch for a
+/// guard that lives longer than it looks: one bound with `let` across a call
+/// to a helper that locks for itself (`decisions_owed_value`,
+/// `daily_budget`, `status_value`, `publish_if_decisions_owed_changed`), or a
+/// temporary in a `match` scrutinee, which lives for the whole `match`.
 pub struct DaemonShared {
     pub(crate) native_identity: Mutex<super::native_identity::Ceremonies>,
     pub(crate) managed: Mutex<Result<super::managed::ManagedService, crate::managed::ManagedError>>,
@@ -6101,17 +6128,23 @@ fn handle_set_notify_kind(shared: &DaemonShared, req: &Request) -> Response {
 }
 
 fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
+    // Read before the commit lock, and policy and the queue are taken again
+    // below only after it is released. `unenroll` holds policy and the queue
+    // while it takes the commit lock, so holding commit while waiting for
+    // either is the other half of a deadlock. The commit lock covers the
+    // settings file, the in-memory settings and what is rebuilt from them;
+    // nothing else. See the lock order on `DaemonShared`.
+    let decisions_owed_before = shared.decisions_owed_value();
     let Ok(locks) = crate::daemon::nearai_credential::session::coordination(shared.store.dir())
     else {
         return Response::err(req.id, ERR_UNAVAILABLE, "settings-write-failed");
     };
-    let Ok(_commit) = locks.commit.lock() else {
+    let Ok(commit) = locks.commit.lock() else {
         return Response::err(req.id, ERR_UNAVAILABLE, "settings-write-failed");
     };
     let Ok(persisted) = crate::daemon::settings::DaemonSettings::load(&shared.store) else {
         return Response::err(req.id, ERR_UNAVAILABLE, "settings-write-failed");
     };
-    let decisions_owed_before = shared.decisions_owed_value();
     let mut settings = shared.settings.lock().expect("settings lock");
     // Advance lifecycle consent only after this candidate is persisted.
     // Routing separately retains its warm reader when its endpoint is unchanged.
@@ -6178,6 +6211,9 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             if settlement_after != settlement_before {
                 super::settlement_estimate::set_enabled(shared, settlement_after);
             }
+            // Released before the queue and policy are touched below; see
+            // the top of this function.
+            drop(commit);
             // The switch to the Manual Scrub check (K4 of #1118) returns
             // every unsent approval made on the contributor's behalf to
             // waiting at once, rather than leaving it reading approved until
@@ -16120,6 +16156,59 @@ mod tests {
             "a restart must not put the question back"
         );
         assert!(!reloaded.private_inference);
+    }
+
+    /// `set_settings` must not hold the credential commit lock while it
+    /// waits for policy or the queue. `unenroll` holds policy and the queue
+    /// and then takes the commit lock (`commons_credentials::clear_with`,
+    /// and `turn_off_insights_counter_pass`), so commit -> policy/queue is
+    /// the other half of a deadlock between two IPC calls.
+    ///
+    /// The test holds the queue, as `unenroll` would, and writes a setting on
+    /// another thread. The commit lock has to stay acquirable while that
+    /// thread waits. A bounded wait, so the old order fails here instead of
+    /// hanging.
+    #[test]
+    fn set_settings_never_holds_the_commit_lock_while_waiting_for_the_queue() {
+        let s = std::sync::Arc::new(shared());
+        let queue = s.queue.lock().unwrap();
+        let writing = {
+            let s = std::sync::Arc::clone(&s);
+            std::thread::spawn(move || {
+                handle_set_settings(
+                    &s,
+                    &req("set_settings", serde_json::json!({"scrub_check": "manual"})),
+                )
+            })
+        };
+        // Give the writer time to reach the queue lock and block on it.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probing = {
+            let dir = s.store.dir().to_path_buf();
+            std::thread::spawn(move || {
+                let locks = crate::daemon::nearai_credential::session::coordination(&dir)
+                    .expect("coordination");
+                let _commit = locks.commit.lock().expect("commit lock");
+                let _ = tx.send(());
+            })
+        };
+        let commit_free_while_queue_held =
+            rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
+        drop(queue);
+        let response = writing.join().expect("writer thread");
+        probing.join().expect("probe thread");
+
+        assert!(
+            commit_free_while_queue_held,
+            "the commit lock stayed held while set_settings waited for the queue: \
+             commit -> queue inverts unenroll's policy -> queue -> commit"
+        );
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(
+            s.settings.lock().unwrap().scrub_check,
+            crate::daemon::settings::ScrubCheck::Manual
+        );
     }
 
     /// Reviewed on #1139: switching to the Manual Scrub check returns every
