@@ -290,8 +290,12 @@ pub struct MonitorTreeCopy {
     pub review_tip: &'static str,
     /// An ignored folder's sub line.
     pub ignored_folder: &'static str,
-    /// The folder row menu's one item. Approved 2026-10-08 (button rule).
+    /// The folder row menu's Ignore item. Approved 2026-10-08 (button rule).
     pub ignore_folder: &'static str,
+    /// The folder row menu's accessible name, now that it holds the
+    /// contribution rule as well as Ignore (owner, 2026-10-19). DRAFT,
+    /// NEEDS APPROVAL.
+    pub folder_menu: &'static str,
     /// The folder and tool switches' accessible names.
     pub watch_folder: &'static str,
     pub watch_tool: &'static str,
@@ -581,6 +585,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             review_tip: "Opens what would be sent. Nothing leaves until you contribute.",
             ignored_folder: "ignored \u{00b7} never queued",
             ignore_folder: "Ignore Directory",
+            folder_menu: "Directory options",
             watch_folder: "Watch this folder",
             watch_tool: "Watch {tool}",
             dismiss_session: "Dismiss trace",

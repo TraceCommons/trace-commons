@@ -168,6 +168,8 @@ public struct MonitorTreeCopy: MonitorWordTable {
     public let reviewTip: String
     public let ignoredFolder: String
     public let ignoreFolder: String
+    /// The folder row menu's accessible name: the rule and Ignore.
+    public let folderMenu: String
     public let watchFolder: String
     public let watchTool: String
     public let dismissSession: String
@@ -202,6 +204,7 @@ public struct MonitorTreeCopy: MonitorWordTable {
         case reviewTip = "review_tip"
         case ignoredFolder = "ignored_folder"
         case ignoreFolder = "ignore_folder"
+        case folderMenu = "folder_menu"
         case watchFolder = "watch_folder"
         case watchTool = "watch_tool"
         case dismissSession = "dismiss_session"

@@ -177,43 +177,11 @@ struct FolderInspector: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Ron's `SubmitAllAsControl`: one outcome for every eligible session,
-    /// in the core's words, or Cancel.
+    /// Ron's `SubmitAllAsControl` (`SubmitAllAsModal`), shared with the
+    /// folder row's Submit split button.
     @ViewBuilder
     private func submitAllAsModal(_ words: MonitorTracesCopy) -> some View {
-        if let outcome = store.disclosure?.outcome {
-            let busy = store.writing.contains(folder.id)
-            GlassModal(
-                title: outcome.submitAllAs, subtitle: outcome.submitAllAsTooltip, width: .narrow,
-                actions: [.cancel(words.inspector.cancel) { choosingVerdict = false }],
-                onCancel: { choosingVerdict = false }
-            ) {
-                GlassModalBody {
-                    Text(Self.applyLine(store.groupOffer(folder).count, words: words))
-                        .glassType(GlassTokens.TypeScale.label)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: GlassTokens.Space.s4) {
-                        Button(outcome.worked) {
-                            choosingVerdict = false
-                            Task { await Self.submitAllAs(.worked, folder: folder, store: store) }
-                        }
-                        .buttonStyle(GlassButtonStyle(.primary, small: true))
-                        Button(outcome.partly) {
-                            choosingVerdict = false
-                            Task { await Self.submitAllAs(.partly, folder: folder, store: store) }
-                        }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                        Button(outcome.failed) {
-                            choosingVerdict = false
-                            Task { await Self.submitAllAs(.failed, folder: folder, store: store) }
-                        }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                    }
-                    .disabled(busy)
-                }
-            }
-        }
+        SubmitAllAsModal(folder: folder, store: store, words: words) { choosingVerdict = false }
     }
 
     /// A rule change's confirmation, in the core's words for this folder.
@@ -363,5 +331,48 @@ struct FolderInspector: View {
             .init(MonitorWords.waiting, String(folder.sessions.count)),
             .init(words.size, size),
         ]
+    }
+}
+
+/// Ron's `SubmitAllAsControl`: one outcome for every eligible session, in
+/// the core's words, or Cancel. Opened from Submit all as on the Folder
+/// inspector's split button and on a folder row's (owner, 2026-10-19).
+struct SubmitAllAsModal: View {
+    let folder: TracesTree.FolderNode
+    let store: TracesStore
+    let words: MonitorTracesCopy
+    /// Closes the modal; called before an outcome is sent too.
+    let close: () -> Void
+
+    var body: some View {
+        if let outcome = store.disclosure?.outcome {
+            let busy = store.writing.contains(folder.id)
+            GlassModal(
+                title: outcome.submitAllAs, subtitle: outcome.submitAllAsTooltip, width: .narrow,
+                actions: [.cancel(words.inspector.cancel, action: close)],
+                onCancel: close
+            ) {
+                GlassModalBody {
+                    Text(FolderInspector.applyLine(store.groupOffer(folder).count, words: words))
+                        .glassType(GlassTokens.TypeScale.label)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: GlassTokens.Space.s4) {
+                        Button(outcome.worked) { send(.worked) }
+                            .buttonStyle(GlassButtonStyle(.primary, small: true))
+                        Button(outcome.partly) { send(.partly) }
+                            .buttonStyle(GlassButtonStyle(.glass))
+                        Button(outcome.failed) { send(.failed) }
+                            .buttonStyle(GlassButtonStyle(.glass))
+                    }
+                    .disabled(busy)
+                }
+            }
+        }
+    }
+
+    private func send(_ verdict: ContributorVerdict) {
+        close()
+        Task { await FolderInspector.submitAllAs(verdict, folder: folder, store: store) }
     }
 }

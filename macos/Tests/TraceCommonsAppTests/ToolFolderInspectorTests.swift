@@ -176,9 +176,12 @@ final class ToolFolderInspectorTests: XCTestCase {
         let source = try TracesParityTests.text("Views/Monitor/ToolFolderInspectors.swift")
         let sheet = try XCTUnwrap(source.range(of: "title: outcome.submitAllAs, subtitle: outcome.submitAllAsTooltip"))
         let body = source[sheet.lowerBound...]
+        // One modal, the inspector's and the folder row's (owner,
+        // 2026-10-19): each outcome button sends its own verdict.
         for verdict in ["worked", "partly", "failed"] {
-            XCTAssertTrue(body.contains("Self.submitAllAs(.\(verdict), folder: folder, store: store)"), verdict)
+            XCTAssertTrue(body.contains("{ send(.\(verdict)) }"), verdict)
         }
+        XCTAssertTrue(body.contains("FolderInspector.submitAllAs(verdict, folder: folder, store: store)"))
         XCTAssertTrue(source.contains("await store.contributeFolder(folder, verdict: verdict)"))
         XCTAssertTrue(body.contains("outcome.worked"))
         XCTAssertTrue(body.contains("outcome.partly"))
