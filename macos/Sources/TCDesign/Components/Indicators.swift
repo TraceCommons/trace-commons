@@ -145,14 +145,30 @@ public struct GlassBadge: View {
     private let count: Int?
     private let subtle: Bool
     private let label: String?
+    private let status: GlassStatus?
 
     /// `label` is what VoiceOver reads, from the core's copy; without it the
     /// count is read alone. A nil `count` is unknown and draws a dash, never
-    /// a number.
-    public init(count: Int?, subtle: Bool = false, label: String? = nil) {
+    /// a number. `status` tints a subtle badge (`tinted(_:)`), so a tab says
+    /// its count and its state in one pill rather than a dot beside a count
+    /// (owner, 2026-10-16).
+    public init(count: Int?, subtle: Bool = false, label: String? = nil, status: GlassStatus? = nil) {
         self.count = count
         self.subtle = subtle
         self.label = label
+        self.status = status
+    }
+
+    /// A subtle badge's fill and ink for a status: #1146's tinted verdict
+    /// pair (`GlassTag`), the status's tint behind its text-safe colour.
+    /// A status with no tint keeps the white count pill.
+    static func tinted(_ status: GlassStatus?) -> (fill: GlassRGBA, ink: GlassRGBA) {
+        switch status {
+        case .on: (GlassTokens.Color.tintOn, GlassTokens.Color.statusOnText)
+        case .ask: (GlassTokens.Color.tintAsk, GlassTokens.Color.statusAskText)
+        case .outside: (GlassTokens.Color.tintOutside, GlassTokens.Color.statusOutsideText)
+        case .off, .shared, .kept, .inference, nil: (GlassTokens.Color.badgeFillSubtle, GlassTokens.Color.textPrimary)
+        }
     }
 
     /// The most the badge states; past it, `99+`, as the menu bar does
@@ -167,14 +183,15 @@ public struct GlassBadge: View {
     }
 
     public var body: some View {
+        let tint = Self.tinted(status)
         Text(Self.text(for: count))
             .glassType(GlassTokens.TypeScale.micro)
             .monospacedDigit()
-            .foregroundStyle(subtle ? GlassColor.textPrimary : GlassTokens.Color.textOnStatus.color)
+            .foregroundStyle(subtle ? tint.ink.color : GlassTokens.Color.textOnStatus.color)
             .padding(.horizontal, 5)
             .frame(minWidth: subtle ? nil : 16, minHeight: subtle ? 14 : 16)
             .background(
-                Capsule().fill(subtle ? GlassTokens.Color.badgeFillSubtle.color : GlassTokens.Color.badgeFill.color)
+                Capsule().fill(subtle ? tint.fill.color : GlassTokens.Color.badgeFill.color)
             )
             .accessibilityLabel(label ?? Self.text(for: count))
     }

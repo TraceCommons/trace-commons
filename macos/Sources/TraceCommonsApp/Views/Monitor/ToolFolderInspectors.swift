@@ -30,6 +30,9 @@ struct FolderInspector: View {
     @State private var confirming: TracesTreeView.Confirmation?
     /// Whether Submit all as's modal is open.
     @State private var choosingVerdict = false
+    /// Whether the Submit split button's menu is open (owner, 2026-10-19:
+    /// the Traces tab's menu panel, not a system menu).
+    @State private var submitMenuOpen = false
 
     var body: some View {
         if let words = store.words {
@@ -149,13 +152,26 @@ struct FolderInspector: View {
                 let title = store.submittingFolder == folder.id
                     ? words.tree.submitting : Self.submitAllTitle(offer.count, words: words)
                 if submits, let outcome = store.disclosure?.outcome {
-                    GlassSplitButton(title, menuLabel: outcome.submitAllAs) {
+                    GlassSplitButton(
+                        title, menuLabel: outcome.submitAllAs, menuOpen: submitMenuOpen,
+                        onMenu: { submitMenuOpen.toggle() }
+                    ) {
                         Task { await store.contributeFolder(folder, verdict: nil) }
-                    } menu: {
-                        Button(outcome.submitAllAs) { choosingVerdict = true }
-                            .help(outcome.submitAllAsTooltip)
                     }
                     .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
+                    .overlay(alignment: .topTrailing) {
+                        if submitMenuOpen {
+                            TracesSubmitMenu(
+                                label: outcome.submitAllAs, tip: outcome.submitAllAsTooltip,
+                                onPick: {
+                                    submitMenuOpen = false
+                                    choosingVerdict = true
+                                },
+                                onDismiss: { submitMenuOpen = false })
+                                .offset(y: GlassTokens.Size.controlLarge + GlassTokens.Space.s2)
+                        }
+                    }
+                    .zIndex(submitMenuOpen ? 1 : 0)
                 } else if submits {
                     Button(title) { Task { await store.contributeFolder(folder, verdict: nil) } }
                         .buttonStyle(GlassButtonStyle(.glass))
@@ -169,6 +185,8 @@ struct FolderInspector: View {
             }
             .lineLimit(1)
             .disabled(busy)
+            // Its menu floats over what follows the buttons.
+            .zIndex(submitMenuOpen ? 1 : 0)
             // A refused write, under the buttons it is about.
             if let refused = store.writeErrors[folder.id] {
                 GlassAlert(words.line(for: refused))
@@ -177,43 +195,11 @@ struct FolderInspector: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Ron's `SubmitAllAsControl`: one outcome for every eligible session,
-    /// in the core's words, or Cancel.
+    /// Ron's `SubmitAllAsControl` (`SubmitAllAsModal`), shared with the
+    /// folder row's Submit split button.
     @ViewBuilder
     private func submitAllAsModal(_ words: MonitorTracesCopy) -> some View {
-        if let outcome = store.disclosure?.outcome {
-            let busy = store.writing.contains(folder.id)
-            GlassModal(
-                title: outcome.submitAllAs, subtitle: outcome.submitAllAsTooltip, width: .narrow,
-                actions: [.cancel(words.inspector.cancel) { choosingVerdict = false }],
-                onCancel: { choosingVerdict = false }
-            ) {
-                GlassModalBody {
-                    Text(Self.applyLine(store.groupOffer(folder).count, words: words))
-                        .glassType(GlassTokens.TypeScale.label)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: GlassTokens.Space.s4) {
-                        Button(outcome.worked) {
-                            choosingVerdict = false
-                            Task { await Self.submitAllAs(.worked, folder: folder, store: store) }
-                        }
-                        .buttonStyle(GlassButtonStyle(.primary, small: true))
-                        Button(outcome.partly) {
-                            choosingVerdict = false
-                            Task { await Self.submitAllAs(.partly, folder: folder, store: store) }
-                        }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                        Button(outcome.failed) {
-                            choosingVerdict = false
-                            Task { await Self.submitAllAs(.failed, folder: folder, store: store) }
-                        }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                    }
-                    .disabled(busy)
-                }
-            }
-        }
+        SubmitAllAsModal(folder: folder, store: store, words: words) { choosingVerdict = false }
     }
 
     /// A rule change's confirmation, in the core's words for this folder.
@@ -363,5 +349,48 @@ struct FolderInspector: View {
             .init(MonitorWords.waiting, String(folder.sessions.count)),
             .init(words.size, size),
         ]
+    }
+}
+
+/// Ron's `SubmitAllAsControl`: one outcome for every eligible session, in
+/// the core's words, or Cancel. Opened from Submit all as on the Folder
+/// inspector's split button and on a folder row's (owner, 2026-10-19).
+struct SubmitAllAsModal: View {
+    let folder: TracesTree.FolderNode
+    let store: TracesStore
+    let words: MonitorTracesCopy
+    /// Closes the modal; called before an outcome is sent too.
+    let close: () -> Void
+
+    var body: some View {
+        if let outcome = store.disclosure?.outcome {
+            let busy = store.writing.contains(folder.id)
+            GlassModal(
+                title: outcome.submitAllAs, subtitle: outcome.submitAllAsTooltip, width: .narrow,
+                actions: [.cancel(words.inspector.cancel, action: close)],
+                onCancel: close
+            ) {
+                GlassModalBody {
+                    Text(FolderInspector.applyLine(store.groupOffer(folder).count, words: words))
+                        .glassType(GlassTokens.TypeScale.label)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: GlassTokens.Space.s4) {
+                        Button(outcome.worked) { send(.worked) }
+                            .buttonStyle(GlassButtonStyle(.primary, small: true))
+                        Button(outcome.partly) { send(.partly) }
+                            .buttonStyle(GlassButtonStyle(.glass))
+                        Button(outcome.failed) { send(.failed) }
+                            .buttonStyle(GlassButtonStyle(.glass))
+                    }
+                    .disabled(busy)
+                }
+            }
+        }
+    }
+
+    private func send(_ verdict: ContributorVerdict) {
+        close()
+        Task { await FolderInspector.submitAllAs(verdict, folder: folder, store: store) }
     }
 }

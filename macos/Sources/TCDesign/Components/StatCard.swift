@@ -14,15 +14,21 @@ public struct GlassStatCard: View {
     /// (a gain in green, a loss in red); nil draws none.
     private let detail: String?
     private let detailInk: GlassRGBA?
-    /// A symbol on the card's trailing side, in the accent, with no
-    /// container (owner, 2026-10-12); nil draws none.
+    /// A symbol on the card's leading side, in the accent, with no
+    /// container (owner, 2026-10-12; moved to the leading side and enlarged,
+    /// owner, 2026-10-15); nil draws none.
     private let systemImage: String?
     /// A figure beside the value, quieter than it (the size of what waits);
     /// nil draws none.
     private let valueAccessory: String?
 
-    /// The icon's size.
-    static let iconGlyph: CGFloat = 18
+    /// The icon's size: near the label and value's two lines together
+    /// (14 + 22pt), so the symbol fills the tile's height.
+    static let iconGlyph: CGFloat = 28
+    /// The icon's column: one width for every symbol, the widest
+    /// (`lock.laptopcomputer`) included, so the labels beside them start at
+    /// the same place from tile to tile.
+    static let iconColumn: CGFloat = 40
 
     public init(
         _ label: String, value: String, detail: String? = nil, detailInk: GlassRGBA? = nil,
@@ -41,15 +47,19 @@ public struct GlassStatCard: View {
     /// macOS text style (title2, 17pt), bold.
     static let valueType = GlassTokens.TypeScale.heading.weight(.bold)
 
+    /// The icon is centred on its own tile's text, not on the tile: a tile
+    /// stretched to its row's taller neighbour keeps the icon beside its
+    /// label and value.
     public var body: some View {
         HStack(alignment: .center, spacing: GlassTokens.Space.s3) {
-            figures
             if let systemImage {
                 Image(systemName: systemImage)
                     .glassGlyph(Self.iconGlyph, weight: .regular)
                     .foregroundStyle(GlassTokens.Color.purpleSoft.color)
+                    .frame(width: Self.iconColumn)
                     .accessibilityHidden(true)
             }
+            figures
         }
         .padding(.vertical, 10)
         .padding(.horizontal, 12)
@@ -89,7 +99,7 @@ public struct GlassStatCard: View {
                     .padding(.top, GlassTokens.Space.s1)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

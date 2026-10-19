@@ -1022,7 +1022,10 @@ final class TracesFolderFirstTreeTests: XCTestCase {
         XCTAssertTrue(sub.hasSuffix(words.counts.sessionsWaitingOne), sub)
 
         let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
-        for needle in ["off: folder.mode == .ignore", "menuLabel: ignorable ? words?.tree.ignoreFolder ?? \"\" : \"\""] {
+        // The row menu holds the rule and, for a folder not ignored,
+        // Ignore (owner, 2026-10-19).
+        for needle in ["off: folder.mode == .ignore", "menuLabel: menu ? words?.tree.folderMenu ?? \"\" : \"\"",
+                       "ignoreLabel: ignorable ? words.tree.ignoreFolder : nil", "let ignorable = switchable && !ignored"] {
             XCTAssertTrue(source.contains(needle), "TracesViews.swift lacks \(needle)")
         }
         // No watch switch on a folder row (owner, 2026-10-08).

@@ -39,6 +39,41 @@ public struct GlassSegment<Value: Hashable>: Identifiable {
         self.dot = dot
         self.accessibilityValue = accessibilityValue
     }
+
+    /// What the segment draws after its title (`GlassSegmentMark`).
+    public var mark: GlassSegmentMark? {
+        if let badge { return .count(badge, status: dot) }
+        return dot.map(GlassSegmentMark.dot)
+    }
+}
+
+/// What a tab draws after its title: one element, never a dot beside a
+/// count (owner, 2026-10-16). A tab with a count draws it in its dot's tint
+/// (`GlassBadge.tinted(_:)`); one with only a dot draws the dot.
+public enum GlassSegmentMark: Equatable, Sendable {
+    case dot(GlassStatus)
+    case count(GlassBadgeValue, status: GlassStatus?)
+}
+
+/// A segment's mark, drawn. With a text equivalent, a count is not read on
+/// its own: the segment's value says it, and its state, in words. The dot
+/// is never read.
+private struct GlassSegmentMarkView: View {
+    let mark: GlassSegmentMark?
+    let hidesCount: Bool
+
+    var body: some View {
+        switch mark {
+        case .dot(let status):
+            GlassStatusDot(status, size: 6)
+        case .count(.count(let count), let status):
+            GlassBadge(count: count, subtle: true, status: status).accessibilityHidden(hidesCount)
+        case .count(.unknown, let status):
+            GlassBadge(count: nil, subtle: true, status: status).accessibilityHidden(hidesCount)
+        case nil:
+            EmptyView()
+        }
+    }
 }
 
 /// Segmented tabs in a well: Home · Inference · Traces. `floating` is the
@@ -66,19 +101,7 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                 } label: {
                     HStack(spacing: GlassTokens.Space.inlineGap) {
                         Text(segment.title)
-                        if let dot = segment.dot {
-                            GlassStatusDot(dot, size: 6)
-                        }
-                        // With a text equivalent, the badge is not read on
-                        // its own: the segment's value says it in words.
-                        Group {
-                            switch segment.badge {
-                            case .count(let count): GlassBadge(count: count, subtle: true)
-                            case .unknown: GlassBadge(count: nil, subtle: true)
-                            case nil: EmptyView()
-                            }
-                        }
-                        .accessibilityHidden(segment.accessibilityValue != nil)
+                        GlassSegmentMarkView(mark: segment.mark, hidesCount: segment.accessibilityValue != nil)
                     }
                     .glassType(GlassTokens.TypeScale.label.weight(selected ? .semibold : .medium))
                     .foregroundStyle(Self.ink(selected: selected, hovering: hovered == segment.value, floating: floating))
@@ -195,19 +218,7 @@ public struct GlassRuleTabs<Value: Hashable>: View {
         } label: {
             HStack(spacing: GlassTokens.Space.inlineGap) {
                 Text(segment.title)
-                if let dot = segment.dot {
-                    GlassStatusDot(dot, size: 6)
-                }
-                // With a text equivalent, the badge is not read on its own:
-                // the segment's value says it in words.
-                Group {
-                    switch segment.badge {
-                    case .count(let count): GlassBadge(count: count, subtle: true)
-                    case .unknown: GlassBadge(count: nil, subtle: true)
-                    case nil: EmptyView()
-                    }
-                }
-                .accessibilityHidden(segment.accessibilityValue != nil)
+                GlassSegmentMarkView(mark: segment.mark, hidesCount: segment.accessibilityValue != nil)
             }
             .glassType(GlassTokens.TypeScale.body.weight(selected ? .semibold : .medium))
             .foregroundStyle(Self.ink(selected: selected, hovering: hovered == segment.value))

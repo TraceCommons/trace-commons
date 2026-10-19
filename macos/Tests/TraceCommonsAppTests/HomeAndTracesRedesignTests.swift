@@ -72,7 +72,8 @@ final class HomeAndTracesRedesignTests: XCTestCase {
         XCTAssertEqual(totals.totals.count, CreditDailyTotals.keptDays)
     }
 
-    /// The tile's sign and tone: green up, red down, no tone for no change.
+    /// The tile's sign and tone: green up, red down, and no line at all for
+    /// no change (owner, 2026-10-16).
     func test_creditDeltaIsSignedAndToned() throws {
         let words = try XCTUnwrap(MonitorWords.table?.homeHistory)
         let up = try XCTUnwrap(HomeFormat.creditDelta(3, words: words))
@@ -81,7 +82,8 @@ final class HomeAndTracesRedesignTests: XCTestCase {
         let down = try XCTUnwrap(HomeFormat.creditDelta(-2.5, words: words))
         XCTAssertTrue(down.text.contains("2.5"))
         XCTAssertEqual(down.ink, GlassTokens.Color.statusOutsideText)
-        XCTAssertEqual(HomeFormat.creditDelta(0, words: words)?.text, words.creditDeltaNone)
+        XCTAssertNil(HomeFormat.creditDelta(0, words: words))
+        XCTAssertNil(HomeFormat.creditDelta(0.04, words: words))
         XCTAssertNil(HomeFormat.creditDelta(nil, words: words))
         XCTAssertEqual(HomeFormat.creditTotal(nil), "—")
     }

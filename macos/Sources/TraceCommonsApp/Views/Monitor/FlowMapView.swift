@@ -25,10 +25,25 @@ struct FlowMapView: View {
     /// A folder node was clicked: its project id, so the window selects the
     /// folder in the tree and shows it in the inspector (owner, 2026-10-09).
     var onSelectFolder: ((String) -> Void)? = nil
+    /// A tool's folder pill was clicked (`FlowMapScene.revealing(_:in:)`).
+    var onReveal: ((FlowMapScene.FolderReveal) -> Void)? = nil
+    /// The traces moving across the Traces map now (`MapTransferPlayer`).
+    var transferRun: MapTransferRun? = nil
+    /// The traces the cards at the map's foot describe, oldest first
+    /// (`MapTransferPlayer.cards`); none for no cards.
+    var transferCards: [MapTransfer] = []
+    /// A card's X, by the trace's id (`MapTransferPlayer.close(_:)`).
+    var onCloseTransfer: ((String) -> Void)? = nil
+    /// The Traces map's style: the rocket and station, or the laptop and
+    /// the library orb (`TracesMapStyle`, Settings, General).
+    var mapStyle: TracesMapStyle = .launch
 
     @State private var zoom: CGFloat = 1
     @State private var hovered: String?
     @State private var pinned: String?
+    /// Where the pointer is on the map, for the tool group's own hit tests
+    /// (owner, 2026-10-19: the pile opens only over its card).
+    @State private var pointer: CGPoint?
     /// The node keyboard focus is on (Full Keyboard Access). It selects the
     /// node as a hover does, so a keyboard user sees the same ring and card
     /// a pointer gets; the system focus ring stays on the button itself.
@@ -38,6 +53,10 @@ struct FlowMapView: View {
 
     static let zoomRange: ClosedRange<CGFloat> = 0.6 ... 2
     static let zoomStep: CGFloat = 0.25
+
+    /// The run the map draws: none under Reduce Motion, where the map
+    /// stays still and only the card says what is happening.
+    private var motion: MapTransferRun? { reduceMotion ? nil : transferRun }
 
     var body: some View {
         GeometryReader { proxy in
@@ -50,8 +69,51 @@ struct FlowMapView: View {
                 }
                 .accessibilityHidden(true)
 
+                // The Traces map's library: the station, or on the standard
+                // map the orb (owner, 2026-10-16 and 2026-10-19).
+                if scene.stack != nil, let library = scene.nodes.first(where: { $0.id == "library" }),
+                   case .library(let active) = library.kind {
+                    libraryArt(lit: active, style: mapStyle, scale: fit.scale)
+                        .position(fit.point(library.at))
+                        .allowsHitTesting(false)
+                }
+                // What moves, under the tool group, so its card and the
+                // trace's details cover it.
+                if scene.stack != nil {
+                    TimelineView(.animation(minimumInterval: 1 / 60, paused: motion == nil)) { timeline in
+                        let t = motion.map { timeline.date.timeIntervalSince($0.start) } ?? 0
+                        Canvas { context, _ in
+                            if let run = motion {
+                                MapTransferDrawing.draw(in: &context, scene: scene, run: run, t: t, fit: fit)
+                            }
+                            // Between contributions the rocket stands on the pad.
+                            if mapStyle == .launch, motion?.action != .contribute {
+                                MapTransferDrawing.restingRocket(scene: scene, fit: fit, in: &context)
+                            }
+                        }
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                    }
+                }
+
                 ForEach(scene.nodes) { node in
                     target(node, fit: fit)
+                }
+
+                ForEach(scene.reveals, id: \.tool) { reveal in
+                    revealPill(reveal, fit: fit)
+                }
+
+                // The tool group over the targets: its open card keeps the
+                // pointer even where it covers the pad.
+                if let stack = scene.stack {
+                    TimelineView(.animation(minimumInterval: 1 / 60, paused: motion == nil)) { timeline in
+                        let t = motion.map { timeline.date.timeIntervalSince($0.start) } ?? 0
+                        MapToolPile(
+                            stack: stack, nodes: scene.nodes.filter { $0.id.hasPrefix("tool:") }, fit: fit,
+                            run: motion, t: t, pointer: pointer)
+                            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+                    }
                 }
 
                 if let id = selection, let node = scene.nodes.first(where: { $0.id == id }) {
@@ -60,10 +122,31 @@ struct FlowMapView: View {
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
             .contentShape(Rectangle())
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location): pointer = location
+                case .ended: pointer = nil
+                }
+            }
             // A click on the field, not a node, lets go of the pinned card.
             .onTapGesture { pinned = nil }
             .overlay(alignment: .bottomTrailing) {
                 if zoomable { zoomControls.padding(GlassTokens.Space.mapOverlayInset) }
+            }
+            // The traces being contributed, kept or dismissed, floating
+            // above the legend and the zoom, stacked as they follow one
+            // another (owner, 2026-10-19).
+            .overlay(alignment: .bottom) {
+                if scene.stack != nil, !transferCards.isEmpty {
+                    TraceTransferStack(
+                        cards: transferCards, anchor: .bottom,
+                        folderLabel: { transfer in scene.nodes.first { $0.id == "folder:" + transfer.folder }?.label },
+                        onClose: onCloseTransfer)
+                        .frame(maxWidth: Self.transferCardWidth)
+                        .padding(.horizontal, GlassTokens.Space.mapOverlayInset)
+                        .padding(.bottom, GlassTokens.Space.mapOverlayInset + Self.legendReserve)
+                        .transition(.opacity)
+                }
             }
             // The legend stays at the window's foot, whatever the map's
             // zoom or focus (owner, 2026-10-12): it is not drawn in the
@@ -83,6 +166,28 @@ struct FlowMapView: View {
             if let focused, !scene.nodes.contains(where: { $0.id == focused }) { self.focused = nil }
         }
     }
+
+    /// The library on the Traces map, at the map's scale: the station on
+    /// the rocket map, the orb on the standard one.
+    @ViewBuilder
+    private func libraryArt(lit: Bool, style: TracesMapStyle, scale: CGFloat) -> some View {
+        switch style {
+        case .launch:
+            GlassLibraryStation(lit: lit)
+                .frame(width: Self.stationSize.width * scale, height: Self.stationSize.height * scale)
+        case .standard:
+            GlassLibraryOrb(lit: lit)
+                .frame(width: MapTransferDrawing.orbFrame * scale, height: MapTransferDrawing.orbFrame * scale)
+        }
+    }
+
+    /// The station's frame on the rocket map, in design units.
+    static let stationSize = CGSize(width: 150, height: 130)
+
+    /// The transfer card's widest, and the room kept under it for the
+    /// legend and the zoom.
+    static let transferCardWidth: CGFloat = 460
+    static let legendReserve: CGFloat = 44
 
     // MARK: Drawing
 
@@ -134,17 +239,33 @@ struct FlowMapView: View {
     }
 
     private func drawNode(_ node: FlowMapScene.Node, in context: inout GraphicsContext, fit: FlowMapGeometry) {
+        // On the Traces map (owner, 2026-10-16) the tools are the pile's
+        // coins (`MapToolPile`) and the library is the station
+        // (`GlassLibraryStation`), both drawn over this canvas; this
+        // computer is a launch pad.
+        let traces = scene.stack != nil
+        if traces, case .tool = node.kind { return }
         let centre = fit.point(node.at)
         let radius = node.radius * fit.scale
         let disc = Path(ellipseIn: CGRect(x: centre.x - radius, y: centre.y - radius, width: radius * 2, height: radius * 2))
         var layer = context
         layer.opacity = node.dim
         let selected = selection == node.id
+        let drawnElsewhere = traces && (node.id == "hub" || node.id == "library")
 
         switch node.kind {
+        case .hub where traces:
+            switch mapStyle {
+            case .launch: Self.drawPad(at: centre, scale: fit.scale, in: &layer)
+            case .standard: Self.drawLaptop(at: centre, scale: fit.scale, in: &layer)
+            }
         case .hub:
             layer.fill(disc, with: .color(GlassTokens.Color.statusOff.color))
             ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassColor.ink(0.25), scale: fit.scale)
+        case .library where traces:
+            // No name under the station or the orb, even under the pointer
+            // (owner, 2026-10-19): its hover card says it.
+            return
         case .library(let active):
             layer.fill(disc, with: .color(active ? GlassTokens.Color.blue.color : GlassTokens.Color.mapNodeOff.color))
             if active { ring(disc, radius: radius, centre: centre, in: &layer, colour: GlassTokens.Color.blue.color.opacity(0.35), scale: fit.scale) }
@@ -187,7 +308,7 @@ struct FlowMapView: View {
                          style: StrokeStyle(lineWidth: 2 * fit.scale, lineCap: .round, lineJoin: .round))
         }
 
-        if selected {
+        if selected, !drawnElsewhere {
             layer.stroke(disc, with: .color(GlassColor.accentText), lineWidth: 2 * fit.scale)
         }
 
@@ -217,6 +338,54 @@ struct FlowMapView: View {
                     .foregroundStyle(GlassTokens.Color.statusOff.color),
                 at: CGPoint(x: centre.x, y: centre.y + radius + type.sublabelOffset))
         }
+    }
+
+    /// This computer as a launch pad (owner, 2026-10-16): a slab on a base,
+    /// with a service tower beside it; the line out lands on its left edge
+    /// (`FlowMapScene.padHalfWidth`) and the rocket stands on it.
+    /// How far above this computer's point the laptop's screen rises: a
+    /// contributed trace sets off upward from there on the standard map.
+    static let laptopScreenTop: CGFloat = 36
+
+    /// This computer as a laptop on the standard map (owner, 2026-10-19):
+    /// its deck as wide as the pad, so the line out lands on its left edge,
+    /// and its screen open above it.
+    static func drawLaptop(at centre: CGPoint, scale s: CGFloat, in context: inout GraphicsContext) {
+        let half: CGFloat = FlowMapScene.padHalfWidth * s
+        let steel: Color = GlassTokens.Color.statusOff.color
+        let deck = Path(roundedRect: CGRect(x: centre.x - half, y: centre.y - 3 * s, width: half * 2, height: 6 * s),
+                        cornerRadius: 3 * s)
+        context.fill(deck, with: .color(steel))
+        let notch = Path(roundedRect: CGRect(x: centre.x - 7 * s, y: centre.y - 3 * s, width: 14 * s, height: 2 * s),
+                         cornerRadius: 1 * s)
+        context.fill(notch, with: .color(GlassTokens.Color.mapNodeOff.color))
+        let top: CGFloat = centre.y - laptopScreenTop * s
+        let lid = CGRect(x: centre.x - 25 * s, y: top, width: 50 * s, height: (laptopScreenTop - 4) * s)
+        context.fill(Path(roundedRect: lid, cornerRadius: 3.5 * s), with: .color(steel.opacity(0.85)))
+        let display: CGRect = lid.insetBy(dx: 2.5 * s, dy: 2.5 * s)
+        let deep: Color = GlassTokens.Gradient.heroCampaign.stops.first?.color.color ?? GlassTokens.Color.blue.color
+        let bright: Color = GlassTokens.Gradient.heroCampaign.stops.last?.color.color ?? GlassTokens.Color.blue.color
+        context.fill(Path(roundedRect: display, cornerRadius: 2 * s), with: .linearGradient(
+            Gradient(colors: [bright.opacity(0.9), deep]),
+            startPoint: CGPoint(x: display.minX, y: display.minY), endPoint: CGPoint(x: display.maxX, y: display.maxY)))
+    }
+
+    static func drawPad(at centre: CGPoint, scale s: CGFloat, in context: inout GraphicsContext) {
+        let half = FlowMapScene.padHalfWidth * s
+        let slab = Path(roundedRect: CGRect(x: centre.x - half, y: centre.y - 5 * s, width: half * 2, height: 10 * s),
+                        cornerRadius: 4 * s)
+        context.fill(slab, with: .linearGradient(
+            Gradient(colors: [GlassTokens.Color.statusOff.color.opacity(0.75), GlassTokens.Color.statusOff.color]),
+            startPoint: CGPoint(x: centre.x, y: centre.y - 5 * s), endPoint: CGPoint(x: centre.x, y: centre.y + 5 * s)))
+        context.fill(Path(roundedRect: CGRect(x: centre.x - 24 * s, y: centre.y + 5 * s, width: 48 * s, height: 6 * s),
+                          cornerRadius: 3 * s), with: .color(GlassTokens.Color.mapNodeOff.color))
+        let steel = GlassTokens.Color.statusOff.color.opacity(0.7)
+        context.fill(Path(roundedRect: CGRect(x: centre.x + 28 * s, y: centre.y - 55 * s, width: 4 * s, height: 50 * s),
+                          cornerRadius: 2 * s), with: .color(steel))
+        context.fill(Path(roundedRect: CGRect(x: centre.x + 14 * s, y: centre.y - 43 * s, width: 16 * s, height: 3 * s),
+                          cornerRadius: 1.5 * s), with: .color(steel))
+        context.fill(Path(roundedRect: CGRect(x: centre.x + 18 * s, y: centre.y - 27 * s, width: 12 * s, height: 3 * s),
+                          cornerRadius: 1.5 * s), with: .color(steel))
     }
 
     /// A node's label and sublabel: their sizes, and how far below the disc
@@ -292,6 +461,13 @@ struct FlowMapView: View {
                     Circle().stroke(GlassTokens.Color.statusOff.color, style: StrokeStyle(lineWidth: 1.5, dash: [2, 2]))
                 }
             }
+            // The lock on each coin: a tool's memory stays on this Mac.
+            if scene.stack != nil, let word = FlowMapScene.words?.legendMemory {
+                legendItem(word) {
+                    Image(systemName: "lock").font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(GlassColor.textTertiary)
+                }
+            }
         }
         .fixedSize()
     }
@@ -347,10 +523,48 @@ struct FlowMapView: View {
             if inside { hovered = node.id } else if hovered == node.id { hovered = nil }
         }
         .help(node.label)
+        .allowsHitTesting(scene.stack == nil || !node.id.hasPrefix("tool:"))
         .accessibilityLabel(node.label)
         .accessibilityValue(node.detail)
         .accessibilityAddTraits(pinned == node.id ? .isSelected : [])
         .position(fit.point(node.at))
+    }
+
+    /// The folder pill (owner, 2026-10-15; one column of folders since
+    /// 2026-10-16): "+N" draws the next few folders, and once they are all
+    /// drawn, the core's fold-back word folds them away again. Its trailing
+    /// edge sits where the folder names end, on the line under the last one. It is a glass control pill in
+    /// the names' own type, so it scales with the map and fits one folder
+    /// line however tightly the lines are packed. Without the core's words
+    /// only the count, a figure, is drawn.
+    @ViewBuilder
+    private func revealPill(_ reveal: FlowMapScene.FolderReveal, fit: FlowMapGeometry) -> some View {
+        let words = FlowMapScene.words
+        let folds = reveal.hidden == 0
+        if let text = folds ? words?.foldFolders : "+\(reveal.hidden)" {
+            let name = folds ? words?.foldFoldersLabel : words?.revealFolders(reveal.next)
+            let unit = max(fit.scale, Self.labelFloor)
+            let size = Self.labelType(scale: fit.scale).labelSize
+            let column = fit.point(reveal.at)
+            let end = column.x - FlowMapScene.folderRadius * fit.scale - 6 * unit
+            Button { onReveal?(reveal) } label: {
+                Text(text)
+                    .font(.system(size: size, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .padding(.horizontal, 8 * unit)
+                    .frame(height: size + 8 * unit)
+                    .glassSurface(.control, hover: GlassTokens.Color.controlHover)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(GlassPressStyle())
+            .fixedSize()
+            .opacity(reveal.dim)
+            .help(name ?? text)
+            .accessibilityLabel(name ?? text)
+            .frame(width: 0, height: 0, alignment: .trailing)
+            .position(x: end, y: column.y)
+        }
     }
 
     private func card(_ node: FlowMapScene.Node, fit: FlowMapGeometry, in size: CGSize) -> some View {

@@ -508,7 +508,14 @@ final class TracesParityTests: XCTestCase {
         let tree = try Self.text("Views/Monitor/TracesViews.swift")
         for needle in ["store.groupOffer(", "offer.offersContribute", "Self.submitTitle(offer.count, words: $0)",
                        "Self.submitHelp(offer.withheldLine, words: words)", "store.contributeFolder(folder, verdict: nil)",
-                       "offer.withheldLine", "submitTitle: submits ?", "onSubmit: submits && !busy ?",
+                       "offer.withheldLine", "submitTitle: submits && !split ?", "onSubmit: submits && !busy ?",
+                       // The row's Submit is the inspector's split button
+                       // (owner, 2026-10-19), Submit all as its chevron.
+                       // Its chevron opens the Traces tab's own menu panel,
+                       // in the "..." menu's look (owner, 2026-10-19).
+                       "title, menuLabel: outcome.submitAllAs, menuOpen: submitMenu == folder.id",
+                       "TracesSubmitMenu(", "verdictFolder = folder",
+                       "SubmitAllAsModal(folder: folder, store: store, words: words)",
                        "store.mayContributeFolder(folder)", "words.tree.submitCount", "words?.tree.submitTip"] {
             XCTAssertTrue(tree.contains(needle), "TracesViews.swift lacks \(needle)")
         }

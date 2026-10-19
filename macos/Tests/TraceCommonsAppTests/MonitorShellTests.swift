@@ -10,6 +10,21 @@ import XCTest
 /// opening on demand, the shell's breadcrumb, and Home's three counts.
 @MainActor
 final class MonitorShellTests: XCTestCase {
+    /// The panes open as the person left them, every launch, however the
+    /// app last quit (owner, 2026-10-19): which panes are shown, and the
+    /// map's width, are kept in their defaults, and the window hands the
+    /// panes that width.
+    func test_thePanesAreKeptAcrossLaunches() throws {
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        for needle in ["@AppStorage(\"monitor.showsMap\") private var showsMap = true",
+                       "@AppStorage(\"monitor.showsInspector\") private var showsInspector = true",
+                       "@AppStorage(\"monitor.mapWidth\") private var mapWidth = Double(GlassTokens.Size.mapWidth)",
+                       "@AppStorage(\"monitor.panesSeeded\") private var panesSeeded = false",
+                       "mapWidth: $mapWidth"] {
+            XCTAssertTrue(window.contains(needle), needle)
+        }
+    }
+
     // MARK: Show ignored folders
 
     /// Shown by default, as #1146's `useState(true)`; the View menu's

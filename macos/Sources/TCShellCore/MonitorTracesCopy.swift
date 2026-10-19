@@ -168,6 +168,8 @@ public struct MonitorTreeCopy: MonitorWordTable {
     public let reviewTip: String
     public let ignoredFolder: String
     public let ignoreFolder: String
+    /// The folder row menu's accessible name: the rule and Ignore.
+    public let folderMenu: String
     public let watchFolder: String
     public let watchTool: String
     public let dismissSession: String
@@ -202,6 +204,7 @@ public struct MonitorTreeCopy: MonitorWordTable {
         case reviewTip = "review_tip"
         case ignoredFolder = "ignored_folder"
         case ignoreFolder = "ignore_folder"
+        case folderMenu = "folder_menu"
         case watchFolder = "watch_folder"
         case watchTool = "watch_tool"
         case dismissSession = "dismiss_session"
@@ -712,7 +715,6 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let uncontributedSize: String
     public let uncontributedEstimate: String
     public let creditDelta: String
-    public let creditDeltaNone: String
     public let insightsToday: String
     public let insightsTeaser: String
     public let campaignEyebrow: String
@@ -757,7 +759,6 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case uncontributedSize = "uncontributed_size"
         case uncontributedEstimate = "uncontributed_estimate"
         case creditDelta = "credit_delta"
-        case creditDeltaNone = "credit_delta_none"
         case insightsToday = "insights_today"
         case insightsTeaser = "insights_teaser"
         case campaignEyebrow = "campaign_eyebrow"

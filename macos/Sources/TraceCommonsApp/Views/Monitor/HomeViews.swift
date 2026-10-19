@@ -1408,10 +1408,10 @@ enum HomeFormat {
 
     /// The Credit tile's change since the last day this Mac saw: signed, in
     /// the status green for a gain and red for a loss (owner, 2026-10-12);
-    /// nil while there is no earlier day to compare with.
+    /// nil while there is no earlier day to compare with, and for no change,
+    /// which the tile does not say (owner, 2026-10-16).
     static func creditDelta(_ delta: Double?, words: MonitorHomeHistoryCopy?) -> (text: String, ink: GlassRGBA?)? {
-        guard let delta, let words else { return nil }
-        if abs(delta) < 0.05 { return (words.creditDeltaNone, nil) }
+        guard let delta, let words, abs(delta) >= 0.05 else { return nil }
         let figure = delta.formatted(.number.precision(.fractionLength(0...1)).sign(strategy: .always()))
         let ink = delta > 0 ? GlassTokens.Color.statusOnText : GlassTokens.Color.statusOutsideText
         return (FirstRunCopy.fill(words.creditDelta, ["amount": figure]), ink)

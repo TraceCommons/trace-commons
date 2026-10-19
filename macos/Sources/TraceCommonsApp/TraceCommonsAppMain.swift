@@ -193,10 +193,11 @@ struct MonitorScene: Scene {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
                      height: GlassTokens.Size.windowHeight)
-        // The panes set the window's limits (without the map it is exactly
-        // its panes), and showing or hiding a pane grows or shrinks the
-        // window on its right (`GlassPaneLayout`), so the window follows its
-        // content's size.
+        // The panes set the window's minimum width (there is no maximum: a
+        // wider window gives the map, or without it the main pane, the
+        // room), and showing or hiding a pane grows or shrinks the window on
+        // its right (`GlassPaneLayout`), so the window follows its content's
+        // size.
         .windowResizability(.contentSize)
         // Cmd-1..3 for the three tabs, and Cmd-Shift-M for the one switch
         // worth reaching without the window. Menu items, so they are in-app

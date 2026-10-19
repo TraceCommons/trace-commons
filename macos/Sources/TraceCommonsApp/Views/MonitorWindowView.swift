@@ -74,9 +74,12 @@ struct MonitorWindowView: View {
 
     @SceneStorage("monitor.tab") private var tab: Tab = .home
     @SceneStorage("monitor.mapTab") private var mapTab: MapTab = .traces
-    /// The person's preferences.
-    @SceneStorage("monitor.showsMap") private var showsMap = true
-    @SceneStorage("monitor.showsInspector") private var showsInspector = true
+    /// The person's preferences, kept in their defaults so every launch
+    /// opens with the panes as they left them (owner, 2026-10-19), however
+    /// the app last quit; and the map's width, as they last left it.
+    @AppStorage("monitor.showsMap") private var showsMap = true
+    @AppStorage("monitor.showsInspector") private var showsInspector = true
+    @AppStorage("monitor.mapWidth") private var mapWidth = Double(GlassTokens.Size.mapWidth)
     /// The Traces graph footer (the toolbar's Graph), on by default as #1146.
     @SceneStorage("monitor.showsGraph") private var showsGraph = true
     /// The View menu's "Show ignored folders"; shown by default, as #1146
@@ -170,11 +173,16 @@ struct MonitorWindowView: View {
     /// False until this window has seeded the two preferences from the
     /// room its screen has (map from 1100pt, inspector from 900pt). After
     /// that the window restores whatever the person chose.
-    @SceneStorage("monitor.panesSeeded") private var panesSeeded = false
+    @AppStorage("monitor.panesSeeded") private var panesSeeded = false
+    /// The traces moving across the Traces map and the trace its cards
+    /// describe, at the map's foot and the Traces tab's top (owner,
+    /// 2026-10-19), fed by `MapTransferFeed`.
+    @StateObject private var transfers = MapTransferPlayer()
 
     var body: some View {
         GlassThreePane(
-            showsMap: showsMap, showsInspector: showsInspector && inspectorAvailable, onFirstLayout: seedPanes
+            showsMap: showsMap, showsInspector: showsInspector && inspectorAvailable, mapWidth: $mapWidth,
+            onFirstLayout: seedPanes
         ) {
             MonitorMainPane(
                 tab: $tab,
@@ -213,7 +221,8 @@ struct MonitorWindowView: View {
                             onReview: { entryId in
                                 Self.select(.session(entryID: entryId), selection: &selection, showsInspector: &showsInspector)
                             },
-                            openHistory: { tracesPage = .history })
+                            openHistory: { tracesPage = .history },
+                            transferCards: transfers.cards, onCloseTransfer: { transfers.close($0) })
                     case .history:
                         // Opening a row shows its details in the inspector,
                         // and opens it (Ron's inspector auto-open).
@@ -292,7 +301,8 @@ struct MonitorWindowView: View {
                     tab = .traces
                     selection = .folder(projectID: projectID)
                     showsInspector = true
-                })
+                },
+                transfers: transfers)
         } inspector: {
             // The whole column scrolls as one, prompts and selection together:
             // unscrolled, a column taller than the window grew the inspector
@@ -309,6 +319,9 @@ struct MonitorWindowView: View {
                 .scrollIndicators(.never)
             }
         }
+        // What History gained, kept and dismissed, for the map's and the
+        // Traces tab's trace cards (owner, 2026-10-19).
+        .modifier(MapTransferFeed(player: transfers, history: home.history, traces: traces))
         // Settings is its own window (owner, 2026-10-08,
         // `SettingsWindowView`), no longer a modal over these panes.
         .glassWindow()
@@ -884,6 +897,17 @@ private struct MonitorMapPane: View {
     /// A folder node clicked on the Traces map, by project id.
     let onSelectFolder: (String) -> Void
     @EnvironmentObject private var model: AppModel
+    /// How many folders past the first ten the Traces map's pill has
+    /// drawn (`FlowMapScene.folderColumn`).
+    @State private var revealedFolders: [String: Int] = [:]
+    /// The window's transfer player (`MapTransferFeed`): the traces moving
+    /// across the Traces map, and the one its card describes.
+    @ObservedObject var transfers: MapTransferPlayer
+    /// The Traces map's rocket and station, or the laptop and orb
+    /// (`TracesMapStyle`, Settings, General); it changes at once.
+    @AppStorage(TracesMapStyle.key) private var mapRocket = true
+
+    private var mapStyle: TracesMapStyle { mapRocket ? .launch : .standard }
 
     var body: some View {
         // The map is content, not chrome: its own field, so the selector,
@@ -920,12 +944,15 @@ private struct MonitorMapPane: View {
                 traces.tree,
                 gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations),
                 contributed: .init(history: history, failure: historyFailure), selectedTool: selectedTool,
-                space: space)
+                revealed: revealedFolders, space: space)
             FlowMapView(
                 scene: scene,
                 legend: [.autoUpload, .ask, .ignore], zoomable: true,
                 accessibilityName: FlowMapScene.words?.mapLabel ?? MonitorWindowView.Tab.traces.title, state: tracesState,
-                focus: scene.focusPoint(tool: focusTool), onSelectFolder: onSelectFolder)
+                focus: scene.focusPoint(tool: focusTool), onSelectFolder: onSelectFolder,
+                onReveal: { revealedFolders = FlowMapScene.revealing($0, in: revealedFolders) },
+                transferRun: transfers.run, transferCards: transfers.cards,
+                onCloseTransfer: { transfers.close($0) }, mapStyle: mapStyle)
         case .privateAI:
             // The one tool list, while this window's client has read it and
             // the core still answers; otherwise nothing is drawn as current.

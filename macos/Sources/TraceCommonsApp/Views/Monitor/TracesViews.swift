@@ -25,6 +25,12 @@ struct TracesTreeView: View {
     /// Opens History on the Traces tab, from the button beside the order
     /// control (owner, 2026-10-12).
     var openHistory: (() -> Void)? = nil
+    /// The traces being contributed, kept or dismissed, whose cards float
+    /// over the top of the tab, oldest first (owner, 2026-10-19,
+    /// `MapTransferPlayer.cards`).
+    var transferCards: [MapTransfer] = []
+    /// A card's X, by the trace's id (`MapTransferPlayer.close(_:)`).
+    var onCloseTransfer: ((String) -> Void)? = nil
 
     /// The folders opened: every folder starts collapsed (#1146
     /// `traces-workspace.tsx`, `expanded = []`), and one opens when a
@@ -37,8 +43,14 @@ struct TracesTreeView: View {
     /// ignoring when the folder has sessions waiting. It carries the core's
     /// words for that folder, decoded when the change was asked for.
     @State private var confirming: Confirmation?
-    /// The folder whose row menu (Ignore folder) is open.
+    /// The folder whose row menu (its contribution rule, and Ignore) is
+    /// open.
     @State private var folderMenu: String?
+    /// The folder whose Submit all as is open, from its row's split
+    /// button (owner, 2026-10-19).
+    @State private var verdictFolder: TracesTree.FolderNode?
+    /// The folder whose Submit split button's menu is open.
+    @State private var submitMenu: String?
     /// The session whose row menu (Dismiss session) is open.
     @State private var sessionMenu: String?
     /// The session whose Dismiss confirmation is open (Ron's
@@ -138,6 +150,28 @@ struct TracesTreeView: View {
             if let pending = confirming { confirmation(pending) }
         }
         .glassModal(item: $dismissing) { dismissModal($0) }
+        .glassModal(item: $verdictFolder) { folder in
+            if let words = store.words {
+                SubmitAllAsModal(folder: folder, store: store, words: words) { verdictFolder = nil }
+            }
+        }
+        // Under the tab bar, over the folders, pushing nothing down (owner,
+        // 2026-10-19): the traces moving now, or just kept or dismissed,
+        // stacked as they follow one another; each goes a few seconds
+        // after, or at its X.
+        .overlay(alignment: .top) {
+            // Not in a glass group: one would blend the stacked cards'
+            // glass into a single surface, and the earlier cards would no
+            // longer read as peeking out below the front one.
+            if !transferCards.isEmpty {
+                TraceTransferStack(
+                    cards: transferCards, anchor: .top,
+                    folderLabel: { transfer in store.tree.allFolders.first { $0.id == transfer.folder }?.label },
+                    onClose: onCloseTransfer)
+                    .environment(\.glassLayer, .floating)
+                    .transition(.opacity)
+            }
+        }
     }
 
     /// The folders the idle filter opens: every folder it lists.
@@ -494,6 +528,17 @@ struct TracesTreeView: View {
         let switchable = folder.mode != nil && folder.offerableModes.contains(.ask)
             && folder.offerableModes.contains(.ignore)
         let ignorable = switchable && !ignored
+        // The row menu holds the contribution rule (owner, 2026-10-19), the
+        // Folder inspector's picker, whenever the core lists a mode and
+        // offers others; and Ignore.
+        let rulable = folder.mode != nil && !folder.offerableModes.isEmpty
+        let menu = rulable || ignorable
+        // Submit is the Folder inspector's split button (owner, 2026-10-19):
+        // the action, and a chevron to Submit all as, when the core's
+        // outcome words are read; else the plain pill.
+        let outcome = store.disclosure?.outcome
+        let split = submits && outcome != nil
+        let submitWord: String? = words.map { busy ? $0.tree.submitting : Self.submitTitle(offer.count, words: $0) }
         GlassListRow(
             depth: .folder,
             tile: .folder,
@@ -505,29 +550,50 @@ struct TracesTreeView: View {
             selected: selection == .folder(projectID: folder.id),
             off: folder.mode == .ignore,
             expanded: folder.sessions.isEmpty ? nil : isOpen(folder.id),
-            submitTitle: submits ? words.map { busy ? $0.tree.submitting : Self.submitTitle(offer.count, words: $0) } : nil,
+            submitTitle: submits && !split ? submitWord : nil,
+            accessory: split ? AnyView(splitSubmit(folder, title: submitWord ?? "", busy: busy)) : nil,
             // No watch switch on the row (owner, 2026-10-08): a folder's
-            // mode is the Folder inspector's picker, and Ignore is the menu.
+            // mode is in the row menu and the Folder inspector's picker.
             expandLabel: folder.label,
-            menuLabel: ignorable ? words?.tree.ignoreFolder ?? "" : "",
+            menuLabel: menu ? words?.tree.folderMenu ?? "" : "",
             menuOpen: folderMenu == folder.id,
             onToggleExpand: { toggle(folder.id) },
             onSelect: { selection = Self.toggled(.folder(projectID: folder.id), current: selection) },
             onSubmit: submits && !busy ? { Task { await store.contributeFolder(folder, verdict: nil) } } : nil,
-            onMenu: ignorable ? { folderMenu = folderMenu == folder.id ? nil : folder.id } : nil
+            onMenu: menu ? {
+                submitMenu = nil
+                folderMenu = folderMenu == folder.id ? nil : folder.id
+            } : nil
         )
         .help(submits ? Self.submitHelp(offer.withheldLine, words: words) : "")
         .disabled(store.writing.contains(folder.id))
         // The row menu floats over the rows below it (#1146 `RowMenuPill`).
         .overlay(alignment: .topTrailing) {
-            if ignorable, folderMenu == folder.id, let label = words?.tree.ignoreFolder {
-                TracesRowMenuPill(label, onDismiss: { folderMenu = nil }) {
-                    folderMenu = nil
-                    request(folder, .ignore)
-                }
+            if menu, folderMenu == folder.id, let words {
+                TracesFolderMenu(
+                    folder: folder, ruleTitle: words.inspector.contributionRule,
+                    ignoreLabel: ignorable ? words.tree.ignoreFolder : nil,
+                    onRule: { mode in
+                        folderMenu = nil
+                        if mode != folder.mode { request(folder, mode) }
+                    },
+                    onIgnore: {
+                        folderMenu = nil
+                        request(folder, .ignore)
+                    },
+                    onDismiss: { folderMenu = nil })
+            } else if split, submitMenu == folder.id, let outcome {
+                TracesSubmitMenu(
+                    label: outcome.submitAllAs, tip: outcome.submitAllAsTooltip,
+                    onPick: {
+                        submitMenu = nil
+                        verdictFolder = folder
+                    },
+                    onDismiss: { submitMenu = nil })
+                    .offset(TracesSubmitMenu.offset)
             }
         }
-        .zIndex(folderMenu == folder.id ? 1 : 0)
+        .zIndex(folderMenu == folder.id || submitMenu == folder.id ? 1 : 0)
         .id(Self.rowID(.folder(projectID: folder.id)))
         .accessibilityFocused($spoken, equals: Self.rowID(.folder(projectID: folder.id)))
         // The withheld line is drawn once: the tab's notice may already say
@@ -540,6 +606,24 @@ struct TracesTreeView: View {
         if isOpen(folder.id) {
             // #1146: a session under an ignored folder is drawn off too.
             ForEach(folder.sessions) { sessionRow($0, off: ignored) }
+        }
+    }
+
+    /// A folder row's Submit as the Folder inspector's split button (owner,
+    /// 2026-10-19): Submit all, and a chevron to Submit all as.
+    @ViewBuilder
+    private func splitSubmit(_ folder: TracesTree.FolderNode, title: String, busy: Bool) -> some View {
+        if let outcome = store.disclosure?.outcome {
+            GlassSplitButton(
+                title, menuLabel: outcome.submitAllAs, menuOpen: submitMenu == folder.id,
+                onMenu: {
+                    folderMenu = nil
+                    submitMenu = submitMenu == folder.id ? nil : folder.id
+                }
+            ) {
+                Task { await store.contributeFolder(folder, verdict: nil) }
+            }
+            .disabled(busy)
         }
     }
 
@@ -840,6 +924,111 @@ enum QueueEntryBridge {
 /// and the core's label, floating under the row's kebab (38 down, 6 in from
 /// the right) over the rows below it, never pushing them down. Escape
 /// closes it, as the menus do.
+/// The glass menu panel the Traces tab's own menus share (owner,
+/// 2026-10-19): a folder row's "..." menu and the Submit split buttons'
+/// chevron, so they look alike. Opaque under its glass, so the rows it
+/// floats over never show through it; Escape closes it.
+struct TracesMenuPanel<Content: View>: View {
+    let onDismiss: () -> Void
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) { content }
+            .padding(GlassTokens.Space.s5)
+            .glassSurface(.menu, floating: true)
+            .background(RoundedRectangle(cornerRadius: GlassTier.menu.radius, style: .continuous)
+                .fill(GlassTokens.Color.paneOpaque.color))
+            .fixedSize()
+            .onExitCommand(perform: onDismiss)
+    }
+}
+
+/// One item in a `TracesMenuPanel`: its glyph and the core's words.
+struct TracesMenuItem: View {
+    let systemImage: String
+    let label: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: GlassTokens.Space.s3) {
+                Image(systemName: systemImage)
+                    .glassGlyph(11, weight: .semibold)
+                    .accessibilityHidden(true)
+                Text(label)
+                    .glassType(GlassTokens.TypeScale.label)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(GlassColor.textPrimary)
+            .padding(.horizontal, GlassTokens.Space.s4)
+            .frame(height: GlassTokens.Size.control)
+            .glassHover(GlassTokens.Color.controlHover, in: Capsule())
+        }
+        .buttonStyle(GlassPressStyle())
+    }
+}
+
+/// A folder row's menu (owner, 2026-10-19): its contribution rule, as the
+/// Folder inspector's picker in the core's names, then Ignore. It floats
+/// over the rows below the row, as the session row's menu pill does.
+struct TracesFolderMenu: View {
+    let folder: TracesTree.FolderNode
+    /// The core's "Contribution rule": the picker's heading and its name.
+    let ruleTitle: String
+    /// The core's Ignore word; nil when the folder cannot be ignored.
+    let ignoreLabel: String?
+    let onRule: (ProjectMode) -> Void
+    let onIgnore: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        TracesMenuPanel(onDismiss: onDismiss) {
+            if let mode = folder.mode, !folder.offerableModes.isEmpty {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    Text(ruleTitle)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .accessibilityHidden(true)
+                    GlassPicker(
+                        ruleTitle,
+                        selection: Binding(get: { mode }, set: { wanted in if let wanted { onRule(wanted) } }),
+                        options: folder.offerableModes.map {
+                            GlassPickerOption(FolderInspector.ruleLabel($0) ?? "\u{2014}", value: $0,
+                                              dot: TracesTreeView.status($0))
+                        },
+                        placeholder: "\u{2014}"
+                    )
+                }
+            }
+            if let ignoreLabel {
+                TracesMenuItem(systemImage: "nosign", label: ignoreLabel, action: onIgnore)
+            }
+        }
+        .offset(TracesRowMenuPill.offset)
+    }
+}
+
+/// The Submit split button's menu (owner, 2026-10-19), in the "..." menu's
+/// look: Submit all as, which opens the outcome modal.
+struct TracesSubmitMenu: View {
+    /// The core's "Submit all as" and its tip.
+    let label: String
+    let tip: String
+    let onPick: () -> Void
+    let onDismiss: () -> Void
+
+    /// Where it sits under a folder row: under the split button's chevron,
+    /// which ends left of the row menu's column.
+    static let offset = CGSize(width: -36, height: 38)
+
+    var body: some View {
+        TracesMenuPanel(onDismiss: onDismiss) {
+            TracesMenuItem(systemImage: "checklist", label: label, action: onPick)
+                .help(tip)
+        }
+    }
+}
+
 struct TracesRowMenuPill: View {
     private let label: String
     private let onDismiss: () -> Void
