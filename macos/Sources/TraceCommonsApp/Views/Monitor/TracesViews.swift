@@ -14,8 +14,7 @@ import TCShellCore
 /// disclosure bundle's folder mode names) (`ShellWordingTests`).
 struct TracesTreeView: View {
     let store: TracesStore
-    /// The queue's configured limit, which the queue-full banner names,
-    /// and the prompts drawn above the tree.
+    /// The missions switch, which a row's tags follow.
     @EnvironmentObject private var model: AppModel
     /// The folder or session selected; nil for none.
     @Binding var selection: MonitorSelection?
@@ -25,12 +24,6 @@ struct TracesTreeView: View {
     /// Opens History on the Traces tab, from the button beside the order
     /// control (owner, 2026-10-12).
     var openHistory: (() -> Void)? = nil
-    /// The traces being contributed, kept or dismissed, whose cards float
-    /// over the top of the tab, oldest first (owner, 2026-10-19,
-    /// `MapTransferPlayer.cards`).
-    var transferCards: [MapTransfer] = []
-    /// A card's X, by the trace's id (`MapTransferPlayer.close(_:)`).
-    var onCloseTransfer: ((String) -> Void)? = nil
 
     /// The folders opened: every folder starts collapsed (#1146
     /// `traces-workspace.tsx`, `expanded = []`), and one opens when a
@@ -102,22 +95,19 @@ struct TracesTreeView: View {
                 // the set asked for was not one.
                 GlassChip("\(words.sample) · \(sample)", status: store.sampleUnknown ? .ask : .off)
             }
+            // The notices that headed the tree (offers, undos, health, the
+            // first-contribution note) are popover notices over the tab now
+            // (owner, 2026-10-19, `MonitorNotices`): the controls and the
+            // tree start at the tab's top, and nothing pushes them down.
             if store.phase == .loading && isEmpty {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                        prompts
-                        // #1146: "Reading local queue…", not a spinner.
-                        Text(store.words?.tree.readingQueue ?? "")
-                            .glassType(GlassTokens.TypeScale.body)
-                            .foregroundStyle(GlassColor.textTertiary)
-                            .padding(GlassTokens.Space.s6)
-                    }
-                }
-                .scrollIndicators(.never)
+                // #1146: "Reading local queue…", not a spinner.
+                Text(store.words?.tree.readingQueue ?? "")
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .padding(GlassTokens.Space.s6)
             } else if isEmpty {
                 ScrollView {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                        prompts
                         // A narrowed list that came back empty still says
                         // so, with its way out.
                         if store.idleOnly { TracesListControls(store: store, openHistory: openHistory) }
@@ -126,21 +116,10 @@ struct TracesTreeView: View {
                 }
                 .scrollIndicators(.never)
             } else {
-                // The prompts sit above the tree on a shelf of their own,
-                // never taller than `promptsShare` of the pane and scrolling
-                // inside it past that: however many show, they never push
-                // the graph footer or the panes beside it out of the window,
-                // and the tree below them always keeps rows on screen
-                // (R-LAYOUT-1, round 2).
-                GeometryReader { pane in
-                    VStack(spacing: 0) {
-                        PromptsShelf(cap: Self.promptsCap(paneHeight: pane.size.height)) {
-                            prompts
-                        }
-                        TracesListControls(store: store, openHistory: openHistory)
-                            .padding(.vertical, GlassTokens.Space.s2)
-                        tree
-                    }
+                VStack(spacing: 0) {
+                    TracesListControls(store: store, openHistory: openHistory)
+                        .padding(.bottom, GlassTokens.Space.s2)
+                    tree
                 }
             }
         }
@@ -155,37 +134,11 @@ struct TracesTreeView: View {
                 SubmitAllAsModal(folder: folder, store: store, words: words) { verdictFolder = nil }
             }
         }
-        // Under the tab bar, over the folders, pushing nothing down (owner,
-        // 2026-10-19): the traces moving now, or just kept or dismissed,
-        // stacked as they follow one another; each goes a few seconds
-        // after, or at its X.
-        .overlay(alignment: .top) {
-            // Not in a glass group: one would blend the stacked cards'
-            // glass into a single surface, and the earlier cards would no
-            // longer read as peeking out below the front one.
-            if !transferCards.isEmpty {
-                TraceTransferStack(
-                    cards: transferCards, anchor: .top,
-                    folderLabel: { transfer in store.tree.allFolders.first { $0.id == transfer.folder }?.label },
-                    onClose: onCloseTransfer)
-                    .environment(\.glassLayer, .floating)
-                    .transition(.opacity)
-            }
-        }
     }
 
     /// The folders the idle filter opens: every folder it lists.
     static func idleFolders(_ tree: TracesTree) -> Set<String> {
         Set(tree.folders.filter { !$0.sessions.isEmpty }.map(\.id))
-    }
-
-    /// The most of the Traces pane the prompts shelf may take; the rest is
-    /// always the tree.
-    static let promptsShare: CGFloat = 0.45
-
-    /// The shelf's ceiling for a pane of this height.
-    static func promptsCap(paneHeight: CGFloat) -> CGFloat {
-        max(0, paneHeight * promptsShare)
     }
 
     /// The folders and sessions, in their own scroll.
@@ -406,43 +359,6 @@ struct TracesTreeView: View {
     /// The folder holding a session.
     static func folder(of entryId: String, in tree: TracesTree) -> String? {
         tree.folders.first { $0.sessions.contains { $0.entryId == entryId } }?.id
-    }
-
-    /// The folder notice, health banners and `InspectorPrompts`, drawn as
-    /// the first rows of the tree's scroll, never above it: a tall offer or
-    /// the first-contribution note scrolls away with the tree instead of
-    /// pushing it, the graph footer and the panes beside it out of the
-    /// window (R-LAYOUT-1).
-    @ViewBuilder
-    private var prompts: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            if let notice = store.folderNotice {
-                GlassNotice(tone: .ask) { Text(notice) }
-            }
-            // Offers, undo and health above the tree (owner, 2026-10-07: an
-            // accepted difference from #1146, which puts them in the
-            // inspector), in the tree's scroll. Why approved sessions are not moving, or that the
-            // core is not answering, first: the pane never reads as current
-            // over a last good tree, and an unread status is never drawn as
-            // healthy. Then the undos, the offers and the first-contribution
-            // note (`InspectorPrompts`).
-            ForEach(TracesHealth.banners(
-                phase: store.phase, status: store.status, words: store.words, coreDown: TracesHealth.coreDownLine,
-                maxQueueEntries: model.daemonSettings?.maxQueueEntries)
-            ) { GlassHealthBanner(banner: $0) }
-            InspectorPrompts(store: store)
-            // The idle or backlog suggestion, in the daemon's words, after
-            // anything owed: the daemon already holds it back while an
-            // arming offer is up.
-            if let card = store.nudgeCard {
-                NudgeGlassCard(
-                    card: card, busy: store.nudgeBusy,
-                    refusal: store.nudgeError.flatMap { store.words?.line(for: $0) }
-                ) { intent in Task { await store.perform(intent) } }
-            }
-            // The one-time offer to turn idle-session notifications on.
-            NudgeOfferCards(place: .traces)
-        }
     }
 
     /// No folder, nothing waiting.
@@ -847,32 +763,6 @@ struct TracesTreeView: View {
     /// The session's size, when the daemon reported it.
     static func size(_ entry: DaemonData.QueueEntry) -> String? {
         entry.sizeBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .memory) }
-    }
-}
-
-/// A content-sized shelf over the Traces tree: as tall as what it holds up
-/// to `cap`, then scrolling inside itself. With nothing in it, it takes no
-/// room and adds no gap.
-struct PromptsShelf<Content: View>: View {
-    let cap: CGFloat
-    @ViewBuilder let content: () -> Content
-    @State private var height: CGFloat = 0
-
-    var body: some View {
-        ScrollView {
-            content()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .onGeometryChange(for: CGFloat.self, of: \.size.height) { height = $0 }
-        }
-        .scrollIndicators(.automatic)
-        .scrollBounceBehavior(.basedOnSize)
-        .frame(height: Self.shelfHeight(content: height, cap: cap))
-        .padding(.bottom, height > 0.5 ? GlassTokens.Space.cardGap : 0)
-    }
-
-    /// The shelf's height for content this tall under this ceiling.
-    static func shelfHeight(content: CGFloat, cap: CGFloat) -> CGFloat {
-        min(max(0, content), max(0, cap))
     }
 }
 

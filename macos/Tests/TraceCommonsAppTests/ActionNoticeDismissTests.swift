@@ -80,11 +80,14 @@ final class ActionNoticeDismissTests: XCTestCase {
                 // A glass notice draws the same message in a `GlassNotice`
                 // whose dismiss button sits a few lines below it; a failed
                 // action's line is an unboxed `GlassAlert` with its dismiss
-                // link after it (Ron, 2026-10-09). The
-                // clear-the-same-property half applies to both unchanged.
+                // link after it (Ron, 2026-10-09); a popover notice over the
+                // Monitor's tab (owner, 2026-10-19) is a `GlassPopoverNotice`
+                // whose X clears it. The clear-the-same-property half
+                // applies to all three unchanged.
                 let next = lines[(index + 1)...].prefix(3).joined(separator: " ")
                 let glass = (lines.dropFirst(index + 1).first ?? "").contains("GlassNotice(")
                     || next.contains("GlassAlert(")
+                    || lines[(index + 1)...].prefix(2).joined(separator: " ").contains("GlassPopoverNotice(")
                 let rendered = lines[(index + 1)...].prefix(glass ? 12 : 3).joined(separator: " ")
                 let location = "\(path):\(index + 1) (\(property))"
                 if glass { glassSites += 1 }

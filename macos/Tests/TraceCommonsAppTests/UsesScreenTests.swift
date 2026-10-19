@@ -523,9 +523,13 @@ final class UsesScreenTests: XCTestCase {
         let body = notices[shellNotices.lowerBound...]
         XCTAssertTrue(body.contains("if let notice = model.firstRunNotice"))
         XCTAssertTrue(body.contains("model.firstRunNotice = nil"))
-        // The Monitor, which the first-run window hands off to, draws them.
+        // The Monitor, which the first-run window hands off to, draws it
+        // as a popover notice over every tab (owner, 2026-10-19).
         let window = try Self.appSource("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains("ShellNotices()"))
+        XCTAssertTrue(window.contains("MonitorNotices("))
+        let monitor = try Self.appSource("Views/Monitor/MonitorNotices.swift")
+        XCTAssertTrue(monitor.contains("if let notice = model.firstRunNotice"))
+        XCTAssertTrue(monitor.contains("onClose: { model.firstRunNotice = nil }"))
     }
 
     private static func appSource(_ path: String) throws -> String {

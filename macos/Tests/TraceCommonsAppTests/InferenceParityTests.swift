@@ -445,16 +445,17 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertTrue(window.contains("navigation.requestSettings(at: .privateAI)"), "the foot card opens Private AI in Settings")
     }
 
-    /// P24, as the owner revised it on 2026-10-09, 2026-10-10 and
-    /// 2026-10-12: the page leads with the managed cards, then the prompts
-    /// and the Private AI summary (the inspector stays closed on this tab),
-    /// then the calls, then balance and funding, and last the card that
-    /// opens Settings. No
-    /// subtitle and no Inference access / Runtime pair. The "Standard
-    /// settings" heading, the tools, the switch and sign-in are the Settings
-    /// panels', in that order; the managed cards (no #1146 panel, O3) are
-    /// never under that heading: it says everything below it changes
-    /// standard sessions, and the managed cards do not.
+    /// P24, as the owner revised it on 2026-10-09, 2026-10-10, 2026-10-12
+    /// and 2026-10-19: the page leads with the Private AI switch (it was the
+    /// status row), then the managed cards, then the calls, then balance
+    /// and funding, and last the card that opens Settings. The offer and
+    /// the NEAR AI sign-in are popover notices over the tab, not cards in
+    /// it (`MonitorNotices`). No subtitle and no Inference access / Runtime
+    /// pair. The "Standard settings" heading, the tools, the switch and
+    /// sign-in are the Settings panels', in that order; the managed cards
+    /// (no #1146 panel, O3) are never under that heading: it says
+    /// everything below it changes standard sessions, and the managed cards
+    /// do not.
     func test_theMainPaneFollowsThePrivateAIPageOrder() throws {
         let account = try Self.text("Views/Monitor/InferenceAccount.swift")
         XCTAssertFalse(account.contains("Text(copy.subtitle)"), "the subtitle is drawn again")
@@ -473,18 +474,17 @@ final class InferenceParityTests: XCTestCase {
             cursor = found.upperBound
         }
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
+        let toggle = try XCTUnwrap(views.range(of: "                PrivateAIToggleRow(store: store)\n"))
         let managed = try XCTUnwrap(views.range(of: "                ManagedSessionsSection()\n"))
-        let prompts = try XCTUnwrap(views.range(of: "InspectorPrompts(store: traces)"))
-        let summary = try XCTUnwrap(views.range(of: "PrivateAIInspectorView(store: store)"))
         let calls = try XCTUnwrap(views.range(of: "                ledgerSections\n"))
         let page = try XCTUnwrap(views.range(of: "InferenceAccountSection(store: store, onOpenSettings: onOpenSettings)"))
-        // Managed sessions lead the page (owner, 2026-10-12).
+        // The switch leads the page, then the managed cards.
         let scroll = try XCTUnwrap(views.range(of: "        ScrollView {\n"))
-        XCTAssertLessThan(scroll.lowerBound, managed.lowerBound)
-        XCTAssertLessThan(managed.lowerBound, prompts.lowerBound, "the managed cards lead the page")
-        XCTAssertLessThan(prompts.lowerBound, summary.lowerBound)
-        XCTAssertLessThan(summary.lowerBound, calls.lowerBound, "the calls follow the summary")
+        XCTAssertLessThan(scroll.lowerBound, toggle.lowerBound)
+        XCTAssertLessThan(toggle.lowerBound, managed.lowerBound, "the switch leads the page")
+        XCTAssertLessThan(managed.lowerBound, calls.lowerBound, "the calls follow the managed cards")
         XCTAssertLessThan(calls.lowerBound, page.lowerBound, "the account cards follow the calls")
+        XCTAssertFalse(views.contains("InspectorPrompts("), "the prompts are drawn inline again")
         // The balance card is the account section's alone.
         XCTAssertEqual(views.components(separatedBy: "PrivateAIBalanceCard(").count - 1, 0, "the balance card is drawn twice")
         XCTAssertEqual(views.components(separatedBy: "ManagedSessionsSection()").count - 1, 1)

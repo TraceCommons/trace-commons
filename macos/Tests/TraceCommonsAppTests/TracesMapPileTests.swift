@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import TCDesign
 @testable import TCShellCore
 import XCTest
 
@@ -300,12 +301,15 @@ final class TracesMapPileTests: XCTestCase {
         XCTAssertFalse(player.cards.contains { $0.id == "a" }, "the oldest goes past the limit")
     }
 
-    /// The stack draws its newest three, the front one first.
+    /// The stack draws its newest three, the front one first, each card
+    /// named by its trace.
     func test_theStackDrawsTheNewestInFront() {
         let cards = (0 ..< 5).map { MapTransfer(id: "\($0)", folder: "f", tool: "codex", action: .keep) }
-        XCTAssertEqual(TraceTransferStack.visible(cards).map(\.id), ["4", "3", "2"])
-        XCTAssertEqual(TraceTransferStack.visible(Array(cards.prefix(1))).map(\.id), ["0"])
-        XCTAssertEqual(TraceTransferStack.visible([]), [])
+        let ids = TraceTransferCard.items(cards, onClose: nil).map(\.id)
+        XCTAssertEqual(ids, cards.map { "transfer:" + $0.id })
+        XCTAssertEqual(GlassPopoverStack.visible(ids), ["transfer:4", "transfer:3", "transfer:2"])
+        XCTAssertEqual(GlassPopoverStack.visible(Array(ids.prefix(1))), ["transfer:0"])
+        XCTAssertEqual(GlassPopoverStack.visible([]), [])
     }
 
     /// The card says what is happening to the trace in the core's words:
@@ -383,8 +387,11 @@ final class TracesMapPileTests: XCTestCase {
         }
         let window = try TracesInspectorHostTests.text("Views/MonitorWindowView.swift")
         for needle in ["MapTransferFeed(player: transfers", "transfers: transfers",
-                       "transferRun: transfers.run, transferCards: transfers.cards",
-                       "transferCards: transfers.cards, onCloseTransfer: { transfers.close($0) })"] {
+                       "transferRun: transfers.run, transferCards: showsTransferCards ? transfers.cards : [],",
+                       "transferCards: transfers.cards, onCloseTransfer: { transfers.close($0) },",
+                       // The map carries the cards only while another tab
+                       // than Traces is shown (owner, 2026-10-19).
+                       "showsTransferCards: shownTab != .traces)"] {
             XCTAssertTrue(window.contains(needle), needle)
         }
     }

@@ -1,15 +1,24 @@
 import XCTest
 
 /// Every window that shows the contributor's traces carries the shared
-/// notice stack (grant voids, arming rewordings, a gate hold, the attached
+/// notices (grant voids, arming rewordings, a gate hold, the attached
 /// daemon and the legacy-invite migration). The monitor had none of them,
 /// so a void during monitor use was never told. The first-run pane tells a
-/// void too: one can arrive while someone is still setting up.
+/// void too: one can arrive while someone is still setting up. Since
+/// 2026-10-19 the Monitor draws them as popover notices over its tabs
+/// (`MonitorNotices`); the first-run pane keeps the stack.
 @MainActor
 final class ShellNoticesPlacementTests: XCTestCase {
     func test_theMonitorAndTheFirstRunPaneBothShowTheNotices() throws {
-        for file in ["Views/MonitorWindowView.swift", "Views/Monitor/FirstRunViews.swift"] {
-            XCTAssertTrue(try MonitorNavigationTests.text(file).contains("ShellNotices()"), "\(file) does not draw the notices")
+        XCTAssertTrue(try MonitorNavigationTests.text("Views/Monitor/FirstRunViews.swift").contains("ShellNotices()"),
+                      "the first-run pane does not draw the notices")
+        XCTAssertTrue(try MonitorNavigationTests.text("Views/MonitorWindowView.swift").contains("MonitorNotices("),
+                      "the Monitor does not draw the notices")
+        let monitor = try MonitorNavigationTests.text("Views/Monitor/MonitorNotices.swift")
+        for notice in ["model.isAttachedDaemon", "model.status.grantVoids", "model.status.armingRewordings",
+                       "model.gateHeldNotice", "model.legacyMigrationNotice", "model.showsLegacyMigrationOfferCard",
+                       "LegacyMigrationMoveControls(offer: offer, placement: .notice)"] {
+            XCTAssertTrue(monitor.contains(notice), "the Monitor's notices lack \(notice)")
         }
         let notices = try MonitorNavigationTests.text("Views/ShellNotices.swift")
         for card in ["AttachedDaemonNotice()", "GrantVoidNotices(", "ArmingRewordingNotices(", "GateHeldNoticeCard(", "LegacyMigrationNoticeCard(", "LegacyMigrationOfferCard("] {

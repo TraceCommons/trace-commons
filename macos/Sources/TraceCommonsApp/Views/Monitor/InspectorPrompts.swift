@@ -165,7 +165,7 @@ struct InspectorPrompts: View {
 /// ago it was approved (the accepted count-up), else #1146's "Upload may
 /// already have started."; then the core's toast, when the title did not
 /// already say it, so its redaction and flag counts are never lost.
-private struct UndoDetail: View {
+struct UndoDetail: View {
     let toast: SubmitToast
     let label: String?
     let at: Date

@@ -2,13 +2,14 @@ import SwiftUI
 import TCDesign
 import TCShellCore
 
-/// The trace being contributed, kept or dismissed (owner, 2026-10-19): one
-/// card, floating over the foot of the Traces map above its legend and
-/// zoom, and over the top of the Traces tab under the tab bar, pushing
-/// nothing aside. It shows while the trace moves and a few seconds after
-/// (`MapTransferPlayer.shown`), never under the pointer, and its X closes
-/// it sooner: the tool, what is happening to the trace, the trace's folder
-/// and time, and the tool's memory files, which stay on this Mac.
+/// The trace being contributed, kept or dismissed (owner, 2026-10-19): a
+/// popover notice (`GlassPopoverNotice`) floating over the top of the
+/// Traces tab while that tab is shown, and over the foot of the Traces map
+/// above its legend and zoom while another tab is (owner, 2026-10-19). It
+/// shows while the trace moves and a few seconds after
+/// (`MapTransferPlayer.shown`), and its X closes it sooner: the tool, what
+/// is happening to the trace, the trace's folder and time, and, behind
+/// Details, the tool's memory files, which stay on this Mac, and the note.
 struct TraceTransferCard: View {
     let transfer: MapTransfer
     /// The folder's name when the transfer carries none.
@@ -25,42 +26,38 @@ struct TraceTransferCard: View {
             let name = tool?.displayName ?? transfer.tool
             let glass = tool.map(TracesTreeView.glassTool) ?? .other(initials: FlowMapScene.initials(transfer.tool))
             let state = Self.state(transfer.action, tool: name, words: words)
-            HStack(alignment: .top, spacing: GlassTokens.Space.s5) {
+            GlassPopoverNotice(
+                title: name, tag: state.tag, tagTone: state.tone,
+                detailsLabel: MonitorWords.noticeDetails, closeLabel: MonitorWords.close, onClose: onClose
+            ) {
                 coin(glass)
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                    HStack(spacing: GlassTokens.Space.s4) {
-                        Text(name).glassType(GlassTokens.TypeScale.bodyStrong).foregroundStyle(GlassColor.textPrimary)
-                        GlassTag(state.tag, tone: state.tone)
-                        Spacer(minLength: 0)
-                    }
-                    HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
-                        Text(words.transferTrace.uppercased())
-                            .glassType(GlassTokens.TypeScale.eyebrow)
-                            .foregroundStyle(GlassColor.textTertiary)
-                        Text(traceLine)
+            } summary: {
+                HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                    Text(words.transferTrace.uppercased())
+                        .glassType(GlassTokens.TypeScale.eyebrow)
+                        .foregroundStyle(GlassColor.textTertiary)
+                    // The folder gives way, never the time: a long name is
+                    // cut in its middle and the date stays whole.
+                    Text(folder)
+                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if let time {
+                        Text("\u{00B7} " + time)
                             .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                            .foregroundStyle(GlassColor.textPrimary)
+                            .foregroundStyle(GlassColor.textSecondary)
                             .lineLimit(1)
-                            .truncationMode(.middle)
+                            .fixedSize()
                     }
-                    memory(words)
-                    Text(state.note)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
-                if let onClose, let close = MonitorWords.table?.close {
-                    GlassRoundButton(close, systemImage: "xmark", small: true, action: onClose)
-                }
+                .accessibilityElement(children: .combine)
+            } details: {
+                memory(words)
+                Text(state.note)
+            } actions: {
+                EmptyView()
             }
-            .padding(GlassTokens.Space.s6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .glassSurface(.nodeCard, floating: true)
-            // Opaque under its glass: a card stacked behind, or the map and
-            // list beneath, never shows through it.
-            .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous)
-                .fill(GlassTokens.Color.paneOpaque.color))
-            .accessibilityElement(children: .contain)
         }
     }
 
@@ -75,11 +72,16 @@ struct TraceTransferCard: View {
         }
     }
 
-    /// The trace's folder and, when recorded, its time (`MapTransfer.at`).
+    /// The trace's folder: the core's name, else the map's.
+    var folder: String { transfer.folderLabel ?? folderLabel ?? transfer.folder }
+
+    /// When the trace was recorded (`MapTransfer.at`), if it was.
+    var time: String? { transfer.at?.formatted(date: .abbreviated, time: .shortened) }
+
+    /// The trace's folder and, when recorded, its time.
     var traceLine: String {
-        let folder = transfer.folderLabel ?? folderLabel ?? transfer.folder
-        guard let at = transfer.at else { return folder }
-        return folder + " \u{00B7} " + at.formatted(date: .abbreviated, time: .shortened)
+        guard let time else { return folder }
+        return folder + " \u{00B7} " + time
     }
 
     private func coin(_ glass: GlassTool) -> some View {
@@ -93,7 +95,7 @@ struct TraceTransferCard: View {
                     .foregroundStyle(glass.tint.color)
             }
         }
-        .frame(width: 30, height: 30)
+        .frame(width: GlassNoticeMark.side, height: GlassNoticeMark.side)
     }
 
     /// The tool's memory files, which stay on this Mac.
@@ -102,86 +104,34 @@ struct TraceTransferCard: View {
             Image(systemName: "lock")
                 .font(.system(size: 10))
                 .foregroundStyle(GlassColor.textPrimary)
-            if let files = words.memoryFiles(transfer.tool) {
-                Text(files).glassType(GlassTokens.TypeScale.mono).foregroundStyle(GlassColor.textPrimary)
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                if let files = words.memoryFiles(transfer.tool) {
+                    Text(files).glassType(GlassTokens.TypeScale.mono).foregroundStyle(GlassColor.textPrimary)
+                }
+                Text(words.memoryStays)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
             }
-            Text(words.memoryStays)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
+            Spacer(minLength: 0)
         }
         .padding(.vertical, GlassTokens.Space.s2)
         .padding(.horizontal, GlassTokens.Space.s4)
         .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(GlassTokens.Color.wellFill.color))
     }
-}
 
-/// The trace cards, stacked (owner, 2026-10-19): when traces follow one
-/// another the cards pile up rather than replace each other. The newest is
-/// in front and up to two earlier ones peek out behind it, on the side the
-/// stack flows toward: upward from the map's foot, downward from the top
-/// of the Traces tab. Each card's X closes that card, and the one behind
-/// comes forward; each also goes on its own when its time is up.
-///
-/// The cards behind are drawn as plates the front card's own size, so
-/// each always shows the same sliver whatever the cards say.
-struct TraceTransferStack: View {
-    /// The side the stack hangs from; it flows away from it.
-    enum Anchor { case top, bottom }
-
-    /// Oldest first, as `MapTransferPlayer.cards`.
-    let cards: [MapTransfer]
-    let anchor: Anchor
-    /// A trace's folder name when the transfer carries none.
-    var folderLabel: (MapTransfer) -> String? = { _ in nil }
-    /// Closes the card for the trace with this id.
-    var onClose: ((String) -> Void)? = nil
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    /// How far each card behind shows past the one in front, and how many
-    /// cards are drawn.
-    static let peek: CGFloat = 8
-    static let drawn = 3
-
-    /// The cards drawn, the front one first.
-    static func visible(_ cards: [MapTransfer]) -> [MapTransfer] {
-        Array(cards.suffix(drawn).reversed())
-    }
-
-    /// Which way a card behind moves from the front one: up from the
-    /// map's foot, down from the tab's top.
-    static func direction(_ anchor: Anchor) -> CGFloat { anchor == .bottom ? -1 : 1 }
-
-    var body: some View {
-        let visible = Self.visible(cards)
-        let behind = max(0, visible.count - 1)
-        if let front = visible.first {
-            TraceTransferCard(
-                transfer: front, folderLabel: folderLabel(front),
-                onClose: onClose.map { close in { close(front.id) } })
-                .background {
-                    ZStack {
-                        ForEach(Array((0 ..< behind).reversed()), id: \.self) { index in
-                            plate(level: CGFloat(index + 1))
-                        }
-                    }
-                    .accessibilityHidden(true)
-                }
-                .id(front.id)
-                .transition(.move(edge: anchor == .bottom ? .bottom : .top).combined(with: .opacity))
-                .padding(anchor == .bottom ? .top : .bottom, Self.peek * CGFloat(behind))
-                .animation(reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 0.86), value: cards)
+    /// The cards for the traces moving now, oldest first
+    /// (`MapTransferPlayer.cards`), as popover items: each closes by the
+    /// trace's id.
+    static func items(
+        _ cards: [MapTransfer], folderLabel: @escaping (MapTransfer) -> String? = { _ in nil },
+        onClose: ((String) -> Void)?
+    ) -> [GlassPopoverItem] {
+        cards.map { transfer in
+            GlassPopoverItem(id: "transfer:" + transfer.id) {
+                TraceTransferCard(
+                    transfer: transfer, folderLabel: folderLabel(transfer),
+                    onClose: onClose.map { close in { close(transfer.id) } })
+            }
         }
-    }
-
-    /// A card behind the front one, `level` back: the front card's size,
-    /// a little narrower, moved out by `peek` a level.
-    private func plate(level: CGFloat) -> some View {
-        Color.clear
-            .glassSurface(.nodeCard, floating: true)
-            .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous)
-                .fill(GlassTokens.Color.paneOpaque.color))
-            .scaleEffect(x: 1 - 0.04 * level, y: 1, anchor: .center)
-            .offset(y: Self.direction(anchor) * Self.peek * level)
-            .opacity(level == 1 ? 0.9 : 0.7)
     }
 }

@@ -94,11 +94,22 @@ struct FirstRunWindowView: View {
 /// finished onboarding.
 struct StartupRefusedBanner: View {
     let sentence: String
+    /// Drawn as a popover notice over the Monitor's tab (owner, 2026-10-19,
+    /// `MonitorNotices`) rather than a banner in the flow.
+    var popover = false
+
+    private var title: String { TracesHealth.coreDownLine?.title ?? TracesHealth.unknownWord ?? "" }
 
     var body: some View {
-        GlassHealthBanner(banner: .init(
-            title: TracesHealth.coreDownLine?.title ?? TracesHealth.unknownWord ?? "",
-            detail: sentence, tone: .outside))
+        if popover {
+            GlassPopoverNotice(title: title) {
+                GlassNoticeMark(.outside)
+            } summary: {
+                Text(sentence)
+            } details: { EmptyView() } actions: { EmptyView() }
+        } else {
+            GlassHealthBanner(banner: .init(title: title, detail: sentence, tone: .outside))
+        }
     }
 }
 

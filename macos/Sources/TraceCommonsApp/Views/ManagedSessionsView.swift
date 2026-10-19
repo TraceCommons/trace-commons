@@ -4,8 +4,10 @@ import TCDesign
 import TCShellCore
 
 /// Saved model accounts and managed sessions, in the glass design (#1146):
-/// the NEAR AI sign-in card, then accounts, then sessions. Drawn in the
-/// Monitor's Inference tab and on the legacy model-calls screen.
+/// the NEAR AI card while signed in, then accounts, then sessions. Signed
+/// out, the NEAR AI sign-in is a popover notice over the tab instead (owner,
+/// 2026-10-19, `MonitorNotices`). Drawn in the Monitor's Inference tab and
+/// on the legacy model-calls screen.
 ///
 /// Every word comes from the shared table (`managed/copy.rs`) through
 /// `AppModel.managedText`; no raw state, auth value or daemon code is drawn.
@@ -21,11 +23,10 @@ struct ManagedSessionsSection: View {
     @State private var stopping: ManagedSession?
     /// The account whose row menu is open.
     @State private var menuFor: String?
-    @Environment(\.openURL) private var openURL
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            if let snapshot = model.managedSnapshot {
+            if let snapshot = model.managedSnapshot, snapshot.nearAiSignedIn {
                 signInCard(snapshot)
             }
             accountsCard
@@ -72,55 +73,43 @@ struct ManagedSessionsSection: View {
 
     // MARK: NEAR AI sign-in
 
-    /// Sessions on the NEAR AI sign-in, first (owner, 2026-10-12): with a
-    /// sign-in, Start Claude Code, Start Codex and, once OpenCode is
-    /// installed, Start OpenCode (owner, 2026-10-16), each a folder choice
-    /// and a launch, with no saved account; without one, the line that asks for
-    /// it and the button that begins it. Nothing here is saved: the entries
-    /// come and go with the sign-in.
+    /// Sessions on the NEAR AI sign-in, first (owner, 2026-10-12): Start
+    /// Claude Code, Start Codex and, once OpenCode is installed, Start
+    /// OpenCode (owner, 2026-10-16), each a folder choice and a launch, with
+    /// no saved account. Drawn only while signed in: signed out, the line
+    /// that asks for it and the button that begins it are a popover notice
+    /// (owner, 2026-10-19). Nothing here is saved: the entries come and go
+    /// with the sign-in.
     @ViewBuilder
     private func signInCard(_ snapshot: ManagedSnapshot) -> some View {
-        let signedIn = snapshot.nearAiSignedIn
         GlassIconCard(
             systemImage: "sparkles",
             title: model.managedText("near_ai"),
-            subtitle: [signedIn
-                ? ManagedSurface.signInScope(
-                    model.managedText("sign_in_scope"),
-                    destination: snapshot.capabilities.terminalDestination,
-                    fallback: model.managedText("terminal"))
-                : model.managedText("sign_in_needed")],
+            subtitle: [ManagedSurface.signInScope(
+                model.managedText("sign_in_scope"),
+                destination: snapshot.capabilities.terminalDestination,
+                fallback: model.managedText("terminal"))],
             trailing: { AnyView(signInActions(snapshot)) })
     }
 
     /// The Start buttons, side by side when they fit and stacked when not;
     /// left out while there is no terminal to start in, which the accounts
-    /// card says. Signed out, the sign-in button.
+    /// card says.
     @ViewBuilder
     private func signInActions(_ snapshot: ManagedSnapshot) -> some View {
-        if snapshot.nearAiSignedIn {
-            if snapshot.capabilities.terminalLaunch {
-                let buttons = ForEach(snapshot.signInStartTools, id: \.self) { tool in
-                    Button { start(tool) } label: {
-                        Text(ManagedSurface.startKey(tool).map(model.managedText) ?? "").lineLimit(1)
-                    }
-                    .buttonStyle(GlassButtonStyle(.primary, small: true))
-                    .fixedSize()
+        if snapshot.capabilities.terminalLaunch {
+            let buttons = ForEach(snapshot.signInStartTools, id: \.self) { tool in
+                Button { start(tool) } label: {
+                    Text(ManagedSurface.startKey(tool).map(model.managedText) ?? "").lineLimit(1)
                 }
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: GlassTokens.Space.s3) { buttons }
-                    VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) { buttons }
-                }
-                .disabled(model.managedBusy)
+                .buttonStyle(GlassButtonStyle(.primary, small: true))
+                .fixedSize()
             }
-        } else {
-            Button { signIn() } label: {
-                Text(model.managedText("sign_in_near_ai")).lineLimit(1)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: GlassTokens.Space.s3) { buttons }
+                VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) { buttons }
             }
-            .buttonStyle(GlassButtonStyle(.primary, small: true))
-            .fixedSize()
-            .accessibilityLabel(model.managedText("sign_in_near_ai_accessibility"))
-            .disabled(model.credentialBusy)
+            .disabled(model.managedBusy)
         }
     }
 
@@ -141,19 +130,6 @@ struct ManagedSessionsSection: View {
               let params = model.managedSnapshot?.signInLaunchParams(tool: tool, cwd: path, requestID: UUID().uuidString)
         else { return }
         model.managedAction("managed_launch_prepare", params: params, openTerminal: true)
-    }
-
-    /// The NEAR AI sign-in, begun as Settings > Private AI begins it.
-    private func signIn() {
-        Task {
-            guard let url = await model.startNearAiCredential(provider: "near") else { return }
-            let accepted = await withCheckedContinuation { continuation in
-                openURL(url) { continuation.resume(returning: $0) }
-            }
-            // A browser that never opened leaves a ceremony nobody can
-            // finish, so it is stopped rather than left to time out.
-            if !accepted { model.cancelNearAiCredential() }
-        }
     }
 
     // MARK: Accounts

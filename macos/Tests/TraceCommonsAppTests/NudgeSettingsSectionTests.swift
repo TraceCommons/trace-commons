@@ -30,8 +30,8 @@ final class NudgeSettingsSectionTests: XCTestCase {
             contentsOf: root.appendingPathComponent("Sources/TraceCommonsApp/Views/Settings/NudgeSettingsSection.swift"),
             encoding: .utf8)
         let start = try XCTUnwrap(source.range(of: "struct NudgeSettingsSection: View {"))
-        let end = try XCTUnwrap(source.range(of: "struct NudgeOfferCard: View {", range: start.upperBound..<source.endIndex))
-        XCTAssertFalse(source[start.upperBound..<end.lowerBound].contains("NudgeOfferCard"))
+        XCTAssertFalse(source[start.upperBound...].contains("store.offers("), "Settings draws an offer")
+        XCTAssertFalse(source.contains("struct NudgeOfferCard"), "the inline offer card is back")
     }
 
     /// Unread settings draw no switch at all, never a row of offs.
@@ -103,10 +103,13 @@ final class NudgeSettingsSectionTests: XCTestCase {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         let monitor = root.appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor")
-        let history = try String(contentsOf: monitor.appendingPathComponent("HomeViews.swift"), encoding: .utf8)
-        let traces = try String(contentsOf: monitor.appendingPathComponent("TracesViews.swift"), encoding: .utf8)
-        XCTAssertTrue(history.contains("NudgeOfferCards(place: .history)"), "History draws no offer")
-        XCTAssertTrue(traces.contains("NudgeOfferCards(place: .traces)"), "Traces draws no offer")
+        // As popover notices over each page (owner, 2026-10-19).
+        let notices = try String(contentsOf: monitor.appendingPathComponent("MonitorNotices.swift"), encoding: .utf8)
+        let history = try XCTUnwrap(notices.range(of: "    private var historyOffers: [GlassPopoverItem] {"))
+        let traces = try XCTUnwrap(notices.range(of: "    private var tracesOffers: [GlassPopoverItem] {"))
+        XCTAssertTrue(notices[history.upperBound...].prefix(400).contains("offerItems(.history)"), "History draws no offer")
+        XCTAssertTrue(notices[traces.upperBound...].prefix(2000).contains("offerItems(.traces)"), "Traces draws no offer")
+        XCTAssertTrue(notices.contains("offers.offers(on: place)"), "the offers are not the store's")
     }
 
     func test_aRefusedWriteIsKept() async {
