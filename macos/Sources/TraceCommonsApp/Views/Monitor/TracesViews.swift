@@ -158,14 +158,16 @@ struct TracesTreeView: View {
         // stacked as they follow one another; each goes a few seconds
         // after, or at its X.
         .overlay(alignment: .top) {
+            // Not in a glass group: one would blend the stacked cards'
+            // glass into a single surface, and the earlier cards would no
+            // longer read as peeking out below the front one.
             if !transferCards.isEmpty {
-                GlassFloatingGroup {
-                    TraceTransferStack(
-                        cards: transferCards, anchor: .top,
-                        folderLabel: { transfer in store.tree.allFolders.first { $0.id == transfer.folder }?.label },
-                        onClose: onCloseTransfer)
-                }
-                .transition(.opacity)
+                TraceTransferStack(
+                    cards: transferCards, anchor: .top,
+                    folderLabel: { transfer in store.tree.allFolders.first { $0.id == transfer.folder }?.label },
+                    onClose: onCloseTransfer)
+                    .environment(\.glassLayer, .floating)
+                    .transition(.opacity)
             }
         }
     }

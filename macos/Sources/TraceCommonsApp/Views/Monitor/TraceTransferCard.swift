@@ -118,11 +118,14 @@ struct TraceTransferCard: View {
 /// The trace cards, stacked (owner, 2026-10-19): when traces follow one
 /// another the cards pile up rather than replace each other. The newest is
 /// in front and up to two earlier ones peek out behind it, on the side the
-/// stack opens toward: above it at the map's foot, below it at the top of
-/// the Traces tab. Each card's X closes that card, and the one behind comes
-/// forward; each also goes on its own when its time is up.
+/// stack flows toward: upward from the map's foot, downward from the top
+/// of the Traces tab. Each card's X closes that card, and the one behind
+/// comes forward; each also goes on its own when its time is up.
+///
+/// The cards behind are drawn as plates the front card's own size, so
+/// each always shows the same sliver whatever the cards say.
 struct TraceTransferStack: View {
-    /// The side the stack hangs from.
+    /// The side the stack hangs from; it flows away from it.
     enum Anchor { case top, bottom }
 
     /// Oldest first, as `MapTransferPlayer.cards`.
@@ -135,7 +138,7 @@ struct TraceTransferStack: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// How far each card behind shows past the one in front, and how many
-    /// are drawn.
+    /// cards are drawn.
     static let peek: CGFloat = 8
     static let drawn = 3
 
@@ -144,27 +147,41 @@ struct TraceTransferStack: View {
         Array(cards.suffix(drawn).reversed())
     }
 
+    /// Which way a card behind moves from the front one: up from the
+    /// map's foot, down from the tab's top.
+    static func direction(_ anchor: Anchor) -> CGFloat { anchor == .bottom ? -1 : 1 }
+
     var body: some View {
         let visible = Self.visible(cards)
-        let up: CGFloat = anchor == .bottom ? -1 : 1
-        let behind = CGFloat(max(0, visible.count - 1))
-        ZStack(alignment: anchor == .bottom ? .bottom : .top) {
-            ForEach(Array(visible.enumerated()), id: \.element.id) { depth, transfer in
-                let level = CGFloat(depth)
-                let fade: Double = depth == 0 ? 1 : 0.75 - 0.2 * Double(depth - 1)
-                TraceTransferCard(
-                    transfer: transfer, folderLabel: folderLabel(transfer),
-                    onClose: onClose.map { close in { close(transfer.id) } })
-                    .scaleEffect(1 - 0.04 * level, anchor: anchor == .bottom ? .top : .bottom)
-                    .offset(y: up * Self.peek * level)
-                    .opacity(fade)
-                    .allowsHitTesting(depth == 0)
-                    .accessibilityHidden(depth > 0)
-                    .zIndex(-Double(depth))
-                    .transition(.move(edge: anchor == .bottom ? .bottom : .top).combined(with: .opacity))
-            }
+        let behind = max(0, visible.count - 1)
+        if let front = visible.first {
+            TraceTransferCard(
+                transfer: front, folderLabel: folderLabel(front),
+                onClose: onClose.map { close in { close(front.id) } })
+                .background {
+                    ZStack {
+                        ForEach(Array((0 ..< behind).reversed()), id: \.self) { index in
+                            plate(level: CGFloat(index + 1))
+                        }
+                    }
+                    .accessibilityHidden(true)
+                }
+                .id(front.id)
+                .transition(.move(edge: anchor == .bottom ? .bottom : .top).combined(with: .opacity))
+                .padding(anchor == .bottom ? .top : .bottom, Self.peek * CGFloat(behind))
+                .animation(reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 0.86), value: cards)
         }
-        .padding(anchor == .bottom ? .top : .bottom, Self.peek * behind)
-        .animation(reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 0.86), value: cards)
+    }
+
+    /// A card behind the front one, `level` back: the front card's size,
+    /// a little narrower, moved out by `peek` a level.
+    private func plate(level: CGFloat) -> some View {
+        Color.clear
+            .glassSurface(.nodeCard, floating: true)
+            .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous)
+                .fill(GlassTokens.Color.paneOpaque.color))
+            .scaleEffect(x: 1 - 0.04 * level, y: 1, anchor: .center)
+            .offset(y: Self.direction(anchor) * Self.peek * level)
+            .opacity(level == 1 ? 0.9 : 0.7)
     }
 }
