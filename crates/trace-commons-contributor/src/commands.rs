@@ -4424,17 +4424,49 @@ fn resolve_project_key(path: &Path) -> Result<String> {
     Ok(resolved.to_string_lossy().to_string())
 }
 
+/// The `include_backlog` parameter `daemon project` sends for its flags.
+///
+/// Neither flag sends none, so the daemon's default applies: a project that
+/// moves into Automatic includes the sessions already waiting in it (owner
+/// decision, 2026-10-19), and one already Automatic keeps whatever hold it
+/// has. `--from-now` sends `false`, arming for new sessions only (K5).
+/// `--include-backlog` sends `true`; it is kept for scripts written when the
+/// default was from now. Both at once is a contradiction, and either one
+/// means nothing outside `--mode auto`.
+fn project_backlog_param(
+    mode: ProjectMode,
+    include_backlog: bool,
+    from_now: bool,
+) -> Result<Option<bool>> {
+    if include_backlog && from_now {
+        anyhow::bail!("--from-now and --include-backlog cannot be used together");
+    }
+    if mode != ProjectMode::AutoUpload {
+        if include_backlog {
+            anyhow::bail!("--include-backlog applies only to --mode auto");
+        }
+        if from_now {
+            anyhow::bail!("--from-now applies only to --mode auto");
+        }
+        return Ok(None);
+    }
+    Ok(match (include_backlog, from_now) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    })
+}
+
 pub fn daemon_set_project(
     store: &ConfigStore,
     path: &Path,
     mode: &str,
     include_backlog: bool,
+    from_now: bool,
     json: bool,
 ) -> Result<()> {
     let mode = parse_project_mode(mode)?;
-    if include_backlog && mode != ProjectMode::AutoUpload {
-        anyhow::bail!("--include-backlog applies only to --mode auto");
-    }
+    let backlog_param = project_backlog_param(mode, include_backlog, from_now)?;
     let key = resolve_project_key(path)?;
     // No `label` is sent. The daemon derives it from the key -- it ignores
     // any label a client supplies, because a caller-chosen string reaching
@@ -4452,12 +4484,13 @@ pub fn daemon_set_project(
     let resp = daemon_call(
         store,
         "set_project_mode",
-        // Only when asked: arming applies to new sessions by default, and
-        // the backlog waits for the contributor (K5).
-        if include_backlog {
-            serde_json::json!({ "project_key": key, "mode": mode, "include_backlog": true })
-        } else {
-            serde_json::json!({ "project_key": key, "mode": mode })
+        // Only when a flag asks: with none, the daemon's default decides
+        // (see `project_backlog_param`).
+        match backlog_param {
+            Some(b) => {
+                serde_json::json!({ "project_key": key, "mode": mode, "include_backlog": b })
+            }
+            None => serde_json::json!({ "project_key": key, "mode": mode }),
         },
     )?;
     // Ask the same daemon that just applied the edit what it now knows, so
@@ -4501,17 +4534,26 @@ pub fn daemon_set_project(
         })
         .unwrap_or(true);
 
-    render(resp, json, |_| {
+    render(resp, json, |result| {
         println!(
             "{display_label}: {}",
             serde_json::to_string(&mode).unwrap_or_default()
         );
-        if mode == ProjectMode::AutoUpload && !include_backlog {
-            println!(
-                "note: new sessions from this project are sent automatically; \
-                 sessions already on disk wait for you (`daemon pending`). Pass \
-                 --include-backlog to send them too."
-            );
+        // What the daemon actually did, from its reply: a project already
+        // armed from now keeps its hold when re-set without a flag.
+        if mode == ProjectMode::AutoUpload {
+            if result["from_now"].as_bool() == Some(true) {
+                println!(
+                    "note: new sessions from this project are sent automatically; \
+                     sessions already on disk wait for you (`daemon pending`). Pass \
+                     --include-backlog to send them too."
+                );
+            } else {
+                println!(
+                    "note: sessions already waiting are sent too. Pass --from-now to \
+                     send only new ones."
+                );
+            }
         }
         if matches_nothing {
             println!(
@@ -4793,6 +4835,34 @@ mod daemon_command_tests {
         assert_eq!(parse_project_mode("ignore").unwrap(), ProjectMode::Ignore);
     }
 
+    /// `daemon project --mode auto` sends no `include_backlog`, so the daemon
+    /// default applies: a folder moving into Automatic includes its backlog.
+    /// `--from-now` sends `false`, `--include-backlog` sends `true`, both
+    /// together are refused, and either is refused outside `--mode auto`.
+    #[test]
+    fn the_backlog_flags_map_to_the_include_backlog_param() {
+        let auto = ProjectMode::AutoUpload;
+        assert_eq!(project_backlog_param(auto, false, false).unwrap(), None);
+        assert_eq!(
+            project_backlog_param(auto, false, true).unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            project_backlog_param(auto, true, false).unwrap(),
+            Some(true)
+        );
+        let both = project_backlog_param(auto, true, true).unwrap_err();
+        assert!(both.to_string().contains("--from-now"), "{both}");
+        assert!(both.to_string().contains("--include-backlog"), "{both}");
+        for mode in [ProjectMode::NotifyOnly, ProjectMode::Ignore] {
+            assert_eq!(project_backlog_param(mode, false, false).unwrap(), None);
+            let e = project_backlog_param(mode, false, true).unwrap_err();
+            assert!(e.to_string().contains("--from-now"), "{e}");
+            let e = project_backlog_param(mode, true, false).unwrap_err();
+            assert!(e.to_string().contains("--include-backlog"), "{e}");
+        }
+    }
+
     #[test]
     fn an_unknown_mode_word_is_rejected_with_the_valid_ones_named() {
         let err = parse_project_mode("yolo").unwrap_err();
@@ -4810,6 +4880,7 @@ mod daemon_command_tests {
             &store,
             std::path::Path::new(crate::daemon::policy::UNKNOWN_PROJECT_KEY),
             "auto",
+            false,
             false,
             false,
         )
@@ -4842,7 +4913,7 @@ mod daemon_command_tests {
         cfg.consent_scopes_chosen = Some(true);
         store.save_config(&cfg).unwrap();
         let project = tempfile::tempdir().unwrap();
-        daemon_set_project(&store, project.path(), "auto", false, false).unwrap();
+        daemon_set_project(&store, project.path(), "auto", false, false, false).unwrap();
         // The key a session in that directory resolves to (#992).
         let key = crate::daemon::policy::project_key_for(Some(
             &std::fs::canonicalize(project.path())

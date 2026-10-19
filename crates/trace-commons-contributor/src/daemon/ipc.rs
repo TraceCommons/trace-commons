@@ -4627,7 +4627,7 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                     },
                 );
                 // K5: whether the arming left the backlog waiting
-                // (`set_project_mode` with `from_now: true`). Armed rows
+                // (`set_project_mode` reply `from_now: true`). Armed rows
                 // only, like the disclosure.
                 // Also true for a folder an "Automatic" override
                 // arms: its backlog waits the same way (#1173).
@@ -4983,29 +4983,32 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     if mode == ProjectMode::AutoUpload && shared.dev_dry_run {
         return Response::err(req.id, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN);
     }
-    // K5: arming is **from now** by default. `auto_upload` arms the project
-    // for sessions that appear from here on, and what is already on disk
-    // waits for the contributor -- the spec's rule that automatic
-    // contribution arms nothing already on disk, applied to every shell at
-    // once. See `policy::ArmedFromNow`. Only an explicit
-    // `include_backlog: true` sends the backlog too, which is what
-    // `auto_upload` meant before. Only a boolean is accepted, and only with
+    // K5, as changed by the owner's decision of 2026-10-19: switching a
+    // folder to Automatic submits everything in it, the traces already
+    // waiting as well as the ones that appear from now on. So when the
+    // folder moves INTO `auto_upload` and `include_backlog` is omitted (or
+    // null), the backlog is included -- what `include_backlog: true` has
+    // always meant. Explicit `include_backlog: false` still arms **from
+    // now**: what is already on disk keeps waiting for the contributor. See
+    // `policy::ArmedFromNow`. When the folder is already Automatic, an
+    // omitted parameter is a shell re-sending the setting and keeps whatever
+    // arming the folder has; that is decided below, once the key is
+    // resolved. Only a boolean is accepted, and `true` only with
     // `auto_upload`: a backlog means nothing for ask-first or Never, and
     // silently ignoring it there would let a shell believe it had set a rule
     // it had not.
-    let include_backlog = match req.params.get("include_backlog") {
-        None | Some(serde_json::Value::Null) => false,
-        Some(serde_json::Value::Bool(b)) => *b,
+    let include_backlog: Option<bool> = match req.params.get("include_backlog") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Bool(b)) => Some(*b),
         Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "include-backlog-invalid"),
     };
-    if include_backlog && mode != ProjectMode::AutoUpload {
+    if include_backlog == Some(true) && mode != ProjectMode::AutoUpload {
         return Response::err(
             req.id,
             ERR_BAD_PARAMS,
             "include-backlog-requires-auto-upload",
         );
     }
-    let from_now = mode == ProjectMode::AutoUpload && !include_backlog;
     // A `label` param is accepted on the wire for compatibility with
     // older clients and then IGNORED. It used to be stored verbatim
     // and echoed back by `list_projects` and written into
@@ -5080,6 +5083,53 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
         let label = disambiguated_label(&key, shown.as_deref(), &known);
         (key, label)
     };
+    // Whether this arming holds back what is already in the folder.
+    //
+    // An explicit `include_backlog` decides it. With none, it depends on
+    // whether the folder is already Automatic:
+    //
+    // - Moving INTO Automatic includes the backlog (the default above).
+    // - Already Automatic: the call is a shell re-sending the setting, and it
+    //   must not release a backlog the contributor held back. It keeps
+    //   whatever hold the folder has -- its own arming-from-now record (kept
+    //   as is below), an Automatic override's record, or the Flow 1 grant's
+    //   hold (either of those is replaced by a fresh arming from now, which
+    //   is what an omitted parameter did before the default changed). A
+    //   folder armed with its backlog has no hold and stays that way.
+    //
+    // "Already Automatic" is read conservatively, as the folder's own stored
+    // mode OR the mode a contribution override resolves it to, so either one
+    // being Automatic counts as a re-send:
+    //
+    // - Stored Automatic under an Ask or Never override resolves to Ask. Read
+    //   by the resolved mode alone, a re-send would count as moving in,
+    //   `set_mode` would drop the folder's hold, and clearing the override
+    //   would then send the backlog the contributor held.
+    // - Stored Ask under an Automatic override resolves to Automatic, and the
+    //   override's record holds the folder's backlog. Read by the stored mode
+    //   alone, setting the folder Automatic would stop the override's record
+    //   applying (`arming_for` skips it once the folder's own mode is
+    //   Automatic) and release that backlog. The contributor sees the folder
+    //   as Automatic already, so this is read as a re-send and keeps a hold.
+    //
+    // The unknown bucket never gets here: `check_mode` below refuses to arm
+    // it, and neither `folder_mode` nor `resolve` ever reports it Automatic.
+    //
+    // Read under the policy lock before the audit append, which needs the
+    // answer for its detail. The append drops the lock; a change made in
+    // that window is the interleaving described there, and the re-read of
+    // the prior record after it only ever lands on a fresh hold.
+    let from_now = mode == ProjectMode::AutoUpload
+        && match include_backlog {
+            Some(include) => !include,
+            None => {
+                let already_automatic = policy.folder_mode(&key) == ProjectMode::AutoUpload
+                    || policy.resolve(&key) == ProjectMode::AutoUpload;
+                already_automatic
+                    && (policy.armed_from_now_at(&key).is_some()
+                        || policy.armed_by_grant.contains(&key))
+            }
+        };
 
     // Every refusal comes before the audit record below, so a refusal
     // records nothing. The unknown bucket first, for its own reason: it can
@@ -5151,7 +5201,8 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // A re-arm from now over an arming from now keeps the record it had:
     // the hold covers what was on disk at the FIRST arming, and a shell
     // re-sending the same setting must neither release that backlog nor
-    // start holding sessions that arrived since.
+    // start holding sessions that arrived since. That is also what an
+    // omitted `include_backlog` resolves to for a folder armed from now.
     let prior_arming = policy.armed_from_now.get(&key).cloned();
     let rearm_from_now = from_now && prior_arming.is_some();
     let was_never = policy.resolve(&key) == ProjectMode::Ignore;
@@ -12190,7 +12241,7 @@ mod tests {
             &s,
             &req(
                 "set_project_mode",
-                serde_json::json!({ "project_key": key, "mode": "auto_upload" }),
+                serde_json::json!({ "project_key": key, "mode": "auto_upload", "include_backlog": false }),
             ),
         );
         assert!(from_now.error.is_none(), "{:?}", from_now.error);
@@ -12198,7 +12249,7 @@ mod tests {
         assert_eq!(
             s.decisions_owed_value(),
             1,
-            "default arming preserves the backlog decision"
+            "arming from now preserves the backlog decision"
         );
         let mut rx = s.events.subscribe();
 
@@ -12217,6 +12268,70 @@ mod tests {
             saw_status |= event.event == EVENT_STATUS_CHANGED;
         }
         assert!(saw_status, "the badge moved; status_changed must say so");
+    }
+
+    /// The default: moving a folder from Ask into Automatic with no
+    /// `include_backlog` includes what is already waiting there. No
+    /// arming-from-now record is kept, the waiting entry no longer waits for
+    /// a person, the badge moves and says so, and the audit row carries no
+    /// from-now label.
+    #[test]
+    fn moving_a_folder_into_automatic_includes_its_waiting_entries_by_default() {
+        let key = "/tmp/auto-includes-backlog";
+        let s = enrolled_shared();
+        seed_entry_with_eligibility(&s, key, None);
+        assert_eq!(s.decisions_owed_value(), 1);
+        let mut rx = s.events.subscribe();
+
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload" }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["from_now"], false);
+        {
+            let policy = s.policy.lock().unwrap();
+            assert!(!policy.is_armed_from_now(key));
+            assert!(!policy.waits_for_a_person_at_send(key, "/tmp/seed.jsonl"));
+        }
+        assert_eq!(s.decisions_owed_value(), 0);
+        let mut saw_status = false;
+        while let Ok(event) = rx.try_recv() {
+            saw_status |= event.event == EVENT_STATUS_CHANGED;
+        }
+        assert!(saw_status, "the badge moved; status_changed must say so");
+        let rows = audit::load(&s.store).unwrap();
+        let row = rows
+            .iter()
+            .find(|e| e.action == "armed-auto-upload")
+            .unwrap();
+        assert_eq!(row.detail, None);
+    }
+
+    /// Explicit `include_backlog: false` still arms from now: the waiting
+    /// entry keeps waiting, and the audit row says from-now.
+    #[test]
+    fn explicit_include_backlog_false_still_arms_from_now() {
+        let key = "/tmp/auto-from-now-explicit";
+        let s = enrolled_shared();
+        seed_entry_with_eligibility(&s, key, None);
+
+        let r = handle_set_project_mode(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({ "project_key": key, "mode": "auto_upload", "include_backlog": false }),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["from_now"], true);
+        assert!(s.policy.lock().unwrap().is_armed_from_now(key));
+        assert_eq!(s.decisions_owed_value(), 1);
+        let rows = audit::load(&s.store).unwrap();
+        assert_eq!(rows.last().unwrap().detail.as_deref(), Some("from-now"));
     }
 
     /// And a policy change that leaves the badge where it was publishes no
