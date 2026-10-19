@@ -6544,7 +6544,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-insights"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6564,7 +6564,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-platform"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -6580,7 +6580,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-sources"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "chrono",
