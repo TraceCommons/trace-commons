@@ -29,9 +29,11 @@ struct FlowMapView: View {
     var onReveal: ((FlowMapScene.FolderReveal) -> Void)? = nil
     /// The traces moving across the Traces map now (`MapTransferPlayer`).
     var transferRun: MapTransferRun? = nil
-    /// The trace the card at the map's foot describes
-    /// (`MapTransferPlayer.shown`); nil for none.
-    var transferShown: MapTransfer? = nil
+    /// The traces the cards at the map's foot describe, oldest first
+    /// (`MapTransferPlayer.cards`); none for no cards.
+    var transferCards: [MapTransfer] = []
+    /// A card's X, by the trace's id (`MapTransferPlayer.close(_:)`).
+    var onCloseTransfer: ((String) -> Void)? = nil
     /// The Traces map's style: the rocket and station, or the laptop and
     /// the library orb (`TracesMapStyle`, Settings, General).
     var mapStyle: TracesMapStyle = .launch
@@ -131,20 +133,21 @@ struct FlowMapView: View {
             .overlay(alignment: .bottomTrailing) {
                 if zoomable { zoomControls.padding(GlassTokens.Space.mapOverlayInset) }
             }
-            // The trace being contributed, kept or dismissed, above the
-            // legend and the zoom (owner, 2026-10-19).
+            // The traces being contributed, kept or dismissed, floating
+            // above the legend and the zoom, stacked as they follow one
+            // another (owner, 2026-10-19).
             .overlay(alignment: .bottom) {
-                if scene.stack != nil, let shown = transferShown {
-                    TraceTransferCard(
-                        transfer: shown, folderLabel: scene.nodes.first { $0.id == "folder:" + shown.folder }?.label)
+                if scene.stack != nil, !transferCards.isEmpty {
+                    TraceTransferStack(
+                        cards: transferCards, anchor: .bottom,
+                        folderLabel: { transfer in scene.nodes.first { $0.id == "folder:" + transfer.folder }?.label },
+                        onClose: onCloseTransfer)
                         .frame(maxWidth: Self.transferCardWidth)
                         .padding(.horizontal, GlassTokens.Space.mapOverlayInset)
                         .padding(.bottom, GlassTokens.Space.mapOverlayInset + Self.legendReserve)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                        .id(shown.id)
+                        .transition(.opacity)
                 }
             }
-            .animation(reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 0.86), value: transferShown)
             // The legend stays at the window's foot, whatever the map's
             // zoom or focus (owner, 2026-10-12): it is not drawn in the
             // map's own space, which scales and moves.

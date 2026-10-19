@@ -258,7 +258,7 @@ final class TracesMapPileTests: XCTestCase {
         let keep = MapTransfer(id: "3", folder: "f", tool: "codex", action: .keep)
         player.enqueue([one, two, keep])
         XCTAssertEqual(player.run?.transfers.map(\.id), ["1", "2"])
-        XCTAssertEqual(player.shown, one)
+        XCTAssertEqual(player.cards, [one], "the first trace's card shows as it sets off")
         player.enqueue([one])
         XCTAssertEqual(player.run?.transfers.map(\.id), ["1", "2"], "a trace plays once")
         player.style = .standard
@@ -273,8 +273,39 @@ final class TracesMapPileTests: XCTestCase {
         player.enqueue([gone])
         XCTAssertNil(player.run)
         player.announce(gone)
-        XCTAssertEqual(player.shown, gone)
+        XCTAssertEqual(player.front, gone)
         XCTAssertNil(player.run)
+    }
+
+    /// Cards that follow one another stack, the newest in front; an X
+    /// closes its own card and the one behind comes forward; the stack
+    /// keeps at most its limit, dropping the oldest.
+    func test_cardsStackAndCloseOneAtATime() {
+        let player = MapTransferPlayer()
+        let first = MapTransfer(id: "a", folder: "f", tool: "codex", action: .contribute)
+        player.enqueue([first])
+        let gone = (0 ..< MapTransferPlayer.stackLimit).map {
+            MapTransfer(id: "d\($0)", folder: "f", tool: "codex", action: .dismiss)
+        }
+        player.announce(gone[0])
+        XCTAssertEqual(player.cards.map(\.id), ["a", "d0"])
+        XCTAssertEqual(player.front?.id, "d0")
+        player.close("d0")
+        XCTAssertEqual(player.front?.id, "a", "the card behind comes forward")
+        XCTAssertNotNil(player.run, "closing a card leaves its run playing")
+        gone.dropFirst().forEach(player.announce)
+        player.announce(MapTransfer(id: "late", folder: "f", tool: "codex", action: .dismiss))
+        XCTAssertEqual(player.cards.count, MapTransferPlayer.stackLimit)
+        XCTAssertEqual(player.front?.id, "late")
+        XCTAssertFalse(player.cards.contains { $0.id == "a" }, "the oldest goes past the limit")
+    }
+
+    /// The stack draws its newest three, the front one first.
+    func test_theStackDrawsTheNewestInFront() {
+        let cards = (0 ..< 5).map { MapTransfer(id: "\($0)", folder: "f", tool: "codex", action: .keep) }
+        XCTAssertEqual(TraceTransferStack.visible(cards).map(\.id), ["4", "3", "2"])
+        XCTAssertEqual(TraceTransferStack.visible(Array(cards.prefix(1))).map(\.id), ["0"])
+        XCTAssertEqual(TraceTransferStack.visible([]), [])
     }
 
     /// The card says what is happening to the trace in the core's words:
@@ -352,7 +383,8 @@ final class TracesMapPileTests: XCTestCase {
         }
         let window = try TracesInspectorHostTests.text("Views/MonitorWindowView.swift")
         for needle in ["MapTransferFeed(player: transfers", "transfers: transfers",
-                       "transferRun: transfers.run, transferShown: transfers.shown", "transferShown: transfers.shown)"] {
+                       "transferRun: transfers.run, transferCards: transfers.cards",
+                       "transferCards: transfers.cards, onCloseTransfer: { transfers.close($0) })"] {
             XCTAssertTrue(window.contains(needle), needle)
         }
     }

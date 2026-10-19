@@ -219,25 +219,33 @@ struct MapTransferRun: Equatable {
 
 /// Plays the runs the window hands it, one at a time (owner, 2026-10-16):
 /// what arrives while a run plays waits for the next, and a run is all of
-/// one action. `shown` is the trace the cards describe (owner, 2026-10-19:
-/// at the foot of the Traces map and at the top of the Traces tab): each
-/// trace of a run as it sets off, held `hold` seconds past the run's end,
-/// or a dismissed trace for `hold` seconds. Under Reduce Motion the runs
-/// still play, so the cards still show; the map draws them still.
+/// one action. `cards` are the traces the cards describe (owner,
+/// 2026-10-19: floating at the foot of the Traces map and over the top of
+/// the Traces tab), oldest first, stacked with the newest in front: each
+/// trace of a run joins as it sets off and stays `hold` seconds past its
+/// run's end; a dismissed trace joins at once and stays `hold` seconds.
+/// Each card's X closes that card alone. Under Reduce Motion the runs still
+/// play, so the cards still show; the map draws them still.
 @MainActor
 final class MapTransferPlayer: ObservableObject {
     @Published private(set) var run: MapTransferRun?
-    @Published private(set) var shown: MapTransfer?
+    @Published private(set) var cards: [MapTransfer] = []
     private var queue: [MapTransfer] = []
     private var played = Set<String>()
     private var timer: Task<Void, Never>?
-    private var showing: Task<Void, Never>?
+    private var feeding: Task<Void, Never>?
+    private var expiries: [String: Task<Void, Never>] = [:]
     /// The map's style for the runs still to play; one already playing
     /// keeps its own.
     var style: TracesMapStyle = .launch
 
     /// How long a card stays after its run ends, or after a dismissal.
     static let hold: Double = 5
+    /// The most cards kept in the stack; the oldest go first past it.
+    static let stackLimit = 6
+
+    /// The card in front of the stack, the newest.
+    var front: MapTransfer? { cards.last }
 
     func enqueue(_ transfers: [MapTransfer]) {
         let fresh = transfers.filter { $0.action != .dismiss && played.insert($0.id).inserted }
@@ -246,16 +254,18 @@ final class MapTransferPlayer: ObservableObject {
         if run == nil { next() }
     }
 
-    /// A dismissed trace: nothing moves on the map, its card shows.
+    /// A card's X: that card goes now; the rest of the stack, and a run
+    /// still playing on the map, carry on.
+    func close(_ id: String) {
+        expiries.removeValue(forKey: id)?.cancel()
+        cards.removeAll { $0.id == id }
+    }
+
+    /// A dismissed trace: nothing moves on the map, its card joins the
+    /// stack.
     func announce(_ transfer: MapTransfer) {
         guard played.insert(transfer.id).inserted else { return }
-        shown = transfer
-        showing?.cancel()
-        showing = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(Self.hold))
-            guard !Task.isCancelled else { return }
-            self?.shown = nil
-        }
+        add(transfer, for: Self.hold)
     }
 
     private func next() {
@@ -267,7 +277,7 @@ final class MapTransferPlayer: ObservableObject {
         queue.removeFirst(batch.count)
         let run = MapTransferRun(transfers: Array(batch), start: .now, style: style)
         self.run = run
-        feature(run)
+        feed(run)
         timer?.cancel()
         timer = Task { [weak self] in
             try? await Task.sleep(for: .seconds(run.end))
@@ -276,21 +286,36 @@ final class MapTransferPlayer: ObservableObject {
         }
     }
 
-    /// Shows each trace of `run` as it sets off, then holds the last.
-    private func feature(_ run: MapTransferRun) {
-        shown = run.transfers.first
-        showing?.cancel()
-        showing = Task { [weak self] in
+    /// Adds each trace of `run` to the stack as it sets off.
+    private func feed(_ run: MapTransferRun) {
+        let until: Double = run.end + Self.hold
+        if let first = run.transfers.first { add(first, for: until) }
+        feeding?.cancel()
+        feeding = Task { [weak self] in
             for (index, transfer) in run.transfers.enumerated().dropFirst() {
                 let wait: Double = Double(index) * MapTransferRun.step - Date().timeIntervalSince(run.start)
                 if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
-                guard !Task.isCancelled else { return }
-                self?.shown = transfer
+                guard !Task.isCancelled, let self else { return }
+                self.add(transfer, for: until - Date().timeIntervalSince(run.start))
             }
-            let rest: Double = run.end + Self.hold - Date().timeIntervalSince(run.start)
-            if rest > 0 { try? await Task.sleep(for: .seconds(rest)) }
+        }
+    }
+
+    /// Puts `transfer` in front of the stack for `seconds`.
+    private func add(_ transfer: MapTransfer, for seconds: Double) {
+        cards.removeAll { $0.id == transfer.id }
+        cards.append(transfer)
+        while cards.count > Self.stackLimit {
+            let oldest = cards.removeFirst()
+            expiries.removeValue(forKey: oldest.id)?.cancel()
+        }
+        let id = transfer.id
+        expiries[id]?.cancel()
+        expiries[id] = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(0, seconds)))
             guard !Task.isCancelled else { return }
-            self?.shown = nil
+            self?.cards.removeAll { $0.id == id }
+            self?.expiries[id] = nil
         }
     }
 }

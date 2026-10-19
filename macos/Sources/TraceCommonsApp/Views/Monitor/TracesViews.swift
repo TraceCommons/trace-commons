@@ -25,10 +25,12 @@ struct TracesTreeView: View {
     /// Opens History on the Traces tab, from the button beside the order
     /// control (owner, 2026-10-12).
     var openHistory: (() -> Void)? = nil
-    /// The trace being contributed, kept or dismissed, whose card shows
-    /// above the folders (owner, 2026-10-19, `MapTransferPlayer.shown`).
-    var transferShown: MapTransfer? = nil
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The traces being contributed, kept or dismissed, whose cards float
+    /// over the top of the tab, oldest first (owner, 2026-10-19,
+    /// `MapTransferPlayer.cards`).
+    var transferCards: [MapTransfer] = []
+    /// A card's X, by the trace's id (`MapTransferPlayer.close(_:)`).
+    var onCloseTransfer: ((String) -> Void)? = nil
 
     /// The folders opened: every folder starts collapsed (#1146
     /// `traces-workspace.tsx`, `expanded = []`), and one opens when a
@@ -89,14 +91,6 @@ struct TracesTreeView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            // Under the tab bar, above the folders: the trace moving now,
-            // or just kept or dismissed; it goes a few seconds after.
-            if let shown = transferShown {
-                TraceTransferCard(
-                    transfer: shown, folderLabel: store.tree.allFolders.first { $0.id == shown.folder }?.label)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .id(shown.id)
-            }
             if let sample = store.sample, let words = store.words {
                 // Debug builds draw sample data here; say so, and say when
                 // the set asked for was not one.
@@ -150,7 +144,21 @@ struct TracesTreeView: View {
             if let pending = confirming { confirmation(pending) }
         }
         .glassModal(item: $dismissing) { dismissModal($0) }
-        .animation(reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 0.86), value: transferShown)
+        // Under the tab bar, over the folders, pushing nothing down (owner,
+        // 2026-10-19): the traces moving now, or just kept or dismissed,
+        // stacked as they follow one another; each goes a few seconds
+        // after, or at its X.
+        .overlay(alignment: .top) {
+            if !transferCards.isEmpty {
+                GlassFloatingGroup {
+                    TraceTransferStack(
+                        cards: transferCards, anchor: .top,
+                        folderLabel: { transfer in store.tree.allFolders.first { $0.id == transfer.folder }?.label },
+                        onClose: onCloseTransfer)
+                }
+                .transition(.opacity)
+            }
+        }
     }
 
     /// The folders the idle filter opens: every folder it lists.

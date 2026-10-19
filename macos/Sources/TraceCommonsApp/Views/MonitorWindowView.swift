@@ -214,7 +214,7 @@ struct MonitorWindowView: View {
                                 Self.select(.session(entryID: entryId), selection: &selection, showsInspector: &showsInspector)
                             },
                             openHistory: { tracesPage = .history },
-                            transferShown: transfers.shown)
+                            transferCards: transfers.cards, onCloseTransfer: { transfers.close($0) })
                     case .history:
                         // Opening a row shows its details in the inspector,
                         // and opens it (Ron's inspector auto-open).
@@ -938,7 +938,8 @@ private struct MonitorMapPane: View {
                 accessibilityName: FlowMapScene.words?.mapLabel ?? MonitorWindowView.Tab.traces.title, state: tracesState,
                 focus: scene.focusPoint(tool: focusTool), onSelectFolder: onSelectFolder,
                 onReveal: { revealedFolders = FlowMapScene.revealing($0, in: revealedFolders) },
-                transferRun: transfers.run, transferShown: transfers.shown, mapStyle: mapStyle)
+                transferRun: transfers.run, transferCards: transfers.cards,
+                onCloseTransfer: { transfers.close($0) }, mapStyle: mapStyle)
         case .privateAI:
             // The one tool list, while this window's client has read it and
             // the core still answers; otherwise nothing is drawn as current.
