@@ -18,24 +18,80 @@ final class TracesStore {
     }
 
     private(set) var phase: Phase = .loading
-    private(set) var tree = TracesTree(tools: [], unplaced: [])
+    private(set) var tree = TracesTree(tools: [], unplaced: []) {
+        didSet { narrow() }
+    }
     /// Whether the tree draws folders set to ignore (the View menu's "Show
     /// ignored folders"; shown by default, as #1146). Changing it redraws
     /// the tree from the last read, without asking the core again.
     var showsIgnored = true {
         didSet {
             guard showsIgnored != oldValue, let read = lastRead else { return }
-            tree = build(read)
+            tree = Self.build(read, showsIgnored: showsIgnored, keepsOrder: keepsOrder, idleOnly: idleOnly)
         }
     }
 
     /// The Traces search (owner, 2026-10-12): the tree narrows to the
     /// folders and sessions whose words contain it, on this Mac's last read;
     /// nothing is asked of the core. Empty shows the whole tree.
-    var searchText = ""
+    ///
+    /// This is what the field holds, keystroke by keystroke. The tree
+    /// narrows to it `searchDelay` after the last keystroke
+    /// (`appliedSearch`), so typing a word narrows once rather than once per
+    /// letter; clearing it shows the whole tree at once.
+    var searchText = "" {
+        didSet {
+            guard searchText != oldValue else { return }
+            scheduleSearch()
+        }
+    }
 
-    /// The tree as drawn: `tree` narrowed by `searchText`.
-    var shownTree: TracesTree { tree.matching(searchText) }
+    /// The search the tree is narrowed by: `searchText`, once typing paused.
+    private(set) var appliedSearch = ""
+
+    /// The tree as drawn: `tree` narrowed by `appliedSearch`. Stored, not
+    /// computed: the view reads it several times a pass, and narrowing on
+    /// every read redid the match each time.
+    private(set) var shownTree = TracesTree(tools: [], unplaced: [])
+
+    /// How long after the last keystroke the tree narrows.
+    @ObservationIgnored var searchDelay: Duration = .milliseconds(150)
+    @ObservationIgnored private var searchTask: Task<Void, Never>?
+    /// How many times the tree has been narrowed. For tests.
+    @ObservationIgnored private(set) var narrowings = 0
+
+    private func narrow() {
+        narrowings += 1
+        shownTree = tree.matching(appliedSearch)
+    }
+
+    private func scheduleSearch() {
+        searchTask?.cancel()
+        searchTask = nil
+        let query = searchText
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            applySearch(query)
+            return
+        }
+        let delay = searchDelay
+        searchTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            self?.applySearch(query)
+        }
+    }
+
+    private func applySearch(_ query: String) {
+        searchTask = nil
+        guard query != appliedSearch else { return }
+        appliedSearch = query
+        narrow()
+    }
+
+    /// Waits for a pending search to narrow the tree. For tests.
+    func searchSettled() async {
+        await searchTask?.value
+    }
 
     // MARK: The nudge (re-engagement)
 
@@ -71,13 +127,63 @@ final class TracesStore {
         return idleOnly && card.kind == .idleSessions ? nil : card
     }
 
-    private func build(
-        _ read: (entries: [DaemonData.QueueEntry], projects: [ProjectRow], settings: DaemonData.Settings?)
+    typealias Read = (entries: [DaemonData.QueueEntry], projects: [ProjectRow], settings: DaemonData.Settings?)
+
+    nonisolated static func build(
+        _ read: Read, showsIgnored: Bool, keepsOrder: Bool, idleOnly: Bool
     ) -> TracesTree {
         TracesTree.build(
             entries: read.entries, projects: read.projects, settings: read.settings,
             scansWhenUnset: Self.scansWhenUnset, showsIgnored: showsIgnored,
             keepsOrder: keepsOrder, onlyWithSessions: idleOnly)
+    }
+
+    /// A session row's lines in the core's words, worked out once per read
+    /// rather than on every redraw: each is a call into the core, and a
+    /// row is redrawn on every change anywhere in the tree.
+    struct RowLines: Equatable, Sendable {
+        let ineligible: String?
+        let attestation: String?
+        let tone: PrivateInferenceTone
+    }
+
+    /// One read, made ready to draw: the tree, each row's tags and lines.
+    struct Derived: Sendable {
+        let tree: TracesTree
+        let tags: [String: NudgeEntryTags]
+        let lines: [String: RowLines]
+    }
+
+    /// Everything a read is turned into before it is drawn. Off the main
+    /// thread: with a few hundred sessions waiting this is hundreds of calls
+    /// into the core, and it used to run on the main thread on every event.
+    nonisolated static func derive(
+        _ read: Read, showsIgnored: Bool, keepsOrder: Bool, idleOnly: Bool, copy: PrivateInferenceCopy?
+    ) -> Derived {
+        var lines: [String: RowLines] = [:]
+        for entry in read.entries {
+            lines[entry.entryId] = rowLines(entry, copy: copy)
+        }
+        return Derived(
+            tree: build(read, showsIgnored: showsIgnored, keepsOrder: keepsOrder, idleOnly: idleOnly),
+            tags: rowTags(read.entries),
+            lines: lines)
+    }
+
+    nonisolated static func rowLines(_ entry: DaemonData.QueueEntry, copy: PrivateInferenceCopy?) -> RowLines {
+        RowLines(
+            ineligible: ineligibleLine(entry, copy: copy),
+            attestation: attestationLine(entry, copy: copy),
+            tone: attestationTone(entry))
+    }
+
+    /// Each row's lines from the last read, by entry id.
+    private(set) var rowLines: [String: RowLines] = [:]
+
+    /// A row's lines: from the last read, or worked out now for a row that
+    /// read did not hold.
+    func lines(_ entry: DaemonData.QueueEntry) -> RowLines {
+        rowLines[entry.entryId] ?? Self.rowLines(entry, copy: inferenceCopy)
     }
 
     /// Asks the core for the list in `order`.
@@ -129,7 +235,7 @@ final class TracesStore {
     }
 
     /// Each row's tags, in the core's words, by entry id.
-    static func rowTags(_ entries: [DaemonData.QueueEntry]) -> [String: NudgeEntryTags] {
+    nonisolated static func rowTags(_ entries: [DaemonData.QueueEntry]) -> [String: NudgeEntryTags] {
         var tags: [String: NudgeEntryTags] = [:]
         for entry in entries {
             guard let input = NudgeEntryTags.input(for: entry),
@@ -291,6 +397,7 @@ final class TracesStore {
         idleOnly = client != nil && idleRequested
         if client != nil { idleRequested = false }
         rowTags = [:]
+        rowLines = [:]
         nudgeBusy = false
         nudgeError = nil
         // A new client is a new daemon: no undo, toast or refusal from the
@@ -342,7 +449,7 @@ final class TracesStore {
     let inferenceCopy: PrivateInferenceCopy? = PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? "")
 
     /// The shared eligibility table, as `AppModel` wires it.
-    static let eligibilityCalls = EligibilityCalls(
+    nonisolated static let eligibilityCalls = EligibilityCalls(
         stateLine: { TCContributionEligibility.stateLine(state: $0) },
         stateTone: { TCContributionEligibility.stateTone(state: $0) },
         control: { TCContributionEligibility.control(state: $0) },
@@ -352,7 +459,7 @@ final class TracesStore {
     )
 
     /// The shared attestation table, as `AppModel` wires it.
-    static let attestationCalls = AttestationCalls(
+    nonisolated static let attestationCalls = AttestationCalls(
         markLine: { TCAttestation.markLine(mark: $0) },
         markTone: { TCAttestation.markTone(mark: $0) },
         reasonLine: { TCAttestation.reasonLine(reason: $0) }
@@ -360,7 +467,7 @@ final class TracesStore {
 
     /// A queue entry's eligibility, as the shared table reads it; nil when
     /// the daemon sent none (eligibility does not apply).
-    static func eligibility(_ entry: DaemonData.QueueEntry) -> ContributionEligibility? {
+    nonisolated static func eligibility(_ entry: DaemonData.QueueEntry) -> ContributionEligibility? {
         entry.eligibility.map { ContributionEligibility(state: $0, reason: entry.eligibilityReason) }
     }
 
@@ -380,9 +487,13 @@ final class TracesStore {
     /// apply. A row says this so an ineligible session never looks like one
     /// that can go.
     func ineligibleLine(_ entry: DaemonData.QueueEntry) -> String? {
+        Self.ineligibleLine(entry, copy: inferenceCopy)
+    }
+
+    nonisolated static func ineligibleLine(_ entry: DaemonData.QueueEntry, copy: PrivateInferenceCopy?) -> String? {
         let eligibility = Self.eligibility(entry)
         guard eligibility != nil, !EligibilitySurface.offersContribute(eligibility, calls: Self.eligibilityCalls),
-              let copy = inferenceCopy
+              let copy
         else { return nil }
         return EligibilitySurface.stateLine(eligibility, copy: copy, calls: Self.eligibilityCalls)
     }
@@ -411,7 +522,7 @@ final class TracesStore {
     }
 
     /// A queue entry's attestation mark, as the shared table reads it.
-    static func attestationMark(_ entry: DaemonData.QueueEntry) -> AttestationMark {
+    nonisolated static func attestationMark(_ entry: DaemonData.QueueEntry) -> AttestationMark {
         AttestationMark(
             mark: entry.attestation ?? "",
             reason: (entry.attestationReason?.isEmpty ?? true) ? nil : entry.attestationReason)
@@ -421,20 +532,24 @@ final class TracesStore {
     /// `attestation_copy.state_line`): the core's sentence for the mark,
     /// without its reason. Nil only when the copy would not decode.
     func attestationLine(_ entry: DaemonData.QueueEntry) -> String? {
-        guard let copy = inferenceCopy else { return nil }
+        Self.attestationLine(entry, copy: inferenceCopy)
+    }
+
+    nonisolated static func attestationLine(_ entry: DaemonData.QueueEntry, copy: PrivateInferenceCopy?) -> String? {
+        guard let copy else { return nil }
         return AttestationSurface.markLine(Self.attestationMark(entry), copy: copy, calls: Self.attestationCalls)
     }
 
     /// The tone the core gives a session's attestation mark. A mark this
     /// build cannot read is `.neutral`, never `.clear`.
-    static func attestationTone(_ entry: DaemonData.QueueEntry) -> PrivateInferenceTone {
+    nonisolated static func attestationTone(_ entry: DaemonData.QueueEntry) -> PrivateInferenceTone {
         AttestationSurface.tone(attestationMark(entry), calls: attestationCalls)
     }
 
     /// The tools the core reads from their usual folder while unset, from
     /// its source copy. Empty if the copy is unavailable: then only tools
     /// with a declaration or something waiting are drawn.
-    static let scansWhenUnset: Set<SourceKind> = {
+    nonisolated static let scansWhenUnset: Set<SourceKind> = {
         guard let copy = TCSourceChecks.settingsCopy() else { return [] }
         return Set(SourceKind.allCases.filter { copy.tools[$0.rawValue]?.unsetScansConventional == true })
     }()
@@ -452,15 +567,29 @@ final class TracesStore {
     /// cancelled and the stream with it. With no client the load fails as
     /// an unreachable core, and there is no stream to follow -- unless the
     /// daemon is still starting (`awaiting`), when the tab stays loading.
+    ///
+    /// Events do not each reload: a Submit all over a hundred traces is
+    /// hundreds of `queue_changed`, and one reload per event kept the main
+    /// thread busy for as long as they kept coming. A burst becomes one
+    /// reload after `reloadDelay`, and at most one more if events arrived
+    /// while it ran, so the last change is always read.
     func run() async {
         guard !awaiting else { return }
         await load()
         guard let client else { return }
+        let reloads = RefreshCoalescer(delay: reloadDelay) { [weak self] in
+            await self?.load()
+        }
+        self.reloads = reloads
+        defer {
+            reloads.cancel()
+            if self.reloads === reloads { self.reloads = nil }
+        }
         for await event in client.events() {
             if Task.isCancelled { return }
             switch event {
             case .snapshot, .queueChanged, .statusChanged, .resyncRequired:
-                await load()
+                reloads.request()
             case .digestDue, .reengageDue, .previewReady, .inferenceCallAdded, .usageChanged, .unknown:
                 break
             }
@@ -468,6 +597,12 @@ final class TracesStore {
         guard !Task.isCancelled else { return }
         lost()
     }
+
+    /// How long the first event of a burst waits before the reload it asks
+    /// for, so the rest of the burst lands in the same one.
+    @ObservationIgnored var reloadDelay: Duration = .milliseconds(100)
+    /// The running `run`'s reloads. For tests.
+    @ObservationIgnored private(set) var reloads: RefreshCoalescer?
 
     /// The event stream ended without this view going: the core went away
     /// (`LiveDaemonClient.finishEvents()`). The badge reads unknown rather
@@ -493,14 +628,23 @@ final class TracesStore {
             async let settings = try? client.settings()
             async let status = try? client.status()
             async let destinations = try? client.toolDestinations()
-            let read = (entries: try await entries, projects: try await projects.projects, settings: await settings)
-            let built = build(read)
-            let tags = Self.rowTags(read.entries)
+            let read: Read = (entries: try await entries, projects: try await projects.projects, settings: await settings)
+            let options = (showsIgnored: showsIgnored, keepsOrder: keepsOrder, idleOnly: idleOnly, copy: inferenceCopy)
+            let derived = await Task.detached(priority: .userInitiated) {
+                Self.derive(
+                    read, showsIgnored: options.showsIgnored, keepsOrder: options.keepsOrder,
+                    idleOnly: options.idleOnly, copy: options.copy)
+            }.value
             let statusRead = await status
             let routes = await destinations
             guard mine == generation else { return }
-            tree = built
-            rowTags = tags
+            // "Show ignored folders" may have changed while the tree was
+            // built off the main thread; draw what the menu now says.
+            tree = showsIgnored == options.showsIgnored
+                ? derived.tree
+                : Self.build(read, showsIgnored: showsIgnored, keepsOrder: keepsOrder, idleOnly: idleOnly)
+            rowTags = derived.tags
+            rowLines = derived.lines
             lastRead = read
             self.status = statusRead
             self.destinations = routes
