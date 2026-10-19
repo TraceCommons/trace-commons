@@ -70,9 +70,12 @@ struct MonitorWindowView: View {
 
     @SceneStorage("monitor.tab") private var tab: Tab = .home
     @SceneStorage("monitor.mapTab") private var mapTab: MapTab = .traces
-    /// The person's preferences.
-    @SceneStorage("monitor.showsMap") private var showsMap = true
-    @SceneStorage("monitor.showsInspector") private var showsInspector = true
+    /// The person's preferences, kept in their defaults so every launch
+    /// opens with the panes as they left them (owner, 2026-10-19), however
+    /// the app last quit; and the map's width, as they last left it.
+    @AppStorage("monitor.showsMap") private var showsMap = true
+    @AppStorage("monitor.showsInspector") private var showsInspector = true
+    @AppStorage("monitor.mapWidth") private var mapWidth = Double(GlassTokens.Size.mapWidth)
     /// The Traces graph footer (the toolbar's Graph), on by default as #1146.
     @SceneStorage("monitor.showsGraph") private var showsGraph = true
     /// The View menu's "Show ignored folders"; shown by default, as #1146
@@ -166,7 +169,7 @@ struct MonitorWindowView: View {
     /// False until this window has seeded the two preferences from the
     /// room its screen has (map from 1100pt, inspector from 900pt). After
     /// that the window restores whatever the person chose.
-    @SceneStorage("monitor.panesSeeded") private var panesSeeded = false
+    @AppStorage("monitor.panesSeeded") private var panesSeeded = false
     /// The traces moving across the Traces map and the trace its cards
     /// describe, at the map's foot and the Traces tab's top (owner,
     /// 2026-10-19), fed by `MapTransferFeed`.
@@ -174,7 +177,8 @@ struct MonitorWindowView: View {
 
     var body: some View {
         GlassThreePane(
-            showsMap: showsMap, showsInspector: showsInspector && inspectorAvailable, onFirstLayout: seedPanes
+            showsMap: showsMap, showsInspector: showsInspector && inspectorAvailable, mapWidth: $mapWidth,
+            onFirstLayout: seedPanes
         ) {
             MonitorMainPane(
                 tab: $tab,

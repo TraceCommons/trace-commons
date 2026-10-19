@@ -92,6 +92,28 @@ final class ThreePaneTests: XCTestCase {
         XCTAssertEqual(noMap, GlassPaneLayout.windowWidth(showsMap: false, showsInspector: true))
     }
 
+    /// The map opens at the width the person last left it at (owner,
+    /// 2026-10-19): the window at launch, and the map when it reopens, are
+    /// sized to it, never below the map's minimum; and that width is what
+    /// the panes then lay the map out at.
+    func test_theMapOpensAtItsKeptWidth() {
+        let kept: CGFloat = 620
+        for inspectorShown in [false, true] {
+            let width = GlassPaneLayout.windowWidth(showsMap: true, showsInspector: inspectorShown, mapWidth: kept)
+            let layout = GlassPaneLayout(windowWidth: width, showsMap: true, showsInspector: inspectorShown)
+            XCTAssertEqual(layout.map, kept, "inspector \(inspectorShown)")
+            XCTAssertEqual(layout.main, main, "inspector \(inspectorShown)")
+        }
+        XCTAssertEqual(GlassPaneLayout.windowWidth(showsMap: true, showsInspector: false, mapWidth: 100),
+                       GlassPaneLayout.minimumWindowWidth(showsMap: true, showsInspector: false))
+        XCTAssertEqual(GlassPaneLayout.windowWidth(showsMap: false, showsInspector: true, mapWidth: kept),
+                       GlassPaneLayout.windowWidth(showsMap: false, showsInspector: true), "no map, no map width")
+        let closed = GlassPaneLayout.windowWidth(showsMap: false, showsInspector: true)
+        let reopened = GlassPaneLayout.windowWidth(
+            current: closed, from: V(map: false, inspector: true), to: V(map: true, inspector: true), mapWidth: kept)
+        XCTAssertEqual(GlassPaneLayout(windowWidth: reopened, showsMap: true, showsInspector: true).map, kept)
+    }
+
     /// Every composition has a floor and no ceiling (owner, 2026-10-15: the
     /// window can always be made wider). Without the map, the main pane
     /// takes a wider window; with it, the map does.

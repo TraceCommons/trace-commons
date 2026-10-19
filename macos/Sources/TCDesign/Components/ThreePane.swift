@@ -104,10 +104,14 @@ public struct GlassPaneLayout: Equatable, Sendable {
         othersWidth(showsInspector: showsInspector) + mainWidth
     }
 
-    /// The window's width with every shown pane at its default width.
-    public static func windowWidth(showsMap: Bool, showsInspector: Bool) -> CGFloat {
+    /// The window's width with every shown pane at its default width, the
+    /// map at `mapWidth`: its default, or the width the person last left it
+    /// at (owner, 2026-10-19), never below its minimum.
+    public static func windowWidth(
+        showsMap: Bool, showsInspector: Bool, mapWidth: CGFloat = GlassTokens.Size.mapWidth
+    ) -> CGFloat {
         fixedWidth(showsInspector: showsInspector)
-            + (showsMap ? GlassTokens.Space.paneGap + GlassTokens.Size.mapWidth : 0)
+            + (showsMap ? GlassTokens.Space.paneGap + max(GlassTokens.Size.mapMinWidth, mapWidth) : 0)
     }
 
     /// The narrowest the window may be for these panes: the map at its
@@ -129,20 +133,24 @@ public struct GlassPaneLayout: Equatable, Sendable {
     }
 
     /// The window's new width when panes open or close: the current width,
-    /// plus each pane that opened (at its default width) and its gap, less
-    /// each pane that closed (at the width it had) and its gap. The other
-    /// panes keep their widths; the map keeps a width the person dragged it
-    /// to when the inspector opens or closes, and the main pane keeps one
-    /// whatever opens or closes. `main` is as `init(windowWidth:showsMap:showsInspector:main:)`
+    /// plus each pane that opened and its gap, less each pane that closed
+    /// (at the width it had) and its gap. A map that opens comes back at
+    /// `mapWidth`, the width the person last left it at, else its default;
+    /// an inspector at its fixed width. The other panes keep their widths;
+    /// the map keeps a width the person dragged it to when the inspector
+    /// opens or closes, and the main pane keeps one whatever opens or
+    /// closes. `main` is as `init(windowWidth:showsMap:showsInspector:main:)`
     /// takes it.
     public static func windowWidth(
-        current: CGFloat, from old: Visibility, to new: Visibility, main: CGFloat = mainWidth
+        current: CGFloat, from old: Visibility, to new: Visibility, main: CGFloat = mainWidth,
+        mapWidth: CGFloat = GlassTokens.Size.mapWidth
     ) -> CGFloat {
         let before = GlassPaneLayout(windowWidth: current, showsMap: old.map, showsInspector: old.inspector, main: main)
         let gap = GlassTokens.Space.paneGap
         var width = current
         if old.map != new.map {
-            width += new.map ? GlassTokens.Size.mapWidth + gap : -((before.map ?? 0) + gap)
+            let opened: CGFloat = max(GlassTokens.Size.mapMinWidth, mapWidth) + gap
+            width += new.map ? opened : -((before.map ?? 0) + gap)
         }
         if old.inspector != new.inspector {
             width += (new.inspector ? 1 : -1) * (inspectorWidth + gap)
@@ -232,6 +240,9 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
     private let map: Map
     private let inspector: Inspector
     private let onFirstLayout: ((CGFloat) -> Void)?
+    /// The map's width as the person last left it, kept across launches by
+    /// the caller; nil to open at the default width every time.
+    private let mapWidth: Binding<Double>?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var host = GlassWindowHost()
     /// The composition the panes are laid out for while no move is under
@@ -244,9 +255,15 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
     /// `onFirstLayout` gets the width the window has to open into once, when
     /// it is first in a window (its screen's visible width): the moment to
     /// seed preferences nobody has chosen yet.
+    ///
+    /// `mapWidth` is where the map's width is kept (owner, 2026-10-19): the
+    /// window opens with the map at it, whatever size the window was put
+    /// back at, and a map that reopens comes back at it; each time the
+    /// person resizes the window with the map shown, it is written.
     public init(
         showsMap: Bool,
         showsInspector: Bool,
+        mapWidth: Binding<Double>? = nil,
         onFirstLayout: ((CGFloat) -> Void)? = nil,
         @ViewBuilder main: () -> Main,
         @ViewBuilder map: () -> Map,
@@ -254,6 +271,7 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
     ) {
         self.showsMap = showsMap
         self.showsInspector = showsInspector
+        self.mapWidth = mapWidth
         self.onFirstLayout = onFirstLayout
         self.main = main()
         self.map = map()
@@ -315,7 +333,10 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
         }
         // The width the panes were last laid out at: the window's width
         // before a pane opened or closed, whatever its size limits do next.
-        .onGeometryChange(for: CGFloat.self, of: \.size.width) { host.width = $0 }
+        .onGeometryChange(for: CGFloat.self, of: \.size.width) { width in
+            host.width = width
+            remember(width)
+        }
         // The panes run to the window's top edge; the title bar's controls
         // sit inside the main pane rather than in a strip above it.
         .ignoresSafeArea(.container, edges: .top)
@@ -325,6 +346,8 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
         .background(GlassWindowProbe { window in
             guard host.window !== window else { return }
             host.window = window
+            // Before the seeding below can move a pane: this runs first.
+            GlassWindowFrame.onNextTurn { openAtKeptWidth(window) }
             onFirstLayout?(window.screen?.visibleFrame.width ?? window.frame.width)
         }.frame(width: 0, height: 0))
         // On the next turn: `.onChange` runs inside SwiftUI's update, and a
@@ -332,6 +355,38 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
         .onChange(of: wanted) { _, new in
             GlassWindowFrame.onNextTurn { move(to: new) }
         }
+    }
+
+    /// The map's kept width, or its default.
+    private var keptMapWidth: CGFloat {
+        mapWidth.map { CGFloat($0.wrappedValue) } ?? GlassTokens.Size.mapWidth
+    }
+
+    /// Sizes a window that has just opened to its panes, the map at its
+    /// kept width (owner, 2026-10-19): the system puts a window back at the
+    /// size it last had, and the map would take all of any difference. The
+    /// top and leading edges stay; a full-screen window is left alone.
+    private func openAtKeptWidth(_ window: NSWindow) {
+        defer { host.opened = true }
+        guard mapWidth != nil, !window.styleMask.contains(.fullScreen) else { return }
+        let width = GlassPaneLayout.windowWidth(
+            showsMap: presented.map, showsInspector: presented.inspector, mapWidth: keptMapWidth)
+        let visible = window.screen?.visibleFrame ?? CGRect(x: -1e6, y: -1e6, width: 2e6, height: 2e6)
+        let frame = GlassPaneLayout.windowFrame(window.frame, width: width, visible: visible)
+        if frame != window.frame { window.setFrame(frame, display: true) }
+    }
+
+    /// Keeps the map's width as the person resizes the window with it
+    /// shown: never while a pane opens or closes, before the window has
+    /// been sized at launch, or in full screen.
+    private func remember(_ width: CGFloat) {
+        guard let mapWidth, host.opened, transition == nil, presented.map,
+              let window = host.window, !window.styleMask.contains(.fullScreen) else { return }
+        let layout = GlassPaneLayout(
+            windowWidth: width, showsMap: true, showsInspector: presented.inspector, main: host.main)
+        guard let map = layout.map, map >= GlassTokens.Size.mapMinWidth,
+              abs(Double(map) - mapWidth.wrappedValue) >= 1 else { return }
+        mapWidth.wrappedValue = Double(map)
     }
 
     /// Moves to `new`: grows or shrinks the window by the pane that opened
@@ -355,7 +410,8 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
             windowWidth: current, showsMap: old.map, showsInspector: old.inspector, main: host.main)
         // The main pane keeps the width it has, whatever opens or closes.
         host.main = before.main
-        let width = GlassPaneLayout.windowWidth(current: current, from: old, to: new, main: host.main)
+        let width = GlassPaneLayout.windowWidth(
+            current: current, from: old, to: new, main: host.main, mapWidth: keptMapWidth)
         let visible = window.screen?.visibleFrame ?? CGRect(x: -1e6, y: -1e6, width: 2e6, height: 2e6)
         let frame = GlassPaneLayout.windowFrame(window.frame, width: width, visible: visible)
         // A window held to the screen squeezes the main pane to make room
@@ -408,6 +464,9 @@ private final class GlassWindowHost {
     var main = GlassPaneLayout.mainWidth
     /// Counts moves, so a finished animation can tell it was overtaken.
     var move = 0
+    /// Whether the window has been sized to its panes since it opened;
+    /// until then a width it reports is the one it was put back at.
+    var opened = false
 }
 
 /// Reports the window the view lands in.
