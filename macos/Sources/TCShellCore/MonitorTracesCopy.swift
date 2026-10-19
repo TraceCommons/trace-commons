@@ -614,7 +614,7 @@ public struct MonitorShellCopy: MonitorWordTable {
     public let connectionReady: String
     public let connectionLocalOnly: String
     /// The expander a popover notice folds its explanations behind (owner,
-    /// 2026-10-19).
+    /// 2026-10-19). Approved 2026-10-19.
     public let noticeDetails: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {

@@ -1228,8 +1228,8 @@ pub struct MonitorShellCopy {
     pub connection_ready: &'static str,
     pub connection_local_only: &'static str,
     /// The expander a popover notice folds its explanations behind (owner,
-    /// 2026-10-19: a notice's info strings collapse into a toggle). DRAFT,
-    /// NEEDS APPROVAL.
+    /// 2026-10-19: a notice's info strings collapse into a toggle).
+    /// Approved 2026-10-19.
     pub notice_details: &'static str,
 }
 
