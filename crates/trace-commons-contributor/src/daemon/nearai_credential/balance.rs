@@ -52,6 +52,18 @@ use std::{
 /// exists not to serve.
 const BALANCE_TTL: Duration = Duration::from_secs(60);
 
+/// How long after billing is opened a payment may still be landing.
+///
+/// Checkout happens in the browser and the service credits the account from
+/// the payment processor's webhook, so the figure can change at any moment in
+/// this window without anything here hearing about it.
+const BILLING_WINDOW: Duration = Duration::from_secs(30 * 60);
+
+/// How long a figure is served again inside [`BILLING_WINDOW`]. Long enough to
+/// coalesce a repaint, short enough that a contributor who has just paid sees
+/// the new figure on their next look.
+const BILLING_TTL: Duration = Duration::from_secs(5);
+
 /// How old a cached balance must be before a fresh read fetches it again.
 ///
 /// A fresh read is what the refresh button asks for, so it skips the TTL. It
@@ -221,6 +233,11 @@ fn cache() -> &'static tokio::sync::Mutex<HashMap<PathBuf, Cached>> {
 /// account's figure, and a forgotten one cannot be served a balance from a
 /// session that no longer exists.
 pub fn invalidate(dir: &Path) {
+    // A forgotten account's payment is not the next account's.
+    billing_opened()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(dir);
     if let Ok(mut map) = cache().try_lock() {
         map.remove(dir);
         return;
@@ -231,6 +248,45 @@ pub fn invalidate(dir: &Path) {
     // forget removes. A subsequent read finds no session and reports
     // `no_session`, which is the state that matters.
     tracing::debug!("near ai balance cache busy during invalidate");
+}
+
+/// When billing was last opened for each directory.
+///
+/// Its own lock rather than the cache's, so recording a click never waits on a
+/// balance read in flight and never has to give up because one is.
+fn billing_opened() -> &'static std::sync::Mutex<HashMap<PathBuf, Instant>> {
+    static OPENED: OnceLock<std::sync::Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
+    OPENED.get_or_init(Default::default)
+}
+
+/// Record that the contributor was just sent to billing.
+///
+/// From here on a figure fetched earlier is not served, and for
+/// [`BILLING_WINDOW`] a fresh one is held only for [`BILLING_TTL`], so a
+/// payment made in the browser shows up on the next read.
+pub fn note_billing_opened(dir: &Path) {
+    billing_opened()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(dir.to_path_buf(), Instant::now());
+}
+
+pub(super) fn billing_opened_at(dir: &Path) -> Option<Instant> {
+    billing_opened()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(dir)
+        .copied()
+}
+
+/// Whether a balance fetched at `fetched` may answer a read at `now`.
+fn serves_cached(fetched: Instant, billing_opened: Option<Instant>, now: Instant) -> bool {
+    let age = now.saturating_duration_since(fetched);
+    match billing_opened {
+        Some(opened) if fetched < opened => false,
+        Some(opened) if now.saturating_duration_since(opened) < BILLING_WINDOW => age < BILLING_TTL,
+        _ => age < BALANCE_TTL,
+    }
 }
 
 /// The refresh token this directory has stored, if any.
@@ -319,6 +375,7 @@ async fn read_account(
     balance_max_age: Duration,
 ) -> Result<AccountReading, BalanceReport> {
     let dir = shared.store.dir().to_path_buf();
+    let opened = billing_opened_at(&dir);
     let mut map = cache().lock().await;
     let entry = map.entry(dir).or_default();
 
@@ -339,6 +396,7 @@ async fn read_account(
 
     if !models
         && let Some((reading, at)) = entry.balance
+        && serves_cached(at, opened, Instant::now())
         && at.elapsed() < balance_max_age
     {
         return Ok(AccountReading::Balance(reading));
@@ -508,6 +566,9 @@ mod tests {
         /// rotation is a test that fails.
         live_refresh: Arc<Mutex<Vec<String>>>,
         exchanges: Arc<Mutex<u32>>,
+        /// What the balance route answers. Swappable, so a test can model a
+        /// payment landing between two reads.
+        balance: Arc<Mutex<serde_json::Value>>,
     }
 
     async fn spawn(router: Router) -> String {
@@ -523,6 +584,8 @@ mod tests {
         let bearers: Bearers = Default::default();
         let live_refresh = Arc::new(Mutex::new(vec!["rt_first".to_string()]));
         let exchanges = Arc::new(Mutex::new(0u32));
+        let balance = Arc::new(Mutex::new(balance));
+        let answer = balance.clone();
 
         let tokens = live_refresh.clone();
         let counter = exchanges.clone();
@@ -570,7 +633,7 @@ mod tests {
             .route(
                 "/v1/organizations/{org}/usage/balance",
                 get(move || {
-                    let balance = balance.clone();
+                    let balance = answer.lock().unwrap().clone();
                     async move { Json(balance) }
                 }),
             )
@@ -590,6 +653,7 @@ mod tests {
             bearers,
             live_refresh,
             exchanges,
+            balance,
         }
     }
 
@@ -954,6 +1018,74 @@ mod tests {
             assert_eq!(body["currency"], "USD");
             assert_eq!(body["scale"], 9);
         }
+    }
+
+    fn balance_hits(stub: &Stub) -> usize {
+        stub.bearers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, _)| path.ends_with("/usage/balance"))
+            .count()
+    }
+
+    fn remaining(report: BalanceReport) -> Option<i64> {
+        match report {
+            BalanceReport::Known(reading) => reading.remaining_nanos,
+            other => panic!("{}", other.state()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_figure_read_before_billing_opened_is_not_served_after_it() {
+        let s = shared();
+        with_session(&s, "rt_first");
+        let stub = stub(one_org(), a_balance()).await;
+        let api = CloudApi::for_test(&stub.origin).unwrap();
+
+        assert_eq!(remaining(read_with(&s, &api).await), Some(8_500_000_000));
+
+        // A payment lands. Without billing having been opened here, the
+        // cached figure still answers: one service call for two reads.
+        stub.balance.lock().unwrap()["remaining"] = serde_json::json!(18_500_000_000i64);
+        assert_eq!(remaining(read_with(&s, &api).await), Some(8_500_000_000));
+        assert_eq!(balance_hits(&stub), 1);
+
+        // Once billing is opened, the figure held from before cannot answer:
+        // the next read asks the service again.
+        note_billing_opened(s.store.dir());
+        assert_eq!(remaining(read_with(&s, &api).await), Some(18_500_000_000));
+        assert_eq!(balance_hits(&stub), 2);
+    }
+
+    #[test]
+    fn the_cache_holds_a_figure_briefly_while_a_payment_may_be_landing() {
+        let now = Instant::now();
+        let ago = |secs: u64| now.checked_sub(Duration::from_secs(secs)).unwrap();
+
+        // No billing opened: the ordinary minute.
+        assert!(serves_cached(ago(30), None, now));
+        assert!(!serves_cached(ago(61), None, now));
+
+        // Fetched before billing opened: never served, however fresh.
+        assert!(!serves_cached(ago(2), Some(ago(1)), now));
+
+        // Fetched after billing opened, inside the window: a few seconds only.
+        assert!(serves_cached(ago(2), Some(ago(10)), now));
+        assert!(!serves_cached(ago(6), Some(ago(10)), now));
+
+        // The window closes: back to the ordinary minute.
+        assert!(serves_cached(ago(30), Some(ago(31 * 60)), now));
+        assert!(!serves_cached(ago(61), Some(ago(31 * 60)), now));
+    }
+
+    #[test]
+    fn forgetting_the_account_ends_the_billing_window() {
+        let s = shared();
+        note_billing_opened(s.store.dir());
+        assert!(billing_opened_at(s.store.dir()).is_some());
+        invalidate(s.store.dir());
+        assert!(billing_opened_at(s.store.dir()).is_none());
     }
 }
 
