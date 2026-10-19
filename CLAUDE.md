@@ -190,8 +190,8 @@ Two crates are separate Cargo workspaces with their own lockfiles, so `-p`
 from the repo root does not reach them: the GTK shell
 (`--manifest-path crates/trace-commons-contributor-gtk/Cargo.toml`) and the
 Tauri app (`--manifest-path tauri-desktop/src-tauri/Cargo.toml`, plus
-`pnpm test` and `pnpm build` in `tauri-desktop/frontend`). The Tauri checks
-run in `.github/workflows/tauri-desktop.yml`.
+`pnpm test` and `pnpm build` in `tauri-desktop/frontend`). No CI job builds or
+tests the Tauri app; run those commands by hand when you change it.
 
 ## Executing a multi-task plan
 
