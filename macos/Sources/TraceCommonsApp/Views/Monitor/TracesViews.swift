@@ -36,6 +36,10 @@ struct TracesTreeView: View {
     /// `traces-workspace.tsx`, `expanded = []`), and one opens when a
     /// session in it is selected from elsewhere (#1146 `reveal`).
     @State private var expanded: Set<String> = []
+    /// The folders the search opened that were not open already: they
+    /// close again when the search is cleared. A folder the person opens or
+    /// closes by hand leaves this set and stays as they left it.
+    @State private var searchOpened: Set<String> = []
     /// The selection last revealed, so a folder the person closes over a
     /// selected session stays closed until the selection moves.
     @State private var revealed: MonitorSelection?
@@ -174,6 +178,21 @@ struct TracesTreeView: View {
         }
     }
 
+    /// What a search does to the open folders. A search opens every folder
+    /// it matched and remembers which of those were closed before it; an
+    /// empty search closes exactly those, and leaves the rest as they were.
+    /// Before this, every folder a search ever matched stayed open, and a
+    /// one-letter search matches nearly all of them.
+    static func searchExpansion(
+        query: String, matched: [String], expanded: Set<String>, searchOpened: Set<String>
+    ) -> (expanded: Set<String>, searchOpened: Set<String>) {
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (expanded.subtracting(searchOpened), [])
+        }
+        let opened = Set(matched).subtracting(expanded)
+        return (expanded.union(matched), searchOpened.union(opened))
+    }
+
     /// The folders the idle filter opens: every folder it lists.
     static func idleFolders(_ tree: TracesTree) -> Set<String> {
         Set(tree.folders.filter { !$0.sessions.isEmpty }.map(\.id))
@@ -192,7 +211,9 @@ struct TracesTreeView: View {
     private var tree: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(spacing: 2) {
+                // Lazy: only the rows on screen are built. Every open
+                // folder's sessions used to be built on every change.
+                LazyVStack(spacing: 2) {
                     // The search narrows what is drawn, never the read.
                     ForEach(store.shownTree.folders) { folderRows($0) }
                     if store.shownTree.folders.isEmpty, let none = store.words?.tree.searchNone {
@@ -227,10 +248,12 @@ struct TracesTreeView: View {
             if store.idleOnly { expanded.formUnion(Self.idleFolders(store.tree)) }
         }
         // A search opens the folders it matched, so the matches are rows,
-        // not closed folders.
-        .onChange(of: store.searchText) { _, query in
-            guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            expanded.formUnion(store.shownTree.folders.map(\.id))
+        // not closed folders; clearing it closes what it opened. On the
+        // applied search, not each keystroke.
+        .onChange(of: store.appliedSearch) { _, query in
+            (expanded, searchOpened) = Self.searchExpansion(
+                query: query, matched: store.shownTree.folders.map(\.id),
+                expanded: expanded, searchOpened: searchOpened)
         }
         // #1146's tree name.
         .accessibilityLabel(store.words?.tree.treeLabel ?? "")
@@ -382,6 +405,7 @@ struct TracesTreeView: View {
     /// other and the inspector keeps what it shows.
     private func disclose(_ selected: MonitorSelection, open: Bool) {
         guard let folder = TracesTreeView.folder(of: selected, in: store.shownTree) else { return }
+        searchOpened.remove(folder)
         if open {
             expanded.insert(folder)
         } else {
@@ -470,6 +494,7 @@ struct TracesTreeView: View {
     private func isOpen(_ id: String) -> Bool { expanded.contains(id) }
 
     private func toggle(_ id: String) {
+        searchOpened.remove(id)
         if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) }
     }
 
@@ -631,14 +656,14 @@ struct TracesTreeView: View {
     private func sessionRow(_ entry: DaemonData.QueueEntry, off: Bool) -> some View {
         let words = store.words
         let selected = selection == .session(entryID: entry.entryId)
+        let lines = store.lines(entry)
         GlassListRow(
             depth: .session,
             tile: Self.sessionTile(entry),
             title: Self.when(entry),
-            sub: Self.sub(entry, held: words?.held, ineligible: store.ineligibleLine(entry),
-                          attestation: store.attestationLine(entry), words: words),
-            flag: Self.flag(entry, ineligible: store.ineligibleLine(entry) != nil,
-                            attestation: TracesStore.attestationTone(entry)),
+            sub: Self.sub(entry, held: words?.held, ineligible: lines.ineligible,
+                          attestation: lines.attestation, words: words),
+            flag: Self.flag(entry, ineligible: lines.ineligible != nil, attestation: lines.tone),
             selected: selected,
             off: off,
             // D10 default: a session's pill opens its review. Focus roves:

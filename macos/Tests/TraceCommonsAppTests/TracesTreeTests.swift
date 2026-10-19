@@ -560,8 +560,12 @@ final class TracesRowWordsTests: XCTestCase {
         // The row is wired to the store's sentence and tone, and a session
         // under an ignored folder is drawn off.
         let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
-        XCTAssertTrue(source.contains("attestation: store.attestationLine(entry), words: words)"))
-        XCTAssertTrue(source.contains("attestation: TracesStore.attestationTone(entry))"))
+        // The sentence and tone come from the read (`store.lines`), which
+        // holds `attestationLine` and `attestationTone` per entry; that
+        // equality is `TracesResponsivenessTests`'s.
+        XCTAssertTrue(source.contains("let lines = store.lines(entry)"))
+        XCTAssertTrue(source.contains("attestation: lines.attestation, words: words)"))
+        XCTAssertTrue(source.contains("attestation: lines.tone)"))
         XCTAssertTrue(source.contains("ForEach(folder.sessions) { sessionRow($0, off: ignored) }"))
     }
 

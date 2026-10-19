@@ -1314,6 +1314,43 @@ final class AppModel: ObservableObject {
         reengage?.update(accepts: accepts)
     }
 
+    /// The reads a `queue_changed` asks for, at most once per
+    /// `queueChangeRefreshes` window however many events arrive in it.
+    private func refreshAfterQueueChange() {
+        refreshQueue()
+        // The daemon count lives on `status`, not this local review
+        // list. Fetch it too, including for older event publishers
+        // that don't accompany queue changes with `status_changed`.
+        refreshStatus()
+        // A queue change is when a project can first become visible:
+        // `list_projects` reports discovered projects from the queue, and
+        // a session for a project nobody has ruled on is exactly what a
+        // queue change delivers. Projects were fetched only by
+        // `refreshAll()` at launch and after `setProjectMode`, so a
+        // project discovered while the app was open stayed invisible in
+        // both Settings and onboarding screen 5 until a relaunch.
+        refreshProjects()
+        // An entry leaving the queue -- accepted, quarantined, or
+        // otherwise resolved -- is exactly the moment a new row appears
+        // in history and the rollup tallies move. `refreshHistory()` was
+        // reachable only from `refreshAll()` at launch, which is why the
+        // History screen kept showing the counts from the moment the app
+        // started no matter how many uploads finished after that: this
+        // is the daemon's own signal that one just did. Both calls are
+        // cheap daemon-side reads of state it already holds (no
+        // recomputation, no network fan-out), so firing them on every
+        // `queue_changed` costs the same as the queue/status/projects
+        // refreshes right above, which already do this on every event
+        // without a debounce.
+        refreshHistory()
+    }
+
+    /// Batches `queue_changed` events: the first in a burst waits this
+    /// long, and the rest land in the same refresh.
+    private lazy var queueChangeRefreshes = RefreshCoalescer(delay: .milliseconds(100)) { [weak self] in
+        self?.refreshAfterQueueChange()
+    }
+
     private func handle(event: DaemonEvent) {
         switch event {
         case .snapshot(let pending, let status):
@@ -1323,32 +1360,10 @@ final class AppModel: ObservableObject {
         case .previewReady(let result):
             applyPreviewOutcome(result)
         case .queueChanged:
-            refreshQueue()
-            // The daemon count lives on `status`, not this local review
-            // list. Fetch it too, including for older event publishers
-            // that don't accompany queue changes with `status_changed`.
-            refreshStatus()
-            // A queue change is when a project can first become visible:
-            // `list_projects` reports discovered projects from the queue, and
-            // a session for a project nobody has ruled on is exactly what a
-            // queue change delivers. Projects were fetched only by
-            // `refreshAll()` at launch and after `setProjectMode`, so a
-            // project discovered while the app was open stayed invisible in
-            // both Settings and onboarding screen 5 until a relaunch.
-            refreshProjects()
-            // An entry leaving the queue -- accepted, quarantined, or
-            // otherwise resolved -- is exactly the moment a new row appears
-            // in history and the rollup tallies move. `refreshHistory()` was
-            // reachable only from `refreshAll()` at launch, which is why the
-            // History screen kept showing the counts from the moment the app
-            // started no matter how many uploads finished after that: this
-            // is the daemon's own signal that one just did. Both calls are
-            // cheap daemon-side reads of state it already holds (no
-            // recomputation, no network fan-out), so firing them on every
-            // `queue_changed` costs the same as the queue/status/projects
-            // refreshes right above, which already do this on every event
-            // without a debounce.
-            refreshHistory()
+            // Coalesced: one Submit all over a hundred traces is hundreds of
+            // `queue_changed`, and five reads per event, each redrawing on
+            // the main thread, pegged it for as long as they kept coming.
+            queueChangeRefreshes.request()
         case .statusChanged:
             refreshStatus()
             // The listener's own state moves under this, and with it whether
