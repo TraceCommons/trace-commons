@@ -349,7 +349,8 @@ pub struct ProjectPolicy {
     #[serde(default)]
     pub scrub_check_upgrade_recorded: bool,
     /// Projects the contributor armed **from now** (`set_project_mode`
-    /// `auto_upload` with `from_now: true`), by project key. See
+    /// `auto_upload` with `include_backlog: false`, or a re-send that keeps
+    /// an earlier hold), by project key. See
     /// [`ArmedFromNow`]. An entry leaves when the project's mode is set
     /// again by any route, since that is a fresh decision about the project.
     #[serde(default)]
@@ -446,8 +447,10 @@ pub struct ContributionOverride {
     pub claim: Option<super::arming_wording::ArmingClaim>,
 }
 
-/// K5: a project armed **from now**: "Share automatically" in Customize, where
-/// the backlog goes only when the contributor picks it.
+/// K5: a project armed **from now** (`include_backlog: false`), where the
+/// backlog goes only when the contributor picks it. Since 2026-10-19 this is
+/// no longer the default: switching a folder to Automatic includes its
+/// backlog unless the caller asks for from now.
 ///
 /// The same rule as the Flow 1 grant ([`AutomaticGrant`]), applied to one
 /// project the contributor armed themselves: **a session already on disk
@@ -1617,8 +1620,8 @@ impl ProjectPolicy {
         self.armed_by_grant.remove(project_key);
         // Likewise an earlier arm-from-now: any mode set here replaces it,
         // and `set_project_mode` re-adds it after this when the new setting
-        // is itself from now. A plain `auto_upload` therefore releases the
-        // backlog, which is what that call has always meant.
+        // is itself from now (asked for, or a re-send keeping an earlier
+        // hold). An arming with the backlog therefore releases it.
         self.armed_from_now.remove(project_key);
         // And it answers any notice that this project's grant had stopped.
         self.grant_voids

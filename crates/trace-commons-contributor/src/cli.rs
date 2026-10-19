@@ -426,9 +426,10 @@ enum DaemonAction {
         /// auto | notify | ignore
         #[arg(long)]
         mode: String,
-        /// With `--mode auto`: also send the sessions already on disk.
-        /// Without it, arming applies to new sessions only and the backlog
-        /// waits for you.
+        /// With `--mode auto`: send only new sessions; the backlog waits.
+        #[arg(long, conflicts_with = "include_backlog")]
+        from_now: bool,
+        /// With `--mode auto`: send the backlog too.
         #[arg(long)]
         include_backlog: bool,
     },
@@ -748,7 +749,15 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 path,
                 mode,
                 include_backlog,
-            } => commands::daemon_set_project(&store, &path, &mode, include_backlog, cli.json),
+                from_now,
+            } => commands::daemon_set_project(
+                &store,
+                &path,
+                &mode,
+                include_backlog,
+                from_now,
+                cli.json,
+            ),
             DaemonAction::History { limit, refresh } => {
                 commands::daemon_history(&store, limit, refresh, cli.json).await
             }
@@ -787,6 +796,34 @@ mod tests {
             std::iter::once("trace-commons-contributor").chain(args.iter().copied()),
         )
         .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    }
+
+    /// `daemon project` takes `--from-now` and still takes
+    /// `--include-backlog`, and refuses both at once.
+    #[test]
+    fn daemon_project_takes_from_now_or_include_backlog_but_not_both() {
+        let flags = |args: &[&str]| match parse(args).command {
+            Command::Daemon {
+                action:
+                    DaemonAction::Project {
+                        include_backlog,
+                        from_now,
+                        ..
+                    },
+            } => (include_backlog, from_now),
+            _ => panic!("not daemon project"),
+        };
+        let base = ["daemon", "project", "/tmp", "--mode", "auto"];
+        assert_eq!(flags(&base), (false, false));
+        assert_eq!(flags(&[&base[..], &["--from-now"]].concat()), (false, true));
+        assert_eq!(
+            flags(&[&base[..], &["--include-backlog"]].concat()),
+            (true, false)
+        );
+        let both = [&base[..], &["--from-now", "--include-backlog"]].concat();
+        assert!(
+            Cli::try_parse_from(std::iter::once("trace-commons-contributor").chain(both)).is_err()
+        );
     }
 
     /// The status line touches no config directory and fails quietly: with

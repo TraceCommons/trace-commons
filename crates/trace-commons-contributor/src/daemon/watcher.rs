@@ -4980,9 +4980,13 @@ mod tests {
     }
 
     /// `set_project_mode auto_upload` through the real IPC arm, under a config
-    /// the arming can take terms from. `include_backlog: false` sends no
-    /// parameter at all, so it exercises the default.
-    fn arm_via_ipc(f: &WatcherFixture, project: &str, include_backlog: bool) -> serde_json::Value {
+    /// the arming can take terms from. `None` sends no `include_backlog`
+    /// parameter at all, so it exercises the default; `Some(b)` sends `b`.
+    fn arm_via_ipc(
+        f: &WatcherFixture,
+        project: &str,
+        include_backlog: Option<bool>,
+    ) -> serde_json::Value {
         if f.shared.store.load_config().unwrap().is_none() {
             f.shared
                 .store
@@ -4993,8 +4997,8 @@ mod tests {
             "project_key": project_key_for(Some(&abs(&format!("Users/testuser/code/{project}")))),
             "mode": "auto_upload",
         });
-        if include_backlog {
-            params["include_backlog"] = serde_json::Value::Bool(true);
+        if let Some(b) = include_backlog {
+            params["include_backlog"] = serde_json::Value::Bool(b);
         }
         ipc_ok(f, "set_project_mode", params)
     }
@@ -5031,7 +5035,7 @@ mod tests {
         let f = WatcherFixture::new();
         f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
         f.settle(at("2030-01-01T00:00:00Z")).await;
-        arm_via_ipc(&f, "proj", false);
+        arm_via_ipc(&f, "proj", Some(false));
         let before_queue = serde_json::to_value(live_entries(&f)).unwrap();
         assert_eq!(f.shared.decisions_owed_value(), 1);
 
@@ -5127,7 +5131,7 @@ mod tests {
         let f = WatcherFixture::new();
         let path = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
         f.settle(at("2030-01-01T00:00:00Z")).await;
-        arm_via_ipc(&f, "proj", false);
+        arm_via_ipc(&f, "proj", Some(false));
         let key = live_entries(&f)[0].project_key.clone();
         let roots = f.shared.source_roots_with_routing();
         let sources = all_sources(&roots);
@@ -5185,11 +5189,11 @@ mod tests {
         assert!(rx.try_recv().is_err(), "an unchanged count needs no event");
     }
 
-    /// K5: arming is from now by default. `auto_upload` with no parameter
-    /// never approves a session that was already queued, or already on disk
-    /// unqueued, when the project was armed -- each waits for the
-    /// contributor -- while a session that first appears afterwards is
-    /// approved unattended as in any armed folder.
+    /// K5, `include_backlog: false`: arming from now never approves a
+    /// session that was already queued, or already on disk unqueued, when
+    /// the project was armed -- each waits for the contributor -- while a
+    /// session that first appears afterwards is approved unattended as in any
+    /// armed folder.
     #[tokio::test]
     async fn arming_from_now_leaves_the_backlog_waiting_and_sends_new_sessions() {
         let f = WatcherFixture::new();
@@ -5199,8 +5203,8 @@ mod tests {
         // On disk, never seen by a pass.
         let unseen = f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
 
-        let armed = arm_via_ipc(&f, "proj", false);
-        assert_eq!(armed["from_now"], true, "the default");
+        let armed = arm_via_ipc(&f, "proj", Some(false));
+        assert_eq!(armed["from_now"], true);
         let first = f.settle(at("2030-01-02T00:00:00Z")).await;
         let later = f.settle(at("2030-01-03T00:00:00Z")).await;
         assert_eq!((first.auto_ready, later.auto_ready), (0, 0), "{later:?}");
@@ -5248,7 +5252,7 @@ mod tests {
         // The folder is known to the daemon before it is armed.
         f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
         f.settle(at("2030-01-01T00:00:00Z")).await;
-        arm_via_ipc(&f, "proj", false);
+        arm_via_ipc(&f, "proj", Some(false));
         // A pass records what was on disk at the arming (K5).
         f.settle(at("2030-01-02T00:00:00Z")).await;
         set_chosen(&f, Some(false));
@@ -5276,7 +5280,7 @@ mod tests {
         // The folder is known to the daemon before it is armed.
         f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
         f.settle(at("2030-01-01T00:00:00Z")).await;
-        arm_via_ipc(&f, "proj", false);
+        arm_via_ipc(&f, "proj", Some(false));
         // A pass records what was on disk at the arming (K5).
         f.settle(at("2030-01-02T00:00:00Z")).await;
         set_chosen(&f, None);
@@ -5344,8 +5348,9 @@ mod tests {
         assert!(saw_status, "the badge moved; status_changed must say so");
     }
 
-    /// `include_backlog: true` is the old arming: the backlog, queued or not,
-    /// is approved unattended once it settles.
+    /// `include_backlog: true` sends the backlog, queued or not: it is
+    /// approved unattended once it settles. The same as the default when a
+    /// folder moves into Automatic.
     #[tokio::test]
     async fn arming_with_include_backlog_sends_the_backlog() {
         let f = WatcherFixture::new();
@@ -5353,7 +5358,7 @@ mod tests {
         f.settle(at("2030-01-01T00:00:00Z")).await;
         let unseen = f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
 
-        let armed = arm_via_ipc(&f, "proj", true);
+        let armed = arm_via_ipc(&f, "proj", Some(true));
         assert_eq!(armed["from_now"], false);
         f.settle(at("2030-01-02T00:00:00Z")).await;
         assert_eq!(state_at(&f, &queued), (QueueState::Approved, true));
@@ -5377,11 +5382,11 @@ mod tests {
         let f = WatcherFixture::new();
         let path = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
         f.settle(at("2030-01-01T00:00:00Z")).await;
-        arm_via_ipc(&f, "proj", true);
+        arm_via_ipc(&f, "proj", Some(true));
         f.settle(at("2030-01-01T01:00:00Z")).await;
         assert_eq!(state_at(&f, &path), (QueueState::Approved, true));
 
-        let r = arm_via_ipc(&f, "proj", false);
+        let r = arm_via_ipc(&f, "proj", Some(false));
         assert_eq!(r["retracted"], 1);
         assert_eq!(state_at(&f, &path), (QueueState::Pending, false));
         let report = f.settle(at("2030-01-02T00:00:00Z")).await;
@@ -5412,16 +5417,17 @@ mod tests {
         assert_eq!(mode_of(&f, "proj"), (ProjectMode::NotifyOnly, false));
     }
 
-    /// A plain re-arm over an arming from now keeps the hold: the default is
-    /// from now, and re-sending it keeps the record of the first arming, so
-    /// the backlog still waits and a session that arrived in between is
-    /// still new.
+    /// Re-sending Automatic with no `include_backlog` over an arming from now
+    /// keeps the hold: the folder is already Automatic, so the call is a
+    /// shell re-sending the setting, and it keeps the record of the first
+    /// arming, so the backlog still waits and a session that arrived in
+    /// between is still new.
     #[tokio::test]
     async fn a_plain_re_arm_over_an_arming_from_now_keeps_the_hold() {
         let f = WatcherFixture::new();
         let queued = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
         f.settle(at("2030-01-01T00:00:00Z")).await;
-        arm_via_ipc(&f, "proj", false);
+        arm_via_ipc(&f, "proj", Some(false));
         f.settle(at("2030-01-02T00:00:00Z")).await;
         let between = f.write_session_started(
             "proj",
@@ -5434,7 +5440,10 @@ mod tests {
         let key = project_key_for(Some(&abs("Users/testuser/code/proj")));
         let before = f.shared.policy.lock().unwrap().armed_from_now[&key].clone();
 
-        let r = arm_via_ipc(&f, "proj", false);
+        // No parameter: the folder is already Automatic, so this is a shell
+        // re-sending the setting, and it keeps what the folder had.
+        let r = arm_via_ipc(&f, "proj", None);
+        assert_eq!(r["from_now"], true, "the hold is kept");
         assert_eq!(
             r["retracted"], 0,
             "what arrived after the arming is not backlog"
@@ -5449,6 +5458,157 @@ mod tests {
         assert_eq!(state_at(&f, &between), (QueueState::Approved, true));
     }
 
+    /// The default: switching a folder from Ask to Automatic with no
+    /// `include_backlog` sends what is already in it. No arming-from-now
+    /// record is kept, the waiting session and the one on disk but never seen
+    /// are both approved unattended once they settle, and the audit row
+    /// carries no from-now label.
+    #[tokio::test]
+    async fn switching_a_folder_to_automatic_sends_its_backlog_by_default() {
+        let f = WatcherFixture::new();
+        let queued = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        assert_eq!(state_at(&f, &queued), (QueueState::Pending, false));
+        let unseen = f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
+
+        let armed = arm_via_ipc(&f, "proj", None);
+        assert_eq!(armed["from_now"], false, "the default includes the backlog");
+        let key = project_key_for(Some(&abs("Users/testuser/code/proj")));
+        {
+            let policy = f.shared.policy.lock().unwrap();
+            assert!(!policy.is_armed_from_now(&key));
+            assert_eq!(policy.armed_from_now_at(&key), None);
+            assert!(!policy.waits_for_a_person_at_send(&key, &queued.to_string_lossy()));
+        }
+        assert_eq!(
+            f.shared.decisions_owed_value(),
+            0,
+            "nothing waits for a person"
+        );
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        assert_eq!(state_at(&f, &queued), (QueueState::Approved, true));
+        assert_eq!(state_at(&f, &unseen), (QueueState::Approved, true));
+
+        let audit = crate::daemon::audit::load(&f.shared.store).unwrap();
+        let row = audit
+            .iter()
+            .find(|e| e.action == "armed-auto-upload")
+            .unwrap();
+        assert_eq!(row.detail, None);
+        assert_eq!(row.project_label.as_deref(), Some("proj"));
+    }
+
+    /// Re-sending Automatic with no `include_backlog` over an arming that
+    /// already included the backlog keeps it as it was: nothing goes back to
+    /// waiting and no hold starts.
+    #[tokio::test]
+    async fn re_sending_automatic_over_a_backlog_arming_changes_nothing() {
+        let f = WatcherFixture::new();
+        let path = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        arm_via_ipc(&f, "proj", None);
+        f.settle(at("2030-01-01T01:00:00Z")).await;
+        assert_eq!(state_at(&f, &path), (QueueState::Approved, true));
+
+        let r = arm_via_ipc(&f, "proj", None);
+        assert_eq!(r["from_now"], false);
+        assert_eq!(r["retracted"], 0);
+        assert_eq!(state_at(&f, &path), (QueueState::Approved, true));
+        let key = project_key_for(Some(&abs("Users/testuser/code/proj")));
+        assert!(!f.shared.policy.lock().unwrap().is_armed_from_now(&key));
+    }
+
+    /// The folder's own mode decides whether a call is a re-send, not the
+    /// mode an override resolves it to. A folder armed from now under an Ask
+    /// override reads as Ask, and re-sending Automatic for it must still keep
+    /// its hold, or clearing the override would send the backlog the
+    /// contributor held back.
+    #[tokio::test]
+    async fn re_sending_automatic_under_an_ask_override_keeps_the_hold() {
+        let f = WatcherFixture::new();
+        let queued = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        arm_via_ipc(&f, "proj", Some(false));
+        let key = project_key_for(Some(&abs("Users/testuser/code/proj")));
+        ipc_ok(
+            &f,
+            "set_contribution_override",
+            serde_json::json!({"mode": "notify_only"}),
+        );
+        let before = f.shared.policy.lock().unwrap().armed_from_now[&key].clone();
+
+        let r = arm_via_ipc(&f, "proj", None);
+        assert_eq!(r["from_now"], true);
+        assert_eq!(r["overridden_by"], "notify_only");
+        assert_eq!(
+            f.shared.policy.lock().unwrap().armed_from_now[&key],
+            before,
+            "the first arming's record is kept"
+        );
+
+        ipc_ok(&f, "clear_contribution_override", serde_json::json!({}));
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        f.settle(at("2030-01-03T00:00:00Z")).await;
+        assert_eq!(state_at(&f, &queued), (QueueState::Pending, false));
+    }
+
+    /// A folder an Automatic override arms has its backlog held by the
+    /// override's record. Setting the folder itself to Automatic with no
+    /// `include_backlog` is read as a re-send, the conservative reading, so
+    /// it arms from now and the backlog keeps waiting.
+    #[tokio::test]
+    async fn automatic_under_an_automatic_override_keeps_a_hold() {
+        let f = WatcherFixture::new();
+        let queued = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        ipc_ok(
+            &f,
+            "set_contribution_override",
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+
+        let r = arm_via_ipc(&f, "proj", None);
+        assert_eq!(r["from_now"], true);
+        let key = project_key_for(Some(&abs("Users/testuser/code/proj")));
+        assert!(f.shared.policy.lock().unwrap().is_armed_from_now(&key));
+
+        ipc_ok(&f, "clear_contribution_override", serde_json::json!({}));
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        f.settle(at("2030-01-03T00:00:00Z")).await;
+        assert_eq!(state_at(&f, &queued), (QueueState::Pending, false));
+    }
+
+    /// A folder the Flow 1 grant armed holds what was on disk at the grant.
+    /// Re-sending Automatic for it with no `include_backlog` must not drop
+    /// that hold: it arms from now instead, as it did before the default
+    /// changed.
+    #[tokio::test]
+    async fn re_sending_automatic_for_a_grant_armed_folder_keeps_a_hold() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let key = project_key_for(Some(&abs("Users/testuser/code/proj")));
+        let terms = crate::daemon::grant_terms::GrantTerms::in_force(&f.shared).unwrap();
+        f.shared
+            .policy
+            .lock()
+            .unwrap()
+            .arm_by_grant(&key, Utc::now(), terms)
+            .unwrap();
+
+        let r = arm_via_ipc(&f, "proj", None);
+        assert_eq!(r["from_now"], true);
+        assert!(f.shared.policy.lock().unwrap().is_armed_from_now(&key));
+    }
+
     /// Defence in depth: content that predates the arming at a path the
     /// record never listed -- a resumed conversation written to a new file --
     /// is held when its first event is older than the arming.
@@ -5457,7 +5617,7 @@ mod tests {
         let f = WatcherFixture::new();
         f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
         f.settle(at("2030-01-01T00:00:00Z")).await;
-        arm_via_ipc(&f, "proj", false);
+        arm_via_ipc(&f, "proj", Some(false));
         f.settle(at("2030-01-02T00:00:00Z")).await;
         // A new file, after the record, whose conversation began in August.
         let resumed = f.write_session("proj", "22222222-2222-2222-2222-222222222222", 0);
@@ -5496,7 +5656,7 @@ mod tests {
         let f = WatcherFixture::new();
         let path = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
         f.settle(at("2030-01-01T00:00:00Z")).await;
-        arm_via_ipc(&f, "proj", false);
+        arm_via_ipc(&f, "proj", Some(false));
         let binds = with_unreadable_claude_root(&f, || async {
             f.settle(at("2030-01-02T00:00:00Z")).await;
         })
@@ -5543,7 +5703,7 @@ mod tests {
         let f = WatcherFixture::new();
         let path = f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
         f.settle(at("2030-01-01T00:00:00Z")).await;
-        arm_via_ipc(&f, "proj", true);
+        arm_via_ipc(&f, "proj", Some(true));
         f.settle(at("2030-01-02T00:00:00Z")).await;
         assert_eq!(state_at(&f, &path), (QueueState::Approved, true));
         let entry_id = live_entries(&f)[0].entry_id;
@@ -5619,7 +5779,7 @@ mod tests {
         assert_eq!(f.shared.status_value()["queue_depth"], 0, "not owed");
 
         // Armed plainly afterwards, and the conversation keeps growing.
-        arm_via_ipc(&f, "proj", true);
+        arm_via_ipc(&f, "proj", Some(true));
         f.append_to_session(&path, "proj", name);
         let report = f.settle(at("2030-01-02T00:00:00Z")).await;
         assert_eq!(report.auto_ready, 0, "{report:?}");
@@ -5654,7 +5814,7 @@ mod tests {
         f.settle(at("2030-01-01T00:00:00Z")).await;
         let entry_id = f.shared.queue.lock().unwrap().pending()[0].entry_id;
         ipc_ok(&f, "keep", serde_json::json!({"entry_id": entry_id}));
-        arm_via_ipc(&f, "proj", true);
+        arm_via_ipc(&f, "proj", Some(true));
         f.settle(at("2030-01-02T00:00:00Z")).await;
         ipc_ok(&f, "undo_keep", serde_json::json!({"entry_id": entry_id}));
         let report = f.settle(at("2030-01-03T00:00:00Z")).await;
@@ -5680,7 +5840,7 @@ mod tests {
         let listed = ipc_ok(&f, "list_kept", serde_json::json!({}));
         assert!(listed["kept"].as_array().unwrap().is_empty());
 
-        arm_via_ipc(&f, "proj", true);
+        arm_via_ipc(&f, "proj", Some(true));
         f.append_to_session(&path, "proj", name);
         let report = f.settle(at("2030-01-02T00:00:00Z")).await;
         assert_eq!(report.dismissed, 1, "{report:?}");
@@ -6020,7 +6180,7 @@ mod tests {
         let a = past(&f, S1);
         // Known to the daemon, so the folder can be armed.
         f.settle(at("2030-01-01T00:00:00Z")).await;
-        arm_via_ipc(&f, "alpha", false);
+        arm_via_ipc(&f, "alpha", Some(false));
         let r = include(&f, &[sid(&a)]).await;
         assert!(r.error.is_none(), "{r:?}");
         assert_eq!(r.result.unwrap()["approved"], 1);

@@ -5589,8 +5589,9 @@ pub unsafe extern "C" fn tc_project_ignore_reconciled_text(
 /// contributor has contributed from it (`arming_suggestion`'s
 /// `contributed_count`). A confirmation shown from Settings, where no count
 /// is in hand, passes 0 and does not render `evidence`. `body` is the
-/// from-now confirmation; `body_with_backlog` the one for
-/// `set_project_mode`'s `include_backlog`.
+/// confirmation every shell renders; `body_with_backlog` the one for
+/// `set_project_mode`'s `include_backlog: true`. Both carry the same text
+/// since switching a folder to Automatic includes its backlog by default.
 ///
 /// Returns an owned JSON string; free it with [`tc_string_free`]. NULL for a
 /// NULL or non-UTF-8 `project_label`, and on a caught panic.

@@ -25,8 +25,9 @@ public struct ProjectArmingCopy: Decodable, Equatable, Sendable {
     public let confirm: String
     /// The button that does not. Declining is a decision about this moment.
     public let decline: String
-    /// The confirmation for arming from now: the scrubbing, that review
-    /// stops, and the way back, in that order.
+    /// The confirmation for switching a folder to Automatic, which includes
+    /// the traces already waiting in it: the scrubbing, that review stops,
+    /// and the way back, in that order.
     public let body: String
     /// The confirmation for arming with the backlog (`include_backlog`).
     public let bodyWithBacklog: String

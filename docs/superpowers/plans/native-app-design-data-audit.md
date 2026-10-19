@@ -49,7 +49,7 @@ Classes: **A** backed · **B** partly backed · **C** no data · **D** native-on
 | screen | element | class | source on main, or what's missing | owner |
 |---|---|---|---|---|
 | Rules | "Repos found in Claude Code sessions" | B | `list_projects` has per-repo rows (`session_count`, `last_session_at`) but no tool/source per project, so the rows can't be filtered by tool. They can be inferred only from pending entries' `source`. | daemon/K |
-| Rules | Ask me / Share automatically / Never per repo | A | `set_project_mode` (`notify_only`/`auto_upload`/`ignore`), arming from now by default (K5) | — |
+| Rules | Ask me / Share automatically / Never per repo | A | `set_project_mode` (`notify_only`/`auto_upload`/`ignore`), arming from now by default (K5; since 2026-10-19 the default includes the backlog, `include_backlog: false` arms from now) | — |
 | Rules | "22 sessions" per repo | A | `list_projects.session_count` | — |
 | Rules | "6 sessions · client" tag | C | No classification of a repo as client work | product decision |
 | Past sessions | Picker by folder, "N of 43 selected", "Show all 22" | A | `list_pending` with `project_id`, then a per-entry `approve` (doc: "The past-session picker"); `pending_count` | — |

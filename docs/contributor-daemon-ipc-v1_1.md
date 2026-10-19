@@ -1955,12 +1955,28 @@ the entries reappearing within any particular time.
 
 ### Arming from now
 
-**Arming is from now by default.** `set_project_mode` with
-`mode: "auto_upload"` arms a folder for **new** sessions; what is already on
-disk waits for the contributor, who sends it by picking it in the
-past-session picker. That applies the Flow 1 grant's rule ("it arms nothing
-already on disk", `grant_automatic` below) to every folder a contributor arms,
-whatever shell arms it. Only `include_backlog: true` sends the backlog too:
+**Switching a folder to Automatic includes its backlog by default** (owner
+decision, 2026-10-19; from 2026-10-06 until then the default was from now).
+`set_project_mode` with `mode: "auto_upload"` and no `include_backlog` (or
+`null`) works out what to do from the folder's state:
+
+- The folder **moves into** Automatic -- neither its own stored mode nor the
+  mode a contribution override resolves it to is `auto_upload` -- so the
+  backlog is included, as `include_backlog: true` does: no from-now record,
+  and sessions already waiting are approved unattended once they settle.
+- The folder is **already** Automatic, by its own mode or by an override, so
+  the call is treated as a shell re-sending the setting. It keeps whatever
+  hold the folder has: its own from-now record is kept as is (see "A re-arm
+  keeps the hold" below), and a folder whose backlog an Automatic override
+  or the Flow 1 grant holds is armed from now afresh. A folder armed with its
+  backlog stays that way. Both modes count, so a re-send never releases a
+  backlog that a clear of the override would otherwise send.
+
+`include_backlog: false` arms **from now**: the folder is armed for **new**
+sessions, and what is already on disk waits for the contributor, who sends
+it by picking it in the past-session picker. That applies the Flow 1 grant's
+rule ("it arms nothing already on disk", `grant_automatic` below) to the
+folder:
 
 - **A session already on disk when the folder was armed -- queued as
   `pending` or not yet seen -- is never approved unattended in it**, whichever
@@ -1984,9 +2000,10 @@ whatever shell arms it. Only `include_backlog: true` sends the backlog too:
   or its file's birth time, is earlier than the arming. Where the filesystem
   reports no birth time and the session no first-event time, the path record
   alone applies.
-- **A re-arm keeps the hold.** `auto_upload` without `include_backlog` over a
-  folder already armed from now keeps the record of the first arming: the
-  backlog still waits, and a session that arrived in between is still new.
+- **A re-arm keeps the hold.** `auto_upload` with `include_backlog` `false`
+  or omitted over a folder already armed from now keeps the record of the
+  first arming: the backlog still waits, and a session that arrived in
+  between is still new.
 - Arming from now over an arming **with** the backlog returns what that
   arming approved unattended and has not sent yet to `pending`, counted in
   `retracted`. It was on disk, so it is backlog. An `approved` entry a
@@ -2005,18 +2022,19 @@ whatever shell arms it. Only `include_backlog: true` sends the backlog too:
   `include_backlog: true` replaces it: the backlog is then approved
   unattended. Recorded paths no arming can still hold are pruned.
 
-**Folders armed before this default are left as they are.** A folder armed
-with the old meaning has no from-now record, so it keeps sending what it
-did; nothing is migrated. Setting its mode again -- `auto_upload` included --
-applies the rule in force at that call.
+**Existing armings are left as they are.** Nothing is migrated when a default
+changes: a folder armed from now keeps its record until its mode is set
+again, and a folder armed with its backlog keeps sending what it did.
 
 `include_backlog` is a boolean. Any other type is refused with
 `include-backlog-invalid`, and `include_backlog: true` with a mode other than
 `auto_upload` with `include-backlog-requires-auto-upload`: a backlog means
 nothing for ask-first or Never, and ignoring it would let a shell believe it
 had set a rule it had not. Both are `bad_params`, and a refusal records and
-changes nothing. The CLI's `daemon project --mode auto` arms from now and
-says the backlog waits; `--include-backlog` sends it.
+changes nothing. The CLI's `daemon project --mode auto` sends no
+`include_backlog`, so the default above applies; `--from-now` sends `false`
+and `--include-backlog` sends `true`. The two flags are refused together, and
+each outside `--mode auto`.
 
 #### The past-session picker
 
@@ -2808,10 +2826,10 @@ Every project the daemon knows about, in two kinds:
 clearing the override returns it to. They differ only while an override is
 in force. See "The contribution override" below.
 
-An armed row also carries `from_now`: `true` when it was armed from now,
-the `set_project_mode` default, so its backlog waits for the contributor,
-and `false` when it was armed with `include_backlog: true` or before that
-default existed. A row armed only by an "Auto contribute" override reports
+An armed row also carries `from_now`: `true` when it was armed from now
+(`include_backlog: false`), so its backlog waits for the contributor, and
+`false` when it was armed with its backlog -- the default since 2026-10-19,
+`include_backlog: true`, or before 2026-10-06. A row armed only by an "Auto contribute" override reports
 `from_now: true` too, since the override holds its backlog the same way.
 Absent on rows that are not armed. See
 "Arming from now" above.
