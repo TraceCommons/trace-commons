@@ -536,8 +536,11 @@ final class DaemonClient {
     /// make all four read as the same shrug. An unreadable answer degrades to
     /// the unreported state, which says the question was not answered and
     /// claims nothing about the money.
-    func nearAiBalance() throws -> BalanceStatus {
-        BalanceStatus.parse(fromJSON: try rawResultJSON(BalanceSurface.statusMethod))
+    /// `fresh` is the refresh button's read: the daemon goes back to NEAR AI
+    /// instead of serving the figure it read in the last minute.
+    func nearAiBalance(fresh: Bool = false) throws -> BalanceStatus {
+        BalanceStatus.parse(fromJSON: try rawResultJSON(
+            BalanceSurface.statusMethod, params: fresh ? ["fresh": true] : [:]))
     }
 
     func nearAiFunding(expected: FundingDestination?) throws -> FundingStatus {
