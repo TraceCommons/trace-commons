@@ -9,19 +9,22 @@ struct InsightCardsView: View {
         VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
             // What the cards answer from, behind the title's "i".
             InsightsSectionTitle(model.text("card_title"), info: [model.text("card_selection_notice")])
-            selection
-            HStack {
-                Button(model.text("card_update")) { model.generateCards() }
-                if model.cardBusy { GlassSpinner() }
-            }
-            if let error = model.cardError { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
-            if let result = model.cardResult {
-                VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                    Text("\(model.text("provider")): \(result.provider.id) · \(result.provider.rubric_version)")
-                        .insightsCaption()
-                    ForEach(result.cards) { card in cardView(card) }
+            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+                selection
+                HStack {
+                    Button(model.text("card_update")) { model.generateCards() }
+                    if model.cardBusy { GlassSpinner() }
+                }
+                if let error = model.cardError { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
+                if let result = model.cardResult {
+                    VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                        Text("\(model.text("provider")): \(result.provider.id) · \(result.provider.rubric_version)")
+                            .insightsCaption()
+                        ForEach(result.cards) { card in cardView(card) }
+                    }
                 }
             }
+            .insightsCardBody()
         }
     }
 

@@ -15,32 +15,35 @@ struct InsightsEpisodesView: View {
                     .accessibilityLabel(model.text("episode_refresh_accessibility"))
                 if model.episodeBusy { GlassSpinner() }
             }
-            if let notice = model.episodeNotice { Text(notice).foregroundStyle(GlassStatus.on.textColor) }
-            if let error = model.episodeError { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
+            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+                if let notice = model.episodeNotice { Text(notice).foregroundStyle(GlassStatus.on.textColor) }
+                if let error = model.episodeError { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
 
-            if let detail = model.episodeDetail {
-                detailView(detail)
-            } else {
-                createView
-                VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                    InsightsGroupHeading(model.text("episode_saved"))
-                    if model.episodes.isEmpty { Text(model.text("episode_empty")).insightsNote() }
-                    ForEach(model.episodes) { entry in
-                        Button { model.openEpisode(entry.id) } label: {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(entry.id).insightsMono().lineLimit(1)
-                                Text("\(model.text("episode_members")): \(entry.episode.members.count)")
-                                    .glassType(GlassTokens.TypeScale.caption)
-                                Text(entry.overlapping_episode_ids.isEmpty
-                                     ? model.text("episode_no_overlap")
-                                     : "\(model.text("episode_overlaps")): \(entry.overlapping_episode_ids.count)")
-                                    .insightsCaption()
-                            }.frame(maxWidth: .infinity, alignment: .leading).insightsRowCard()
+                if let detail = model.episodeDetail {
+                    detailView(detail)
+                } else {
+                    createView
+                    VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                        InsightsGroupHeading(model.text("episode_saved"))
+                        if model.episodes.isEmpty { Text(model.text("episode_empty")).insightsNote() }
+                        ForEach(model.episodes) { entry in
+                            Button { model.openEpisode(entry.id) } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(entry.id).insightsMono().lineLimit(1)
+                                    Text("\(model.text("episode_members")): \(entry.episode.members.count)")
+                                        .glassType(GlassTokens.TypeScale.caption)
+                                    Text(entry.overlapping_episode_ids.isEmpty
+                                         ? model.text("episode_no_overlap")
+                                         : "\(model.text("episode_overlaps")): \(entry.overlapping_episode_ids.count)")
+                                        .insightsCaption()
+                                }.frame(maxWidth: .infinity, alignment: .leading).insightsRowCard()
+                            }
+                            .buttonStyle(GlassPressStyle())
                         }
-                        .buttonStyle(GlassPressStyle())
                     }
                 }
             }
+            .insightsCardBody()
         }
         .disabled(model.episodeBusy)
         .insightsSurface()

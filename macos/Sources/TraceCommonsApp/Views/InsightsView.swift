@@ -238,33 +238,36 @@ struct InsightsView: View {
             InsightsSectionTitle(model.text("analytics_tab_analyze"), info: [
                 model.text("intro"), model.text("snapshot_notice"), model.text("cancellation_notice"),
             ])
-            if let location = Self.storeLocationLine(storeSelection, copy: storeCopy) {
-                Text(location)
-                    .glassType(GlassTokens.TypeScale.caption).textSelection(.enabled)
+            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+                if let location = Self.storeLocationLine(storeSelection, copy: storeCopy) {
+                    Text(location)
+                        .glassType(GlassTokens.TypeScale.caption).textSelection(.enabled)
+                }
+                HStack(spacing: GlassTokens.Space.s4) {
+                    GlassSelect(model.text("source"), selection: $source, options: [
+                        GlassPickerOption(model.text("codex"), value: "codex"),
+                        GlassPickerOption(model.text("claude_code"), value: "claude_code"),
+                        GlassPickerOption(model.text("trajectory"), value: "trajectory"),
+                    ])
+                    .fixedSize()
+                    Button(model.text("choose_file")) { choosingFile = true }
+                    // Short labels repeat on this screen; each is named in full
+                    // for VoiceOver, in the core's words.
+                    Button(model.text("refresh")) { model.refresh() }
+                        .accessibilityLabel(model.text("refresh_accessibility"))
+                    if model.busy { GlassSpinner() }
+                }.disabled(model.busy)
+                if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
+                if !model.invalidatedEpisodeIDs.isEmpty {
+                    VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                        Text(model.text("episode_invalidated_notice"))
+                        ForEach(model.invalidatedEpisodeIDs, id: \.self) { id in
+                            Text(id).insightsMono()
+                        }
+                    }.textSelection(.enabled)
+                }
             }
-            HStack(spacing: GlassTokens.Space.s4) {
-                GlassSelect(model.text("source"), selection: $source, options: [
-                    GlassPickerOption(model.text("codex"), value: "codex"),
-                    GlassPickerOption(model.text("claude_code"), value: "claude_code"),
-                    GlassPickerOption(model.text("trajectory"), value: "trajectory"),
-                ])
-                .fixedSize()
-                Button(model.text("choose_file")) { choosingFile = true }
-                // Short labels repeat on this screen; each is named in full
-                // for VoiceOver, in the core's words.
-                Button(model.text("refresh")) { model.refresh() }
-                    .accessibilityLabel(model.text("refresh_accessibility"))
-                if model.busy { GlassSpinner() }
-            }.disabled(model.busy)
-            if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
-            if !model.invalidatedEpisodeIDs.isEmpty {
-                VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                    Text(model.text("episode_invalidated_notice"))
-                    ForEach(model.invalidatedEpisodeIDs, id: \.self) { id in
-                        Text(id).insightsMono()
-                    }
-                }.textSelection(.enabled)
-            }
+            .insightsCardBody()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
@@ -308,13 +311,16 @@ struct InsightsView: View {
                     InsightsInfo(model.text("save"), [model.text("save_notice")])
                 }
             }.disabled(model.busy)
-            if model.selectedIsSaved {
-                assessment
-                InsightEvidenceControls(model: model, insight: insight)
-                    .id(insight.id)
-            } else {
-                Text(model.text("link_saved_required")).insightsCaption()
+            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+                if model.selectedIsSaved {
+                    assessment
+                    InsightEvidenceControls(model: model, insight: insight)
+                        .id(insight.id)
+                } else {
+                    Text(model.text("link_saved_required")).insightsCaption()
+                }
             }
+            .insightsCardBody()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
@@ -324,18 +330,21 @@ struct InsightsView: View {
     private var savedSection: some View {
         VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
             InsightsSectionTitle(model.text("saved"))
-            if model.snapshots.isEmpty { Text(model.text("empty")).insightsNote() }
-            ForEach(model.snapshots) { insight in
-                Button { model.explain(insight.id) } label: {
-                    VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                        Text(model.text(insight.source_format))
-                        Text(InsightsDate.label(insight.analyzed_at)).insightsCaption()
-                        Text(insight.id).insightsMono().lineLimit(1)
-                    }.frame(maxWidth: .infinity, alignment: .leading).insightsRowCard()
+            VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                if model.snapshots.isEmpty { Text(model.text("empty")).insightsNote() }
+                ForEach(model.snapshots) { insight in
+                    Button { model.explain(insight.id) } label: {
+                        VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                            Text(model.text(insight.source_format))
+                            Text(InsightsDate.label(insight.analyzed_at)).insightsCaption()
+                            Text(insight.id).insightsMono().lineLimit(1)
+                        }.frame(maxWidth: .infinity, alignment: .leading).insightsRowCard()
+                    }
+                    .buttonStyle(GlassPressStyle())
+                    .disabled(model.busy)
                 }
-                .buttonStyle(GlassPressStyle())
-                .disabled(model.busy)
             }
+            .insightsCardBody()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
@@ -388,43 +397,46 @@ struct InsightDetail: View {
     var body: some View {
         VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
             // What a result can and cannot say, behind the title's "i".
-            VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                InsightsSectionTitle(text("result"), info: [
-                    text("boundary_notice"), text("unknown_notice"), text("coverage_notice"),
-                ])
-                Text(InsightsDate.label(insight.analyzed_at)).insightsCaption()
-                Text("\(text("provider")): \(insight.report.provider.id) · \(insight.report.provider.version)").insightsCaption()
-                Text("\(text("rubric")): \(insight.report.provider.rubric_version) · \(insight.report.provider.execution_mode)")
-                    .insightsCaption()
-            }
-            VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                InsightsGroupHeading(text("summary_metrics"))
-                ForEach(insight.report.metrics) { metric in
-                    VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                        Text("\(text("metric_" + metric.id)): \(metric.value.map { $0.formatted() } ?? text("unknown"))")
-                        Text("\(text("coverage")): \(metric.coverage.observed.formatted()) / \(metric.coverage.total.formatted())")
-                            .insightsCaption()
-                    }
+            InsightsSectionTitle(text("result"), info: [
+                text("boundary_notice"), text("unknown_notice"), text("coverage_notice"),
+            ])
+            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+                VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                    Text(InsightsDate.label(insight.analyzed_at)).insightsCaption()
+                    Text("\(text("provider")): \(insight.report.provider.id) · \(insight.report.provider.version)").insightsCaption()
+                    Text("\(text("rubric")): \(insight.report.provider.rubric_version) · \(insight.report.provider.execution_mode)")
+                        .insightsCaption()
                 }
-                Text("\(text("cost")): \(text("unknown"))")
-            }
-            InsightModelSection(observations: insight.model_observations, copy: copy)
-            if let assessment = insight.manual_annotation {
                 VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                    InsightsGroupHeading(text("assessment"), info: [text("assessment_notice")])
-                    Text("\(text("category_" + assessment.category)) / \(text("outcome_" + assessment.outcome))")
-                    Text(InsightsDate.label(assessment.recorded_at)).insightsCaption()
+                    InsightsGroupHeading(text("summary_metrics"))
+                    ForEach(insight.report.metrics) { metric in
+                        VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                            Text("\(text("metric_" + metric.id)): \(metric.value.map { $0.formatted() } ?? text("unknown"))")
+                            Text("\(text("coverage")): \(metric.coverage.observed.formatted()) / \(metric.coverage.total.formatted())")
+                                .insightsCaption()
+                        }
+                    }
+                    Text("\(text("cost")): \(text("unknown"))")
                 }
-            }
-            VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                InsightsGroupHeading(text("evidence"), info: [text("evidence_notice")])
-                ForEach(insight.report.evidence) { evidence in
-                    VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                        Text("\(text("evidence")): \(evidence.id)").insightsMono()
-                        Text("\(text("source_digest")): \(evidence.source_digest)").insightsMono().textSelection(.enabled)
+                InsightModelSection(observations: insight.model_observations, copy: copy)
+                if let assessment = insight.manual_annotation {
+                    VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                        InsightsGroupHeading(text("assessment"), info: [text("assessment_notice")])
+                        Text("\(text("category_" + assessment.category)) / \(text("outcome_" + assessment.outcome))")
+                        Text(InsightsDate.label(assessment.recorded_at)).insightsCaption()
+                    }
+                }
+                VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                    InsightsGroupHeading(text("evidence"), info: [text("evidence_notice")])
+                    ForEach(insight.report.evidence) { evidence in
+                        VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                            Text("\(text("evidence")): \(evidence.id)").insightsMono()
+                            Text("\(text("source_digest")): \(evidence.source_digest)").insightsMono().textSelection(.enabled)
+                        }
                     }
                 }
             }
+            .insightsCardBody()
         }.textSelection(.enabled)
     }
 }

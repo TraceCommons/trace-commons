@@ -17,18 +17,21 @@ struct ComparisonSpecificationsView: View {
                     .accessibilityLabel(text("comparison_specification_refresh_accessibility"))
                 if model.busy { GlassSpinner() }
             }
-            if let notice = model.notice { Text(text(notice)).foregroundStyle(GlassStatus.on.textColor) }
-            if let error = model.error { Text(text(error)).foregroundStyle(GlassStatus.outside.textColor) }
-            draft
-            if let specification = model.previewSpecification, let result = model.previewResult {
-                InsightsGroupHeading(text("comparison_preview_notice"))
-                specificationView(specification); resultView(result)
-                // Save is short; what it cannot undo is said beside it.
-                Text(text("comparison_specification_immutable_notice")).insightsCaption()
-                Button(text("comparison_specification_save")) { model.save() }
-                    .accessibilityLabel(text("comparison_specification_save_accessibility"))
+            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+                if let notice = model.notice { Text(text(notice)).foregroundStyle(GlassStatus.on.textColor) }
+                if let error = model.error { Text(text(error)).foregroundStyle(GlassStatus.outside.textColor) }
+                draft
+                if let specification = model.previewSpecification, let result = model.previewResult {
+                    InsightsGroupHeading(text("comparison_preview_notice"))
+                    specificationView(specification); resultView(result)
+                    // Save is short; what it cannot undo is said beside it.
+                    Text(text("comparison_specification_immutable_notice")).insightsCaption()
+                    Button(text("comparison_specification_save")) { model.save() }
+                        .accessibilityLabel(text("comparison_specification_save_accessibility"))
+                }
+                InsightsRule(); saved
             }
-            InsightsRule(); saved
+            .insightsCardBody()
         }.disabled(model.busy)
         .insightsSurface()
     }

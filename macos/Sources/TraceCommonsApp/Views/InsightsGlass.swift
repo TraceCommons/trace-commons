@@ -124,12 +124,23 @@ enum InsightsLayout {
     static let headingGap: CGFloat = GlassTokens.Space.s4
     /// Between the lines of one group.
     static let lineGap: CGFloat = GlassTokens.Space.s2
+    /// How much further a card's body sits in from the card's edges than
+    /// its title and its actions do (owner, 2026-10-19: the content between
+    /// a card's title and its buttons ran too close to the card's sides).
+    static let bodyInset: CGFloat = GlassTokens.Space.s5
 }
 
 extension View {
     /// A section: a card on the pane (cards inside it are quiet).
     func insightsSection() -> some View {
         GlassCard { self }
+    }
+
+    /// A card's body: everything between its title and its actions, inset
+    /// `InsightsLayout.bodyInset` further on both sides. What is nested in
+    /// it (a chart, a well, a row card) keeps its own padding.
+    func insightsCardBody() -> some View {
+        padding(.horizontal, InsightsLayout.bodyInset)
     }
 }
 

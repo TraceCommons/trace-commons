@@ -20,9 +20,12 @@ struct ComparisonTasksView: View {
                     .accessibilityLabel(text("comparison_task_list_accessibility"))
                 if model.busy { GlassSpinner() }
             }
-            if let notice = model.notice { Text(text(notice)).foregroundStyle(GlassStatus.on.textColor) }
-            if let error = model.error { Text(text(error)).foregroundStyle(GlassStatus.outside.textColor) }
-            if let detail = model.detail { detailView(detail) } else { listView }
+            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+                if let notice = model.notice { Text(text(notice)).foregroundStyle(GlassStatus.on.textColor) }
+                if let error = model.error { Text(text(error)).foregroundStyle(GlassStatus.outside.textColor) }
+                if let detail = model.detail { detailView(detail) } else { listView }
+            }
+            .insightsCardBody()
         }
         .disabled(model.busy)
         .insightsSurface()

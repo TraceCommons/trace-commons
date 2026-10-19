@@ -132,26 +132,29 @@ struct InsightsOverviewTab: View {
     private func recapCard(_ recap: InsightsRecap) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             Text(InsightsComparisonsWords.recapTitle(recap, copy: copy)).insightsTitle()
-            HStack(alignment: .top, spacing: GlassTokens.Space.s8) {
-                ForEach(recap.sources) { source in
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                        Text(InsightsOverviewWords.figure(source.tokens, copy: copy))
-                            .glassType(GlassTokens.TypeScale.title).monospacedDigit()
-                        Text(InsightsOverviewWords.sourceLine(source.source, copy: copy)).insightsCaption()
-                        if let change = InsightsComparisonsWords.recapChange(source, sessions: recap.sessions, copy: copy) {
-                            Text(change).insightsCaption()
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                HStack(alignment: .top, spacing: GlassTokens.Space.s8) {
+                    ForEach(recap.sources) { source in
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                            Text(InsightsOverviewWords.figure(source.tokens, copy: copy))
+                                .glassType(GlassTokens.TypeScale.title).monospacedDigit()
+                            Text(InsightsOverviewWords.sourceLine(source.source, copy: copy)).insightsCaption()
+                            if let change = InsightsComparisonsWords.recapChange(source, sessions: recap.sessions, copy: copy) {
+                                Text(change).insightsCaption()
+                            }
                         }
                     }
                 }
-            }
-            ForEach(Array(recap.items.enumerated()), id: \.offset) { _, item in
-                if let line = InsightsComparisonsWords.recapItem(item, copy: copy) {
+                ForEach(Array(recap.items.enumerated()), id: \.offset) { _, item in
+                    if let line = InsightsComparisonsWords.recapItem(item, copy: copy) {
+                        Text(line).insightsNote()
+                    }
+                }
+                if let line = InsightsComparisonsWords.recapThreshold(recap, copy: copy) {
                     Text(line).insightsNote()
                 }
             }
-            if let line = InsightsComparisonsWords.recapThreshold(recap, copy: copy) {
-                Text(line).insightsNote()
-            }
+            .insightsCardBody()
             HStack(spacing: GlassTokens.Space.s4) {
                 Button(text("analytics_recap_open")) { openRecap() }
                     .buttonStyle(GlassButtonStyle(.primary, small: true))
@@ -181,9 +184,12 @@ struct InsightsOverviewTab: View {
                         .accessibilityHidden(true)
                     Text(text("analytics_lever_title")).insightsTitle()
                 }
-                ForEach(InsightsComparisonsWords.leverLines(pick, copy: copy), id: \.self) { line in
-                    Text(line).insightsNote()
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    ForEach(InsightsComparisonsWords.leverLines(pick, copy: copy), id: \.self) { line in
+                        Text(line).insightsNote()
+                    }
                 }
+                .insightsCardBody()
                 HStack(spacing: GlassTokens.Space.s4) {
                     if pick.kind == "repeated_reads" {
                         Button(text("analytics_lever_show_reads")) { showReads() }
@@ -232,43 +238,46 @@ struct InsightsOverviewTab: View {
                 Text(InsightsOverviewWords.sourceLine(source.source, copy: copy)).insightsTitle()
                     .fixedSize(horizontal: false, vertical: true)
             }
-            HStack(alignment: .top, spacing: GlassTokens.Space.s8) {
-                drillButton("tokens") {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                        Text(text("analytics_card_tokens")).insightsEyebrow()
-                        Text(figure(source.tokens)).insightsFigure()
-                        if source.change_permille != nil {
-                            Text(InsightsOverviewWords.change(source, copy: copy)).insightsCaption()
+            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
+                HStack(alignment: .top, spacing: GlassTokens.Space.s8) {
+                    drillButton("tokens") {
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                            Text(text("analytics_card_tokens")).insightsEyebrow()
+                            Text(figure(source.tokens)).insightsFigure()
+                            if source.change_permille != nil {
+                                Text(InsightsOverviewWords.change(source, copy: copy)).insightsCaption()
+                            }
+                            if let largest = source.largest_session {
+                                Text(InsightsOverviewWords.fill(text("analytics_largest"), ["t": figure(largest.tokens)]))
+                                    .insightsCaption()
+                            }
                         }
-                        if let largest = source.largest_session {
-                            Text(InsightsOverviewWords.fill(text("analytics_largest"), ["t": figure(largest.tokens)]))
-                                .insightsCaption()
-                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    drillButton("cache_share") {
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                            Text(text("analytics_card_cache_share")).insightsEyebrow()
+                            Text(source.cache_share.map { InsightsOverviewWords.share($0, copy: copy) + "%" }
+                                 ?? text("analytics_unavailable")).insightsFigure()
+                            // A bar, not a ring (owner decision D1, open).
+                            InsightsShareBar(permille: source.cache_share?.permille,
+                                             tick: InsightsOverviewWords.bestTick(source))
+                                .padding(.vertical, GlassTokens.Space.s2)
+                            if source.best != nil {
+                                Text(InsightsOverviewWords.bestWeek(source, copy: copy)).insightsCaption()
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
-                drillButton("cache_share") {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                        Text(text("analytics_card_cache_share")).insightsEyebrow()
-                        Text(source.cache_share.map { InsightsOverviewWords.share($0, copy: copy) + "%" }
-                             ?? text("analytics_unavailable")).insightsFigure()
-                        // A bar, not a ring (owner decision D1, open).
-                        InsightsShareBar(permille: source.cache_share?.permille,
-                                         tick: InsightsOverviewWords.bestTick(source))
-                            .padding(.vertical, GlassTokens.Space.s2)
-                        if source.best != nil {
-                            Text(InsightsOverviewWords.bestWeek(source, copy: copy)).insightsCaption()
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if source.source == "claude_code", let days = overview.by_day {
+                    byDay(days)
+                } else if source.source == "codex" {
+                    codexInterval(overview)
                 }
             }
-            if source.source == "claude_code", let days = overview.by_day {
-                byDay(days)
-            } else if source.source == "codex" {
-                codexInterval(overview)
-            }
+            .insightsCardBody()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
@@ -388,17 +397,20 @@ struct InsightsOverviewTab: View {
                 Button(text("analytics_tab_patterns")) { showPatterns() }
                     .buttonStyle(GlassButtonStyle(.link))
             }
-            VStack(spacing: 0) {
-                ForEach(Array(patterns.cards.enumerated()), id: \.element.id) { index, card in
-                    GlassTableRow(first: index == 0) {
-                        HStack(alignment: .firstTextBaseline) {
-                            Text(InsightsPatternsWords.title(card.kind, copy: copy))
-                            Spacer(minLength: GlassTokens.Space.s4)
-                            Text(figure(card.tokens)).insightsMono()
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(spacing: 0) {
+                    ForEach(Array(patterns.cards.enumerated()), id: \.element.id) { index, card in
+                        GlassTableRow(first: index == 0) {
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(InsightsPatternsWords.title(card.kind, copy: copy))
+                                Spacer(minLength: GlassTokens.Space.s4)
+                                Text(figure(card.tokens)).insightsMono()
+                            }
                         }
                     }
                 }
             }
+            .insightsCardBody()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
@@ -413,29 +425,32 @@ struct InsightsOverviewTab: View {
                 ])
                 InsightsInfo(text("analytics_card_by_model"), [text("analytics_model_labels_note")])
             }
-            switch breakdown {
-            case .model:
-                let rows = InsightsOverviewWords.modelRows(overview, copy: copy)
-                let most = rows.map(\.tokens).max() ?? 0
-                ForEach(rows) { row in
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                        HStack {
-                            Text(row.label).lineLimit(1).truncationMode(.middle)
-                            Spacer()
-                            Text(InsightsOverviewWords.figure(row.tokens, copy: copy)).insightsMono()
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                switch breakdown {
+                case .model:
+                    let rows = InsightsOverviewWords.modelRows(overview, copy: copy)
+                    let most = rows.map(\.tokens).max() ?? 0
+                    ForEach(rows) { row in
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                            HStack {
+                                Text(row.label).lineLimit(1).truncationMode(.middle)
+                                Spacer()
+                                Text(InsightsOverviewWords.figure(row.tokens, copy: copy)).insightsMono()
+                            }
+                            InsightsShareBar(fraction: most == 0 ? 0 : Double(row.tokens) / Double(most))
                         }
-                        InsightsShareBar(fraction: most == 0 ? 0 : Double(row.tokens) / Double(most))
                     }
-                }
-            case .tool:
-                ForEach(overview.by_tool) { tool in
-                    HStack {
-                        Text(InsightsOverviewWords.harness(tool.source, copy: copy))
-                        Spacer()
-                        Text(InsightsOverviewWords.figure(tool.tokens, copy: copy)).insightsMono()
+                case .tool:
+                    ForEach(overview.by_tool) { tool in
+                        HStack {
+                            Text(InsightsOverviewWords.harness(tool.source, copy: copy))
+                            Spacer()
+                            Text(InsightsOverviewWords.figure(tool.tokens, copy: copy)).insightsMono()
+                        }
                     }
                 }
             }
+            .insightsCardBody()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
@@ -490,27 +505,30 @@ struct InsightsCounterSessionsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             Text(text("analytics_drill_title")).insightsTitle()
-            VStack(spacing: 0) {
-                ForEach(sessions.rows) { row in
-                    InsightsDrillRow(
-                        title: InsightsOverviewWords.harness(row.session.source, copy: copy),
-                        figure: InsightsOverviewWords.figure(row.session.tokens.flatMap { UInt64(exactly: $0) },
-                                                            copy: copy),
-                        label: InsightsSessionsWords.counterLabel(row.session, copy: copy),
-                        state: InsightsOverviewWords.state(row.session.state, copy: copy),
-                        reasons: row.session.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
-                            .joined(separator: " \u{b7} ")
-                    ) {
-                        if routed { route(row.session.routing) }
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                VStack(spacing: 0) {
+                    ForEach(sessions.rows) { row in
+                        InsightsDrillRow(
+                            title: InsightsOverviewWords.harness(row.session.source, copy: copy),
+                            figure: InsightsOverviewWords.figure(row.session.tokens.flatMap { UInt64(exactly: $0) },
+                                                                copy: copy),
+                            label: InsightsSessionsWords.counterLabel(row.session, copy: copy),
+                            state: InsightsOverviewWords.state(row.session.state, copy: copy),
+                            reasons: row.session.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
+                                .joined(separator: " \u{b7} ")
+                        ) {
+                            if routed { route(row.session.routing) }
+                        }
                     }
                 }
+                if routed {
+                    Text(text("analytics_route_measure_note")).insightsCaption()
+                }
+                if let line = InsightsRouteWords.unavailableLine(sessions.column, copy: copy) {
+                    Text(line).insightsCaption()
+                }
             }
-            if routed {
-                Text(text("analytics_route_measure_note")).insightsCaption()
-            }
-            if let line = InsightsRouteWords.unavailableLine(sessions.column, copy: copy) {
-                Text(line).insightsCaption()
-            }
+            .insightsCardBody()
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -549,29 +567,32 @@ struct InsightsCardInputsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             Text(text("analytics_drill_title")).insightsTitle()
-            if inputs.card == "cache_share" {
-                ForEach(inputs.sources) { source in
-                    HStack {
-                        Text(InsightsOverviewWords.harness(source.source, copy: copy))
-                        Spacer()
-                        Text(fraction(source.cache_share)).insightsMono()
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                if inputs.card == "cache_share" {
+                    ForEach(inputs.sources) { source in
+                        HStack {
+                            Text(InsightsOverviewWords.harness(source.source, copy: copy))
+                            Spacer()
+                            Text(fraction(source.cache_share)).insightsMono()
+                        }
+                    }
+                }
+                VStack(spacing: 0) {
+                    ForEach(inputs.sessions) { session in
+                        InsightsDrillRow(
+                            title: InsightsOverviewWords.harness(session.source, copy: copy),
+                            figure: inputs.card == "cache_share"
+                                ? fraction(session.cache_share)
+                                : InsightsOverviewWords.figure(session.tokens, copy: copy),
+                            label: InsightsSessionsWords.rowLabel(session.session_ref, tokens: session.tokens,
+                                                                  snapshots: snapshots, copy: copy),
+                            state: InsightsOverviewWords.state(session.state, copy: copy),
+                            reasons: session.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
+                                .joined(separator: " \u{b7} "))
                     }
                 }
             }
-            VStack(spacing: 0) {
-                ForEach(inputs.sessions) { session in
-                    InsightsDrillRow(
-                        title: InsightsOverviewWords.harness(session.source, copy: copy),
-                        figure: inputs.card == "cache_share"
-                            ? fraction(session.cache_share)
-                            : InsightsOverviewWords.figure(session.tokens, copy: copy),
-                        label: InsightsSessionsWords.rowLabel(session.session_ref, tokens: session.tokens,
-                                                              snapshots: snapshots, copy: copy),
-                        state: InsightsOverviewWords.state(session.state, copy: copy),
-                        reasons: session.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
-                            .joined(separator: " \u{b7} "))
-                }
-            }
+            .insightsCardBody()
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)

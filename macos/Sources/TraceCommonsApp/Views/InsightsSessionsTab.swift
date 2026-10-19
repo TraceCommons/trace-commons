@@ -116,13 +116,16 @@ struct InsightsSessionsTab: View {
         let last = turns.max() ?? 1
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             chartHeading
-            legend(drill)
-            plot(drill, first: first, last: last)
-            HStack {
-                Text(InsightsSessionsWords.turnLabel(first, copy: copy)).insightsTick()
-                Spacer()
-                Text(InsightsSessionsWords.turnLabel(last, copy: copy)).insightsTick()
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                legend(drill)
+                plot(drill, first: first, last: last)
+                HStack {
+                    Text(InsightsSessionsWords.turnLabel(first, copy: copy)).insightsTick()
+                    Spacer()
+                    Text(InsightsSessionsWords.turnLabel(last, copy: copy)).insightsTick()
+                }
             }
+            .insightsCardBody()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()

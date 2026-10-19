@@ -14,44 +14,45 @@ struct InsightsSummaryView: View {
         VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
             // What the summary covers, who computed it, and what it cannot
             // say, behind the title's "i".
-            VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                InsightsSectionTitle(text("summary_title"), info: [
-                    text("summary_scope"),
-                    "\(text("provider")): \(summary.provider.id) · \(summary.provider.version)",
-                    "\(text("rubric")): \(summary.provider.rubric_version)",
-                ] + summary.limitations.map { text("summary_limitation_" + $0.rawValue) })
+            InsightsSectionTitle(text("summary_title"), info: [
+                text("summary_scope"),
+                "\(text("provider")): \(summary.provider.id) · \(summary.provider.version)",
+                "\(text("rubric")): \(summary.provider.rubric_version)",
+            ] + summary.limitations.map { text("summary_limitation_" + $0.rawValue) })
+            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
                 Text("\(text("summary_analysis_range")): \(analysisRange)").insightsCaption()
-            }
-            VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                SummaryCountRow(label: text("summary_snapshots"), count: summary.saved_snapshots)
-                if summary.saved_snapshots == 0 { Text(text("summary_empty")).insightsNote() }
-                SummaryCountRow(label: text("summary_assessed"), count: summary.user_reported.assessed_snapshots)
-                SummaryCountRow(label: text("summary_unassessed"), count: summary.user_reported.unassessed_snapshots)
-            }
-            HStack(alignment: .top, spacing: InsightsLayout.groupGap) {
-                categories
-                outcomes
-            }
-            VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                InsightsGroupHeading(text("summary_metrics"))
-                ForEach(summary.metrics) { metric in
-                    metricView(metric)
+                VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                    SummaryCountRow(label: text("summary_snapshots"), count: summary.saved_snapshots)
+                    if summary.saved_snapshots == 0 { Text(text("summary_empty")).insightsNote() }
+                    SummaryCountRow(label: text("summary_assessed"), count: summary.user_reported.assessed_snapshots)
+                    SummaryCountRow(label: text("summary_unassessed"), count: summary.user_reported.unassessed_snapshots)
                 }
-            }
-            VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                InsightsGroupHeading(text("summary_evidence"))
-                if summary.snapshots.isEmpty { Text(text("summary_no_evidence")).insightsNote() }
-                ForEach(summary.snapshots) { snapshot in
-                    Button { openSnapshot(snapshot.id) } label: {
-                        VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                            Text("\(text("summary_open_snapshot")) · \(text(snapshot.source_format))")
-                            Text(InsightsDate.label(snapshot.analyzed_at)).insightsCaption()
-                            Text(snapshot.id).insightsMono().lineLimit(2)
-                        }.frame(maxWidth: .infinity, alignment: .leading).insightsRowCard()
+                HStack(alignment: .top, spacing: InsightsLayout.groupGap) {
+                    categories
+                    outcomes
+                }
+                VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                    InsightsGroupHeading(text("summary_metrics"))
+                    ForEach(summary.metrics) { metric in
+                        metricView(metric)
                     }
-                    .buttonStyle(GlassPressStyle())
+                }
+                VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
+                    InsightsGroupHeading(text("summary_evidence"))
+                    if summary.snapshots.isEmpty { Text(text("summary_no_evidence")).insightsNote() }
+                    ForEach(summary.snapshots) { snapshot in
+                        Button { openSnapshot(snapshot.id) } label: {
+                            VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
+                                Text("\(text("summary_open_snapshot")) · \(text(snapshot.source_format))")
+                                Text(InsightsDate.label(snapshot.analyzed_at)).insightsCaption()
+                                Text(snapshot.id).insightsMono().lineLimit(2)
+                            }.frame(maxWidth: .infinity, alignment: .leading).insightsRowCard()
+                        }
+                        .buttonStyle(GlassPressStyle())
+                    }
                 }
             }
+            .insightsCardBody()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

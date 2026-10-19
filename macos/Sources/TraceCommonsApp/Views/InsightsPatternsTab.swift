@@ -88,16 +88,19 @@ struct InsightsPatternsTab: View {
             // How the figure was arrived at, behind the title's "i".
             InsightsSectionTitle(InsightsPatternsWords.title(card.kind, copy: copy),
                                  info: InsightsPatternsWords.basisLines(card, copy: copy))
-            // The token figure is the headline; the count sits beneath it.
-            HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s5) {
-                Text(figure(card.tokens)).insightsFigure()
-                if card.change != nil {
-                    Text(InsightsPatternsWords.change(card, copy: copy)).insightsCaption()
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                // The token figure is the headline; the count sits beneath it.
+                HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s5) {
+                    Text(figure(card.tokens)).insightsFigure()
+                    if card.change != nil {
+                        Text(InsightsPatternsWords.change(card, copy: copy)).insightsCaption()
+                    }
                 }
+                Text(InsightsPatternsWords.countLine(card, threshold: threshold, copy: copy)).insightsNote()
+                    .fixedSize(horizontal: false, vertical: true)
+                weeklyBars(card)
             }
-            Text(InsightsPatternsWords.countLine(card, threshold: threshold, copy: copy)).insightsNote()
-                .fixedSize(horizontal: false, vertical: true)
-            weeklyBars(card)
+            .insightsCardBody()
             if card.sessions > 0, model.counter == nil {
                 Button(InsightsPatternsWords.seeSessions(card, copy: copy)) {
                     if model.sessions?.pattern == card.kind { model.hideSessions() } else { model.showSessions(card.kind) }
@@ -180,41 +183,44 @@ struct InsightsPatternsTab: View {
     private func goals(_ found: InsightsComparisons) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             InsightsSectionTitle(text("analytics_goals_title"), info: [text("analytics_goals_note")])
-            VStack(spacing: 0) {
-                ForEach(Array(found.goals.enumerated()), id: \.element.id) { index, goal in
-                    GlassTableRow(first: index == 0) {
-                        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                            HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
-                                Text(InsightsComparisonsWords.goal(goal.goal, copy: copy))
-                                    .fixedSize(horizontal: false, vertical: true)
-                                Spacer(minLength: GlassTokens.Space.s4)
-                                Text(InsightsComparisonsWords.goalFigure(goal, copy: copy)).insightsMono()
-                            }
-                            HStack(alignment: .center, spacing: GlassTokens.Space.s5) {
-                                HStack(spacing: GlassTokens.Space.s2) {
-                                    ForEach(Array((goal.marks?.marks ?? []).enumerated()), id: \.offset) { _, mark in
-                                        InsightsGoalMark(wire: mark, copy: copy)
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                VStack(spacing: 0) {
+                    ForEach(Array(found.goals.enumerated()), id: \.element.id) { index, goal in
+                        GlassTableRow(first: index == 0) {
+                            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                                HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
+                                    Text(InsightsComparisonsWords.goal(goal.goal, copy: copy))
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Spacer(minLength: GlassTokens.Space.s4)
+                                    Text(InsightsComparisonsWords.goalFigure(goal, copy: copy)).insightsMono()
+                                }
+                                HStack(alignment: .center, spacing: GlassTokens.Space.s5) {
+                                    HStack(spacing: GlassTokens.Space.s2) {
+                                        ForEach(Array((goal.marks?.marks ?? []).enumerated()), id: \.offset) { _, mark in
+                                            InsightsGoalMark(wire: mark, copy: copy)
+                                        }
                                     }
+                                    if let change = InsightsComparisonsWords.goalChange(goal, copy: copy) {
+                                        Text(change).insightsCaption()
+                                    }
+                                    Spacer(minLength: GlassTokens.Space.s4)
+                                    Button(text("analytics_goal_delete")) { comparisons.deleteGoal(goal.id) }
+                                        .buttonStyle(GlassButtonStyle(.link))
                                 }
-                                if let change = InsightsComparisonsWords.goalChange(goal, copy: copy) {
-                                    Text(change).insightsCaption()
-                                }
-                                Spacer(minLength: GlassTokens.Space.s4)
-                                Button(text("analytics_goal_delete")) { comparisons.deleteGoal(goal.id) }
-                                    .buttonStyle(GlassButtonStyle(.link))
                             }
                         }
                     }
                 }
-            }
-            HStack(spacing: GlassTokens.Space.s6) {
-                ForEach(["met", "not_met"], id: \.self) { wire in
-                    HStack(spacing: GlassTokens.Space.s3) {
-                        InsightsGoalMark(wire: wire, copy: copy).accessibilityHidden(true)
-                        Text(InsightsComparisonsWords.mark(wire, copy: copy)).insightsCaption()
+                HStack(spacing: GlassTokens.Space.s6) {
+                    ForEach(["met", "not_met"], id: \.self) { wire in
+                        HStack(spacing: GlassTokens.Space.s3) {
+                            InsightsGoalMark(wire: wire, copy: copy).accessibilityHidden(true)
+                            Text(InsightsComparisonsWords.mark(wire, copy: copy)).insightsCaption()
+                        }
                     }
                 }
             }
+            .insightsCardBody()
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 GlassSelect(text("analytics_goal_add"), selection: $goalKind,
                             options: InsightsComparisonsWords.goalKinds.map { kind in
@@ -250,36 +256,39 @@ struct InsightsPatternsTab: View {
     private func rereadTable(_ patterns: InsightsWeekPatterns) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             Text(text("analytics_reread_title")).insightsTitle()
-            if patterns.reread_files.isEmpty {
-                Text(text("analytics_unavailable")).insightsNote()
-            } else {
-                VStack(spacing: 0) {
-                    GlassTableHead {
-                        HStack(alignment: .bottom, spacing: GlassTokens.Space.s4) {
-                            Text(text("analytics_reread_file")).frame(maxWidth: .infinity, alignment: .leading)
-                            Text(text("analytics_reread_reads")).frame(width: 44, alignment: .trailing)
-                            Text(text("analytics_reread_after_shrink"))
-                                .multilineTextAlignment(.trailing)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(width: 120, alignment: .trailing)
-                            Text(text("analytics_reread_tokens")).frame(width: 56, alignment: .trailing)
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                if patterns.reread_files.isEmpty {
+                    Text(text("analytics_unavailable")).insightsNote()
+                } else {
+                    VStack(spacing: 0) {
+                        GlassTableHead {
+                            HStack(alignment: .bottom, spacing: GlassTokens.Space.s4) {
+                                Text(text("analytics_reread_file")).frame(maxWidth: .infinity, alignment: .leading)
+                                Text(text("analytics_reread_reads")).frame(width: 44, alignment: .trailing)
+                                Text(text("analytics_reread_after_shrink"))
+                                    .multilineTextAlignment(.trailing)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(width: 120, alignment: .trailing)
+                                Text(text("analytics_reread_tokens")).frame(width: 56, alignment: .trailing)
+                            }
                         }
-                    }
-                    ForEach(patterns.reread_files) { row in
-                        GlassTableRow {
-                            HStack(spacing: GlassTokens.Space.s4) {
-                                Text(InsightsPatternsWords.fileLabel(row, copy: copy)).insightsMono()
-                                    .foregroundStyle(GlassColor.textPrimary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                Text(String(row.reads)).insightsMono().frame(width: 44, alignment: .trailing)
-                                Text(String(row.after_shrink)).insightsMono().frame(width: 120, alignment: .trailing)
-                                Text(figure(row.tokens)).insightsMono().foregroundStyle(GlassColor.textPrimary)
-                                    .frame(width: 56, alignment: .trailing)
+                        ForEach(patterns.reread_files) { row in
+                            GlassTableRow {
+                                HStack(spacing: GlassTokens.Space.s4) {
+                                    Text(InsightsPatternsWords.fileLabel(row, copy: copy)).insightsMono()
+                                        .foregroundStyle(GlassColor.textPrimary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    Text(String(row.reads)).insightsMono().frame(width: 44, alignment: .trailing)
+                                    Text(String(row.after_shrink)).insightsMono().frame(width: 120, alignment: .trailing)
+                                    Text(figure(row.tokens)).insightsMono().foregroundStyle(GlassColor.textPrimary)
+                                        .frame(width: 56, alignment: .trailing)
+                                }
                             }
                         }
                     }
                 }
             }
+            .insightsCardBody()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
@@ -323,17 +332,20 @@ struct InsightsPatternSessionsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             Text(InsightsPatternsWords.title(found.pattern, copy: copy)).insightsTitle()
-            VStack(spacing: 0) {
-                ForEach(found.sessions) { session in
-                    InsightsDrillRow(
-                        title: session.session_ref,
-                        figure: InsightsOverviewWords.figure(session.tokens, copy: copy),
-                        label: nil,
-                        state: InsightsOverviewWords.state(session.state, copy: copy),
-                        reasons: session.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
-                            .joined(separator: " \u{b7} "))
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(spacing: 0) {
+                    ForEach(found.sessions) { session in
+                        InsightsDrillRow(
+                            title: session.session_ref,
+                            figure: InsightsOverviewWords.figure(session.tokens, copy: copy),
+                            label: nil,
+                            state: InsightsOverviewWords.state(session.state, copy: copy),
+                            reasons: session.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
+                                .joined(separator: " \u{b7} "))
+                    }
                 }
             }
+            .insightsCardBody()
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
