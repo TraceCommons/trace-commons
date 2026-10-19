@@ -88,6 +88,47 @@ final class InsightsGlassConventionsTests: XCTestCase {
         }
     }
 
+    /// A container inside a card's body (a chart's well, a quiet card, a
+    /// row card) is not inset as far as the body's text (owner,
+    /// 2026-10-19): the body marks itself, and each container gives the
+    /// body's extra inset back, so its edges line up with the card's title.
+    func test_inlineContainersAreNotInsetAsFarAsTheText() throws {
+        let glass = try Self.text("Views/InsightsGlass.swift")
+        XCTAssertTrue(glass.contains("""
+                padding(.horizontal, InsightsLayout.bodyInset)
+                    .environment(\\.insightsInCardBody, true)
+        """), "the card body does not mark what is in it")
+        XCTAssertTrue(glass.contains("content.padding(.horizontal, inBody ? -InsightsLayout.bodyInset : 0)"),
+                      "a container in a body keeps the text's inset")
+        for opening in ["func insightsPlot() -> some View {", "func insightsCard() -> some View {",
+                        "func insightsRowCard() -> some View {"] {
+            let start = try XCTUnwrap(glass.range(of: opening), opening)
+            let end = try XCTUnwrap(glass.range(of: "\n    }\n", range: start.upperBound..<glass.endIndex))
+            XCTAssertTrue(glass[start.upperBound..<end.lowerBound].contains(".modifier(InsightsInlineContainer())"),
+                          "\(opening) is inset as far as the text")
+        }
+        // A quiet card resets the mark for what it holds, so a container
+        // inside it is not pulled out twice.
+        XCTAssertEqual(glass.components(separatedBy: "environment(\\.insightsInCardBody, false)").count - 1, 2)
+    }
+
+    /// The week picker sits on the right of its row on Overview and
+    /// Patterns, and Patterns' scope line ("Claude Code traces only") is a
+    /// card of its own on the left (owner, 2026-10-19).
+    func test_theWeekPickerIsOnTheRightAndTheScopeIsACard() throws {
+        for (file, leading) in [("Views/InsightsPatternsTab.swift", "InsightsScopeCard(source: \"claude_code\", line: line)"),
+                                ("Views/InsightsOverviewTab.swift", "drillButton(\"sessions\") {")] {
+            let source = try Self.text(file)
+            let header = try XCTUnwrap(source.range(of: "private func header("), file)
+            let picker = try XCTUnwrap(source.range(of: "InsightsWeekSelect(", range: header.upperBound..<source.endIndex))
+            let first = try XCTUnwrap(source.range(of: leading, range: header.upperBound..<source.endIndex))
+            XCTAssertLessThan(first.lowerBound, picker.lowerBound, "\(file): the week picker is on the left")
+        }
+        let glass = try Self.text("Views/InsightsGlass.swift")
+        let card = try XCTUnwrap(glass.range(of: "struct InsightsScopeCard: View {"))
+        XCTAssertTrue(glass[card.upperBound...].prefix(600).contains("GlassCard(quiet: true, flush: true) {"))
+    }
+
     func test_noLiteralWhiteOrBlackInk() throws {
         for file in Self.files {
             let source = try Self.text(file)

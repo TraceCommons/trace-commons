@@ -89,23 +89,24 @@ struct InsightsOverviewTab: View {
         }
     }
 
-    /// The week and the Sessions figure on one row, then the coverage line
-    /// and whatever qualifies the counts.
+    /// The Sessions figure and the week on one row, the week picker on the
+    /// right as on Patterns (owner, 2026-10-19), then the coverage line and
+    /// whatever qualifies the counts.
     private func header(_ overview: InsightsWeekOverview) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
-                InsightsWeekSelect(weekStart: overview.week_start, weeks: overview.weeks, copy: copy,
-                                   select: selectWeek)
-                Spacer(minLength: GlassTokens.Space.s4)
                 drillButton("sessions") {
                     HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
-                        VStack(alignment: .trailing, spacing: 0) {
+                        VStack(alignment: .leading, spacing: 0) {
                             Text(text("analytics_card_sessions")).insightsEyebrow()
                             Text(String(overview.sessions)).insightsFigure()
                         }
                         if model.drills("sessions") { GlassChevron() }
                     }
                 }
+                Spacer(minLength: GlassTokens.Space.s4)
+                InsightsWeekSelect(weekStart: overview.week_start, weeks: overview.weeks, copy: copy,
+                                   select: selectWeek)
             }
             InsightsCoverageLine(coverage: overview.coverage, copy: copy, info: headerInfo(overview))
         }
@@ -294,6 +295,8 @@ struct InsightsOverviewTab: View {
         .padding(.vertical, GlassTokens.Space.s5)
         .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
             .strokeBorder(GlassTokens.Color.chartGrid.color, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+        // A well in the card's body: in line with the title, not the text.
+        .modifier(InsightsInlineContainer())
     }
 
     struct Day: Identifiable, Equatable {

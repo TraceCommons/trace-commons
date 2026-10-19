@@ -43,15 +43,19 @@ extension View {
         glassType(GlassTokens.TypeScale.label.weight(.regular)).foregroundStyle(GlassStatus.on.textColor)
     }
 
-    /// A quiet glass card around this content.
+    /// A quiet glass card around this content. Inside a card's body it
+    /// reaches out to the card's own edges (`InsightsInlineContainer`).
     func insightsCard() -> some View {
-        GlassCard(quiet: true) { self }
+        GlassCard(quiet: true) { environment(\.insightsInCardBody, false) }
+            .modifier(InsightsInlineContainer())
     }
 
     /// The label of a row that acts: a quiet card that lifts under the
-    /// pointer. Its button takes `GlassPressStyle`.
+    /// pointer. Its button takes `GlassPressStyle`. Inside a card's body it
+    /// reaches out to the card's own edges (`InsightsInlineContainer`).
     func insightsRowCard() -> some View {
-        GlassCard(quiet: true, interactive: true) { self }
+        GlassCard(quiet: true, interactive: true) { environment(\.insightsInCardBody, false) }
+            .modifier(InsightsInlineContainer())
     }
 
     /// A screen's defaults: body type in the primary ink, glass buttons
@@ -137,10 +141,13 @@ extension View {
     }
 
     /// A card's body: everything between its title and its actions, inset
-    /// `InsightsLayout.bodyInset` further on both sides. What is nested in
-    /// it (a chart, a well, a row card) keeps its own padding.
+    /// `InsightsLayout.bodyInset` further on both sides. A container nested
+    /// in it (a chart's well, a quiet card, a row card) is not inset that
+    /// far: it reaches back out to the card's own edges, in line with the
+    /// title (owner, 2026-10-19), and keeps its own padding inside.
     func insightsCardBody() -> some View {
         padding(.horizontal, InsightsLayout.bodyInset)
+            .environment(\.insightsInCardBody, true)
     }
 }
 
@@ -236,6 +243,7 @@ extension View {
             .padding(.bottom, GlassTokens.Space.s4)
             .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
                 .fill(GlassTokens.Color.chartSurface.color))
+            .modifier(InsightsInlineContainer())
     }
 }
 
@@ -336,6 +344,28 @@ struct InsightsHarnessTile: View {
     }
 }
 
+/// What a tab's figures cover, on a card of its own (owner, 2026-10-19):
+/// the harness's tile and the core's line ("Claude Code traces only: 31 of
+/// 37."). It takes the row's free width; the week picker sits to its right.
+struct InsightsScopeCard: View {
+    let source: String
+    let line: String
+
+    var body: some View {
+        GlassCard(quiet: true, flush: true) {
+            HStack(spacing: GlassTokens.Space.s4) {
+                InsightsHarnessTile(source: source)
+                Text(line).insightsCaption()
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, GlassTokens.Space.s3)
+            .padding(.horizontal, GlassTokens.Space.s5)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 /// One row of a drill-down, sized for the main pane: the session and its
 /// figure on the first line, its label under it, then its coverage state
 /// and reasons. A four-column table does not fit 408pt.
@@ -370,5 +400,23 @@ struct InsightsDrillRow<Extra: View>: View {
 extension InsightsDrillRow where Extra == EmptyView {
     init(title: String, figure: String, label: String?, state: String, reasons: String) {
         self.init(title: title, figure: figure, label: label, state: state, reasons: reasons, extra: { EmptyView() })
+    }
+}
+
+/// Whether a view sits in a card's body (`insightsCardBody`), whose text is
+/// inset further than the card's title.
+extension EnvironmentValues {
+    @Entry var insightsInCardBody = false
+}
+
+/// An inline container (a chart's well, a quiet card) inside a card's body
+/// is not inset as far as the body's text (owner, 2026-10-19): it gives the
+/// body's extra inset back on both sides, so its edges line up with the
+/// card's title. Outside a card's body it is left as it is.
+struct InsightsInlineContainer: ViewModifier {
+    @Environment(\.insightsInCardBody) private var inBody
+
+    func body(content: Content) -> some View {
+        content.padding(.horizontal, inBody ? -InsightsLayout.bodyInset : 0)
     }
 }
