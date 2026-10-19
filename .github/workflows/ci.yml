@@ -1511,7 +1511,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-      # Pinned to the version the Tauri jobs use. curl and jq are on the image.
+      # Node 24, the current LTS. curl and jq are on the image.
       - uses: actions/setup-node@v7
         with:
           node-version: 24

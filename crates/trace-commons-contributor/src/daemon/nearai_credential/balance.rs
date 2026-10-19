@@ -64,6 +64,13 @@ const BILLING_WINDOW: Duration = Duration::from_secs(30 * 60);
 /// the new figure on their next look.
 const BILLING_TTL: Duration = Duration::from_secs(5);
 
+/// How old a cached balance must be before a fresh read fetches it again.
+///
+/// A fresh read is what the refresh button asks for, so it skips the TTL. It
+/// does not skip this: a double click, or a button held down, is still one
+/// call to the service.
+const FRESH_READ_FLOOR: Duration = Duration::from_secs(5);
+
 /// How long one exchanged access token is reused before another is minted.
 ///
 /// The service does not tell us the access token's lifetime -- the exchange
@@ -312,8 +319,13 @@ fn report_for(error: &anyhow::Error) -> BalanceReport {
 /// Infallible from the caller's perspective by construction: there is no
 /// failure this can produce that is not one of [`BalanceReport`]'s named
 /// states, and none of those states is a number.
-pub async fn read(shared: &DaemonShared) -> BalanceReport {
+///
+/// `fresh` is the refresh button's read: it fetches again unless the cached
+/// figure is younger than [`FRESH_READ_FLOOR`], where an ordinary read reuses
+/// anything younger than [`BALANCE_TTL`].
+pub async fn read(shared: &DaemonShared, fresh: bool) -> BalanceReport {
     match CloudApi::live() {
+        Ok(api) if fresh => read_fresh_with(shared, &api).await,
         Ok(api) => read_with(shared, &api).await,
         // A client this build could not construct is a machine whose trust
         // store would not load. Nothing about the balance is known, and that
@@ -329,7 +341,16 @@ pub async fn read(shared: &DaemonShared) -> BalanceReport {
 /// stub rather than asserted about by reading it. `read` is the only shipping
 /// caller and it passes the pinned live client.
 async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
-    match read_account(shared, api, false).await {
+    balance_report(read_account(shared, api, false, BALANCE_TTL).await)
+}
+
+/// [`read_with`] for a fresh read: see [`read`].
+async fn read_fresh_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
+    balance_report(read_account(shared, api, false, FRESH_READ_FLOOR).await)
+}
+
+fn balance_report(reading: Result<AccountReading, BalanceReport>) -> BalanceReport {
+    match reading {
         Ok(AccountReading::Balance(reading)) => BalanceReport::Known(reading),
         Err(report) => report,
         _ => BalanceReport::Unavailable,
@@ -350,6 +371,8 @@ async fn read_account(
     shared: &DaemonShared,
     api: &CloudApi,
     models: bool,
+    // How young a cached balance must be to be served instead of fetched.
+    balance_max_age: Duration,
 ) -> Result<AccountReading, BalanceReport> {
     let dir = shared.store.dir().to_path_buf();
     let opened = billing_opened_at(&dir);
@@ -374,6 +397,7 @@ async fn read_account(
     if !models
         && let Some((reading, at)) = entry.balance
         && serves_cached(at, opened, Instant::now())
+        && at.elapsed() < balance_max_age
     {
         return Ok(AccountReading::Balance(reading));
     }
@@ -740,6 +764,63 @@ mod tests {
         assert_eq!(*stub.exchanges.lock().unwrap(), 1);
     }
 
+    /// The refresh button asks for a fresh figure. Inside the TTL a plain read
+    /// is served from the cache, which is what made the button look dead: the
+    /// app re-reads the balance whenever it re-reads the key, so the cache is
+    /// almost always warm when the contributor presses it.
+    #[tokio::test]
+    async fn a_fresh_read_goes_back_to_the_service_inside_the_ttl() {
+        let s = shared();
+        with_session(&s, "rt_first");
+        let stub = stub(one_org(), a_balance()).await;
+        let api = CloudApi::for_test(&stub.origin).unwrap();
+        let balance_calls = |stub: &Stub| {
+            stub.bearers
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(path, _)| path.ends_with("/usage/balance"))
+                .count()
+        };
+
+        assert!(matches!(read_with(&s, &api).await, BalanceReport::Known(_)));
+        assert_eq!(balance_calls(&stub), 1);
+
+        // Within the floor, a fresh read is still the cached one: a held-down
+        // or double-clicked button must not become a burst of calls.
+        assert!(matches!(
+            read_fresh_with(&s, &api).await,
+            BalanceReport::Known(_)
+        ));
+        assert_eq!(balance_calls(&stub), 1);
+
+        // Past the floor, a fresh read reaches the service again, reusing the
+        // access token rather than spending a rotation.
+        backdate_balance(&s, FRESH_READ_FLOOR).await;
+        let BalanceReport::Known(reading) = read_fresh_with(&s, &api).await else {
+            panic!("a fresh read must still produce the figure");
+        };
+        assert_eq!(reading.remaining_nanos, Some(8_500_000_000));
+        assert_eq!(balance_calls(&stub), 2);
+        assert_eq!(*stub.exchanges.lock().unwrap(), 1);
+
+        // An ordinary read right after is served from what the fresh read cached.
+        assert!(matches!(read_with(&s, &api).await, BalanceReport::Known(_)));
+        assert_eq!(balance_calls(&stub), 2);
+    }
+
+    /// Age this directory's cached balance by `by`, as if that much time had
+    /// passed since it was fetched.
+    async fn backdate_balance(s: &DaemonShared, by: Duration) {
+        // The cache is process-wide, so another test's read may hold it.
+        let mut map = cache().lock().await;
+        let entry = map.get_mut(s.store.dir()).expect("a cached entry");
+        let (_, at) = entry.balance.as_mut().expect("a cached balance");
+        *at = Instant::now()
+            .checked_sub(by)
+            .expect("a monotonic clock this old");
+    }
+
     #[tokio::test]
     async fn a_refused_refresh_is_a_named_state_that_neither_clears_nor_zeroes() {
         let s = shared();
@@ -1018,7 +1099,7 @@ pub async fn read_model_spend(shared: &DaemonShared) -> serde_json::Value {
 }
 
 async fn read_model_spend_with(shared: &DaemonShared, api: &CloudApi) -> serde_json::Value {
-    match read_account(shared, api, true).await {
+    match read_account(shared, api, true, BALANCE_TTL).await {
         Ok(AccountReading::Models(value)) => value,
         Err(report) => unknown_model_spend(report),
         _ => unknown_model_spend(BalanceReport::Unavailable),

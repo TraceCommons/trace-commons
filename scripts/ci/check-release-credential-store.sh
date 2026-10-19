@@ -32,7 +32,6 @@ FEATURE="test-credential-store"
 BUILD_FILES=(
   .github/workflows/release-apps.yml          # macOS DMG, FFI dylib/DLL, MSIX, appinstaller, flatpak
   .github/workflows/release-contributor.yml   # contributor CLI release binaries
-  .github/workflows/tauri-desktop.yml         # Tauri bundle build
   macos/scripts/make-app-bundle.sh
   macos/scripts/make-release-dmg.sh
   windows/scripts/make-msix.ps1

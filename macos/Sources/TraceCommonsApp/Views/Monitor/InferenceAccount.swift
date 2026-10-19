@@ -211,7 +211,7 @@ struct PrivateAIBalanceCard: View {
             systemImage: "dollarsign.circle", title: copy.balanceTitle, subtitle: [copy.balanceWhat],
             refresh: .init(
                 copy.panelBalanceRefreshAccessibility,
-                isDisabled: model.credentialBusy, action: { model.refreshNearAiBalance() }),
+                isDisabled: model.credentialBusy, action: { model.refreshNearAiBalance(fresh: true) }),
             content: { BalanceRow(copy: copy, showsScope: false) })
     }
 }

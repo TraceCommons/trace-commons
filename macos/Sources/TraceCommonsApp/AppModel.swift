@@ -685,10 +685,14 @@ final class AppModel: ObservableObject {
     /// read WITH: signing in, signing in again and forgetting all move this
     /// row, and a card whose two halves disagreed about whether a session
     /// exists would be worse than either half alone.
-    func refreshNearAiBalance() {
+    ///
+    /// `fresh` is for the card's refresh button. Every other re-read may be
+    /// served the daemon's figure from the last minute; the button may not,
+    /// or pressing it changes nothing.
+    func refreshNearAiBalance(fresh: Bool = false) {
         perform(
             BalanceSurface.statusMethod,
-            work: { try $0.nearAiBalance() }
+            work: { try $0.nearAiBalance(fresh: fresh) }
         ) { status in
             self.publishIfChanged(\.balanceStatus, status)
         }

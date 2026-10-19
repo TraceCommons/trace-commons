@@ -318,7 +318,7 @@ jobs:
       # two release streams and the desktop app from neither -- even though the
       # app has built in CI (`windows contributor app` in ci.yml) since it
       # landed. The CLI zip below is untouched; this is an additional asset.
-      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: "8.0.x"
 
@@ -329,7 +329,7 @@ jobs:
       # SDK; driving this project from the SDK CLI fails with MSB4062 naming a
       # path under the dotnet SDK directory, which reads like a .NET version
       # problem and is not one. ci.yml's app job hit exactly this.
-      - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+      - uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3
 
       # The app is C# over the same C ABI the macOS app uses, so the cdylib has
       # to exist before anything managed builds. TraceCommons.App.csproj fails
@@ -451,7 +451,7 @@ jobs:
           Get-Content $listFile | ForEach-Object { Write-Host "  $_" }
           "app_sign_list=$listFile" >> $env:GITHUB_OUTPUT
 
-      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_SIGNING_TENANT_ID }}
@@ -723,14 +723,14 @@ jobs:
       # the newest installed SDK regardless of what setup-dotnet put there,
       # and the runner image ships .NET 10, whose layout Windows App SDK 1.6
       # cannot build against.
-      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: '8.0.x'
       # MSBuild from Visual Studio, not `dotnet build`. A WinUI 3 project
       # invokes tasks from Microsoft.Build.AppxPackage.dll and
       # Microsoft.Build.Packaging.Pri.Tasks.dll, which are never part of the
       # .NET SDK.
-      - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+      - uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3
       # No build cache in a release job, deliberately. A cache is a
       # write-target a lower-privilege job can poison, and this job holds
       # signing authority.
@@ -747,7 +747,7 @@ jobs:
           TC_FFI_LIB_DIR: ${{ github.workspace }}\target\release
         run: msbuild src\TraceCommons.App\TraceCommons.App.csproj -restore -p:Configuration=Release -p:Platform=x64
 
-      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_SIGNING_TENANT_ID }}

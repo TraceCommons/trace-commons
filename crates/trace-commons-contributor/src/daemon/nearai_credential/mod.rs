@@ -517,8 +517,13 @@ pub async fn handle_migrate(shared: &DaemonShared, req: &Request) -> Response {
 ///
 /// Async because it may exchange a refresh token and then make two management
 /// calls; on the async dispatch path for the same reason `handle_start` is.
+///
+/// `"fresh": true` is the refresh button's read: it goes back to the service
+/// instead of serving the short-lived cache. Anything else, including a
+/// malformed value, is an ordinary read, because this route never errors.
 pub async fn handle_balance(shared: &DaemonShared, req: &Request) -> Response {
-    Response::ok(req.id, balance::read(shared).await.to_value())
+    let fresh = req.params.get("fresh").and_then(serde_json::Value::as_bool) == Some(true);
+    Response::ok(req.id, balance::read(shared, fresh).await.to_value())
 }
 
 /// Read a verified credits destination, optionally bound to a displayed context.

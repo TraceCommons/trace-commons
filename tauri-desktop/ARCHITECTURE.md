@@ -86,10 +86,8 @@ cargo check --locked --manifest-path tauri-desktop/src-tauri/Cargo.toml
 cargo test --locked --manifest-path tauri-desktop/src-tauri/Cargo.toml
 ```
 
-`.github/workflows/tauri-desktop.yml` runs on every push and pull request. It
-runs frontend and Storybook builds,
-`pnpm test`, `pnpm audit`, Rust format/check/test across macOS, Linux, and
-Windows, Linux Clippy, Linux and Windows unsigned bundles, all-feature Cargo
-license/source/advisory audits, and the declared Tauri MSRV check. CI proves
-compile, test, and bundle creation; it does not establish GUI, OS-permission,
-packaged-device, signed-package, update, callback, or provider acceptance.
+No CI job builds or tests this app. The `tauri-desktop` workflow was removed
+on 2026-10-19; run the commands above by hand when you change it. Nothing
+automated covers the frontend build, `pnpm audit`, the Rust format/check/test,
+the Linux and Windows bundles, the Cargo license/source/advisory audits of
+this workspace, or its MSRV.
