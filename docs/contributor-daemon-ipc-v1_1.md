@@ -676,7 +676,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `acknowledge_legacy_invite_migration` | — | `acknowledged: bool` | records that the move notice was shown |
 | `acknowledge_arming_rewordings` | `ids[]` (**required**) | `acknowledged: <count>` | records that the rewording notices with these ids were shown; see `arming_rewordings` below |
 | `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
-| `near_ai_balance` | — | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
+| `near_ai_balance` | `fresh?` | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
 | `clear_public_profile` | — | the profile (now empty), plus `withdrawn: true` and `handle_persisted` | performs real network I/O; see "The public profile" below |
 | `get_public_profile` | — | `on_roster`, `handle`, `bio`, `public_since`, `public_url` | a LOCAL cache, not a server read-back; `public_url` is always `null` |
@@ -6377,6 +6377,10 @@ shape rather than a bare number:
   A stale balance presented as current is worse than no balance; the daemon
   will not serve a cached figure older than a minute, and returns a failure
   state rather than the last good number when a read fails.
+- **`"fresh": true` skips that minute.** It is what a refresh button sends:
+  the daemon asks the service again unless its figure is under five seconds
+  old, so a double click is still one call. Any other value is an ordinary
+  read.
 
 The units are the service's own: fixed scale 9 (nano-dollars) and USD,
 carried on the wire rather than assumed, and not rounded by the daemon.
