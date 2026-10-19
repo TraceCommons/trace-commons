@@ -1067,7 +1067,8 @@ pub struct MonitorFlowMapCopy {
     /// the Traces tab, while a trace is contributed or kept and after one
     /// is dismissed (owner, 2026-10-19): what is happening to it, the
     /// heading over the trace, what happens to the tool's memory, and a
-    /// note, `{tool}` the tool's name. DRAFT, NEEDS APPROVAL.
+    /// note, `{tool}` the tool's name. The dismissal's tag and note are
+    /// the owner's (2026-10-19); the rest are DRAFT, NEEDS APPROVAL.
     pub transfer_contributing: &'static str,
     pub transfer_keeping: &'static str,
     pub transfer_dismissed: &'static str,
