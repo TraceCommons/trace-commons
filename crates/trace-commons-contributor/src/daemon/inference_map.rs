@@ -491,7 +491,8 @@ pub fn destinations(facts: &DestinationFacts) -> serde_json::Value {
 fn managed_session_projection(row: &crate::managed::sessions::SessionView) -> serde_json::Value {
     use crate::managed::{ConnectionKind, ToolId};
     let provider = match (row.connection, row.tool) {
-        (ConnectionKind::NearAi, _) => "near_ai",
+        // Both NEAR AI connections: an account, and the app's own sign-in.
+        (ConnectionKind::NearAi | ConnectionKind::NearAiSignIn, _) => "near_ai",
         (_, ToolId::Claude) => "anthropic",
         (_, ToolId::Codex | ToolId::Opencode) => "openai",
     };
@@ -1033,6 +1034,43 @@ mod tests {
     const REQUEST_DIGEST: &str = "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11";
     const RESPONSE_DIGEST: &str =
         "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22";
+
+    /// A managed session row as the registry stores it, on `connection`.
+    fn managed_row(tool: &str, connection: &str) -> crate::managed::sessions::SessionView {
+        serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-4000-8000-000000000001",
+            "tool": tool,
+            "connection": connection,
+            "account_id": "00000000-0000-4000-8000-000000000002",
+            "account_label": "Work",
+            "selection_generation": 1,
+            "project_label": "project",
+            "cwd": "/tmp/project",
+            "started_at": "2026-10-19T12:00:00Z",
+            "state": "running",
+            "exit_code": null,
+            "can_focus": false,
+            "purpose": "coding",
+        }))
+        .expect("a stored session view")
+    }
+
+    /// A session on the app's NEAR AI sign-in goes to NEAR AI, like one on
+    /// a NEAR AI account. The map drew every sign-in session as going
+    /// straight to Anthropic or OpenAI, by tool.
+    #[test]
+    fn a_near_ai_sign_in_session_is_drawn_going_to_near_ai() {
+        for tool in ["claude", "codex", "opencode"] {
+            for connection in ["near_ai", "near_ai_signin"] {
+                let row = managed_session_projection(&managed_row(tool, connection));
+                assert_eq!(row["provider"], "near_ai", "{tool} on {connection}");
+            }
+        }
+        let claude = managed_session_projection(&managed_row("claude", "subscription"));
+        assert_eq!(claude["provider"], "anthropic");
+        let codex = managed_session_projection(&managed_row("codex", "api_key"));
+        assert_eq!(codex["provider"], "openai");
+    }
 
     /// Nudge U4 names tools from this table: a known source by its
     /// display name, an unknown one not at all.

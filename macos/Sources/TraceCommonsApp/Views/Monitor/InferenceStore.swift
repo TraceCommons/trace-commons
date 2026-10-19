@@ -99,6 +99,10 @@ final class InferenceStore {
                 _ = await (calls, destinations)
             case .snapshot, .statusChanged, .resyncRequired:
                 await load()
+            // A managed session started, stopped, exited or was dismissed:
+            // the map draws those from `tool_destinations`.
+            case .unknown("managed_changed"):
+                await loadDestinations()
             case .queueChanged, .digestDue, .reengageDue, .previewReady, .usageChanged, .unknown:
                 break
             }
@@ -197,8 +201,12 @@ final class InferenceStore {
     }
 
     private func loadDestinations() async {
+        destinationReads += 1
         await read("tool_destinations", { try await $0.toolDestinations() }) { self.destinations = $0 }
     }
+
+    /// How many times `tool_destinations` has been asked for. For tests.
+    @ObservationIgnored private(set) var destinationReads = 0
 
     private func loadHarnesses() async {
         await read("harness_list", { try await $0.harnessList() }) { if let value = $0 { self.harnesses = value } }
