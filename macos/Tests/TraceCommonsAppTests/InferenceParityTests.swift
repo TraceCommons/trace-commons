@@ -204,7 +204,7 @@ final class InferenceParityTests: XCTestCase {
         // Each card under its icon (owner, 2026-10-10); the billing card
         // draws its own.
         for needle in ["PrivateAIBalanceCard(copy: copy)", "                FundingRow(copy: copy)\n",
-                       "BalanceRow(copy: copy, showsScope: false)", "action: { model.refreshNearAiBalance() })",
+                       "BalanceRow(copy: copy, showsScope: false)", "action: { model.refreshNearAiBalance(fresh: true) })",
                        "systemImage: \"dollarsign.circle\"", "systemImage: \"gearshape\""] {
             XCTAssertTrue(account.contains(needle), "InferenceAccount.swift lacks \(needle)")
         }
