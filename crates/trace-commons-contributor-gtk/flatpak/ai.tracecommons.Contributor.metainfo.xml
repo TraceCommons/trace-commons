@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.20.3" date="2026-10-20">
+      <description>
+        <p>Maintenance release for Linux: the version number follows the macOS app.</p>
+      </description>
+    </release>
     <release version="0.20.2" date="2026-10-20">
       <description>
         <p>Maintenance release for Linux: the version number follows the macOS app.</p>
