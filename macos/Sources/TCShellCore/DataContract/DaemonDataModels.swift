@@ -46,12 +46,47 @@ public enum DaemonDataDecoding {
     }
 
     static func parseDate(_ text: String) -> Date? {
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = withFraction.date(from: text) { return date }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: text)
+        DaemonTimestamp.parse(text)
+    }
+}
+
+/// The one parser for the daemon's RFC 3339 timestamps, with or without
+/// fractional seconds, `Z` or an offset. Its two formatters are built once:
+/// building one or two per timestamp cost about 0.33 ms each, so a
+/// `list_pending` of 180 entries spent about 180 ms on formatters alone
+/// (`TracesScalePerfTests`). A lock guards them, since the formatter is not
+/// `Sendable` and replies are decoded on a concurrent queue.
+public enum DaemonTimestamp {
+    public static func parse(_ text: String) -> Date? {
+        formatters.parse(text)
+    }
+
+    private static let formatters = Formatters()
+
+    private final class Formatters: @unchecked Sendable {
+        private let lock = NSLock()
+        private let withFraction: ISO8601DateFormatter = {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter
+        }()
+        private let plain: ISO8601DateFormatter = {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            return formatter
+        }()
+
+        /// The same answer as trying the fractional form, then the plain
+        /// one; a timestamp with no `.` cannot be the fractional form, so it
+        /// is tried as the plain one first, rather than parsed twice.
+        func parse(_ text: String) -> Date? {
+            lock.lock()
+            defer { lock.unlock() }
+            if text.utf8.contains(UInt8(ascii: ".")) {
+                return withFraction.date(from: text) ?? plain.date(from: text)
+            }
+            return plain.date(from: text) ?? withFraction.date(from: text)
+        }
     }
 }
 

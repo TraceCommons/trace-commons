@@ -517,7 +517,8 @@ final class TracesParityTests: XCTestCase {
                        // (owner, 2026-10-19), Submit all as its chevron.
                        // Its chevron opens the Traces tab's own menu panel,
                        // in the "..." menu's look (owner, 2026-10-19).
-                       "title, menuLabel: outcome.submitAllAs, menuOpen: submitMenu == folder.id",
+                       "menuLabel: outcome?.submitAllAs ?? \"\",\n                menuOpen: submitMenu == folder.id, busy: busy)",
+                       "GlassSplitButton(split.title, menuLabel: split.menuLabel, menuOpen: split.menuOpen",
                        "TracesSubmitMenu(", "verdictFolder = folder",
                        "SubmitAllAsModal(folder: folder, store: store, words: words)",
                        "store.mayContributeFolder(folder)", "words.tree.submitCount", "words?.tree.submitTip"] {

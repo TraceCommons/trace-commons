@@ -892,14 +892,9 @@ enum DaemonDecoding {
     /// seconds; `.iso8601` alone rejects those, so both spellings are tried.
     static func decoder() -> JSONDecoder {
         let decoder = JSONDecoder()
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
         decoder.dateDecodingStrategy = .custom { decoder in
             let text = try decoder.singleValueContainer().decode(String.self)
-            if let d = withFraction.date(from: text) { return d }
-            if let d = plain.date(from: text) { return d }
+            if let d = DaemonTimestamp.parse(text) { return d }
             throw DecodingError.dataCorrupted(
                 .init(codingPath: decoder.codingPath, debugDescription: "unparseable timestamp")
             )

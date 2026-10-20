@@ -62,6 +62,31 @@ final class TracesResponsivenessTests: XCTestCase {
         }
     }
 
+    /// Each folder's Submit all offer is the shared table's answer, worked
+    /// out with the read, so drawing a folder row calls nothing in the core.
+    func test_folderOffersAreWorkedOutWithTheRead() async throws {
+        for set: SampleDaemonClient.SampleSet in [.normalDay, .busyQueue] {
+            let store = await loaded(set)
+            XCTAssertFalse(store.tree.folders.isEmpty)
+            for folder in store.tree.folders {
+                let input = TracesStore.offerInput(folder, idleOnly: store.idleOnly)
+                let held = try XCTUnwrap(store.offers[input], "no offer for \(folder.label)")
+                XCTAssertEqual(held, TracesStore.offer(input))
+                XCTAssertEqual(store.groupOffer(folder), held)
+            }
+        }
+        // Under the idle filter the offer counts what is drawn instead.
+        let store = await loaded(.busyQueue)
+        await store.showIdleOnly(true)
+        for folder in store.tree.folders {
+            let input = TracesStore.offerInput(folder, idleOnly: true)
+            XCTAssertNil(input.contributable)
+            XCTAssertEqual(store.offers[input], TracesStore.offer(input))
+        }
+        store.attach(nil)
+        XCTAssertTrue(store.offers.isEmpty, "a new client keeps the old offers")
+    }
+
     func test_aNewClientDropsTheOldRowsLines() async {
         let store = await loaded()
         XCTAssertFalse(store.rowLines.isEmpty)
@@ -129,16 +154,41 @@ final class TracesResponsivenessTests: XCTestCase {
         XCTAssertTrue(blank.searchOpened.isEmpty)
     }
 
-    /// The tree stays an eager `VStack`: row menus float over later rows
-    /// by `zIndex`, which a `LazyVStack` does not honour between its
-    /// children, and `scrollTo` and VoiceOver focus reach rows a lazy stack
-    /// has not built. Rows are cheap now that their lines come from the read.
-    func test_theTreeIsAnEagerStack() throws {
+    /// The tree is a `LazyVStack`. Rows were not cheap: at 231 folders,
+    /// building every one took a fifth of a second each time the tab opened
+    /// (`TracesScalePerfTests`, `TracesTreeScaleTests`). What the eager
+    /// stack was kept for, each with its own mechanism now:
+    /// - row menus float over later rows from one overlay on the stack, at
+    ///   the bounds the open row publishes, not by `zIndex` between lazy
+    ///   children;
+    /// - `scrollTo` reaches an unbuilt row by the flat `ForEach`'s ids, and
+    ///   waits for a folder it just opened to be drawn;
+    /// - VoiceOver focus moves after the scroll has built the row.
+    func test_theTreeIsALazyStackWithItsMenusOverIt() throws {
         let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
         let tree = try XCTUnwrap(source.range(of: "private var tree: some View {"))
-        let folders = try XCTUnwrap(source.range(of: "ForEach(store.shownTree.folders)", range: tree.upperBound..<source.endIndex))
-        let body = source[tree.upperBound..<folders.lowerBound]
-        XCTAssertTrue(body.contains("VStack(spacing: 2)"))
-        XCTAssertFalse(body.contains("LazyVStack("))
+        let rows = try XCTUnwrap(source.range(
+            of: "ForEach(Self.drawnRows(in: store.shownTree, expanded: expanded))", range: tree.upperBound..<source.endIndex))
+        let head = source[tree.upperBound..<rows.lowerBound]
+        XCTAssertTrue(head.contains("LazyVStack(spacing: 2)"))
+        let body = String(source[tree.upperBound...].prefix(4000))
+        for needle in [
+            ".overlayPreferenceValue(TracesMenuAnchors.self, alignment: .topLeading)",
+            "revealed.scrollTarget = id", ".onChange(of: expanded)", "Task { @MainActor in spoken = id }",
+            // An open menu is read after the rows, so VoiceOver is moved to it.
+            ".onChange(of: folderMenu ?? submitMenu ?? sessionMenu)", "Task { @MainActor in menuSpoken = true }",
+        ] {
+            XCTAssertTrue(body.contains(needle) || source.contains(needle), "the tree lacks \(needle)")
+        }
+        // No row floats its own menu or orders itself over the others.
+        let rowsStart = try XCTUnwrap(source.range(of: "struct TracesFolderRow"))
+        let rowsEnd = try XCTUnwrap(source.range(of: "struct PreviewSlot"))
+        let rowViews = source[rowsStart.lowerBound..<rowsEnd.lowerBound]
+        XCTAssertFalse(rowViews.contains(".zIndex("))
+        XCTAssertFalse(rowViews.contains("TracesRowMenuPill("))
+        XCTAssertEqual(rowViews.components(separatedBy: ".anchorPreference(key: TracesMenuAnchors.self").count - 1, 2)
+        XCTAssertEqual(source.components(separatedBy: ".accessibilityFocused($menuSpoken)").count - 1, 2)
+        // Each row is rebuilt only when what it draws changes.
+        XCTAssertEqual(source.components(separatedBy: ".equatable()\n        .id(Self.rowID(").count - 1, 2)
     }
 }

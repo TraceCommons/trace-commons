@@ -147,11 +147,13 @@ final class TracesStore {
         let tone: PrivateInferenceTone
     }
 
-    /// One read, made ready to draw: the tree, each row's tags and lines.
+    /// One read, made ready to draw: the tree, each row's tags and lines,
+    /// and each folder's Submit all offer.
     struct Derived: Sendable {
         let tree: TracesTree
         let tags: [String: NudgeEntryTags]
         let lines: [String: RowLines]
+        let offers: [OfferInput: GroupSubmitOffer]
     }
 
     /// Everything a read is turned into before it is drawn. Off the main
@@ -164,10 +166,13 @@ final class TracesStore {
         for entry in read.entries {
             lines[entry.entryId] = rowLines(entry, copy: copy)
         }
-        return Derived(
-            tree: build(read, showsIgnored: showsIgnored, keepsOrder: keepsOrder, idleOnly: idleOnly),
-            tags: rowTags(read.entries),
-            lines: lines)
+        let tree = build(read, showsIgnored: showsIgnored, keepsOrder: keepsOrder, idleOnly: idleOnly)
+        var offers: [OfferInput: GroupSubmitOffer] = [:]
+        for folder in tree.folders {
+            let input = offerInput(folder, idleOnly: idleOnly)
+            if offers[input] == nil { offers[input] = offer(input) }
+        }
+        return Derived(tree: tree, tags: rowTags(read.entries), lines: lines, offers: offers)
     }
 
     nonisolated static func rowLines(_ entry: DaemonData.QueueEntry, copy: PrivateInferenceCopy?) -> RowLines {
@@ -398,6 +403,7 @@ final class TracesStore {
         if client != nil { idleRequested = false }
         rowTags = [:]
         rowLines = [:]
+        offers = [:]
         nudgeBusy = false
         nudgeError = nil
         // A new client is a new daemon: no undo, toast or refusal from the
@@ -645,6 +651,7 @@ final class TracesStore {
                 : Self.build(read, showsIgnored: showsIgnored, keepsOrder: keepsOrder, idleOnly: idleOnly)
             rowTags = derived.tags
             rowLines = derived.lines
+            offers = derived.offers
             lastRead = read
             self.status = statusRead
             self.destinations = routes
@@ -941,20 +948,44 @@ final class TracesStore {
     /// instead -- less any held for a person, which no group sends -- and
     /// Submit sends only those (`approveFolder(filter:)`); what the daemon
     /// then leaves out as ineligible is said after, in its own line.
+    ///
+    /// Worked out off the main thread with the read (`derive`), by what it
+    /// is asked of the table, so a redraw makes no call into the core; a
+    /// folder that read did not hold is asked now.
     func groupOffer(_ folder: TracesTree.FolderNode) -> GroupSubmitOffer {
+        let input = Self.offerInput(folder, idleOnly: idleOnly)
+        return offers[input] ?? Self.offer(input)
+    }
+
+    /// What a folder's offer asks of the shared table: everything the
+    /// answer depends on, so two folders that ask the same share it.
+    struct OfferInput: Hashable, Sendable {
+        let pending: Int?
+        let contributable: Int?
+        let fallback: Int
+    }
+
+    nonisolated static func offerInput(_ folder: TracesTree.FolderNode, idleOnly: Bool) -> OfferInput {
         if idleOnly {
-            return EligibilitySurface.groupSubmit(
-                pendingCount: folder.sessions.filter { !$0.heldForReview }.count,
-                contributableCount: nil,
-                fallbackPending: folder.sessions.count,
-                calls: Self.eligibilityCalls)
+            return OfferInput(
+                pending: folder.sessions.filter { !$0.heldForReview }.count,
+                contributable: nil,
+                fallback: folder.sessions.count)
         }
-        return EligibilitySurface.groupSubmit(
-            pendingCount: folder.pendingCount,
-            contributableCount: folder.contributableCount,
-            fallbackPending: folder.sessions.count,
+        return OfferInput(
+            pending: folder.pendingCount, contributable: folder.contributableCount, fallback: folder.sessions.count)
+    }
+
+    nonisolated static func offer(_ input: OfferInput) -> GroupSubmitOffer {
+        EligibilitySurface.groupSubmit(
+            pendingCount: input.pending,
+            contributableCount: input.contributable,
+            fallbackPending: input.fallback,
             calls: Self.eligibilityCalls)
     }
+
+    /// The offers the last read worked out, by what each asked.
+    @ObservationIgnored private(set) var offers: [OfferInput: GroupSubmitOffer] = [:]
 
     /// Whether Submit all may be drawn at all, besides the table's answer:
     /// the core is attached, and the folder is not one that is never sent.

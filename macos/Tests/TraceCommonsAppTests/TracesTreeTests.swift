@@ -566,7 +566,8 @@ final class TracesRowWordsTests: XCTestCase {
         XCTAssertTrue(source.contains("let lines = store.lines(entry)"))
         XCTAssertTrue(source.contains("attestation: lines.attestation, words: words)"))
         XCTAssertTrue(source.contains("attestation: lines.tone)"))
-        XCTAssertTrue(source.contains("ForEach(folder.sessions) { sessionRow($0, off: ignored) }"))
+        XCTAssertTrue(source.contains("let off = folder.mode == .ignore"))
+        XCTAssertTrue(source.contains("rows += folder.sessions.map { .session($0, off: off) }"))
     }
 
     /// A session that cannot be contributed as it stands says the core's
@@ -881,8 +882,9 @@ final class TracesFolderFirstTreeTests: XCTestCase {
                      "requestSource(", "store.setSource(", "SourceChange"] {
             XCTAssertFalse(body.contains(gone), "the tree still draws \(gone)")
         }
-        // The folders as the search narrows them (owner, 2026-10-12).
-        XCTAssertTrue(body.contains("ForEach(store.shownTree.folders)"))
+        // The folders as the search narrows them (owner, 2026-10-12), as
+        // the lazy stack's flat rows.
+        XCTAssertTrue(body.contains("ForEach(Self.drawnRows(in: store.shownTree, expanded: expanded))"))
     }
 
     /// Every session row shows its own tool's tile, and names the tool to
@@ -913,7 +915,8 @@ final class TracesFolderFirstTreeTests: XCTestCase {
 
         let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
         XCTAssertTrue(source.contains("tile: Self.sessionTile(entry),"))
-        XCTAssertTrue(source.contains(".accessibilityHint(Self.toolName(entry) ?? \"\")"))
+        XCTAssertTrue(source.contains("toolName: Self.toolName(entry) ?? \"\","))
+        XCTAssertTrue(source.contains(".accessibilityHint(toolName)"))
     }
 
     /// #1146's session title: the short weekday and time it was found.

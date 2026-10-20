@@ -110,6 +110,10 @@ final class MissionsHiddenTests: XCTestCase {
         XCTAssertTrue(rail.contains("if model.missionsShown {\n                headCard(\n"
             + "                    systemImage: HomeOverviewIcons.missions,"))
         let traces = try Self.source("Views/Monitor/TracesViews.swift")
-        XCTAssertTrue(traces.contains("NudgeRowTags(tags: tags.showing(missions: model.missionsShown))"))
+        let window = try Self.source("Views/MonitorWindowView.swift")
+        // The tree takes the switch as a value (no app model in the tree,
+        // whose every publish redrew each row); its rows blank the tag.
+        XCTAssertTrue(traces.contains("tags: store.rowTags[entry.entryId].map { $0.showing(missions: missionsShown) }"))
+        XCTAssertTrue(window.contains("missionsShown: model.missionsShown,"))
     }
 }
