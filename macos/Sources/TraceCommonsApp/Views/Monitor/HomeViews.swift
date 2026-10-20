@@ -394,9 +394,9 @@ private struct HomeOverview: View {
 
 }
 
-/// The Not contributed card (owner, 2026-10-19): half a hero's height, and
-/// a large icon on the left; then the label, the count and size, and the
-/// core's call to share (owner, 2026-10-20). Since 2026-10-20 it is on the
+/// The Not contributed card (owner, 2026-10-19): half a hero's height; the
+/// label, the count and size, and the core's call to share (owner,
+/// 2026-10-20), over its icon as a watermark on the right, as the tiles'. Since 2026-10-20 it is on the
 /// standard card fill with a solid accent border (`borderWidth`), in place
 /// of the turning glow edge. The whole card is the button.
 private struct HomeNotContributedCard: View {
@@ -406,7 +406,6 @@ private struct HomeNotContributedCard: View {
     let detail: String?
     let action: () -> Void
 
-    static let iconSize: CGFloat = 30
     /// The accent border's width.
     static let borderWidth: CGFloat = 1.5
     /// The border's colour: the accent, solid.
@@ -416,11 +415,6 @@ private struct HomeNotContributedCard: View {
         let shape = RoundedRectangle(cornerRadius: GlassTier.card.radius, style: .continuous)
         Button(action: action) {
             HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
-                Image(systemName: HomeStatIcons.uncontributed)
-                    .glassGlyph(Self.iconSize)
-                    .foregroundStyle(GlassGlowEdge.markGradient)
-                    .frame(width: Self.iconSize + GlassTokens.Space.s6)
-                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                     Text(title)
                         .glassType(GlassTokens.TypeScale.eyebrow)
@@ -446,9 +440,13 @@ private struct HomeNotContributedCard: View {
                 Spacer(minLength: 0)
                 GlassChevron()
             }
-            .padding(.horizontal, GlassTokens.Space.s7)
+            // The tiles' inset, so its words start where theirs do.
+            .padding(.horizontal, 12)
             .padding(.vertical, GlassTokens.Space.s5)
             .frame(maxWidth: .infinity, alignment: .leading)
+            // Its icon as the tiles' is: the card's watermark (owner,
+            // 2026-10-20).
+            .glassCardWatermark(HomeStatIcons.uncontributed)
             // The stat tiles' fill and hover, under a solid accent border.
             .glassTier(.card, hover: GlassTokens.Color.cardHover)
             .overlay(shape.strokeBorder(Self.border.color, lineWidth: Self.borderWidth))
@@ -477,24 +475,16 @@ enum HomeStatIcons {
 }
 
 /// Home's Private AI card while Private AI is not working (owner,
-/// 2026-10-20): the stat tiles' icon, "Not connected" and Connect, all
-/// centred on the card's height, which the button sets.
+/// 2026-10-20): "Not connected" and Connect, centred on the card's height,
+/// which the button sets, over the card's icon as a watermark, as the
+/// tiles'.
 private struct HomePrivateAIConnectCard: View {
     let title: String
     let connect: String
     let action: () -> Void
 
-    /// The stat tiles' icon size and column (`GlassStatCard`).
-    static let iconGlyph: CGFloat = 28
-    static let iconColumn: CGFloat = 40
-
     var body: some View {
         HStack(alignment: .center, spacing: GlassTokens.Space.s3) {
-            Image(systemName: HomeStatIcons.privateAI)
-                .glassGlyph(Self.iconGlyph, weight: .regular)
-                .foregroundStyle(GlassTokens.Color.purpleSoft.color)
-                .frame(width: Self.iconColumn)
-                .accessibilityHidden(true)
             Text(title)
                 .glassType(GlassTokens.TypeScale.bodyStrong)
                 .foregroundStyle(GlassColor.textPrimary)
@@ -507,6 +497,7 @@ private struct HomePrivateAIConnectCard: View {
         .padding(.vertical, 10)
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .glassCardWatermark(HomeStatIcons.privateAI)
         .glassTier(.card)
         .accessibilityElement(children: .contain)
     }
@@ -1542,17 +1533,19 @@ private struct HomeStatTile: View {
     /// nil for a tile on the page its number lives on (History's).
     var action: (() -> Void)?
 
-    /// #1146's `StatCard`: a full card, the value bold and tabular.
+    /// #1146's `StatCard`: a full card, the value bold and tabular. Its
+    /// icon is the card's watermark on the right (owner, 2026-10-20), as
+    /// every small card on Home draws it.
     var body: some View {
         if let action {
             Button(action: action) {
                 GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
-                              valueAccessory: valueAccessory, interactive: true)
+                              valueAccessory: valueAccessory, interactive: true, iconPlacement: .watermark)
             }
             .buttonStyle(GlassPressStyle())
         } else {
             GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
-                          valueAccessory: valueAccessory)
+                          valueAccessory: valueAccessory, iconPlacement: .watermark)
         }
     }
 }

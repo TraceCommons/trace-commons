@@ -89,7 +89,8 @@ final class HomeViewTests: XCTestCase {
         XCTAssertTrue(home.contains(".glassTier(.card, hover: GlassTokens.Color.cardHover)"))
         XCTAssertTrue(home.contains(".overlay(shape.strokeBorder(Self.border.color, lineWidth: Self.borderWidth))"))
         XCTAssertFalse(home.contains(".overlay(GlassGlowEdge("), "the glow edge is back")
-        XCTAssertTrue(home.contains(".foregroundStyle(GlassGlowEdge.markGradient)"))
+        // Its icon is the card's watermark, as the tiles' (owner, 2026-10-20).
+        XCTAssertTrue(home.contains(".glassCardWatermark(HomeStatIcons.uncontributed)"))
         let card = try XCTUnwrap(home.range(of: "private struct HomeNotContributedCard: View {"))
         XCTAssertFalse(home[card.upperBound...].prefix(2500).contains("Gradient.heroMissions"), "the dark gradient is back")
         XCTAssertTrue(home.contains(

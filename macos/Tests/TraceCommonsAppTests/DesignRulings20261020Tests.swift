@@ -157,4 +157,32 @@ final class DesignRulings20261020Tests: XCTestCase {
             "Spacer(minLength: GlassTokens.Space.s4)\n                // The re-read control at the head's trailing end"))
         XCTAssertTrue(card.contains("GlassRefreshButton(refresh.label, small: true, action: refresh.action)"))
     }
+
+    /// Home's small cards draw their icons as watermarks (owner,
+    /// 2026-10-20): large on the right, tilted as the promotions' graphics
+    /// are, cut off by the card's edges, behind the words, a little faded.
+    func test_homesSmallCardsCarryWatermarks() throws {
+        XCTAssertEqual(GlassCardWatermark.angle, -12)
+        XCTAssertLessThan(GlassCardWatermark.opacity, 1)
+        XCTAssertGreaterThan(GlassCardWatermark.opacity, 0.4)
+        XCTAssertGreaterThan(GlassCardWatermark.bleed.width, 0)
+        XCTAssertGreaterThan(GlassCardWatermark.bleed.height, 0)
+        let home = try Self.text("Views/Monitor/HomeViews.swift")
+        XCTAssertEqual(home.components(separatedBy: "iconPlacement: .watermark").count - 1, 2)
+        XCTAssertTrue(home.contains(".glassCardWatermark(HomeStatIcons.uncontributed)"))
+        XCTAssertTrue(home.contains(".glassCardWatermark(HomeStatIcons.privateAI)"))
+        // Behind the words and over the fill: before the card's tier.
+        for icon in ["uncontributed", "privateAI"] {
+            let mark = try XCTUnwrap(home.range(of: ".glassCardWatermark(HomeStatIcons.\(icon))"))
+            let tier = try XCTUnwrap(home.range(of: ".glassTier(.card", range: mark.upperBound..<home.endIndex))
+            XCTAssertLessThan(home.distance(from: mark.upperBound, to: tier.lowerBound), 200, icon)
+        }
+        let card = try String(
+            contentsOf: GlassSurfaceRulesTests.root.deletingLastPathComponent()
+                .appendingPathComponent("TCDesign/Components/StatCard.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(card.contains(
+            ".glassCardWatermark(iconPlacement == .watermark ? systemImage : nil)\n        .glassTier(.card,"))
+        XCTAssertTrue(card.contains(".clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))"))
+    }
 }
