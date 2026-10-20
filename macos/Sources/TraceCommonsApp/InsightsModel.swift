@@ -1180,9 +1180,10 @@ final class InsightsSessionsModel {
     private(set) var pageFailed = false
     /// The automatic retry has been spent for this failure.
     private var autoRetried = false
-    /// The store's `updated_at` and `sessions_stored` as the first page last
-    /// said them. A page that says otherwise means rows came or went since,
-    /// and the first page is read again and merged in above the loaded rows.
+    /// The store's `sessions_stored` and `revision` as the first page last
+    /// said them (`updated_at` from a daemon without `revision`). A page
+    /// that says otherwise means rows came or went since, and the loaded
+    /// range is read again from the first page.
     private var stamp: String?
     private let retryBackoff: Duration
     /// Set when feed T is on but its traces could not be read, shown with
@@ -1237,8 +1238,9 @@ final class InsightsSessionsModel {
     func loadMore() {
         if pageFailed {
             guard !autoRetried else { return }
-            autoRetried = true
-            readNext(after: retryBackoff)
+            // Spent only by a read that starts: asked while the list is
+            // busy, it is kept for the next time the last rows appear.
+            if readNext(after: retryBackoff) { autoRetried = true }
         } else {
             readNext(after: nil)
         }
@@ -1251,9 +1253,12 @@ final class InsightsSessionsModel {
         readNext(after: nil)
     }
 
-    private func readNext(after delay: Duration?) {
+    /// Starts reading the next page; `false` when none was started (no
+    /// next page, or a read already under way).
+    @discardableResult
+    private func readNext(after delay: Duration?) -> Bool {
         guard active, watched != nil, let cursor = nextCursor, !loadingMore, !listBusy,
-              let watchedReader else { return }
+              let watchedReader else { return false }
         let current = listToken
         loadingMore = true
         pageFailed = false
@@ -1273,7 +1278,7 @@ final class InsightsSessionsModel {
                 self.autoRetried = false
                 if Self.stamp(page) != self.stamp {
                     // Rows came or went since the first page was read.
-                    self.mergeFirstPage(dropping: nil)
+                    self.refresh(dropping: nil)
                 } else if fresh.isEmpty, let next = page.next, next != cursor {
                     // Nothing new to draw, so no last row will appear
                     // again: ask for the following page now. Each read moves
@@ -1292,40 +1297,68 @@ final class InsightsSessionsModel {
                 self.pageFailed = true
             }
         }
+        return true
     }
 
     private static func stamp(_ page: DaemonData.InsightsSessions) -> String {
-        "\(page.updatedAt ?? "")|\(page.sessionsStored.map(String.init) ?? "")"
+        let changed = page.revision.map(String.init) ?? page.updatedAt ?? ""
+        return "\(page.sessionsStored.map(String.init) ?? "")|\(changed)"
     }
 
-    /// Read the first page again and put it above the rows already loaded,
-    /// keeping those rows (and the scroll position they hold). `stale` is a
-    /// row the daemon no longer lists: it is dropped, and its fresh self, if
-    /// the first page has it, takes the new place. A read that fails leaves
-    /// the list as it was.
-    private func mergeFirstPage(dropping stale: String?) {
-        guard active, let watchedReader, watched != nil else { return }
+    /// Read the loaded range again from the first page, as many rows as
+    /// are loaded, and put the answer in place of the list. The daemon's
+    /// answer is the truth for that range: a row made again (its file grew)
+    /// shows once, under its new reference and at its place, wherever it
+    /// was in the list; a row gone is gone. `stale` is a row the daemon no
+    /// longer knows: it is taken out at once, before the read. A read that
+    /// fails leaves the list as it was; a refused cursor reads from the
+    /// first page alone. A failed next page past the range stays failed.
+    private func refresh(dropping stale: String?) {
+        guard active, let watchedReader, let loaded = watched else { return }
         if let stale { watched?.removeAll { $0.sessionRef == stale } }
+        let wanted = max(loaded.count, 1)
         listTask?.cancel(); pageTask?.cancel(); pageTask = nil; loadingMore = false
         listToken = UUID(); let current = listToken
         listBusy = true
         listTask = Task { [weak self] in
-            let outcome: Result<DaemonData.InsightsSessions, Error>
-            do { outcome = .success(try await watchedReader(nil)) } catch { outcome = .failure(error) }
+            var rows: [DaemonData.InsightsWatchedSession] = []
+            var seen = Set<String>()
+            var cursor: String?
+            var first: DaemonData.InsightsSessions?
+            var next: String?
+            var outcome: Result<Void, Error> = .success(())
+            // Each page moves the cursor; the bound only stops a daemon that
+            // would not.
+            for _ in 0..<1_000 {
+                let page: DaemonData.InsightsSessions
+                do { page = try await watchedReader(cursor) } catch { outcome = .failure(error); break }
+                if first == nil { first = page }
+                guard page.showsCounterPass else { break }
+                for row in page.sessions ?? [] where seen.insert(row.sessionRef).inserted { rows.append(row) }
+                next = page.next
+                guard let following = page.next, following != cursor, rows.count < wanted,
+                      !Task.isCancelled else { break }
+                cursor = following
+            }
             guard let self, self.active, self.listToken == current, !Task.isCancelled else { return }
             self.listBusy = false
             switch outcome {
-            case .success(let list) where list.showsCounterPass:
-                let fresh = list.sessions ?? []
-                let freshRefs = Set(fresh.map(\.sessionRef))
-                let kept = (self.watched ?? []).filter { !freshRefs.contains($0.sessionRef) && $0.sessionRef != stale }
-                self.watched = fresh + kept
-                if kept.isEmpty { self.nextCursor = list.next }
-                self.stamp = Self.stamp(list)
-            case .success(let list):
-                self.showSaved(notice: list.enabled)
+            case .failure(let error) where Self.isCursorRefused(error):
+                self.readWatched()
             case .failure:
                 break
+            case .success:
+                guard let first, first.showsCounterPass else {
+                    if let first { self.showSaved(notice: first.enabled) }
+                    return
+                }
+                self.watched = rows
+                self.nextCursor = next
+                self.stamp = Self.stamp(first)
+                if next == nil { self.pageFailed = false; self.autoRetried = false }
+                if let selected = self.selected, !rows.contains(where: { $0.sessionRef == selected }) {
+                    self.collapse()
+                }
             }
         }
     }
@@ -1429,10 +1462,11 @@ final class InsightsSessionsModel {
                 guard let self, self.active, self.token == current, !Task.isCancelled else { return }
                 if watchedRead != nil, Self.isUnknownReference(error) {
                     // Made again since its page was read (its file grew), or
-                    // dropped: take that row out and merge a fresh first page
-                    // in above the rest, so the loaded list stays.
+                    // dropped: read the loaded range again, so the session
+                    // is back at its place under its new reference and the
+                    // rest of the list stays.
                     self.collapse()
-                    self.mergeFirstPage(dropping: reference)
+                    self.refresh(dropping: reference)
                     return
                 }
                 // A failed read never keeps another session's figures.

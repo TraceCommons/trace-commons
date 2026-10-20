@@ -50,6 +50,18 @@ final class InsightsWatchedSessionsTests: XCTestCase {
             + #""truncated":\#(next != nil),"next":\#(nextJSON),"sessions":[\#(rows.joined(separator: ","))]}"#
     }
 
+    /// A page listing exactly `refs` (as `t<n>`), with the store's
+    /// `sessions_stored`, `revision` and `updated_at` as given.
+    static func rowsJSON(_ refs: [Int], next: String?, stored: Int = 6, revision: Int = 10,
+                         updatedAt: String = "2026-10-19T12:00:00+00:00") -> String {
+        let rows = refs.map { n in
+            #"{"session_ref":"t\#(n)","source":"claude_code","started_at":"2026-10-19T10:00:00+00:00","turns":3,"tokens":30,"sparkline":{"points":[10,10,10],"peak_tokens":10,"peak_turn":1},"folder":"f"}"#
+        }
+        let nextJSON = next.map { "\"\($0)\"" } ?? "null"
+        return #"{"enabled":true,"feed":"counter_pass","readable":true,"updated_at":"\#(updatedAt)","sessions_stored":\#(stored),"revision":\#(revision),"#
+            + #""truncated":\#(next != nil),"next":\#(nextJSON),"sessions":[\#(rows.joined(separator: ","))]}"#
+    }
+
     static func drillJSON(_ reference: String) -> String {
         InsightsSessionsTests.claudeJSON
             .replacingOccurrences(of: "\"feed\":\"saved\",\"session_ref\":\"snap-1\"",
@@ -469,52 +481,110 @@ final class InsightsWatchedSessionsTests: XCTestCase {
         model.close()
     }
 
-    /// A stale drill (the row's file grew, or the store dropped it) keeps the
-    /// rows read so far: the stale row goes, and a fresh first page merges in
-    /// above the rest.
+    private static let twoPages: [String?: String] = [
+        nil: rowsJSON([9, 8, 7], next: "c1"),
+        "c1": rowsJSON([6, 5, 4], next: nil),
+    ]
+
+    /// A stale drill on a row below page one (its file grew, so the store
+    /// made it again as t13 at the same place) keeps the session: the feed
+    /// reads its loaded range again and the re-made row is in the stale
+    /// one's place. Nothing the user scrolled past is lost.
     @MainActor
-    func testAnUnknownReferenceKeepsTheLoadedRowsAndMergesAFreshFirstPage() async throws {
-        let daemon = WatchedRecorder(pages: Self.retryPages)
+    func testAStaleDrillBelowPageOnePutsTheReMadeRowInItsPlace() async throws {
+        let daemon = WatchedRecorder(pages: Self.twoPages)
         let model = Self.failingFeed(daemon)
         model.open(); model.showWatched(true)
         await settle(model)
         model.loadMore(); await settle(model)
         XCTAssertEqual(model.watched?.map(\.sessionRef), ["t9", "t8", "t7", "t6", "t5", "t4"])
-        await daemon.setPage(nil, Self.pageJSON(first: 10, count: 3, next: "c1"))
+        await daemon.setPage(nil, Self.rowsJSON([9, 8, 7], next: "c1", revision: 11))
+        await daemon.setPage("c1", Self.rowsJSON([6, 13, 4], next: nil, revision: 11))
         await daemon.failDrills(with: .daemon(code: "bad_params", message: "insights-session-unknown"))
         model.toggle("t5")
         await settle(model)
         XCTAssertNil(model.selected)
-        XCTAssertEqual(model.watched?.map(\.sessionRef), ["t10", "t9", "t8", "t7", "t6", "t4"],
-                       "the stale row is gone, the rest stay, the fresh page leads")
-        XCTAssertTrue(model.atEnd, "the loaded tail's end is kept")
+        XCTAssertEqual(model.watched?.map(\.sessionRef), ["t9", "t8", "t7", "t6", "t13", "t4"],
+                       "the re-made session is back in its place, everything else stays")
+        XCTAssertTrue(model.atEnd)
         model.close()
     }
 
-    /// A page that reports another `updated_at` or `sessions_stored` than
-    /// the first page did makes the feed read the first page again and merge
-    /// it above the loaded rows.
+    /// When rows changed (here t9 was made again as t12), the feed reads
+    /// its loaded range from the first page and the answer replaces the
+    /// list: the re-made session shows once, never as both t12 and t9.
     @MainActor
-    func testAChangedStoreStampMergesAFreshFirstPage() async throws {
+    func testARefreshShowsAReMadeSessionOnce() async throws {
         let daemon = WatchedRecorder(pages: [
-            nil: Self.pageJSON(first: 9, count: 3, next: "c1"),
-            "c1": Self.pageJSON(first: 6, count: 3, next: nil, stored: 8),
+            nil: Self.rowsJSON([9, 8, 7], next: "c1"),
+            "c1": Self.rowsJSON([6, 5, 4], next: nil, revision: 11),
         ])
         let model = Self.failingFeed(daemon)
         model.open(); model.showWatched(true)
         await settle(model)
-        await daemon.setPage(nil, Self.pageJSON(first: 10, count: 3, next: "c1", stored: 8))
-        model.loadMore()
+        await daemon.setPage(nil, Self.rowsJSON([12, 8, 7], next: "c1", revision: 11))
+        model.loadMore()   // c1 says revision 11: rows changed
         await settle(model)
         let reads = await daemon.reads
-        XCTAssertEqual(reads, [nil, "c1", nil], "the first page is read again, not the cursor")
-        XCTAssertEqual(model.watched?.map(\.sessionRef), ["t10", "t9", "t8", "t7", "t6", "t5", "t4"])
+        XCTAssertEqual(reads, [nil, "c1", nil, "c1"], "the loaded range is read again from the top")
+        XCTAssertEqual(model.watched?.map(\.sessionRef), ["t12", "t8", "t7", "t6", "t5", "t4"])
         XCTAssertTrue(model.atEnd)
         // The stamp is now the new one: the end is not re-read.
         model.loadMore()
         await settle(model)
         let after = await daemon.reads
-        XCTAssertEqual(after, [nil, "c1", nil])
+        XCTAssertEqual(after, [nil, "c1", nil, "c1"])
+        model.close()
+    }
+
+    /// A pass that stored nothing moves `updated_at` but not `revision` or
+    /// `sessions_stored`: paging on reads no first page again.
+    @MainActor
+    func testAPassThatStoredNothingReadsNoFirstPage() async throws {
+        let daemon = WatchedRecorder(pages: [
+            nil: Self.rowsJSON([9, 8, 7], next: "c1", updatedAt: "2026-10-19T12:00:00+00:00"),
+            "c1": Self.rowsJSON([6, 5, 4], next: nil, updatedAt: "2026-10-19T12:05:00+00:00"),
+        ])
+        let model = Self.failingFeed(daemon)
+        model.open(); model.showWatched(true)
+        await settle(model)
+        model.loadMore()
+        await settle(model)
+        let reads = await daemon.reads
+        XCTAssertEqual(reads, [nil, "c1"])
+        XCTAssertEqual(model.watched?.count, 6)
+        model.close()
+    }
+
+    /// The automatic retry is spent only by a read that starts: asking while
+    /// the list is being read again keeps it for later.
+    @MainActor
+    func testABusyListDoesNotSpendTheAutomaticRetry() async throws {
+        let daemon = WatchedRecorder(pages: Self.twoPages)
+        await daemon.failPage("c1", times: 1)
+        let model = Self.failingFeed(daemon)
+        model.open(); model.showWatched(true)
+        await settle(model)
+        model.loadMore(); await settle(model)
+        XCTAssertTrue(model.pageFailed)
+
+        await daemon.holdFirstPage()
+        await daemon.failDrills(with: .daemon(code: "bad_params", message: "insights-session-unknown"))
+        model.toggle("t8")   // stale: the loaded range is read again
+        for _ in 0..<50 { await Task.yield() }
+        XCTAssertTrue(model.busy, "the first page is held")
+        model.loadMore()     // the last row appears while the list is busy
+        await daemon.releaseFirstPage()
+        await settle(model)
+        XCTAssertTrue(model.pageFailed, "the page past the loaded range is still unread")
+
+        model.loadMore()     // the last row appears again: the retry is still there
+        await settle(model)
+        let reads = await daemon.reads
+        XCTAssertEqual(reads.last, "c1")
+        XCTAssertEqual(reads.filter { $0 == "c1" }.count, 2)
+        XCTAssertFalse(model.pageFailed)
+        XCTAssertEqual(model.watched?.count, 6)
         model.close()
     }
 
@@ -562,6 +632,8 @@ final class InsightsWatchedSessionsTests: XCTestCase {
     func testTheTabDrawsTheFeedAndTheFeedLine() throws {
         let tab = try MonitorNavigationTests.text("Views/InsightsSessionsTab.swift")
         XCTAssertTrue(tab.contains("LazyVStack"), "drawn lazily")
+        XCTAssertTrue(tab.contains(".scrollPosition(id: $anchorRow"), "a replaced list keeps the row in view")
+        XCTAssertTrue(tab.contains(".scrollTargetLayout()"))
         XCTAssertTrue(tab.contains("InsightsSessionsWords.rowAccessibilityLabel("))
         XCTAssertTrue(tab.contains("InsightsSparkline(points:"))
         XCTAssertTrue(tab.contains("model.loadMore()"))
@@ -634,8 +706,17 @@ private actor WatchedRecorder {
         self.answer = answer; self.pages = pages
     }
     func failDrills(with error: DaemonDataError) { failure = error }
-    func list(_ cursor: String?) throws -> DaemonData.InsightsSessions {
+    /// First-page reads wait until `releaseFirstPage()`.
+    private var holding = false
+    private var held: [CheckedContinuation<Void, Never>] = []
+    func holdFirstPage() { holding = true }
+    func releaseFirstPage() {
+        holding = false
+        held.forEach { $0.resume() }; held = []
+    }
+    func list(_ cursor: String?) async throws -> DaemonData.InsightsSessions {
         reads.append(cursor)
+        if cursor == nil && holding { await withCheckedContinuation { held.append($0) } }
         if let cursor, let failing = pageFailures[cursor], failing.times > 0 {
             pageFailures[cursor] = (failing.times - 1, failing.error)
             throw failing.error

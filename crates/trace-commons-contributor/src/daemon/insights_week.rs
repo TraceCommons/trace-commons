@@ -1386,6 +1386,10 @@ impl CounterPass {
             "readable": true,
             "updated_at": self.updated_at(),
             "sessions_stored": stored,
+            // Moves only when a row is made (the store's next reference), so
+            // with `sessions_stored` it tells a client its rows changed;
+            // `updated_at` moves on every pass.
+            "revision": store.as_ref().map_or(0, |store| store.next_seq),
             "truncated": next.is_some(),
             "next": next.map(|cursor| cursor.encode(tag)),
             "sessions": sessions,

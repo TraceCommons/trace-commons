@@ -35,6 +35,9 @@ struct InsightsSessionsTab: View {
     @State private var readTurn: Int?
     /// The feed row the arrow keys are on (Full Keyboard Access).
     @State private var keyRow: String?
+    /// The feed row at the top of the scroll: when the list is read again
+    /// and replaced, the scroll stays on it rather than jumping.
+    @State private var anchorRow: String?
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
     private func figure(_ value: UInt64?) -> String { InsightsOverviewWords.figure(value, copy: copy) }
@@ -53,6 +56,7 @@ struct InsightsSessionsTab: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .insightsSurface()
             }
+            .scrollPosition(id: $anchorRow, anchor: .top)
             .onChange(of: keyRow) { _, row in
                 guard let row else { return }
                 withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) { proxy.scrollTo(row) }
@@ -99,6 +103,7 @@ struct InsightsSessionsTab: View {
             }
             feedFoot(empty: rows.isEmpty)
         }
+        .scrollTargetLayout()
         // Full Keyboard Access: focus the feed, then up and down move
         // between rows and Return opens or closes the row.
         .focusable()

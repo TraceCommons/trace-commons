@@ -609,7 +609,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
 | `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
-| `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
+| `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
@@ -4787,7 +4787,9 @@ Both are checked before the gate, so a bad param is refused whether counting
 is on or off.
 
 While enabled and readable it answers `updated_at`, `sessions_stored` (every
-row outside Never folders, never page-relative), `truncated` (more rows
+row outside Never folders, never page-relative), `revision` (a whole number
+that moves only when a row is made; a pass that stores nothing leaves it,
+though `updated_at` moves on every pass), `truncated` (more rows
 follow this page), `next` (the cursor for the following page, or `null` at
 the end of the list; `truncated` is `next != null`) and `sessions[]`.
 
@@ -4819,13 +4821,15 @@ has one, else the time discovery placed it, else its file's last write:
   later than before, but a dated row keeps its start time and so its place:
   it does not move to the top. A client that has already paged past that place
   does not see the new row until it reads from the first page again. Its old
-  reference now drills to `insights-session-unknown`. A client that gets that
-  error keeps the rows already loaded, drops the stale one and reads the
-  first page again to merge it in above them.
+  reference now drills to `insights-session-unknown`.
 
-A client notices late rows by `updated_at` and `sessions_stored`: when a
-page says other values than the first page did, a row came or went, and the
-client reads the first page again and merges it above the loaded rows.
+A client notices that rows came or went by `sessions_stored` and `revision`
+(not `updated_at`, which moves on every pass): when a page says other values
+than the first page did, or a drill answers `insights-session-unknown`, it
+reads from the first page again, as many rows as it had loaded, and puts
+that in place of the loaded list. The answer is then the truth for that
+whole range: a re-made row shows once, under its new reference and at its
+place, and a client that keeps the row on screen in view sees no jump.
 
 Each row is exactly
 `{"session_ref", "source", "started_at", "turns", "tokens", "sparkline", "folder"}`:

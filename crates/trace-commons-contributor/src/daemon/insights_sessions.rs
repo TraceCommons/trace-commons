@@ -1072,6 +1072,35 @@ mod tests {
         );
     }
 
+    /// `revision` moves only when a row is made: a pass that stores nothing
+    /// leaves it (and so a client's stamp) as it was, while `updated_at`
+    /// moves on every pass; a new row moves it.
+    #[test]
+    fn the_revision_moves_only_when_a_row_is_made() {
+        let f = Fixture::new();
+        let mut files = five_dated_and_one_undated(&f);
+        run_owned(&f, &files);
+        let before = f.page(None, 3);
+        assert!(before["revision"].is_u64(), "{before}");
+        run_owned(&f, &files);
+        assert_eq!(
+            f.page(None, 3)["revision"],
+            before["revision"],
+            "nothing stored"
+        );
+        files.push((
+            SOURCE_CLAUDE_CODE,
+            f.write("d9.jsonl", &claude_bytes_shifted(9)),
+            PROJECT,
+        ));
+        run_owned(&f, &files);
+        assert_ne!(
+            f.page(None, 3)["revision"],
+            before["revision"],
+            "a row was made"
+        );
+    }
+
     /// A store started again under the same key (its file unreadable, so
     /// the pass begins an empty one) hands `t0`, `t1`, ... to other
     /// sessions: a cursor from before is refused, though the key is the

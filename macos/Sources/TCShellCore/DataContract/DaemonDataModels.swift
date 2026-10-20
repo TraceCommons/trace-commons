@@ -2140,6 +2140,9 @@ extension DaemonData {
         public let reason: String?
         public let updatedAt: String?
         public let sessionsStored: Int?
+        /// Moves only when the store makes a row (`updated_at` moves on every
+        /// pass); `nil` from a daemon that predates it.
+        public let revision: Int?
         /// More rows follow this page.
         public let truncated: Bool?
         /// The cursor for the next page (`before`); `nil` at the end of the
@@ -2154,7 +2157,7 @@ extension DaemonData {
         }
 
         public enum CodingKeys: String, CodingKey {
-            case enabled, feed, readable, reason, truncated, next, sessions
+            case enabled, feed, readable, reason, revision, truncated, next, sessions
             case updatedAt = "updated_at"
             case sessionsStored = "sessions_stored"
         }
