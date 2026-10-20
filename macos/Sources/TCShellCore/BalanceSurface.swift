@@ -98,12 +98,7 @@ public struct BalanceStatus: Equatable, Sendable {
     /// neither is no timestamp, which draws no age line rather than an
     /// invented one.
     private static func timestamp(_ text: String) -> Date? {
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = withFraction.date(from: text) { return date }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: text)
+        DaemonTimestamp.parse(text)
     }
 }
 
