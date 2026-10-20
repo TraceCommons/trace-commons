@@ -313,6 +313,7 @@ pub fn saved_sessions(reports: &[LocalInsight]) -> Vec<SessionInput> {
                 },
                 SourceFormat::Codex => SessionBody::Codex {
                     observed: codex_observed(insight),
+                    series: None,
                 },
                 SourceFormat::Trajectory => SessionBody::Unknown {
                     source: None,
@@ -353,6 +354,7 @@ pub fn dated_weeks(sessions: &[SessionInput], tz: &FixedOffset) -> Vec<NaiveDate
                 .for_each(&mut add),
             SessionBody::Codex {
                 observed: Some(observed),
+                ..
             } => {
                 add(&observed.first_at);
                 add(&observed.last_at);

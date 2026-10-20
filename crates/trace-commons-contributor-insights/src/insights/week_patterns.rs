@@ -584,6 +584,7 @@ mod tests {
                     total: 110,
                     baseline_excluded: false,
                 }),
+                series: None,
             },
         }
     }
