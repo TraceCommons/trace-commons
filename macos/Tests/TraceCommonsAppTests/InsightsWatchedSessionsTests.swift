@@ -164,6 +164,18 @@ final class InsightsWatchedSessionsTests: XCTestCase {
         XCTAssertNil(InsightsSessionsWords.moved(nil, by: 1, in: []))
     }
 
+    /// The sparkline spans the box: oldest on the left, 0 at the bottom, the
+    /// largest point at the top; one point is a level line mid-row.
+    func testTheSparklineScalesToItsLargestPoint() {
+        let box = CGSize(width: 90, height: 20)
+        XCTAssertEqual(InsightsSparkline.positions([], in: box), [])
+        XCTAssertEqual(InsightsSparkline.positions([5], in: box), [CGPoint(x: 45, y: 0)])
+        XCTAssertEqual(InsightsSparkline.positions([0, 50, 100, 25], in: box),
+                       [CGPoint(x: 0, y: 20), CGPoint(x: 30, y: 10), CGPoint(x: 60, y: 0), CGPoint(x: 90, y: 15)])
+        XCTAssertEqual(InsightsSparkline.positions([0, 0], in: box), [CGPoint(x: 0, y: 20), CGPoint(x: 90, y: 20)],
+                       "all zero is a flat line at the bottom, never a division by zero")
+    }
+
     @MainActor
     func testSessionsSwitchToTheWatchedFeedExpandOneRowAndBack() async throws {
         let daemon = WatchedRecorder()
