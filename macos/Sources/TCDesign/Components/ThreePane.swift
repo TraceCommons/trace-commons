@@ -19,6 +19,10 @@ public extension EnvironmentValues {
 /// - With the map, the map takes a resize first, down to `mapMinWidth`;
 ///   past that the main pane gives up room, down to `mainWidth`, and takes
 ///   it back first when the window widens again.
+/// - The divider in the gap between the main pane and the map moves the
+///   room between them (owner, 2026-10-20): dragged right it widens the
+///   main pane and narrows the map, down to `mapMinWidth`
+///   (`draggedMain(from:by:windowWidth:showsInspector:)`).
 /// - Opening a pane grows the window to the right by that pane and its gap;
 ///   closing it shrinks the window by the same (`windowWidth(current:from:to:main:)`),
 ///   so no other pane moves or changes width.
@@ -106,12 +110,24 @@ public struct GlassPaneLayout: Equatable, Sendable {
 
     /// The window's width with every shown pane at its default width, the
     /// map at `mapWidth`: its default, or the width the person last left it
-    /// at (owner, 2026-10-19), never below its minimum.
+    /// at (owner, 2026-10-19), never below its minimum. `main` is the main
+    /// pane's kept width (owner, 2026-10-20), never below its default.
     public static func windowWidth(
-        showsMap: Bool, showsInspector: Bool, mapWidth: CGFloat = GlassTokens.Size.mapWidth
+        showsMap: Bool, showsInspector: Bool, mapWidth: CGFloat = GlassTokens.Size.mapWidth,
+        main: CGFloat = mainWidth
     ) -> CGFloat {
-        fixedWidth(showsInspector: showsInspector)
+        fixedWidth(showsInspector: showsInspector) + (max(main, mainWidth) - mainWidth)
             + (showsMap ? GlassTokens.Space.paneGap + max(GlassTokens.Size.mapMinWidth, mapWidth) : 0)
+    }
+
+    /// The main pane's width while the divider beside the map is dragged
+    /// (owner, 2026-10-20): its width when the drag began plus how far the
+    /// pointer has moved, never under `mainWidth` and never so wide that
+    /// the map goes under `mapMinWidth`. The window keeps its width.
+    public static func draggedMain(
+        from start: CGFloat, by dx: CGFloat, windowWidth width: CGFloat, showsInspector: Bool
+    ) -> CGFloat {
+        GlassPaneLayout(windowWidth: width, showsMap: true, showsInspector: showsInspector, main: start + dx).main
     }
 
     /// The narrowest the window may be for these panes: the map at its
@@ -243,8 +259,17 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
     /// The map's width as the person last left it, kept across launches by
     /// the caller; nil to open at the default width every time.
     private let mapWidth: Binding<Double>?
+    /// The main pane's width beside the map as the person last dragged the
+    /// divider to (owner, 2026-10-20), kept across launches by the caller.
+    private let mainWidth: Binding<Double>?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var host = GlassWindowHost()
+    /// The main pane's width while the divider is dragged, and its width
+    /// when the drag began; nil otherwise.
+    @State private var dragMain: CGFloat?
+    @State private var dragStart: CGFloat?
+    /// Whether the pointer is over the divider, for its grip.
+    @State private var overDivider = false
     /// The composition the panes are laid out for while no move is under
     /// way. It trails the preferences by one move.
     @State private var presented: GlassPaneLayout.Visibility
@@ -264,6 +289,7 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
         showsMap: Bool,
         showsInspector: Bool,
         mapWidth: Binding<Double>? = nil,
+        mainWidth: Binding<Double>? = nil,
         onFirstLayout: ((CGFloat) -> Void)? = nil,
         @ViewBuilder main: () -> Main,
         @ViewBuilder map: () -> Map,
@@ -272,6 +298,7 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
         self.showsMap = showsMap
         self.showsInspector = showsInspector
         self.mapWidth = mapWidth
+        self.mainWidth = mainWidth
         self.onFirstLayout = onFirstLayout
         self.main = main()
         self.map = map()
@@ -296,7 +323,7 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
             let layout = transition.map { GlassPaneLayout(windowWidth: proxy.size.width, transition: $0) }
                 ?? GlassPaneLayout(
                     windowWidth: proxy.size.width, showsMap: presented.map, showsInspector: presented.inspector,
-                    main: host.main)
+                    main: dragMain ?? host.main)
             // Every pane is exactly the window's height and starts at its top
             // edge. A pane whose content outgrew the window used to make the
             // row taller than the window, and the row centred the others in
@@ -310,11 +337,20 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
                     .frame(width: layout.main, height: height)
                     .environment(\.glassWindowControlsInset, GlassTokens.Space.windowControlsInset)
                 if let width = layout.map {
+                    // The gap before the map is the divider while no pane
+                    // opens or closes (owner, 2026-10-20).
+                    Group {
+                        if transition == nil {
+                            divider(main: layout.main, windowWidth: proxy.size.width)
+                        } else {
+                            Color.clear
+                        }
+                    }
+                    .frame(width: layout.mapGap, height: height)
                     map
                         .frame(width: width, height: height)
                         .clipped()
                         .opacity(transition?.to.map == false ? 0 : 1)
-                        .padding(.leading, layout.mapGap)
                         .transition(.opacity)
                 }
                 if let width = layout.inspector {
@@ -368,12 +404,72 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
     /// top and leading edges stay; a full-screen window is left alone.
     private func openAtKeptWidth(_ window: NSWindow) {
         defer { host.opened = true }
+        if let mainWidth { host.main = max(GlassPaneLayout.mainWidth, CGFloat(mainWidth.wrappedValue)) }
         guard mapWidth != nil, !window.styleMask.contains(.fullScreen) else { return }
         let width = GlassPaneLayout.windowWidth(
-            showsMap: presented.map, showsInspector: presented.inspector, mapWidth: keptMapWidth)
+            showsMap: presented.map, showsInspector: presented.inspector, mapWidth: keptMapWidth,
+            main: presented.map ? host.main : GlassPaneLayout.mainWidth)
         let visible = window.screen?.visibleFrame ?? CGRect(x: -1e6, y: -1e6, width: 2e6, height: 2e6)
         let frame = GlassPaneLayout.windowFrame(window.frame, width: width, visible: visible)
         if frame != window.frame { window.setFrame(frame, display: true) }
+    }
+
+    /// The divider between the main pane and the map (owner, 2026-10-20):
+    /// the gap itself, with the left-right resize cursor over it and a
+    /// faint grip while it is pointed at or dragged. Dragging moves room
+    /// between the two panes (`GlassPaneLayout.draggedMain`); the window
+    /// keeps its width. Measured in the window's coordinates, so the
+    /// divider moving under the pointer does not feed back into the drag.
+    private func divider(main: CGFloat, windowWidth: CGFloat) -> some View {
+        ZStack {
+            Color.clear.contentShape(Rectangle())
+            Capsule()
+                .fill(GlassColor.textTertiary)
+                .frame(width: 3, height: 36)
+                .opacity(overDivider || dragMain != nil ? 0.6 : 0)
+        }
+        .onHover { inside in
+            guard inside != overDivider else { return }
+            overDivider = inside
+            if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+        }
+        // A divider that goes while pointed at (the map hidden) gives the
+        // cursor back.
+        .onDisappear {
+            if overDivider { NSCursor.pop() }
+            overDivider = false
+        }
+        .gesture(
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { value in
+                    let start = dragStart ?? main
+                    dragStart = start
+                    dragMain = GlassPaneLayout.draggedMain(
+                        from: start, by: value.translation.width, windowWidth: windowWidth,
+                        showsInspector: presented.inspector)
+                }
+                .onEnded { value in
+                    let start = dragStart ?? main
+                    let kept = GlassPaneLayout.draggedMain(
+                        from: start, by: value.translation.width, windowWidth: windowWidth,
+                        showsInspector: presented.inspector)
+                    host.main = kept
+                    dragStart = nil
+                    dragMain = nil
+                    keep(main: kept, windowWidth: windowWidth)
+                })
+        .accessibilityHidden(true)
+    }
+
+    /// Keeps the main pane's width the divider was left at, and the map's
+    /// width beside it, for the next launch.
+    private func keep(main: CGFloat, windowWidth: CGFloat) {
+        mainWidth?.wrappedValue = Double(main)
+        let layout = GlassPaneLayout(
+            windowWidth: windowWidth, showsMap: true, showsInspector: presented.inspector, main: main)
+        if let mapWidth, let map = layout.map, map >= GlassTokens.Size.mapMinWidth {
+            mapWidth.wrappedValue = Double(map)
+        }
     }
 
     /// Keeps the map's width as the person resizes the window with it

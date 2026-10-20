@@ -23,8 +23,6 @@ struct MapToolPile: View {
     let t: Double
     /// The pointer on the map, in the map's own coordinates; nil off it.
     var pointer: CGPoint? = nil
-    /// Whether the transfer is a contribution, for its colours.
-    var contributing: Bool { run?.action != .keep }
 
     @State private var tall = false
     @State private var wide = false
@@ -100,7 +98,7 @@ struct MapToolPile: View {
         }
         let tint = tool.tint.color
         let side = Stack.coin * s
-        let runGlow: Color = contributing ? GlassTokens.Color.statusOn.color : GlassTokens.Color.purpleSoft.color
+        let runGlow = MapTransferDrawing.glow(run?.action)
         let glow: Color = grown ? runGlow.opacity(0.45) : .clear
         return ZStack {
             // The coin's edge below it, then an opaque face and its rim.
@@ -222,13 +220,24 @@ enum MapTransferDrawing {
     static let orbFrame: CGFloat = 104
     static var orbRadius: CGFloat { orbFrame / 2 * (1 - GlassLibraryOrb.inset) }
 
+    /// A run's colour (owner, 2026-10-20): blue for traces being shared,
+    /// orange for traces kept on this Mac, on the orbs, the coin's light,
+    /// the pile's glow and the pad's charge. A dismissed trace is not
+    /// shared, so it takes the kept colour, as it took the non-shared one
+    /// before.
+    static func glowToken(_ action: MapTransfer.Action?) -> GlassRGBA {
+        action == .contribute ? GlassTokens.Color.mapOrbShared : GlassTokens.Color.mapOrbKept
+    }
+
+    static func glow(_ action: MapTransfer.Action?) -> Color { glowToken(action).color }
+
     static func draw(
         in context: inout GraphicsContext, scene: FlowMapScene, run: MapTransferRun, t: Double, fit: FlowMapGeometry
     ) {
         guard let stack = scene.stack else { return }
         let s = fit.scale
         let contributing = run.action == .contribute
-        let glow = contributing ? GlassTokens.Color.statusOn.color : GlassTokens.Color.purpleSoft.color
+        let glow = glow(run.action)
         let hub = scene.nodes.first { $0.id == "hub" }?.at ?? FlowMapScene.hubPoint
         let library = scene.nodes.first { $0.id == "library" }?.at ?? FlowMapScene.libraryPoint
         let outArc = scene.arcs.last { $0.from == stack.portRight }
@@ -278,7 +287,7 @@ enum MapTransferDrawing {
         fit: FlowMapGeometry
     ) {
         let s = fit.scale
-        let glow = run.action == .contribute ? GlassTokens.Color.statusOn.color : GlassTokens.Color.purpleSoft.color
+        let glow = glow(run.action)
         let order = run.order(stack.tools, at: t)
         for (id, p) in run.orbits(at: t) {
             guard let index = order.firstIndex(of: id) else { continue }
@@ -394,7 +403,7 @@ enum MapTransferDrawing {
             centre.x += CGFloat(sin(t * 90)) * 0.7 * s
         }
         let charge = min(run.arrived(at: t), 4)
-        let glow: Color = flight != nil ? flameOuter : (charge > 0 ? GlassTokens.Color.statusOn.color : flameOuter.opacity(0.5))
+        let glow: Color = flight != nil ? flameOuter : (charge > 0 ? GlassTokens.Color.mapOrbShared.color : flameOuter.opacity(0.5))
         let glowRadius = flight != nil ? 8 * s : (5 + CGFloat(charge) * 4) * s
 
         if flight != nil, progress < 0.6 {

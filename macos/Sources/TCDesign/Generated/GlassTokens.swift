@@ -77,6 +77,10 @@ public enum GlassTokens {
         public static let dataShared: GlassRGBA = GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1))
         public static let dataKept: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1))
         public static let dataInference: GlassRGBA = GlassRGBA(0xA78BFA, alpha: 1, light: GlassRGBA(0x7D5CE0, alpha: 1))
+        /// A shared trace on the Traces map: its orb on the lines, the light round its coin, the pile's glow and the launch pad's charge. The accent's soft blue (owner, 2026-10-20: it was the watching green).
+        public static let mapOrbShared: GlassRGBA = GlassRGBA(0x0091FD, alpha: 1, light: GlassRGBA(0x0070C6, alpha: 1))
+        /// A kept trace on the Traces map, drawn as mapOrbShared is: orange, the NEAR AI data palette's data-2 (owner, 2026-10-20).
+        public static let mapOrbKept: GlassRGBA = GlassRGBA(0xD95926, alpha: 1, light: GlassRGBA(0xCF5320, alpha: 1))
         /// The opaque ground every chart is plotted on, never straight on glass (Near AI OS surface-chart).
         public static let chartSurface: GlassRGBA = GlassRGBA(0x0D1124, alpha: 1, light: GlassRGBA(0xF7F8FA, alpha: 1))
         /// Gridlines and the axis rule on chartSurface (Near AI OS chart-grid).
@@ -236,6 +240,8 @@ public enum GlassTokens {
             "dataShared": dataShared,
             "dataKept": dataKept,
             "dataInference": dataInference,
+            "mapOrbShared": mapOrbShared,
+            "mapOrbKept": mapOrbKept,
             "chartSurface": chartSurface,
             "chartGrid": chartGrid,
             "chartSeries1": chartSeries1,

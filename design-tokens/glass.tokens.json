@@ -45,6 +45,8 @@
     "dataShared": { "hex": "#8a3dff", "light": { "hex": "#7a2cf5" } },
     "dataKept": { "hex": "#3a7bd5", "light": { "hex": "#2f6bc4" } },
     "dataInference": { "hex": "#a78bfa", "light": { "hex": "#7d5ce0" } },
+    "mapOrbShared": { "hex": "#0091fd", "note": "A shared trace on the Traces map: its orb on the lines, the light round its coin, the pile's glow and the launch pad's charge. The accent's soft blue (owner, 2026-10-20: it was the watching green).", "light": { "hex": "#0070c6" } },
+    "mapOrbKept": { "hex": "#d95926", "note": "A kept trace on the Traces map, drawn as mapOrbShared is: orange, the NEAR AI data palette's data-2 (owner, 2026-10-20).", "light": { "hex": "#cf5320" } },
     "chartSurface": { "hex": "#0d1124", "note": "The opaque ground every chart is plotted on, never straight on glass (Near AI OS surface-chart).", "light": { "hex": "#f7f8fa" } },
     "chartGrid": { "hex": "#ffffff", "alpha": 0.1, "note": "Gridlines and the axis rule on chartSurface (Near AI OS chart-grid).", "light": { "hex": "#000000", "alpha": 0.08 } },
     "chartSeries1": { "hex": "#0091fd", "note": "The first series of a multi-series chart (Near AI OS data-1): 3:1 or more on chartSurface. The parent's current data palette (owner, 2026-10-20: the purple it had is gone from Insights). Series are used in order and never cycled.", "light": { "hex": "#2a78d6" } },

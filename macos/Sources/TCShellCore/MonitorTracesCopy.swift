@@ -721,6 +721,13 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let uncontributed: String
     public let uncontributedSize: String
     public let uncontributedEstimate: String
+    /// Home's section titles, and the Private AI section's card while
+    /// Private AI is not working, with its button (owner, 2026-10-20).
+    public let sectionPrivateAI: String
+    public let sectionTraces: String
+    public let sectionAccount: String
+    public let privateAINotConnected: String
+    public let privateAIConnect: String
     public let creditDelta: String
     public let insightsToday: String
     public let insightsTeaser: String
@@ -765,6 +772,11 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case uncontributed
         case uncontributedSize = "uncontributed_size"
         case uncontributedEstimate = "uncontributed_estimate"
+        case sectionPrivateAI = "section_private_ai"
+        case sectionTraces = "section_traces"
+        case sectionAccount = "section_account"
+        case privateAINotConnected = "private_ai_not_connected"
+        case privateAIConnect = "private_ai_connect"
         case creditDelta = "credit_delta"
         case insightsToday = "insights_today"
         case insightsTeaser = "insights_teaser"

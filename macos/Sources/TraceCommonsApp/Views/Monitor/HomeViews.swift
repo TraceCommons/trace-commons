@@ -46,6 +46,10 @@ struct HomeTabView: View {
     /// no Missions card, no catalogue card, no mission page, and the
     /// drafts inbox is not read.
     var missionsEnabled: Bool = false
+    /// The Private AI tab's store, which the window runs for as long as it
+    /// is open: Home's Private AI section reads its state and counts from
+    /// it. Nil draws the counts as dashes.
+    var inference: InferenceStore? = nil
 
     /// The core's Insights copy, read once: it is fixed for the life of the
     /// process, and reading it is a C ABI call and a JSON decode, which
@@ -79,7 +83,7 @@ struct HomeTabView: View {
                 insightsHeading: Self.insightsHeading,
                 missionDrafts: missionDrafts, missionsEnabled: missionsEnabled,
                 openHistory: openHistory, openMissionDrafts: { page = .missionDrafts },
-                openInsights: openInsights, openMissions: { page = .missions })
+                openInsights: openInsights, openMissions: { page = .missions }, inference: inference)
         case .history:
             HistoryPage(store: store, statusLabel: statusLabel, selection: $selection, back: { page = .overview })
         case .missions:
@@ -121,6 +125,8 @@ private struct HomeOverview: View {
     let openMissionDrafts: () -> Void
     let openInsights: () -> Void
     let openMissions: () -> Void
+    /// The Private AI section's state and counts (`HomeTabView.inference`).
+    let inference: InferenceStore?
     /// The NEAR AI balance the Balance tile reads.
     @EnvironmentObject private var model: AppModel
 
@@ -277,46 +283,90 @@ private struct HomeOverview: View {
         let settlement = SummaryFacts.fresh(store.status, unless: store.failures["status"])?.settlementEstimate
         let uncontributed = HomeUncontributed(traces.tree.allSessions, settlement: settlement)
         let delta = HomeFormat.creditDelta(store.creditTotals.delta(on: .now), words: words)
-        return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            // Waiting and Contributed, then what is not contributed as an
-            // upsell two tiles tall across both columns, then Credit and the
-            // NEAR AI balance (owner, 2026-10-19).
-            Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
-                GridRow {
-                    HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
-                                 systemImage: HomeStatIcons.waiting, action: openTraces)
-                    HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted),
-                                 systemImage: HomeStatIcons.contributed, action: openHistory)
-                }
-                if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) {
+        // Three groups, each under its title (owner, 2026-10-20): Private
+        // AI first, then Traces (Waiting and Contributed, and what is not
+        // contributed across both columns), then Account (Credit and the
+        // NEAR AI balance).
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            privateAI
+            HomeSection(words?.sectionTraces) {
+                Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
                     GridRow {
-                        notContributed(uncontributed, title: title)
-                            .gridCellColumns(2)
+                        HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
+                                     systemImage: HomeStatIcons.waiting, action: openTraces)
+                        HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted),
+                                     systemImage: HomeStatIcons.contributed, action: openHistory)
+                    }
+                    if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) {
+                        GridRow {
+                            notContributed(uncontributed, title: title)
+                                .gridCellColumns(2)
+                        }
                     }
                 }
-                GridRow {
-                    HomeStatTile(label: HomeFormat.creditPendingWord,
-                                 value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)),
-                                 detail: delta?.text, detailInk: delta?.ink,
-                                 systemImage: HomeStatIcons.credit, action: openPrivateAI)
-                    if let copy = model.privateInferenceCopy {
-                        let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
-                        HomeStatTile(label: copy.balanceTitle, value: balance.value, detail: balance.detail,
-                                     systemImage: HomeStatIcons.balance, valueAccessory: balance.beside,
-                                     action: openPrivateAI)
-                    } else {
-                        Color.clear
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            HomeSection(words?.sectionAccount) {
+                Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
+                    GridRow {
+                        HomeStatTile(label: HomeFormat.creditPendingWord,
+                                     value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)),
+                                     detail: delta?.text, detailInk: delta?.ink,
+                                     systemImage: HomeStatIcons.credit, action: openPrivateAI)
+                        if let copy = model.privateInferenceCopy {
+                            let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
+                            HomeStatTile(label: copy.balanceTitle, value: balance.value, detail: balance.detail,
+                                         systemImage: HomeStatIcons.balance, valueAccessory: balance.beside,
+                                         action: openPrivateAI)
+                        } else {
+                            Color.clear
+                        }
+                    }
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Home's Private AI section (owner, 2026-10-20), drawn once the core's
+    /// words have loaded and the daemon runs. While Private AI is working
+    /// (`HomePrivateAI.connected`), two tiles: the calls answered here and
+    /// how many are verified, over the Private AI tab's window. Otherwise
+    /// one card across the row saying it is not connected, with Connect,
+    /// which opens the Private AI tab: turning it on is there, beside what
+    /// it exposes, never one press on Home.
+    @ViewBuilder
+    private var privateAI: some View {
+        if let words, model.privateInferenceCopy != nil, case .running = model.startup {
+            HomeSection(words.sectionPrivateAI) {
+                if HomePrivateAI.connected(inference?.privateAI?.state, calls: model.privateInferenceCalls) {
+                    let totals = HomePrivateAI.totals(inference)
+                    Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
+                        GridRow {
+                            HomeStatTile(label: MonitorWords.calls, value: HomeFormat.count(totals.calls),
+                                         systemImage: HomeStatIcons.calls, action: openPrivateAI)
+                            HomeStatTile(label: InferenceWords.proof(.verified), value: HomeFormat.count(totals.verified),
+                                         systemImage: HomeStatIcons.verified, action: openPrivateAI)
+                        }
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    GlassIconCard(systemImage: HomeStatIcons.privateAI, title: words.privateAINotConnected) {
+                        Button(words.privateAIConnect, action: openPrivateAI)
+                            .buttonStyle(GlassButtonStyle(.primary, small: true))
+                            .fixedSize()
+                    } content: {
+                        EmptyView()
                     }
                 }
             }
-            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     /// What waits on this Mac, not yet contributed, across both columns
-    /// (owner, 2026-10-19): a slim card with no fill and a gradient edge, a
-    /// large icon on the left, how many traces and their size, and the
-    /// core's dollar line. The whole card opens Traces. Drawn only while
+    /// (owner, 2026-10-19): a slim card with a solid accent border, a large
+    /// icon on the left, how many traces and their size, and the core's
+    /// call to share. The whole card opens Traces. Drawn only while
     /// something waits.
     private func notContributed(_ uncontributed: HomeUncontributed, title: String) -> some View {
         HomeNotContributedCard(
@@ -349,20 +399,23 @@ private struct HomeOverview: View {
 
 }
 
-/// The Not contributed card (owner, 2026-10-19): half a hero's height, no
-/// fill, the promo glow edge turning slowly round it (`GlassGlowEdge`), and
-/// a large icon on the left in its lighter brand gradient; then the label,
-/// the count and size, and the core's dollar line. Under the pointer it
-/// takes the control hover fill; the whole card is the button.
+/// The Not contributed card (owner, 2026-10-19): half a hero's height, and
+/// a large icon on the left; then the label, the count and size, and the
+/// core's call to share (owner, 2026-10-20). Since 2026-10-20 it is on the
+/// standard card fill with a solid accent border (`borderWidth`), in place
+/// of the turning glow edge. The whole card is the button.
 private struct HomeNotContributedCard: View {
     let title: String
     let count: Int
     let size: String?
     let detail: String?
     let action: () -> Void
-    @State private var hovering = false
 
     static let iconSize: CGFloat = 30
+    /// The accent border's width.
+    static let borderWidth: CGFloat = 1.5
+    /// The border's colour: the accent, solid.
+    static var border: GlassRGBA { GlassTokens.Color.controlSelected }
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: GlassTier.card.radius, style: .continuous)
@@ -401,14 +454,12 @@ private struct HomeNotContributedCard: View {
             .padding(.horizontal, GlassTokens.Space.s7)
             .padding(.vertical, GlassTokens.Space.s5)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(shape.fill(hovering ? GlassTokens.Color.controlHover.color : Color.clear))
-            // Quieter than a promotion's edge (owner, 2026-10-19: at full
-            // strength it was too bright).
-            .overlay(GlassGlowEdge(cornerRadius: GlassTier.card.radius, strength: 0.4, intensity: 0.6))
+            // The stat tiles' fill and hover, under a solid accent border.
+            .glassTier(.card, hover: GlassTokens.Color.cardHover)
+            .overlay(shape.strokeBorder(Self.border.color, lineWidth: Self.borderWidth))
             .contentShape(shape)
         }
         .buttonStyle(GlassPressStyle())
-        .onHover { hovering = $0 }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
     }
@@ -423,6 +474,58 @@ enum HomeStatIcons {
     static let uncontributed = "lock.laptopcomputer"
     /// The NEAR AI balance (owner, 2026-10-19).
     static let balance = "creditcard"
+    /// Home's Private AI section (owner, 2026-10-20): the not-connected
+    /// card in the Private AI notices' mark, and the two tiles.
+    static let privateAI = "shield.lefthalf.filled"
+    static let calls = "arrow.left.arrow.right"
+    static let verified = "checkmark.shield"
+}
+
+/// A group of Home's cards under its title (owner, 2026-10-20). With no
+/// title (the core's words not loaded yet) the cards are drawn alone.
+struct HomeSection<Content: View>: View {
+    let title: String?
+    let content: Content
+
+    init(_ title: String?, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    /// The title's face: the tabs' heading face (`GlassTabHeading`), so
+    /// every heading on a tab reads alike.
+    static var titleType: GlassTypeStyle { GlassTabHeading<EmptyView>.titleType }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            if let title, !title.isEmpty {
+                Text(title)
+                    .glassType(Self.titleType)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .accessibilityAddTraits(.isHeader)
+            }
+            content
+        }
+    }
+}
+
+/// Home's Private AI section's reading of the Private AI tab's store.
+@MainActor
+enum HomePrivateAI {
+    /// Whether Private AI is working: the core's tone for the listener's
+    /// state reads as working, the rule every indicator follows, never the
+    /// settings switch (`PrivateInferenceTone.readsAsWorking`).
+    static func connected(_ state: DaemonData.PrivateInferenceState?, calls: PrivateInferenceCalls) -> Bool {
+        PrivateInferenceSurface.tone(InferenceAccountSection.surfaceState(state), calls: calls).readsAsWorking
+    }
+
+    /// The Private AI tab's totals (`InferenceTabView.totals`): unknown
+    /// until its calls page has been read and is readable.
+    static func totals(_ store: InferenceStore?) -> (calls: Int?, verified: Int?) {
+        guard let page = store?.calls, page.readable else { return (nil, nil) }
+        let totals = InferenceTabView.totals(page, summary: store?.summary, destinations: store?.destinations)
+        return (totals.calls, totals.verified)
+    }
 }
 
 /// The Home cards' icons, shared with the edge rail's Home peek.
@@ -810,12 +913,16 @@ private struct HistoryFilterPill: View {
 /// line when the next one would not fit.
 struct HistoryFilterFlow: Layout {
     let spacing: CGFloat
+    /// The gap between lines; `spacing` when not given.
+    var lineSpacing: CGFloat? = nil
+
+    private var lineGap: CGFloat { lineSpacing ?? spacing }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let lines = Self.lines(width: proposal.width ?? .infinity, sizes: subviews.map { $0.sizeThatFits(.unspecified) },
                                spacing: spacing)
         let width = lines.map(\.width).max() ?? 0
-        let height = lines.map(\.height).reduce(0, +) + spacing * CGFloat(max(lines.count - 1, 0))
+        let height = lines.map(\.height).reduce(0, +) + lineGap * CGFloat(max(lines.count - 1, 0))
         return CGSize(width: proposal.width.map { min($0, width) } ?? width, height: height)
     }
 
@@ -828,7 +935,7 @@ struct HistoryFilterFlow: Layout {
                 subviews[index].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(sizes[index]))
                 x += sizes[index].width + spacing
             }
-            y += line.height + spacing
+            y += line.height + lineGap
         }
     }
 
@@ -1439,8 +1546,11 @@ struct HomeUncontributed: Equatable {
     static let gone: Set<String> = ["uploading", "uploaded"]
 
     init(_ sessions: [DaemonData.QueueEntry], settlement: DaemonData.SettlementEstimate? = nil) {
-        let text = settlement?.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        dollars = (text?.isEmpty ?? true) ? nil : settlement?.text
+        // The core's call to share (owner, 2026-10-20), else its plain line
+        // from an older core.
+        let line = settlement.map { $0.shareText ?? $0.text }
+        let text = line?.trimmingCharacters(in: .whitespacesAndNewlines)
+        dollars = (text?.isEmpty ?? true) ? nil : line
         let waiting = sessions.filter { !Self.gone.contains($0.state) }
         count = waiting.count
         bytes = waiting.reduce(Int64(0)) { $0 + Int64($1.sizeBytes ?? 0) }

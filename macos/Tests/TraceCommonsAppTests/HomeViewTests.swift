@@ -27,7 +27,7 @@ final class HomeViewTests: XCTestCase {
             // History lives on Traces (owner, 2026-10-12); Home's way in is
             // the Contributed tile.
             "openHistory: openHistory, openMissionDrafts: { page = .missionDrafts }, ",
-            "openInsights: openInsights, openMissions: { page = .missions })",
+            "openInsights: openInsights, openMissions: { page = .missions }, inference: inference)",
         ] {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")
         }
@@ -83,15 +83,15 @@ final class HomeViewTests: XCTestCase {
         XCTAssertTrue(home.contains(
             "if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) { "
                 + "GridRow { notContributed(uncontributed, title: title) .gridCellColumns(2) } }"))
-        // Slim, with no fill and a gradient edge (owner, 2026-10-19).
+        // Slim, on the standard card fill under a solid accent border
+        // (owner, 2026-10-20: it had no fill and a turning glow edge).
         XCTAssertTrue(home.contains("detail: uncontributed.detail(words), action: openTraces)"))
-        // The promo glow edge turns round it, and the icon takes the edge's
-        // lighter gradient (owner, 2026-10-19: the first gradient was too dark).
-        XCTAssertTrue(home.contains(".overlay(GlassGlowEdge(cornerRadius: GlassTier.card.radius, strength: 0.4, intensity: 0.6))"))
+        XCTAssertTrue(home.contains(".glassTier(.card, hover: GlassTokens.Color.cardHover)"))
+        XCTAssertTrue(home.contains(".overlay(shape.strokeBorder(Self.border.color, lineWidth: Self.borderWidth))"))
+        XCTAssertFalse(home.contains(".overlay(GlassGlowEdge("), "the glow edge is back")
         XCTAssertTrue(home.contains(".foregroundStyle(GlassGlowEdge.markGradient)"))
         let card = try XCTUnwrap(home.range(of: "private struct HomeNotContributedCard: View {"))
         XCTAssertFalse(home[card.upperBound...].prefix(2500).contains("Gradient.heroMissions"), "the dark gradient is back")
-        XCTAssertTrue(home.contains(".background(shape.fill(hovering ? GlassTokens.Color.controlHover.color : Color.clear))"))
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: copy.balanceTitle, value: balance.value, detail: balance.detail, "
                 + "systemImage: HomeStatIcons.balance, valueAccessory: balance.beside, action: openPrivateAI)"))

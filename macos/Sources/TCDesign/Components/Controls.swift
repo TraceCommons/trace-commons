@@ -632,15 +632,9 @@ public struct GlassIconMenu<Value: Hashable, More: View>: View {
     public var body: some View {
         let side = GlassTokens.Size.controlLarge
         Menu {
-            // An inline picker: the menu draws its items with the system's
-            // checkmark beside the chosen one, in the leading gutter.
-            Picker(label, selection: $selection) {
-                ForEach(options) { option in
-                    Text(option.title).tag(Optional(option.value))
-                }
-            }
-            .pickerStyle(.inline)
-            .labelsHidden()
+            // The system's check mark beside the chosen one, in the
+            // leading gutter, once (`GlassMenuChoices`).
+            GlassMenuChoices(options, chosen: selection) { selection = $0 }
             if More.self != EmptyView.self {
                 Divider()
                 more

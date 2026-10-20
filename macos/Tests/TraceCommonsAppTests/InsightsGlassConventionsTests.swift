@@ -112,21 +112,29 @@ final class InsightsGlassConventionsTests: XCTestCase {
         XCTAssertEqual(glass.components(separatedBy: "environment(\\.insightsInCardBody, false)").count - 1, 2)
     }
 
-    /// The week picker sits on the right of its row on Overview and
-    /// Patterns, and Patterns' scope line ("Claude Code traces only") is a
-    /// card of its own on the left (owner, 2026-10-19).
-    func test_theWeekPickerIsOnTheRightAndTheScopeIsACard() throws {
-        for (file, leading) in [("Views/InsightsPatternsTab.swift", "InsightsScopeCard(source: \"claude_code\", line: line)"),
-                                ("Views/InsightsOverviewTab.swift", "drillButton(\"sessions\") {")] {
+    /// The week picker has its row to itself, on the right (owner,
+    /// 2026-10-19), on Overview and Patterns. Under it is one section
+    /// (owner, 2026-10-20): Overview's Sessions figure, or Patterns' scope
+    /// line ("Claude Code traces only"), over the coverage line.
+    func test_theWeekPickerHasItsRowAndTheSectionIsUnderIt() throws {
+        for (file, leading) in [("Views/InsightsOverviewTab.swift", "drillButton(\"sessions\") {"),
+                                ("Views/InsightsPatternsTab.swift", "InsightsScopeLine(source: \"claude_code\", line: line)")] {
             let source = try Self.text(file)
-            let header = try XCTUnwrap(source.range(of: "private func header("), file)
-            let picker = try XCTUnwrap(source.range(of: "InsightsWeekSelect(", range: header.upperBound..<source.endIndex))
-            let first = try XCTUnwrap(source.range(of: leading, range: header.upperBound..<source.endIndex))
-            XCTAssertLessThan(first.lowerBound, picker.lowerBound, "\(file): the week picker is on the left")
+            let start = try XCTUnwrap(source.range(of: "private func header("), file)
+            let end = try XCTUnwrap(source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex), file)
+            let body = String(source[start.upperBound..<end.lowerBound])
+            XCTAssertTrue(body.contains("HStack(spacing: 0) {\n                Spacer(minLength: 0)\n                InsightsWeekSelect("),
+                          "\(file): the week picker has its row to itself, on the right")
+            let picker = try XCTUnwrap(body.range(of: "InsightsWeekSelect("), file)
+            let first = try XCTUnwrap(body.range(of: leading), file)
+            let coverage = try XCTUnwrap(body.range(of: "InsightsCoverageLine("), file)
+            let section = try XCTUnwrap(body.range(of: ".insightsSection()"), file)
+            XCTAssertLessThan(picker.lowerBound, first.lowerBound, "\(file): the section is under the picker")
+            XCTAssertLessThan(first.lowerBound, coverage.lowerBound, file)
+            XCTAssertLessThan(coverage.lowerBound, section.lowerBound, "\(file): one section holds both")
         }
-        let glass = try Self.text("Views/InsightsGlass.swift")
-        let card = try XCTUnwrap(glass.range(of: "struct InsightsScopeCard: View {"))
-        XCTAssertTrue(glass[card.upperBound...].prefix(600).contains("GlassCard(quiet: true, flush: true) {"))
+        XCTAssertFalse(try Self.text("Views/InsightsGlass.swift").contains("struct InsightsScopeCard"),
+                       "the scope is a card of its own again")
     }
 
     func test_noLiteralWhiteOrBlackInk() throws {
