@@ -274,6 +274,9 @@ fn price_turn(
 
 /// The accounting family's categories, in its required order.
 ///
+/// Claude: a `TotalOnly` write of zero tokens prices as no write; any other
+/// `TotalOnly` write has an unknown lifetime and is unpriced.
+///
 /// Codex: the stored `uncached_input` excludes the cache write (see the
 /// module doc), so the write is priced once, at its own rate. A Claude-shaped
 /// split write has no OpenAI lifetime and is unpriced unless empty.
@@ -288,8 +291,12 @@ fn billable_counts(
     };
     Ok(match accounting {
         PricingAccounting::ClaudeCode => {
-            let CacheWrite::Split { m5, h1 } = usage.cache_write else {
-                return Err(UnpricedReason::CacheLifetimeUnknown);
+            // A nonzero total with no lifetime is unpriced; an empty write
+            // has no lifetime to know.
+            let (m5, h1) = match usage.cache_write {
+                CacheWrite::Split { m5, h1 } => (m5, h1),
+                CacheWrite::TotalOnly(0) => (0, 0),
+                CacheWrite::TotalOnly(_) => return Err(UnpricedReason::CacheLifetimeUnknown),
             };
             vec![
                 count(UncachedInput, usage.uncached_input),
@@ -560,6 +567,37 @@ mod tests {
         assert_eq!(model.priced_turns, 0);
         assert_eq!(model.usd_micros, None);
         assert_eq!(price.total_usd_micros, None);
+    }
+
+    /// An empty write has no lifetime to know: it prices as zero write
+    /// tokens. Only a nonzero `TotalOnly` write is unpriced.
+    #[test]
+    fn an_empty_total_only_claude_write_prices_as_no_write() {
+        let mut empty = priced_claude_turn(0, 0);
+        empty.cache_write = Some(CacheWrite::TotalOnly(0));
+        let mut one = priced_claude_turn(1, 0);
+        one.cache_write = Some(CacheWrite::TotalOnly(1));
+        let price = |turns: &[TurnRecord]| {
+            price_session(
+                &claude_catalog(&["test-model-a"]),
+                PricingAccounting::ClaudeCode,
+                &labels(&["test-model-a"]),
+                turns,
+            )
+        };
+        // 1M uncached + 1M read + 1M output = 1+2+7.
+        let priced = price(std::slice::from_ref(&empty));
+        assert_eq!(priced.by_model["test-model-a"].priced_turns, 1);
+        assert_eq!(priced.total_usd_micros, Some(10_000_000));
+
+        let blocked = price(&[empty, one]);
+        let model = &blocked.by_model["test-model-a"];
+        assert_eq!(model.priced_turns, 1);
+        assert_eq!(
+            model.unpriced_reasons[&UnpricedReason::CacheLifetimeUnknown],
+            1
+        );
+        assert_eq!(blocked.total_usd_micros, None);
     }
 
     #[test]
