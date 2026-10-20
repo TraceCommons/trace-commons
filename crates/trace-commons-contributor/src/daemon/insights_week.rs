@@ -10,7 +10,17 @@
 //! On a full watcher poll, after the session has been quiet for the same
 //! `quiescence_secs` the watcher waits before offering it, the pass reads the
 //! Claude Code and Codex sessions the watcher already finds and stores their
-//! counter rows: Claude per-turn rows with the extractor saved analysis uses
+//! counter rows. The poll does not run the pass: it hands an owned job (the
+//! sessions' paths, sizes and last writes, the Never folders, the settings
+//! it needs and the time) to [`submit_counter_pass`] and moves on, and the
+//! pass reads on a thread of the runtime's blocking pool. One pass runs at a
+//! time; a poll that arrives while one runs replaces the one job waiting
+//! behind it, so the newest sessions are read next and a long pass leaves
+//! one follow-up, not a backlog. Shutdown, the setting going off, or a
+//! `clear` abandons a pass between files and before its write, and a pass
+//! made before a `clear` writes nothing and keeps no key.
+//!
+//! The rows are Claude per-turn rows, with the extractor saved analysis uses
 //! (`insights::turn_series`), and Codex's first-to-last observed change only
 //! (owner decision D11, open). Sessions in a folder that is Never, by its
 //! own rule or a global Never override, are not read, and rows already
@@ -18,8 +28,8 @@
 //! session that has any is marked truncated, so it counts as partial
 //! coverage and never as complete.
 //!
-//! A poll reads a bounded number of files and bytes, newest first, so a first
-//! pass over a large corpus catches up across polls. The first file a poll
+//! A pass reads a bounded number of files and bytes, newest first, so a first
+//! pass over a large corpus catches up across polls. The first file a pass
 //! reads is always read, so a file larger than the byte budget is never
 //! starved (owner decision D4, settled 2026-10-20: stream, no file-size cap,
 //! the per-poll budget stays). Each file is read line by line, never held
@@ -407,6 +417,146 @@ impl Default for WeekOptions {
     }
 }
 
+/// How a job's sessions are placed in folders: a candidate's project key
+/// and whether its folder is Never, the contribution override included.
+/// Owns what it needs, so it can run on the pass's own thread; asked only
+/// for a session about to be read, with no lock of the pass held.
+pub(crate) type ProjectOf =
+    Box<dyn FnMut(&DaemonShared, &CounterCandidate) -> (String, bool) + Send>;
+
+/// One pass to run, made by a watcher tick: owned, so nothing it holds
+/// borrows from the tick.
+pub(crate) struct CounterJob {
+    pub candidates: Vec<CounterCandidate>,
+    pub never_project_keys: NeverFolders,
+    pub now: DateTime<Utc>,
+    pub quiescence_secs: u64,
+    pub project_of: ProjectOf,
+}
+
+/// A job as the worker holds it, with the clear count it was made under.
+struct QueuedJob {
+    job: CounterJob,
+    cleared: u64,
+}
+
+/// The background pass's dispatch state. A leaf lock.
+#[derive(Default)]
+struct WorkerSlot {
+    /// A worker thread is running jobs.
+    running: bool,
+    /// The newest job not yet started. A newer one replaces it.
+    pending: Option<QueuedJob>,
+}
+
+/// Hand `job` to the background pass and return at once.
+///
+/// At most one pass runs at a time. While one runs, the job waits as the
+/// one pending job, replacing any older one there, and the running worker
+/// takes it up when it finishes: the newest sessions are always read, and
+/// ticks that arrive during a long pass leave one follow-up pass, not one
+/// each. With no pass running, a worker is started on the runtime's
+/// blocking pool, as the settlement scan is; outside a runtime the job runs
+/// here.
+///
+/// The clear count is taken now, so a caller holding `pass_lock` (as the
+/// watcher does, and as unenroll does across its clear) makes a job that
+/// a later clear voids.
+pub(crate) fn submit_counter_pass(shared: &Arc<DaemonShared>, job: CounterJob) {
+    let counter = &shared.insights_counter;
+    let queued = QueuedJob {
+        job,
+        cleared: counter.cleared.load(Ordering::SeqCst),
+    };
+    let start = {
+        let mut slot = counter.worker_slot();
+        slot.pending = Some(queued);
+        !std::mem::replace(&mut slot.running, true)
+    };
+    if !start {
+        return;
+    }
+    let worker = Arc::clone(shared);
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            // Not awaited: the handle is dropped and the tick goes on.
+            drop(handle.spawn_blocking(move || run_counter_jobs(&worker)));
+        }
+        Err(_) => run_counter_jobs(&worker),
+    }
+}
+
+/// The worker: run pending jobs until there are none, then stop. Taking the
+/// next job and stopping happen under one lock, so a job submitted as the
+/// worker finishes either is taken here or starts a new worker.
+fn run_counter_jobs(shared: &DaemonShared) {
+    let counter = &shared.insights_counter;
+    // A panicking job must not leave `running` set, or no pass would run
+    // again in this process.
+    struct StopOnPanic<'a>(&'a CounterPass);
+    impl Drop for StopOnPanic<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                let mut slot = self.0.worker_slot();
+                self.0.worker_stopped(&mut slot);
+            }
+        }
+    }
+    let _guard = StopOnPanic(counter);
+    loop {
+        let next = {
+            let mut slot = counter.worker_slot();
+            match slot.pending.take() {
+                Some(next) => next,
+                None => {
+                    counter.worker_stopped(&mut slot);
+                    return;
+                }
+            }
+        };
+        run_counter_job(shared, next);
+    }
+}
+
+/// Run one job, unless the daemon is stopping, the switch is off or the
+/// store was cleared since it was made. The same three stop it between
+/// files. Failures are logged inside, by fixed label only; the result is
+/// recorded as `last_pass_at`, as it was when the pass ran in the tick.
+fn run_counter_job(shared: &DaemonShared, queued: QueuedJob) {
+    let counter = &shared.insights_counter;
+    let QueuedJob { job, cleared } = queued;
+    let should_stop = || {
+        shared.shutdown.load(Ordering::Relaxed)
+            // A poisoned lock reads as off: fail closed.
+            || !shared
+                .settings
+                .lock()
+                .map(|settings| settings.insights_counter_pass)
+                .unwrap_or(false)
+            || counter.cleared.load(Ordering::SeqCst) != cleared
+    };
+    if should_stop() {
+        return;
+    }
+    let CounterJob {
+        candidates,
+        never_project_keys,
+        now,
+        quiescence_secs,
+        mut project_of,
+    } = job;
+    let mut project_of = |candidate: &CounterCandidate| project_of(shared, candidate);
+    let _ = counter.run_pass_from(
+        &candidates,
+        &never_project_keys,
+        now,
+        quiescence_secs,
+        &mut project_of,
+        cleared,
+        &should_stop,
+    );
+}
+
 /// The daemon's counter pass and its store.
 pub struct CounterPass {
     rows_path: PathBuf,
@@ -422,6 +572,25 @@ pub struct CounterPass {
     /// Bumped by every `clear`, so a fold that read the settings before an
     /// unenroll turned the pass off cannot write the store back after it.
     cleared: AtomicU64,
+    /// The background pass: whether one is running, and the one job kept
+    /// for after it. See [`submit_counter_pass`].
+    worker: Mutex<WorkerSlot>,
+    /// Signalled when the worker goes idle.
+    #[cfg(test)]
+    idle: std::sync::Condvar,
+    /// Test seams for the background pass: a hook run before each file
+    /// read, a count of passes started, and whether a tick leaves the pass
+    /// running rather than waiting for it.
+    #[cfg(test)]
+    test_seams: TestSeams,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TestSeams {
+    before_read: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    passes_started: std::sync::atomic::AtomicUsize,
+    detached: std::sync::atomic::AtomicBool,
 }
 
 impl CounterPass {
@@ -446,14 +615,65 @@ impl CounterPass {
             last_failure: Mutex::new(None),
             last_fold_failure: Mutex::new(None),
             cleared: AtomicU64::new(0),
+            worker: Mutex::new(WorkerSlot::default()),
+            #[cfg(test)]
+            idle: std::sync::Condvar::new(),
+            #[cfg(test)]
+            test_seams: TestSeams::default(),
         }
     }
 
-    /// Run one pass. `project_of` resolves a candidate's project key and
-    /// whether its folder is Never, the contribution override included; it
-    /// is asked only for a session about to be read. `never_folders` are
-    /// every folder that is Never, so rows for sessions no longer on disk
-    /// drop too.
+    /// Run `hook` before every file the pass reads.
+    #[cfg(test)]
+    pub(crate) fn set_before_read_for_test(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self.test_seams.before_read.lock().unwrap() = Some(hook);
+    }
+
+    /// How many passes have started.
+    #[cfg(test)]
+    pub(crate) fn passes_started_for_test(&self) -> usize {
+        self.test_seams.passes_started.load(Ordering::SeqCst)
+    }
+
+    /// Leave the pass running when a tick returns, as the daemon does,
+    /// instead of waiting for it.
+    #[cfg(test)]
+    pub(crate) fn detach_for_test(&self) {
+        self.test_seams.detached.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a tick should wait for the pass before it returns.
+    #[cfg(test)]
+    pub(crate) fn detached_for_test(&self) -> bool {
+        self.test_seams.detached.load(Ordering::SeqCst)
+    }
+
+    /// Wait until no pass is running and none is pending.
+    #[cfg(test)]
+    pub(crate) fn await_idle_for_test(&self) {
+        let slot = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+        let _idle = self
+            .idle
+            .wait_while(slot, |slot| slot.running || slot.pending.is_some())
+            .unwrap_or_else(|e| e.into_inner());
+    }
+
+    fn worker_slot(&self) -> std::sync::MutexGuard<'_, WorkerSlot> {
+        // A leaf lock that is never held across a call that could panic.
+        self.worker.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The worker found nothing more to run and stopped.
+    fn worker_stopped(&self, slot: &mut WorkerSlot) {
+        slot.running = false;
+        #[cfg(test)]
+        self.idle.notify_all();
+    }
+
+    /// Run one pass in the calling thread, against the store as cleared
+    /// now and with nothing to stop it. The daemon's watcher runs passes
+    /// through [`submit_counter_pass`] instead.
+    #[cfg(test)]
     pub(crate) fn run_pass(
         &self,
         candidates: &[CounterCandidate],
@@ -462,12 +682,53 @@ impl CounterPass {
         quiescence_secs: u64,
         project_of: &mut dyn FnMut(&CounterCandidate) -> (String, bool),
     ) -> Result<PassSummary, &'static str> {
+        let cleared = self.cleared.load(Ordering::SeqCst);
+        self.run_pass_from(
+            candidates,
+            never_project_keys,
+            now,
+            quiescence_secs,
+            project_of,
+            cleared,
+            &|| false,
+        )
+        .map(Option::unwrap_or_default)
+    }
+
+    /// Run one pass. `project_of` resolves a candidate's project key and
+    /// whether its folder is Never, the contribution override included; it
+    /// is asked only for a session about to be read. `never_folders` are
+    /// every folder that is Never, so rows for sessions no longer on disk
+    /// drop too.
+    ///
+    /// `cleared` is the clear count the job was made under: once a `clear`
+    /// moves it, the pass writes nothing and keeps no key. `should_stop` is
+    /// asked before each file read and before the write; once it answers
+    /// true the pass is abandoned and writes nothing. `Ok(None)` is an
+    /// abandoned pass.
+    #[allow(clippy::too_many_arguments)]
+    fn run_pass_from(
+        &self,
+        candidates: &[CounterCandidate],
+        never_project_keys: &NeverFolders,
+        now: DateTime<Utc>,
+        quiescence_secs: u64,
+        project_of: &mut dyn FnMut(&CounterCandidate) -> (String, bool),
+        cleared: u64,
+        should_stop: &dyn Fn() -> bool,
+    ) -> Result<Option<PassSummary>, &'static str> {
+        #[cfg(test)]
+        self.test_seams
+            .passes_started
+            .fetch_add(1, Ordering::SeqCst);
         let result = self.pass_inner(
             candidates,
             never_project_keys,
             now,
             quiescence_secs,
             project_of,
+            cleared,
+            should_stop,
         );
         let failure = result.as_ref().err().copied();
         if let Ok(mut last) = self.last_failure.lock() {
@@ -480,14 +741,23 @@ impl CounterPass {
                 *last = failure;
             }
         }
-        if result.is_ok() {
-            if let Ok(mut at) = self.last_pass_at.lock() {
-                *at = Some(now);
-            }
-        }
         result
     }
 
+    #[cfg(test)]
+    fn run_before_read_hook(&self) {
+        let hook = self.test_seams.before_read.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    /// The pass. It plans and reads against the store as cached when it
+    /// begins, holding no lock, and then writes under the cache lock onto
+    /// the store as it stands by then: a ledger fold may have moved its
+    /// tallies and cursor meanwhile, and those are kept. Rows themselves
+    /// change only here, and only one pass runs at a time.
+    #[allow(clippy::too_many_arguments)]
     fn pass_inner(
         &self,
         candidates: &[CounterCandidate],
@@ -495,8 +765,19 @@ impl CounterPass {
         now: DateTime<Utc>,
         quiescence_secs: u64,
         project_of: &mut dyn FnMut(&CounterCandidate) -> (String, bool),
-    ) -> Result<PassSummary, &'static str> {
+        cleared: u64,
+        should_stop: &dyn Fn() -> bool,
+    ) -> Result<Option<PassSummary>, &'static str> {
         let key = self.keys.load_or_create().map_err(|_| UNREADABLE_KEY)?;
+        // A clear since the job was made: the key just read may be one this
+        // call made after the clear forgot it. Forget it again, and write
+        // nothing.
+        if self.cleared.load(Ordering::SeqCst) != cleared {
+            if self.keys.clear().is_err() {
+                tracing::warn!("insights counter key could not be forgotten");
+            }
+            return Ok(None);
+        }
         let fingerprint = key_fingerprint(&key);
         // A store that cannot be read, or was made under another key, is
         // started again: its rows are re-derived from the sessions on disk.
@@ -580,8 +861,15 @@ impl CounterPass {
                 summary.deferred += 1;
                 continue;
             }
+            // Between files: shutdown, the switch going off or a clear
+            // abandons the pass. A file already being read finishes first.
+            if should_stop() {
+                return Ok(None);
+            }
             bytes_budgeted = bytes_budgeted.saturating_add(cost);
             removals.remove(&session);
+            #[cfg(test)]
+            self.run_before_read_hook();
             let read = read_body(source, candidate, &key);
             reads.push((
                 session,
@@ -606,10 +894,26 @@ impl CounterPass {
 
         // A v1 store is written back as v2 even when nothing else changed.
         let upgrade = current.schema != COUNTER_STORE_SCHEMA;
-        if reads.is_empty() && removals.is_empty() && !restart && !upgrade {
-            return Ok(summary);
+        let unchanged = reads.is_empty() && removals.is_empty() && !restart && !upgrade;
+        // Asked with no lock of this pass held: it reads the settings.
+        if should_stop() {
+            return Ok(None);
         }
-        let mut store = (*current).clone();
+        let mut cached = self.cached.lock().map_err(|_| STORE_WRITE_FAILED)?;
+        // Under the lock `clear` holds across removal, so a clear is either
+        // seen here or happens after this write and removes it.
+        if self.cleared.load(Ordering::SeqCst) != cleared {
+            return Ok(None);
+        }
+        if unchanged {
+            self.mark_pass(now);
+            return Ok(Some(summary));
+        }
+        // The store as it stands now, not as it was when the pass began.
+        let mut store = match self.load_into(&mut cached) {
+            Ok(Some(store)) if store.key_fingerprint == fingerprint => (*store).clone(),
+            Ok(_) | Err(_) => CounterStore::empty(fingerprint),
+        };
         store.schema = COUNTER_STORE_SCHEMA.to_string();
         // A session dropped for a Never folder takes its tally with it; one
         // that only aged out keeps it until its last call does too.
@@ -638,8 +942,17 @@ impl CounterPass {
             COUNTER_STORE_MAX_TOOL_CALLS,
         );
         prune_routing(&mut store, &gone, cutoff);
-        self.save(store)?;
-        Ok(summary)
+        self.save_into(&mut cached, store)?;
+        self.mark_pass(now);
+        Ok(Some(summary))
+    }
+
+    /// A pass finished at `now`, for the answer's `updated_at`. Called under
+    /// the cache lock, the order `clear` takes the two in.
+    fn mark_pass(&self, now: DateTime<Utc>) {
+        if let Ok(mut at) = self.last_pass_at.lock() {
+            *at = Some(now);
+        }
     }
 
     /// The `insights_week` answer.
@@ -1027,6 +1340,7 @@ impl CounterPass {
         Ok(Some(store))
     }
 
+    #[cfg(test)]
     fn save(&self, store: CounterStore) -> Result<(), &'static str> {
         let mut cached = self.cached.lock().map_err(|_| STORE_WRITE_FAILED)?;
         self.save_into(&mut cached, store)
@@ -1069,11 +1383,12 @@ impl CounterPass {
     /// the two cannot interleave. The key is read before that lock, so a
     /// keychain's latency never holds an `insights_week` answer.
     ///
-    /// The counter pass writes from the store it loaded when it began, so a
-    /// fold landing inside a pass would be written over, tallies and cursor
-    /// together, and the next fold would take the rows still in the window
-    /// again. In the daemon they do not overlap: the tick loop refreshes the
-    /// ledger, and so folds, before it runs the watcher's pass, in sequence.
+    /// The counter pass runs on its own thread, so a fold can land while a
+    /// pass is reading. The pass plans and reads from the store it loaded
+    /// when it began, but writes under this same cache lock onto the store
+    /// as it stands then, so a fold made meanwhile keeps its tallies and
+    /// cursor; were the pass to write its starting store back, the next fold
+    /// would take the rows still in the window again.
     pub(crate) fn fold_ledger(
         &self,
         enabled: &dyn Fn() -> bool,
@@ -3853,6 +4168,54 @@ mod tests {
             .unwrap();
         assert_eq!(summary, Default::default());
         assert_eq!(f.rows_text(), before);
+    }
+
+    /// A ledger fold that lands while a pass is reading is kept: the pass
+    /// writes its rows onto the store as it stands at the write, not over
+    /// it with the store it loaded when it began. The pass runs off the
+    /// watcher's tick, so the next tick's fold can arrive mid-pass.
+    #[test]
+    fn a_fold_during_a_pass_is_not_written_over() {
+        let f = Fixture::new();
+        let first = f.write("x.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &first)]);
+        fold_with(&f.pass, true, vec![ledger_call(1, 30, "PRIVATE-CODEX-ID")]).unwrap();
+        let second = f.write("y.jsonl", &codex_bytes());
+
+        let (entered, read_entered) = std::sync::mpsc::channel::<()>();
+        let (go, wait_for_go) = std::sync::mpsc::channel::<()>();
+        let wait_for_go = Mutex::new(wait_for_go);
+        f.pass.set_before_read_for_test(Arc::new(move || {
+            let _ = entered.send(());
+            let _ = wait_for_go.lock().unwrap().recv();
+        }));
+        std::thread::scope(|scope| {
+            let pass = scope.spawn(|| {
+                f.run(&[
+                    candidate(SOURCE_CODEX, &first),
+                    candidate(SOURCE_CODEX, &second),
+                ])
+            });
+            read_entered.recv().unwrap();
+            fold_with(
+                &f.pass,
+                true,
+                vec![
+                    ledger_call(1, 30, "PRIVATE-CODEX-ID"),
+                    ledger_call(2, 20, "PRIVATE-CODEX-ID"),
+                ],
+            )
+            .unwrap();
+            drop(go);
+            assert_eq!(pass.join().unwrap().read, 1);
+        });
+        let store = f.pass.load_cached().unwrap().unwrap();
+        assert_eq!(store.rows.len(), 2, "the pass's row is written");
+        assert_eq!(
+            store.ledger_folded_through,
+            Some(2),
+            "the fold made during the pass is kept"
+        );
     }
 
     #[test]

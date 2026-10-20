@@ -4466,9 +4466,20 @@ D4, open; off by default). While it is on, each full watcher poll hands the
 Claude Code and Codex sessions it discovered to the pass, which reads a
 session only once it has been quiet for `quiescence_secs`, only when its size
 or last write changed since its row was made, and at most 16 files and 64 MB
-per poll, newest first, so a first pass over a large corpus catches up across
-polls. The first file a poll reads is always read, so a file over 64 MB is
-read alone in one poll rather than never. It is not tied to whether a session was offered, sent, kept or
+per pass, newest first, so a first pass over a large corpus catches up across
+polls. The first file a pass reads is always read, so a file over 64 MB is
+read alone in one pass rather than never. The pass runs on a thread of its
+own, not in the poll: the poll hands it the sessions and goes on, so new
+sessions, offers, the queue and `status_changed` never wait for a large
+transcript to be read. One pass runs at a time. A poll that arrives while
+one is running keeps its sessions as the one pass waiting to run next,
+replacing any older one, so the newest sessions are read once the running
+pass finishes. A pass stops between files, and writes nothing, when the
+daemon stops, the setting goes off or `unenroll` clears the store; a pass
+that was running or waiting at an `unenroll` writes nothing afterwards and
+makes no new key. No event marks a pass's end: `insights_week` answers from
+whatever the last finished pass stored, with its `updated_at`.
+It is not tied to whether a session was offered, sent, kept or
 declined. A session in a folder that is Never, by its own rule or a global
 Never contribution override (every folder while one is in force), is not
 read, and rows already stored for one are dropped by the next pass and left
