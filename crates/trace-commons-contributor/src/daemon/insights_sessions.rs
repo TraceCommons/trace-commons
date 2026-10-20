@@ -1103,9 +1103,21 @@ mod tests {
     fn the_cursor_follows_recency_not_the_listed_order() {
         let f = Fixture::new();
         run_owned(&f, &five_dated_and_one_undated(&f));
-        let first = f.page(None, 1);
-        // By recency the undated row (written 2026-09-20) leads.
-        assert_eq!(rows(&first)[0]["started_at"], serde_json::Value::Null);
+        // By recency the undated row (written 2026-09-20) and 09-18 are
+        // taken; the page lists 09-18 first and the undated row last.
+        let first = f.page(None, 2);
+        assert_eq!(
+            rows(&first)
+                .iter()
+                .map(|row| row["started_at"].clone())
+                .collect::<Vec<_>>(),
+            [
+                serde_json::json!("2026-09-18T09:00:00+00:00"),
+                serde_json::Value::Null,
+            ]
+        );
+        // A cursor taken from the listed last row (the undated one) would
+        // list 09-18 again; the recency cursor goes on to 09-17.
         let second = f.page(first["next"].as_str(), 2);
         assert_eq!(
             rows(&second)
@@ -1113,8 +1125,8 @@ mod tests {
                 .map(|row| row["started_at"].clone())
                 .collect::<Vec<_>>(),
             [
-                serde_json::json!("2026-09-18T09:00:00+00:00"),
                 serde_json::json!("2026-09-17T09:00:00+00:00"),
+                serde_json::json!("2026-09-16T09:00:00+00:00"),
             ]
         );
     }

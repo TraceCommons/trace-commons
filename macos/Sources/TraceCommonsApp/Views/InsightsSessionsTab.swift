@@ -150,7 +150,7 @@ struct InsightsSessionsTab: View {
             .overlay {
                 if keyRow == row.sessionRef {
                     RoundedRectangle(cornerRadius: GlassTokens.Radius.cardQuiet)
-                        .strokeBorder(GlassTokens.Color.chartSeries1.color, lineWidth: 2)
+                        .strokeBorder(GlassTokens.Color.selection.color, lineWidth: 2)
                 }
             }
         }
