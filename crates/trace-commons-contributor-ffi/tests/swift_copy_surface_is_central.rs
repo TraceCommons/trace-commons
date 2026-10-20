@@ -318,6 +318,10 @@ fn fragments(sentence: &str) -> Vec<String> {
     out.into_iter()
         .map(|f| normalise(&f))
         .filter(|f| f.split_whitespace().count() >= 4)
+        // A fragment of holes and separators only (`{folder} · {date}
+        // {time} · {harness}`) holds no word a shell could write itself, and
+        // matches any interpolation of the same shape.
+        .filter(|f| f.chars().any(char::is_alphabetic))
         .collect()
 }
 

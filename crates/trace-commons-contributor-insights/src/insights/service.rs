@@ -1844,6 +1844,21 @@ mod tests {
                 "analytics_session_label_undated",
                 "Undated \u{b7} {harness} \u{b7} {t} tokens",
             ),
+            // A watched trace's picker label under feed T, and the folder
+            // word for a digest no known folder matches.
+            (
+                "analytics_watched_label",
+                "{folder} \u{b7} {date} {time} \u{b7} {harness} \u{b7} {n} turns",
+            ),
+            (
+                "analytics_watched_label_no_turns",
+                "{folder} \u{b7} {date} {time} \u{b7} {harness}",
+            ),
+            (
+                "analytics_watched_label_undated",
+                "{folder} \u{b7} Undated \u{b7} {harness}",
+            ),
+            ("analytics_folder_unknown", "Unknown folder"),
             ("analytics_setting_ledger_feed", "Count Private AI tokens"),
             // Where a feed T session's calls went (design part B). Only
             // proof reads "verified"; no proxy record never reads as "not

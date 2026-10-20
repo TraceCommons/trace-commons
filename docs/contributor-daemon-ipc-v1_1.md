@@ -609,6 +609,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
 | `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
+| `insights_sessions` | — | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `truncated`, `sessions[]` of `{session_ref, source, started_at, turns, folder}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
+| `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]`, `leaves_this_mac` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" and "`leaves_this_mac`" below |
@@ -4639,7 +4641,8 @@ sessions on disk. Otherwise:
   never the store's own order, which follows a keyed digest of each path
   and so means nothing. A row carries no reference, so a shell that draws
   them knows each by its place, and the order is stable from one answer to
-  the next while no row is re-read.
+  the next while no row is re-read. The Sessions tab lists the same rows,
+  each with an opaque reference, through `insights_sessions`.
 - `routing` is where the session's proxy calls went, from its route tally
   (above), or `null` on every row while `routing_available` is false.
   `category` is one of, first match wins, every label from the proxy's
@@ -4719,6 +4722,59 @@ With the setting off none of these are present, as above.
 No path, project key or label, session or message ID, digest, file content
 or price ever appears here, and nothing is logged but fixed labels. The
 method carries no sentence; a shell draws the core's copy for these labels.
+
+### `insights_sessions` and `insights_session_drill`
+
+Additive. The Insights Sessions tab over the same counter store (feed T):
+the stored sessions, and one of them turn by turn. Synchronous, read-only,
+no network, and local under the developer dry run, like `insights_week`, and
+gated the same way: with `insights_counter_pass` off both answer
+`{"enabled": false, "feed": "counter_pass"}` without opening the store or the
+key; on, a key, store or folder-rule read that fails answers
+`{"enabled": true, "feed": "counter_pass", "readable": false, "reason"}`
+(`key_unavailable`, `store_unreadable`, `policy_unreadable`), never an empty
+list. Sessions in a Never folder are neither listed nor drilled.
+
+`insights_sessions` takes no params. While enabled and readable it answers
+`updated_at`, `sessions_stored` (rows outside Never folders), `truncated`
+(more stored than listed) and `sessions[]`, newest first by the transcript's
+earliest recorded event, at most 200. Each row is exactly
+`{"session_ref", "source", "started_at", "turns", "folder"}`:
+
+- `session_ref` is opaque: `t` and the order the pass made the row in. It is
+  never a digest or a path, and it changes when the session's file grows and
+  its row is made again, so a shell lists again rather than keeping it.
+- `source` is `claude_code` or `codex`.
+- `started_at` is the earliest recorded event, RFC 3339, or `null`.
+- `turns` is the Claude Code turn count; `null` for Codex, which records no
+  per-turn series (owner decision D11, open), and for an unreadable session.
+- `folder` is the folder's display label, the same `project_label` that
+  `list_projects` shows for it, or `null` when no folder the daemon knows
+  (folder rules, the queue, uploads, the folders the watcher has seen) has
+  that digest now. The row stores only a keyed digest of its folder's project
+  key; the label is matched at answer time and never stored, and no key or
+  path crosses. A shell draws `null` with the core's
+  `analytics_folder_unknown`.
+
+`insights_session_drill` takes `session_ref` (**required**, from the list)
+and `tz` (optional, seconds east; the daemon's local offset when absent). It
+answers `{"enabled", "feed", "readable", "session"}`, where `session` has
+exactly the shape of the in-process `session_drill` operation's `session`,
+computed by the same engine from the stored counters, with `feed:
+"counter_pass"` and `session_ref` echoed: the date and the span are the
+transcript's earliest and latest recorded events, by the rule a saved
+snapshot's time evidence uses, so the same bytes give the same drill. A
+Codex session has `series: null` and `series_unavailable: "not_recorded"`.
+A missing or non-string `session_ref` is `bad_params` /
+`insights-session-ref-invalid`; one that names no listed row (never stored,
+made again since, or in a Never folder) is `bad_params` /
+`insights-session-unknown`; a malformed `tz` is `bad_params` /
+`tz-invalid`.
+
+Each stored row keeps the earliest and latest recorded event for this. A row
+stored before they were kept is read once more, within the per-poll limits,
+even when its file is unchanged; until then its drill's date and span are
+`null`, never guessed.
 
 ### `set_settings`
 

@@ -29,7 +29,10 @@
 //! going first, and limited to recent weeks. Rows are keyed by a keyed digest
 //! of the harness and the session's address, and carry a keyed digest of the
 //! folder's project key (owner decision D7, open), never the key itself or a
-//! path. The key is the daemon's own, in the OS keychain behind the
+//! path. Each row also keeps its transcript's earliest and latest recorded
+//! event, by the rule a saved snapshot's time evidence uses, for the Sessions
+//! drill's date and span; a row stored before those were kept is read once
+//! more. The key is the daemon's own, in the OS keychain behind the
 //! `DigestKeyStore` trait (owner decision D16, open); tests use an in-memory
 //! store and never reach a keychain. The store and its key are removed on
 //! unenroll.
@@ -47,6 +50,14 @@
 //! (owner decision D15, extended to feed T). Never a session or project
 //! digest, a path, a message or session ID, a backend or model name, a price
 //! or a title. Nothing here is logged except fixed labels.
+//!
+//! The Sessions tab reads the same rows through `insights_sessions` and
+//! `insights_session_drill` (`daemon::insights_sessions`): each listed row
+//! carries an opaque reference (`t` and the order the row was made in, the
+//! engine's own `session_ref`), its harness, first event time, turn count
+//! and its folder's display label, resolved at answer time from the folder
+//! digest and never stored; the drill is the saved-snapshot drill's shape.
+//! Still never a digest, a path or a key.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -182,9 +193,40 @@ struct CounterRow {
     /// every pass.
     #[serde(default)]
     harness_session_read: bool,
+    /// The transcript's earliest and latest recorded event, by the rule a
+    /// saved snapshot's time evidence uses
+    /// (`insights::time_evidence::extract_recorded_time_evidence`), so the
+    /// Sessions drill's date and span match a saved snapshot's for the same
+    /// bytes. `None` when no record carries a valid time, or the file could
+    /// not be read or parsed. Never on the wire except as the drill's date
+    /// and span, and as `insights_sessions`' `started_at`.
+    #[serde(default)]
+    earliest_event_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    latest_event_at: Option<DateTime<Utc>>,
+    /// Whether the two times above were looked for when the row was read. A
+    /// row made before they were kept lacks it and is read once more, within
+    /// the per-poll budget, even when its file is unchanged.
+    #[serde(default)]
+    event_span_read: bool,
 }
 
 impl CounterRow {
+    /// The opaque reference the Sessions methods name this row by: the
+    /// engine's own `session_ref`, the order the row was made in. Never a
+    /// digest or a path. A row read again when its file grew is made again
+    /// under a new one.
+    fn reference(&self) -> String {
+        format!("t{}", self.seq)
+    }
+
+    /// The time a Sessions row is listed and labelled by: its earliest
+    /// recorded event, the drill's date; for a row made before that was
+    /// kept, its first event.
+    fn listed_at(&self) -> Option<DateTime<Utc>> {
+        self.earliest_event_at.or(self.first_event_at)
+    }
+
     fn turns(&self) -> usize {
         match &self.body {
             RowBody::Claude { series, .. } => series.turns.len(),
@@ -203,7 +245,7 @@ impl CounterRow {
         SessionInput {
             // The order the row was made in, so the engine can tell the
             // sessions apart. Never a digest; every wire form drops it.
-            session_ref: format!("t{}", self.seq),
+            session_ref: self.reference(),
             import_seq: self.seq,
             placed_at: self.placed_at,
             // Feed T rows are one per session address, and the overlap rule
@@ -456,6 +498,7 @@ impl CounterPass {
                 row.size_bytes == candidate.size_bytes
                     && row.modified_at == candidate.modified_at
                     && row.harness_session_read
+                    && row.event_span_read
             });
             if unchanged && !removals.contains(&session) {
                 continue;
@@ -482,19 +525,22 @@ impl CounterPass {
             }
             bytes_budgeted = bytes_budgeted.saturating_add(cost);
             removals.remove(&session);
-            let (body, harness_session, first_event_at) = read_body(source, candidate, &key);
+            let read = read_body(source, candidate, &key);
             reads.push((
                 session,
                 CounterRow {
                     size_bytes: candidate.size_bytes,
                     modified_at: candidate.modified_at,
                     placed_at: candidate.started_at,
-                    first_event_at,
+                    first_event_at: read.first_event_at,
                     project: project_digest(&key, &project_key),
                     seq: 0,
-                    body,
-                    harness_session,
+                    body: read.body,
+                    harness_session: read.harness_session,
                     harness_session_read: true,
+                    earliest_event_at: read.span.map(|(earliest, _)| earliest),
+                    latest_event_at: read.span.map(|(_, latest)| latest),
+                    event_span_read: true,
                 },
             ));
         }
@@ -731,6 +777,157 @@ impl CounterPass {
             tracing::warn!("insights counter key could not be forgotten");
         }
         Ok(())
+    }
+
+    /// The rows a Sessions answer may show, with the key they were made
+    /// under: `Ok(None)` before any pass made a key, and no rows when the
+    /// store was made under another key. Never-folder rows are left out.
+    fn visible_rows(
+        &self,
+        never_project_keys: &NeverFolders,
+    ) -> Result<(Option<DigestKey>, Vec<CounterRow>), &'static str> {
+        // Never creates a key: no key means no pass has stored a row yet.
+        let key = self.keys.load().map_err(|_| UNREADABLE_KEY)?;
+        let store = self.load_cached()?;
+        let rows = match (&key, &store) {
+            (Some(key), Some(store)) if store.key_fingerprint == key_fingerprint(key) => {
+                let never = never_digests(key, never_project_keys);
+                store
+                    .rows
+                    .values()
+                    .filter(|row| !never.contains(&row.project))
+                    .cloned()
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        Ok((key, rows))
+    }
+
+    /// The `insights_sessions` answer: the stored sessions newest first, at
+    /// most `limit`, each with an opaque reference, its harness, its first
+    /// recorded event, its turns (Claude Code only) and its folder's label.
+    ///
+    /// `folders` are the project keys the daemon knows, each with the label
+    /// it shows for that folder; a row's folder digest is matched against
+    /// their digests under the counter key, here, so neither a key nor a
+    /// digest leaves this function. No match crosses as `null`.
+    pub(crate) fn sessions_value(
+        &self,
+        enabled: bool,
+        never_project_keys: &NeverFolders,
+        folders: &[(String, String)],
+        limit: usize,
+    ) -> serde_json::Value {
+        if !enabled {
+            // Owner decision D4, open: nothing is read for Insights.
+            return serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS});
+        }
+        let (key, mut rows) = match self.visible_rows(never_project_keys) {
+            Ok(found) => found,
+            Err(reason) => return unreadable_value(reason),
+        };
+        let labels: BTreeMap<KeyedDigest, &str> = match &key {
+            Some(key) => folders
+                .iter()
+                .map(|(project_key, label)| (project_digest(key, project_key), label.as_str()))
+                .collect(),
+            None => BTreeMap::new(),
+        };
+        // Newest first by the first recorded event; a row with none by the
+        // time discovery placed it, then by its file's last write. Ties go
+        // to the row made later.
+        rows.sort_by_key(|row| {
+            std::cmp::Reverse((
+                row.listed_at().or(row.placed_at).unwrap_or(row.modified_at),
+                row.seq,
+            ))
+        });
+        let stored = rows.len();
+        let sessions: Vec<serde_json::Value> = rows
+            .iter()
+            .take(limit)
+            .map(|row| {
+                let source = match &row.body {
+                    RowBody::Claude { .. } => AnalyticsSource::ClaudeCode,
+                    RowBody::Codex { .. } => AnalyticsSource::Codex,
+                    RowBody::Unknown { source, .. } => *source,
+                };
+                let turns = match &row.body {
+                    RowBody::Claude { series, .. } => Some(series.turns.len()),
+                    _ => None,
+                };
+                serde_json::json!({
+                    "session_ref": row.reference(),
+                    "source": source,
+                    "started_at": row.listed_at().map(|at| at.to_rfc3339()),
+                    "turns": turns,
+                    "folder": labels.get(&row.project).copied(),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "enabled": true,
+            "feed": FEED_COUNTER_PASS,
+            "readable": true,
+            "updated_at": self.updated_at(),
+            "sessions_stored": stored,
+            "truncated": stored > limit,
+            "sessions": sessions,
+        })
+    }
+
+    /// The `insights_session_drill` answer for the row `reference` names, in
+    /// the shape a saved snapshot's `session_drill` has, from the same
+    /// engine. `Err` when no visible row has that reference.
+    pub(crate) fn drill_value(
+        &self,
+        enabled: bool,
+        reference: &str,
+        never_project_keys: &NeverFolders,
+        tz: FixedOffset,
+    ) -> Result<serde_json::Value, &'static str> {
+        if !enabled {
+            return Ok(serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS}));
+        }
+        let rows = match self.visible_rows(never_project_keys) {
+            Ok((_, rows)) => rows,
+            Err(reason) => return Ok(unreadable_value(reason)),
+        };
+        let row = rows
+            .iter()
+            .find(|row| row.reference() == reference)
+            .ok_or(super::insights_sessions::ERR_SESSION_UNKNOWN)?;
+        let input = row.session_input();
+        let mut drill = crate::insights::session_drill::session_drill(
+            reference,
+            &input.body,
+            row.earliest_event_at,
+            row.latest_event_at,
+            tz,
+        );
+        drill.feed = Feed::CounterPass;
+        Ok(serde_json::json!({
+            "enabled": true,
+            "feed": FEED_COUNTER_PASS,
+            "readable": true,
+            "session": drill,
+        }))
+    }
+
+    /// When a pass last finished, RFC 3339.
+    fn updated_at(&self) -> Option<String> {
+        self.last_pass_at
+            .lock()
+            .ok()
+            .and_then(|at| *at)
+            .map(|at| at.to_rfc3339())
+    }
+
+    /// Make the key, as a pass would, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn keys_load_or_create_for_test(&self) {
+        self.keys.load_or_create().unwrap();
     }
 
     /// Whether no key is held, for tests that check a clear forgot it.
@@ -974,18 +1171,19 @@ fn never_digests(key: &DigestKey, never: &NeverFolders) -> NeverDigests {
 /// the transcript records, under the harness name the adapter reports (the
 /// same string the proxy ledger's attribution uses); `None` when there is
 /// none or more than one, as a saved snapshot's identity does.
-fn read_body(
-    source: AnalyticsSource,
-    candidate: &CounterCandidate,
-    key: &DigestKey,
-) -> (RowBody, Option<KeyedDigest>, Option<DateTime<Utc>>) {
+fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &DigestKey) -> ReadBody {
     let unknown = RowBody::Unknown {
         source,
         reason: UnknownReason::NoUsageCounters,
     };
     // The bound is on the file read; `size_bytes` is the whole group's.
     let Some(bytes) = bounded_read(&candidate.path, COUNTER_PASS_MAX_SESSION_BYTES) else {
-        return (unknown, None, None);
+        return ReadBody {
+            body: unknown,
+            harness_session: None,
+            first_event_at: None,
+            span: None,
+        };
     };
     let harness_session = harness_session_id(source_format(source), &bytes)
         .map(|id| harness_session_digest(key, candidate.source, &id));
@@ -1015,7 +1213,33 @@ fn read_body(
             Err(_) => unknown,
         },
     };
-    (body, harness_session, first_event_at)
+    ReadBody {
+        body,
+        harness_session,
+        first_event_at,
+        span: recorded_span(source, &bytes),
+    }
+}
+
+/// What one read of a session file yields.
+struct ReadBody {
+    body: RowBody,
+    harness_session: Option<KeyedDigest>,
+    first_event_at: Option<DateTime<Utc>>,
+    /// The earliest and latest recorded event.
+    span: Option<(DateTime<Utc>, DateTime<Utc>)>,
+}
+
+/// The earliest and latest recorded event, by the same extractor a saved
+/// snapshot's time evidence comes from. `None` when the file does not parse
+/// or carries no valid time: never a guess.
+fn recorded_span(source: AnalyticsSource, bytes: &[u8]) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let evidence = crate::insights::time_evidence::extract_recorded_time_evidence(
+        source_format(source),
+        bytes,
+    )
+    .ok()?;
+    Some((evidence.earliest?.recorded_at, evidence.latest?.recorded_at))
 }
 
 /// The first line's top-level `timestamp`, RFC 3339, as UTC: the rule the
@@ -1236,6 +1460,17 @@ fn parse_iso_week(text: &str) -> Option<NaiveDate> {
 }
 
 /// What the answer joins to one engine row, by its `t{seq}` reference.
+/// An answer for a store or key that could not be read: never empty, never
+/// zero.
+fn unreadable_value(reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": true,
+        "feed": FEED_COUNTER_PASS,
+        "readable": false,
+        "reason": reason,
+    })
+}
+
 struct RowJoin<'a> {
     started_at: Option<DateTime<Utc>>,
     tally: Option<&'a RouteTally>,
@@ -1859,6 +2094,9 @@ mod tests {
                     body: RowBody::Codex { observed: None },
                     harness_session: None,
                     harness_session_read: true,
+                    earliest_event_at: None,
+                    latest_event_at: None,
+                    event_span_read: true,
                 },
             );
         }

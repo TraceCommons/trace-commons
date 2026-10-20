@@ -31,12 +31,19 @@ struct InsightsView: View {
         var weekReader: InsightsModel.WeekReader? = daemon.map { client in
             { isoWeek in try await client.insightsWeek(isoWeek: isoWeek) }
         }
+        var watchedReader: InsightsSessionsModel.WatchedReader? = daemon.map { client in
+            { try await client.insightsSessions() }
+        }
+        let watchedDrill: InsightsSessionsModel.WatchedDrillReader? = daemon.map { client in
+            { reference in try await client.insightsSessionDrill(sessionRef: reference) }
+        }
         #if DEBUG
         // A design review's sample week, in place of the daemon's week and
         // the store's analytics answers (`InsightsSampleWeek`).
         if InsightsSampleWeek.enabled {
             service = InsightsSampleWeek.service(fallback: service)
             weekReader = nil
+            watchedReader = nil
         }
         #endif
         let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
@@ -46,6 +53,8 @@ struct InsightsView: View {
                   model: InsightsModel(service: service, weekReader: weekReader),
                   comparisonModel: ComparisonTasksModel(service: service),
                   specificationModel: ComparisonSpecificationsModel(service: service),
+                  sessionsModel: InsightsSessionsModel(service: service, watchedReader: watchedReader,
+                                                       watchedDrill: watchedDrill),
                   turnOffRecapCard: turnOff)
     }
 
@@ -58,6 +67,7 @@ struct InsightsView: View {
                     comparisonModel: ComparisonTasksModel,
                     specificationModel: ComparisonSpecificationsModel,
                     overviewModel: InsightsOverviewModel? = nil,
+                    sessionsModel: InsightsSessionsModel? = nil,
                     initialTab: InsightsTab = .overview,
                     turnOffRecapCard: (@Sendable () async throws -> Void)? = nil) {
         self.storeSelection = storeSelection
@@ -67,7 +77,7 @@ struct InsightsView: View {
         _specificationModel = State(initialValue: specificationModel)
         _overviewModel = State(initialValue: overviewModel ?? InsightsOverviewModel(service: model.service))
         _patternsModel = State(initialValue: InsightsPatternsModel(service: model.service))
-        _sessionsModel = State(initialValue: InsightsSessionsModel(service: model.service))
+        _sessionsModel = State(initialValue: sessionsModel ?? InsightsSessionsModel(service: model.service))
         _comparisonsModel = State(initialValue: InsightsComparisonsModel(service: model.service))
         _tab = State(initialValue: initialTab)
         self.turnOffRecapCard = turnOffRecapCard
@@ -128,7 +138,8 @@ struct InsightsView: View {
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
                                     selectWeek: selectWeek)
             case .sessions:
-                InsightsSessionsTab(model: sessionsModel, snapshots: model.snapshots, copy: model.copy)
+                InsightsSessionsTab(model: sessionsModel, snapshots: model.snapshots, copy: model.copy,
+                                    notice: (model.counterPassNoticeKey ?? sessionsModel.noticeKey).map(model.text))
             case .analyze: content
             }
         }
@@ -184,10 +195,11 @@ struct InsightsView: View {
     }
 
     /// Feed T's week replaces the saved week in both tabs, its counted
-    /// sessions back the Sessions card's drill-down, and its weekly figures
-    /// go to the core for goals, the lever and the summary card; `nil`
-    /// (feed S) takes all of it away.
+    /// sessions back the Sessions card's drill-down, the Sessions tab lists
+    /// watched traces, and its weekly figures go to the core for goals, the
+    /// lever and the summary card; `nil` (feed S) takes all of it away.
     private func showCounterWeek(_ week: DaemonData.InsightsWeek?) {
+        sessionsModel.showWatched(week != nil)
         overviewModel.showCounter(week?.coreOverview, sessions: week.flatMap(InsightsCounterSessions.init(week:)))
         patternsModel.showCounter(week?.corePatterns)
         comparisonsModel.load(counterWeeks: week?.coreHistory, weekStart: week?.weekStart,

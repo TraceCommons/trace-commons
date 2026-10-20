@@ -3,7 +3,9 @@ import SwiftUI
 import TCBridge
 import TCDesign
 
-/// Sessions (drill-in) over one saved snapshot (feed S). Every word is the
+/// Sessions (drill-in) over one session: a watched trace while the daemon's
+/// watched-folder counting (feed T) shows, a saved snapshot (feed S)
+/// otherwise, never both (owner decision 2026-10-20). Every word is the
 /// core's analytics copy and every figure the core's. Input sent each turn is
 /// stacked cache read, cache write and uncached on the chart surface, with a
 /// dashed line at the long-context threshold and the core's lettered markers
@@ -17,10 +19,13 @@ import TCDesign
 /// or pressing a marker, reads that turn out in the legend.
 struct InsightsSessionsTab: View {
     let model: InsightsSessionsModel
-    /// Saved snapshots, newest first, for the session picker. Each is shown
-    /// by its label, never its ID.
+    /// Saved snapshots, newest first, for the session picker under feed S.
+    /// Each is shown by its label, never its ID.
     let snapshots: [LocalInsight]
     let copy: [String: String]
+    /// Why watched-folder counting is not showing (the window's week, or
+    /// this tab's own list), as Overview says it; `nil` otherwise.
+    var notice: String? = nil
     /// The turn being read; `nil` reads the whole session.
     @State private var readTurn: Int?
 
@@ -30,12 +35,11 @@ struct InsightsSessionsTab: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
-                if !snapshots.isEmpty {
+                if !choices.isEmpty {
                     GlassSelect(text("analytics_drill_session"), selection: Binding(
                         get: { model.selected ?? "" },
                         set: { model.select($0); readTurn = nil }
-                    ), options: InsightsSessionsWords.pickerChoices(snapshots, copy: copy)
-                        .map { GlassPickerOption($0.title, value: $0.value) })
+                    ), options: choices.map { GlassPickerOption($0.title, value: $0.value) })
                 }
                 if let drill = model.drill {
                     header(drill)
@@ -50,7 +54,7 @@ struct InsightsSessionsTab: View {
                             }
                         }
                     }
-                } else if model.failed || snapshots.isEmpty {
+                } else if model.failed || choices.isEmpty {
                     Text(text("analytics_unavailable")).insightsError()
                 }
                 if model.busy { GlassSpinner() }
@@ -61,13 +65,19 @@ struct InsightsSessionsTab: View {
         }
     }
 
+    /// Watched traces while feed T shows, the saved snapshots otherwise.
+    private var choices: [(value: String, title: String)] {
+        if let watched = model.watched { return InsightsSessionsWords.watchedChoices(watched, copy: copy) }
+        return InsightsSessionsWords.pickerChoices(snapshots, copy: copy)
+    }
+
     private func header(_ drill: InsightsSessionDrill) -> some View {
         HStack(alignment: .top, spacing: GlassTokens.Space.s5) {
             InsightsHarnessTile(source: drill.source ?? "")
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 // Which traces are counted, behind the header's "i".
                 InsightsSectionTitle(InsightsSessionsWords.header(drill, copy: copy),
-                                     info: [text("analytics_feed_saved")])
+                                     info: InsightsSessionsWords.feedLines(drill.feed, notice: notice, copy: copy))
                 if !drill.reasons.isEmpty {
                     Text(drill.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
                         .joined(separator: " \u{b7} "))

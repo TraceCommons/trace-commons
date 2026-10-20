@@ -2092,6 +2092,70 @@ extension DaemonData {
         }
     }
 
+    /// `insights_sessions`: the Sessions tab's list over the daemon's counter
+    /// pass (feed T), newest first. Use it only when `showsCounterPass`;
+    /// otherwise the tab shows saved snapshots. Each row is known by an
+    /// opaque `sessionRef`; no path, digest or session id crosses.
+    public struct InsightsSessions: Codable, Equatable, Sendable {
+        public let enabled: Bool
+        public let feed: String
+        /// `nil` while disabled; `false` when the store, key or folder rules
+        /// could not be read, which is never drawn as an empty list.
+        public let readable: Bool?
+        public let reason: String?
+        public let updatedAt: String?
+        public let sessionsStored: Int?
+        /// More stored than listed.
+        public let truncated: Bool?
+        public let sessions: [InsightsWatchedSession]?
+
+        /// Enabled, readable, from the counter pass, and carrying a list.
+        public var showsCounterPass: Bool {
+            enabled && readable == true && feed == "counter_pass" && sessions != nil
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case enabled, feed, readable, reason, truncated, sessions
+            case updatedAt = "updated_at"
+            case sessionsStored = "sessions_stored"
+        }
+    }
+
+    /// One watched trace in `insights_sessions`.
+    public struct InsightsWatchedSession: Codable, Equatable, Sendable, Identifiable {
+        /// Opaque; made again when the trace's file grows, so it is listed
+        /// again rather than kept.
+        public let sessionRef: String
+        public let source: String
+        /// The earliest recorded event, RFC 3339.
+        public let startedAt: String?
+        /// Claude Code only; `nil` for Codex, which records no turns.
+        public let turns: Int?
+        /// The folder's label, the one `list_projects` shows; `nil` when no
+        /// folder the daemon knows matches, drawn with the core's word.
+        public let folder: String?
+
+        public var id: String { sessionRef }
+
+        public enum CodingKeys: String, CodingKey {
+            case source, turns, folder
+            case sessionRef = "session_ref"
+            case startedAt = "started_at"
+        }
+    }
+
+    /// `insights_session_drill`: one watched trace turn by turn, in the
+    /// core's own `session_drill` shape (`session`), kept as the JSON it
+    /// came as so the app decodes it with the same `TCBridge` type the
+    /// saved drill uses.
+    public struct InsightsSessionDrillAnswer: Codable, Equatable, Sendable {
+        public let enabled: Bool
+        public let feed: String
+        public let readable: Bool?
+        public let reason: String?
+        public let session: CoreJSON?
+    }
+
     /// `insights_glance`: today's routed calls per tool from the proxy ledger
     /// (owner decision D3, settled 2026-10-09: on by default). Three shapes: off
     /// (`enabled: false`), unreadable (`readable: false`), and the day's

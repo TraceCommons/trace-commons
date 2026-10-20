@@ -56,6 +56,8 @@ pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
     // failed-check tokens are `f`, shared with the file counts.
     "v",
     "o",
+    // A watched trace's folder label (`list_projects`' label).
+    "folder",
 ];
 
 /// Key, words. Approved in Ron's 2026-10-11 owner review (D17).
@@ -376,6 +378,25 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_session_label_undated",
         "Undated · {harness} · {t} tokens",
     ),
+    // A watched trace's label in the session picker under feed T (owner
+    // decision 2026-10-20): its folder's label, its first recorded event's
+    // local date and time, the harness and its turns. A Codex trace records
+    // no turns, so its label has none.
+    (
+        "analytics_watched_label",
+        "{folder} · {date} {time} · {harness} · {n} turns",
+    ),
+    (
+        "analytics_watched_label_no_turns",
+        "{folder} · {date} {time} · {harness}",
+    ),
+    // The same label for a trace with no recorded event time.
+    (
+        "analytics_watched_label_undated",
+        "{folder} · Undated · {harness}",
+    ),
+    // `{folder}` when no folder the daemon knows matches the trace's.
+    ("analytics_folder_unknown", "Unknown folder"),
     ("analytics_turn", "Turn {n}"),
     (
         "analytics_codex_not_recorded",
