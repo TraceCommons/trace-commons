@@ -3099,6 +3099,151 @@ mod tests {
         assert!(!f.rows_text().contains("evicted"), "empty, left out");
     }
 
+    /// A digest for a synthetic row or mark, distinct per `i` and `tag`.
+    fn synthetic_digest(tag: u8, i: usize) -> KeyedDigest {
+        let mut digest = [0u8; 32];
+        digest[0] = tag;
+        digest[1..9].copy_from_slice(&(i as u64).to_be_bytes());
+        KeyedDigest(digest)
+    }
+
+    fn synthetic_row(modified_at: DateTime<Utc>, seq: u64, body: RowBody) -> CounterRow {
+        CounterRow {
+            size_bytes: 1,
+            modified_at,
+            placed_at: None,
+            first_event_at: None,
+            project: KeyedDigest([9; 32]),
+            seq,
+            body,
+            harness_session: None,
+            harness_session_read: true,
+            earliest_event_at: None,
+            latest_event_at: None,
+            event_span_read: true,
+            streamed: true,
+        }
+    }
+
+    /// `COUNTER_STORE_MAX_SESSIONS` eviction marks, all newer than
+    /// `written()` and older than `rows_at`.
+    fn full_marks(store: &mut CounterStore) {
+        for i in 0..COUNTER_STORE_MAX_SESSIONS {
+            store.evicted.insert(
+                synthetic_digest(0xEE, i),
+                Evicted {
+                    size_bytes: 1,
+                    modified_at: written() + Duration::seconds(1),
+                },
+            );
+        }
+    }
+
+    /// @poldsam's second review of #1499: a store holding a full set of
+    /// rows and a full set of eviction marks, all newer than an old,
+    /// unchanged file. Reading that file evicts it, and its new mark, the
+    /// oldest, is the one the mark cap drops in the same pass. With no row
+    /// and no mark it looked new on the next poll and was read again, every
+    /// poll. It must be read at most once, and not again after a restart.
+    #[test]
+    fn an_old_session_past_full_marks_is_not_read_every_poll() {
+        let f = Fixture::new();
+        let key = f.pass.keys.load_or_create().unwrap();
+        let mut store = CounterStore::empty(key_fingerprint(&key));
+        for i in 0..COUNTER_STORE_MAX_SESSIONS {
+            store.rows.insert(
+                synthetic_digest(0x11, i),
+                synthetic_row(
+                    written() + Duration::seconds(2),
+                    i as u64,
+                    RowBody::Codex { observed: None },
+                ),
+            );
+        }
+        store.next_seq = COUNTER_STORE_MAX_SESSIONS as u64;
+        full_marks(&mut store);
+        f.pass.save(store).unwrap();
+
+        let path = f.write("old.jsonl", &claude_bytes());
+        let old = candidate(SOURCE_CLAUDE_CODE, &path);
+        let first = f.run(std::slice::from_ref(&old)).read;
+        assert!(first <= 1, "read at most once, got {first}");
+        let second = f.run(std::slice::from_ref(&old)).read;
+        let third = f.run(std::slice::from_ref(&old)).read;
+        assert_eq!((second, third), (0, 0), "second and third polls");
+        let restarted = f
+            .reopened()
+            .run_pass(
+                std::slice::from_ref(&old),
+                &NeverFolders::NONE,
+                now(),
+                QUIET,
+                &mut |_| (PROJECT.to_string(), false),
+            )
+            .unwrap();
+        assert_eq!(restarted.read, 0, "nor after a restart");
+        let store = f.pass.load_cached().unwrap().unwrap();
+        assert_eq!(store.rows.len(), COUNTER_STORE_MAX_SESSIONS);
+        assert!(store.rows.values().all(|row| row.modified_at > written()));
+    }
+
+    /// The same loop with the turn cap binding instead of the session cap:
+    /// a few rows, far under the session cap, holding all but a handful of
+    /// the turn cap, with the marks full. The old file is read once,
+    /// evicted, and never read again, also while newer sessions keep
+    /// arriving and the caps keep evicting.
+    #[test]
+    fn an_old_session_past_full_marks_is_not_read_every_poll_under_the_turn_cap() {
+        let f = Fixture::new();
+        let path = f.write("old.jsonl", &claude_bytes());
+        let old = candidate(SOURCE_CLAUDE_CODE, &path);
+        // The old file's turns, from a throwaway pass over it.
+        let (old_turns, mut body) = {
+            let scratch = Fixture::new();
+            let scratch_path = scratch.write("old.jsonl", &claude_bytes());
+            scratch.run(&[candidate(SOURCE_CLAUDE_CODE, &scratch_path)]);
+            let store = scratch.pass.load_cached().unwrap().unwrap();
+            let row = store.rows.values().next().unwrap().clone();
+            (row.turns(), row.body)
+        };
+        assert!(old_turns > 1);
+        // One row holding the turn cap less one fewer than the old file's
+        // turns, so the old file does not fit beside it.
+        let RowBody::Claude { series, .. } = &mut body else {
+            panic!("a Claude row");
+        };
+        series.tool_calls.clear();
+        let one = series.turns[0].clone();
+        series.turns = vec![one; COUNTER_STORE_MAX_TURNS - (old_turns - 1)];
+
+        let key = f.pass.keys.load_or_create().unwrap();
+        let mut store = CounterStore::empty(key_fingerprint(&key));
+        store.rows.insert(
+            synthetic_digest(0x11, 0),
+            synthetic_row(written() + Duration::seconds(2), 0, body),
+        );
+        store.next_seq = 1;
+        full_marks(&mut store);
+        f.pass.save(store).unwrap();
+
+        assert_eq!(f.run(std::slice::from_ref(&old)).read, 1, "first poll");
+        assert_eq!(
+            f.pass.load_cached().unwrap().unwrap().rows.len(),
+            1,
+            "the old file was evicted"
+        );
+        assert_eq!(f.run(std::slice::from_ref(&old)).read, 0, "second poll");
+        assert_eq!(f.run(std::slice::from_ref(&old)).read, 0, "third poll");
+
+        // Newer sessions arrive and the caps evict again; the old file is
+        // still not read.
+        let newer_path = f.write("newer.jsonl", &claude_bytes());
+        let mut newer = candidate(SOURCE_CLAUDE_CODE, &newer_path);
+        newer.modified_at = written() + Duration::seconds(3);
+        assert_eq!(f.run(&[newer.clone(), old.clone()]).read, 1, "only the newer");
+        assert_eq!(f.run(&[newer, old]).read, 0, "fourth poll");
+    }
+
     #[test]
     fn sessions_older_than_the_kept_weeks_are_not_read_and_old_rows_drop() {
         let f = Fixture::new();
