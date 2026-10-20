@@ -306,6 +306,25 @@ impl CounterRow {
     }
 }
 
+/// The tag a `insights_sessions` cursor carries: the first four bytes of
+/// the key's fingerprint, exclusive-or the store's generation, as a number
+/// of at most ten digits (no digest-like run crosses). A new key (a new
+/// device) or a store begun again under the same key (an unreadable file, a
+/// clear) is a new tag, so a cursor from before is refused. A store written
+/// before generations reads as generation `0`, so its tag, and the cursors
+/// already answered from it, are unchanged until it is begun again.
+fn store_tag_of(key: &DigestKey, store: &CounterStore) -> u64 {
+    let bytes = key_fingerprint(key).0;
+    let key_part = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    u64::from(key_part ^ store.generation)
+}
+
+/// A store's generation: random and never `0`, the value a store written
+/// before generations reads as.
+fn new_generation() -> u32 {
+    (uuid::Uuid::new_v4().as_u128() as u32).max(1)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CounterStore {
@@ -340,6 +359,14 @@ struct CounterStore {
     /// store written before it, and left out of the file while empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     evicted: BTreeMap<KeyedDigest, Evicted>,
+    /// Names this store, apart from its key: drawn at random when the
+    /// store is begun, so a store begun again under the same key (an
+    /// unreadable file, a clear) is another store, and an
+    /// `insights_sessions` cursor from before is refused rather than read
+    /// against references that now name other sessions. `0` in a store
+    /// written before it.
+    #[serde(default)]
+    generation: u32,
 }
 
 /// The observation an evicted session's row was made from. No path and no
@@ -369,6 +396,7 @@ impl CounterStore {
             ledger_folded_through: None,
             ledger_folded_started: None,
             evicted: BTreeMap::new(),
+            generation: new_generation(),
         }
     }
 }
@@ -1212,16 +1240,12 @@ impl CounterPass {
         Ok((key, store))
     }
 
-    /// The tag a `insights_sessions` cursor carries: the first four bytes
-    /// of the key's fingerprint, as a number, or `0` without a key. A new
-    /// key (a cleared store, a new device) is a new tag, so a cursor from
-    /// before is refused.
+    /// The tag a `insights_sessions` cursor carries for the store now
+    /// visible: `store_tag_of` it, or `0` with no key or store.
+    #[cfg(test)]
     pub(crate) fn store_tag(&self) -> u64 {
-        match self.keys.load() {
-            Ok(Some(key)) => {
-                let bytes = key_fingerprint(&key).0;
-                u64::from(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-            }
+        match self.visible_store() {
+            Ok((Some(key), Some(store))) => store_tag_of(&key, &store),
             _ => 0,
         }
     }
@@ -1278,7 +1302,10 @@ impl CounterPass {
         };
         // A cursor from another store names other sessions: refuse it, and
         // the shell reads the first page.
-        let tag = self.store_tag();
+        let tag = match (&key, &store) {
+            (Some(key), Some(store)) => store_tag_of(key, store),
+            _ => 0,
+        };
         if page.before.is_some() && page.store != tag {
             return Err(super::insights_sessions::ERR_SESSIONS_CURSOR_INVALID);
         }

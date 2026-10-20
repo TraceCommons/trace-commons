@@ -4770,13 +4770,15 @@ neither answers exactly the first page an unpaged daemon answered, so a
 client that sends no params keeps working:
 
 - `before`: the `next` cursor an earlier page answered. It is opaque (`p`,
-  then four plain-digit numbers separated by `.`, the last naming the store
-  and its key): never a reference, digest or path. A non-string, a string
-  not in that format (a sign or an empty part is refused), or a cursor
-  answered from another store (it started again under a new key, so its
-  references name other sessions now) is `bad_params` /
-  `insights-sessions-cursor-invalid`. A client that gets it reads the first
-  page.
+  then four plain-digit numbers separated by `.`, the last naming the store:
+  its key and a generation drawn at random when the store is begun): never
+  a reference, digest or path. A non-string, a string not in that format (a
+  sign or an empty part is refused), or a cursor answered from another
+  store is `bad_params` /
+  `insights-sessions-cursor-invalid`. Another store is one under a new key,
+  or one begun again under the same key (an unreadable file, a clear):
+  either way its references name other sessions now. A client that gets it
+  reads the first page.
 - `limit`: the most rows this page lists, a whole number of at least 1;
   above 200 is held to 200; absent is 200. Anything else is `bad_params` /
   `insights-sessions-limit-invalid`.

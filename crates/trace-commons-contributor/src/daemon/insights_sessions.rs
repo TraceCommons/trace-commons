@@ -1072,6 +1072,36 @@ mod tests {
         );
     }
 
+    /// A store started again under the same key (its file unreadable, so
+    /// the pass begins an empty one) hands `t0`, `t1`, ... to other
+    /// sessions: a cursor from before is refused, though the key is the
+    /// same.
+    #[test]
+    fn a_cursor_from_a_store_restarted_under_the_same_key_is_refused() {
+        let mut f = Fixture::new();
+        let files = five_dated_and_one_undated(&f);
+        run_owned(&f, &files);
+        let cursor = f.page(None, 3)["next"].as_str().unwrap().to_string();
+        assert!(f.page_result(Some(&cursor), 3).is_ok(), "same store");
+
+        // The file is unreadable when the daemon starts again, under the
+        // same key: the pass starts an empty store and reads the sessions
+        // into it afresh.
+        let path = f.dir.path().join(COUNTER_ROWS_FILE);
+        std::fs::write(&path, b"not a store").unwrap();
+        f.pass = CounterPass::with_keys(path, Box::new(InMemoryDigestKeyStore::with_seed([3; 32])));
+        run_owned(&f, &files);
+        assert_eq!(
+            f.page_result(Some(&cursor), 3),
+            Err(ERR_SESSIONS_CURSOR_INVALID)
+        );
+        let again = f.page(None, 3);
+        assert!(
+            f.page_result(Some(again["next"].as_str().unwrap()), 3)
+                .is_ok()
+        );
+    }
+
     /// Rows are placed by their first event, and stored late: a row whose
     /// event falls between page 1's top and its cursor is above the cursor,
     /// so no later page returns it. It lists at its place on the next
