@@ -1041,7 +1041,9 @@ enum InsightsPatternsWords {
         let underCount = leadsWithCount(card)
         switch card.kind {
         case "repeated_reads" where underCount:
-            return fill(text("analytics_pattern_repeated_reads_count_under_count", copy), ["f": count(card.files, copy)])
+            let key = "analytics_pattern_repeated_reads_count_under_count"
+                + (card.files == 1 ? "_one" : "_other")
+            return fill(text(key, copy), ["f": count(card.files, copy)])
         case "retried_calls" where underCount:
             return text("analytics_pattern_retried_calls_count_under_count", copy)
         case "edit_fail_edit" where underCount:
@@ -1396,8 +1398,6 @@ enum InsightsSessionsWords {
         return InsightsOverviewWords.fill(text("analytics_watched_label", copy), filled)
     }
 
-    /// The session picker under feed T: each watched trace by its label,
-    /// valued by its opaque reference, newest first.
     /// The trace shown first: the newest dated one. The daemon lists
     /// undated traces last; an older daemon listed one first, which is
     /// skipped here too. With none dated, the first listed.
@@ -1405,6 +1405,8 @@ enum InsightsSessionsWords {
         rows.first { $0.startedAt != nil } ?? rows.first
     }
 
+    /// The session picker under feed T: each watched trace by its label,
+    /// valued by its opaque reference, newest first.
     static func watchedChoices(_ rows: [DaemonData.InsightsWatchedSession],
                                copy: [String: String]) -> [(value: String, title: String)] {
         rows.map { (value: $0.sessionRef, title: watchedLabel($0, copy: copy)) }

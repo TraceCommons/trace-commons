@@ -1817,8 +1817,12 @@ mod tests {
                 "{r} reads",
             ),
             (
-                "analytics_pattern_repeated_reads_count_under_count",
-                "Of {f} files that weren't edited in between",
+                "analytics_pattern_repeated_reads_count_under_count_one",
+                "In {f} file not edited in between",
+            ),
+            (
+                "analytics_pattern_repeated_reads_count_under_count_other",
+                "In {f} files not edited in between",
             ),
             ("analytics_pattern_retried_calls_headline_one", "{c} call"),
             (
@@ -1827,7 +1831,7 @@ mod tests {
             ),
             (
                 "analytics_pattern_retried_calls_count_under_count",
-                "Repeated with the same tool and input, with only reads in between",
+                "Same tool and input, with only reads in between",
             ),
             ("analytics_pattern_edit_fail_edit_headline_one", "{l} time"),
             (
@@ -1836,7 +1840,7 @@ mod tests {
             ),
             (
                 "analytics_pattern_edit_fail_edit_count_under_count",
-                "A file was edited, a command failed, and the same file was edited again.",
+                "File edited, command failed, same file edited again",
             ),
             ("analytics_pattern_long_context_headline_one", "{n} turn"),
             ("analytics_pattern_long_context_headline_other", "{n} turns"),

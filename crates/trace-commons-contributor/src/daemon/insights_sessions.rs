@@ -500,9 +500,42 @@ mod tests {
                 serde_json::Value::Null,
             ]
         );
-        // Bounded to one, the one kept is the newest dated session.
-        let first = rows(&f.list_bounded(&[], &[], 1));
-        assert_eq!(first[0]["started_at"], "2026-09-16T09:00:00+00:00");
+    }
+
+    /// The bound picks which sessions are listed by recency, dated or not;
+    /// only then are the picked ones ordered dated first. So a session
+    /// placed just now is not cut by a long tail of older dated ones, and
+    /// it still lists after the dated rows that were kept.
+    #[test]
+    fn a_recent_undated_session_survives_the_bound_and_lists_last() {
+        let f = Fixture::new();
+        let a = f.write("a.jsonl", &claude_bytes_shifted(0));
+        let b = f.write("b.jsonl", &claude_bytes_shifted(1));
+        let c = f.write("c.jsonl", &claude_bytes_shifted(2));
+        let undated = f.write(
+            "undated.jsonl",
+            b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"PRIVATE_SUMMARY\"}}\n",
+        );
+        f.run(&[
+            (SOURCE_CLAUDE_CODE, &a, PROJECT),
+            (SOURCE_CLAUDE_CODE, &b, PROJECT),
+            (SOURCE_CLAUDE_CODE, &c, PROJECT),
+            (SOURCE_CLAUDE_CODE, &undated, PROJECT),
+        ]);
+        let value = f.list_bounded(&[], &[], 2);
+        assert_eq!(value["sessions_stored"], 4);
+        assert_eq!(value["truncated"], true);
+        let started: Vec<serde_json::Value> = rows(&value)
+            .iter()
+            .map(|row| row["started_at"].clone())
+            .collect();
+        assert_eq!(
+            started,
+            [
+                serde_json::json!("2026-09-16T09:00:00+00:00"),
+                serde_json::Value::Null,
+            ]
+        );
     }
 
     #[test]

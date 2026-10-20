@@ -481,7 +481,8 @@ final class InsightsPatternsTests: XCTestCase {
         "analytics_pattern_long_context_line": "after {threshold}",
         "analytics_pattern_repeated_reads_headline_one": "{r} READ",
         "analytics_pattern_repeated_reads_headline_other": "{r} READS",
-        "analytics_pattern_repeated_reads_count_under_count": "of {f} files",
+        "analytics_pattern_repeated_reads_count_under_count_one": "in {f} file",
+        "analytics_pattern_repeated_reads_count_under_count_other": "in {f} files",
         "analytics_pattern_retried_calls_headline_one": "{c} CALL",
         "analytics_pattern_retried_calls_headline_other": "{c} CALLS",
         "analytics_pattern_retried_calls_count_under_count": "same tool and input",
@@ -579,7 +580,9 @@ final class InsightsPatternsTests: XCTestCase {
         let reads = try card("repeated_reads", tokens: "0", count: 2, files: "1")
         XCTAssertTrue(InsightsPatternsWords.leadsWithCount(reads))
         XCTAssertEqual(InsightsPatternsWords.headline(reads, copy: copy), "2 READS")
-        XCTAssertEqual(InsightsPatternsWords.countLine(reads, threshold: 200_000, copy: copy), "of 1 files")
+        XCTAssertEqual(InsightsPatternsWords.countLine(reads, threshold: 200_000, copy: copy), "in 1 file")
+        let manyFiles = try card("repeated_reads", tokens: "0", count: 5, files: "3")
+        XCTAssertEqual(InsightsPatternsWords.countLine(manyFiles, threshold: 200_000, copy: copy), "in 3 files")
         let call = try card("retried_calls", tokens: "0", count: 1)
         XCTAssertEqual(InsightsPatternsWords.headline(call, copy: copy), "1 CALL")
         XCTAssertEqual(InsightsPatternsWords.countLine(call, threshold: 200_000, copy: copy), "same tool and input")

@@ -268,8 +268,12 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "{r} reads",
     ),
     (
-        "analytics_pattern_repeated_reads_count_under_count",
-        "Of {f} files that weren't edited in between",
+        "analytics_pattern_repeated_reads_count_under_count_one",
+        "In {f} file not edited in between",
+    ),
+    (
+        "analytics_pattern_repeated_reads_count_under_count_other",
+        "In {f} files not edited in between",
     ),
     (
         "analytics_estimate_from_result_size",
@@ -288,7 +292,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     (
         "analytics_pattern_retried_calls_count_under_count",
-        "Repeated with the same tool and input, with only reads in between",
+        "Same tool and input, with only reads in between",
     ),
     // 12. Edit, failed command, edit (owner decision D9: kept, labelled inferred).
     (
@@ -306,7 +310,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     (
         "analytics_pattern_edit_fail_edit_count_under_count",
-        "A file was edited, a command failed, and the same file was edited again.",
+        "File edited, command failed, same file edited again",
     ),
     (
         "analytics_inferred_from_order",
