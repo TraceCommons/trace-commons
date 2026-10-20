@@ -44,7 +44,7 @@ enum DebugScreenshot {
             home.attach(model.daemonData)
             await home.load()
             render(
-                TracesTreeView(store: traces, selection: .constant(first))
+                TracesTreeView(store: traces, selection: .constant(first), missionsShown: model.missionsShown)
                     .environmentObject(model),
                 to: directory + "/macos-shell-traces-tree.png",
                 size: CGSize(width: 760, height: 720)

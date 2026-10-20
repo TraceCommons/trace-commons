@@ -33,6 +33,25 @@ final class DaemonTimestampTests: XCTestCase {
         XCTAssertNil(DaemonTimestamp.parse("garbage"))
     }
 
+    /// Many generated timestamps, every fraction length and offset, parse
+    /// to the very same `Date` the per-timestamp formatters gave.
+    func test_generatedTimestampsParseAsTheFormattersDid() {
+        var state: UInt64 = 0x9E37_79B9_7F4A_7C15
+        func next(_ bound: Int) -> Int {
+            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Int((state >> 33) % UInt64(bound))
+        }
+        let base = ISO8601DateFormatter()
+        for _ in 0..<2000 {
+            let stamp = String(base.string(from: Date(timeIntervalSince1970: Double(1_600_000_000 + next(300_000_000))))
+                .dropLast())
+            let digits = next(10)
+            let fraction = digits == 0 ? "" : "." + (0..<digits).map { _ in String(next(10)) }.joined()
+            let text = stamp + fraction + ["Z", "+00:00", "-07:00", "+05:30"][next(4)]
+            XCTAssertEqual(DaemonTimestamp.parse(text), Self.reference(text), text)
+        }
+    }
+
     /// Decoders on several threads at once share the one parser.
     func test_theParserIsSharedAcrossThreads() {
         let texts = Self.shapes

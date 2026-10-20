@@ -215,15 +215,20 @@ struct MonitorWindowView: View {
                 case .traces:
                     switch tracesPage {
                     case .tree:
+                        // Equatable: a pass of this window for anything else
+                        // (its own state, the app model) does not redraw the
+                        // tree's rows.
                         TracesTreeView(
                             store: traces,
                             selection: Binding(
                                 get: { selection },
                                 set: { Self.select($0, selection: &selection, showsInspector: &showsInspector) }),
+                            missionsShown: model.missionsShown,
                             onReview: { entryId in
                                 Self.select(.session(entryID: entryId), selection: &selection, showsInspector: &showsInspector)
                             },
                             openHistory: { tracesPage = .history })
+                            .equatable()
                     case .history:
                         // Opening a row shows its details in the inspector,
                         // and opens it (Ron's inspector auto-open).

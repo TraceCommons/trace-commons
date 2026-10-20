@@ -76,10 +76,16 @@ public enum DaemonTimestamp {
             return formatter
         }()
 
+        /// The same answer as trying the fractional form, then the plain
+        /// one; a timestamp with no `.` cannot be the fractional form, so it
+        /// is tried as the plain one first, rather than parsed twice.
         func parse(_ text: String) -> Date? {
             lock.lock()
             defer { lock.unlock() }
-            return withFraction.date(from: text) ?? plain.date(from: text)
+            if text.utf8.contains(UInt8(ascii: ".")) {
+                return withFraction.date(from: text) ?? plain.date(from: text)
+            }
+            return plain.date(from: text) ?? withFraction.date(from: text)
         }
     }
 }
