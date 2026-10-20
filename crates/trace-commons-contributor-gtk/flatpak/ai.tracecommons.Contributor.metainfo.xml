@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.20.1" date="2026-10-19">
+      <description>
+        <p>Fixes a hang that could stop uploads and approvals while a large backlog was being sent, and Claude Code sessions on NEAR AI no longer fail on their first message.</p>
+      </description>
+    </release>
     <release version="0.20.0" date="2026-10-19">
       <description>
         <p>Switching a folder to Automatic also sends the traces already waiting in it.</p>
