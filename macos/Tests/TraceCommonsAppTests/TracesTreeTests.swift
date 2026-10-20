@@ -1057,7 +1057,7 @@ final class TracesFolderFirstTreeTests: XCTestCase {
         let title = try XCTUnwrap(tree.range(of: "title: words.tree.dismissSessionTitle"))
         let dismiss = try XCTUnwrap(tree.range(of: "perform(.dismiss"))
         XCTAssertLessThan(title.lowerBound, dismiss.lowerBound, "the dismiss is inside the confirmation")
-        for needle in ["menuLabel: words?.tree.dismissSession ?? \"\"", "onMenu: { sessionMenu = ",
+        for needle in ["menuLabel: words?.tree.dismissSession ?? \"\"", "onMenu: { rowMenu = Self.toggled(.session(entry.entryId), current: rowMenu) }",
                        "dismissing = entry", ".glassModal(item: $dismissing)", "words.tree.dismissSessionKeep",
                        "words.dismissAction", "words.tree.dismissing", "words.tree.dismissSessionFailed"] {
             XCTAssertTrue(tree.contains(needle), "the tree lacks \(needle)")
