@@ -46,7 +46,6 @@ final class ManagedSessionsRenderTests: XCTestCase {
             model.managedSnapshot = snapshot
             XCTAssertFalse(snapshot.canLaunch(tool: "claude"))
             XCTAssertEqual(ManagedSessionsSection.offersLaunch(snapshot), installed.contains("codex"))
-            XCTAssertFalse(ManagedSessionsSection.accountsBodyEmpty(snapshot, failing: false))
             XCTAssertEqual(snapshot.needsToolInstallation, installed.isEmpty)
             try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 720, height: 900), to: directory.appendingPathComponent("availability-\(installed.first ?? "none").png"))
         }
@@ -87,8 +86,9 @@ final class ManagedSessionsRenderTests: XCTestCase {
         try render(ManagedLaunchSheet(onClose: {}, accountID: "opencode-test").environmentObject(model), size: CGSize(width: 580, height: 580), to: directory.appendingPathComponent("managed-opencode-launch.png"))
     }
 
-    /// #1408: the explanation before the folder picker, for each Start
-    /// button, and its artwork at rest, as Reduce Motion shows it.
+    /// #1408, as the launch dialog (owner, 2026-10-19): the explanation,
+    /// the folder row and Open {tool}, for each tool, and its artwork at
+    /// rest, as Reduce Motion shows it.
     @MainActor
     func testTheFolderExplainerRendersForEachStartButton() throws {
         let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -97,13 +97,15 @@ final class ManagedSessionsRenderTests: XCTestCase {
         XCTAssertEqual(model.managedSnapshot?.explainsFolderChoice, true)
         XCTAssertEqual(ManagedFolderExplainerSheet.line(tool: "codex", model: model),
                        "Choose a folder for Codex to work in. It opens in Terminal.")
+        XCTAssertEqual(ManagedFolderExplainerSheet.openLabel(tool: "claude", model: model), "Open Claude Code")
+        XCTAssertEqual(ManagedFolderExplainerSheet.openLabel(tool: "codex", model: model), "Open Codex")
         XCTAssertTrue(ManagedFolderHandoff.startsAtRest(reduceMotion: true))
         XCTAssertFalse(ManagedFolderHandoff.startsAtRest(reduceMotion: false))
         let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }
         for tool in ManagedSurface.signInTools {
-            try render(ManagedFolderExplainerSheet(tool: tool, onCancel: {}, onChoose: {}).environmentObject(model), size: CGSize(width: 520, height: 360), to: directory.appendingPathComponent("managed-folder-explainer-\(tool).png"))
+            try render(ManagedFolderExplainerSheet(tool: tool, onCancel: {}, onOpen: { _ in }).environmentObject(model), size: CGSize(width: 520, height: 400), to: directory.appendingPathComponent("managed-folder-explainer-\(tool).png"))
         }
         try render(ManagedFolderHandoff(tool: .claudeCode, atRest: true), size: CGSize(width: 320, height: 160), to: directory.appendingPathComponent("managed-folder-handoff-rest.png"))
     }

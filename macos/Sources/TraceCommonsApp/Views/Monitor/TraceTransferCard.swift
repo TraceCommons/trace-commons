@@ -22,27 +22,38 @@ struct TraceTransferCard: View {
 
     var body: some View {
         if let words = Self.words {
-            let tool = SourceKind(rawValue: transfer.tool)
-            let name = tool?.displayName ?? transfer.tool
-            let glass = tool.map(TracesTreeView.glassTool) ?? .other(initials: FlowMapScene.initials(transfer.tool))
-            let state = Self.state(transfer.action, tool: name, words: words)
+            let name = SourceKind(rawValue: transfer.tool)?.displayName ?? transfer.tool
+            // A batch from several tools names none: no tool's logo, and a
+            // note that is every tool's.
+            let state = Self.state(transfer.action, tool: transfer.mixedTools ? nil : name, words: words)
+            // A batch from several tools names none: its count is the title.
             GlassPopoverNotice(
-                title: name, tag: state.tag, tagTone: state.tone,
+                title: transfer.mixedTools ? words.traces(transfer.count) : name, tag: state.tag, tagTone: state.tone,
                 detailsLabel: MonitorWords.noticeDetails, closeLabel: MonitorWords.close, onClose: onClose
             ) {
-                coin(glass)
+                if let glass = Self.toolMark(transfer) {
+                    coin(glass)
+                } else {
+                    GlassNoticeMark(systemImage: Self.mixedSymbol, tint: GlassColor.textSecondary)
+                }
             } summary: {
                 HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
-                    Text(words.transferTrace.uppercased())
+                    // A batch says how many traces it is (owner,
+                    // 2026-10-19), and names its folder only when they
+                    // share one.
+                    Text((transfer.count > 1 ? words.traces(transfer.count) : words.transferTrace).uppercased())
                         .glassType(GlassTokens.TypeScale.eyebrow)
                         .foregroundStyle(GlassColor.textTertiary)
+                        .fixedSize()
                     // The folder gives way, never the time: a long name is
                     // cut in its middle and the date stays whole.
-                    Text(folder)
-                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    if !transfer.mixedFolders {
+                        Text(folder)
+                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                     if let time {
                         Text("\u{00B7} " + time)
                             .glassType(GlassTokens.TypeScale.label.weight(.regular))
@@ -53,7 +64,7 @@ struct TraceTransferCard: View {
                 }
                 .accessibilityElement(children: .combine)
             } details: {
-                memory(words)
+                if !transfer.mixedTools { memory(words) }
                 Text(state.note)
             } actions: {
                 EmptyView()
@@ -61,16 +72,30 @@ struct TraceTransferCard: View {
         }
     }
 
-    /// The card's tag, its tone, and its note, by what is happening.
-    static func state(_ action: MapTransfer.Action, tool: String, words: MonitorFlowMapCopy)
+    /// The card's tag, its tone, and its note, by what is happening. `tool`
+    /// is nil for a batch from several tools, whose note names none.
+    static func state(_ action: MapTransfer.Action, tool: String?, words: MonitorFlowMapCopy)
         -> (tag: String, tone: GlassTag.Tone, note: String)
     {
         switch action {
-        case .contribute: (words.transferContributing, .on, words.transferNote(contributing: true, tool: tool))
+        case .contribute:
+            (words.transferContributing, .on,
+             tool.map { words.transferNote(contributing: true, tool: $0) } ?? words.transferContributeNoteMixed)
         case .keep: (words.transferKeeping, .neutral, words.transferKeepNote)
         case .dismiss: (words.transferDismissed, .neutral, words.transferDismissNote)
         }
     }
+
+    /// The tool whose logo the card's coin draws; nil for a batch from
+    /// several tools, which draws `mixedSymbol` instead.
+    static func toolMark(_ transfer: MapTransfer) -> GlassTool? {
+        guard !transfer.mixedTools else { return nil }
+        return SourceKind(rawValue: transfer.tool).map(TracesTreeView.glassTool)
+            ?? .other(initials: FlowMapScene.initials(transfer.tool))
+    }
+
+    /// A mixed batch's mark: a stack, no one tool's.
+    static let mixedSymbol = "square.stack"
 
     /// The trace's folder: the core's name, else the map's.
     var folder: String { transfer.folderLabel ?? folderLabel ?? transfer.folder }

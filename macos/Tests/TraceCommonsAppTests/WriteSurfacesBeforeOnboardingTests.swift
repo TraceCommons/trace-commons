@@ -47,11 +47,12 @@ final class WriteSurfacesBeforeOnboardingTests: XCTestCase {
         XCTAssertLessThan(open.lowerBound, compute.lowerBound)
     }
 
-    /// The override rows are disabled while onboarding is required, beside
-    /// the store's own evidence that the core is up.
+    /// The popover draws no override rows any more (owner, 2026-10-19), so
+    /// none can be chosen before onboarding.
     func test_theOverrideRowsWaitForOnboarding() throws {
         let panel = try MonitorNavigationTests.text("Views/Monitor/MenuBarGlassPanel.swift")
-        XCTAssertTrue(panel.contains(".disabled(!store.canChooseOverride || model.requiresOnboarding)"))
+        XCTAssertFalse(panel.contains("store.choose("))
+        XCTAssertFalse(panel.contains("store.chooseMixed()"))
     }
 
     /// "Manage rules" opens first run while onboarding is required: no
@@ -62,8 +63,8 @@ final class WriteSurfacesBeforeOnboardingTests: XCTestCase {
         let routed = LaunchRouting.opening(MenuPanelData.manageRules(requiresOnboarding: true), startup: .running, requiresOnboarding: true, onboardingKnown: true)
         XCTAssertEqual(routed.window, .firstRun)
         XCTAssertNil(routed.settings)
+        // The popover no longer offers Manage rules (owner, 2026-10-19).
         let panel = try MonitorNavigationTests.text("Views/Monitor/MenuBarGlassPanel.swift")
-        XCTAssertTrue(panel.contains(
-            "Button(MenuWords.manageRules) { open(MenuPanelData.manageRules(requiresOnboarding: model.requiresOnboarding)) }"))
+        XCTAssertFalse(panel.contains("MenuWords.manageRules"))
     }
 }

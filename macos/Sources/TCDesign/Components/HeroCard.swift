@@ -40,6 +40,9 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     /// longer title or a wrapped line never pushes the action off the card.
     static var minHeight: CGFloat { 156 }
     static var graphicReserve: CGFloat { 150 }
+    /// How much of the large graphic shows through (owner, 2026-10-19: at
+    /// full strength it competed with the words).
+    static var graphicOpacity: Double { 0.5 }
 
     /// The title's face: larger and heavier than a card title, as a hero's
     /// is (the references' display type, on the system face).
@@ -56,6 +59,7 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
                     graphic
                         .frame(width: Self.graphicReserve + 60)
                         .frame(maxHeight: .infinity)
+                        .opacity(Self.graphicOpacity)
                         .accessibilityHidden(true)
                 }
             .background {

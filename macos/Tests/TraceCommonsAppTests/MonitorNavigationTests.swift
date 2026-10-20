@@ -585,7 +585,8 @@ final class MonitorNavigationTests: XCTestCase {
         // (#1241 Task 10); every window it opens goes through OpenMonitor.
         XCTAssertFalse(panel.contains("navigation.section"), "the panel opens through OpenMonitor")
         XCTAssertTrue(panel.contains("navigation.requestSettings()"))
-        XCTAssertTrue(panel.contains("PrivateInferenceTray.perform("))
+        // No Private AI pill (owner, 2026-10-19), so no tray write.
+        XCTAssertFalse(panel.contains("PrivateInferenceTray.perform("))
         XCTAssertTrue(panel.contains("MenuBarWords.pauseUntil(index)"))
     }
 
@@ -624,9 +625,13 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertFalse(panel.contains("MainWindowView.Section"))
         XCTAssertFalse(panel.contains("openMain("))
         XCTAssertTrue(panel.contains("OpenMonitor.request(destination)"))
-        for needle in ["open(.inference)", "open(.traces(entryId: nil))", "open(.home(.history))",
-                       "open(MenuPanelData.manageRules(requiresOnboarding: model.requiresOnboarding))"] {
+        // Recent activity (History) and Manage rules are gone (owner,
+        // 2026-10-19); a tool opens the Private AI tab at its dialog.
+        for needle in ["open(.inference)", "open(.traces(entryId: nil))", "model.pendingManagedLaunch = tool"] {
             XCTAssertTrue(panel.contains(needle), "the menu panel never opens \(needle)")
+        }
+        for gone in ["open(.home(.history))", "MenuWords.manageRules"] {
+            XCTAssertFalse(panel.contains(gone), "the menu panel opens \(gone) again")
         }
         // Settings' Private AI section holds the switch and the tools now
         // (owner, 2026-10-10): no pointer back to the Monitor.

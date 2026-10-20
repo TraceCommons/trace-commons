@@ -8,15 +8,19 @@ struct ManagedFolderChoice: Identifiable, Equatable {
     var id: String { tool }
 }
 
-/// Before the folder picker, until a session has started on this computer
-/// (#1408, Ron's rulings 2026-10-14): the Start button's own label as the
-/// title, a folder sliding into a terminal, one line, then Cancel and
-/// Choose folder. Every word is the core's (`managed/copy.rs`).
+/// A tool's launch dialog (owner, 2026-10-19; #1408's explainer before
+/// it): the Start button's own label as the title, a folder sliding into a
+/// terminal, the line that says why a folder is asked for, the folder row
+/// with its Choose folder button, then Cancel and Open {tool}, which is
+/// enabled once a folder is chosen and opens the tool there in the
+/// terminal. Every word is the core's (`managed/copy.rs`).
 struct ManagedFolderExplainerSheet: View {
     let tool: String
     let onCancel: () -> Void
-    let onChoose: () -> Void
+    /// Open, with the chosen folder's path.
+    let onOpen: (String) -> Void
     @EnvironmentObject private var model: AppModel
+    @State private var path: String?
 
     /// The line, with the tool's name and the terminal the daemon reports.
     @MainActor
@@ -28,12 +32,19 @@ struct ManagedFolderExplainerSheet: View {
             fallback: model.managedText("terminal"))
     }
 
+    /// The dialog's Open button: "Open Claude Code".
+    @MainActor
+    static func openLabel(tool: String, model: AppModel) -> String {
+        model.managedText("open_tool").replacingOccurrences(of: "{tool}", with: ManagedWords.tool(tool, model: model) ?? "")
+    }
+
     var body: some View {
         GlassModal(
             title: ManagedSurface.startKey(tool).map(model.managedText) ?? "", width: .narrow,
             actions: [
                 .cancel(model.managedText("cancel"), action: onCancel),
-                GlassModalAction(model.managedText("choose_folder"), isDefault: true, id: "choose", action: onChoose),
+                GlassModalAction(Self.openLabel(tool: tool, model: model), isDefault: true, isEnabled: path != nil,
+                                 id: "open") { if let path { onOpen(path) } },
             ],
             onCancel: onCancel
         ) {
@@ -44,7 +55,56 @@ struct ManagedFolderExplainerSheet: View {
                     .glassType(GlassTokens.TypeScale.label)
                     .foregroundStyle(GlassColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+                // The folder, once chosen, and the button that chooses it.
+                HStack(spacing: GlassTokens.Space.s4) {
+                    GlassToolTile(.folder)
+                    if let path {
+                        Text(path)
+                            .glassType(GlassTokens.TypeScale.mono)
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.head)
+                            .help(path)
+                    }
+                    Spacer(minLength: GlassTokens.Space.s4)
+                    Button(model.managedText("choose_folder")) {
+                        if let chosen = FolderPanel.choose() { path = chosen }
+                    }
+                    .buttonStyle(GlassButtonStyle(.glass, small: true))
+                    .fixedSize()
+                }
             }
+        }
+    }
+}
+
+/// A tool's launch button (owner, 2026-10-19): its logo and its name on a
+/// glass button, named for assistive tech by the core's Start label. On
+/// the Private AI tab's NEAR AI card and in the menu bar's popover.
+struct ManagedToolButton: View {
+    let tool: String
+    let action: () -> Void
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: GlassTokens.Space.s3) {
+                logo(ManagedWords.glassTool(tool))
+                Text(ManagedWords.tool(tool, model: model) ?? "").lineLimit(1)
+            }
+        }
+        .buttonStyle(GlassButtonStyle(.glass, small: true))
+        .fixedSize()
+        .accessibilityLabel(ManagedSurface.startKey(tool).map(model.managedText) ?? "")
+    }
+
+    /// The tool's logo in its tint, or its initials when it has none.
+    @ViewBuilder
+    private func logo(_ glass: GlassTool) -> some View {
+        if let logo = glass.logo {
+            GlassToolLogoShape(logo).fill(glass.tint.color).frame(width: 14, height: 14)
+        } else {
+            Text(glass.initials).glassType(GlassTokens.TypeScale.micro).foregroundStyle(glass.tint.color)
         }
     }
 }

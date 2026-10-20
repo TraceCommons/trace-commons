@@ -77,10 +77,29 @@ final class HomeViewTests: XCTestCase {
             "HomeStatTile(label: HomeFormat.creditPendingWord, "
                 + "value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)), "
                 + "detail: delta?.text, detailInk: delta?.ink, systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
+        // What is not contributed is an upsell two tiles tall across both
+        // columns, under Waiting and Contributed (owner, 2026-10-19), and
+        // the NEAR AI balance sits beside Credit.
         XCTAssertTrue(home.contains(
-            "HomeStatTile(label: words?.uncontributed ?? \"\", value: String(uncontributed.count), "
-                + "detail: uncontributed.detail(words), systemImage: HomeStatIcons.uncontributed, "
-                + "valueAccessory: uncontributed.size(words), action: openTraces)"))
+            "if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) { "
+                + "GridRow { notContributed(uncontributed, title: title) .gridCellColumns(2) } }"))
+        // Slim, with no fill and a gradient edge (owner, 2026-10-19).
+        XCTAssertTrue(home.contains("detail: uncontributed.detail(words), action: openTraces)"))
+        // The promo glow edge turns round it, and the icon takes the edge's
+        // lighter gradient (owner, 2026-10-19: the first gradient was too dark).
+        XCTAssertTrue(home.contains(".overlay(GlassGlowEdge(cornerRadius: GlassTier.card.radius, strength: 0.4, intensity: 0.6))"))
+        XCTAssertTrue(home.contains(".foregroundStyle(GlassGlowEdge.markGradient)"))
+        let card = try XCTUnwrap(home.range(of: "private struct HomeNotContributedCard: View {"))
+        XCTAssertFalse(home[card.upperBound...].prefix(2500).contains("Gradient.heroMissions"), "the dark gradient is back")
+        XCTAssertTrue(home.contains(".background(shape.fill(hovering ? GlassTokens.Color.controlHover.color : Color.clear))"))
+        XCTAssertTrue(home.contains(
+            "HomeStatTile(label: copy.balanceTitle, value: balance.value, detail: balance.detail, "
+                + "systemImage: HomeStatIcons.balance, valueAccessory: balance.beside, action: openPrivateAI)"))
+        let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))
+        let upsell = try XCTUnwrap(home.range(of: "notContributed(uncontributed, title: title)"))
+        let credit = try XCTUnwrap(home.range(of: "HomeStatTile(label: HomeFormat.creditPendingWord"))
+        XCTAssertLessThan(waiting.lowerBound, upsell.lowerBound)
+        XCTAssertLessThan(upsell.lowerBound, credit.lowerBound, "Not contributed sits under Waiting and Contributed")
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted), "
                 + "systemImage: HomeStatIcons.contributed, action: openHistory)"))

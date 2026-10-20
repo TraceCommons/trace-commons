@@ -193,6 +193,7 @@
     "start_claude": "Start Claude Code",
     "start_codex": "Start Codex",
     "start_opencode": "Start OpenCode",
+    "open_tool": "Open {tool}",
     "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
     "sign_in_needed": "Sign in to NEAR AI to start a session.",
     "sign_in_near_ai": "Sign in",

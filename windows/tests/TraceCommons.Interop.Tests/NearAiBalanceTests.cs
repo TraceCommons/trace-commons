@@ -161,21 +161,25 @@ public class NearAiBalanceTests
 
     /// <summary>
     /// Every other reported state gets its own finished sentence, and no two
-    /// share one.
+    /// share one. Signed out is a short label, not a sentence ("Sign in
+    /// required", owner, 2026-10-19, #1489), so it carries no full stop.
     /// </summary>
     [Fact]
     public void EveryUnreadStateGetsItsOwnFinishedSentence()
     {
         PrivateInferenceCopy copy = Copy();
-        string[] lines = Reported
-            .Where(state => state != "known")
+        string[] unread = Reported.Where(state => state != "known").ToArray();
+        string[] lines = unread
             .Select(state => NearAiBalanceSurface.StateLine(Of(state), copy))
             .ToArray();
 
-        foreach (string line in lines)
+        for (int index = 0; index < lines.Length; index++)
         {
-            Assert.NotEqual(string.Empty, line);
-            Assert.EndsWith(".", line.Trim(), StringComparison.Ordinal);
+            Assert.NotEqual(string.Empty, lines[index]);
+            if (unread[index] != "no_session")
+            {
+                Assert.EndsWith(".", lines[index].Trim(), StringComparison.Ordinal);
+            }
         }
 
         Assert.Equal(lines.Length, lines.Distinct(StringComparer.Ordinal).Count());

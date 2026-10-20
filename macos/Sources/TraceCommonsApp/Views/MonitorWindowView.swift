@@ -200,7 +200,6 @@ struct MonitorWindowView: View {
                     traces.decisionsOwed, shield: traces.shield, secondLook: traces.words?.secondLookWaiting),
                 showsMap: $showsMap, showsInspector: $showsInspector, inspectorAvailable: inspectorAvailable,
                 showsGraph: $showsGraph,
-                showsIgnored: $showsIgnored,
                 breadcrumb: Self.breadcrumb(
                     tab: Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding),
                     homePage: homePage.shown(missions: model.missionsShown),
@@ -385,6 +384,9 @@ struct MonitorWindowView: View {
             traces.showsIgnored = showsIgnored
         }
         .onChange(of: showsIgnored) { _, shows in traces.showsIgnored = shows }
+        // The Traces list's filter menu sets it on the store (owner,
+        // 2026-10-19); the window keeps the choice.
+        .onChange(of: traces.showsIgnored) { _, shows in if showsIgnored != shows { showsIgnored = shows } }
         // #1146 `MonitorShell`: picking Inference shows the map's Private AI
         // view, picking Traces its Traces view; Home keeps the choice.
         .onChange(of: tab) { _, picked in
@@ -516,6 +518,10 @@ struct MonitorWindowView: View {
         case .inference, .insights: false
         }
     }
+
+    /// Whether the toolbar's Graph toggle works: only on Traces, the tab
+    /// the graph is drawn under (owner, 2026-10-19).
+    static func graphAvailable(_ tab: Tab) -> Bool { tab == .traces }
 
     /// History is the page on screen (`showsHistory`).
     private var historyShown: Bool {
@@ -696,7 +702,7 @@ struct MonitorWindowView: View {
 }
 
 /// The main pane, always shown: clearance for the traffic lights, the
-/// toolbar capsule (View menu, Graph, Map, Inspector) and the round Settings
+/// toolbar capsule (Graph, Map, Inspector) and the round Settings
 /// button on the top row (#1146 `monitor-toolbar.tsx`), then the tabs, the
 /// breadcrumb for Home's pages, the tab's screen and, on Traces, the graph
 /// footer. The tabs' screens are R6 (Traces), R8 (Inference) and R9 (Home).
@@ -714,7 +720,6 @@ private struct MonitorMainPane<Content: View, Footer: View, Notices: View>: View
     /// toggle is then disabled and reads as hidden.
     let inspectorAvailable: Bool
     @Binding var showsGraph: Bool
-    @Binding var showsIgnored: Bool
     /// Home's History or Missions trail; nil for no breadcrumb.
     let breadcrumb: [GlassCrumb]?
     let onSettings: () -> Void
@@ -723,13 +728,10 @@ private struct MonitorMainPane<Content: View, Footer: View, Notices: View>: View
     /// The shown tab's popover notices, floating over its top under the
     /// tab bar and pushing nothing down (`MonitorNotices`).
     @ViewBuilder let notices: () -> Notices
-    @State private var viewMenu = false
     @EnvironmentObject private var model: AppModel
     /// Half the unified title bar's 52pt height.
     static var lightsCentre: CGFloat { 26 }
 
-    /// The View menu's width (#1146 `monitor-toolbar.tsx`, `w-[250px]`).
-    static var viewMenuWidth: CGFloat { 250 }
     /// The Settings button's gap from the toolbar capsule: #1146's `gap-2`
     /// plus `ml-1.5`.
     static var settingsGap: CGFloat { GlassTokens.Space.s4 + GlassTokens.Space.s3 }
@@ -758,16 +760,23 @@ private struct MonitorMainPane<Content: View, Footer: View, Notices: View>: View
                 VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                     HStack(spacing: Self.settingsGap) {
                         Spacer(minLength: 0)
+                        // No View menu (owner, 2026-10-19): its one item,
+                        // Show ignored folders, is in the Traces list's filter
+                        // menu, beside what it filters.
                         GlassToolbarGroup {
-                            GlassToolbarButton(MonitorShellWords.view, icon: .glyph(.viewMenu), expanded: viewMenu) {
-                                viewMenu.toggle()
-                            }
-                            GlassToolbarButton(MonitorShellWords.graphToggle(shown: showsGraph), icon: .glyph(.graph), pressed: showsGraph) {
+                            // The graph is the Traces tab's (owner, 2026-10-19):
+                            // elsewhere its toggle is disabled and reads as
+                            // hidden, as the inspector's does where it cannot open.
+                            GlassToolbarButton(
+                                MonitorShellWords.graphToggle(shown: showsGraph && MonitorWindowView.graphAvailable(shown)),
+                                icon: .glyph(.graph), pressed: showsGraph && MonitorWindowView.graphAvailable(shown)
+                            ) {
                                 // #1146's footer opens and closes over .25s.
                                 withAnimation(GlassMotion.systemReducesMotion ? nil : .easeInOut(duration: 0.25)) {
                                     showsGraph.toggle()
                                 }
                             }
+                            .disabled(!MonitorWindowView.graphAvailable(shown))
                             GlassToolbarButton(MonitorShellWords.mapToggle(shown: showsMap), icon: .glyph(.map), pressed: showsMap) {
                                 showsMap.toggle()
                             }
@@ -793,21 +802,6 @@ private struct MonitorMainPane<Content: View, Footer: View, Notices: View>: View
                     // title bar centres 26pt below the window's top edge.
                     .padding(.top, Self.lightsCentre - GlassTokens.Space.windowPadding - GlassTokens.Space.panePadding
                         - GlassTokens.Size.controlLarge / 2)
-                    // The View menu drops from the toolbar over the tabs, 250pt
-                    // wide, its trailing edge on the Settings button's.
-                    .overlay(alignment: .topTrailing) {
-                        if viewMenu {
-                            GlassMenu(onDismiss: { viewMenu = false }) {
-                                GlassMenuItem(MonitorShellWords.showIgnoredFolders, checked: showsIgnored) {
-                                    showsIgnored.toggle()
-                                    viewMenu = false
-                                }
-                            }
-                            .frame(width: Self.viewMenuWidth)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.top, GlassTokens.Size.controlLarge + GlassTokens.Space.s2)
-                        }
-                    }
                     .zIndex(1)
                     // The notices that sat here above the tabs (the shell's
                     // consent and account notices, a refused start, onboarding

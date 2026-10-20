@@ -22,6 +22,26 @@ struct MapTransfer: Equatable, Identifiable {
     /// The folder's name as the core gave it, for the card; nil when it
     /// gave none, and the card then looks the folder up on the map.
     var folderLabel: String? = nil
+    /// How many traces the card stands for: more than one for a batch, a
+    /// run of traces sent together (owner, 2026-10-19: one card for a
+    /// batch, not a stack of them).
+    var count: Int = 1
+    /// For a batch, whether its traces came from more than one folder or
+    /// tool; the card then names neither.
+    var mixedFolders = false
+    var mixedTools = false
+
+    /// One card for a run of several traces: the first trace's folder,
+    /// tool and time, and how many there are.
+    static func batch(_ transfers: [MapTransfer]) -> MapTransfer? {
+        guard let first = transfers.first else { return nil }
+        guard transfers.count > 1 else { return first }
+        return MapTransfer(
+            id: "batch:" + first.id, folder: first.folder, tool: first.tool, action: first.action,
+            at: first.at, folderLabel: first.folderLabel, count: transfers.count,
+            mixedFolders: Set(transfers.map(\.folder)).count > 1,
+            mixedTools: Set(transfers.map(\.tool)).count > 1)
+    }
 }
 
 /// Finds transfers between two reads. `list_pending` lists only what
@@ -233,7 +253,6 @@ final class MapTransferPlayer: ObservableObject {
     private var queue: [MapTransfer] = []
     private var played = Set<String>()
     private var timer: Task<Void, Never>?
-    private var feeding: Task<Void, Never>?
     private var expiries: [String: Task<Void, Never>] = [:]
     /// The map's style for the runs still to play; one already playing
     /// keeps its own.
@@ -286,19 +305,13 @@ final class MapTransferPlayer: ObservableObject {
         }
     }
 
-    /// Adds each trace of `run` to the stack as it sets off.
+    /// Adds `run` to the stack as it sets off: one card for its trace, or
+    /// one card for the whole batch when several go together (owner,
+    /// 2026-10-19: a stack of one card per trace was too noisy). The map
+    /// still moves each trace in turn.
     private func feed(_ run: MapTransferRun) {
         let until: Double = run.end + Self.hold
-        if let first = run.transfers.first { add(first, for: until) }
-        feeding?.cancel()
-        feeding = Task { [weak self] in
-            for (index, transfer) in run.transfers.enumerated().dropFirst() {
-                let wait: Double = Double(index) * MapTransferRun.step - Date().timeIntervalSince(run.start)
-                if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
-                guard !Task.isCancelled, let self else { return }
-                self.add(transfer, for: until - Date().timeIntervalSince(run.start))
-            }
-        }
+        if let card = MapTransfer.batch(run.transfers) { add(card, for: until) }
     }
 
     /// Puts `transfer` in front of the stack for `seconds`.

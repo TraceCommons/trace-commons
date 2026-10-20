@@ -5,8 +5,9 @@ import TCShellCore
 
 /// Ron's Folder inspector (#1146, `waiting-page.tsx` `FolderInspector`):
 /// the header, the shared/kept legend, then three sections, each an
-/// expander heading over bare content: the folder's path, what is waiting
-/// and its size; its contribution rule with the mode picker; and, while
+/// expander heading over bare content: its contribution rule with the mode
+/// picker; the folder's details (its path, what is waiting and its size);
+/// and, while
 /// sessions wait, Ron's Decisions card (`waiting-project-folder.tsx`) with
 /// Submit all eligible, Submit all as (a modal with one outcome for every
 /// eligible session) and Ignore.
@@ -36,33 +37,33 @@ struct FolderInspector: View {
 
     var body: some View {
         if let words = store.words {
-            // Scrolls as the Summary and a session do: disclosure lines, a
-            // refusal or a short window never push the pane past the window.
-            ScrollView {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                    InspectorHeader(tile: .folder, title: folder.label, sub: Self.headerSub(folder, words: words))
-                    // The legend says its words or is not drawn, as the Summary's.
-                    if let table = MonitorWords.table {
-                        HStack(spacing: GlassTokens.Space.s3) {
-                            GlassLegendCell(table.shared, value: Self.shared(folder, history: history), status: .shared)
-                            GlassLegendCell(table.kept, value: String(folder.sessions.count), status: .kept)
-                        }
-                    }
-                    InspectorSection(words.inspector.project) {
-                        GlassKeyValueList(Self.rows(folder, words: words))
-                    }
-                    InspectorSection(words.inspector.contributionRule) {
-                        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) { rule(words) }
-                    }
-                    if !folder.sessions.isEmpty && folder.mode != .ignore {
-                        InspectorSection(words.inspector.decisions) {
-                            decisions(words)
-                        }
+            // No scroll of its own: the inspector column scrolls as one
+            // (`MonitorWindowView`), and a scroll nested in it was sized
+            // short of its content and cut off the Decisions card's Submit
+            // (owner, 2026-10-19).
+            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                InspectorHeader(tile: .folder, title: folder.label, sub: Self.headerSub(folder, words: words))
+                // The legend says its words or is not drawn, as the Summary's.
+                if let table = MonitorWords.table {
+                    HStack(spacing: GlassTokens.Space.s3) {
+                        GlassLegendCell(table.shared, value: Self.shared(folder, history: history), status: .shared)
+                        GlassLegendCell(table.kept, value: String(folder.sessions.count), status: .kept)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                // The rule first, under the legend (owner, 2026-10-19), then
+                // the folder's details, then what waits on a decision.
+                InspectorSection(words.inspector.contributionRule) {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) { rule(words) }
+                }
+                InspectorSection(words.inspector.projectDetails) {
+                    GlassKeyValueList(Self.rows(folder, words: words))
+                }
+                if !folder.sessions.isEmpty && folder.mode != .ignore {
+                    InspectorSection(words.inspector.decisions) {
+                        decisions(words)
+                    }
+                }
             }
-            .scrollIndicators(.never)
             .frame(maxWidth: .infinity, alignment: .leading)
             // Whole-window confirmations, as the tree's: the destructive
             // action right-most and never on Return; Escape cancels.

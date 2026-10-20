@@ -69,8 +69,11 @@ enum DebugScreenshot {
             inference.attach(model.daemonData)
             await inference.load()
             render(
-                InferenceAccountSection(store: inference)
-                    .padding(GlassTokens.Space.cardGap)
+                VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                    InferenceBalanceSection()
+                    InferenceAccountSection(store: inference)
+                }
+                .padding(GlassTokens.Space.cardGap)
                     .environmentObject(model),
                 to: directory + "/macos-shell-inference-account.png",
                 size: CGSize(width: 420, height: 720)

@@ -12,6 +12,9 @@
 //!   folder you choose." Shells fill `{destination}` from
 //!   `capabilities.terminal_destination`, as for `launch_scope`, so Windows
 //!   never reads "Terminal".
+//! - `open_tool` "Open {tool}" -- the launch dialog's button once a folder
+//!   is chosen (owner, 2026-10-19: "Open Claude"). Shells fill `{tool}`
+//!   with the tool's name.
 //! - `sign_in_needed` "Sign in to NEAR AI to start a session." Also the line
 //!   a shell shows for the refusal `managed-near-ai-sign-in-required`.
 //! - `sign_in_near_ai` "Sign in" -- the button that starts the NEAR AI
@@ -160,6 +163,7 @@ pub fn copy() -> serde_json::Value {
             "start_claude": "Start Claude Code",
             "start_codex": "Start Codex",
             "start_opencode": "Start OpenCode",
+            "open_tool": "Open {tool}",
             "sign_in_scope": "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.",
             "sign_in_needed": "Sign in to NEAR AI to start a session.",
             "sign_in_near_ai": "Sign in",

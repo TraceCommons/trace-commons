@@ -22,11 +22,7 @@ struct InferenceAccountSection: View {
 
     var body: some View {
         if let copy = model.privateInferenceCopy {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                PrivateAIBalanceCard(copy: copy)
-                FundingRow(copy: copy)
-                PrivateAISettingsLinkCard(copy: copy, onOpen: onOpenSettings)
-            }
+            PrivateAISettingsLinkCard(copy: copy, onOpen: onOpenSettings)
         }
     }
 
@@ -44,6 +40,22 @@ struct InferenceAccountSection: View {
     /// A caught panic is the core's unknown word too.
     static func runtimeWord(_ state: DaemonData.PrivateInferenceState?, copy: PrivateInferenceCopy) -> String {
         TCPrivateInference.runtimeWord(state: state?.state ?? "") ?? copy.runtimeUnknown
+    }
+}
+
+/// The NEAR AI balance and, under it, billing (owner, 2026-10-19: moved to
+/// the top of the Private AI tab, under the Private AI switch). Nothing is
+/// drawn until the core's Private AI words arrive.
+struct InferenceBalanceSection: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        if let copy = model.privateInferenceCopy {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                PrivateAIBalanceCard(copy: copy)
+                FundingRow(copy: copy)
+            }
+        }
     }
 }
 

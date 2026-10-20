@@ -180,6 +180,7 @@ struct SessionReviewCard: View {
                     Text(measures)
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textTertiary)
+                        .padding(.horizontal, Self.textInset)
                 }
             }
             redactions(summary, review)
@@ -609,8 +610,14 @@ struct SessionReviewCard: View {
             sectionTitle(title)
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) { content() }
         }
+        .padding(.horizontal, Self.textInset)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    /// How much further text runs in from the card's sides than the boxes
+    /// in it do (owner, 2026-10-19: text in a container needs room on both
+    /// sides). The quote and the warnings keep the card's own inset.
+    static let textInset: CGFloat = GlassTokens.Space.s4
 
     /// A bulleted line in the reading face.
     private func bullet(_ text: String) -> some View {
