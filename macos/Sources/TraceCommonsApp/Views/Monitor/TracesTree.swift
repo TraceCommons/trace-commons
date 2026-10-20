@@ -71,6 +71,10 @@ struct TracesTree: Equatable {
     /// The tree pane's top level: every folder the core reports (ignored
     /// ones only when `showsIgnored`), newest waiting session first.
     var folders: [FolderNode] = []
+    /// How many folders "Show ignored folders" leaves out: they would be
+    /// drawn with it on. While any is, the list keeps its controls, and so
+    /// the toggle, even with nothing else to draw.
+    var hiddenIgnored = 0
 
     struct ToolNode: Equatable, Identifiable {
         let kind: SourceKind
@@ -189,9 +193,14 @@ struct TracesTree: Equatable {
         var byTool: [SourceKind: [FolderNode]] = [:]
         var unplaced: [FolderNode] = []
         var drawn: [FolderNode] = []
+        var hiddenIgnored = 0
         for id in order {
-            guard var node = folders[id], showsIgnored || node.mode != .ignore else { continue }
+            guard var node = folders[id] else { continue }
             if onlyWithSessions && node.sessions.isEmpty { continue }
+            guard showsIgnored || node.mode != .ignore else {
+                hiddenIgnored += 1
+                continue
+            }
             if !keepsOrder {
                 node.sessions.sort { ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast) }
             }
@@ -213,7 +222,8 @@ struct TracesTree: Equatable {
 
         return TracesTree(
             tools: tools, unplaced: unplaced,
-            folders: keepsOrder ? listedOrder(drawn, entries: entries) : ordered(drawn))
+            folders: keepsOrder ? listedOrder(drawn, entries: entries) : ordered(drawn),
+            hiddenIgnored: hiddenIgnored)
     }
 
     /// Folders in the order their first session was listed; folders with

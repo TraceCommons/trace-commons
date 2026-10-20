@@ -39,6 +39,30 @@ final class MonitorShellTests: XCTestCase {
         XCTAssertTrue(TracesStore(client: nil).showsIgnored, "ignored folders are shown by default (#1146)")
     }
 
+    /// Ignored folders the toggle hides keep the list's controls, and so
+    /// the toggle, on screen (#1490 review): with every waiting folder
+    /// ignored and the toggle off, the tab must not read as if nothing were
+    /// waiting with no way back.
+    func test_hiddenIgnoredFoldersKeepTheToggleReachable() throws {
+        let project = ProjectRow(projectId: "p1", projectLabel: "quiet", projectPath: "/x", mode: .ignore)
+        let hidden = TracesTree.build(entries: [], projects: [project], settings: nil, scansWhenUnset: [], showsIgnored: false)
+        XCTAssertTrue(hidden.folders.isEmpty)
+        XCTAssertEqual(hidden.hiddenIgnored, 1)
+        let shown = TracesTree.build(entries: [], projects: [project], settings: nil, scansWhenUnset: [], showsIgnored: true)
+        XCTAssertEqual(shown.hiddenIgnored, 0)
+        // A narrowed list leaves out empty folders anyway: none is hidden
+        // by the toggle there.
+        let idle = TracesTree.build(entries: [], projects: [project], settings: nil, scansWhenUnset: [],
+                                    showsIgnored: false, onlyWithSessions: true)
+        XCTAssertEqual(idle.hiddenIgnored, 0)
+        XCTAssertTrue(TracesTreeView.keepsControlsWhenEmpty(idleOnly: false, hiddenIgnored: 1))
+        XCTAssertTrue(TracesTreeView.keepsControlsWhenEmpty(idleOnly: true, hiddenIgnored: 0))
+        XCTAssertFalse(TracesTreeView.keepsControlsWhenEmpty(idleOnly: false, hiddenIgnored: 0))
+        let view = try Self.text("Views/Monitor/TracesViews.swift")
+        XCTAssertTrue(view.contains(
+            "if Self.keepsControlsWhenEmpty(idleOnly: store.idleOnly, hiddenIgnored: store.tree.hiddenIgnored) {"))
+    }
+
     /// The store redraws from its last read when the choice changes,
     /// without asking the core again.
     func test_theStoreRedrawsWhenTheChoiceChanges() async throws {

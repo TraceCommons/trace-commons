@@ -113,8 +113,11 @@ struct TracesTreeView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                         // A narrowed list that came back empty still says
-                        // so, with its way out.
-                        if store.idleOnly { TracesListControls(store: store, openHistory: openHistory) }
+                        // so, with its way out: the idle filter's Clear, or
+                        // Show ignored folders when it hides every folder.
+                        if Self.keepsControlsWhenEmpty(idleOnly: store.idleOnly, hiddenIgnored: store.tree.hiddenIgnored) {
+                            TracesListControls(store: store, openHistory: openHistory)
+                        }
                         if store.phase == .loaded { emptyTree }
                     }
                 }
@@ -157,6 +160,12 @@ struct TracesTreeView: View {
         }
         let opened = Set(matched).subtracting(expanded)
         return (expanded.union(matched), searchOpened.union(opened))
+    }
+
+    /// Whether an empty list still draws its controls: when a filter in
+    /// them emptied it, so the way out stays on screen.
+    static func keepsControlsWhenEmpty(idleOnly: Bool, hiddenIgnored: Int) -> Bool {
+        idleOnly || hiddenIgnored > 0
     }
 
     /// The folders the idle filter opens: every folder it lists.
