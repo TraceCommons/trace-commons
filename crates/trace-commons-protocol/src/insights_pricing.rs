@@ -10,12 +10,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-pub const PRICING_TABLE_SCHEMA_VERSION: u32 = 1;
+pub const PRICING_TABLE_SCHEMA_VERSION: u32 = 2;
 pub const PRICING_CALCULATOR_VERSION: &str = "deterministic-usd-cost-v1";
 pub const COST_FRACTION_DENOMINATOR: u64 = 1_000_000;
 const MICROS_ROUNDING_DENOMINATOR: u128 = 1_000_000_000;
 const MAX_PRICE_ENTRIES: usize = 1024;
-const MAX_RATES_PER_ENTRY: usize = 4;
+const MAX_RATES_PER_ENTRY: usize = 5;
 const MAX_ID_BYTES: usize = 96;
 const MAX_PROVENANCE_TEXT_BYTES: usize = 256;
 const MAX_SOURCE_URL_BYTES: usize = 2048;
@@ -40,7 +40,8 @@ pub enum BillableTokenCategory {
     UncachedInput,
     CachedInput,
     CacheReadInput,
-    CacheCreationInput,
+    CacheWriteFiveMinuteInput,
+    CacheWriteOneHourInput,
     Output,
 }
 
@@ -153,7 +154,13 @@ impl PricingAccounting {
         use BillableTokenCategory::*;
         match self {
             Self::Codex => &[UncachedInput, CachedInput, Output],
-            Self::ClaudeCode => &[UncachedInput, CacheReadInput, CacheCreationInput, Output],
+            Self::ClaudeCode => &[
+                UncachedInput,
+                CacheReadInput,
+                CacheWriteFiveMinuteInput,
+                CacheWriteOneHourInput,
+                Output,
+            ],
         }
     }
 }
@@ -463,6 +470,84 @@ mod tests {
         }
     }
 
+    fn claude_table() -> PricingTable {
+        // Synthetic rates: 5-minute write 7, 1-hour write 11 nanos per
+        // million tokens; every other category 1.
+        let mut entry = entry(0, None, 1);
+        entry.accounting = PricingAccounting::ClaudeCode;
+        entry.rates = PricingAccounting::ClaudeCode
+            .required_categories()
+            .iter()
+            .map(|category| TokenRate {
+                category: *category,
+                usd_nanos_per_million_tokens: match category {
+                    BillableTokenCategory::CacheWriteFiveMinuteInput => 7,
+                    BillableTokenCategory::CacheWriteOneHourInput => 11,
+                    _ => 1,
+                },
+            })
+            .collect();
+        table(vec![entry])
+    }
+
+    fn claude_input(tokens: [u64; 5]) -> PricingUsageInput {
+        PricingUsageInput {
+            provider: "synthetic-provider".to_owned(),
+            model: "synthetic-model".to_owned(),
+            accounting: PricingAccounting::ClaudeCode,
+            observed_from: at(1),
+            observed_until: at(2),
+            counts: PricingAccounting::ClaudeCode
+                .required_categories()
+                .iter()
+                .zip(tokens)
+                .map(|(category, tokens)| BillableTokenCount {
+                    category: *category,
+                    tokens,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn claude_accounting_prices_each_cache_write_lifetime_at_its_own_rate() {
+        // 1_000_000_000 tokens of each write lifetime: 7 + 11 = 18 micros.
+        let estimate = calculate_estimated_cost(
+            &claude_table(),
+            &claude_input([0, 0, 1_000_000_000, 1_000_000_000, 0]),
+        )
+        .unwrap();
+        assert_eq!(estimate.estimated_cost_usd_micros, 18);
+        assert_eq!(
+            estimate
+                .breakdown
+                .iter()
+                .map(|b| b.category)
+                .collect::<Vec<_>>(),
+            PricingAccounting::ClaudeCode.required_categories()
+        );
+    }
+
+    #[test]
+    fn a_schema_v1_table_never_validates() {
+        let mut old = table(vec![entry(0, None, 1)]);
+        old.schema_version = 1;
+        old.table_id = old.canonical_table_id().unwrap();
+        assert_eq!(old.validate(), Err(PricingError::InvalidTable));
+    }
+
+    #[test]
+    fn split_category_serde_spellings_are_pinned() {
+        assert_eq!(
+            serde_json::to_value(BillableTokenCategory::CacheWriteFiveMinuteInput).unwrap(),
+            "cache_write_five_minute_input"
+        );
+        assert_eq!(
+            serde_json::to_value(BillableTokenCategory::CacheWriteOneHourInput).unwrap(),
+            "cache_write_one_hour_input"
+        );
+    }
+
     #[test]
     fn canonical_table_digest_and_body_substitution_are_bound() {
         let first = table(vec![entry(0, None, 1)]);
@@ -610,7 +695,7 @@ mod tests {
         let value = serde_json::to_value(&estimate).unwrap();
         assert_eq!(
             serde_json::to_string(&estimate).unwrap(),
-            r#"{"schema_version":1,"calculator_version":"deterministic-usd-cost-v1","table_id":"sha256:3e925482baf04f4a1cf3727cefd62fbf49b8c3b1bcb044bd2cd8d9c556c358ff","table_version":1,"currency":"usd","provider":"synthetic-provider","model":"synthetic-model","accounting":"codex","observed_from":"1970-01-01T00:00:00Z","observed_until":"1970-01-01T00:00:00Z","breakdown":[{"category":"uncached_input","tokens":1,"usd_nanos_per_million_tokens":10},{"category":"cached_input","tokens":2,"usd_nanos_per_million_tokens":10},{"category":"output","tokens":3,"usd_nanos_per_million_tokens":10}],"estimated_cost_usd_micros":0,"nonzero_rounded_to_zero":true}"#
+            r#"{"schema_version":2,"calculator_version":"deterministic-usd-cost-v1","table_id":"sha256:c758c99b2d787ebb9c38e4ba4799950c114bbafdc52cd69c8a13a5dc05b09b9e","table_version":1,"currency":"usd","provider":"synthetic-provider","model":"synthetic-model","accounting":"codex","observed_from":"1970-01-01T00:00:00Z","observed_until":"1970-01-01T00:00:00Z","breakdown":[{"category":"uncached_input","tokens":1,"usd_nanos_per_million_tokens":10},{"category":"cached_input","tokens":2,"usd_nanos_per_million_tokens":10},{"category":"output","tokens":3,"usd_nanos_per_million_tokens":10}],"estimated_cost_usd_micros":0,"nonzero_rounded_to_zero":true}"#
         );
         assert!(
             value
