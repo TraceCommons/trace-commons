@@ -1090,61 +1090,172 @@ enum InsightsPatternsWords {
     }
 }
 
-/// The Sessions tab (drill-in) over one saved snapshot (feed S). The
-/// selection follows the saved list: the newest session until another is
-/// picked, and the newest left when the picked one is deleted.
+/// The Sessions tab (drill-in). While the daemon's watched-folder counting
+/// (feed T) shows, the picker lists watched traces only and each drills
+/// through the daemon (`insights_sessions`, `insights_session_drill`; owner
+/// decision 2026-10-20: feeds are never mixed). Otherwise it is one saved
+/// snapshot (feed S): the selection follows the saved list, the newest
+/// session until another is picked, and the newest left when the picked one
+/// is deleted.
 @Observable @MainActor
 final class InsightsSessionsModel {
+    /// Reads `insights_sessions` through the daemon client.
+    typealias WatchedReader = @Sendable () async throws -> DaemonData.InsightsSessions
+    /// Reads `insights_session_drill` for one listed reference.
+    typealias WatchedDrillReader = @Sendable (String) async throws -> DaemonData.InsightsSessionDrillAnswer
     private let service: InsightsModel.Service
+    private let watchedReader: WatchedReader?
+    private let watchedDrill: WatchedDrillReader?
     private var task: Task<Void, Never>?
+    private var listTask: Task<Void, Never>?
     private var token = UUID()
+    private var listToken = UUID()
     private var active = false
-    private(set) var busy = false
+    private var drillBusy = false
+    private var listBusy = false
+    /// A drill or the watched list is being read.
+    var busy: Bool { drillBusy || listBusy }
     private(set) var failed = false
     private(set) var drill: InsightsSessionDrill?
-    /// The saved snapshot on screen.
+    /// The session on screen: a saved snapshot ID, or a watched trace's
+    /// opaque reference while `watched` is set.
     private(set) var selected: String?
+    /// The watched traces, newest first, only while feed T shows; `nil` is
+    /// the saved snapshots.
+    private(set) var watched: [DaemonData.InsightsWatchedSession]?
+    /// Set when feed T is on but its traces could not be read, shown with
+    /// the saved feed's line, as Overview shows it; `nil` when it is off or
+    /// the daemon predates it.
+    private(set) var noticeKey: String?
+    /// The saved list as last synced, newest first, kept while watched
+    /// traces show so going back needs no second read.
+    private var savedIDs: [String] = []
+    private var wantsWatched = false
 
-    init(service: @escaping InsightsModel.Service) { self.service = service }
+    init(service: @escaping InsightsModel.Service,
+         watchedReader: WatchedReader? = nil,
+         watchedDrill: WatchedDrillReader? = nil) {
+        self.service = service
+        self.watchedReader = watchedReader
+        self.watchedDrill = watchedDrill
+    }
 
-    func open() { active = true; load() }
-    func close() { active = false; token = UUID(); task?.cancel(); task = nil; busy = false }
-    func reload() { load() }
-    func select(_ snapshotID: String) { selected = snapshotID; load() }
+    func open() {
+        active = true
+        if wantsWatched { readWatched() } else { load() }
+    }
+    func close() {
+        active = false; token = UUID(); listToken = UUID()
+        task?.cancel(); task = nil; listTask?.cancel(); listTask = nil; drillBusy = false; listBusy = false
+    }
+    func reload() { if wantsWatched { readWatched() } else { load() } }
+    func select(_ reference: String) { selected = reference; load() }
 
     /// Keep the selection inside the saved list, newest first. Reads only
-    /// when the selection changes.
+    /// when the selection changes, and nothing while watched traces show.
     func sync(snapshotIDs: [String]) {
+        savedIDs = snapshotIDs
+        guard watched == nil else { return }
         if let selected, snapshotIDs.contains(selected) { return }
         guard let newest = snapshotIDs.first else {
             token = UUID(); task?.cancel(); task = nil
-            selected = nil; drill = nil; failed = false; busy = false
+            selected = nil; drill = nil; failed = false; drillBusy = false
             return
         }
         select(newest)
     }
 
+    /// Show the watched traces while feed T shows (`true`), or go back to the
+    /// saved snapshots (`false`). A watched list that cannot be read falls
+    /// back to the saved snapshots, with a notice only when counting is on.
+    func showWatched(_ on: Bool) {
+        wantsWatched = on && watchedReader != nil
+        if wantsWatched { readWatched() } else { showSaved(notice: false) }
+    }
+
+    private func showSaved(notice: Bool) {
+        listToken = UUID(); listTask?.cancel(); listTask = nil; listBusy = false
+        noticeKey = notice ? InsightsModel.FeedLineKey.counterPassUnavailable : nil
+        if watched != nil {
+            // A watched trace's figures never stay on the saved feed.
+            watched = nil
+            token = UUID(); task?.cancel(); task = nil
+            selected = nil; drill = nil; failed = false; drillBusy = false
+        }
+        sync(snapshotIDs: savedIDs)
+    }
+
+    private func readWatched() {
+        guard active, let watchedReader else { return }
+        listTask?.cancel()
+        listToken = UUID(); let current = listToken
+        listBusy = true
+        listTask = Task { [weak self] in
+            let outcome: Result<DaemonData.InsightsSessions, Error>
+            do { outcome = .success(try await watchedReader()) } catch { outcome = .failure(error) }
+            guard let self, self.active, self.listToken == current, !Task.isCancelled else { return }
+            self.listBusy = false
+            switch outcome {
+            case .success(let list) where list.showsCounterPass:
+                let rows = list.sessions ?? []
+                self.watched = rows; self.noticeKey = nil
+                if let selected = self.selected, rows.contains(where: { $0.sessionRef == selected }) {
+                    if self.drill?.session_ref != selected || self.drill?.feed != "counter_pass" { self.load() }
+                } else if let newest = rows.first {
+                    self.select(newest.sessionRef)
+                } else {
+                    self.token = UUID(); self.task?.cancel(); self.task = nil
+                    self.selected = nil; self.drill = nil; self.failed = false; self.drillBusy = false
+                }
+            case .success(let list):
+                self.showSaved(notice: list.enabled)
+            case .failure(let error):
+                self.showSaved(notice: !((error as? DaemonDataError)?.isNotServed ?? false))
+            }
+        }
+    }
+
     private func load() {
-        guard active, let snapshotID = selected else { return }
+        guard active, let reference = selected else { return }
         task?.cancel()
         token = UUID(); let current = token
-        busy = true; failed = false
+        drillBusy = true; failed = false
+        let watchedRead: WatchedDrillReader? = watched == nil ? nil : watchedDrill
+        if watched != nil && watchedRead == nil { drillBusy = false; failed = true; drill = nil; return }
         let service = service
         let operation = InsightsRequest.Operation("session_drill", tz: InsightsOverviewModel.offset,
-                                                  snapshotID: snapshotID)
+                                                  snapshotID: reference)
         task = Task { [weak self] in
             do {
-                let response = try await service(.init(operation: operation))
+                let drill: InsightsSessionDrill
+                if let watchedRead {
+                    let answer = try await watchedRead(reference)
+                    guard answer.enabled, answer.readable == true, let core = answer.coreDrill,
+                          core.feed == "counter_pass" else { throw InsightsError.invalidResponse }
+                    drill = core
+                } else {
+                    let response = try await service(.init(operation: operation))
+                    guard response.type == operation.type, let read = response.session
+                    else { throw InsightsError.invalidResponse }
+                    drill = read
+                }
                 guard let self, self.active, self.token == current, !Task.isCancelled else { return }
-                guard response.type == operation.type, let drill = response.session,
-                      drill.session_ref == snapshotID else { throw InsightsError.invalidResponse }
-                self.drill = drill; self.busy = false
+                guard drill.session_ref == reference else { throw InsightsError.invalidResponse }
+                self.drill = drill; self.drillBusy = false
             } catch {
                 guard let self, self.active, self.token == current, !Task.isCancelled else { return }
                 // A failed read never keeps another session's figures.
-                self.drill = nil; self.failed = true; self.busy = false
+                self.drill = nil; self.failed = true; self.drillBusy = false
             }
         }
+    }
+}
+
+extension DaemonData.InsightsSessionDrillAnswer {
+    /// The drill in the core's own shape, the type the saved drill decodes
+    /// into, so one view draws either feed.
+    var coreDrill: InsightsSessionDrill? {
+        session.flatMap { try? JSONDecoder().decode(InsightsSessionDrill.self, from: $0.data) }
     }
 }
 
@@ -1228,6 +1339,46 @@ enum InsightsSessionsWords {
 
     private static func parseEvent(_ wire: String) -> Date? {
         try? Date(wire, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true))
+    }
+
+    /// A watched trace's label (feed T, owner decision 2026-10-20): its
+    /// folder's label, its first recorded event's local day and time, its
+    /// harness and its turns. Codex records no turns, so its label has none;
+    /// a folder no longer known reads the core's word. Never the reference.
+    static func watchedLabel(_ row: DaemonData.InsightsWatchedSession, copy: [String: String],
+                             timeZone: TimeZone = TimeZone(secondsFromGMT: TimeZone.current.secondsFromGMT())
+                                ?? .current) -> String {
+        let values = [
+            "folder": row.folder ?? text("analytics_folder_unknown", copy),
+            "harness": InsightsOverviewWords.harness(row.source, copy: copy),
+        ]
+        guard let first = row.startedAt.flatMap(parseEvent) else {
+            return InsightsOverviewWords.fill(text("analytics_watched_label_undated", copy), values)
+        }
+        var filled = values
+        filled["date"] = first.formatted(Date.FormatStyle(timeZone: timeZone)
+            .weekday(.abbreviated).month(.abbreviated).day())
+        filled["time"] = first.formatted(Date.FormatStyle(timeZone: timeZone).hour().minute())
+        guard let turns = row.turns else {
+            return InsightsOverviewWords.fill(text("analytics_watched_label_no_turns", copy), filled)
+        }
+        filled["n"] = String(turns)
+        return InsightsOverviewWords.fill(text("analytics_watched_label", copy), filled)
+    }
+
+    /// The session picker under feed T: each watched trace by its label,
+    /// valued by its opaque reference, newest first.
+    static func watchedChoices(_ rows: [DaemonData.InsightsWatchedSession],
+                               copy: [String: String]) -> [(value: String, title: String)] {
+        rows.map { (value: $0.sessionRef, title: watchedLabel($0, copy: copy)) }
+    }
+
+    /// Which feed the drill on screen is from, behind the header's "i": the
+    /// watched-folder line, or the saved line with the unavailable notice
+    /// when counting is on but could not be read, as Overview says it.
+    static func feedLines(_ feed: String, notice: String?, copy: [String: String]) -> [String] {
+        if feed == "counter_pass" { return [text("analytics_feed_counter_pass", copy)] }
+        return [text("analytics_feed_saved", copy)] + (notice.map { [$0] } ?? [])
     }
 
     /// The session picker: each saved session by its label, valued by its ID.

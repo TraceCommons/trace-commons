@@ -240,6 +240,15 @@ public protocol DaemonDataClient: Sendable {
     /// daemon refuses it as `unknown_method`. Either way, and on any failed
     /// read, the window shows the saved-imports feed instead, never both.
     func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek
+    /// `insights_sessions`: the watched traces the counter pass stored,
+    /// newest first, for the Sessions tab while feed T shows. Answers
+    /// `enabled: false` while the setting is off; an older daemon refuses it
+    /// as `unknown_method`. Either way, and on any failed read, the tab shows
+    /// saved snapshots instead.
+    func insightsSessions() async throws -> DaemonData.InsightsSessions
+    /// `insights_session_drill`: one listed watched trace turn by turn, by
+    /// its `sessionRef`, at the local UTC offset.
+    func insightsSessionDrill(sessionRef: String) async throws -> DaemonData.InsightsSessionDrillAnswer
     /// `insights_glance`: today's routed calls per tool from the proxy
     /// ledger (on by default; owner decision D3, settled 2026-10-09). `tzSeconds` is the local UTC offset
     /// (`TimeZone.current.secondsFromGMT()`). `enabled: false`, an older

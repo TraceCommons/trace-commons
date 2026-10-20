@@ -110,7 +110,8 @@ pub struct OverviewSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LargestSession {
     /// The snapshot ID under feed S. Never a path, and absent under feed T,
-    /// whose rows carry no reference that may leave the daemon.
+    /// whose week rows carry no reference (the Sessions tab's
+    /// `insights_sessions` names its rows by its own opaque reference).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_ref: Option<String>,
     pub tokens: u64,

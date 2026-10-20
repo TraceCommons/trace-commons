@@ -59,7 +59,7 @@ re-read table names files only by a letter and the extension; no path is
 stored or shown. Week-to-week change is left out here.
 
 Sessions reads `session_drill` for one saved snapshot, the newest unless you
-pick another. The header gives the date, harness, turns, tokens and the time
+pick another, while watched-folder counting (below) is not showing. The header gives the date, harness, turns, tokens and the time
 between the first and last recorded event, which is not active time. Input
 sent each turn is stacked cache read, uncached and cache write, with a dashed
 line at the long-context threshold. A turn with any counter unknown is a gap,
@@ -75,7 +75,19 @@ When the daemon's watched-folder counting (feed T, the
 `insights_counter_pass` setting, off by default) is on and readable,
 Overview and Patterns show its week instead, in the same shapes, and the feed
 line says so; the two feeds are never mixed, and a failed read falls back to
-the saved week with a line saying counting is unavailable. Only then are
+the saved week with a line saying counting is unavailable. Sessions then
+lists watched traces only (`insights_sessions`, newest first, at most 200),
+each labelled by its folder, the day and time of its first recorded event,
+the tool and its turns ("trace-commons · Mon, Oct 19 14:02 · Claude Code ·
+119 turns"; a Codex trace records no turns, so its label has none). The
+folder is the label the daemon shows for that folder elsewhere, matched at
+answer time from the trace's stored folder digest; a folder it no longer
+knows reads "Unknown folder". Picking one reads `insights_session_drill`,
+the same drill a saved snapshot has, from the daemon's stored counters, so
+the same file gives the same figures either way; its header's "i" names the
+watched-folder feed. Saved snapshots stay under Analyze. A watched list that
+cannot be read falls back to the saved snapshots with the same unavailable
+line Overview shows. Only then are
 weeks compared: "vs last week" and "Your best week" (a tick on the cache
 bar) need comparable weeks. The daemon's kept weekly figures go unchanged to
 the core's `comparisons`, which marks your goals (Patterns, "Goals": six
@@ -85,8 +97,10 @@ useful", no advice) and, on the first opens after a week closes, the weekly
 summary card at the top of Overview. "View week" puts the closed week on
 screen; "Hide" clears the daemon's `insights_recap_card_enabled`, the
 card's only switch. Goals and "Not useful" are stored as rule IDs and Monday
-dates only. Feed T sessions carry no reference, so its cards do not drill
-down to sessions.
+dates only. The week's feed T session rows carry no reference, so Overview
+and Patterns cards do not drill down to sessions; the Sessions tab lists
+them through `insights_sessions`, whose opaque references are not the
+week's.
 
 Insights is the main window's fourth tab (Cmd-4; 2026-10-15, before that
 a Home page, and Home's Insights card now switches to the tab). It draws in
