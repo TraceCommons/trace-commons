@@ -245,7 +245,12 @@ public protocol DaemonDataClient: Sendable {
     /// `enabled: false` while the setting is off; an older daemon refuses it
     /// as `unknown_method`. Either way, and on any failed read, the tab shows
     /// saved snapshots instead.
-    func insightsSessions() async throws -> DaemonData.InsightsSessions
+    ///
+    /// Paged: `before` is the `next` cursor of the page before (`nil` for
+    /// the first page) and `limit` the most rows a page lists (`nil` for the
+    /// daemon's bound). A daemon that predates paging ignores both and
+    /// answers its one page with no `next`.
+    func insightsSessions(before: String?, limit: Int?) async throws -> DaemonData.InsightsSessions
     /// `insights_session_drill`: one listed watched trace turn by turn, by
     /// its `sessionRef`, at the local UTC offset.
     func insightsSessionDrill(sessionRef: String) async throws -> DaemonData.InsightsSessionDrillAnswer
@@ -339,6 +344,12 @@ extension DaemonDataClient {
     /// The first page of the mission catalogue, at the daemon's default size.
     public func networkMissionCatalogue() async throws -> DaemonData.NetworkMissionCatalogue {
         try await networkMissionCatalogue(limit: nil, before: nil)
+    }
+
+    /// The first page of `insights_sessions`, at the daemon's bound: the
+    /// request an unpaged daemon answered.
+    public func insightsSessions() async throws -> DaemonData.InsightsSessions {
+        try await insightsSessions(before: nil, limit: nil)
     }
 }
 

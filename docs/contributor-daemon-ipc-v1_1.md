@@ -609,7 +609,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
 | `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
-| `insights_sessions` | — | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `truncated`, `sessions[]` of `{session_ref, source, started_at, turns, folder}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
+| `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
@@ -4765,11 +4765,74 @@ key; on, a key, store or folder-rule read that fails answers
 (`key_unavailable`, `store_unreadable`, `policy_unreadable`), never an empty
 list. Sessions in a Never folder are neither listed nor drilled.
 
-`insights_sessions` takes no params. While enabled and readable it answers
-`updated_at`, `sessions_stored` (rows outside Never folders), `truncated`
-(more stored than listed) and `sessions[]`, newest first by the transcript's
-earliest recorded event, at most 200. Each row is exactly
-`{"session_ref", "source", "started_at", "turns", "folder"}`:
+`insights_sessions` is paged. Both params are optional, and a request with
+neither answers exactly the first page an unpaged daemon answered, so a
+client that sends no params keeps working:
+
+- `before`: the `next` cursor an earlier page answered. It is opaque (`p`,
+  then four plain-digit numbers separated by `.`, the last naming the store:
+  its key and a generation drawn at random when the store is begun): never
+  a reference, digest or path. A non-string, a string not in that format (a
+  sign or an empty part is refused), or a cursor answered from another
+  store is `bad_params` /
+  `insights-sessions-cursor-invalid`. Another store is one under a new key,
+  or one begun again under the same key (an unreadable file, a clear):
+  either way its references name other sessions now. A client that gets it
+  reads the first page.
+- `limit`: the most rows this page lists, a whole number of at least 1;
+  above 200 is held to 200; absent is 200. Anything else is `bad_params` /
+  `insights-sessions-limit-invalid`.
+
+Both are checked before the gate, so a bad param is refused whether counting
+is on or off.
+
+While enabled and readable it answers `updated_at`, `sessions_stored` (every
+row outside Never folders, never page-relative), `revision` (a whole number
+that moves only when a row is made; a pass that stores nothing leaves it,
+though `updated_at` moves on every pass), `truncated` (more rows
+follow this page), `next` (the cursor for the following page, or `null` at
+the end of the list; `truncated` is `next != null`) and `sessions[]`.
+
+Which rows a page lists is chosen by recency alone: the transcript's
+earliest recorded event, else the time discovery placed the row, else its
+file's last write, with ties going to the row made later. A page takes the
+most recent rows strictly older than `before`, at most `limit` of them, and
+`next` is the last of those by recency. Only then are the page's rows
+ordered: dated first, newest first, and the undated ones after, in their
+recency order. So a session placed just now is not cut by a long tail of
+older dated ones, and an undated row never leads a page; undated rows list
+last **within each page**, not after every dated row of the whole list.
+
+A page never repeats a row or shifts one already answered: the cursor is a
+recency key, not a position, and a page takes only rows strictly older than
+it. Where a row stored while a client is paging appears follows its recency
+key, which is its first recorded event (not the time it was stored) when it
+has one, else the time discovery placed it, else its file's last write:
+
+- A row whose key is older than the cursor in use is taken by the page that
+  reaches that part of the list, at its place by key among the rows still to
+  come.
+- A row whose key is newer than the cursor in use is not shown to a client
+  paging onward, and the client never sees it in that run. It lists at its
+  place by key in the next read from the first page. A late-arriving row is
+  therefore not always at the top: a session discovered late whose first
+  event is old lists where that event falls.
+- A row made again because its file grew gets a new reference, so it ties
+  later than before, but a dated row keeps its start time and so its place:
+  it does not move to the top. A client that has already paged past that place
+  does not see the new row until it reads from the first page again. Its old
+  reference now drills to `insights-session-unknown`.
+
+A client notices that rows came or went by `sessions_stored` and `revision`
+(not `updated_at`, which moves on every pass): when a page says other values
+than the first page did, or a drill answers `insights-session-unknown`, it
+reads from the first page again, as many rows as it had loaded, and puts
+that in place of the loaded list. The answer is then the truth for that
+whole range: a re-made row shows once, under its new reference and at its
+place, and a client that keeps the row on screen in view sees no jump.
+
+Each row is exactly
+`{"session_ref", "source", "started_at", "turns", "tokens", "sparkline", "folder"}`:
 
 - `session_ref` is opaque: `t` and the order the pass made the row in. It is
   never a digest or a path, and it changes when the session's file grows and
@@ -4778,6 +4841,22 @@ earliest recorded event, at most 200. Each row is exactly
 - `started_at` is the earliest recorded event, RFC 3339, or `null`.
 - `turns` is the Claude Code turn count; `null` for Codex, which records no
   per-turn series (owner decision D11, open), and for an unreadable session.
+- `tokens` is the session's tokens as its drill's header counts them: for
+  Claude Code the known turns' tokens together (uncached input, cache read,
+  cache write and output), for Codex the change between its first and last
+  token count. `null` when no counter is known, never 0.
+- `sparkline` is the session's tokens per turn, folded for a row, or `null`
+  for Codex (no per-turn series) and for a session with no known turn:
+  `{"points", "peak_tokens", "peak_turn"}`. `points` is at most 32 whole
+  numbers, oldest first: one per turn when there are 32 turns or fewer;
+  otherwise the turns are cut into 32 consecutive runs, as even as integer
+  division makes them, and each point is the largest turn in its run, so a
+  spike is never averaged away. A turn with unknown counters counts as 0 in
+  its point. `peak_tokens` and `peak_turn` are read from the turns
+  themselves, not the points: the largest one turn's tokens and that turn's
+  ordinal (the first such turn on a tie). Integers only; no text, path or
+  digest. Computed by `insights::session_sparkline`, so another shell's
+  daemon client reads the same series.
 - `folder` is the folder's display label, the same `project_label` that
   `list_projects` shows for it, or `null` when no folder the daemon knows
   (folder rules, the queue, uploads, the folders the watcher has seen) has

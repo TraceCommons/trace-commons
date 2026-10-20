@@ -476,7 +476,7 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         throw DaemonDataError.notAvailableYet(method: "insights_week")
     }
 
-    public func insightsSessions() async throws -> DaemonData.InsightsSessions {
+    public func insightsSessions(before: String?, limit: Int?) async throws -> DaemonData.InsightsSessions {
         guard set != .coreDown else { throw DaemonDataError.unreachable }
         // SAMPLE: no counter pass is recorded, so Sessions shows saved
         // snapshots, as against a daemon that predates it.

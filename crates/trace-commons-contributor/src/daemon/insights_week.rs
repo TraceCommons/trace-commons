@@ -306,6 +306,25 @@ impl CounterRow {
     }
 }
 
+/// The tag a `insights_sessions` cursor carries: the first four bytes of
+/// the key's fingerprint, exclusive-or the store's generation, as a number
+/// of at most ten digits (no digest-like run crosses). A new key (a new
+/// device) or a store begun again under the same key (an unreadable file, a
+/// clear) is a new tag, so a cursor from before is refused. A store written
+/// before generations reads as generation `0`, so its tag, and the cursors
+/// already answered from it, are unchanged until it is begun again.
+fn store_tag_of(key: &DigestKey, store: &CounterStore) -> u64 {
+    let bytes = key_fingerprint(key).0;
+    let key_part = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    u64::from(key_part ^ store.generation)
+}
+
+/// A store's generation: random and never `0`, the value a store written
+/// before generations reads as.
+fn new_generation() -> u32 {
+    (uuid::Uuid::new_v4().as_u128() as u32).max(1)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CounterStore {
@@ -340,6 +359,14 @@ struct CounterStore {
     /// store written before it, and left out of the file while empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     evicted: BTreeMap<KeyedDigest, Evicted>,
+    /// Names this store, apart from its key: drawn at random when the
+    /// store is begun, so a store begun again under the same key (an
+    /// unreadable file, a clear) is another store, and an
+    /// `insights_sessions` cursor from before is refused rather than read
+    /// against references that now name other sessions. `0` in a store
+    /// written before it.
+    #[serde(default)]
+    generation: u32,
 }
 
 /// The observation an evicted session's row was made from. No path and no
@@ -369,6 +396,7 @@ impl CounterStore {
             ledger_folded_through: None,
             ledger_folded_started: None,
             evicted: BTreeMap::new(),
+            generation: new_generation(),
         }
     }
 }
@@ -1194,40 +1222,36 @@ impl CounterPass {
         Ok(())
     }
 
-    /// The rows a Sessions answer may show, with the key they were made
-    /// under: `Ok(None)` before any pass made a key, and no rows when the
-    /// store was made under another key. Never-folder rows are left out.
-    fn visible_rows(
+    /// The store a Sessions answer reads, with the key its rows were made
+    /// under: `Ok(None)` for the store when no pass made a key or the store
+    /// was made under another key. Rows are read in place, never copied.
+    fn visible_store(
         &self,
-        never_project_keys: &NeverFolders,
-    ) -> Result<(Option<DigestKey>, Vec<CounterRow>), &'static str> {
+    ) -> Result<(Option<DigestKey>, Option<Arc<CounterStore>>), &'static str> {
         // Never creates a key: no key means no pass has stored a row yet.
         let key = self.keys.load().map_err(|_| UNREADABLE_KEY)?;
         let store = self.load_cached()?;
-        let rows = match (&key, &store) {
+        let store = match (&key, store) {
             (Some(key), Some(store)) if store.key_fingerprint == key_fingerprint(key) => {
-                let never = never_digests(key, never_project_keys);
-                store
-                    .rows
-                    .values()
-                    .filter(|row| !never.contains(&row.project))
-                    .cloned()
-                    .collect()
+                Some(store)
             }
-            _ => Vec::new(),
+            _ => None,
         };
-        Ok((key, rows))
+        Ok((key, store))
     }
 
-    /// The `insights_sessions` answer: at most `limit` stored sessions, the
-    /// most recent ones by the time discovery knows, listed dated first
-    /// (newest first) and undated ones after, each with an opaque reference, its harness, its first
-    /// recorded event, its turns (Claude Code only) and its folder's label.
-    ///
-    /// `folders` are the project keys the daemon knows, each with the label
-    /// it shows for that folder; a row's folder digest is matched against
-    /// their digests under the counter key, here, so neither a key nor a
-    /// digest leaves this function. No match crosses as `null`.
+    /// The tag a `insights_sessions` cursor carries for the store now
+    /// visible: `store_tag_of` it, or `0` with no key or store.
+    #[cfg(test)]
+    pub(crate) fn store_tag(&self) -> u64 {
+        match self.visible_store() {
+            Ok((Some(key), Some(store))) => store_tag_of(&key, &store),
+            _ => 0,
+        }
+    }
+
+    /// The `insights_sessions` answer's first page, at most `limit` rows.
+    #[cfg(test)]
     pub(crate) fn sessions_value(
         &self,
         enabled: bool,
@@ -1235,13 +1259,66 @@ impl CounterPass {
         folders: &[(String, String)],
         limit: usize,
     ) -> serde_json::Value {
+        self.sessions_page_value(
+            enabled,
+            never_project_keys,
+            folders,
+            super::insights_sessions::SessionsPage {
+                before: None,
+                store: 0,
+                limit,
+            },
+        )
+        .expect("a first page has no cursor to refuse")
+    }
+
+    /// One page of the `insights_sessions` answer: the stored sessions older
+    /// by recency than the page's cursor, at most its limit, chosen and
+    /// ordered by `insights_sessions::select_page` (the most recent by the
+    /// time discovery knows, then dated first, newest first, undated after).
+    /// Each row has an opaque reference, its harness, its first recorded
+    /// event, its turns (Claude Code only), its tokens and sparkline, and its
+    /// folder's label; `next` is the cursor for the following page, `null`
+    /// at the end.
+    ///
+    /// `folders` are the project keys the daemon knows, each with the label
+    /// it shows for that folder; a row's folder digest is matched against
+    /// their digests under the counter key, here, so neither a key nor a
+    /// digest leaves this function. No match crosses as `null`.
+    pub(crate) fn sessions_page_value(
+        &self,
+        enabled: bool,
+        never_project_keys: &NeverFolders,
+        folders: &[(String, String)],
+        page: super::insights_sessions::SessionsPage,
+    ) -> Result<serde_json::Value, &'static str> {
         if !enabled {
             // Owner decision D4, open: nothing is read for Insights.
-            return serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS});
+            return Ok(serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS}));
         }
-        let (key, mut rows) = match self.visible_rows(never_project_keys) {
+        let (key, store) = match self.visible_store() {
             Ok(found) => found,
-            Err(reason) => return unreadable_value(reason),
+            Err(reason) => return Ok(unreadable_value(reason)),
+        };
+        // A cursor from another store names other sessions: refuse it, and
+        // the shell reads the first page.
+        let tag = match (&key, &store) {
+            (Some(key), Some(store)) => store_tag_of(key, store),
+            _ => 0,
+        };
+        if page.before.is_some() && page.store != tag {
+            return Err(super::insights_sessions::ERR_SESSIONS_CURSOR_INVALID);
+        }
+        let rows: Vec<&CounterRow> = match (&key, &store) {
+            (Some(key), Some(store)) => {
+                let never = never_digests(key, never_project_keys);
+                store
+                    .rows
+                    .values()
+                    .filter(|row| !never.contains(&row.project))
+                    .collect()
+            }
+            _ => Vec::new(),
         };
         let labels: BTreeMap<KeyedDigest, &str> = match &key {
             Some(key) => folders
@@ -1250,27 +1327,26 @@ impl CounterPass {
                 .collect(),
             None => BTreeMap::new(),
         };
-        // The bound chooses which rows are listed by recency alone: the
-        // first recorded event, else the time discovery placed the row,
-        // else its file's last write; ties go to the row made later. So a
-        // session placed just now is not cut by older dated ones.
-        rows.sort_by_key(|row| {
-            std::cmp::Reverse((
-                row.listed_at().or(row.placed_at).unwrap_or(row.modified_at),
-                row.seq,
-            ))
-        });
         let stored = rows.len();
-        rows.truncate(limit);
-        // Then the chosen rows are ordered dated first, newest first, with
-        // the undated ones after (the sort is stable, so they keep their
-        // recency order). An undated row never leads the list: a shell
-        // selects the first row by default, and a large file still being
-        // written would otherwise sit above every dated one.
-        rows.sort_by_key(|row| row.listed_at().is_none());
+        // Recency is the first recorded event, else the time discovery
+        // placed the row, else its file's last write; ties go to the row
+        // made later. So a session placed just now is not cut by older
+        // dated ones, and an undated row never leads a page: a large file
+        // still being written would otherwise sit above every dated one.
+        let (rows, next) = super::insights_sessions::select_page(
+            rows,
+            |row| super::insights_sessions::SessionsCursor {
+                at: row.listed_at().or(row.placed_at).unwrap_or(row.modified_at),
+                seq: row.seq,
+            },
+            |row| row.listed_at().is_some(),
+            page,
+        );
+        use crate::insights::session_sparkline;
         let sessions: Vec<serde_json::Value> = rows
             .iter()
             .map(|row| {
+                let row = *row;
                 let source = match &row.body {
                     RowBody::Claude { .. } => AnalyticsSource::ClaudeCode,
                     RowBody::Codex { .. } => AnalyticsSource::Codex,
@@ -1280,24 +1356,44 @@ impl CounterPass {
                     RowBody::Claude { series, .. } => Some(series.turns.len()),
                     _ => None,
                 };
+                // The row's tokens as the drill's header counts them, and
+                // the sparkline over its per-turn series (Claude Code only:
+                // Codex records no per-turn series, owner decision D11).
+                let (tokens, sparkline) = match &row.body {
+                    RowBody::Claude { series, .. } => (
+                        session_sparkline::known_tokens(&series.turns),
+                        session_sparkline::session_sparkline(&series.turns),
+                    ),
+                    RowBody::Codex { observed } => {
+                        (observed.as_ref().map(|observed| observed.total), None)
+                    }
+                    RowBody::Unknown { .. } => (None, None),
+                };
                 serde_json::json!({
                     "session_ref": row.reference(),
                     "source": source,
                     "started_at": row.listed_at().map(|at| at.to_rfc3339()),
                     "turns": turns,
+                    "tokens": tokens,
+                    "sparkline": sparkline,
                     "folder": labels.get(&row.project).copied(),
                 })
             })
             .collect();
-        serde_json::json!({
+        Ok(serde_json::json!({
             "enabled": true,
             "feed": FEED_COUNTER_PASS,
             "readable": true,
             "updated_at": self.updated_at(),
             "sessions_stored": stored,
-            "truncated": stored > limit,
+            // Moves only when a row is made (the store's next reference), so
+            // with `sessions_stored` it tells a client its rows changed;
+            // `updated_at` moves on every pass.
+            "revision": store.as_ref().map_or(0, |store| store.next_seq),
+            "truncated": next.is_some(),
+            "next": next.map(|cursor| cursor.encode(tag)),
             "sessions": sessions,
-        })
+        }))
     }
 
     /// The `insights_session_drill` answer for the row `reference` names, in
@@ -1313,13 +1409,24 @@ impl CounterPass {
         if !enabled {
             return Ok(serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS}));
         }
-        let rows = match self.visible_rows(never_project_keys) {
-            Ok((_, rows)) => rows,
+        let (key, store) = match self.visible_store() {
+            Ok(found) => found,
             Err(reason) => return Ok(unreadable_value(reason)),
         };
-        let row = rows
-            .iter()
-            .find(|row| row.reference() == reference)
+        let never = key
+            .as_ref()
+            .map_or(NeverDigests::These(BTreeSet::new()), |key| {
+                never_digests(key, never_project_keys)
+            });
+        let row = store
+            .as_ref()
+            .and_then(|store| {
+                store
+                    .rows
+                    .values()
+                    .filter(|row| !never.contains(&row.project))
+                    .find(|row| row.reference() == reference)
+            })
             .ok_or(super::insights_sessions::ERR_SESSION_UNKNOWN)?;
         let input = row.session_input();
         let mut drill = crate::insights::session_drill::session_drill(

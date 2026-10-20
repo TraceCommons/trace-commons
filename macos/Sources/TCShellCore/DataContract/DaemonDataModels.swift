@@ -2140,8 +2140,15 @@ extension DaemonData {
         public let reason: String?
         public let updatedAt: String?
         public let sessionsStored: Int?
-        /// More stored than listed.
+        /// Moves only when the store makes a row (`updated_at` moves on every
+        /// pass); `nil` from a daemon that predates it.
+        public let revision: Int?
+        /// More rows follow this page.
         public let truncated: Bool?
+        /// The cursor for the next page (`before`); `nil` at the end of the
+        /// list, and from a daemon that predates paging, which lists one
+        /// page only.
+        public let next: String?
         public let sessions: [InsightsWatchedSession]?
 
         /// Enabled, readable, from the counter pass, and carrying a list.
@@ -2150,9 +2157,28 @@ extension DaemonData {
         }
 
         public enum CodingKeys: String, CodingKey {
-            case enabled, feed, readable, reason, truncated, sessions
+            case enabled, feed, readable, reason, revision, truncated, next, sessions
             case updatedAt = "updated_at"
             case sessionsStored = "sessions_stored"
+        }
+    }
+
+    /// A watched trace's tokens per turn, folded for its row: at most 32
+    /// whole numbers, oldest first, each the largest turn in its run, and
+    /// the largest one turn with its ordinal.
+    public struct InsightsSessionSparkline: Codable, Equatable, Sendable {
+        public let points: [UInt64]
+        public let peakTokens: UInt64
+        public let peakTurn: UInt32
+
+        public init(points: [UInt64], peakTokens: UInt64, peakTurn: UInt32) {
+            self.points = points; self.peakTokens = peakTokens; self.peakTurn = peakTurn
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case points
+            case peakTokens = "peak_tokens"
+            case peakTurn = "peak_turn"
         }
     }
 
@@ -2169,11 +2195,17 @@ extension DaemonData {
         /// The folder's label, the one `list_projects` shows; `nil` when no
         /// folder the daemon knows matches, drawn with the core's word.
         public let folder: String?
+        /// The trace's tokens as its drill's header counts them; `nil` when
+        /// no counter is known (or from a daemon that predates it), never 0.
+        public let tokens: UInt64?
+        /// Tokens per turn for the row; `nil` for Codex, for a trace with no
+        /// known turn, and from a daemon that predates it.
+        public let sparkline: InsightsSessionSparkline?
 
         public var id: String { sessionRef }
 
         public enum CodingKeys: String, CodingKey {
-            case source, turns, folder
+            case source, turns, folder, tokens, sparkline
             case sessionRef = "session_ref"
             case startedAt = "started_at"
         }
