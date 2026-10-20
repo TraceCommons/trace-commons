@@ -25,8 +25,13 @@ struct ManagedSessionsSection: View {
             if let snapshot = model.managedSnapshot, snapshot.nearAiSignedIn {
                 signInCard(snapshot)
             }
+            // Signed in or not: a failed Stop or Dismiss, and a missing
+            // terminal, are said with no NEAR AI card above them.
+            statusBlock
             if let snapshot = model.managedSnapshot {
                 sessionsCard(snapshot)
+            } else {
+                connectingCard
             }
         }
         // Glass modals over the whole window, not stock sheets.
@@ -108,6 +113,104 @@ struct ManagedSessionsSection: View {
               let params = model.managedSnapshot?.signInLaunchParams(tool: tool, cwd: path, requestID: UUID().uuidString)
         else { return }
         model.managedAction("managed_launch_prepare", params: params, openTerminal: true)
+    }
+
+    // MARK: Status
+
+    /// What the managed cards cannot do now, and why. These lived in the
+    /// saved-accounts card (base of #1490) and outlive it: a launch, stop
+    /// or dismiss that failed; no terminal to launch in; no supported tool
+    /// installed; the list not read yet.
+    enum StatusItem: Equatable {
+        case connecting
+        case failure(String)
+        case installTools
+        case noTerminal
+    }
+
+    /// The states to say, in the order they are drawn. No terminal follows
+    /// `terminalLaunch`, as the tool buttons do: the notice shows exactly
+    /// when they are left out.
+    static func statusItems(_ snapshot: ManagedSnapshot?, errorKey: String?) -> [StatusItem] {
+        var items: [StatusItem] = []
+        if snapshot == nil { items.append(.connecting) }
+        if let errorKey { items.append(.failure(errorKey)) }
+        if let snapshot {
+            if snapshot.needsToolInstallation { items.append(.installTools) }
+            if !snapshot.capabilities.terminalLaunch { items.append(.noTerminal) }
+        }
+        return items
+    }
+
+    /// A failure, the install list and the no-terminal notice, on a card
+    /// under the NEAR AI card; nothing while there is nothing to say. The
+    /// unread list is the sessions card's own (`connectingCard`).
+    @ViewBuilder
+    private var statusBlock: some View {
+        let items = Self.statusItems(model.managedSnapshot, errorKey: model.managedErrorKey).filter { $0 != .connecting }
+        if !items.isEmpty {
+            GlassCard {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                        statusRow(item)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func statusRow(_ item: StatusItem) -> some View {
+        switch item {
+        case .connecting:
+            EmptyView()
+        case .failure(let key):
+            actionFailure(key)
+        case .installTools:
+            if let snapshot = model.managedSnapshot {
+                ManagedToolInstallation(tools: snapshot.tools ?? [], copy: model.managedText, retry: model.refreshManagedSessions)
+            }
+        case .noTerminal:
+            GlassNotice(tone: .ask, title: model.managedText("terminal_unavailable")) { EmptyView() }
+        }
+    }
+
+    /// A failed request: the failed request's red lines, unboxed (Ron,
+    /// 2026-10-09). The headline, then the reason when it is a different
+    /// word, then, for an unsupported version, each tool's update link.
+    private func actionFailure(_ key: String) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+            GlassAlert(model.managedText("action_failed"))
+            if key != "action_failed" {
+                // `{terminal}` is the chosen app the daemon names.
+                GlassAlert(ManagedSurface.fillTerminal(
+                    model.managedText(key),
+                    terminal: model.managedSnapshot?.capabilities.terminalDestination,
+                    fallback: model.managedText("terminal")))
+                    .textSelection(.enabled)
+            }
+            if key == "unsupported_version" {
+                ForEach(model.managedSnapshot?.updateRecoveryTools(attemptedTool: model.managedErrorTool) ?? []) { availability in
+                    ManagedInstallLink(tool: availability, copy: model.managedText, labelKey: "update", includeToolName: true)
+                }
+            }
+        }
+    }
+
+    /// The sessions card while the list has not been read: connecting,
+    /// with Retry.
+    private var connectingCard: some View {
+        GlassIconCard(
+            systemImage: "terminal", title: model.managedText("title"),
+            subtitle: [model.managedText("connecting")],
+            trailing: {
+                Button { model.refreshManagedSessions() } label: {
+                    Label(model.managedText("retry"), systemImage: "arrow.clockwise").lineLimit(1)
+                }
+                .buttonStyle(GlassButtonStyle(.glass, small: true))
+                .fixedSize()
+                .disabled(model.managedBusy)
+            })
     }
 
     // MARK: Sessions
