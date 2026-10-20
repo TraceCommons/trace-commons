@@ -73,6 +73,9 @@ struct MonitorNotices: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
+        .onChange(of: currentHealthIDs) { _, current in
+            closed = Self.prunedClosed(closed, currentHealth: current)
+        }
         .task(id: model.liveData.map(ObjectIdentifier.init)) {
             offers.attach(model.daemonData)
             await offers.load()
@@ -82,6 +85,22 @@ struct MonitorNotices: View {
     /// The items not closed for now, in the stack's order.
     static func shown(_ items: [GlassPopoverItem], closed: Set<String>) -> [GlassPopoverItem] {
         items.filter { !closed.contains($0.id) }
+    }
+
+    /// The close id of a health banner, or nil when it may not be closed.
+    /// A waiting safeguard (the daily upload limit, a busy witness, a gate
+    /// hold) is closable by its title alone, so another one appearing above
+    /// it does not reopen it. A core that is down or unread is not: closing
+    /// it would leave the tab reading as healthy.
+    static func healthCloseID(for banner: TracesHealth.Banner) -> String? {
+        banner.tone == .ask ? "health:" + banner.title : nil
+    }
+
+    /// `closed` without the closed health banners that are no longer shown,
+    /// so one whose cause has gone comes back when the cause recurs (the next
+    /// day's upload limit, say). Other closed cards are left as they are.
+    static func prunedClosed(_ closed: Set<String>, currentHealth: Set<String>) -> Set<String> {
+        closed.filter { !$0.hasPrefix("health:") || currentHealth.contains($0) }
     }
 
     /// Where a tab's notices go: History is the Traces tab's other page.
@@ -315,13 +334,18 @@ struct MonitorNotices: View {
         }
         // Why approved traces are not moving, or that the core is not
         // answering: the list never reads as current over a last good
-        // tree. No X: each goes when its cause does.
+        // tree. A waiting safeguard can be closed and comes back when its
+        // cause recurs; a down or unread core has no X.
         for banner in TracesHealth.banners(
             phase: traces.phase, status: traces.status, words: traces.words, coreDown: TracesHealth.coreDownLine,
             maxQueueEntries: model.daemonSettings?.maxQueueEntries)
         where !banner.title.isEmpty {
-            items.append(GlassPopoverItem(id: "health:" + banner.id) {
-                GlassPopoverNotice(title: banner.title) {
+            let closeID = Self.healthCloseID(for: banner)
+            items.append(GlassPopoverItem(id: closeID ?? "health:" + banner.id) {
+                GlassPopoverNotice(
+                    title: banner.title, closeLabel: closeID == nil ? nil : closeWord,
+                    onClose: closeID.map(close)
+                ) {
                     GlassNoticeMark(banner.tone)
                 } summary: {
                     if let detail = banner.detail { Text(detail) }
@@ -330,6 +354,15 @@ struct MonitorNotices: View {
         }
         items += undoItems
         return items
+    }
+
+    /// The close ids of the closable health banners shown now, read the
+    /// way `tracesNow` reads them.
+    private var currentHealthIDs: Set<String> {
+        Set(TracesHealth.banners(
+            phase: traces.phase, status: traces.status, words: traces.words, coreDown: nil,
+            maxQueueEntries: model.daemonSettings?.maxQueueEntries
+        ).filter { !$0.title.isEmpty }.compactMap(Self.healthCloseID(for:)))
     }
 
     /// The consent notices about folders: every grant the daemon voided,
