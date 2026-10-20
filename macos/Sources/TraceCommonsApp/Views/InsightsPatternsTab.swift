@@ -90,10 +90,12 @@ struct InsightsPatternsTab: View {
             InsightsSectionTitle(InsightsPatternsWords.title(card.kind, copy: copy),
                                  info: InsightsPatternsWords.basisLines(card, copy: copy))
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                // The token figure is the headline; the count sits beneath it.
+                // The token figure is the headline and the count sits beneath
+                // it; an estimate that rounds to 0 leads with the count, and
+                // the token change is not drawn beside a count.
                 HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s5) {
-                    Text(figure(card.tokens)).insightsFigure()
-                    if card.change != nil {
+                    Text(InsightsPatternsWords.headline(card, copy: copy)).insightsFigure()
+                    if card.change != nil, !InsightsPatternsWords.leadsWithCount(card) {
                         Text(InsightsPatternsWords.change(card, copy: copy)).insightsCaption()
                     }
                 }

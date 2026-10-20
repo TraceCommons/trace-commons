@@ -121,6 +121,10 @@ public struct InsightsPatternCard: Decodable, Sendable, Equatable, Identifiable 
     /// The headline; `nil` is unknown, never zero.
     public let tokens: UInt64?
     public let count: UInt32?
+    /// What the card leads with: `tokens`, or `count` when the estimate
+    /// rounds to 0 while the card found something. `nil` from a core that
+    /// predates it, read as `tokens`.
+    public let headline: String?
     /// Repeated reads only: how many files were read again.
     public let files: UInt32?
     public let sessions: UInt32

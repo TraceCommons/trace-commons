@@ -18,7 +18,6 @@ struct InsightsView: View {
     private let turnOffRecapCard: (@Sendable () async throws -> Void)?
     private let storeSelection: InsightsStoreSelection
     private let storeCopy: [String: String]
-    @State private var choosingFile = false
     @State private var source = "codex"
 
     /// `daemon` is the app's live client, for the week from the daemon's
@@ -239,9 +238,6 @@ struct InsightsView: View {
                 if id != nil { proxy.scrollTo("insight-detail", anchor: .top) }
             }
         }
-        .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.data]) { result in
-            if case .success(let file) = result { model.analyze(file: file, source: source) }
-        }
     }
 
     /// Choose a trace file to analyze. What analysis is and keeps, and that
@@ -263,7 +259,11 @@ struct InsightsView: View {
                         GlassPickerOption(model.text("trajectory"), value: "trajectory"),
                     ])
                     .fixedSize()
-                    Button(model.text("choose_file")) { choosingFile = true }
+                    Button(model.text("choose_file")) {
+                        if let file = FolderPanel.chooseTraceFile(source: source) {
+                            model.analyze(file: file, source: source)
+                        }
+                    }
                     // Short labels repeat on this screen; each is named in full
                     // for VoiceOver, in the core's words.
                     Button(model.text("refresh")) { model.refresh() }

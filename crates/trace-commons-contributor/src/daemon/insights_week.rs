@@ -804,8 +804,8 @@ impl CounterPass {
         Ok((key, rows))
     }
 
-    /// The `insights_sessions` answer: the stored sessions newest first, at
-    /// most `limit`, each with an opaque reference, its harness, its first
+    /// The `insights_sessions` answer: the stored sessions newest first,
+    /// undated ones last, at most `limit`, each with an opaque reference, its harness, its first
     /// recorded event, its turns (Claude Code only) and its folder's label.
     ///
     /// `folders` are the project keys the daemon knows, each with the label
@@ -834,14 +834,20 @@ impl CounterPass {
                 .collect(),
             None => BTreeMap::new(),
         };
-        // Newest first by the first recorded event; a row with none by the
-        // time discovery placed it, then by its file's last write. Ties go
-        // to the row made later.
+        // Dated rows first, newest first by the first recorded event; then
+        // the rows with no recorded time, by the time discovery placed them,
+        // then by their file's last write. An undated row never leads the
+        // list: a shell selects the first row by default, and a large file
+        // still being written would otherwise sit above every dated one.
+        // Ties go to the row made later.
         rows.sort_by_key(|row| {
-            std::cmp::Reverse((
-                row.listed_at().or(row.placed_at).unwrap_or(row.modified_at),
-                row.seq,
-            ))
+            (
+                row.listed_at().is_none(),
+                std::cmp::Reverse((
+                    row.listed_at().or(row.placed_at).unwrap_or(row.modified_at),
+                    row.seq,
+                )),
+            )
         });
         let stored = rows.len();
         let sessions: Vec<serde_json::Value> = rows

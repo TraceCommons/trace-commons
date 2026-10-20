@@ -9,7 +9,8 @@
 //!
 //! # What crosses the socket
 //!
-//! `insights_sessions` lists the stored sessions newest first, bounded by
+//! `insights_sessions` lists the stored sessions newest first (a session
+//! with no recorded time after every dated one), bounded by
 //! [`WATCHED_SESSIONS_MAX`]. Each row carries an opaque reference (`t` and
 //! the order the pass made the row in: never a digest or a path), its
 //! harness, its first recorded event's time, its turn count (Claude Code
@@ -468,6 +469,40 @@ mod tests {
             );
         }
         assert_nothing_identifying(&f, &value);
+    }
+
+    /// A session with no recorded time lists after every dated one, so the
+    /// tab's first row (its default selection) is the newest dated session,
+    /// even when the undated file was written last.
+    #[test]
+    fn undated_sessions_list_after_dated_ones() {
+        let f = Fixture::new();
+        let older = f.write("older.jsonl", &claude_bytes_shifted(0));
+        let newer = f.write("newer.jsonl", &claude_bytes_shifted(2));
+        // No line carries a time or a usage counter.
+        let undated = f.write(
+            "undated.jsonl",
+            b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"PRIVATE_SUMMARY\"}}\n",
+        );
+        f.run(&[
+            (SOURCE_CLAUDE_CODE, &older, PROJECT),
+            (SOURCE_CLAUDE_CODE, &newer, PROJECT),
+            (SOURCE_CLAUDE_CODE, &undated, PROJECT),
+        ]);
+        let listed = rows(&f.list(&[], &[]));
+        let started: Vec<serde_json::Value> =
+            listed.iter().map(|row| row["started_at"].clone()).collect();
+        assert_eq!(
+            started,
+            [
+                serde_json::json!("2026-09-16T09:00:00+00:00"),
+                serde_json::json!("2026-09-14T09:00:00+00:00"),
+                serde_json::Value::Null,
+            ]
+        );
+        // Bounded to one, the one kept is the newest dated session.
+        let first = rows(&f.list_bounded(&[], &[], 1));
+        assert_eq!(first[0]["started_at"], "2026-09-16T09:00:00+00:00");
     }
 
     #[test]

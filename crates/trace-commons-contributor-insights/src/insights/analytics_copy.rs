@@ -260,6 +260,17 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_pattern_repeated_reads_count",
         "{r} reads of {f} files that weren't edited in between",
     ),
+    // A card whose estimate rounds to 0 leads with its count (owner
+    // decision 2026-10-20), and the line beneath it drops the count.
+    ("analytics_pattern_repeated_reads_headline_one", "{r} read"),
+    (
+        "analytics_pattern_repeated_reads_headline_other",
+        "{r} reads",
+    ),
+    (
+        "analytics_pattern_repeated_reads_count_under_count",
+        "Of {f} files that weren't edited in between",
+    ),
     (
         "analytics_estimate_from_result_size",
         "estimated from result size",
@@ -270,6 +281,15 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_pattern_retried_calls_count",
         "{c} calls repeated with the same tool and input, with only reads in between",
     ),
+    ("analytics_pattern_retried_calls_headline_one", "{c} call"),
+    (
+        "analytics_pattern_retried_calls_headline_other",
+        "{c} calls",
+    ),
+    (
+        "analytics_pattern_retried_calls_count_under_count",
+        "Repeated with the same tool and input, with only reads in between",
+    ),
     // 12. Edit, failed command, edit (owner decision D9: kept, labelled inferred).
     (
         "analytics_pattern_edit_fail_edit",
@@ -278,6 +298,15 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     (
         "analytics_pattern_edit_fail_edit_count",
         "{l} times a file was edited, a command failed, and the same file was edited again.",
+    ),
+    ("analytics_pattern_edit_fail_edit_headline_one", "{l} time"),
+    (
+        "analytics_pattern_edit_fail_edit_headline_other",
+        "{l} times",
+    ),
+    (
+        "analytics_pattern_edit_fail_edit_count_under_count",
+        "A file was edited, a command failed, and the same file was edited again.",
     ),
     (
         "analytics_inferred_from_order",
@@ -289,6 +318,8 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_pattern_long_context_line",
         "Input sent after context passed {threshold}",
     ),
+    ("analytics_pattern_long_context_headline_one", "{n} turn"),
+    ("analytics_pattern_long_context_headline_other", "{n} turns"),
     ("analytics_from_counters", "from token counts"),
     // 14.
     (

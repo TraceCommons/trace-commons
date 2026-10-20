@@ -1804,6 +1804,47 @@ mod tests {
         );
     }
 
+    /// Owner decision 2026-10-20: a Patterns card whose estimate rounds to
+    /// 0 leads with its count and unit, one and many, and the line beneath
+    /// it does not say the count again.
+    #[test]
+    fn a_count_headline_has_words_for_one_and_many() {
+        let copy = ui_copy();
+        for (key, words) in [
+            ("analytics_pattern_repeated_reads_headline_one", "{r} read"),
+            (
+                "analytics_pattern_repeated_reads_headline_other",
+                "{r} reads",
+            ),
+            (
+                "analytics_pattern_repeated_reads_count_under_count",
+                "Of {f} files that weren't edited in between",
+            ),
+            ("analytics_pattern_retried_calls_headline_one", "{c} call"),
+            (
+                "analytics_pattern_retried_calls_headline_other",
+                "{c} calls",
+            ),
+            (
+                "analytics_pattern_retried_calls_count_under_count",
+                "Repeated with the same tool and input, with only reads in between",
+            ),
+            ("analytics_pattern_edit_fail_edit_headline_one", "{l} time"),
+            (
+                "analytics_pattern_edit_fail_edit_headline_other",
+                "{l} times",
+            ),
+            (
+                "analytics_pattern_edit_fail_edit_count_under_count",
+                "A file was edited, a command failed, and the same file was edited again.",
+            ),
+            ("analytics_pattern_long_context_headline_one", "{n} turn"),
+            ("analytics_pattern_long_context_headline_other", "{n} turns"),
+        ] {
+            assert_eq!(copy.get(key).map(String::as_str), Some(words), "{key}");
+        }
+    }
+
     #[test]
     fn ui_copy_carries_the_analytics_words_and_none_of_the_held_ones() {
         use super::super::analytics_copy::{ANALYTICS_COPY, ANALYTICS_PLACEHOLDERS};

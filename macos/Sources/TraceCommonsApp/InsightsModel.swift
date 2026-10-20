@@ -1011,11 +1011,41 @@ enum InsightsPatternsWords {
         text("analytics_pattern_" + kind, copy)
     }
 
+    /// Whether the core says the card leads with its count: its estimate
+    /// rounds to 0 while it found something (owner decision 2026-10-20).
+    /// An older core, or a word this build does not know, leads with tokens.
+    static func leadsWithCount(_ card: InsightsPatternCard) -> Bool {
+        card.headline == "count" && card.count != nil
+    }
+
+    /// Each card's hole for its count in the headline words.
+    private static let countHole = [
+        "repeated_reads": "r", "retried_calls": "c", "edit_fail_edit": "l", "long_context": "n",
+    ]
+
+    /// The card's headline: the token figure, or the count with its unit
+    /// ("2 reads", "1 call") when the core leads with the count.
+    static func headline(_ card: InsightsPatternCard, copy: [String: String]) -> String {
+        guard leadsWithCount(card), let found = card.count, let hole = countHole[card.kind] else {
+            return InsightsOverviewWords.figure(card.tokens, copy: copy)
+        }
+        let key = "analytics_pattern_" + card.kind + (found == 1 ? "_headline_one" : "_headline_other")
+        return InsightsOverviewWords.fill(text(key, copy), [hole: String(found)])
+    }
+
     /// The line under the headline: the core's count sentence, or the
-    /// long-context threshold line.
+    /// long-context threshold line. Under a count headline the sentence
+    /// without the count, so the count is not said twice.
     static func countLine(_ card: InsightsPatternCard, threshold: UInt64, copy: [String: String]) -> String {
         let fill = InsightsOverviewWords.fill
+        let underCount = leadsWithCount(card)
         switch card.kind {
+        case "repeated_reads" where underCount:
+            return fill(text("analytics_pattern_repeated_reads_count_under_count", copy), ["f": count(card.files, copy)])
+        case "retried_calls" where underCount:
+            return text("analytics_pattern_retried_calls_count_under_count", copy)
+        case "edit_fail_edit" where underCount:
+            return text("analytics_pattern_edit_fail_edit_count_under_count", copy)
         case "repeated_reads":
             return fill(text("analytics_pattern_repeated_reads_count", copy),
                         ["r": count(card.count, copy), "f": count(card.files, copy)])
@@ -1201,7 +1231,7 @@ final class InsightsSessionsModel {
                 self.watched = rows; self.noticeKey = nil
                 if let selected = self.selected, rows.contains(where: { $0.sessionRef == selected }) {
                     if self.drill?.session_ref != selected || self.drill?.feed != "counter_pass" { self.load() }
-                } else if let newest = rows.first {
+                } else if let newest = InsightsSessionsWords.defaultWatched(rows) {
                     self.select(newest.sessionRef)
                 } else {
                     self.token = UUID(); self.task?.cancel(); self.task = nil
@@ -1368,6 +1398,13 @@ enum InsightsSessionsWords {
 
     /// The session picker under feed T: each watched trace by its label,
     /// valued by its opaque reference, newest first.
+    /// The trace shown first: the newest dated one. The daemon lists
+    /// undated traces last; an older daemon listed one first, which is
+    /// skipped here too. With none dated, the first listed.
+    static func defaultWatched(_ rows: [DaemonData.InsightsWatchedSession]) -> DaemonData.InsightsWatchedSession? {
+        rows.first { $0.startedAt != nil } ?? rows.first
+    }
+
     static func watchedChoices(_ rows: [DaemonData.InsightsWatchedSession],
                                copy: [String: String]) -> [(value: String, title: String)] {
         rows.map { (value: $0.sessionRef, title: watchedLabel($0, copy: copy)) }
@@ -1395,6 +1432,12 @@ enum InsightsSessionsWords {
                          copy: [String: String]) -> String {
         guard let insight = snapshots.first(where: { $0.id == sessionRef }) else { return dash(copy) }
         return label(insight, tokens: tokens, copy: copy)
+    }
+
+    /// The reasons under the drill's title, in the core's words, less the
+    /// one the body line already says in place of the chart.
+    static func headerReasons(_ drill: InsightsSessionDrill, copy: [String: String]) -> [String] {
+        drill.reasons.filter { $0 != drill.series_unavailable }.map { InsightsOverviewWords.reason($0, copy: copy) }
     }
 
     /// Why there is no chart; `nil` when there is one.

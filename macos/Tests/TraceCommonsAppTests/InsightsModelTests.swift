@@ -479,6 +479,17 @@ final class InsightsPatternsTests: XCTestCase {
         "analytics_pattern_retried_calls_count": "{c} calls",
         "analytics_pattern_edit_fail_edit_count": "{l} times",
         "analytics_pattern_long_context_line": "after {threshold}",
+        "analytics_pattern_repeated_reads_headline_one": "{r} READ",
+        "analytics_pattern_repeated_reads_headline_other": "{r} READS",
+        "analytics_pattern_repeated_reads_count_under_count": "of {f} files",
+        "analytics_pattern_retried_calls_headline_one": "{c} CALL",
+        "analytics_pattern_retried_calls_headline_other": "{c} CALLS",
+        "analytics_pattern_retried_calls_count_under_count": "same tool and input",
+        "analytics_pattern_edit_fail_edit_headline_one": "{l} TIME",
+        "analytics_pattern_edit_fail_edit_headline_other": "{l} TIMES",
+        "analytics_pattern_edit_fail_edit_count_under_count": "edited, failed, edited",
+        "analytics_pattern_long_context_headline_one": "{n} TURN",
+        "analytics_pattern_long_context_headline_other": "{n} TURNS",
         "analytics_estimate_from_result_size": "ABOUT",
         "analytics_from_counters": "COUNTERS",
         "analytics_inferred_from_order": "INFERRED",
@@ -548,6 +559,56 @@ final class InsightsPatternsTests: XCTestCase {
         XCTAssertEqual(bars[1].tokens, 0)
         XCTAssertEqual(InsightsPatternsWords.drawnBars(week.cards[1]).map(\.week), ["2026-09-14"])
         XCTAssertEqual(InsightsPatternsWords.drawnBars(week.cards[2]).count, 0)
+    }
+
+    /// Owner decision 2026-10-20: a card whose estimate rounds to 0 leads
+    /// with its count and unit, as the core says, and the line beneath it
+    /// drops the count; a token headline is unchanged, and an answer from
+    /// before the core said leads with tokens.
+    func testACardTheCoreLeadsWithItsCountShowsTheCountAndUnit() throws {
+        let copy = Self.words
+        func card(_ kind: String, tokens: String, count: UInt32, files: String = "null",
+                  headline: String? = "count") throws -> InsightsPatternCard {
+            let field = headline.map { "\"headline\":\"\($0)\"," } ?? ""
+            let json = """
+            {"kind":"\(kind)","tokens":\(tokens),"count":\(count),\(field)"files":\(files),"sessions":1,
+             "basis":"estimate_from_result_size","inferred":false,"weeks":[],"change":250,"change_unavailable":null}
+            """
+            return try JSONDecoder().decode(InsightsPatternCard.self, from: Data(json.utf8))
+        }
+        let reads = try card("repeated_reads", tokens: "0", count: 2, files: "1")
+        XCTAssertTrue(InsightsPatternsWords.leadsWithCount(reads))
+        XCTAssertEqual(InsightsPatternsWords.headline(reads, copy: copy), "2 READS")
+        XCTAssertEqual(InsightsPatternsWords.countLine(reads, threshold: 200_000, copy: copy), "of 1 files")
+        let call = try card("retried_calls", tokens: "0", count: 1)
+        XCTAssertEqual(InsightsPatternsWords.headline(call, copy: copy), "1 CALL")
+        XCTAssertEqual(InsightsPatternsWords.countLine(call, threshold: 200_000, copy: copy), "same tool and input")
+        let cycle = try card("edit_fail_edit", tokens: "0", count: 3)
+        XCTAssertEqual(InsightsPatternsWords.headline(cycle, copy: copy), "3 TIMES")
+        XCTAssertEqual(InsightsPatternsWords.countLine(cycle, threshold: 200_000, copy: copy), "edited, failed, edited")
+        let long = try card("long_context", tokens: "0", count: 1)
+        XCTAssertEqual(InsightsPatternsWords.headline(long, copy: copy), "1 TURN")
+        XCTAssertEqual(InsightsPatternsWords.countLine(long, threshold: 200_000, copy: copy),
+                       "after " + InsightsOverviewWords.figure(200_000, copy: copy))
+
+        // The token headline, as before: the figure, and the count line.
+        let tokens = try card("repeated_reads", tokens: "20000", count: 3, files: "2", headline: "tokens")
+        XCTAssertFalse(InsightsPatternsWords.leadsWithCount(tokens))
+        XCTAssertEqual(InsightsPatternsWords.headline(tokens, copy: copy),
+                       InsightsOverviewWords.figure(20_000, copy: copy))
+        XCTAssertEqual(InsightsPatternsWords.countLine(tokens, threshold: 200_000, copy: copy), "3 reads of 2 files")
+        // An answer without the field leads with tokens, even at 0.
+        let older = try card("retried_calls", tokens: "0", count: 2, headline: nil)
+        XCTAssertNil(older.headline)
+        XCTAssertFalse(InsightsPatternsWords.leadsWithCount(older))
+        XCTAssertEqual(InsightsPatternsWords.headline(older, copy: copy), "0")
+        // A headline this build does not know leads with tokens.
+        XCTAssertFalse(InsightsPatternsWords.leadsWithCount(try card("retried_calls", tokens: "0", count: 2,
+                                                                     headline: "later")))
+        // The count headline never carries the token change beside it.
+        let view = try InsightsGlassConventionsTests.text("Views/InsightsPatternsTab.swift")
+        XCTAssertTrue(view.contains("Text(InsightsPatternsWords.headline(card, copy: copy)).insightsFigure()"))
+        XCTAssertTrue(view.contains("if card.change != nil, !InsightsPatternsWords.leadsWithCount(card) {"))
     }
 
     func testNoWeekIsComparedUnderTheSavedFeed() throws {
@@ -875,6 +936,26 @@ final class InsightsSessionsTests: XCTestCase {
         XCTAssertEqual(InsightsSessionsWords.unavailableLine(codex, copy: Self.words), "NOT RECORDED")
         XCTAssertTrue(InsightsSessionsWords.segments(codex, copy: Self.words).isEmpty)
         XCTAssertNil(InsightsSessionsWords.unavailableLine(try drill(), copy: Self.words))
+    }
+
+    /// A trace with no token counts says so once: in the body line in place
+    /// of the chart, not again under the title.
+    func testAReasonTheBodyLineSaysIsNotRepeatedUnderTheTitle() throws {
+        let unknown = try drill(Self.codexJSON
+            .replacingOccurrences(of: "\"source\":\"codex\"", with: "\"source\":\"claude_code\"")
+            .replacingOccurrences(of: "\"series_unavailable\":\"not_recorded\"",
+                                  with: "\"series_unavailable\":\"no_usage_counters\""))
+        XCTAssertEqual(InsightsSessionsWords.unavailableLine(unknown, copy: Self.words), "NO COUNTERS")
+        XCTAssertEqual(InsightsSessionsWords.headerReasons(unknown, copy: Self.words), [])
+        // A different body line keeps the reason under the title.
+        let codex = try drill(Self.codexJSON)
+        XCTAssertEqual(InsightsSessionsWords.headerReasons(codex, copy: Self.words), ["NO COUNTERS"])
+        // With a chart, every reason stays under the title.
+        let partial = try drill()
+        XCTAssertEqual(InsightsSessionsWords.headerReasons(partial, copy: Self.words).count, 1)
+        let tab = try InsightsGlassConventionsTests.text("Views/InsightsSessionsTab.swift")
+        XCTAssertTrue(tab.contains("InsightsSessionsWords.headerReasons(drill, copy: copy)"))
+        XCTAssertFalse(tab.contains("drill.reasons.map"))
     }
 
     @MainActor

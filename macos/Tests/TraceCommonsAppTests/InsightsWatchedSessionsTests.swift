@@ -182,6 +182,20 @@ final class InsightsWatchedSessionsTests: XCTestCase {
     }
 
     @MainActor
+    /// The first trace shown is the newest dated one, even from a daemon
+    /// that lists an undated trace first; with none dated, the first.
+    func testTheDefaultTraceIsTheNewestDatedOne() throws {
+        let rows = try XCTUnwrap(Self.list().sessions)
+        XCTAssertEqual(InsightsSessionsWords.defaultWatched(rows)?.sessionRef, "t7")
+        let undatedFirst = [rows[2], rows[0], rows[1]]
+        XCTAssertEqual(InsightsSessionsWords.defaultWatched(undatedFirst)?.sessionRef, "t7")
+        XCTAssertEqual(InsightsSessionsWords.defaultWatched([rows[2]])?.sessionRef, "t2")
+        XCTAssertNil(InsightsSessionsWords.defaultWatched([]))
+        let model = try MonitorNavigationTests.text("InsightsModel.swift")
+        XCTAssertTrue(model.contains("} else if let newest = InsightsSessionsWords.defaultWatched(rows) {"))
+    }
+
+    @MainActor
     func testTheTabDrawsWatchedChoicesAndTheFeedLine() throws {
         let tab = try MonitorNavigationTests.text("Views/InsightsSessionsTab.swift")
         XCTAssertTrue(tab.contains("InsightsSessionsWords.watchedChoices("))

@@ -78,9 +78,9 @@ struct InsightsSessionsTab: View {
                 // Which traces are counted, behind the header's "i".
                 InsightsSectionTitle(InsightsSessionsWords.header(drill, copy: copy),
                                      info: InsightsSessionsWords.feedLines(drill.feed, notice: notice, copy: copy))
-                if !drill.reasons.isEmpty {
-                    Text(drill.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
-                        .joined(separator: " \u{b7} "))
+                let reasons = InsightsSessionsWords.headerReasons(drill, copy: copy)
+                if !reasons.isEmpty {
+                    Text(reasons.joined(separator: " \u{b7} "))
                         .insightsCaption()
                 }
             }
