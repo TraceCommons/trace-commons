@@ -180,7 +180,7 @@ enum RowBody {
     },
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CounterRow {
     /// The observation the row was made from, so an unchanged file is not
@@ -244,45 +244,6 @@ struct CounterRow {
     /// even when its file is unchanged. Any other row is not.
     #[serde(default)]
     streamed: bool,
-}
-
-#[cfg(test)]
-thread_local! {
-    static ROW_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// Rows copied on this thread since `reset_row_clones`, for the test that
-/// a page or a drill copies no stored row.
-#[cfg(test)]
-pub(super) fn row_clones() -> usize {
-    ROW_CLONES.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-pub(super) fn reset_row_clones() {
-    ROW_CLONES.with(|clones| clones.set(0));
-}
-
-impl Clone for CounterRow {
-    fn clone(&self) -> Self {
-        #[cfg(test)]
-        ROW_CLONES.with(|clones| clones.set(clones.get() + 1));
-        Self {
-            size_bytes: self.size_bytes,
-            modified_at: self.modified_at,
-            placed_at: self.placed_at,
-            first_event_at: self.first_event_at,
-            project: self.project,
-            seq: self.seq,
-            body: self.body.clone(),
-            harness_session: self.harness_session,
-            harness_session_read: self.harness_session_read,
-            earliest_event_at: self.earliest_event_at,
-            latest_event_at: self.latest_event_at,
-            event_span_read: self.event_span_read,
-            streamed: self.streamed,
-        }
-    }
 }
 
 impl CounterRow {

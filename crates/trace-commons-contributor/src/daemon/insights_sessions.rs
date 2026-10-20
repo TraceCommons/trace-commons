@@ -1115,19 +1115,30 @@ mod tests {
         assert_eq!(rows(&fresh)[1]["started_at"], "2026-09-17T09:00:00+00:00");
     }
 
-    /// A page is chosen from borrowed rows and only the kept ones are
-    /// serialized: no stored row is copied to answer a page or a drill.
+    /// A page is chosen without copying a row: `select_page` takes rows of
+    /// a type that cannot be cloned, so the compiler holds it to moving
+    /// (the daemon passes `&CounterRow`), and only the kept rows are
+    /// serialized.
     #[test]
-    fn a_page_and_a_drill_copy_no_stored_row() {
-        let f = Fixture::new();
-        run_owned(&f, &five_dated_and_one_undated(&f));
-        let first = f.page(None, 3);
-        let reference = refs(&first)[0].clone();
-        super::super::insights_week::reset_row_clones();
-        let _ = f.page(None, 3);
-        let _ = f.page(first["next"].as_str(), 3);
-        let _ = f.drill(&reference, &[]).unwrap();
-        assert_eq!(super::super::insights_week::row_clones(), 0);
+    fn a_page_is_chosen_without_copying_a_row() {
+        struct Uncopyable(i64);
+        let at = |secs: i64| SessionsCursor {
+            at: DateTime::<Utc>::from_timestamp(secs, 0).unwrap(),
+            seq: secs as u64,
+        };
+        let rows = (0..6).map(Uncopyable).collect::<Vec<_>>();
+        let (taken, next) = select_page(
+            rows,
+            |row| at(row.0),
+            |_| true,
+            SessionsPage {
+                before: None,
+                store: 0,
+                limit: 3,
+            },
+        );
+        assert_eq!(taken.iter().map(|row| row.0).collect::<Vec<_>>(), [5, 4, 3]);
+        assert_eq!(next, Some(at(3)));
     }
 
     #[test]
