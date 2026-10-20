@@ -354,10 +354,17 @@ struct PrivateAIInspectorView: View {
         let state = PrivateAISwitchCard.stateLabel(
             state: InferenceAccountSection.surfaceState(store.privateAI?.state), copy: copy,
             calls: model.privateInferenceCalls)
-        // #1146: the Status dot is on while working, outside otherwise.
-        return InspectorFactRow(label: copy.inspectorStatus, value: state.line,
-                                status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))
-            .padding(.horizontal, GlassTokens.Space.s2)
+        // The tab's heading row, in the one style every tab's heading
+        // takes (owner, 2026-10-19, `GlassTabHeading`), with the state on
+        // the right. #1146: the Status dot is on while working, outside
+        // otherwise, always beside the core's sentence.
+        return GlassTabHeading(copy.inspectorStatus) {
+            Spacer(minLength: GlassTokens.Space.s4)
+            GlassStatusLabel(state.line, status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))
+                .multilineTextAlignment(.trailing)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
     }
 
     /// The Status row's dot (#1146 `inference-inspector.tsx`): on while the
@@ -365,34 +372,6 @@ struct PrivateAIInspectorView: View {
     static func statusDot(_ state: DaemonData.PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus {
         PrivateInferenceIndicator.dotStatus(
             PrivateInferenceSurface.tone(InferenceAccountSection.surfaceState(state), calls: calls))
-    }
-}
-
-/// One inspector fact as #1146 draws it: the label on the left, the value
-/// right-aligned and semibold, with the state's dot before it when it has one.
-private struct InspectorFactRow: View {
-    let label: String
-    let value: String
-    var status: GlassStatus?
-
-    var body: some View {
-        HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
-            Text(label)
-                .foregroundStyle(GlassColor.textPrimary)
-                .fixedSize()
-            Spacer(minLength: GlassTokens.Space.s4)
-            HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
-                // The dot sits beside the sentence it stands for.
-                if let status { GlassStatusDot(status).padding(.top, 5) }
-                Text(value)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .multilineTextAlignment(.trailing)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .glassType(GlassTokens.TypeScale.body)
-        .accessibilityElement(children: .combine)
     }
 }
 

@@ -402,7 +402,9 @@ private struct HomeNotContributedCard: View {
             .padding(.vertical, GlassTokens.Space.s5)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(shape.fill(hovering ? GlassTokens.Color.controlHover.color : Color.clear))
-            .overlay(GlassGlowEdge(cornerRadius: GlassTier.card.radius))
+            // Quieter than a promotion's edge (owner, 2026-10-19: at full
+            // strength it was too bright).
+            .overlay(GlassGlowEdge(cornerRadius: GlassTier.card.radius, strength: 0.4, intensity: 0.6))
             .contentShape(shape)
         }
         .buttonStyle(GlassPressStyle())

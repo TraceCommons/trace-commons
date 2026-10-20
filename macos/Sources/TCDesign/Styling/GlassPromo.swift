@@ -253,18 +253,23 @@ private struct GlassPromoLight: View {
 public struct GlassGlowEdge: View {
     private let cornerRadius: CGFloat
     private let strength: Double
+    private let intensity: Double
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    public init(cornerRadius: CGFloat, strength: Double = 1) {
+    /// `strength` scales the soft glow; `intensity` the whole edge, its
+    /// line too, for a quieter card than a promotion.
+    public init(cornerRadius: CGFloat, strength: Double = 1, intensity: Double = 1) {
         self.cornerRadius = cornerRadius
         self.strength = strength
+        self.intensity = intensity
     }
 
-    /// A mark drawn beside the edge, in its lighter brand colours: lavender
-    /// into blue.
+    /// A mark drawn beside the edge, in its brand colours at mid tone:
+    /// purple into blue, neither the dark hero ground nor the bright
+    /// lavender (owner, 2026-10-19).
     public static var markGradient: LinearGradient {
         LinearGradient(
-            colors: [GlassTokens.Color.purpleText.color, GlassTokens.Color.promoTintEnd.color],
+            colors: [GlassTokens.Color.purpleSoft.color, GlassTokens.Color.promoTintEnd.color],
             startPoint: .topLeading, endPoint: .bottomTrailing)
     }
 
@@ -272,6 +277,7 @@ public struct GlassGlowEdge: View {
         GlassPromoEdge(
             treatment: .glowBorder, strength: strength, still: reduceMotion,
             shape: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .opacity(intensity)
     }
 }
 

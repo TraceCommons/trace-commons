@@ -549,8 +549,11 @@ final class InferenceParityTests: XCTestCase {
     /// lone Calls dash under them are gone.
     func test_theInspectorSummaryIsTheStatusRowAlone() throws {
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
-        XCTAssertTrue(views.contains("InspectorFactRow(label: copy.inspectorStatus, value: state.line,"))
-        XCTAssertEqual(views.components(separatedBy: "InspectorFactRow(label:").count - 1, 1,
+        // The status is the tab's heading row (owner, 2026-10-19): the
+        // shared heading over the core's dot and sentence.
+        XCTAssertTrue(views.contains("return GlassTabHeading(copy.inspectorStatus) {"))
+        XCTAssertTrue(views.contains("GlassStatusLabel(state.line, status: Self.statusDot("))
+        XCTAssertEqual(views.components(separatedBy: "GlassTabHeading(").count - 1, 1,
                        "the summary draws a row besides Status")
         for needle in ["copy.inspectorCredential", "copy.inspectorConnectedTools", "copy.inspectorConnected,",
                        "copy.inspectorNotConnected", "copy.inspectorNone",

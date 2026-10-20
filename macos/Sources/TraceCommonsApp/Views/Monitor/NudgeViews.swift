@@ -82,16 +82,9 @@ struct TracesListControls: View {
 
     var body: some View {
         let copy = store.nudgeCopy
-        HStack(spacing: GlassTokens.Space.s4) {
-            if let title = store.words?.tree.treeTitle {
-                // The cards' title face (owner, 2026-10-11: no larger than
-                // the app's other titles).
-                Text(title)
-                    .glassType(GlassTokens.TypeScale.bodyStrong)
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .lineLimit(1)
-                    .accessibilityAddTraits(.isHeader)
-            }
+        // The tab's heading row, in the one style every tab's heading takes
+        // (owner, 2026-10-19, `GlassTabHeading`).
+        GlassTabHeading(store.words?.tree.treeTitle ?? "") {
             if store.idleOnly, let label = copy?[.listFilterIdle], let clear = copy?[.listFilterClear] {
                 GlassTag(label, tone: .accent)
                 Button(clear) { Task { await store.showIdleOnly(false) } }

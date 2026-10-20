@@ -1,3 +1,4 @@
+import SwiftUI
 import TCBridge
 import TCDesign
 @testable import TCShellCore
@@ -111,6 +112,18 @@ final class DesignRulings20261019Tests: XCTestCase {
         XCTAssertEqual(expired.value, "—")
         XCTAssertNil(expired.beside)
         XCTAssertNotNil(expired.detail)
+    }
+
+    /// The tabs' own headings share one style (owner, 2026-10-19): the
+    /// Traces list's title and the Private AI status both use
+    /// `GlassTabHeading`, in the card-title face, at the content's edge.
+    func test_theTabHeadingsShareOneStyle() throws {
+        let traces = try Self.text("Views/Monitor/NudgeViews.swift")
+        let privateAI = try Self.text("Views/Monitor/InferenceViews.swift")
+        XCTAssertTrue(traces.contains("GlassTabHeading(store.words?.tree.treeTitle ?? \"\") {"))
+        XCTAssertTrue(privateAI.contains("return GlassTabHeading(copy.inspectorStatus) {"))
+        XCTAssertFalse(privateAI.contains("InspectorFactRow"), "the status has its own row style again")
+        XCTAssertEqual(GlassTabHeading<EmptyView>.titleType, GlassTokens.TypeScale.bodyStrong)
     }
 
     /// The estimate's info popover is in plain words.
