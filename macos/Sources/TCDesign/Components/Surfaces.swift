@@ -207,11 +207,14 @@ private struct GlassMenuRowBody: View {
     var body: some View {
         configuration.label
             .glassType(GlassTokens.TypeScale.body)
-            .foregroundStyle(hovering && isEnabled ? Color.white : (isEnabled ? GlassColor.textPrimary : GlassColor.textTertiary))
+            .foregroundStyle(hovering && isEnabled
+                ? GlassTokens.Color.menuHoverText.color
+                : (isEnabled ? GlassColor.textPrimary : GlassColor.textTertiary))
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, GlassTokens.Space.s4)
             .padding(.vertical, GlassTokens.Space.s2)
-            // The macOS menu selection: blue, with white text.
+            // The menu selection: the accent, with the menu's hover ink on
+            // it (white, or navy on the flat Dark's light blue).
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(hovering && isEnabled ? GlassTokens.Color.menuSelection.color : .clear)
