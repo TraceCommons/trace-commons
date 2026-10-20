@@ -217,7 +217,10 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
 
 /// Remove the Insights counter store (feed T) and forget its key: owner
 /// decision D4, open, clears it on unenroll. Under the pass lock the caller
-/// holds, so no watcher pass writes it again meanwhile.
+/// holds, so no watcher tick makes a counter-pass job meanwhile. The pass
+/// itself runs off the tick, on its own thread; `clear` moves the count
+/// every job is made under, so a pass already running, or a job waiting
+/// behind it, writes nothing afterwards and keeps no key.
 fn clear_insights_counter(shared: &DaemonShared) -> Result<(), (&'static str, &'static str)> {
     // The setting goes off first, so the next watcher tick does not rebuild
     // under a new key the store this clears.

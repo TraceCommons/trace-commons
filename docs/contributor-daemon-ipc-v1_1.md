@@ -4466,20 +4466,42 @@ D4, open; off by default). While it is on, each full watcher poll hands the
 Claude Code and Codex sessions it discovered to the pass, which reads a
 session only once it has been quiet for `quiescence_secs`, only when its size
 or last write changed since its row was made, and at most 16 files and 64 MB
-per poll, newest first, so a first pass over a large corpus catches up across
-polls. It is not tied to whether a session was offered, sent, kept or
+per pass, newest first, so a first pass over a large corpus catches up across
+polls. The first file a pass reads is always read, so a file over 64 MB is
+read alone in one pass rather than never. The pass runs on a thread of its
+own, not in the poll: the poll hands it the sessions and goes on, so new
+sessions, offers, the queue and `status_changed` never wait for a large
+transcript to be read. One pass runs at a time. A poll that arrives while
+one is running keeps its sessions as the one pass waiting to run next,
+replacing any older one, so the newest sessions are read once the running
+pass finishes. A pass stops between files, and writes nothing, when the
+daemon stops, the setting goes off or `unenroll` clears the store; a pass
+that was running or waiting at an `unenroll` writes nothing afterwards and
+makes no new key. No event marks a pass's end: `insights_week` answers from
+whatever the last finished pass stored, with its `updated_at`.
+It is not tied to whether a session was offered, sent, kept or
 declined. A session in a folder that is Never, by its own rule or a global
 Never contribution override (every folder while one is in force), is not
 read, and rows already stored for one are dropped by the next pass and left
 out of every answer at once. Claude Code rows are per turn; Codex rows are the change
 between the first and last counter only (owner decision D11, open). A Claude
 Code session with delegated transcripts is counted from its main file and
-marked `truncated` (partial coverage), never as complete. A file over 16 MB,
-or one that cannot be read, is stored as unknown, never as zero.
+marked `truncated` (partial coverage), never as complete. Each file is read
+line by line, never held whole, so no file is skipped for its size, and
+what a read keeps is bounded by the per-session series caps, not the file
+(owner decision D4, settled 2026-10-20 for streaming and the per-poll
+budget). A file
+with one line over 16 MB, or one that cannot be read, is stored as unknown,
+never as zero. A row stored as unknown with no usage counters by a daemon
+that skipped files over 16 MB is read once more after the upgrade, even when
+its file is unchanged.
 
 **The store.** One file in the daemon directory, capped at 2048 sessions,
 131072 turns and 131072 tool calls (oldest last write first), and limited to
-sessions written in the last 13 weeks. Rows are keyed by a keyed digest of
+sessions written in the last 13 weeks. A session the caps evict is marked by
+its keyed digest and the size and last write its row was made from, and is
+not read again until its file changes; the marks age out with the rows and
+are capped at 2048, oldest first. Rows are keyed by a keyed digest of
 the harness and the session's address, and carry a keyed digest of the
 folder's project key (owner decision D7, open). Each row also carries a
 keyed digest of the one session ID the transcript records, under the same
@@ -4620,7 +4642,8 @@ sessions on disk. Otherwise:
   `undated`, `reimport_overlap`, `not_routed`, `stale` (unknown). An unknown
   session contributes no figure and is never counted as zero.
 - `comparable` is whether this week may be compared at all: at least five
-  sessions with at least 80% of them known. When it is false, `unavailable`
+  sessions with at least 80% of them counted, known or partial. Only unknown
+  sessions count against it. When it is false, `unavailable`
   says why (`below_coverage_floor`).
 - `change_vs_last_week` is one entry per source present this week, in the
   same order: `permille` is (this - last) / last per mille, rounded half away

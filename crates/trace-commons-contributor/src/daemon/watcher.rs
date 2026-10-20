@@ -47,6 +47,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -126,7 +127,7 @@ pub struct TickReport {
 /// runtime (the default `#[tokio::test]` flavor, which every test in this
 /// module's suite uses) run the pass inline instead, since
 /// `block_in_place` panics there.
-pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport> {
+pub async fn tick(shared: &Arc<DaemonShared>, now: DateTime<Utc>) -> Result<TickReport> {
     // `is_paused` also auto-clears a timed pause that has lapsed, so an
     // elapsed `pause {until}` resumes ticking on its own rather than needing
     // an explicit `resume` from whichever app set the timer -- cheap enough
@@ -141,7 +142,7 @@ pub async fn tick(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickRepor
 /// function rather than `async fn` (it never awaited anything -- every step
 /// is a blocking filesystem or lock operation) and why `tick` runs it
 /// through `run_blocking`.
-fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport> {
+fn tick_blocking(shared: &Arc<DaemonShared>, now: DateTime<Utc>) -> Result<TickReport> {
     let max_queue_entries = {
         let s = shared.settings.lock().expect("settings lock");
         s.max_queue_entries
@@ -175,7 +176,7 @@ fn tick_blocking(shared: &DaemonShared, now: DateTime<Utc>) -> Result<TickReport
 /// (`finish_pass`); neither is duplicated, because a copy of either would
 /// drift, and what it would drift on is what the daemon decides to upload.
 fn tick_over(
-    shared: &DaemonShared,
+    shared: &Arc<DaemonShared>,
     now: DateTime<Utc>,
     sources: Vec<Box<dyn TraceSource>>,
     source_identities: SourceIdentities,
@@ -200,10 +201,16 @@ fn tick_over(
         let policy = shared.policy.lock().expect("policy lock");
         (policy.grant_id(), policy.armings_from_now())
     };
-    let discovered: Vec<(&dyn TraceSource, Vec<SessionRef>)> = sources
-        .iter()
-        .filter_map(|source| source.discover().ok().map(|refs| (source.as_ref(), refs)))
-        .collect();
+    // `source_indices[i]` is where `discovered[i]`'s source sits in
+    // `sources`; a source whose discovery failed leaves a gap in the indices.
+    let mut discovered: Vec<(&dyn TraceSource, Vec<SessionRef>)> = Vec::new();
+    let mut source_indices: Vec<usize> = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        if let Ok(refs) = source.discover() {
+            discovered.push((source.as_ref(), refs));
+            source_indices.push(index);
+        }
+    }
     // Before any session is visited, so nothing on disk in a source recorded
     // now can be armed by the grant. A source whose discovery failed is not
     // recorded, and arms nothing until a pass records it.
@@ -221,8 +228,9 @@ fn tick_over(
         }
     }
     // Insights feed T, after the offers: a full pass only, and only while
-    // the contributor has switched it on.
-    counter_pass(shared, now, &discovered);
+    // the contributor has switched it on. Only the job is made here; the
+    // pass reads on its own thread, after this tick has moved on.
+    let counter_job = counter_pass_job(shared, now, &discovered, &source_indices);
     // Only when every source listed cleanly: a source whose discovery failed
     // would otherwise lose its sessions from the count until it recovers.
     if discovered.len() == sources.len() {
@@ -230,6 +238,16 @@ fn tick_over(
     }
 
     backfill_estimate_features(shared, &discovered, &mut out);
+    // The listing is done with, so the sources can move to the pass.
+    if let Some(draft) = counter_job {
+        super::insights_week::submit_counter_pass(shared, draft.into_job(sources));
+        // A test waits for the pass, unless it asked to watch it run on
+        // its own; the daemon never does.
+        #[cfg(test)]
+        if !shared.insights_counter.detached_for_test() {
+            shared.insights_counter.await_idle_for_test();
+        }
+    }
 
     let held_by_project = std::mem::take(&mut out.gate_blocked_by_project);
     let report = finish_pass(shared, out, true, now)?;
@@ -239,35 +257,47 @@ fn tick_over(
 }
 
 /// The Insights counter pass (feed T), gated on the `insights_counter_pass`
-/// setting (owner decision D4, open). Off, it returns before reading
-/// anything. On, it hands every Claude Code and Codex session this pass
-/// discovered to `insights_week`, which reads only quiet sessions whose rows
-/// are missing or stale, within a per-poll budget. It is not tied to
+/// setting (owner decision D4, open). Off, it makes no job and nothing is
+/// read. On, it collects every Claude Code and Codex session this pass
+/// discovered for `insights_week`, which reads only quiet sessions whose
+/// rows are missing or stale, within a per-poll budget. It is not tied to
 /// eligibility: a session already offered, uploaded, kept or declined still
 /// counts for the contributor's own Insights, which never leave this machine.
 /// A folder that is Never is the exception, by its own rule or a global
 /// Never override (owner decision D4); see `insights_week`.
-fn counter_pass(
+///
+/// The pass itself does not run here. Streaming a large transcript takes
+/// seconds, and the tick holds the pass lock that new sessions, offers and
+/// unenroll wait on, so the tick makes an owned job and
+/// `insights_week::submit_counter_pass` runs it on a thread of its own, one
+/// pass at a time. This collects what the job needs (paths, sizes, last
+/// writes, which source found each) under the tick, and stats only a
+/// session whose source gave no group time; a session's folder is resolved
+/// later, on the pass's thread, and only for a session about to be read.
+fn counter_pass_job(
     shared: &DaemonShared,
     now: DateTime<Utc>,
     discovered: &[(&dyn TraceSource, Vec<SessionRef>)],
-) {
+    source_indices: &[usize],
+) -> Option<CounterJobDraft> {
     let (enabled, quiescence_secs) = {
         let s = shared.settings.lock().expect("settings lock");
         (s.insights_counter_pass, s.quiescence_secs)
     };
     if !enabled {
-        return;
+        return None;
     }
-    let mut origins: Vec<(&dyn TraceSource, &SessionRef, Observation)> = Vec::new();
+    let mut origins: Vec<(usize, SessionRef, Observation)> = Vec::new();
     let mut candidates = Vec::new();
-    for (source, refs) in discovered {
+    for ((source, refs), &source_index) in discovered.iter().zip(source_indices) {
         if !matches!(
             source.name(),
             crate::source::SOURCE_CLAUDE_CODE | crate::source::SOURCE_CODEX
         ) {
             continue;
         }
+        // `source_index` is which of the tick's own sources this is, so the
+        // job can own it.
         for session_ref in refs {
             let modified_at = match session_ref.group_modified_at {
                 Some(at) => at,
@@ -286,8 +316,8 @@ fn counter_pass(
                 group_member_count: session_ref.group_member_count,
             });
             origins.push((
-                *source,
-                session_ref,
+                source_index,
+                session_ref.clone(),
                 Observation {
                     path: session_ref.path.clone(),
                     size_bytes: session_ref.size_bytes,
@@ -296,31 +326,58 @@ fn counter_pass(
             ));
         }
     }
-    let never_keys =
+    let never_project_keys =
         super::insights_week::never_folders(&shared.policy.lock().expect("policy lock"));
-    // Asked only for a session about to be read. The folder's resolved
-    // rule, the contribution override included (owner decision D4): a
-    // global Never leaves every folder out, as it does from sending.
-    let mut project_of = |candidate: &super::insights_week::CounterCandidate| {
-        let (source, session_ref, obs) = &origins[candidate.origin];
-        let cwd = resolve_cwd(shared, *source, session_ref, obs);
-        let (project_key, _) = project_for(cwd.as_deref());
-        let never = shared
-            .policy
-            .lock()
-            .expect("policy lock")
-            .resolve(&project_key)
-            == ProjectMode::Ignore;
-        (project_key, never)
-    };
-    // Failures are logged inside, by fixed label only.
-    let _ = shared.insights_counter.run_pass(
-        &candidates,
-        &never_keys,
+    Some(CounterJobDraft {
+        candidates,
+        origins,
+        never_project_keys,
         now,
         quiescence_secs,
-        &mut project_of,
-    );
+    })
+}
+
+/// A counter-pass job before the tick's sources move into it.
+struct CounterJobDraft {
+    candidates: Vec<super::insights_week::CounterCandidate>,
+    /// Per candidate (`CounterCandidate::origin`): the index of its source
+    /// in the tick's sources, its session and its observation.
+    origins: Vec<(usize, SessionRef, Observation)>,
+    never_project_keys: super::insights_week::NeverFolders,
+    now: DateTime<Utc>,
+    quiescence_secs: u64,
+}
+
+impl CounterJobDraft {
+    /// The job, owning `sources` so the pass's thread can resolve a
+    /// session's folder through the same cwd cache the watcher uses.
+    fn into_job(self, sources: Vec<Box<dyn TraceSource>>) -> super::insights_week::CounterJob {
+        let origins = self.origins;
+        // The folder's resolved rule, the contribution override included
+        // (owner decision D4): a global Never leaves every folder out, as
+        // it does from sending. The state and policy locks are each taken
+        // briefly, with nothing of the pass's held.
+        let project_of =
+            move |shared: &DaemonShared, candidate: &super::insights_week::CounterCandidate| {
+                let (source_index, session_ref, obs) = &origins[candidate.origin];
+                let cwd = resolve_cwd(shared, sources[*source_index].as_ref(), session_ref, obs);
+                let (project_key, _) = project_for(cwd.as_deref());
+                let never = shared
+                    .policy
+                    .lock()
+                    .expect("policy lock")
+                    .resolve(&project_key)
+                    == ProjectMode::Ignore;
+                (project_key, never)
+            };
+        super::insights_week::CounterJob {
+            candidates: self.candidates,
+            never_project_keys: self.never_project_keys,
+            now: self.now,
+            quiescence_secs: self.quiescence_secs,
+            project_of: Box::new(project_of),
+        }
+    }
 }
 
 /// Record what is on disk for the Flow 1 grant `grant`, per source: each
@@ -2336,7 +2393,7 @@ mod tests {
     /// developer's real transcripts.
     struct WatcherFixture {
         _dir: tempfile::TempDir,
-        shared: DaemonShared,
+        shared: Arc<DaemonShared>,
         claude_root: PathBuf,
     }
 
@@ -2348,7 +2405,7 @@ mod tests {
             let codex_root = dir.path().join("codex-sessions");
             std::fs::create_dir_all(&claude_root).unwrap();
             std::fs::create_dir_all(&codex_root).unwrap();
-            let shared = DaemonShared::load(store).unwrap();
+            let shared = Arc::new(DaemonShared::load(store).unwrap());
             {
                 let mut s = shared.settings.lock().unwrap();
                 s.claude_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
@@ -2805,6 +2862,265 @@ mod tests {
             crate::daemon::insights_week::WeekOptions::default(),
         );
         assert_eq!(value["sessions_stored"], 0);
+    }
+
+    /// What the background counter pass tests observe, in the order it
+    /// happened. Ordering, never wall-clock time.
+    #[derive(Debug, PartialEq, Eq)]
+    enum PassEvent {
+        TickReturned,
+        ReadEntered,
+    }
+
+    /// A counter pass whose file reads wait for the test: each read reports
+    /// `ReadEntered`, then waits until the gate is opened. The gate opens
+    /// when this is dropped too, so a failing assertion cannot leave the
+    /// blocking pool waiting forever.
+    struct HeldReads {
+        events: std::sync::mpsc::Receiver<PassEvent>,
+        sender: std::sync::mpsc::Sender<PassEvent>,
+        release: Option<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl HeldReads {
+        fn install(shared: &DaemonShared) -> Self {
+            let (sender, events) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let released = std::sync::Mutex::new(released);
+            let reads = sender.clone();
+            shared.insights_counter.detach_for_test();
+            shared
+                .insights_counter
+                .set_before_read_for_test(Arc::new(move || {
+                    let _ = reads.send(PassEvent::ReadEntered);
+                    // Returns once the sender is dropped.
+                    let _ = released.lock().unwrap().recv();
+                }));
+            Self {
+                events,
+                sender,
+                release: Some(release),
+            }
+        }
+
+        /// Tick on a thread of its own, reporting `TickReturned` when the
+        /// tick does. A tick that waited for the pass would report a read
+        /// first, and then never return until the reads are released.
+        fn tick(&self, shared: &Arc<DaemonShared>, now: DateTime<Utc>) {
+            let shared = Arc::clone(shared);
+            let sender = self.sender.clone();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(tick(&shared, now)).unwrap();
+                let _ = sender.send(PassEvent::TickReturned);
+            });
+        }
+
+        /// The next event. The timeout only turns a tick that never
+        /// returns (it waits for a held read) into a failure instead of a
+        /// hang; no passing run comes near it.
+        fn next(&self) -> PassEvent {
+            self.events
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .expect("a tick returns while the pass's read is held")
+        }
+
+        /// The first tick returned and its pass started reading, in either
+        /// order, with the read still held.
+        fn tick_returned_and_read_entered(&self) {
+            let mut seen = [self.next(), self.next()];
+            seen.sort_by_key(|event| *event == PassEvent::ReadEntered);
+            assert_eq!(seen, [PassEvent::TickReturned, PassEvent::ReadEntered]);
+        }
+
+        fn release(&mut self) {
+            self.release.take();
+        }
+    }
+
+    impl Drop for HeldReads {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    fn counter_sessions_stored(f: &WatcherFixture, now: DateTime<Utc>) -> serde_json::Value {
+        f.shared.insights_counter.week_value(
+            true,
+            None,
+            chrono::FixedOffset::east_opt(0).unwrap(),
+            now,
+            &crate::daemon::insights_week::NeverFolders::NONE,
+            crate::daemon::insights_week::WeekOptions::default(),
+        )["sessions_stored"]
+            .clone()
+    }
+
+    /// The counter pass runs off the tick: a tick hands it the sessions and
+    /// returns while the pass is still reading, and a second tick returns
+    /// too while the first pass is held mid-read.
+    #[test]
+    fn a_tick_does_not_wait_for_the_counter_pass() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.shared.settings.lock().unwrap().insights_counter_pass = true;
+        let later = Utc::now() + chrono::Duration::hours(2);
+        let mut held = HeldReads::install(&f.shared);
+
+        held.tick(&f.shared, later);
+        held.tick_returned_and_read_entered();
+        assert!(
+            !f.shared
+                .store
+                .daemon_path(super::super::insights_week::COUNTER_ROWS_FILE)
+                .exists(),
+            "nothing is written while the read is held"
+        );
+        held.tick(&f.shared, later);
+        assert_eq!(
+            held.next(),
+            PassEvent::TickReturned,
+            "a tick returns while a pass is running"
+        );
+
+        held.release();
+        f.shared.insights_counter.await_idle_for_test();
+        assert_eq!(counter_sessions_stored(&f, later), 1);
+    }
+
+    /// Single flight: ticks that arrive while a pass is running start no
+    /// second pass beside it, and keep only the newest sessions for one
+    /// follow-up pass, which runs once the first finishes.
+    #[test]
+    fn ticks_during_a_counter_pass_leave_one_follow_up_with_the_newest_sessions() {
+        let f = WatcherFixture::new();
+        f.write_session("first", "11111111-1111-1111-1111-111111111111", 0);
+        f.shared.settings.lock().unwrap().insights_counter_pass = true;
+        let later = Utc::now() + chrono::Duration::hours(2);
+        let mut held = HeldReads::install(&f.shared);
+
+        held.tick(&f.shared, later);
+        held.tick_returned_and_read_entered();
+        held.tick(&f.shared, later);
+        assert_eq!(held.next(), PassEvent::TickReturned);
+        // Only the last tick's job sees this session.
+        f.write_session("newest", "22222222-2222-2222-2222-222222222222", 0);
+        held.tick(&f.shared, later);
+        assert_eq!(held.next(), PassEvent::TickReturned);
+        assert_eq!(f.shared.insights_counter.passes_started_for_test(), 1);
+
+        held.release();
+        f.shared.insights_counter.await_idle_for_test();
+        assert_eq!(
+            f.shared.insights_counter.passes_started_for_test(),
+            2,
+            "one follow-up pass, not one per tick"
+        );
+        assert_eq!(
+            counter_sessions_stored(&f, later),
+            2,
+            "the follow-up read the newest tick's sessions"
+        );
+    }
+
+    /// A job that panics leaves the slot idle: not running, and no job
+    /// waiting. A waiting job left behind would make a test's wait for idle
+    /// hang instead of fail.
+    #[test]
+    fn a_panicking_counter_job_leaves_the_slot_idle() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.shared.settings.lock().unwrap().insights_counter_pass = true;
+        let later = Utc::now() + chrono::Duration::hours(2);
+        let (entered, read_entered) = std::sync::mpsc::channel::<()>();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = std::sync::Mutex::new(released);
+        f.shared.insights_counter.detach_for_test();
+        f.shared
+            .insights_counter
+            .set_before_read_for_test(Arc::new(move || {
+                let _ = entered.send(());
+                // Returns once the sender is dropped.
+                let _ = released.lock().unwrap().recv();
+                panic!("the counter job panics mid-read");
+            }));
+        let tick_on_thread = |shared: &Arc<DaemonShared>| {
+            let shared = Arc::clone(shared);
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(tick(&shared, later)).unwrap();
+            })
+        };
+
+        let first = tick_on_thread(&f.shared);
+        read_entered
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the first job starts reading");
+        // A second job waits behind the one that is running.
+        let second = tick_on_thread(&f.shared);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while f.shared.insights_counter.worker_state_for_test() != (true, true) {
+            assert!(std::time::Instant::now() < deadline, "no job is waiting");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        drop(release);
+        while f.shared.insights_counter.worker_state_for_test().0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker never stopped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            f.shared.insights_counter.worker_state_for_test(),
+            (false, false),
+            "a panicking job leaves nothing running and nothing waiting"
+        );
+        first.join().unwrap();
+        second.join().unwrap();
+    }
+
+    /// A clear (what unenroll does) while a pass is reading, and while a
+    /// newer job waits behind it, leaves no rows and no key: the running
+    /// pass does not commit, and the waiting job does not start.
+    #[test]
+    fn a_clear_during_a_counter_pass_leaves_no_rows_and_no_key() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.shared.settings.lock().unwrap().insights_counter_pass = true;
+        let later = Utc::now() + chrono::Duration::hours(2);
+        let mut held = HeldReads::install(&f.shared);
+
+        held.tick(&f.shared, later);
+        held.tick_returned_and_read_entered();
+        held.tick(&f.shared, later);
+        assert_eq!(held.next(), PassEvent::TickReturned);
+        f.shared.insights_counter.clear().unwrap();
+
+        held.release();
+        f.shared.insights_counter.await_idle_for_test();
+        assert!(
+            !f.shared
+                .store
+                .daemon_path(super::super::insights_week::COUNTER_ROWS_FILE)
+                .exists(),
+            "the pass running at the clear wrote nothing"
+        );
+        assert!(
+            f.shared.insights_counter.key_is_absent_for_test(),
+            "no key was made again after the clear"
+        );
+        assert_eq!(
+            f.shared.insights_counter.passes_started_for_test(),
+            1,
+            "the job waiting at the clear never started"
+        );
     }
 
     #[tokio::test]

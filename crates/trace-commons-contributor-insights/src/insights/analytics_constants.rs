@@ -71,7 +71,8 @@ pub const RESULT_BYTES_PER_TOKEN: u64 = 4;
 /// Owner decision D10, open.
 pub const TOKEN_ESTIMATE_ROUNDING: u64 = 10_000;
 
-/// A week is comparable when known sessions are at least this share of all.
+/// A week is comparable when counted sessions, known and partial, are at
+/// least this share of all; only unknown sessions count against it.
 /// Owner decision D10, open.
 pub const COMPARABLE_COVERAGE: Ratio = Ratio::new(4, 5);
 /// ...and it has at least this many sessions. Owner decision D10, open.
@@ -196,14 +197,20 @@ pub const COUNTER_STORE_MAX_TOOL_CALLS: usize = 131_072;
 pub const COUNTER_STORE_KEEP_WEEKS: i64 = 13;
 /// One poll reads at most this many session files for the counter pass; the
 /// rest wait for later polls, so a first pass over a large corpus never stalls
-/// the watcher. Owner decision D4, open.
+/// the watcher. Owner decision D4, settled 2026-10-20 (the per-poll budget
+/// stays).
 pub const COUNTER_PASS_MAX_READS_PER_TICK: usize = 16;
-/// ...and at most this many bytes. Owner decision D4, open.
+/// ...and at most this many bytes, except that the first file a poll reads
+/// is always read, streamed and never held whole, so a file larger than this
+/// is never starved. Owner decision D4, settled 2026-10-20.
 pub const COUNTER_PASS_MAX_BYTES_PER_TICK: u64 = 64 * 1024 * 1024;
-/// A session file larger than this is not read; it is stored as unknown,
-/// never as zero. The same bound the extractors apply. Owner decision D4,
-/// open.
-pub const COUNTER_PASS_MAX_SESSION_BYTES: u64 = 16 * 1024 * 1024;
+/// Session files are read line by line, so no file is skipped for its size
+/// and memory does not grow with it: it is bounded by one line and by what
+/// the scans keep, at most the series caps (`MAX_SERIES_TURNS`,
+/// `MAX_SERIES_TOOL_CALLS`) for Claude Code (owner decision D4, settled
+/// 2026-10-20). One line longer than this is not read: its session is
+/// stored as unknown, never as zero.
+pub const COUNTER_PASS_MAX_LINE_BYTES: u64 = 16 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests {
@@ -306,7 +313,7 @@ mod tests {
         assert_eq!(COUNTER_STORE_KEEP_WEEKS, 13);
         assert_eq!(COUNTER_PASS_MAX_READS_PER_TICK, 16);
         assert_eq!(COUNTER_PASS_MAX_BYTES_PER_TICK, 64 * 1024 * 1024);
-        assert_eq!(COUNTER_PASS_MAX_SESSION_BYTES, 16 * 1024 * 1024);
+        assert_eq!(COUNTER_PASS_MAX_LINE_BYTES, 16 * 1024 * 1024);
         // The kept weeks cover the six weekly marks plus the lever's baseline.
         const { assert!(COUNTER_STORE_KEEP_WEEKS as usize > WEEKLY_MARKS + LEVER_BASELINE_WEEKS) };
     }

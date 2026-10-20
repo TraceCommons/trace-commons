@@ -668,16 +668,18 @@ pub fn counted_claude_turns<Tz: TimeZone>(
         .collect()
 }
 
-/// Whether a week may be compared with another: feed T only, known sessions
-/// at least [`COMPARABLE_COVERAGE`] of all, and at least
-/// [`COMPARABLE_MIN_SESSIONS`] sessions.
+/// Whether a week may be compared with another: feed T only, counted
+/// sessions (known and partial) at least [`COMPARABLE_COVERAGE`] of all, and
+/// at least [`COMPARABLE_MIN_SESSIONS`] sessions. Only unknown sessions count
+/// against the floor (owner decision, 2026-10-20).
 pub fn comparable(rollup: &WeekRollup) -> Result<(), Unavailable> {
     if rollup.feed != Feed::CounterPass {
         return Err(Unavailable::NeedsCounterPass);
     }
     let sessions = rollup.coverage.sessions();
+    let counted = u64::from(rollup.coverage.known) + u64::from(rollup.coverage.partial);
     if sessions < COMPARABLE_MIN_SESSIONS
-        || !COMPARABLE_COVERAGE.reached_by(u64::from(rollup.coverage.known), u64::from(sessions))
+        || !COMPARABLE_COVERAGE.reached_by(counted, u64::from(sessions))
     {
         return Err(Unavailable::BelowCoverageFloor);
     }
@@ -1399,10 +1401,61 @@ mod tests {
     }
 
     #[test]
-    fn comparable_needs_four_fifths_known() {
+    fn comparable_needs_four_fifths_counted() {
         assert_eq!(comparable(&week_with(Feed::CounterPass, 8, 2)), Ok(()));
         assert_eq!(
             comparable(&week_with(Feed::CounterPass, 7, 2)),
+            Err(Unavailable::BelowCoverageFloor)
+        );
+    }
+
+    /// `week_with` under feed T, plus `partial` truncated Claude sessions.
+    fn week_with_partial(known: u32, partial: u32, unknown_count: u32) -> WeekRollup {
+        let mut sessions: Vec<SessionInput> = Vec::new();
+        for i in 0..known + partial {
+            let mut session = claude(
+                &format!("k{i}"),
+                u64::from(i),
+                vec![turn(0, Some(at(6, i % 20)), None)],
+            );
+            if let SessionBody::Claude { series, .. } = &mut session.body {
+                series.truncated = i >= known;
+            }
+            sessions.push(session);
+        }
+        for i in 0..unknown_count {
+            sessions.push(unknown(
+                &format!("u{i}"),
+                UnknownReason::Stale,
+                Some(at(6, 1)),
+            ));
+        }
+        let rollup = week_rollup(Feed::CounterPass, &sessions, monday(), &Utc);
+        assert_eq!(rollup.coverage.known, known);
+        assert_eq!(rollup.coverage.partial, partial);
+        assert_eq!(rollup.coverage.unknown, unknown_count);
+        rollup
+    }
+
+    #[test]
+    fn partial_sessions_count_toward_the_comparable_floor() {
+        // Owner decision 2026-10-20: only unknown sessions count against it.
+        assert_eq!(comparable(&week_with_partial(3, 32, 0)), Ok(()));
+        assert_eq!(comparable(&week_with_partial(0, 8, 2)), Ok(()));
+        assert_eq!(comparable(&week_with_partial(3, 5, 2)), Ok(()));
+        assert_eq!(
+            comparable(&week_with_partial(3, 4, 2)),
+            Err(Unavailable::BelowCoverageFloor)
+        );
+        // The owner's week: 3 known, 32 partial, 10 unknown is 35 of 45.
+        assert_eq!(
+            comparable(&week_with_partial(3, 32, 10)),
+            Err(Unavailable::BelowCoverageFloor)
+        );
+        assert_eq!(comparable(&week_with_partial(3, 37, 10)), Ok(()));
+        // Partial sessions alone still need five.
+        assert_eq!(
+            comparable(&week_with_partial(0, 4, 0)),
             Err(Unavailable::BelowCoverageFloor)
         );
     }

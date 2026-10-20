@@ -546,6 +546,10 @@ async fn supervise(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Result<()> 
     shared.reconcile_private_inference().await;
     repair_stale_status_line(&shared, dry_run);
     let result = supervise_passes(&shared, dry_run).await;
+    // However the loop ended (a signal included, which sets nothing else),
+    // so work running off the loop stops at its next check: the Insights
+    // counter pass between files, the settlement scan between traces.
+    shared.shutdown.store(true, Ordering::Relaxed);
     shared.stop_private_inference().await;
     result
 }
