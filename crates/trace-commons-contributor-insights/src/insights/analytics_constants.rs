@@ -212,6 +212,31 @@ pub const COUNTER_PASS_MAX_BYTES_PER_TICK: u64 = 64 * 1024 * 1024;
 /// stored as unknown, never as zero.
 pub const COUNTER_PASS_MAX_LINE_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Whether a Codex transcript records a contributor declining an edit in a
+/// shape the Codex scan can match. While false, Codex `denied` is unknown
+/// (`None`) in every mode, never a known zero.
+///
+/// Search of 2026-10-20 over 4,823 local Codex transcripts: no
+/// `exec_approval_request` or `apply_patch_approval_request` event is
+/// persisted, and no `apply_patch` denial was found. Five `exec_command`
+/// rejections in four files were found, each a `response_item` of type
+/// `function_call_output` whose output ends
+/// `CreateProcess { message: "Rejected(\"rejected by user\")" }`, all in
+/// `on-request` turns that carry no `approvals_reviewer` field. None was a
+/// denial of an edit, and no denial appeared in a turn that names the
+/// reviewer (`user` was seen only under `never`), so the reviewer value that
+/// names the contributor cannot be pinned from a real transcript. Spec
+/// section 1, "Codex markers are not confirmed".
+pub const CODEX_DENIAL_CONFIRMED: bool = false;
+
+/// The model label Codex's automatic reviewer declares in `turn_context`.
+/// A session whose turns all declare it is the reviewer's, not the
+/// contributor's: it keeps its token totals and is left out of every model
+/// answer (spec section 2, "Reviewer sessions"). Search of 2026-10-20: 1,009
+/// local Codex transcripts declare it in `turn_context`, and none of them
+/// declares another model.
+pub const CODEX_REVIEWER_MODEL: &str = "codex-auto-review";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +356,15 @@ mod tests {
         assert!(!LEVER_RATIO.reached_by(124, 100));
         // No overflow at the extremes.
         assert!(half.reached_by(u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn codex_denial_follows_the_confirmed_marker() {
+        // false: the 2026-10-20 search found exec rejections only in turns
+        // that carry no `approvals_reviewer`, and none of an edit; Codex
+        // `denied` is always None.
+        const { assert!(!CODEX_DENIAL_CONFIRMED) };
+        assert_eq!(CODEX_REVIEWER_MODEL, "codex-auto-review");
     }
 
     #[test]
