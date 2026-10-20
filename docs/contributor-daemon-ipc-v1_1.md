@@ -4498,10 +4498,17 @@ its file is unchanged.
 
 **The store.** One file in the daemon directory, capped at 2048 sessions,
 131072 turns and 131072 tool calls (oldest last write first), and limited to
-sessions written in the last 13 weeks. A session the caps evict is marked by
-its keyed digest and the size and last write its row was made from, and is
-not read again until its file changes; the marks age out with the rows and
-are capped at 2048, oldest first. Rows are keyed by a keyed digest of
+sessions written in the last 13 weeks, so it keeps the newest sessions. A
+session the caps evict is marked by its keyed digest and the size and last
+write its row was made from; the marks age out with the rows and are capped
+at 2048, oldest first, so the newest mark stays while any does. A session
+with no row is not read when its last write is no later than the newest
+mark, or, with the store at 2048 sessions, earlier than every row kept: the
+caps would evict it again. An evicted file is read again once it changes,
+since a write moves its last write past the mark. The limit: a session older
+than the newest mark is not read even when rows leave for another reason,
+such as a Never folder, until that mark ages out of the 13 weeks. Rows are
+keyed by a keyed digest of
 the harness and the session's address, and carry a keyed digest of the
 folder's project key (owner decision D7, open). Each row also carries a
 keyed digest of the one session ID the transcript records, under the same
