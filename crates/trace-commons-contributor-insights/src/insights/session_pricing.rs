@@ -979,4 +979,118 @@ mod tests {
         assert_eq!(price.tables, expected);
         assert_eq!(price.total_usd_micros, Some(4 * 23_000_000));
     }
+
+    /// The shipped tables, end to end. Expected figures are worked by hand
+    /// from the page rates in USD per million tokens, so they are micros
+    /// per token-rate product over one million.
+    #[test]
+    fn a_shipped_rate_prices_a_known_turn_end_to_end() {
+        use crate::insights::pricing_catalog::{
+            SHIPPED_PRICING_TABLES, production_pricing_catalog,
+        };
+
+        let catalog = production_pricing_catalog();
+        let effective_from = catalog.tables()[0].entries[0].effective_from;
+        let dated =
+            |ordinal: u32, offset: i64, counts: [u32; 3], write: CacheWrite| -> TurnRecord {
+                let mut record = turn(ordinal, Some(0), Some(0), counts.map(Some), Some(write));
+                record.at = Some(effective_from + chrono::Duration::seconds(offset));
+                record
+            };
+        let price = |accounting, label: &str, turns: &[TurnRecord]| {
+            price_session(&catalog, accounting, &labels(&[label]), turns)
+        };
+
+        // Opus 5.5: 1,000 x 4 + 10,000 x 0.20 + 2,000 x 5 + 3,000 x 8
+        // + 500 x 20 = 50,000 micros.
+        let claude = price(
+            PricingAccounting::ClaudeCode,
+            "claude-opus-5-5",
+            &[dated(
+                0,
+                0,
+                [1_000, 10_000, 500],
+                CacheWrite::Split {
+                    m5: 2_000,
+                    h1: 3_000,
+                },
+            )],
+        );
+        assert_eq!(claude.total_usd_micros, Some(50_000));
+
+        // GPT-6 Astra: 1,000 x 10 + 10,000 x 1 + 2,000 x 12.50 + 500 x 50
+        // = 70,000 micros.
+        let codex = price(
+            PricingAccounting::Codex,
+            "gpt-6-astra",
+            &[dated(
+                0,
+                0,
+                [1_000, 10_000, 500],
+                CacheWrite::TotalOnly(2_000),
+            )],
+        );
+        assert_eq!(codex.total_usd_micros, Some(70_000));
+
+        let mut used = claude.tables.clone();
+        used.extend(codex.tables.clone());
+        assert_eq!(
+            used.iter()
+                .map(|table| (table.version, table.table_id.as_str()))
+                .collect::<Vec<_>>(),
+            SHIPPED_PRICING_TABLES.to_vec()
+        );
+
+        // One second before every entry: unpriced, never the shipped rate.
+        let early = price(
+            PricingAccounting::ClaudeCode,
+            "claude-opus-5-5",
+            &[dated(
+                0,
+                -1,
+                [1_000, 10_000, 500],
+                CacheWrite::Split { m5: 0, h1: 0 },
+            )],
+        );
+        assert_eq!(
+            early.by_model["claude-opus-5-5"].unpriced_reasons[&UnpricedReason::WindowUnresolved],
+            1
+        );
+        assert_eq!(early.total_usd_micros, None);
+
+        // Haiku 5.5 at 100,000 prompt tokens: 100,000 x 0.10 + 1,000 x 0.50
+        // = 10,500. One more prompt token moves the whole request to the
+        // higher prices: 100,001 x 0.50 + 1,000 x 2.50 = 52,500.5, rounded
+        // half up once.
+        let haiku = |uncached| {
+            price(
+                PricingAccounting::ClaudeCode,
+                "claude-haiku-5-5",
+                &[dated(
+                    0,
+                    0,
+                    [uncached, 0, 1_000],
+                    CacheWrite::Split { m5: 0, h1: 0 },
+                )],
+            )
+            .total_usd_micros
+        };
+        assert_eq!(haiku(100_000), Some(10_500));
+        assert_eq!(haiku(100_001), Some(52_501));
+
+        // "272K" is not stated in tokens: a prompt that is above 272,000 but
+        // not above 272 x 1,024 is unpriced, never put in either band.
+        let astra = |uncached| {
+            price(
+                PricingAccounting::Codex,
+                "gpt-6-astra",
+                &[dated(0, 0, [uncached, 0, 0], CacheWrite::TotalOnly(0))],
+            )
+            .total_usd_micros
+        };
+        assert_eq!(astra(272_000), Some(2_720_000));
+        assert_eq!(astra(275_000), None);
+        assert_eq!(astra(278_528), None);
+        assert_eq!(astra(278_529), Some(5_570_580));
+    }
 }
