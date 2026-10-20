@@ -1180,6 +1180,10 @@ final class InsightsSessionsModel {
     private(set) var pageFailed = false
     /// The automatic retry has been spent for this failure.
     private var autoRetried = false
+    /// The store's `updated_at` and `sessions_stored` as the first page last
+    /// said them. A page that says otherwise means rows came or went since,
+    /// and the first page is read again and merged in above the loaded rows.
+    private var stamp: String?
     private let retryBackoff: Duration
     /// Set when feed T is on but its traces could not be read, shown with
     /// the saved feed's line, as Overview shows it; `nil` when it is off or
@@ -1263,15 +1267,65 @@ final class InsightsSessionsModel {
             switch outcome {
             case .success(let page) where page.showsCounterPass:
                 let known = Set((self.watched ?? []).map(\.sessionRef))
-                self.watched = (self.watched ?? []) + (page.sessions ?? []).filter { !known.contains($0.sessionRef) }
+                let fresh = (page.sessions ?? []).filter { !known.contains($0.sessionRef) }
+                self.watched = (self.watched ?? []) + fresh
                 self.nextCursor = page.next
                 self.autoRetried = false
+                if Self.stamp(page) != self.stamp {
+                    // Rows came or went since the first page was read.
+                    self.mergeFirstPage(dropping: nil)
+                } else if fresh.isEmpty, let next = page.next, next != cursor {
+                    // Nothing new to draw, so no last row will appear
+                    // again: ask for the following page now. Each read moves
+                    // the cursor, so this ends.
+                    self.readNext(after: nil)
+                }
             case .success(let page):
                 self.showSaved(notice: page.enabled)
+            case .failure(let error) where Self.isCursorRefused(error):
+                // The store started again: these references name other
+                // rows now, so the list is read from the first page.
+                self.readWatched()
             case .failure:
                 // The rows read so far stay; the foot says the rest could
                 // not be read and offers to try again.
                 self.pageFailed = true
+            }
+        }
+    }
+
+    private static func stamp(_ page: DaemonData.InsightsSessions) -> String {
+        "\(page.updatedAt ?? "")|\(page.sessionsStored.map(String.init) ?? "")"
+    }
+
+    /// Read the first page again and put it above the rows already loaded,
+    /// keeping those rows (and the scroll position they hold). `stale` is a
+    /// row the daemon no longer lists: it is dropped, and its fresh self, if
+    /// the first page has it, takes the new place. A read that fails leaves
+    /// the list as it was.
+    private func mergeFirstPage(dropping stale: String?) {
+        guard active, let watchedReader, watched != nil else { return }
+        if let stale { watched?.removeAll { $0.sessionRef == stale } }
+        listTask?.cancel(); pageTask?.cancel(); pageTask = nil; loadingMore = false
+        listToken = UUID(); let current = listToken
+        listBusy = true
+        listTask = Task { [weak self] in
+            let outcome: Result<DaemonData.InsightsSessions, Error>
+            do { outcome = .success(try await watchedReader(nil)) } catch { outcome = .failure(error) }
+            guard let self, self.active, self.listToken == current, !Task.isCancelled else { return }
+            self.listBusy = false
+            switch outcome {
+            case .success(let list) where list.showsCounterPass:
+                let fresh = list.sessions ?? []
+                let freshRefs = Set(fresh.map(\.sessionRef))
+                let kept = (self.watched ?? []).filter { !freshRefs.contains($0.sessionRef) && $0.sessionRef != stale }
+                self.watched = fresh + kept
+                if kept.isEmpty { self.nextCursor = list.next }
+                self.stamp = Self.stamp(list)
+            case .success(let list):
+                self.showSaved(notice: list.enabled)
+            case .failure:
+                break
             }
         }
     }
@@ -1326,7 +1380,7 @@ final class InsightsSessionsModel {
             case .success(let list) where list.showsCounterPass:
                 let rows = list.sessions ?? []
                 let wasWatched = self.watched != nil
-                self.watched = rows; self.nextCursor = list.next; self.pageFailed = false; self.autoRetried = false; self.noticeKey = nil
+                self.watched = rows; self.nextCursor = list.next; self.pageFailed = false; self.autoRetried = false; self.stamp = Self.stamp(list); self.noticeKey = nil
                 if !wasWatched {
                     // Coming from the saved feed: no row is open until one
                     // is clicked.
@@ -1374,16 +1428,26 @@ final class InsightsSessionsModel {
             } catch {
                 guard let self, self.active, self.token == current, !Task.isCancelled else { return }
                 if watchedRead != nil, Self.isUnknownReference(error) {
-                    // Made again since its page was read (its file grew):
-                    // read the feed afresh rather than leave a dead row open.
+                    // Made again since its page was read (its file grew), or
+                    // dropped: take that row out and merge a fresh first page
+                    // in above the rest, so the loaded list stays.
                     self.collapse()
-                    self.readWatched()
+                    self.mergeFirstPage(dropping: reference)
                     return
                 }
                 // A failed read never keeps another session's figures.
                 self.drill = nil; self.failed = true; self.drillBusy = false
             }
         }
+    }
+
+    /// The daemon refused the cursor: it was answered from another store
+    /// (`insights-sessions-cursor-invalid`).
+    private static func isCursorRefused(_ error: Error) -> Bool {
+        if case .daemon(_, let message)? = error as? DaemonDataError {
+            return message == "insights-sessions-cursor-invalid"
+        }
+        return false
     }
 
     /// The daemon no longer lists that reference (`insights-session-unknown`).

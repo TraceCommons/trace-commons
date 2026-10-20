@@ -443,6 +443,10 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // The feed foot's button after a page could not be read; same wording as
     // the startup retry in `health_copy`.
     ("analytics_sessions_retry", "Try again"),
+    (
+        "analytics_sessions_page_failed",
+        "More traces couldn't be loaded.",
+    ),
     ("analytics_turn", "Turn {n}"),
     (
         "analytics_codex_not_recorded",

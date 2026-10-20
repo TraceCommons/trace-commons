@@ -23,6 +23,7 @@ final class InsightsWatchedSessionsTests: XCTestCase {
         "analytics_sparkline_peak": "PEAK {t} AT {n}",
         "analytics_sessions_loading_more": "LOADING",
         "analytics_sessions_retry": "RETRY",
+        "analytics_sessions_page_failed": "PAGEFAILED",
     ]) { $1 }
 
     /// `insights_sessions` as the daemon answers it (see the daemon's
@@ -468,6 +469,95 @@ final class InsightsWatchedSessionsTests: XCTestCase {
         model.close()
     }
 
+    /// A stale drill (the row's file grew, or the store dropped it) keeps the
+    /// rows read so far: the stale row goes, and a fresh first page merges in
+    /// above the rest.
+    @MainActor
+    func testAnUnknownReferenceKeepsTheLoadedRowsAndMergesAFreshFirstPage() async throws {
+        let daemon = WatchedRecorder(pages: Self.retryPages)
+        let model = Self.failingFeed(daemon)
+        model.open(); model.showWatched(true)
+        await settle(model)
+        model.loadMore(); await settle(model)
+        XCTAssertEqual(model.watched?.map(\.sessionRef), ["t9", "t8", "t7", "t6", "t5", "t4"])
+        await daemon.setPage(nil, Self.pageJSON(first: 10, count: 3, next: "c1"))
+        await daemon.failDrills(with: .daemon(code: "bad_params", message: "insights-session-unknown"))
+        model.toggle("t5")
+        await settle(model)
+        XCTAssertNil(model.selected)
+        XCTAssertEqual(model.watched?.map(\.sessionRef), ["t10", "t9", "t8", "t7", "t6", "t4"],
+                       "the stale row is gone, the rest stay, the fresh page leads")
+        XCTAssertTrue(model.atEnd, "the loaded tail's end is kept")
+        model.close()
+    }
+
+    /// A page that reports another `updated_at` or `sessions_stored` than
+    /// the first page did makes the feed read the first page again and merge
+    /// it above the loaded rows.
+    @MainActor
+    func testAChangedStoreStampMergesAFreshFirstPage() async throws {
+        let daemon = WatchedRecorder(pages: [
+            nil: Self.pageJSON(first: 9, count: 3, next: "c1"),
+            "c1": Self.pageJSON(first: 6, count: 3, next: nil, stored: 8),
+        ])
+        let model = Self.failingFeed(daemon)
+        model.open(); model.showWatched(true)
+        await settle(model)
+        await daemon.setPage(nil, Self.pageJSON(first: 10, count: 3, next: "c1", stored: 8))
+        model.loadMore()
+        await settle(model)
+        let reads = await daemon.reads
+        XCTAssertEqual(reads, [nil, "c1", nil], "the first page is read again, not the cursor")
+        XCTAssertEqual(model.watched?.map(\.sessionRef), ["t10", "t9", "t8", "t7", "t6", "t5", "t4"])
+        XCTAssertTrue(model.atEnd)
+        // The stamp is now the new one: the end is not re-read.
+        model.loadMore()
+        await settle(model)
+        let after = await daemon.reads
+        XCTAssertEqual(after, [nil, "c1", nil])
+        model.close()
+    }
+
+    /// A cursor the store no longer accepts (it started again) reads the
+    /// first page and replaces the list: the old references name other rows.
+    @MainActor
+    func testARefusedCursorReadsTheFirstPageAgain() async throws {
+        let daemon = WatchedRecorder(pages: Self.retryPages)
+        await daemon.failPage("c1", times: 1,
+                              error: .daemon(code: "bad_params", message: "insights-sessions-cursor-invalid"))
+        let model = Self.failingFeed(daemon)
+        model.open(); model.showWatched(true)
+        await settle(model)
+        model.loadMore()
+        await settle(model)
+        let reads = await daemon.reads
+        XCTAssertEqual(reads, [nil, "c1", nil])
+        XCTAssertFalse(model.pageFailed, "a refused cursor is not a failed page")
+        XCTAssertEqual(model.watched?.map(\.sessionRef), ["t9", "t8", "t7"])
+        model.close()
+    }
+
+    /// A page whose rows are all listed already adds nothing for the last
+    /// row to appear against: the next page is asked for anyway.
+    @MainActor
+    func testAPageOfKnownRowsDoesNotStallPaging() async throws {
+        let daemon = WatchedRecorder(pages: [
+            nil: Self.pageJSON(first: 9, count: 3, next: "c1"),
+            "c1": Self.pageJSON(first: 8, count: 2, next: "c2"),
+            "c2": Self.pageJSON(first: 6, count: 2, next: nil),
+        ])
+        let model = Self.failingFeed(daemon)
+        model.open(); model.showWatched(true)
+        await settle(model)
+        model.loadMore()
+        await settle(model)
+        let reads = await daemon.reads
+        XCTAssertEqual(reads, [nil, "c1", "c2"])
+        XCTAssertEqual(model.watched?.map(\.sessionRef), ["t9", "t8", "t7", "t6", "t5"])
+        XCTAssertTrue(model.atEnd)
+        model.close()
+    }
+
     @MainActor
     func testTheTabDrawsTheFeedAndTheFeedLine() throws {
         let tab = try MonitorNavigationTests.text("Views/InsightsSessionsTab.swift")
@@ -477,6 +567,7 @@ final class InsightsWatchedSessionsTests: XCTestCase {
         XCTAssertTrue(tab.contains("model.loadMore()"))
         XCTAssertTrue(tab.contains("model.retry()"), "the foot offers a retry")
         XCTAssertTrue(tab.contains("analytics_sessions_retry"))
+        XCTAssertTrue(tab.contains("analytics_sessions_page_failed"), "a sentence, not a bare dash")
         XCTAssertTrue(tab.contains("model.toggle("))
         XCTAssertTrue(tab.contains("InsightsSessionsWords.feedLines("))
         XCTAssertFalse(tab.contains("watchedChoices"), "no picker over watched traces")
@@ -529,22 +620,25 @@ enum Answer: CustomStringConvertible, Sendable {
 
 private actor WatchedRecorder {
     let answer: Answer
-    let pages: [String?: String]
+    private(set) var pages: [String?: String]
+    func setPage(_ cursor: String?, _ json: String) { pages[cursor] = json }
     var drills: [String] = []
     var reads: [String?] = []
     private var failure: DaemonDataError?
     /// Cursors whose next read throws, and how many more times.
-    private var pageFailures: [String: Int] = [:]
-    func failPage(_ cursor: String, times: Int) { pageFailures[cursor] = times }
+    private var pageFailures: [String: (times: Int, error: DaemonDataError)] = [:]
+    func failPage(_ cursor: String, times: Int, error: DaemonDataError = .unreachable) {
+        pageFailures[cursor] = (times, error)
+    }
     init(answer: Answer = .json(InsightsWatchedSessionsTests.listJSON), pages: [String?: String] = [:]) {
         self.answer = answer; self.pages = pages
     }
     func failDrills(with error: DaemonDataError) { failure = error }
     func list(_ cursor: String?) throws -> DaemonData.InsightsSessions {
         reads.append(cursor)
-        if let cursor, let left = pageFailures[cursor], left > 0 {
-            pageFailures[cursor] = left - 1
-            throw DaemonDataError.unreachable
+        if let cursor, let failing = pageFailures[cursor], failing.times > 0 {
+            pageFailures[cursor] = (failing.times - 1, failing.error)
+            throw failing.error
         }
         if let page = pages[cursor] { return try InsightsWatchedSessionsTests.list(page) }
         switch answer {

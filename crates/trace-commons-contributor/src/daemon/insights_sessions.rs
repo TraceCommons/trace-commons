@@ -64,33 +64,52 @@ pub(crate) struct SessionsCursor {
 }
 
 impl SessionsCursor {
-    /// `p`, then seconds, nanoseconds and the row's order, each separated by
-    /// `.`: no digest, path or reference, and no long hex run.
-    pub(crate) fn encode(&self) -> String {
+    /// `p`, then seconds, nanoseconds, the row's order and the store tag,
+    /// each separated by `.`: no digest, path or reference, and no long hex
+    /// run. The tag names the store (its key) the cursor was answered from,
+    /// so a cursor from another store is refused rather than followed.
+    pub(crate) fn encode(&self, store: u64) -> String {
         format!(
-            "p{}.{}.{}",
+            "p{}.{}.{}.{}",
             self.at.timestamp(),
             self.at.timestamp_subsec_nanos(),
-            self.seq
+            self.seq,
+            store
         )
     }
 
-    pub(crate) fn decode(text: &str) -> Option<Self> {
+    /// The cursor and its store tag. Every part is plain ASCII digits: no
+    /// sign, space or empty part, which integer parsing alone would accept.
+    pub(crate) fn decode(text: &str) -> Option<(Self, u64)> {
         let mut parts = text.strip_prefix('p')?.split('.');
-        let secs: i64 = parts.next()?.parse().ok()?;
+        let secs_text = parts.next()?;
         let nanos_text = parts.next()?;
-        let seq: u64 = parts.next()?.parse().ok()?;
-        if parts.next().is_some() || !nanos_text.bytes().all(|b| b.is_ascii_digit()) {
+        let seq_text = parts.next()?;
+        let store_text = parts.next()?;
+        if parts.next().is_some() {
             return None;
         }
+        let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+        if ![secs_text, nanos_text, seq_text, store_text]
+            .iter()
+            .all(|part| digits(part))
+        {
+            return None;
+        }
+        let secs: i64 = secs_text.parse().ok()?;
         let nanos: u32 = nanos_text.parse().ok()?;
+        let seq: u64 = seq_text.parse().ok()?;
+        let store: u64 = store_text.parse().ok()?;
         if nanos >= 1_000_000_000 {
             return None;
         }
-        Some(Self {
-            at: DateTime::from_timestamp(secs, nanos)?,
-            seq,
-        })
+        Some((
+            Self {
+                at: DateTime::from_timestamp(secs, nanos)?,
+                seq,
+            },
+            store,
+        ))
     }
 }
 
@@ -99,6 +118,8 @@ impl SessionsCursor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SessionsPage {
     pub(crate) before: Option<SessionsCursor>,
+    /// The store tag `before` carried; `0` when there is no cursor.
+    pub(crate) store: u64,
     pub(crate) limit: usize,
 }
 
@@ -106,6 +127,7 @@ impl SessionsPage {
     /// The first page, as `insights_sessions` with no params answers it.
     pub(crate) const FIRST: Self = Self {
         before: None,
+        store: 0,
         limit: WATCHED_SESSIONS_MAX,
     };
 }
@@ -117,10 +139,12 @@ pub(crate) fn page_params(params: &serde_json::Value) -> Result<SessionsPage, &'
     if params.get("before").is_none() && params.get("limit").is_none() {
         return Ok(SessionsPage::FIRST);
     }
-    let before = match params.get("before") {
-        None | Some(serde_json::Value::Null) => None,
+    let (before, store) = match params.get("before") {
+        None | Some(serde_json::Value::Null) => (None, 0),
         Some(serde_json::Value::String(text)) => {
-            Some(SessionsCursor::decode(text).ok_or(ERR_SESSIONS_CURSOR_INVALID)?)
+            let (cursor, store) =
+                SessionsCursor::decode(text).ok_or(ERR_SESSIONS_CURSOR_INVALID)?;
+            (Some(cursor), store)
         }
         Some(_) => return Err(ERR_SESSIONS_CURSOR_INVALID),
     };
@@ -134,7 +158,11 @@ pub(crate) fn page_params(params: &serde_json::Value) -> Result<SessionsPage, &'
             _ => return Err(ERR_SESSIONS_LIMIT_INVALID),
         },
     };
-    Ok(SessionsPage { before, limit })
+    Ok(SessionsPage {
+        before,
+        store,
+        limit,
+    })
 }
 
 /// The rows one page lists, from every visible row, and the cursor for the
@@ -272,12 +300,15 @@ pub fn handle_sessions(shared: &DaemonShared, req: &Request) -> Response {
     } else {
         Vec::new()
     };
-    Response::ok(
-        req.id,
-        shared
-            .insights_counter
-            .sessions_page_value(enabled, &never, &folders, page),
-    )
+    // A cursor from another store is refused as a bad cursor, so the shell
+    // reads the first page.
+    match shared
+        .insights_counter
+        .sessions_page_value(enabled, &never, &folders, page)
+    {
+        Ok(answer) => Response::ok(req.id, answer),
+        Err(label) => Response::err(req.id, ERR_BAD_PARAMS, label),
+    }
 }
 
 /// `insights_session_drill`.
@@ -386,10 +417,14 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::with_seed(3)
+        }
+
+        fn with_seed(seed: u8) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let pass = CounterPass::with_keys(
                 dir.path().join(COUNTER_ROWS_FILE),
-                Box::new(InMemoryDigestKeyStore::with_seed([3; 32])),
+                Box::new(InMemoryDigestKeyStore::with_seed([seed; 32])),
             );
             Self { dir, pass }
         }
@@ -445,15 +480,20 @@ mod tests {
         }
 
         fn page(&self, before: Option<&str>, limit: usize) -> serde_json::Value {
-            self.pass.sessions_page_value(
-                true,
-                &NeverFolders::NONE,
-                &[],
-                SessionsPage {
-                    before: before.map(|text| SessionsCursor::decode(text).unwrap()),
-                    limit,
-                },
-            )
+            self.page_result(before, limit).unwrap()
+        }
+
+        fn page_result(
+            &self,
+            before: Option<&str>,
+            limit: usize,
+        ) -> Result<serde_json::Value, &'static str> {
+            let params = match before {
+                Some(text) => serde_json::json!({"before": text, "limit": limit}),
+                None => serde_json::json!({"limit": limit}),
+            };
+            self.pass
+                .sessions_page_value(true, &NeverFolders::NONE, &[], page_params(&params)?)
         }
 
         fn drill(
@@ -978,21 +1018,116 @@ mod tests {
             at: Utc.with_ymd_and_hms(2026, 9, 16, 9, 0, 0).unwrap() + Duration::nanoseconds(7),
             seq: 12,
         };
-        let text = cursor.encode();
+        let text = cursor.encode(77);
         assert!(text.starts_with('p'), "{text}");
-        assert_eq!(SessionsCursor::decode(&text), Some(cursor));
+        assert_eq!(SessionsCursor::decode(&text), Some((cursor, 77)));
         for bad in [
             "",
             "p",
             "t12",
             "p1.2",
-            "p1.2.3.4",
-            "px.0.1",
-            "p1.2000000000.3",
-            "p1.-2.3",
+            "p1.2.3",
+            "p1.2.3.4.5",
+            "px.0.1.2",
+            "p1.2000000000.3.4",
+            "p1.-2.3.4",
+            // A sign is not a digit, though integer parsing accepts one.
+            "p+5.0.+3.7",
+            "p5.+0.3.7",
+            "p5.0.3.+7",
+            "p5.0.+3.7",
+            "p5.0.3.",
+            "p 5.0.3.7",
         ] {
             assert_eq!(SessionsCursor::decode(bad), None, "{bad}");
         }
+    }
+
+    /// A cursor from before the store started again (a cleared key, a new
+    /// device) is refused, so the client reads the first page: its
+    /// references `t0`, `t1`, ... now name other sessions.
+    #[test]
+    fn a_cursor_from_another_store_is_refused() {
+        let f = Fixture::new();
+        let files = five_dated_and_one_undated(&f);
+        run_owned(&f, &files);
+        let first = f.page(None, 3);
+        let cursor = first["next"].as_str().unwrap().to_string();
+        assert!(f.page_result(Some(&cursor), 3).is_ok(), "same store");
+
+        // The store started again under another key: its `t0`, `t1`, ...
+        // are other sessions.
+        let g = Fixture::with_seed(4);
+        let other = five_dated_and_one_undated(&g);
+        run_owned(&g, &other);
+        assert_eq!(
+            g.page_result(Some(&cursor), 3),
+            Err(ERR_SESSIONS_CURSOR_INVALID)
+        );
+        // The first page of the new store is answered and its cursor works.
+        let again = g.page(None, 3);
+        assert!(
+            g.page_result(Some(again["next"].as_str().unwrap()), 3)
+                .is_ok()
+        );
+    }
+
+    /// Rows are placed by their first event, and stored late: a row whose
+    /// event falls between page 1's top and its cursor is above the cursor,
+    /// so no later page returns it. It lists at its place on the next
+    /// first-page read.
+    #[test]
+    fn a_late_row_between_the_top_and_the_cursor_waits_for_a_first_page_read() {
+        let f = Fixture::new();
+        let mut files = five_dated_and_one_undated(&f);
+        run_owned(&f, &files);
+        // The undated row is the most recent by recency, so four rows by
+        // recency list the undated one last.
+        let first = f.page(None, 4);
+        let first_refs = refs(&first);
+        assert_eq!(
+            rows(&first)[0]["started_at"],
+            "2026-09-18T09:00:00+00:00",
+            "page 1's top"
+        );
+        assert_eq!(
+            rows(&first)[2]["started_at"],
+            "2026-09-16T09:00:00+00:00",
+            "page 1's cursor"
+        );
+        files.push((
+            SOURCE_CLAUDE_CODE,
+            f.write("late.jsonl", &claude_bytes_shifted(3)),
+            PROJECT,
+        ));
+        run_owned(&f, &files);
+        let fresh = f.page(None, 5);
+        let late = refs(&fresh)[1].clone();
+        assert!(
+            !first_refs.contains(&late),
+            "a row the first read did not list"
+        );
+        // Paging on from the old cursor never lists it.
+        let second = f.page(first["next"].as_str(), 7);
+        assert!(!refs(&second).contains(&late), "{late} between the pages");
+        assert_eq!(second["sessions_stored"], 7, "the count says a row came");
+        // The next first-page read lists it, between the old top and cursor.
+        assert_eq!(rows(&fresh)[1]["started_at"], "2026-09-17T09:00:00+00:00");
+    }
+
+    /// A page is chosen from borrowed rows and only the kept ones are
+    /// serialized: no stored row is copied to answer a page or a drill.
+    #[test]
+    fn a_page_and_a_drill_copy_no_stored_row() {
+        let f = Fixture::new();
+        run_owned(&f, &five_dated_and_one_undated(&f));
+        let first = f.page(None, 3);
+        let reference = refs(&first)[0].clone();
+        super::super::insights_week::reset_row_clones();
+        let _ = f.page(None, 3);
+        let _ = f.page(first["next"].as_str(), 3);
+        let _ = f.drill(&reference, &[]).unwrap();
+        assert_eq!(super::super::insights_week::row_clones(), 0);
     }
 
     #[test]
@@ -1016,9 +1151,10 @@ mod tests {
             seq: 3,
         };
         assert_eq!(
-            page_params(&serde_json::json!({"before": cursor.encode(), "limit": 25})),
+            page_params(&serde_json::json!({"before": cursor.encode(41), "limit": 25})),
             Ok(SessionsPage {
                 before: Some(cursor),
+                store: 41,
                 limit: 25
             })
         );
@@ -1176,7 +1312,7 @@ mod tests {
             at: Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap(),
             seq: 0,
         };
-        let past = f.page(Some(&oldest.encode()), 6);
+        let past = f.page(Some(&oldest.encode(f.pass.store_tag())), 6);
         assert_eq!(rows(&past), Vec::<serde_json::Value>::new());
         assert_eq!(past["next"], serde_json::Value::Null);
         assert_eq!(past["truncated"], false);

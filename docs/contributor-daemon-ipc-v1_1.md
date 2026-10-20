@@ -4770,9 +4770,13 @@ neither answers exactly the first page an unpaged daemon answered, so a
 client that sends no params keeps working:
 
 - `before`: the `next` cursor an earlier page answered. It is opaque (`p`,
-  then numbers separated by `.`): never a reference, digest or path. A
-  non-string, or a string no page could have answered, is `bad_params` /
-  `insights-sessions-cursor-invalid`.
+  then four plain-digit numbers separated by `.`, the last naming the store
+  and its key): never a reference, digest or path. A non-string, a string
+  not in that format (a sign or an empty part is refused), or a cursor
+  answered from another store (it started again under a new key, so its
+  references name other sessions now) is `bad_params` /
+  `insights-sessions-cursor-invalid`. A client that gets it reads the first
+  page.
 - `limit`: the most rows this page lists, a whole number of at least 1;
   above 200 is held to 200; absent is 200. Anything else is `bad_params` /
   `insights-sessions-limit-invalid`.
@@ -4814,7 +4818,12 @@ has one, else the time discovery placed it, else its file's last write:
   it does not move to the top. A client that has already paged past that place
   does not see the new row until it reads from the first page again. Its old
   reference now drills to `insights-session-unknown`. A client that gets that
-  error re-reads the first page.
+  error keeps the rows already loaded, drops the stale one and reads the
+  first page again to merge it in above them.
+
+A client notices late rows by `updated_at` and `sessions_stored`: when a
+page says other values than the first page did, a row came or went, and the
+client reads the first page again and merges it above the loaded rows.
 
 Each row is exactly
 `{"session_ref", "source", "started_at", "turns", "tokens", "sparkline", "folder"}`:

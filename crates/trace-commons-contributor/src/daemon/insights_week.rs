@@ -180,7 +180,7 @@ enum RowBody {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CounterRow {
     /// The observation the row was made from, so an unchanged file is not
@@ -244,6 +244,44 @@ struct CounterRow {
     /// even when its file is unchanged. Any other row is not.
     #[serde(default)]
     streamed: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    static ROW_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Rows copied on this thread since `reset_row_clones`, for the test that
+/// a page or a drill copies no stored row.
+#[cfg(test)]
+pub(super) fn row_clones() -> usize {
+    ROW_CLONES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(super) fn reset_row_clones() {
+    ROW_CLONES.with(|clones| clones.set(0));
+}
+
+impl Clone for CounterRow {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        ROW_CLONES.with(|clones| clones.set(clones.get() + 1));
+        Self {
+            size_bytes: self.size_bytes,
+            modified_at: self.modified_at,
+            placed_at: self.placed_at,
+            first_event_at: self.first_event_at,
+            project: self.project,
+            seq: self.seq,
+            body: self.body.clone(),
+            harness_session: self.harness_session,
+            harness_session_read: self.harness_session_read,
+            earliest_event_at: self.earliest_event_at,
+            latest_event_at: self.latest_event_at,
+            event_span_read: self.event_span_read,
+        }
+    }
 }
 
 impl CounterRow {
@@ -1194,29 +1232,36 @@ impl CounterPass {
         Ok(())
     }
 
-    /// The rows a Sessions answer may show, with the key they were made
-    /// under: `Ok(None)` before any pass made a key, and no rows when the
-    /// store was made under another key. Never-folder rows are left out.
-    fn visible_rows(
+    /// The store a Sessions answer reads, with the key its rows were made
+    /// under: `Ok(None)` for the store when no pass made a key or the store
+    /// was made under another key. Rows are read in place, never copied.
+    fn visible_store(
         &self,
-        never_project_keys: &NeverFolders,
-    ) -> Result<(Option<DigestKey>, Vec<CounterRow>), &'static str> {
+    ) -> Result<(Option<DigestKey>, Option<Arc<CounterStore>>), &'static str> {
         // Never creates a key: no key means no pass has stored a row yet.
         let key = self.keys.load().map_err(|_| UNREADABLE_KEY)?;
         let store = self.load_cached()?;
-        let rows = match (&key, &store) {
+        let store = match (&key, store) {
             (Some(key), Some(store)) if store.key_fingerprint == key_fingerprint(key) => {
-                let never = never_digests(key, never_project_keys);
-                store
-                    .rows
-                    .values()
-                    .filter(|row| !never.contains(&row.project))
-                    .cloned()
-                    .collect()
+                Some(store)
             }
-            _ => Vec::new(),
+            _ => None,
         };
-        Ok((key, rows))
+        Ok((key, store))
+    }
+
+    /// The tag a `insights_sessions` cursor carries: the first four bytes
+    /// of the key's fingerprint, as a number, or `0` without a key. A new
+    /// key (a cleared store, a new device) is a new tag, so a cursor from
+    /// before is refused.
+    pub(crate) fn store_tag(&self) -> u64 {
+        match self.keys.load() {
+            Ok(Some(key)) => {
+                let bytes = key_fingerprint(&key).0;
+                u64::from(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            }
+            _ => 0,
+        }
     }
 
     /// The `insights_sessions` answer's first page, at most `limit` rows.
@@ -1234,9 +1279,11 @@ impl CounterPass {
             folders,
             super::insights_sessions::SessionsPage {
                 before: None,
+                store: 0,
                 limit,
             },
         )
+        .expect("a first page has no cursor to refuse")
     }
 
     /// One page of the `insights_sessions` answer: the stored sessions older
@@ -1258,14 +1305,31 @@ impl CounterPass {
         never_project_keys: &NeverFolders,
         folders: &[(String, String)],
         page: super::insights_sessions::SessionsPage,
-    ) -> serde_json::Value {
+    ) -> Result<serde_json::Value, &'static str> {
         if !enabled {
             // Owner decision D4, open: nothing is read for Insights.
-            return serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS});
+            return Ok(serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS}));
         }
-        let (key, rows) = match self.visible_rows(never_project_keys) {
+        let (key, store) = match self.visible_store() {
             Ok(found) => found,
-            Err(reason) => return unreadable_value(reason),
+            Err(reason) => return Ok(unreadable_value(reason)),
+        };
+        // A cursor from another store names other sessions: refuse it, and
+        // the shell reads the first page.
+        let tag = self.store_tag();
+        if page.before.is_some() && page.store != tag {
+            return Err(super::insights_sessions::ERR_SESSIONS_CURSOR_INVALID);
+        }
+        let rows: Vec<&CounterRow> = match (&key, &store) {
+            (Some(key), Some(store)) => {
+                let never = never_digests(key, never_project_keys);
+                store
+                    .rows
+                    .values()
+                    .filter(|row| !never.contains(&row.project))
+                    .collect()
+            }
+            _ => Vec::new(),
         };
         let labels: BTreeMap<KeyedDigest, &str> = match &key {
             Some(key) => folders
@@ -1293,6 +1357,7 @@ impl CounterPass {
         let sessions: Vec<serde_json::Value> = rows
             .iter()
             .map(|row| {
+                let row = *row;
                 let source = match &row.body {
                     RowBody::Claude { .. } => AnalyticsSource::ClaudeCode,
                     RowBody::Codex { .. } => AnalyticsSource::Codex,
@@ -1326,16 +1391,16 @@ impl CounterPass {
                 })
             })
             .collect();
-        serde_json::json!({
+        Ok(serde_json::json!({
             "enabled": true,
             "feed": FEED_COUNTER_PASS,
             "readable": true,
             "updated_at": self.updated_at(),
             "sessions_stored": stored,
             "truncated": next.is_some(),
-            "next": next.map(|cursor| cursor.encode()),
+            "next": next.map(|cursor| cursor.encode(tag)),
             "sessions": sessions,
-        })
+        }))
     }
 
     /// The `insights_session_drill` answer for the row `reference` names, in
@@ -1351,13 +1416,24 @@ impl CounterPass {
         if !enabled {
             return Ok(serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS}));
         }
-        let rows = match self.visible_rows(never_project_keys) {
-            Ok((_, rows)) => rows,
+        let (key, store) = match self.visible_store() {
+            Ok(found) => found,
             Err(reason) => return Ok(unreadable_value(reason)),
         };
-        let row = rows
-            .iter()
-            .find(|row| row.reference() == reference)
+        let never = key
+            .as_ref()
+            .map_or(NeverDigests::These(BTreeSet::new()), |key| {
+                never_digests(key, never_project_keys)
+            });
+        let row = store
+            .as_ref()
+            .and_then(|store| {
+                store
+                    .rows
+                    .values()
+                    .filter(|row| !never.contains(&row.project))
+                    .find(|row| row.reference() == reference)
+            })
             .ok_or(super::insights_sessions::ERR_SESSION_UNKNOWN)?;
         let input = row.session_input();
         let mut drill = crate::insights::session_drill::session_drill(

@@ -185,7 +185,7 @@ struct InsightsSessionsTab: View {
             .accessibilityElement(children: .combine)
         } else if model.pageFailed {
             HStack(spacing: GlassTokens.Space.s3) {
-                Text(text("analytics_unavailable")).insightsError()
+                Text(text("analytics_sessions_page_failed")).insightsError()
                 Button(text("analytics_sessions_retry")) { model.retry() }
             }
         } else if empty {
