@@ -90,10 +90,12 @@ struct InsightsPatternsTab: View {
             InsightsSectionTitle(InsightsPatternsWords.title(card.kind, copy: copy),
                                  info: InsightsPatternsWords.basisLines(card, copy: copy))
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                // The token figure is the headline; the count sits beneath it.
+                // The token figure is the headline and the count sits beneath
+                // it; an estimate that rounds to 0 leads with the count, and
+                // the token change is not drawn beside a count.
                 HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s5) {
-                    Text(figure(card.tokens)).insightsFigure()
-                    if card.change != nil {
+                    Text(InsightsPatternsWords.headline(card, copy: copy)).insightsFigure()
+                    if card.change != nil, !InsightsPatternsWords.leadsWithCount(card) {
                         Text(InsightsPatternsWords.change(card, copy: copy)).insightsCaption()
                     }
                 }
@@ -141,7 +143,10 @@ struct InsightsPatternsTab: View {
                             y: .value(text("analytics_card_tokens"), tokens), width: .ratio(0.6))
                     .foregroundStyle(GlassTokens.Color.purpleSoft.color)
                     .annotation(position: .top, spacing: GlassTokens.Space.s1) {
-                        if bar.week == current { Text(figure(tokens)).insightsTick(current: true) }
+                        if bar.week == current,
+                           let label = InsightsPatternsWords.currentWeekFigure(card, copy: copy) {
+                            Text(label).insightsTick(current: true)
+                        }
                     }
                 } else {
                     PointMark(x: .value(text("analytics_this_week"), Self.weekLabel(bar.week)),

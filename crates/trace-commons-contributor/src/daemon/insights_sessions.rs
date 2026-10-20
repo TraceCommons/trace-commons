@@ -9,7 +9,8 @@
 //!
 //! # What crosses the socket
 //!
-//! `insights_sessions` lists the stored sessions newest first, bounded by
+//! `insights_sessions` lists the stored sessions newest first (a session
+//! with no recorded time after every dated one), bounded by
 //! [`WATCHED_SESSIONS_MAX`]. Each row carries an opaque reference (`t` and
 //! the order the pass made the row in: never a digest or a path), its
 //! harness, its first recorded event's time, its turn count (Claude Code
@@ -468,6 +469,73 @@ mod tests {
             );
         }
         assert_nothing_identifying(&f, &value);
+    }
+
+    /// A session with no recorded time lists after every dated one, so the
+    /// tab's first row (its default selection) is the newest dated session,
+    /// even when the undated file was written last.
+    #[test]
+    fn undated_sessions_list_after_dated_ones() {
+        let f = Fixture::new();
+        let older = f.write("older.jsonl", &claude_bytes_shifted(0));
+        let newer = f.write("newer.jsonl", &claude_bytes_shifted(2));
+        // No line carries a time or a usage counter.
+        let undated = f.write(
+            "undated.jsonl",
+            b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"PRIVATE_SUMMARY\"}}\n",
+        );
+        f.run(&[
+            (SOURCE_CLAUDE_CODE, &older, PROJECT),
+            (SOURCE_CLAUDE_CODE, &newer, PROJECT),
+            (SOURCE_CLAUDE_CODE, &undated, PROJECT),
+        ]);
+        let listed = rows(&f.list(&[], &[]));
+        let started: Vec<serde_json::Value> =
+            listed.iter().map(|row| row["started_at"].clone()).collect();
+        assert_eq!(
+            started,
+            [
+                serde_json::json!("2026-09-16T09:00:00+00:00"),
+                serde_json::json!("2026-09-14T09:00:00+00:00"),
+                serde_json::Value::Null,
+            ]
+        );
+    }
+
+    /// The bound picks which sessions are listed by recency, dated or not;
+    /// only then are the picked ones ordered dated first. So a session
+    /// placed just now is not cut by a long tail of older dated ones, and
+    /// it still lists after the dated rows that were kept.
+    #[test]
+    fn a_recent_undated_session_survives_the_bound_and_lists_last() {
+        let f = Fixture::new();
+        let a = f.write("a.jsonl", &claude_bytes_shifted(0));
+        let b = f.write("b.jsonl", &claude_bytes_shifted(1));
+        let c = f.write("c.jsonl", &claude_bytes_shifted(2));
+        let undated = f.write(
+            "undated.jsonl",
+            b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"PRIVATE_SUMMARY\"}}\n",
+        );
+        f.run(&[
+            (SOURCE_CLAUDE_CODE, &a, PROJECT),
+            (SOURCE_CLAUDE_CODE, &b, PROJECT),
+            (SOURCE_CLAUDE_CODE, &c, PROJECT),
+            (SOURCE_CLAUDE_CODE, &undated, PROJECT),
+        ]);
+        let value = f.list_bounded(&[], &[], 2);
+        assert_eq!(value["sessions_stored"], 4);
+        assert_eq!(value["truncated"], true);
+        let started: Vec<serde_json::Value> = rows(&value)
+            .iter()
+            .map(|row| row["started_at"].clone())
+            .collect();
+        assert_eq!(
+            started,
+            [
+                serde_json::json!("2026-09-16T09:00:00+00:00"),
+                serde_json::Value::Null,
+            ]
+        );
     }
 
     #[test]

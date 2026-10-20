@@ -1189,8 +1189,9 @@ impl CounterPass {
         Ok((key, rows))
     }
 
-    /// The `insights_sessions` answer: the stored sessions newest first, at
-    /// most `limit`, each with an opaque reference, its harness, its first
+    /// The `insights_sessions` answer: at most `limit` stored sessions, the
+    /// most recent ones by the time discovery knows, listed dated first
+    /// (newest first) and undated ones after, each with an opaque reference, its harness, its first
     /// recorded event, its turns (Claude Code only) and its folder's label.
     ///
     /// `folders` are the project keys the daemon knows, each with the label
@@ -1219,9 +1220,10 @@ impl CounterPass {
                 .collect(),
             None => BTreeMap::new(),
         };
-        // Newest first by the first recorded event; a row with none by the
-        // time discovery placed it, then by its file's last write. Ties go
-        // to the row made later.
+        // The bound chooses which rows are listed by recency alone: the
+        // first recorded event, else the time discovery placed the row,
+        // else its file's last write; ties go to the row made later. So a
+        // session placed just now is not cut by older dated ones.
         rows.sort_by_key(|row| {
             std::cmp::Reverse((
                 row.listed_at().or(row.placed_at).unwrap_or(row.modified_at),
@@ -1229,9 +1231,15 @@ impl CounterPass {
             ))
         });
         let stored = rows.len();
+        rows.truncate(limit);
+        // Then the chosen rows are ordered dated first, newest first, with
+        // the undated ones after (the sort is stable, so they keep their
+        // recency order). An undated row never leads the list: a shell
+        // selects the first row by default, and a large file still being
+        // written would otherwise sit above every dated one.
+        rows.sort_by_key(|row| row.listed_at().is_none());
         let sessions: Vec<serde_json::Value> = rows
             .iter()
-            .take(limit)
             .map(|row| {
                 let source = match &row.body {
                     RowBody::Claude { .. } => AnalyticsSource::ClaudeCode,

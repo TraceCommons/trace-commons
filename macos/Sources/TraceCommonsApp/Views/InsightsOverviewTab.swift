@@ -407,7 +407,9 @@ struct InsightsOverviewTab: View {
                             HStack(alignment: .firstTextBaseline) {
                                 Text(InsightsPatternsWords.title(card.kind, copy: copy))
                                 Spacer(minLength: GlassTokens.Space.s4)
-                                Text(figure(card.tokens)).insightsMono()
+                                // The Patterns card's own headline: a count
+                                // when the estimate rounds to 0.
+                                Text(InsightsPatternsWords.headline(card, copy: copy)).insightsMono()
                             }
                         }
                     }
