@@ -309,6 +309,24 @@ struct CounterStore {
     /// `insights_route_tally::fold_plan`).
     #[serde(default)]
     ledger_folded_started: Option<DateTime<Utc>>,
+    /// Sessions the caps evicted, by the same keyed session digest as
+    /// `rows`, with the observation their row was made from. A candidate
+    /// with no row that matches one is unchanged since it was evicted and is
+    /// not read again; without this an evicted file would look new on every
+    /// poll, be read whole as the poll's first read, and be evicted again.
+    /// Aged out with the rows, and capped, oldest going first. Absent in a
+    /// store written before it, and left out of the file while empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    evicted: BTreeMap<KeyedDigest, Evicted>,
+}
+
+/// The observation an evicted session's row was made from. No path and no
+/// counters: only what tells an unchanged file from a changed one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Evicted {
+    size_bytes: u64,
+    modified_at: DateTime<Utc>,
 }
 
 impl CounterStore {
@@ -328,6 +346,7 @@ impl CounterStore {
             routing: BTreeMap::new(),
             ledger_folded_through: None,
             ledger_folded_started: None,
+            evicted: BTreeMap::new(),
         }
     }
 }
@@ -525,6 +544,16 @@ impl CounterPass {
             if unchanged && !removals.contains(&session) {
                 continue;
             }
+            // Evicted by the caps and unchanged since: reading it again
+            // would only evict it again.
+            if !current.rows.contains_key(&session)
+                && current.evicted.get(&session).is_some_and(|evicted| {
+                    evicted.size_bytes == candidate.size_bytes
+                        && evicted.modified_at == candidate.modified_at
+                })
+            {
+                continue;
+            }
             let (project_key, never_folder) = project_of(candidate);
             if never_folder && COUNTER_PASS_EXCLUDES_NEVER_FOLDERS {
                 if current.rows.contains_key(&session) {
@@ -591,8 +620,12 @@ impl CounterPass {
         for (session, mut row) in reads {
             row.seq = store.next_seq;
             store.next_seq += 1;
+            store.evicted.remove(&session);
             store.rows.insert(session, row);
         }
+        store
+            .evicted
+            .retain(|_, evicted| evicted.modified_at >= cutoff);
         enforce_caps(
             &mut store,
             COUNTER_STORE_MAX_SESSIONS,
@@ -1549,7 +1582,8 @@ pub(crate) fn fold_ledger_after_refresh(
 }
 
 /// Drop the oldest sessions, by last write and then by the order they were
-/// counted, until every cap holds. Whole sessions go, never part of one.
+/// counted, until every cap holds. Whole sessions go, never part of one, and
+/// each is marked evicted so an unchanged file is not read again.
 fn enforce_caps(store: &mut CounterStore, max_sessions: usize, max_turns: usize, max_tools: usize) {
     let mut turns: usize = store.rows.values().map(CounterRow::turns).sum();
     let mut tools: usize = store.rows.values().map(CounterRow::tool_calls).sum();
@@ -1569,6 +1603,28 @@ fn enforce_caps(store: &mut CounterStore, max_sessions: usize, max_turns: usize,
         if let Some(row) = store.rows.remove(&session) {
             turns -= row.turns();
             tools -= row.tool_calls();
+            store.evicted.insert(
+                session,
+                Evicted {
+                    size_bytes: row.size_bytes,
+                    modified_at: row.modified_at,
+                },
+            );
+        }
+    }
+    // The eviction marks are capped too, oldest going first: those are the
+    // nearest to aging out. Past the cap the oldest evicted files can be
+    // read again, each once per poll at most.
+    if store.evicted.len() > max_sessions {
+        let mut marks: Vec<(DateTime<Utc>, KeyedDigest)> = store
+            .evicted
+            .iter()
+            .map(|(session, evicted)| (evicted.modified_at, *session))
+            .collect();
+        marks.sort();
+        let excess = marks.len() - max_sessions;
+        for (_, session) in marks.into_iter().take(excess) {
+            store.evicted.remove(&session);
         }
     }
 }
@@ -2598,6 +2654,15 @@ mod tests {
         enforce_caps(&mut store, 3, usize::MAX, usize::MAX);
         let kept: Vec<u8> = store.rows.keys().map(|k| k.0[0]).collect();
         assert_eq!(kept, vec![2, 3, 4]);
+        let evicted: Vec<u8> = store.evicted.keys().map(|k| k.0[0]).collect();
+        assert_eq!(evicted, vec![0, 1]);
+
+        // The eviction marks are capped by the same count, oldest first.
+        enforce_caps(&mut store, 1, usize::MAX, usize::MAX);
+        let kept: Vec<u8> = store.rows.keys().map(|k| k.0[0]).collect();
+        assert_eq!(kept, vec![4]);
+        let evicted: Vec<u8> = store.evicted.keys().map(|k| k.0[0]).collect();
+        assert_eq!(evicted, vec![3]);
     }
 
     #[test]
@@ -2610,6 +2675,89 @@ mod tests {
         assert!(turns > 1);
         enforce_caps(&mut store, usize::MAX, turns - 1, usize::MAX);
         assert!(store.rows.is_empty());
+    }
+
+    /// A store at its session cap evicts the oldest session it reads. The
+    /// next poll must not read that file again while it is unchanged: with
+    /// no row it would look new, be the poll's first read, exempt from the
+    /// byte budget, and be evicted again by the same pass, every poll. A
+    /// file that changes is read again.
+    #[test]
+    fn an_evicted_unchanged_session_is_not_read_again() {
+        let f = Fixture::new();
+        let key = f.pass.keys.load_or_create().unwrap();
+        let mut store = CounterStore::empty(key_fingerprint(&key));
+        for i in 0..COUNTER_STORE_MAX_SESSIONS {
+            let mut digest = [0u8; 32];
+            digest[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            store.rows.insert(
+                KeyedDigest(digest),
+                CounterRow {
+                    size_bytes: 1,
+                    modified_at: written() + Duration::seconds(1),
+                    placed_at: None,
+                    first_event_at: None,
+                    project: KeyedDigest([9; 32]),
+                    seq: i as u64,
+                    body: RowBody::Codex { observed: None },
+                    harness_session: None,
+                    harness_session_read: true,
+                    earliest_event_at: None,
+                    latest_event_at: None,
+                    event_span_read: true,
+                    streamed: true,
+                },
+            );
+        }
+        store.next_seq = COUNTER_STORE_MAX_SESSIONS as u64;
+        f.pass.save(store).unwrap();
+
+        let path = f.write("old.jsonl", &claude_bytes());
+        let old = candidate(SOURCE_CLAUDE_CODE, &path);
+        assert_eq!(f.run(std::slice::from_ref(&old)).read, 1);
+        let stored = || {
+            let reopened = f.reopened();
+            let store = reopened.load_cached().unwrap().unwrap();
+            assert_eq!(store.rows.len(), COUNTER_STORE_MAX_SESSIONS);
+            assert!(store.rows.values().all(|row| row.modified_at > written()));
+        };
+        stored();
+
+        assert_eq!(
+            f.run(std::slice::from_ref(&old)).read,
+            0,
+            "evicted and unchanged: not read again"
+        );
+        let restarted = f
+            .reopened()
+            .run_pass(
+                std::slice::from_ref(&old),
+                &NeverFolders::NONE,
+                now(),
+                QUIET,
+                &mut |_| (PROJECT.to_string(), false),
+            )
+            .unwrap();
+        assert_eq!(restarted.read, 0, "nor after a restart");
+
+        let mut changed = old.clone();
+        changed.size_bytes += 1;
+        changed.modified_at = written() + Duration::seconds(2);
+        assert_eq!(f.run(&[changed]).read, 1, "a changed file is read again");
+        stored();
+        assert!(!f.pass.load_cached().unwrap().unwrap().evicted.is_empty());
+
+        // The marks age out with the rows.
+        let later = now() + Duration::weeks(COUNTER_STORE_KEEP_WEEKS + 1);
+        f.pass
+            .run_pass(&[], &NeverFolders::NONE, later, QUIET, &mut |_| {
+                (PROJECT.to_string(), false)
+            })
+            .unwrap();
+        let store = f.pass.load_cached().unwrap().unwrap();
+        assert!(store.rows.is_empty());
+        assert!(store.evicted.is_empty());
+        assert!(!f.rows_text().contains("evicted"), "empty, left out");
     }
 
     #[test]
