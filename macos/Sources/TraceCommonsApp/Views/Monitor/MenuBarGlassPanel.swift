@@ -21,7 +21,6 @@ import TCShellCore
 struct MenuBarGlassPanel: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let navigation: MainWindowNavigation
     let store: MenuPanelStore
     /// Whether the panel draws its own glass. Inside `MenuBarExtra` the
@@ -29,20 +28,11 @@ struct MenuBarGlassPanel: View {
     /// glass on it is glass on glass (R14); the preview window has none.
     var ownsSurface = false
 
-    /// Whether Watching's pause choices are open in place of the top row.
-    @State private var watchOpen = false
-
     static let width: CGFloat = 380
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            if watchOpen {
-                watchList
-                    .transition(.opacity)
-            } else {
-                topRow
-                    .transition(.opacity)
-            }
+            topRow
             nudgeRow
             settlementRow
             tools
@@ -54,7 +44,6 @@ struct MenuBarGlassPanel: View {
         .padding(GlassTokens.Space.s5)
         .frame(width: Self.width)
         .modifier(PanelSurface(owns: ownsSurface))
-        .animation(reduceMotion ? nil : GlassMotion.curve(GlassTokens.Motion.slide), value: watchOpen)
         // The glance is re-read while open: its ledger can go stale silently.
         .task { await store.followGlance() }
         // A fresh read on opening; the label follows the event stream. The
@@ -69,7 +58,8 @@ struct MenuBarGlassPanel: View {
 
     /// The traces worth a second look, first (owner, 2026-10-19: moved to
     /// the top; the core's approved heading is kept), then Watching,
-    /// Settings and Quit as icon buttons in the top right corner.
+    /// Settings and Quit as icon buttons in the top right corner. Watching
+    /// is a dropdown menu of its pause choices, or Resume.
     private var topRow: some View {
         HStack(spacing: GlassTokens.Space.s3) {
             Button { open(.traces(entryId: nil)) } label: {
@@ -82,7 +72,7 @@ struct MenuBarGlassPanel: View {
             }
             .buttonStyle(GlassMenuRowStyle())
             .padding(.vertical, -GlassTokens.Space.s2)
-            GlassRoundButton(MonitorWords.watching, systemImage: paused ? "eye.slash" : "eye") { watchOpen = true }
+            GlassRoundMenu(MonitorWords.watching, systemImage: paused ? "eye.slash" : "eye") { watchItems }
                 .accessibilityValue(watchValue)
                 .disabled(watchState == .coreDown || watchState == .loading)
             GlassRoundButton(MonitorWords.table?.settingsTitle ?? MenuWords.settings, icon: .glyph(.gear)) {
@@ -117,29 +107,20 @@ struct MenuBarGlassPanel: View {
         }
     }
 
-    /// Watching's pause choices (`MenuBarWords`), or resume, under its
-    /// heading, whose close goes back to the top row.
-    private var watchList: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            GlassSubListHeader(MonitorWords.watching, closeLabel: MonitorWords.watching) { watchOpen = false }
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                if paused {
-                    GlassOptionRow(MenuBarWords.resume, fill: .solid(GlassTokens.Color.blue), checked: false) {
-                        model.resume()
-                        watchOpen = false
-                    }
-                } else {
-                    ForEach(Array([MenuBarWords.pauseHour, MenuBarWords.pauseMorning,
-                                   MenuBarWords.pauseIndefinite].enumerated()), id: \.offset) { index, label in
-                        GlassOptionRow(label, fill: .solid(GlassTokens.Color.menuPillOff), checked: false) {
-                            model.pause(until: MenuBarWords.pauseUntil(index))
-                            watchOpen = false
-                        }
-                    }
+    /// Watching's dropdown (owner, 2026-10-19: a traditional menu, not a
+    /// list sliding open in the panel): under its name, the pause choices
+    /// (`MenuBarWords`) while watching, or Resume while paused.
+    @ViewBuilder
+    private var watchItems: some View {
+        Section(MonitorWords.watching) {
+            if paused {
+                Button(MenuBarWords.resume) { model.resume() }
+            } else {
+                ForEach(Array([MenuBarWords.pauseHour, MenuBarWords.pauseMorning,
+                               MenuBarWords.pauseIndefinite].enumerated()), id: \.offset) { index, label in
+                    Button(label) { model.pause(until: MenuBarWords.pauseUntil(index)) }
                 }
             }
-            .padding(GlassTokens.Space.s3)
-            .glassTier(.card)
         }
     }
 

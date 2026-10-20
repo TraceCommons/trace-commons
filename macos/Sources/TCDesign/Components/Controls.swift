@@ -658,6 +658,41 @@ public struct GlassIconMenu<Value: Hashable, More: View>: View {
     }
 }
 
+/// A round glass icon button that opens a traditional dropdown menu of the
+/// caller's items (owner, 2026-10-19: the menu bar's Watching), the system's
+/// own menu in place of a list sliding open inside the panel. The same 28pt
+/// round glass control as `GlassRoundButton`; named by `label` for
+/// assistive tech and in its tooltip.
+public struct GlassRoundMenu<Content: View>: View {
+    private let label: String
+    private let icon: GlassIcon
+    private let content: Content
+
+    public init(_ label: String, systemImage: String, @ViewBuilder content: () -> Content) {
+        self.label = label
+        self.icon = .symbol(systemImage)
+        self.content = content()
+    }
+
+    public var body: some View {
+        let side = GlassTokens.Size.controlLarge
+        Menu {
+            content
+        } label: {
+            GlassIconView(icon: icon, symbolSize: 13, weight: .medium)
+                .foregroundStyle(GlassColor.textPrimary)
+                .frame(width: side, height: side)
+                .glassSurface(.control, radius: side / 2, hover: GlassTokens.Color.controlHover)
+        }
+        .menuStyle(.button)
+        .buttonStyle(GlassPressStyle())
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel(label)
+        .help(label)
+    }
+}
+
 extension GlassIconMenu where More == EmptyView {
     public init(_ label: String, systemImage: String, selection: Binding<Value?>, options: [GlassPickerOption<Value>]) {
         self.init(label, systemImage: systemImage, selection: selection, options: options, more: { EmptyView() })

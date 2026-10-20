@@ -53,14 +53,19 @@ final class DesignRulings20261019Tests: XCTestCase {
         let row = try XCTUnwrap(panel.range(of: "    private var topRow: some View {"))
         let body = String(panel[row.upperBound...].prefix(1800))
         let flagged = try XCTUnwrap(body.range(of: "MenuWords.flagged"))
-        let watching = try XCTUnwrap(body.range(of: "GlassRoundButton(MonitorWords.watching"))
+        let watching = try XCTUnwrap(body.range(of: "GlassRoundMenu(MonitorWords.watching"))
         let settings = try XCTUnwrap(body.range(of: "icon: .glyph(.gear)"))
         let quit = try XCTUnwrap(body.range(of: "GlassRoundButton(MenuWords.quit, systemImage: \"power\")"))
         XCTAssertLessThan(flagged.lowerBound, watching.lowerBound)
         XCTAssertLessThan(watching.lowerBound, settings.lowerBound)
         XCTAssertLessThan(settings.lowerBound, quit.lowerBound)
+        // Watching is a traditional dropdown (owner, 2026-10-19), not a
+        // list that slides open in the panel.
+        XCTAssertTrue(panel.contains("Section(MonitorWords.watching) {"))
+        XCTAssertTrue(panel.contains("Button(MenuBarWords.resume) { model.resume() }"))
+        XCTAssertTrue(panel.contains("Button(label) { model.pause(until: MenuBarWords.pauseUntil(index)) }"))
         for gone in ["GlassStatePill(", "private var pills", "privateAIOptions", "Button(MenuWords.settings)",
-                     "Button(MenuWords.quit)"] {
+                     "Button(MenuWords.quit)", "GlassSubListHeader(", "GlassOptionRow(", "watchOpen"] {
             XCTAssertFalse(panel.contains(gone), "the popover draws \(gone) again")
         }
     }
