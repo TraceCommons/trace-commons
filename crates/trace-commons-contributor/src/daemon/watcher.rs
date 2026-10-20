@@ -201,10 +201,16 @@ fn tick_over(
         let policy = shared.policy.lock().expect("policy lock");
         (policy.grant_id(), policy.armings_from_now())
     };
-    let discovered: Vec<(&dyn TraceSource, Vec<SessionRef>)> = sources
-        .iter()
-        .filter_map(|source| source.discover().ok().map(|refs| (source.as_ref(), refs)))
-        .collect();
+    // `source_indices[i]` is where `discovered[i]`'s source sits in
+    // `sources`; a source whose discovery failed leaves a gap in the indices.
+    let mut discovered: Vec<(&dyn TraceSource, Vec<SessionRef>)> = Vec::new();
+    let mut source_indices: Vec<usize> = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        if let Ok(refs) = source.discover() {
+            discovered.push((source.as_ref(), refs));
+            source_indices.push(index);
+        }
+    }
     // Before any session is visited, so nothing on disk in a source recorded
     // now can be armed by the grant. A source whose discovery failed is not
     // recorded, and arms nothing until a pass records it.
@@ -224,7 +230,7 @@ fn tick_over(
     // Insights feed T, after the offers: a full pass only, and only while
     // the contributor has switched it on. Only the job is made here; the
     // pass reads on its own thread, after this tick has moved on.
-    let counter_job = counter_pass_job(shared, now, &sources, &discovered);
+    let counter_job = counter_pass_job(shared, now, &discovered, &source_indices);
     // Only when every source listed cleanly: a source whose discovery failed
     // would otherwise lose its sessions from the count until it recovers.
     if discovered.len() == sources.len() {
@@ -271,8 +277,8 @@ fn tick_over(
 fn counter_pass_job(
     shared: &DaemonShared,
     now: DateTime<Utc>,
-    sources: &[Box<dyn TraceSource>],
     discovered: &[(&dyn TraceSource, Vec<SessionRef>)],
+    source_indices: &[usize],
 ) -> Option<CounterJobDraft> {
     let (enabled, quiescence_secs) = {
         let s = shared.settings.lock().expect("settings lock");
@@ -283,20 +289,15 @@ fn counter_pass_job(
     }
     let mut origins: Vec<(usize, SessionRef, Observation)> = Vec::new();
     let mut candidates = Vec::new();
-    for (source, refs) in discovered {
+    for ((source, refs), &source_index) in discovered.iter().zip(source_indices) {
         if !matches!(
             source.name(),
             crate::source::SOURCE_CLAUDE_CODE | crate::source::SOURCE_CODEX
         ) {
             continue;
         }
-        // Which of the tick's own sources this is, so the job can own it.
-        let source_ptr = std::ptr::from_ref::<dyn TraceSource>(*source).cast::<()>();
-        let Some(source_index) = sources.iter().position(|owned| {
-            std::ptr::from_ref::<dyn TraceSource>(owned.as_ref()).cast::<()>() == source_ptr
-        }) else {
-            continue;
-        };
+        // `source_index` is which of the tick's own sources this is, so the
+        // job can own it.
         for session_ref in refs {
             let modified_at = match session_ref.group_modified_at {
                 Some(at) => at,
@@ -3023,6 +3024,66 @@ mod tests {
             2,
             "the follow-up read the newest tick's sessions"
         );
+    }
+
+    /// A job that panics leaves the slot idle: not running, and no job
+    /// waiting. A waiting job left behind would make a test's wait for idle
+    /// hang instead of fail.
+    #[test]
+    fn a_panicking_counter_job_leaves_the_slot_idle() {
+        let f = WatcherFixture::new();
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.shared.settings.lock().unwrap().insights_counter_pass = true;
+        let later = Utc::now() + chrono::Duration::hours(2);
+        let (entered, read_entered) = std::sync::mpsc::channel::<()>();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = std::sync::Mutex::new(released);
+        f.shared.insights_counter.detach_for_test();
+        f.shared
+            .insights_counter
+            .set_before_read_for_test(Arc::new(move || {
+                let _ = entered.send(());
+                // Returns once the sender is dropped.
+                let _ = released.lock().unwrap().recv();
+                panic!("the counter job panics mid-read");
+            }));
+        let tick_on_thread = |shared: &Arc<DaemonShared>| {
+            let shared = Arc::clone(shared);
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(tick(&shared, later)).unwrap();
+            })
+        };
+
+        let first = tick_on_thread(&f.shared);
+        read_entered
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the first job starts reading");
+        // A second job waits behind the one that is running.
+        let second = tick_on_thread(&f.shared);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while f.shared.insights_counter.worker_state_for_test() != (true, true) {
+            assert!(std::time::Instant::now() < deadline, "no job is waiting");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        drop(release);
+        while f.shared.insights_counter.worker_state_for_test().0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker never stopped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            f.shared.insights_counter.worker_state_for_test(),
+            (false, false),
+            "a panicking job leaves nothing running and nothing waiting"
+        );
+        first.join().unwrap();
+        second.join().unwrap();
     }
 
     /// A clear (what unenroll does) while a pass is reading, and while a

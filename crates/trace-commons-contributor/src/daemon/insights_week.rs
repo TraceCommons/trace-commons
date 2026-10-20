@@ -492,12 +492,15 @@ pub(crate) fn submit_counter_pass(shared: &Arc<DaemonShared>, job: CounterJob) {
 fn run_counter_jobs(shared: &DaemonShared) {
     let counter = &shared.insights_counter;
     // A panicking job must not leave `running` set, or no pass would run
-    // again in this process.
+    // again in this process, nor a job waiting for a worker that is gone.
     struct StopOnPanic<'a>(&'a CounterPass);
     impl Drop for StopOnPanic<'_> {
         fn drop(&mut self) {
             if std::thread::panicking() {
                 let mut slot = self.0.worker_slot();
+                // The waiting job goes too: the next tick submits a fresh
+                // one, and a test waiting for idle must not hang on it.
+                slot.pending = None;
                 self.0.worker_stopped(&mut slot);
             }
         }
@@ -646,6 +649,13 @@ impl CounterPass {
     #[cfg(test)]
     pub(crate) fn detached_for_test(&self) -> bool {
         self.test_seams.detached.load(Ordering::SeqCst)
+    }
+
+    /// Whether a worker is running and whether a job is waiting.
+    #[cfg(test)]
+    pub(crate) fn worker_state_for_test(&self) -> (bool, bool) {
+        let slot = self.worker_slot();
+        (slot.running, slot.pending.is_some())
     }
 
     /// Wait until no pass is running and none is pending.
