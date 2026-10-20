@@ -60,13 +60,15 @@ struct InferenceTabView: View {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 // The owner's order (2026-10-09, 2026-10-10, 2026-10-19),
                 // with the inspector closed on this tab: the Private AI
-                // switch leads, then the NEAR AI balance with billing under
-                // it, then the managed cards (owner ruling O3: in the main
-                // pane), then the calls, and last the card that opens
-                // Settings, where the tools and the connection are. The
-                // offer and the NEAR AI sign-in are popover notices over
-                // the tab (`MonitorNotices`).
-                PrivateAIToggleRow(store: store)
+                // status leads (a static dot and the core's sentence; the
+                // owner set aside a switch here on 2026-10-19), then the
+                // NEAR AI balance with billing under it, then the managed
+                // cards (owner ruling O3: in the main pane), then the
+                // calls, and last the card that opens Settings, where the
+                // switch, the tools and the connection are. The offer and
+                // the NEAR AI sign-in are popover notices over the tab
+                // (`MonitorNotices`).
+                PrivateAIInspectorView(store: store)
                 InferenceBalanceSection()
                 ManagedSessionsSection()
                 ledgerSections
@@ -363,102 +365,6 @@ struct PrivateAIInspectorView: View {
     static func statusDot(_ state: DaemonData.PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus {
         PrivateInferenceIndicator.dotStatus(
             PrivateInferenceSurface.tone(InferenceAccountSection.surfaceState(state), calls: calls))
-    }
-}
-
-/// The Private AI switch at the top of the Private AI tab (owner,
-/// 2026-10-19): it was the Status row, a dot and the core's sentence. It
-/// writes the daemon's switch as Settings' connection card does
-/// (`InferenceStore.setPrivateAI`). Turning it on with no NEAR AI sign-in
-/// on this Mac begins the sign-in instead, and the switch goes on once the
-/// sign-in lands. Under it, the core's sentence when what was asked for is
-/// not what happened (on, but the listener is not working), the sign-in's
-/// progress while it is waited on, and a refused write.
-struct PrivateAIToggleRow: View {
-    let store: InferenceStore
-    @EnvironmentObject private var model: AppModel
-    @Environment(\.openURL) private var openURL
-    /// On was asked for before a sign-in: the switch goes on once it lands.
-    @State private var onAfterSignIn = false
-
-    var body: some View {
-        if case .running = model.startup, let copy = model.privateInferenceCopy {
-            let state = InferenceAccountSection.surfaceState(store.privateAI?.state)
-            let label = PrivateAISwitchCard.stateLabel(state: state, copy: copy, calls: model.privateInferenceCalls)
-            let working = PrivateInferenceIndicator.readsAsWorking(state, calls: model.privateInferenceCalls)
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                Toggle(copy.inspectorStatus, isOn: Binding(
-                    get: { store.privateAI?.on ?? false },
-                    set: { set($0, copy: copy) }))
-                    .toggleStyle(GlassToggleStyle(.settings))
-                    .glassType(GlassTokens.TypeScale.body)
-                    .foregroundStyle(GlassColor.textPrimary)
-                    // Unread is neither on nor off: no switch to press.
-                    .disabled(store.privateAIBusy || store.privateAI == nil || model.credentialBusy)
-                    .accessibilityValue(label.line)
-                if let caption = Self.caption(
-                    on: store.privateAI?.on, working: working, waitingOnSignIn: onAfterSignIn && needsSignIn,
-                    state: label.line,
-                    signIn: CredentialSurface.stateLine(model.credentialStatus, copy: copy, calls: model.credentialCalls))
-                {
-                    Text(caption)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                // A refused switch: the failed request's red line, unboxed,
-                // its Dismiss a link after it (Ron, 2026-10-09).
-                if let refusal = store.privateAIRefusal {
-                    HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
-                        GlassAlert(refusal)
-                        Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) {
-                            store.dismissPrivateAIRefusal()
-                        }
-                        .buttonStyle(GlassButtonStyle(.link))
-                        .fixedSize()
-                    }
-                }
-            }
-            .padding(.horizontal, GlassTokens.Space.s2)
-            // The sign-in landed: the switch goes on, as it was asked.
-            .onChange(of: needsSignIn) { _, needs in
-                guard !needs, onAfterSignIn else { return }
-                onAfterSignIn = false
-                write(true, copy: copy)
-            }
-        }
-    }
-
-    /// No NEAR AI key on this Mac: the core offers the sign-in
-    /// (`CredentialSurface.action` is obtain).
-    private var needsSignIn: Bool {
-        CredentialSurface.action(model.credentialStatus, calls: model.credentialCalls) == .obtain
-    }
-
-    /// The line under the switch: the sign-in's progress while On waits on
-    /// it; the core's sentence while the switch is on and the listener is
-    /// not working; nothing otherwise, where the switch says it all.
-    static func caption(on: Bool?, working: Bool, waitingOnSignIn: Bool, state: String, signIn: String) -> String? {
-        if waitingOnSignIn { return signIn.isEmpty ? nil : signIn }
-        guard on == true, !working, !state.isEmpty else { return nil }
-        return state
-    }
-
-    private func set(_ on: Bool, copy: PrivateInferenceCopy) {
-        if on, needsSignIn {
-            onAfterSignIn = true
-            NearAiSignIn.begin(model, openURL: openURL)
-            return
-        }
-        onAfterSignIn = false
-        write(on, copy: copy)
-    }
-
-    private func write(_ on: Bool, copy: PrivateInferenceCopy) {
-        Task { @MainActor in
-            await store.setPrivateAI(on: on, unconfirmed: copy.writeUnconfirmed)
-            model.refreshSettings()
-        }
     }
 }
 

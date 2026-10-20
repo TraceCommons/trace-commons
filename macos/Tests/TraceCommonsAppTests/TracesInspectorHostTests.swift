@@ -267,8 +267,8 @@ final class TracesInspectorHostTests: XCTestCase {
     }
 
     /// The inspector stays closed on Inference (owner, 2026-10-09): the
-    /// Private AI switch heads the tab's main pane (owner, 2026-10-19), and
-    /// the inspector column draws nothing of Inference's.
+    /// Private AI status heads the tab's main pane, and the inspector
+    /// column draws nothing of Inference's.
     func test_inferenceHasNoInspector() throws {
         XCTAssertFalse(MonitorWindowView.inspectorAvailable(.inference, homePage: .overview))
         let pane = try Self.inspectorColumn()
@@ -279,8 +279,8 @@ final class TracesInspectorHostTests: XCTestCase {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertFalse(window.contains("PrivateAIInspectorView("))
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
-        XCTAssertEqual(views.components(separatedBy: "PrivateAIToggleRow(store: store)").count - 1, 1)
-        XCTAssertFalse(views.contains("PrivateAIInspectorView(store: store)"), "the status row is drawn beside the switch")
+        XCTAssertEqual(views.components(separatedBy: "PrivateAIInspectorView(store: store)").count - 1, 1)
+        XCTAssertFalse(views.contains("PrivateAIToggleRow"), "the status is a switch again")
     }
 
     /// The column draws the host; an opened History row shows in

@@ -474,7 +474,10 @@ final class InferenceParityTests: XCTestCase {
             cursor = found.upperBound
         }
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
-        let toggle = try XCTUnwrap(views.range(of: "                PrivateAIToggleRow(store: store)\n"))
+        // The status is a static dot and the core's sentence, not a
+        // switch (owner, 2026-10-19).
+        let toggle = try XCTUnwrap(views.range(of: "                PrivateAIInspectorView(store: store)\n"))
+        XCTAssertFalse(views.contains("PrivateAIToggleRow"), "the status is a switch again")
         let managed = try XCTUnwrap(views.range(of: "                ManagedSessionsSection()\n"))
         let calls = try XCTUnwrap(views.range(of: "                ledgerSections\n"))
         let page = try XCTUnwrap(views.range(of: "InferenceAccountSection(store: store, onOpenSettings: onOpenSettings)"))
@@ -483,7 +486,7 @@ final class InferenceParityTests: XCTestCase {
         // it (owner, 2026-10-19), then the managed cards.
         let scroll = try XCTUnwrap(views.range(of: "        ScrollView {\n"))
         XCTAssertLessThan(scroll.lowerBound, toggle.lowerBound)
-        XCTAssertLessThan(toggle.lowerBound, balance.lowerBound, "the switch leads the page")
+        XCTAssertLessThan(toggle.lowerBound, balance.lowerBound, "the status leads the page")
         XCTAssertLessThan(balance.lowerBound, managed.lowerBound, "the balance sits under the switch")
         XCTAssertLessThan(managed.lowerBound, calls.lowerBound, "the calls follow the managed cards")
         XCTAssertLessThan(calls.lowerBound, page.lowerBound, "the account cards follow the calls")
