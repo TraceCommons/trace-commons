@@ -1095,6 +1095,14 @@ enum InsightsPatternsWords {
         card.weeks.map { Bar(week: $0.week_start, tokens: $0.tokens) }
     }
 
+    /// The figure above the current week's bar. A card that leads with its
+    /// count draws none: its estimate rounds to 0 and a "0" would contradict
+    /// the headline. `nil` also when the week has no figure.
+    static func currentWeekFigure(_ card: InsightsPatternCard, copy: [String: String]) -> String? {
+        guard !leadsWithCount(card), let tokens = bars(card).last?.tokens else { return nil }
+        return InsightsOverviewWords.figure(tokens, copy: copy)
+    }
+
     /// The bars to draw: weeks with a figure only.
     static func drawnBars(_ card: InsightsPatternCard) -> [Bar] {
         bars(card).filter { $0.tokens != nil }

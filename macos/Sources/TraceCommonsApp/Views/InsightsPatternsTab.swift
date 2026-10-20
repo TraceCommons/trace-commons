@@ -143,7 +143,10 @@ struct InsightsPatternsTab: View {
                             y: .value(text("analytics_card_tokens"), tokens), width: .ratio(0.6))
                     .foregroundStyle(GlassTokens.Color.purpleSoft.color)
                     .annotation(position: .top, spacing: GlassTokens.Space.s1) {
-                        if bar.week == current { Text(figure(tokens)).insightsTick(current: true) }
+                        if bar.week == current,
+                           let label = InsightsPatternsWords.currentWeekFigure(card, copy: copy) {
+                            Text(label).insightsTick(current: true)
+                        }
                     }
                 } else {
                     PointMark(x: .value(text("analytics_this_week"), Self.weekLabel(bar.week)),

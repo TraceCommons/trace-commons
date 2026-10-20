@@ -617,6 +617,31 @@ final class InsightsPatternsTests: XCTestCase {
         XCTAssertTrue(overview.contains("Text(InsightsPatternsWords.headline(card, copy: copy)).insightsMono()"))
     }
 
+    func testACountHeadlineCardDrawsNoZeroOnItsCurrentWeekBar() throws {
+        let copy = Self.words
+        func card(headline: String, tokens: String, count: UInt32) throws -> InsightsPatternCard {
+            let json = """
+            {"kind":"retried_calls","tokens":\(tokens),"count":\(count),"headline":"\(headline)","files":null,"sessions":1,
+             "basis":"estimate_from_result_size","inferred":false,
+             "weeks":[{"week_start":"2026-10-05","tokens":12000},{"week_start":"2026-10-12","tokens":\(tokens)}],
+             "change":null,"change_unavailable":null}
+            """
+            return try JSONDecoder().decode(InsightsPatternCard.self, from: Data(json.utf8))
+        }
+        // Tokens Some(0), count 1: the headline is the count, and no "0" sits above the bar.
+        let counted = try card(headline: "count", tokens: "0", count: 1)
+        XCTAssertTrue(InsightsPatternsWords.leadsWithCount(counted))
+        XCTAssertNil(InsightsPatternsWords.currentWeekFigure(counted, copy: copy))
+        // A token headline keeps the figure on the current week.
+        let tokens = try card(headline: "tokens", tokens: "20000", count: 3)
+        XCTAssertEqual(InsightsPatternsWords.currentWeekFigure(tokens, copy: copy),
+                       InsightsOverviewWords.figure(20_000, copy: copy))
+        // The view draws that text and nothing else on the current bar.
+        let view = try InsightsGlassConventionsTests.text("Views/InsightsPatternsTab.swift")
+        XCTAssertTrue(view.contains("InsightsPatternsWords.currentWeekFigure(card, copy: copy)"))
+        XCTAssertFalse(view.contains("Text(figure(tokens)).insightsTick(current: true)"))
+    }
+
     func testNoWeekIsComparedUnderTheSavedFeed() throws {
         let week = try patterns()
         for card in week.cards {
