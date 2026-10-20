@@ -245,6 +245,36 @@ private struct GlassPromoLight: View {
     }
 }
 
+/// The glow border's edge on its own, for a card with no fill of its own
+/// (owner, 2026-10-19: Home's Not contributed card): the brand gradient
+/// turning slowly round a rounded rectangle, with a soft glow. Still under
+/// Reduce Motion, and while its window cannot be seen
+/// (`GlassAnimationTimeline`).
+public struct GlassGlowEdge: View {
+    private let cornerRadius: CGFloat
+    private let strength: Double
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    public init(cornerRadius: CGFloat, strength: Double = 1) {
+        self.cornerRadius = cornerRadius
+        self.strength = strength
+    }
+
+    /// A mark drawn beside the edge, in its lighter brand colours: lavender
+    /// into blue.
+    public static var markGradient: LinearGradient {
+        LinearGradient(
+            colors: [GlassTokens.Color.purpleText.color, GlassTokens.Color.promoTintEnd.color],
+            startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+
+    public var body: some View {
+        GlassPromoEdge(
+            treatment: .glowBorder, strength: strength, still: reduceMotion,
+            shape: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    }
+}
+
 /// The card's edge on a treatment: a brand gradient running round it for
 /// `glowBorder`, and a thin brand rule on the others, so a promotion card
 /// is told apart from its neighbours without its motion.

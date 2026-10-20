@@ -96,6 +96,23 @@ final class DesignRulings20261019Tests: XCTestCase {
         XCTAssertTrue(source.contains(".opacity(Self.graphicOpacity)"))
     }
 
+    /// Signed out, the Balance tile's "Sign in required" sits beside its
+    /// dash; a longer sentence, such as an expired sign-in's, goes under it.
+    func test_theSignedOutBalanceSitsBesideTheDash() throws {
+        let model = AppModel()
+        let copy = try XCTUnwrap(model.privateInferenceCopy)
+        let signedOut = HomeFormat.balance(
+            BalanceStatus.parse(fromJSON: #"{"state":"no_session"}"#), copy: copy, calls: model.balanceCalls)
+        XCTAssertEqual(signedOut.value, "—")
+        XCTAssertEqual(signedOut.beside, "Sign in required")
+        XCTAssertNil(signedOut.detail)
+        let expired = HomeFormat.balance(
+            BalanceStatus.parse(fromJSON: #"{"state":"session_expired"}"#), copy: copy, calls: model.balanceCalls)
+        XCTAssertEqual(expired.value, "—")
+        XCTAssertNil(expired.beside)
+        XCTAssertNotNil(expired.detail)
+    }
+
     /// The estimate's info popover is in plain words.
     func test_theEstimateExplainerIsPlain() throws {
         let copy = try XCTUnwrap(NudgeCopy.decode(fromJSON: TCCoreCopy.nudgeCopyJSON()))

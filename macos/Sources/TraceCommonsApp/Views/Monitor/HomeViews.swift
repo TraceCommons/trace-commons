@@ -302,7 +302,8 @@ private struct HomeOverview: View {
                     if let copy = model.privateInferenceCopy {
                         let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
                         HomeStatTile(label: copy.balanceTitle, value: balance.value, detail: balance.detail,
-                                     systemImage: HomeStatIcons.balance, action: openPrivateAI)
+                                     systemImage: HomeStatIcons.balance, valueAccessory: balance.beside,
+                                     action: openPrivateAI)
                     } else {
                         Color.clear
                     }
@@ -349,10 +350,10 @@ private struct HomeOverview: View {
 }
 
 /// The Not contributed card (owner, 2026-10-19): half a hero's height, no
-/// fill, a gradient edge, and a large icon in the same gradient on the
-/// left; then the label, the count and size, and the core's dollar line.
-/// Under the pointer it takes the control hover fill; the whole card is
-/// the button.
+/// fill, the promo glow edge turning slowly round it (`GlassGlowEdge`), and
+/// a large icon on the left in its lighter brand gradient; then the label,
+/// the count and size, and the core's dollar line. Under the pointer it
+/// takes the control hover fill; the whole card is the button.
 private struct HomeNotContributedCard: View {
     let title: String
     let count: Int
@@ -361,7 +362,6 @@ private struct HomeNotContributedCard: View {
     let action: () -> Void
     @State private var hovering = false
 
-    static let gradient = GlassTokens.Gradient.heroMissions
     static let iconSize: CGFloat = 30
 
     var body: some View {
@@ -370,7 +370,7 @@ private struct HomeNotContributedCard: View {
             HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
                 Image(systemName: HomeStatIcons.uncontributed)
                     .glassGlyph(Self.iconSize)
-                    .foregroundStyle(Self.gradient.linear)
+                    .foregroundStyle(GlassGlowEdge.markGradient)
                     .frame(width: Self.iconSize + GlassTokens.Space.s6)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
@@ -402,7 +402,7 @@ private struct HomeNotContributedCard: View {
             .padding(.vertical, GlassTokens.Space.s5)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(shape.fill(hovering ? GlassTokens.Color.controlHover.color : Color.clear))
-            .overlay(shape.strokeBorder(Self.gradient.linear, lineWidth: 1.5))
+            .overlay(GlassGlowEdge(cornerRadius: GlassTier.card.radius))
             .contentShape(shape)
         }
         .buttonStyle(GlassPressStyle())
@@ -1468,18 +1468,25 @@ struct HomeUncontributed: Equatable {
 /// Formatting for Home and History. Pure, so the rules are tested.
 enum HomeFormat {
     /// The Balance tile's figure (owner, 2026-10-19): the amount left when
-    /// the core reads one, else a dash with the core's sentence for why
-    /// under it. Never a figure the core did not give.
+    /// the core reads one, else a dash with the core's sentence for why.
+    /// Signed out, the core's short "Sign in required" sits beside the dash
+    /// (`beside`); every other sentence is longer, some carry a recovery,
+    /// and they go under it (`detail`). Never a figure the core did not give.
     static func balance(
         _ status: BalanceStatus, copy: PrivateInferenceCopy, calls: BalanceCalls
-    ) -> (value: String, detail: String?) {
-        if let sentence = BalanceSurface.stateLine(status, copy: copy, calls: calls) { return ("—", sentence) }
-        guard BalanceSurface.showsFigures(status, calls: calls) else { return ("—", nil) }
+    ) -> (value: String, beside: String?, detail: String?) {
+        if let sentence = BalanceSurface.stateLine(status, copy: copy, calls: calls) {
+            return status.state == signedOutBalance ? ("—", sentence, nil) : ("—", nil, sentence)
+        }
+        guard BalanceSurface.showsFigures(status, calls: calls) else { return ("—", nil, nil) }
         switch BalanceSurface.remaining(status, copy: copy, calls: calls) {
-        case .figure(let amount): return (amount, nil)
-        case .sentence(let sentence): return ("—", sentence)
+        case .figure(let amount): return (amount, nil, nil)
+        case .sentence(let sentence): return ("—", nil, sentence)
         }
     }
+
+    /// The daemon's balance label with no NEAR AI sign-in kept here.
+    static let signedOutBalance = "no_session"
 
     /// A card heading from the core's copy: the word, or nil when the copy
     /// has not arrived (or the word is empty), so no card is drawn on a

@@ -85,11 +85,16 @@ final class HomeViewTests: XCTestCase {
                 + "GridRow { notContributed(uncontributed, title: title) .gridCellColumns(2) } }"))
         // Slim, with no fill and a gradient edge (owner, 2026-10-19).
         XCTAssertTrue(home.contains("detail: uncontributed.detail(words), action: openTraces)"))
-        XCTAssertTrue(home.contains(".overlay(shape.strokeBorder(Self.gradient.linear, lineWidth: 1.5))"))
+        // The promo glow edge turns round it, and the icon takes the edge's
+        // lighter gradient (owner, 2026-10-19: the first gradient was too dark).
+        XCTAssertTrue(home.contains(".overlay(GlassGlowEdge(cornerRadius: GlassTier.card.radius))"))
+        XCTAssertTrue(home.contains(".foregroundStyle(GlassGlowEdge.markGradient)"))
+        let card = try XCTUnwrap(home.range(of: "private struct HomeNotContributedCard: View {"))
+        XCTAssertFalse(home[card.upperBound...].prefix(2500).contains("Gradient.heroMissions"), "the dark gradient is back")
         XCTAssertTrue(home.contains(".background(shape.fill(hovering ? GlassTokens.Color.controlHover.color : Color.clear))"))
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: copy.balanceTitle, value: balance.value, detail: balance.detail, "
-                + "systemImage: HomeStatIcons.balance, action: openPrivateAI)"))
+                + "systemImage: HomeStatIcons.balance, valueAccessory: balance.beside, action: openPrivateAI)"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))
         let upsell = try XCTUnwrap(home.range(of: "notContributed(uncontributed, title: title)"))
         let credit = try XCTUnwrap(home.range(of: "HomeStatTile(label: HomeFormat.creditPendingWord"))
