@@ -362,8 +362,8 @@ struct Candidate {
 }
 
 enum Declaration {
-    Valid(u64, String),
-    Invalid(u64),
+    Valid(String),
+    Invalid,
 }
 
 /// Extract persisted evidence from one already-selected Codex JSONL file.
@@ -391,13 +391,31 @@ pub fn extract_codex_usage_evidence(bytes: &[u8]) -> Result<PersistedUsageEviden
 /// lines counted), fails the scan on a line that is not UTF-8 JSON, and
 /// passes the SHA-256 of every byte read to [`Self::finish`]. No size bound:
 /// that is the caller's.
+///
+/// Memory does not grow with the transcript: of the usage records it keeps
+/// the first, the last and the first [`MAX_USAGE_RECORD_REFS`] line numbers,
+/// and of the turn contexts only what the attribution reads.
 #[derive(Default)]
 pub struct CodexUsageScan {
     candidate_records: u64,
     complete_records: u64,
     duplicate_records: u64,
-    candidates: Vec<Candidate>,
-    declarations: Vec<Declaration>,
+    /// The first and latest complete usage records: the interval's baseline
+    /// and final snapshot.
+    first: Option<Candidate>,
+    last: Option<Candidate>,
+    /// The first complete usage records' line numbers.
+    refs: Vec<u64>,
+    /// The latest turn context before the first usage record: the model in
+    /// scope at the baseline. Fixed once that record is read.
+    declared: Option<Declaration>,
+    /// The first turn context after the baseline, up to the latest usage
+    /// record, that is not the baseline's model: why the attribution is
+    /// unavailable.
+    departure: Option<ModelAttributionUnavailableReason>,
+    /// The same, for turn contexts after the latest usage record, which
+    /// count only once a later usage record is read.
+    pending_departure: Option<ModelAttributionUnavailableReason>,
     session: Option<String>,
     session_invalid: bool,
     multiple_sessions: bool,
@@ -405,6 +423,16 @@ pub struct CodexUsageScan {
 }
 
 impl CodexUsageScan {
+    /// The usage records and turn contexts held, for the tests that bound
+    /// them.
+    #[cfg(test)]
+    fn held(&self) -> (usize, usize) {
+        (
+            usize::from(self.first.is_some()) + usize::from(self.last.is_some()),
+            usize::from(self.declared.is_some()),
+        )
+    }
+
     /// The record on physical line `index`. Fails with a fixed label on a
     /// record that is not an object.
     pub fn observe(&mut self, index: u64, row: &Value) -> Result<()> {
@@ -431,15 +459,27 @@ impl CodexUsageScan {
         // Codex session metadata identifies the provider but does not declare a
         // model. The persisted turn context is the authoritative model scope.
         if kind == Some("turn_context") {
-            self.declarations.push(
-                match payload
-                    .and_then(|payload| payload.get("model"))
-                    .and_then(Value::as_str)
-                {
-                    Some(model) if safe_model(model) => Declaration::Valid(index, model.to_owned()),
-                    _ => Declaration::Invalid(index),
-                },
-            );
+            let model = payload
+                .and_then(|payload| payload.get("model"))
+                .and_then(Value::as_str)
+                .filter(|model| safe_model(model));
+            if self.first.is_none() {
+                self.declared = Some(match model {
+                    Some(model) => Declaration::Valid(model.to_owned()),
+                    None => Declaration::Invalid,
+                });
+            } else if let Some(Declaration::Valid(baseline)) = &self.declared {
+                let departure = match model {
+                    None => Some(ModelAttributionUnavailableReason::MissingOrInvalidDeclaration),
+                    Some(model) if model != baseline => {
+                        Some(ModelAttributionUnavailableReason::ModelChanged)
+                    }
+                    Some(_) => None,
+                };
+                if self.pending_departure.is_none() {
+                    self.pending_departure = departure;
+                }
+            }
         }
         if kind != Some("event_msg") {
             return Ok(());
@@ -460,7 +500,7 @@ impl CodexUsageScan {
             return Ok(());
         };
         self.complete_records = self.complete_records.checked_add(1).ok_or_else(invalid)?;
-        if let Some(previous) = self.candidates.last() {
+        if let Some(previous) = &self.last {
             if subtract(&counts, &previous.counts).is_none() {
                 self.aggregate_problem = Some(AggregateUnavailableReason::CumulativeReset);
             } else if counts == previous.counts {
@@ -473,11 +513,24 @@ impl CodexUsageScan {
             .and_then(Value::as_str)
             .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
             .map(|value| value.with_timezone(&Utc));
-        self.candidates.push(Candidate {
+        let candidate = Candidate {
             index,
             timestamp,
             counts,
-        });
+        };
+        if self.first.is_none() {
+            self.first = Some(candidate.clone());
+        }
+        self.last = Some(candidate);
+        if self.refs.len() < MAX_USAGE_RECORD_REFS {
+            self.refs.push(index);
+        }
+        // Turn contexts read since the last usage record are now inside the
+        // interval.
+        let pending = self.pending_departure.take();
+        if self.departure.is_none() {
+            self.departure = pending;
+        }
         Ok(())
     }
 
@@ -488,8 +541,12 @@ impl CodexUsageScan {
             candidate_records,
             complete_records,
             duplicate_records,
-            candidates,
-            declarations,
+            first,
+            last,
+            refs,
+            declared,
+            departure,
+            pending_departure: _,
             session,
             session_invalid,
             multiple_sessions,
@@ -507,12 +564,16 @@ impl CodexUsageScan {
         }
         let aggregate_counts = aggregate_problem
             .is_none()
-            .then(|| candidates.last().map(|value| value.counts.clone()))
+            .then(|| last.as_ref().map(|value| value.counts.clone()))
             .flatten();
 
-        let (mut interval, mut interval_unavailable_reason) =
-            interval(&candidates, aggregate_counts.as_ref());
-        let mut model_attribution = attribution(&declarations, interval.as_ref());
+        let (mut interval, mut interval_unavailable_reason) = interval(
+            first.as_ref(),
+            last.as_ref(),
+            complete_records,
+            aggregate_counts.as_ref(),
+        );
+        let mut model_attribution = attribution(declared.as_ref(), departure, interval.as_ref());
         if interval
             .as_ref()
             .is_some_and(|value| value.baseline.record_index == value.final_snapshot.record_index)
@@ -523,14 +584,11 @@ impl CodexUsageScan {
         {
             interval = None;
             interval_unavailable_reason = Some(IntervalUnavailableReason::InsufficientBaseline);
-            model_attribution = attribution(&declarations, None);
+            model_attribution = attribution(declared.as_ref(), departure, None);
         }
-        let refs = candidates
-            .iter()
-            .take(MAX_USAGE_RECORD_REFS)
-            .map(|value| UsageRecordRef {
-                record_index: value.index,
-            })
+        let refs = refs
+            .into_iter()
+            .map(|record_index| UsageRecordRef { record_index })
             .collect::<Vec<_>>();
         let omitted_record_refs = complete_records
             .checked_sub(u64::try_from(refs.len()).map_err(|_| invalid())?)
@@ -725,8 +783,12 @@ pub fn extract_claude_usage_evidence(bytes: &[u8]) -> Result<PersistedUsageEvide
     Ok(evidence)
 }
 
+/// The interval from the first complete usage record to the last, of
+/// `count` complete records.
 fn interval(
-    candidates: &[Candidate],
+    first: Option<&Candidate>,
+    last: Option<&Candidate>,
+    count: u64,
     aggregate: Option<&NativeTokenCounts>,
 ) -> (
     Option<ObservedUsageInterval>,
@@ -735,11 +797,10 @@ fn interval(
     if aggregate.is_none() {
         return (None, Some(IntervalUnavailableReason::IncompleteAggregate));
     }
-    let Some(baseline) = candidates.first() else {
+    let (Some(baseline), Some(final_snapshot)) = (first, last) else {
         return (None, Some(IntervalUnavailableReason::InsufficientBaseline));
     };
-    let final_snapshot = candidates.last().expect("baseline exists");
-    if candidates.len() == 1 && fields(&baseline.counts) != Some([0; 5]) {
+    if count == 1 && fields(&baseline.counts) != Some([0; 5]) {
         return (None, Some(IntervalUnavailableReason::InsufficientBaseline));
     }
     let (Some(baseline_time), Some(final_time)) = (baseline.timestamp, final_snapshot.timestamp)
@@ -777,29 +838,25 @@ fn interval(
     )
 }
 
+/// The model the interval is attributed to: the turn context in scope at
+/// its baseline (`declared`), unless a later one up to its final snapshot
+/// departs from it (`departure`).
 fn attribution(
-    declarations: &[Declaration],
+    declared: Option<&Declaration>,
+    departure: Option<ModelAttributionUnavailableReason>,
     interval: Option<&ObservedUsageInterval>,
 ) -> UsageModelAttribution {
-    let Some(interval) = interval else {
+    if interval.is_none() {
         return UsageModelAttribution::Unavailable {
             reason: ModelAttributionUnavailableReason::NoDeclarationAtBaseline,
         };
-    };
+    }
     // Counters already present at the baseline are explicitly unpriced. Use
     // the latest durable context at that boundary rather than treating older
     // model scopes as part of the observed interval.
-    let baseline_declaration = declarations
-        .iter()
-        .rev()
-        .find(|declaration| match declaration {
-            Declaration::Valid(index, _) | Declaration::Invalid(index) => {
-                *index <= interval.baseline.record_index
-            }
-        });
-    let (baseline_index, model) = match baseline_declaration {
-        Some(Declaration::Valid(index, model)) => (*index, model.as_str()),
-        Some(Declaration::Invalid(_)) => {
+    let model = match declared {
+        Some(Declaration::Valid(model)) => model,
+        Some(Declaration::Invalid) => {
             return UsageModelAttribution::Unavailable {
                 reason: ModelAttributionUnavailableReason::MissingOrInvalidDeclaration,
             };
@@ -810,25 +867,8 @@ fn attribution(
             };
         }
     };
-    for declaration in declarations.iter().filter(|declaration| match declaration {
-        Declaration::Valid(index, _) | Declaration::Invalid(index) => {
-            *index > baseline_index && *index <= interval.final_snapshot.record_index
-        }
-    }) {
-        match declaration {
-            Declaration::Invalid(_) => {
-                return UsageModelAttribution::Unavailable {
-                    reason: ModelAttributionUnavailableReason::MissingOrInvalidDeclaration,
-                };
-            }
-            Declaration::Valid(_, value) => {
-                if model != value {
-                    return UsageModelAttribution::Unavailable {
-                        reason: ModelAttributionUnavailableReason::ModelChanged,
-                    };
-                }
-            }
-        }
+    if let Some(reason) = departure {
+        return UsageModelAttribution::Unavailable { reason };
     }
     UsageModelAttribution::SingleDeclaredModel {
         model: model.to_owned(),
@@ -884,6 +924,131 @@ mod tests {
             value["timestamp"] = json!(at);
         }
         value
+    }
+
+    /// Codex transcripts from a compact plan, one step per record: `a`/`b`
+    /// a turn context declaring that model, `x` one declaring none, `u` a
+    /// usage record with higher counters, `d` one repeating the last
+    /// counters, `r` one lower than the last, `z` one at zero, `t` one with
+    /// no timestamp. Each repeated `times` over.
+    fn codex_plan(plan: &[(&str, usize)]) -> Vec<Value> {
+        let mut rows = vec![meta()];
+        let mut counts = 0u64;
+        let mut minute = 0u64;
+        for (steps, times) in plan {
+            for _ in 0..*times {
+                for step in steps.chars() {
+                    minute += 1;
+                    let at = format!("2026-01-01T{:02}:{:02}:00Z", minute / 60 % 24, minute % 60);
+                    rows.push(match step {
+                        'a' => context(Some("gpt-a")),
+                        'b' => context(Some("gpt-b")),
+                        'x' => context(None),
+                        'u' => {
+                            counts += 10;
+                            usage(Some(&at), counts * 2, counts, counts, 0)
+                        }
+                        'd' => usage(Some(&at), counts * 2, counts, counts, 0),
+                        'r' => {
+                            counts = counts.saturating_sub(5);
+                            usage(Some(&at), counts * 2, counts, counts, 0)
+                        }
+                        'z' => usage(Some(&at), 0, 0, 0, 0),
+                        't' => {
+                            counts += 10;
+                            usage(None, counts * 2, counts, counts, 0)
+                        }
+                        _ => unreachable!(),
+                    });
+                }
+            }
+        }
+        rows
+    }
+
+    /// Every attribution and interval outcome, with records past the kept
+    /// references and declarations before, inside and after the interval.
+    fn codex_plans() -> Vec<Vec<Value>> {
+        let plans: &[&[(&str, usize)]] = &[
+            &[("a", 1), ("u", 300)],
+            &[("b", 1), ("a", 1), ("u", 200), ("au", 100)],
+            &[("a", 1), ("u", 100), ("b", 1), ("u", 100)],
+            &[("a", 1), ("u", 100), ("x", 1), ("u", 100)],
+            &[("a", 1), ("u", 100), ("bx", 1), ("u", 100)],
+            &[("a", 1), ("u", 100), ("xb", 1), ("u", 100)],
+            &[("a", 1), ("u", 100), ("bxa", 3)],
+            &[("u", 100), ("a", 1), ("u", 10)],
+            &[("x", 1), ("u", 100)],
+            &[("b", 1), ("x", 1), ("a", 1), ("u", 100)],
+            &[("a", 1), ("z", 1)],
+            &[("a", 1), ("u", 1)],
+            &[("u", 1)],
+            &[("a", 1), ("u", 50), ("d", 30), ("u", 50)],
+            &[("a", 1), ("u", 50), ("r", 1), ("u", 50)],
+            &[("a", 1), ("t", 1), ("u", 100)],
+            &[("a", 1), ("u", 100), ("t", 1)],
+            &[("a", 1), ("ub", 100)],
+            &[("ab", 50), ("u", 1)],
+            &[("a", 1), ("u", 64)],
+            &[("a", 1), ("u", 65)],
+            &[("a", 1)],
+        ];
+        plans.iter().map(|plan| codex_plan(plan)).collect()
+    }
+
+    fn codex_scan(rows: &[Value]) -> CodexUsageScan {
+        let mut scan = CodexUsageScan::default();
+        for (offset, row) in rows.iter().enumerate() {
+            scan.observe(offset as u64 + 1, row).unwrap();
+        }
+        scan
+    }
+
+    /// Every plan's result, pinned by its SHA-256 as the scan that held every
+    /// record produced it, so bounding what the scan holds changes nothing it
+    /// yields.
+    #[test]
+    fn codex_results_are_unchanged_by_the_bounded_scan() {
+        let mut all = Vec::new();
+        let mut outcomes = std::collections::BTreeSet::new();
+        for rows in codex_plans() {
+            let evidence = codex_scan(&rows).finish("0".repeat(64)).unwrap();
+            outcomes.insert(serde_json::to_string(&evidence.attribution).unwrap());
+            outcomes.insert(format!("{:?}", evidence.interval_unavailable_reason));
+            outcomes.insert(format!("{:?}", evidence.aggregate_unavailable_reason));
+            all.push(serde_json::to_value(&evidence).unwrap());
+        }
+        // The plans reach every outcome the pin is meant to hold.
+        for outcome in [
+            "single_declared_model",
+            "missing_or_invalid_declaration",
+            "model_changed",
+            "no_declaration_at_baseline",
+            "CumulativeReset",
+            "InsufficientBaseline",
+            "MissingOrInvalidTimestamp",
+            "NoUsage",
+        ] {
+            assert!(
+                outcomes.iter().any(|seen| seen.contains(outcome)),
+                "{outcome}: {outcomes:?}"
+            );
+        }
+        let bytes = serde_json::to_vec(&all).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            "4252e0a980aee39464eb4a349e8680bec97f841e3878a3b79bdf1f0c82ae6a73"
+        );
+    }
+
+    /// However many usage records and turn contexts a transcript holds, the
+    /// scan keeps a bounded number.
+    #[test]
+    fn the_codex_scan_holds_a_bounded_number_of_records() {
+        let scan = codex_scan(&codex_plan(&[("a", 1), ("ubau", 500)]));
+        let (usage, declarations) = scan.held();
+        assert!(usage <= 2, "{usage}");
+        assert!(declarations <= 2, "{declarations}");
     }
 
     #[test]
