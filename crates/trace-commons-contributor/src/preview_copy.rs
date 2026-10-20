@@ -1085,7 +1085,7 @@ pub struct MonitorFlowMapCopy {
     pub memory_stays: &'static str,
     pub transfer_contribute_note: &'static str,
     /// The contribute note on a batch card for traces from several tools:
-    /// it names no one tool. DRAFT, NEEDS APPROVAL.
+    /// it names no one tool (owner, 2026-10-20).
     pub transfer_contribute_note_mixed: &'static str,
     pub transfer_keep_note: &'static str,
     pub transfer_dismiss_note: &'static str,
@@ -1561,8 +1561,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             memory_stays: "Memory files stay on this Mac.",
             transfer_contribute_note: "What {tool} read from its memory is part of the trace, \
                 and is scrubbed with it before it leaves.",
-            transfer_contribute_note_mixed: "What each tool read from its memory is part of its \
-                trace, and is scrubbed with it before it leaves.",
+            transfer_contribute_note_mixed: "Each tool's memory is scrubbed before it's sent.",
             transfer_keep_note: "The trace stays on this Mac with its memory. Nothing is sent.",
             transfer_dismiss_note: "Removed from the traces waiting for you. Nothing was sent.",
             transfer_traces: "{count} traces",
