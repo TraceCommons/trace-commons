@@ -4565,6 +4565,7 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
     let policy = shared.policy.lock().expect("policy lock");
     let queue = shared.queue.lock().expect("queue lock");
     let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+    let labels = super::policy::LabelCollisions::new(&known);
     let counts = |key: &str| {
         let pending: Vec<&super::queue::QueueEntry> = queue
             .pending()
@@ -4584,11 +4585,14 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
     // count is an ABSENT key and not a null. A client tests for the key,
     // exactly as it does for `eligibility`; a null would be one more thing
     // three shells each decide how to read.
-    let with_counts = |mut row: serde_json::Value, counts: (usize, Option<usize>)| {
-        let key = row["project_id"]
-            .as_str()
-            .and_then(|id| project_key_for_id(id, &known));
-        let project_seen = key.and_then(|k| seen.get(&k));
+    //
+    // Handed the key the row was built from. It used to resolve the row's
+    // id back to its key by re-hashing every known key, which made this
+    // handler quadratic in the number of folders (about 100 ms at 231)
+    // while it held the policy and queue locks.
+    let with_counts = |mut row: serde_json::Value, key: &str| {
+        let counts = counts(key);
+        let project_seen = seen.get(key);
         let session_count = project_seen.map_or(0, |s| s.count);
         let last_session_at = project_seen.and_then(|s| s.last_modified_at);
         row["session_count"] = serde_json::Value::from(session_count);
@@ -4631,30 +4635,26 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
         .iter()
         .map(|(key, entry)| {
             let shown = entry.display_path.as_deref().unwrap_or(key);
-            with_counts(
+            let mode = policy.resolve(key);
+            let mut row = with_counts(
                 serde_json::json!({
                 "project_id": project_id_for(key),
-                "project_label": disambiguated_label(key, entry.display_path.as_deref(), &known),
+                "project_label": labels.label(key, entry.display_path.as_deref()),
                 "project_path": display_path(shown),
-                "mode": policy.resolve(key),
+                "mode": mode,
                 "folder_mode": policy.folder_mode(key),
                 "added_at": entry.added_at,
                 "configured": true,
                 "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
                 }),
-                counts(key),
-            )
-        })
-        .map(|mut row| {
+                key,
+            );
             // K6: an armed project says which arming disclosure its
             // sessions have earned. Absent, not null, on every other row,
             // as with the counts above: only an armed project has one.
-            let key = row["project_id"]
-                .as_str()
-                .and_then(|id| project_key_for_id(id, &known));
-            if let Some(key) = key.filter(|k| policy.resolve(k) == ProjectMode::AutoUpload) {
+            if mode == ProjectMode::AutoUpload {
                 row["automatic_disclosure"] = serde_json::Value::from(
-                    match super::automatic_gate::project_disclosure(&policy, &key) {
+                    match super::automatic_gate::project_disclosure(&policy, key) {
                         super::automatic_gate::Disclosure::ModelScrubbed => "model_scrubbed",
                         super::automatic_gate::Disclosure::PatternsOnly => "patterns_only",
                     },
@@ -4664,7 +4664,7 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 // only, like the disclosure.
                 // Also true for a folder an "Automatic" override
                 // arms: its backlog waits the same way (#1173).
-                row["from_now"] = serde_json::Value::Bool(policy.armed_from_now_at(&key).is_some());
+                row["from_now"] = serde_json::Value::Bool(policy.armed_from_now_at(key).is_some());
             }
             row
         })
@@ -4672,7 +4672,7 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
             with_counts(
                 serde_json::json!({
                 "project_id": project_id_for(key),
-                "project_label": disambiguated_label(key, shown.as_deref(), &known),
+                "project_label": labels.label(key, shown.as_deref()),
                 "project_path": display_path(shown.as_deref().unwrap_or(key)),
                 "mode": policy.resolve(key),
                 "folder_mode": policy.folder_mode(key),
@@ -4680,7 +4680,7 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 "configured": false,
                 "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
                 }),
-                counts(key),
+                key,
             )
         }))
         .collect();
@@ -12676,6 +12676,213 @@ mod tests {
             serde_json::json!("Google"),
             "Antigravity must name its own vendor rather than falling through to null"
         );
+    }
+
+    /// Check every `list_projects` row against the derivation the handler
+    /// used before it stopped re-resolving keys: the id resolved back
+    /// through `project_key_for_id` over the whole known-key set, and the
+    /// label from the unindexed `disambiguated_label`. Also checks that the
+    /// rows are exactly the configured keys plus the queued-only keys, once
+    /// each, and that the armed-only and eligibility-only fields are absent
+    /// rather than null where they do not apply.
+    fn assert_list_projects_matches_the_old_derivation(s: &DaemonShared) -> serde_json::Value {
+        let result = handle_request(s, &req("list_projects", serde_json::json!({})))
+            .result
+            .expect("list_projects answers");
+        let policy = s.policy.lock().unwrap();
+        let queue = s.queue.lock().unwrap();
+        let known = super::super::policy::known_keys(
+            &policy,
+            queue.all().iter().map(|e| e.project_key.clone()),
+        );
+        let discovered: std::collections::BTreeMap<String, Option<String>> = queue
+            .all()
+            .iter()
+            .map(|e| (e.project_key.clone(), e.project_path.clone()))
+            .filter(|(key, _)| !policy.projects.contains_key(key))
+            .collect();
+        let rows = result["projects"].as_array().expect("projects array");
+        let mut row_keys = Vec::new();
+        for row in rows {
+            let id = row["project_id"].as_str().expect("project_id");
+            let key = project_key_for_id(id, &known).expect("every row id resolves");
+            let shown = match policy.projects.get(&key) {
+                Some(entry) => entry.display_path.clone(),
+                None => discovered.get(&key).cloned().expect("a queued key"),
+            };
+            assert_eq!(
+                row["project_label"],
+                serde_json::json!(disambiguated_label(&key, shown.as_deref(), &known)),
+                "{row}"
+            );
+            assert_eq!(
+                row["configured"],
+                policy.projects.contains_key(&key),
+                "{row}"
+            );
+            assert_eq!(
+                row["mode"],
+                serde_json::json!(policy.resolve(&key)),
+                "{row}"
+            );
+            assert_eq!(
+                row["is_unresolved_bucket"],
+                key == UNKNOWN_PROJECT_KEY,
+                "{row}"
+            );
+            let pending = queue
+                .pending()
+                .iter()
+                .filter(|e| e.project_key == key)
+                .count();
+            assert_eq!(row["pending_count"], pending, "{row}");
+            let obj = row.as_object().unwrap();
+            let armed = policy.resolve(&key) == ProjectMode::AutoUpload;
+            assert_eq!(obj.contains_key("automatic_disclosure"), armed, "{row}");
+            assert_eq!(obj.contains_key("from_now"), armed, "{row}");
+            if armed {
+                assert_eq!(
+                    row["from_now"],
+                    policy.armed_from_now_at(&key).is_some(),
+                    "{row}"
+                );
+            }
+            assert!(
+                obj.get("contributable_count").is_none_or(|v| !v.is_null()),
+                "absent, never null: {row}"
+            );
+            row_keys.push(key);
+        }
+        let mut expected: Vec<String> = policy
+            .projects
+            .keys()
+            .cloned()
+            .chain(discovered.keys().cloned())
+            .collect();
+        expected.sort();
+        let mut sorted = row_keys.clone();
+        sorted.sort();
+        assert_eq!(sorted, expected, "one row per configured or queued key");
+        result
+    }
+
+    fn row_for<'a>(result: &'a serde_json::Value, key: &str) -> &'a serde_json::Value {
+        let id = project_id_for(key);
+        result["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["project_id"] == id.as_str())
+            .unwrap_or_else(|| panic!("no row for {id}"))
+    }
+
+    /// `list_projects` answers exactly what the old per-row re-resolution
+    /// answered, across colliding basenames, a key repeated in the queue,
+    /// the unknown bucket, armed and unarmed rows -- and still does after
+    /// the changes a cache would have had to notice (a new colliding
+    /// folder, an arming, a new queued folder), because nothing is cached.
+    #[test]
+    fn list_projects_answers_what_per_row_resolution_answered() {
+        let s = enrolled_shared();
+        let now = Utc::now();
+        {
+            let mut policy = s.policy.lock().unwrap();
+            for key in ["/tmp/lpf-a/app", "/tmp/lpf-b/app", "/tmp/lpf-a/solo"] {
+                policy.set_mode(key, ProjectMode::NotifyOnly, now).unwrap();
+            }
+            policy
+                .set_mode("/tmp/lpf-a/armed", ProjectMode::AutoUpload, now)
+                .unwrap();
+            policy.arm_from_now("/tmp/lpf-a/armed", now);
+        }
+        // `solo` is queued three times, so its key repeats in the known set;
+        // a repeat of one's own key is not a collision.
+        for _ in 0..3 {
+            seed_entry(&s, "/tmp/lpf-a/solo");
+        }
+        seed_entry(&s, "/tmp/lpf-c/queued-only");
+        seed_entry(&s, "/tmp/lpf-d/app");
+        seed_entry(&s, UNKNOWN_PROJECT_KEY);
+
+        let first = assert_list_projects_matches_the_old_derivation(&s);
+        assert_eq!(row_for(&first, "/tmp/lpf-a/solo")["project_label"], "solo");
+        for key in ["/tmp/lpf-a/app", "/tmp/lpf-b/app", "/tmp/lpf-d/app"] {
+            let label = row_for(&first, key)["project_label"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(label.starts_with("app ("), "{label}");
+            assert!(!label.contains("lpf-"), "no path text in a label: {label}");
+        }
+        assert_eq!(
+            row_for(&first, "/tmp/lpf-a/armed")["from_now"],
+            true,
+            "{first}"
+        );
+        assert_eq!(
+            row_for(&first, UNKNOWN_PROJECT_KEY)["is_unresolved_bucket"],
+            true
+        );
+
+        // Changes that would invalidate any cache of the answer.
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode("/tmp/lpf-e/solo", ProjectMode::NotifyOnly, now)
+            .unwrap();
+        s.policy
+            .lock()
+            .unwrap()
+            .set_mode("/tmp/lpf-b/app", ProjectMode::AutoUpload, now)
+            .unwrap();
+        seed_entry(&s, "/tmp/lpf-f/fresh");
+
+        let second = assert_list_projects_matches_the_old_derivation(&s);
+        let solo = row_for(&second, "/tmp/lpf-a/solo")["project_label"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(solo.starts_with("solo ("), "now colliding: {solo}");
+        let newly_armed = row_for(&second, "/tmp/lpf-b/app");
+        assert_eq!(newly_armed["from_now"], false, "{newly_armed}");
+        assert!(newly_armed.get("automatic_disclosure").is_some());
+        assert_eq!(row_for(&second, "/tmp/lpf-f/fresh")["pending_count"], 1);
+    }
+
+    /// The cost of `list_projects` is one id derivation per row. Resolving
+    /// each row's id back to its key by re-hashing the whole known-key set
+    /// made it quadratic: about 100 ms at 231 folders. Counted, not timed,
+    /// so it cannot flake on a busy runner.
+    #[test]
+    fn list_projects_derives_one_id_per_row() {
+        let s = shared();
+        let now = Utc::now();
+        {
+            let mut policy = s.policy.lock().unwrap();
+            for i in 0..231 {
+                policy
+                    .set_mode(
+                        &format!("/tmp/lpc-{}/proj{i}", i % 40),
+                        ProjectMode::NotifyOnly,
+                        now,
+                    )
+                    .unwrap();
+            }
+        }
+        for i in 0..180 {
+            seed_entry(&s, &format!("/tmp/lpc-{}/proj{}", (i % 231) % 40, i % 231));
+        }
+        for i in 0..20 {
+            seed_entry(&s, &format!("/tmp/lpc-discovered/d{i}"));
+        }
+        super::super::policy::project_id_derivations::reset();
+        let result = handle_request(&s, &req("list_projects", serde_json::json!({})))
+            .result
+            .unwrap();
+        let derived = super::super::policy::project_id_derivations::count();
+        let rows = result["projects"].as_array().unwrap().len();
+        assert_eq!(rows, 251);
+        assert_eq!(derived, rows, "one sha256 id per row, not per known key");
     }
 
     /// Seed one pending queue entry for `project_key`, the way a poll that

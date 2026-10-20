@@ -1774,11 +1774,36 @@ pub const ERR_PROJECT_ID_UNRECOGNIZED: &str = "project-id-unrecognized";
 /// directory did not already confer; it is an identifier a client can hold,
 /// and the daemon still resolves it only against projects it already knows.
 pub fn project_id_for(project_key: &str) -> String {
+    #[cfg(test)]
+    project_id_derivations::record();
     let digest = Sha256::digest(project_key.as_bytes());
     format!(
         "{PROJECT_ID_PREFIX}{}",
         hex_prefix(&digest, PROJECT_ID_HEX_CHARS)
     )
+}
+
+/// How many ids `project_id_for` has derived on this thread, so a test can
+/// hold a handler to a count of sha256 derivations rather than a timing.
+#[cfg(test)]
+pub(crate) mod project_id_derivations {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn record() {
+        COUNT.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(crate) fn reset() {
+        COUNT.with(|c| c.set(0));
+    }
+
+    pub(crate) fn count() -> usize {
+        COUNT.with(Cell::get)
+    }
 }
 
 /// Resolve an opaque project id back to the key it was minted from, or
@@ -1942,16 +1967,74 @@ pub fn disambiguated_label(
     // still treated as colliding and still both get a suffix. Testing on
     // the rendered label instead would let `Api` and `api` sit side by side
     // looking like two spellings of one project.
+    label_with_suffix_if(project_key, project_path, |folded| {
+        known_keys
+            .iter()
+            .any(|other| other != project_key && project_label_for(other) == folded)
+    })
+}
+
+/// [`disambiguated_label`] for many keys against one known-key set, with
+/// the folded basenames counted once instead of once per label.
+///
+/// `disambiguated_label` scans the whole set for each call, so labelling
+/// every row of `list_projects` was quadratic in the number of folders.
+/// This answers the same label: a key collides when some *other* distinct
+/// key folds to the same basename. Keys are deduplicated, because the known
+/// set repeats a key once per queue entry, and a key repeated is not a
+/// collision with itself.
+pub struct LabelCollisions {
+    /// Folded basename to the first distinct key seen with it, and whether
+    /// a second distinct key shares it.
+    by_label: std::collections::HashMap<String, (String, bool)>,
+}
+
+impl LabelCollisions {
+    pub fn new(known_keys: &[String]) -> Self {
+        let mut by_label: std::collections::HashMap<String, (String, bool)> =
+            std::collections::HashMap::new();
+        for key in known_keys {
+            match by_label.entry(project_label_for(key)) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert((key.clone(), false));
+                }
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    let (first, shared) = slot.get_mut();
+                    if first != key {
+                        *shared = true;
+                    }
+                }
+            }
+        }
+        Self { by_label }
+    }
+
+    /// The label [`disambiguated_label`] gives `project_key` against the
+    /// known-key set this was built from.
+    pub fn label(&self, project_key: &str, project_path: Option<&str>) -> String {
+        label_with_suffix_if(project_key, project_path, |folded| {
+            self.by_label
+                .get(folded)
+                .is_some_and(|(first, shared)| *shared || first != project_key)
+        })
+    }
+}
+
+/// The rendering both [`disambiguated_label`] and [`LabelCollisions`] share:
+/// the label from the unfolded path, with a `sha256(key)` suffix when
+/// `collides` says the folded basename is shared.
+fn label_with_suffix_if(
+    project_key: &str,
+    project_path: Option<&str>,
+    collides: impl FnOnce(&str) -> bool,
+) -> String {
     let label = project_label_for(project_path.unwrap_or(project_key));
     if project_key == UNKNOWN_PROJECT_KEY {
         return label;
     }
 
     let folded = project_label_for(project_key);
-    let collides = known_keys
-        .iter()
-        .any(|other| other != project_key && project_label_for(other) == folded);
-    if !collides {
+    if !collides(&folded) {
         return label;
     }
 
@@ -1977,6 +2060,45 @@ mod tests {
 
     fn now() -> DateTime<Utc> {
         "2026-08-08T12:00:00Z".parse().unwrap()
+    }
+
+    /// `LabelCollisions` gives every key the label `disambiguated_label`
+    /// gives it: colliding basenames get the hash suffix, a key repeated
+    /// in the known set does not collide with itself, the unknown bucket
+    /// never gets a suffix, and a key outside the set collides with any
+    /// key that shares its basename.
+    #[test]
+    fn label_collisions_label_as_disambiguated_label_does() {
+        let known: Vec<String> = [
+            "/tmp/lc-a/app",
+            "/tmp/lc-b/app",
+            "/tmp/lc-a/solo",
+            "/tmp/lc-a/solo",
+            "/tmp/lc-a/solo",
+            "/tmp/lc-c/twice",
+            "/tmp/lc-c/twice",
+            "/tmp/lc-d/twice",
+            UNKNOWN_PROJECT_KEY,
+            UNKNOWN_PROJECT_KEY,
+            "/",
+        ]
+        .iter()
+        .map(|k| k.to_string())
+        .collect();
+        let labels = LabelCollisions::new(&known);
+        let outside = ["/tmp/lc-e/solo", "/tmp/lc-e/fresh", "/tmp/lc-e/app"];
+        for key in known.iter().map(String::as_str).chain(outside) {
+            for shown in [None, Some("/tmp/Shown/App")] {
+                assert_eq!(
+                    labels.label(key, shown),
+                    disambiguated_label(key, shown, &known),
+                    "{key} {shown:?}"
+                );
+            }
+        }
+        assert_eq!(labels.label("/tmp/lc-a/solo", None), "solo");
+        assert!(labels.label("/tmp/lc-c/twice", None).starts_with("twice ("));
+        assert!(labels.label("/tmp/lc-e/solo", None).starts_with("solo ("));
     }
 
     #[test]
