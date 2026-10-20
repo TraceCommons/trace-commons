@@ -94,6 +94,9 @@ struct TracesTreeView: View, Equatable {
     /// VoiceOver's focus, which follows the selection the arrow keys move,
     /// so a person hearing the tree hears where it went.
     @AccessibilityFocusState private var spoken: String?
+    /// Whether keeping the selection on screen animates. Off only where no
+    /// animation can run: a window that is never shown (the render tests).
+    @Environment(\.tracesScrollAnimates) private var scrollAnimates
 
     struct Confirmation {
         let folder: TracesTree.FolderNode
@@ -441,7 +444,7 @@ struct TracesTreeView: View, Equatable {
     /// Keeps a row on screen. VoiceOver follows once the scroll has built
     /// the row: a lazy row off screen does not exist until then.
     private func scroll(to id: String, _ proxy: ScrollViewProxy) {
-        withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) {
+        withAnimation(scrollAnimates ? GlassMotion.fast(GlassMotion.systemReducesMotion) : nil) {
             proxy.scrollTo(id)
         }
         Task { @MainActor in spoken = id }
@@ -905,6 +908,11 @@ struct TracesTreeView: View, Equatable {
     static func size(_ entry: DaemonData.QueueEntry) -> String? {
         entry.sizeBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .memory) }
     }
+}
+
+extension EnvironmentValues {
+    /// See `TracesTreeView.scrollAnimates`.
+    @Entry var tracesScrollAnimates = true
 }
 
 /// The bounds of the rows whose menu is open, by row id, so the tree

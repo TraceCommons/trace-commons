@@ -305,6 +305,9 @@ final class TracesScalePerfTests: XCTestCase {
                 TracesTreeView(store: store, selection: $box.selection, missionsShown: model.missionsShown)
                     .equatable()
                     .environmentObject(model)
+                    // The window is never shown, so no scroll animation runs
+                    // in it: an animated scroll never moves.
+                    .environment(\.tracesScrollAnimates, false)
                     .onChange(of: box.selection) { box.renders += 1 }
                     .onChange(of: store.tree) { box.renders += 1 }
                     .onAppear { box.renders += 1 }
