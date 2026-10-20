@@ -32,6 +32,7 @@ pub mod recap;
 pub mod service;
 pub mod session_drill;
 pub mod session_identity;
+pub mod session_sparkline;
 pub mod summary;
 pub mod task_attribution;
 pub mod time_evidence;
