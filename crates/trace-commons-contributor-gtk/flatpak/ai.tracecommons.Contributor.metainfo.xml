@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.20.5" date="2026-10-20">
+      <description>
+        <p>Maintenance release for Linux: the version number follows the macOS app.</p>
+      </description>
+    </release>
     <release version="0.20.4" date="2026-10-20">
       <description>
         <p>Insights counts long sessions, and counting runs in the background so the queue no longer waits for it.</p>
