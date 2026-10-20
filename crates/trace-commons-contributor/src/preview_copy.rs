@@ -1084,6 +1084,9 @@ pub struct MonitorFlowMapCopy {
     pub transfer_trace: &'static str,
     pub memory_stays: &'static str,
     pub transfer_contribute_note: &'static str,
+    /// The contribute note on a batch card for traces from several tools:
+    /// it names no one tool. DRAFT, NEEDS APPROVAL.
+    pub transfer_contribute_note_mixed: &'static str,
     pub transfer_keep_note: &'static str,
     pub transfer_dismiss_note: &'static str,
     /// A batch card's count, when one submit sends several traces at once
@@ -1558,6 +1561,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             memory_stays: "Memory files stay on this Mac.",
             transfer_contribute_note: "What {tool} read from its memory is part of the trace, \
                 and is scrubbed with it before it leaves.",
+            transfer_contribute_note_mixed: "What each tool read from its memory is part of its \
+                trace, and is scrubbed with it before it leaves.",
             transfer_keep_note: "The trace stays on this Mac with its memory. Nothing is sent.",
             transfer_dismiss_note: "Removed from the traces waiting for you. Nothing was sent.",
             transfer_traces: "{count} traces",
@@ -2024,6 +2029,11 @@ mod tests {
         // hole at all.
         assert!(map.coin_waiting.contains("{count}"));
         assert!(map.transfer_contribute_note.contains("{tool}"));
+        // A batch from several tools names none of them.
+        assert!(
+            !map.transfer_contribute_note_mixed.is_empty()
+                && !map.transfer_contribute_note_mixed.contains('{')
+        );
         assert!(!map.transfer_dismissed.is_empty() && !map.transfer_dismiss_note.contains('{'));
         assert!(map.collected.contains("{count}") && map.collected.contains("{total}"));
         assert!(map.kept_here.contains("{count}") && !map.kept_here_one.contains('{'));
