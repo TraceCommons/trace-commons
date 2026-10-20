@@ -992,6 +992,8 @@ mod tests {
         assert_eq!(models.len(), 3);
     }
 
+    // The stub Codex is a shell script made executable with Unix permissions.
+    #[cfg(unix)]
     #[test]
     fn codex_catalog_file_reads_the_installed_codex_list() {
         use super::codex_catalog_file;
