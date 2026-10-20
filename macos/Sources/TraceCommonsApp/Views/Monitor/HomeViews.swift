@@ -351,13 +351,8 @@ private struct HomeOverview: View {
                     }
                     .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    GlassIconCard(systemImage: HomeStatIcons.privateAI, title: words.privateAINotConnected) {
-                        Button(words.privateAIConnect, action: openPrivateAI)
-                            .buttonStyle(GlassButtonStyle(.primary, small: true))
-                            .fixedSize()
-                    } content: {
-                        EmptyView()
-                    }
+                    HomePrivateAIConnectCard(
+                        title: words.privateAINotConnected, connect: words.privateAIConnect, action: openPrivateAI)
                 }
             }
         }
@@ -479,6 +474,42 @@ enum HomeStatIcons {
     static let privateAI = "shield.lefthalf.filled"
     static let calls = "arrow.left.arrow.right"
     static let verified = "checkmark.shield"
+}
+
+/// Home's Private AI card while Private AI is not working (owner,
+/// 2026-10-20): the stat tiles' icon, "Not connected" and Connect, all
+/// centred on the card's height, which the button sets.
+private struct HomePrivateAIConnectCard: View {
+    let title: String
+    let connect: String
+    let action: () -> Void
+
+    /// The stat tiles' icon size and column (`GlassStatCard`).
+    static let iconGlyph: CGFloat = 28
+    static let iconColumn: CGFloat = 40
+
+    var body: some View {
+        HStack(alignment: .center, spacing: GlassTokens.Space.s3) {
+            Image(systemName: HomeStatIcons.privateAI)
+                .glassGlyph(Self.iconGlyph, weight: .regular)
+                .foregroundStyle(GlassTokens.Color.purpleSoft.color)
+                .frame(width: Self.iconColumn)
+                .accessibilityHidden(true)
+            Text(title)
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .foregroundStyle(GlassColor.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: GlassTokens.Space.s4)
+            Button(connect, action: action)
+                .buttonStyle(GlassButtonStyle(.primary, small: true))
+                .fixedSize()
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassTier(.card)
+        .accessibilityElement(children: .contain)
+    }
 }
 
 /// A group of Home's cards under its title (owner, 2026-10-20). With no

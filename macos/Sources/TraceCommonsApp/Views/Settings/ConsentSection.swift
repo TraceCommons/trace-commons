@@ -57,9 +57,7 @@ struct ConsentSection: View {
 
         // #1146: CONSENT over the question as the h2, and Refresh.
         GlassEyebrowCard(SettingsLegacyWords.consentEyebrow, title: SettingsLegacyWords.consentHeading) {
-            Button(SettingsLegacyWords.refresh, action: model.refreshStatus)
-                .buttonStyle(GlassButtonStyle(.link))
-                .fixedSize()
+            GlassRefreshButton(SettingsLegacyWords.refresh, action: model.refreshStatus)
         } content: {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 caption(SettingsLegacyWords.appliesFromNow)

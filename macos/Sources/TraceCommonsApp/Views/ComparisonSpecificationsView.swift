@@ -13,9 +13,8 @@ struct ComparisonSpecificationsView: View {
             // That a comparison only looks back, behind the title's "i".
             InsightsSectionTitle(title: text("comparison_specification_title"),
                                  info: [text("comparison_retrospective_notice")]) {
-                Button(text("comparison_specification_refresh")) { model.refresh() }
-                    .accessibilityLabel(text("comparison_specification_refresh_accessibility"))
                 if model.busy { GlassSpinner() }
+                GlassRefreshButton(text("comparison_specification_refresh_accessibility")) { model.refresh() }
             }
             VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
                 if let notice = model.notice { Text(text(notice)).foregroundStyle(GlassStatus.on.textColor) }

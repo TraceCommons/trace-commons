@@ -79,7 +79,14 @@ final class DesignRulings20261020Tests: XCTestCase {
     /// tab rather than turning anything on. Working: Calls and Verified.
     func test_thePrivateAISectionConnectsOrCounts() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("Button(words.privateAIConnect, action: openPrivateAI)"))
+        XCTAssertTrue(home.contains(
+            "HomePrivateAIConnectCard( title: words.privateAINotConnected, connect: words.privateAIConnect, action: openPrivateAI)"
+                .replacingOccurrences(of: "( ", with: "(\n                        ")))
+        // Centred on the card's height (owner, 2026-10-20), not the icon
+        // card's top-aligned head.
+        let card = try XCTUnwrap(home.range(of: "private struct HomePrivateAIConnectCard: View {"))
+        XCTAssertTrue(home[card.upperBound...].prefix(900).contains("HStack(alignment: .center, spacing: GlassTokens.Space.s3) {"))
+        XCTAssertTrue(home.contains("Button(connect, action: action)"))
         XCTAssertTrue(home.contains("HomeStatTile(label: MonitorWords.calls, value: HomeFormat.count(totals.calls),"))
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: InferenceWords.proof(.verified), value: HomeFormat.count(totals.verified),"))
@@ -116,5 +123,38 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertTrue(glass.contains(
             "Text(words.last ?? \"\").accessibilityHidden(true)\n                    InsightsInfo(infoTitle, info)"))
         XCTAssertFalse(glass.contains("            InsightsInfo(title, info)\n            Spacer("), "the title's i is at the row's end again")
+    }
+
+    /// Every refresh is the round refresh icon button at the trailing end
+    /// of what it re-reads (owner, 2026-10-20): no "Refresh" in words, no
+    /// bare glyph, and the icon card's beside its title no more.
+    func test_everyRefreshIsTheRightAlignedIconButton() throws {
+        XCTAssertEqual(GlassRefreshButton.systemImage, "arrow.clockwise")
+        let files = ["Views/ComparisonTasksView.swift", "Views/ComparisonSpecificationsView.swift",
+                     "Views/InsightsEpisodesView.swift", "Views/InsightsView.swift", "Views/MissionDraftsView.swift",
+                     "Views/Settings/ConsentSection.swift", "Views/Settings/StartupSection.swift",
+                     "Views/Settings/WatchingSection.swift"]
+        for file in files {
+            let source = try Self.text(file)
+            XCTAssertTrue(source.contains("GlassRefreshButton("), "\(file) has no refresh icon button")
+            for words in ["Button(model.text(\"refresh\"))", "Button(text(\"comparison_task_list\"))",
+                          "Button(text(\"comparison_specification_refresh\"))", "Button(SettingsLegacyWords.refresh"] {
+                let pattern = "(?<![A-Za-z])" + NSRegularExpression.escapedPattern(for: words)
+                XCTAssertNil(source.range(of: pattern, options: .regularExpression), "\(file) has a Refresh in words again")
+            }
+        }
+        // In the drafts' row it comes after the spacer, on the right.
+        let drafts = try Self.text("Views/MissionDraftsView.swift")
+        let spacer = try XCTUnwrap(drafts.range(of: "Spacer(minLength: 0)\n            // At the row's trailing end"))
+        let refresh = try XCTUnwrap(drafts.range(of: "GlassRefreshButton(model.text(\"refresh\"))"))
+        XCTAssertLessThan(spacer.lowerBound, refresh.lowerBound)
+        let card = try String(
+            contentsOf: GlassSurfaceRulesTests.root.deletingLastPathComponent()
+                .appendingPathComponent("TCDesign/Components/Containers.swift"),
+            encoding: .utf8)
+        XCTAssertFalse(card.contains("GlassRefreshButton(refresh.label, size: 12"), "the icon card's refresh is beside its title again")
+        XCTAssertTrue(card.contains(
+            "Spacer(minLength: GlassTokens.Space.s4)\n                // The re-read control at the head's trailing end"))
+        XCTAssertTrue(card.contains("GlassRefreshButton(refresh.label, small: true, action: refresh.action)"))
     }
 }
