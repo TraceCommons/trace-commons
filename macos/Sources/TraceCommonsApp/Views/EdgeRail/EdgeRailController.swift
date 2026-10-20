@@ -54,6 +54,8 @@ final class EdgeRailController {
             // is using while it is open: it draws in focus, without the
             // flat theme's out-of-focus dim (`inactiveDim`).
             .environment(\.controlActiveState, .key)
+            // Names this window in the log when it resizes.
+            .windowBreadcrumb(.edgeRail)
         panel.contentView = Self.hostingView(root)
         self.panel = panel
         state.open = false

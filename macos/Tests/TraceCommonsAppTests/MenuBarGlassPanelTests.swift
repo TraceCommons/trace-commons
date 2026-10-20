@@ -544,20 +544,21 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertFalse(MenuWords.quit.isEmpty)
     }
 
-    /// The popover keeps its top edge under the menu bar when a pill's
-    /// sub-list opens or closes: a resized window keeps its bottom edge,
-    /// so the pin moves it back to the top it opened at.
+    /// The popover keeps its top edge under the menu bar when its content
+    /// grows or shrinks: the window takes the content's height and extends
+    /// downward from the menu bar, whichever edge AppKit kept.
     func test_thePopoverKeepsItsTopEdgeWhenItsHeightChanges() {
         let top: CGFloat = 870
         // Shrunk with its bottom edge kept: the top fell 120pt.
         let shrunk = CGRect(x: 900, y: 400, width: 380, height: 350)
-        XCTAssertEqual(MenuBarTopEdgePin.pinnedOrigin(shrunk, top: top), CGPoint(x: 900, y: 520))
-        // Grown: the top is put back too, and the window extends downward.
-        let grown = CGRect(x: 900, y: 400, width: 380, height: 520)
-        XCTAssertEqual(MenuBarTopEdgePin.pinnedOrigin(grown, top: top), CGPoint(x: 900, y: 350))
-        // Already in place, or no top learned yet: nothing moves.
-        XCTAssertNil(MenuBarTopEdgePin.pinnedOrigin(CGRect(x: 900, y: 400, width: 380, height: 470), top: top))
-        XCTAssertNil(MenuBarTopEdgePin.pinnedOrigin(shrunk, top: nil))
+        XCTAssertEqual(MenuBarTopEdgePin.frame(current: shrunk, content: CGSize(width: 380, height: 350), top: top),
+                       CGRect(x: 900, y: 520, width: 380, height: 350))
+        // Content that grew: the top is put back too, and the window extends downward.
+        XCTAssertEqual(MenuBarTopEdgePin.frame(current: shrunk, content: CGSize(width: 380, height: 520), top: top),
+                       CGRect(x: 900, y: 350, width: 380, height: 520))
+        // Already in place: nothing moves.
+        XCTAssertNil(MenuBarTopEdgePin.frame(
+            current: CGRect(x: 900, y: 400, width: 380, height: 470), content: CGSize(width: 380, height: 470), top: top))
     }
 
     /// The pinned top is the menu bar's bottom edge on the window's screen,
@@ -572,15 +573,15 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertEqual(MenuBarTopEdgePin.menuBarBottom(screen: screen, visible: screen, thickness: 24), 958)
     }
 
-    /// A resize notification arrives inside SwiftUI's own resize of the
-    /// panel, so the pin moves the window on the next turn of the run loop
-    /// rather than there, the shape that crashed the edge rail (#1402).
+    /// A notification can arrive inside a resize of the panel, so the pin
+    /// sets the window's frame on the next turn of the run loop rather
+    /// than there, the shape that crashed the edge rail (#1402).
     func test_thePinMovesTheWindowOutsideTheResizePass() throws {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
-        XCTAssertTrue(source.contains("GlassWindowFrame.onNextTurn { [weak self, weak window] in"))
+        XCTAssertTrue(source.contains("GlassWindowFrame.onNextTurn { [weak self] in"))
     }
 
 

@@ -127,6 +127,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
                 .focusEffectDisabled()
                 // Animations hold still while the window cannot be seen.
                 .glassAnimationVisibility()
+                // Names this window in the log when it resizes.
+                .windowBreadcrumb(.firstRun)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 860, height: 760)
@@ -143,6 +145,8 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
                 .focusEffectDisabled()
                 // Animations hold still while the window cannot be seen.
                 .glassAnimationVisibility()
+                // Names this window in the log when it resizes.
+                .windowBreadcrumb(.settings)
         }
         .defaultSize(width: GlassTokens.Size.modalWidth, height: 640)
         .windowResizability(.contentMinSize)
@@ -199,16 +203,21 @@ struct MonitorScene: Scene {
                 .focusEffectDisabled()
                 // Animations hold still while the window cannot be seen.
                 .glassAnimationVisibility()
+                // Names this window in the log when it resizes.
+                .windowBreadcrumb(.monitor)
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
                      height: GlassTokens.Size.windowHeight)
         // The panes set the window's minimum width (there is no maximum: a
         // wider window gives the map, or without it the main pane, the
-        // room), and showing or hiding a pane grows or shrinks the window on
-        // its right (`GlassPaneLayout`), so the window follows its content's
-        // size.
-        .windowResizability(.contentSize)
+        // room). Showing or hiding a pane grows or shrinks the window on its
+        // right (`GlassPaneLayout`), and `GlassThreePane` makes that resize
+        // itself, once per change and on the next turn, so the scene takes
+        // only its minimum size from its content: with `.contentSize`
+        // SwiftUI resized the window to its content as well, from inside
+        // the window's layout pass, a second writer of the same frame.
+        .windowResizability(.contentMinSize)
         // Cmd-1..3 for the three tabs, and Cmd-Shift-M for the one switch
         // worth reaching without the window. Menu items, so they are in-app
         // only; see `MonitorCommands`.
