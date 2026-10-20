@@ -200,12 +200,16 @@ struct PendingCall {
     ask: bool,
     at: Option<DateTime<Utc>>,
     paired: bool,
-    path: Option<KeyedDigest>,
+    /// An edit call's keyed path and its extension class.
+    path: Option<(KeyedDigest, PathClass)>,
+    /// An edit call's lines removed and added, `None` when the transcript
+    /// does not show them. Counted only once the edit is applied.
+    lines: Option<(u32, u32)>,
     /// Keyed digests of each `Edit` or `MultiEdit` sub-edit's old and new
     /// text, dropped once the result is read.
     texts: Vec<(KeyedDigest, KeyedDigest)>,
     /// A `Bash` call's `args_key`, and whether it was made before the
-    /// session's first edit call.
+    /// session's first applied edit.
     command: Option<(KeyedDigest, bool)>,
 }
 
@@ -265,6 +269,8 @@ pub struct ClaudeFactsScan<'k> {
     lines_removed: u32,
     lines_unknown: bool,
     edit_calls: u32,
+    /// Edits whose result was neither a denial nor an error.
+    applied_edits: u32,
     modes_seen: [bool; 3],
     /// Advanced by each contributor prompt, denial and interrupt.
     barrier: u64,
@@ -302,6 +308,7 @@ impl<'k> ClaudeFactsScan<'k> {
             lines_removed: 0,
             lines_unknown: false,
             edit_calls: 0,
+            applied_edits: 0,
             modes_seen: [false; 3],
             barrier: 0,
             rejected_since_prompt: false,
@@ -431,7 +438,9 @@ impl<'k> ClaudeFactsScan<'k> {
     }
 
     /// Counts one `tool_use` block at the time it is made, and returns what
-    /// its result needs.
+    /// its result needs. An edit call counts toward its model's edits here;
+    /// the session shape (edited files and lines) counts only edits that
+    /// were applied, when the result arrives.
     fn tool_use(
         &mut self,
         block: &Value,
@@ -448,6 +457,7 @@ impl<'k> ClaudeFactsScan<'k> {
             at,
             paired: false,
             path: None,
+            lines: Some((0, 0)),
             texts: Vec::new(),
             command: None,
         };
@@ -457,7 +467,7 @@ impl<'k> ClaudeFactsScan<'k> {
             }
             call.command = args_key(self.key, tool, input)
                 .ok()
-                .map(|args| (args, self.edit_calls == 0));
+                .map(|args| (args, self.applied_edits == 0));
             return call;
         }
         if !call.edit {
@@ -477,15 +487,7 @@ impl<'k> ClaudeFactsScan<'k> {
             .and_then(Value::as_str)
             .filter(|path| !path.is_empty())
         {
-            let digest = path_key(self.key, path);
-            if !self.files.contains_key(&digest) {
-                if self.files.len() < MAX_SERIES_TOOL_CALLS {
-                    self.files.insert(digest, path_class(path));
-                } else {
-                    self.capped = true;
-                }
-            }
-            call.path = Some(digest);
+            call.path = Some((path_key(self.key, path), path_class(path)));
         }
         let mut pairs: Vec<(Option<&str>, Option<&str>)> = Vec::new();
         match tool {
@@ -502,18 +504,20 @@ impl<'k> ClaudeFactsScan<'k> {
                         ));
                     }
                 }
-                None => self.lines_unknown = true,
+                None => call.lines = None,
             },
             // An overwrite's removed lines are not in the transcript.
-            _ => self.lines_unknown = true,
+            _ => call.lines = None,
         }
         for pair in pairs {
             let (Some(old), Some(new)) = pair else {
-                self.lines_unknown = true;
+                call.lines = None;
                 continue;
             };
-            self.lines_removed = self.lines_removed.saturating_add(line_count(old));
-            self.lines_added = self.lines_added.saturating_add(line_count(new));
+            if let Some((removed, added)) = &mut call.lines {
+                *removed = removed.saturating_add(line_count(old));
+                *added = added.saturating_add(line_count(new));
+            }
             call.texts
                 .push((edit_text_key(self.key, old), edit_text_key(self.key, new)));
         }
@@ -604,12 +608,13 @@ impl<'k> ClaudeFactsScan<'k> {
         }
         call.paired = true;
         let texts = std::mem::take(&mut call.texts);
-        let (model, edit, ask, used_at, path, command) = (
+        let (model, edit, ask, used_at, path, lines, command) = (
             call.model,
             call.edit,
             call.ask,
             call.at,
             call.path,
+            call.lines,
             call.command,
         );
         let denied = result_text_contains(block.get("content"), CLAUDE_DENIAL_TEXT);
@@ -643,9 +648,26 @@ impl<'k> ClaudeFactsScan<'k> {
                 _ => {}
             }
         }
-        if let (Some(path), false) = (path, is_error == Some(true)) {
-            for (old, new) in texts {
-                self.applied_edit(path, old, new, model);
+        if edit && is_error != Some(true) {
+            self.applied_edits = self.applied_edits.saturating_add(1);
+            match lines {
+                Some((removed, added)) => {
+                    self.lines_removed = self.lines_removed.saturating_add(removed);
+                    self.lines_added = self.lines_added.saturating_add(added);
+                }
+                None => self.lines_unknown = true,
+            }
+            if let Some((path, class)) = path {
+                if !self.files.contains_key(&path) {
+                    if self.files.len() < MAX_SERIES_TOOL_CALLS {
+                        self.files.insert(path, class);
+                    } else {
+                        self.capped = true;
+                    }
+                }
+                for (old, new) in texts {
+                    self.applied_edit(path, old, new, model);
+                }
             }
         }
         false
@@ -809,18 +831,97 @@ fn line_count(text: &str) -> u32 {
     u32::try_from(text.lines().count()).unwrap_or(u32::MAX)
 }
 
-/// Path operands of an `mv` or `git mv` command, minus one: the files a
-/// single command renames or moves. Zero for any other command. Only the
-/// count leaves this function.
+/// Path operands of each `mv` or `git mv` command in a command line, minus
+/// one per command: the files those commands rename or move. A control
+/// operator (`&&`, `||`, `;`, `|`, `&`) starts a new command, and a
+/// redirection (`>`, `<`, `2>`, `&>`) ends a command's operands, so neither
+/// is counted as a path. Quotes group words. Zero for any other command.
+/// Only the count leaves this function.
 fn renamed_operands(command: &str) -> u32 {
-    let mut words = command.split_whitespace();
-    let rest = match words.next() {
-        Some("mv") => words,
-        Some("git") if words.next() == Some("mv") => words,
-        _ => return 0,
-    };
-    let operands = rest.filter(|word| !word.starts_with('-')).count();
-    u32::try_from(operands.saturating_sub(1)).unwrap_or(u32::MAX)
+    let mut total: u32 = 0;
+    for words in shell_commands(command) {
+        let mut words = words.iter().map(String::as_str);
+        let rest = match words.next() {
+            Some("mv") => words,
+            Some("git") if words.next() == Some("mv") => words,
+            _ => continue,
+        };
+        let operands = rest.filter(|word| !word.starts_with('-')).count();
+        let renamed = u32::try_from(operands.saturating_sub(1)).unwrap_or(u32::MAX);
+        total = total.saturating_add(renamed);
+    }
+    total
+}
+
+/// The words of each simple command in `line`, split at control operators,
+/// with each command's words cut at its first redirection. A small reading
+/// of shell syntax: quotes group, and nothing is expanded.
+fn shell_commands(line: &str) -> Vec<Vec<String>> {
+    let mut commands = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut redirected = false;
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else {
+                word.push(c);
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' => {
+                quote = Some(c);
+                in_word = true;
+            }
+            '<' | '>' => {
+                // A numeric file descriptor before it belongs to the
+                // redirection, not to the operands.
+                if !(in_word && !word.is_empty() && word.chars().all(|d| d.is_ascii_digit())) {
+                    end_word(&mut words, &mut word, &mut in_word, redirected);
+                }
+                word.clear();
+                in_word = false;
+                redirected = true;
+            }
+            '&' if chars.peek() == Some(&'>') => {
+                end_word(&mut words, &mut word, &mut in_word, redirected);
+                redirected = true;
+            }
+            '&' if redirected && word.is_empty() && !in_word => {
+                // `>&1`: part of the redirection.
+            }
+            ';' | '|' | '&' => {
+                end_word(&mut words, &mut word, &mut in_word, redirected);
+                if !words.is_empty() {
+                    commands.push(std::mem::take(&mut words));
+                }
+                redirected = false;
+            }
+            c if c.is_whitespace() => end_word(&mut words, &mut word, &mut in_word, redirected),
+            c => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    end_word(&mut words, &mut word, &mut in_word, redirected);
+    if !words.is_empty() {
+        commands.push(words);
+    }
+    commands
+}
+
+fn end_word(words: &mut Vec<String>, word: &mut String, in_word: &mut bool, redirected: bool) {
+    if *in_word && !redirected {
+        words.push(std::mem::take(word));
+    }
+    word.clear();
+    *in_word = false;
 }
 
 /// Whether a `tool_result`'s content (a string, or any text part) contains
@@ -1060,10 +1161,55 @@ mod tests {
     fn renames_count_operands_and_keep_no_command_text() {
         let (f, _) = one("renames");
         // `mv a b` is 1, `git mv -f c d e dir` is 3, `mv -n x` and an `mv`
-        // that is not the first word are 0.
-        assert_eq!(f.shape.renamed_files, 4);
+        // that is not the first word are 0. Then the compound commands:
+        // `mv h i && build` is 1, `mv j k; mv l m` is 2, `mv n o 2>/dev/null
+        // || fallback` is 1, and `git mv p q | tee log > out` is 1.
+        assert_eq!(f.shape.renamed_files, 9);
         let bytes = serde_json::to_vec(&f).unwrap();
         assert!(!contains(&bytes, "PRIVATE_CMD"));
+    }
+
+    #[test]
+    fn a_shell_operator_or_redirection_ends_the_mv_operands() {
+        assert_eq!(renamed_operands("mv a b"), 1);
+        assert_eq!(renamed_operands("mv a b && cargo build"), 1);
+        assert_eq!(renamed_operands("mv a b&&cargo build x y"), 1);
+        assert_eq!(renamed_operands("mv a b || echo failed here"), 1);
+        assert_eq!(renamed_operands("mv a b; mv c d"), 2);
+        assert_eq!(renamed_operands("mv a b;mv c d e"), 3);
+        assert_eq!(renamed_operands("mv a b | tee log"), 1);
+        assert_eq!(renamed_operands("mv a b > out.log"), 1);
+        assert_eq!(renamed_operands("mv a b >out.log"), 1);
+        assert_eq!(renamed_operands("mv a b 2>/dev/null"), 1);
+        assert_eq!(renamed_operands("mv a b 2> /dev/null"), 1);
+        assert_eq!(renamed_operands("mv a b < in"), 1);
+        assert_eq!(renamed_operands("mv a b &>/dev/null"), 1);
+        assert_eq!(renamed_operands("mv a b 2>&1 | head"), 1);
+        assert_eq!(renamed_operands("mv a b & mv c d"), 2);
+        assert_eq!(renamed_operands("cargo build && mv a b"), 1);
+        assert_eq!(renamed_operands("git mv a b c dir && git commit -m x"), 3);
+        assert_eq!(renamed_operands("mv 'a b' \"c d\""), 1);
+        assert_eq!(renamed_operands("mv 'a;b' c"), 1);
+        assert_eq!(renamed_operands("echo mv a b"), 0);
+        assert_eq!(renamed_operands("mv -n x"), 0);
+        assert_eq!(renamed_operands(""), 0);
+    }
+
+    #[test]
+    fn a_denied_or_failed_edit_adds_no_file_lines_or_first_edit() {
+        let (f, m) = one("unapplied-edits");
+        // Every call is an edit made, and the denied one is counted.
+        assert_eq!(m.edits, Some(4));
+        assert_eq!(m.denied, Some(1));
+        // Only the applied Edit reaches the shape: one source file, and its
+        // lines. The failed Write does not make the line counts unknown.
+        assert_eq!(f.shape.edited_files.source, 1);
+        assert_eq!(f.shape.edited_files.doc, 0);
+        assert_eq!(f.shape.lines_removed, Some(1));
+        assert_eq!(f.shape.lines_added, Some(2));
+        // The test failed after a denied edit but before the first applied
+        // one, then passed after it.
+        assert_eq!(f.shape.failed_before_first_edit_then_passed, 1);
     }
 
     #[test]
