@@ -61,6 +61,12 @@ public enum DaemonTimestamp {
         formatters.parse(text)
     }
 
+    /// Only the fractional form, for `SourceCandidate.Wire.parseTimestamp`'s
+    /// truncated retry, which has never tried the plain one.
+    static func parseFractionalOnly(_ text: String) -> Date? {
+        formatters.parseFractionalOnly(text)
+    }
+
     private static let formatters = Formatters()
 
     private final class Formatters: @unchecked Sendable {
@@ -75,6 +81,12 @@ public enum DaemonTimestamp {
             formatter.formatOptions = [.withInternetDateTime]
             return formatter
         }()
+
+        func parseFractionalOnly(_ text: String) -> Date? {
+            lock.lock()
+            defer { lock.unlock() }
+            return withFraction.date(from: text)
+        }
 
         /// The same answer as trying the fractional form, then the plain
         /// one; a timestamp with no `.` cannot be the fractional form, so it

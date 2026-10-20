@@ -466,9 +466,6 @@ enum InsightsChoices {
 
 enum InsightsDate {
     static func label(_ raw: String) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let date = formatter.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
-        return date?.formatted(date: .abbreviated, time: .standard) ?? raw
+        DaemonTimestamp.parse(raw)?.formatted(date: .abbreviated, time: .standard) ?? raw
     }
 }
