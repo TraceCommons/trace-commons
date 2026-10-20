@@ -34,7 +34,7 @@ use super::insights_week::{
     FEED_COUNTER_PASS, NeverFolders, UNREADABLE_POLICY, never_project_keys,
 };
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, Request, Response};
-use super::policy::{UNKNOWN_PROJECT_KEY, disambiguated_label, known_keys};
+use super::policy::{UNKNOWN_PROJECT_KEY, disambiguated_label, display_path_for_key, known_keys};
 
 /// The most sessions one `insights_sessions` answer lists, newest first.
 /// `truncated` says when more are stored.
@@ -81,31 +81,44 @@ pub(crate) fn folder_labels(shared: &DaemonShared) -> Vec<(String, String)> {
             .collect(),
         Err(_) => Vec::new(),
     };
-    let (Ok(policy), Ok(queue)) = (shared.policy.lock(), shared.queue.lock()) else {
-        return Vec::new();
+    let (known, shown) = {
+        let (Ok(policy), Ok(queue)) = (shared.policy.lock(), shared.queue.lock()) else {
+            return Vec::new();
+        };
+        let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+        let mut shown: std::collections::BTreeMap<String, Option<String>> =
+            std::collections::BTreeMap::new();
+        for (key, entry) in &policy.projects {
+            shown.insert(key.clone(), entry.display_path.clone());
+        }
+        for entry in queue.all() {
+            shown
+                .entry(entry.project_key.clone())
+                .or_insert_with(|| entry.project_path.clone());
+        }
+        for key in known.iter().chain(watched.iter()) {
+            shown.entry(key.clone()).or_insert(None);
+        }
+        (known, shown)
     };
-    let known = known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
-    let mut shown: std::collections::BTreeMap<String, Option<String>> =
-        std::collections::BTreeMap::new();
-    for (key, entry) in &policy.projects {
-        shown.insert(key.clone(), entry.display_path.clone());
-    }
-    for entry in queue.all() {
-        shown
-            .entry(entry.project_key.clone())
-            .or_insert_with(|| entry.project_path.clone());
-    }
-    for key in known.iter().chain(watched.iter()) {
-        shown.entry(key.clone()).or_insert(None);
-    }
+    // Labelled with no lock held: a folder with no stored spelling is
+    // looked up on disk.
     shown
         .into_iter()
         .filter(|(key, _)| key != UNKNOWN_PROJECT_KEY)
         .map(|(key, path)| {
-            let label = disambiguated_label(&key, path.as_deref(), &known);
+            let label = folder_label(&key, path, &known);
             (key, label)
         })
         .collect()
+}
+
+/// A folder's label as `list_projects` renders it. A key with no stored
+/// spelling (a folder only the watcher has seen) is spelled the way the
+/// filesystem spells it, never in the folded key's case.
+fn folder_label(key: &str, shown: Option<String>, known: &[String]) -> String {
+    let shown = shown.or_else(|| display_path_for_key(key));
+    disambiguated_label(key, shown.as_deref(), known)
 }
 
 /// `tz`, seconds east; the daemon's own offset when absent.
@@ -682,6 +695,20 @@ mod tests {
             rows(&old.list(&[], &[]))[0]["session_ref"],
             again,
             "not read a third time"
+        );
+    }
+
+    #[test]
+    fn a_folder_only_the_watcher_saw_keeps_its_own_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("IronWire");
+        std::fs::create_dir(&folder).unwrap();
+        let (key, _) = super::super::policy::project_for(folder.to_str());
+        assert_eq!(folder_label(&key, None, &[]), "IronWire");
+        // A stored spelling wins, as `list_projects` uses it.
+        assert_eq!(
+            folder_label(&key, Some(folder.display().to_string()), &[]),
+            "IronWire"
         );
     }
 
