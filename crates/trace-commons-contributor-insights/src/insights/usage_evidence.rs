@@ -1034,11 +1034,33 @@ mod tests {
                 "{outcome}: {outcomes:?}"
             );
         }
-        let bytes = serde_json::to_vec(&all).unwrap();
+        // Keys sorted before hashing: a workspace build unifies serde_json's
+        // `preserve_order`, which keeps insertion order, so the raw bytes
+        // differ by how the crate was built.
+        let bytes = serde_json::to_vec(&sorted_keys(Value::Array(all))).unwrap();
         assert_eq!(
             format!("{:x}", Sha256::digest(&bytes)),
             "4252e0a980aee39464eb4a349e8680bec97f841e3878a3b79bdf1f0c82ae6a73"
         );
+    }
+
+    /// `value` with every object's keys in sorted order, whichever map
+    /// serde_json was built with.
+    fn sorted_keys(value: Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key, sorted_keys(value)))
+                        .collect(),
+                )
+            }
+            Value::Array(items) => Value::Array(items.into_iter().map(sorted_keys).collect()),
+            other => other,
+        }
     }
 
     /// However many usage records and turn contexts a transcript holds, the
