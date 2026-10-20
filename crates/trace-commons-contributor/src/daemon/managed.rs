@@ -584,7 +584,10 @@ async fn model_catalogue(request: &Request) -> Response {
     else {
         return respond(request, Err(ManagedError::ModelUnavailable.into()));
     };
-    let result = match models::fetch(&client, near_ai_base_url()).await {
+    let offered = models::fetch(&client, near_ai_base_url())
+        .await
+        .map(|models| models::offered(p.tool, models));
+    let result = match offered {
         Some(models) if !models.is_empty() => {
             let default = models::default_for(p.tool, &models).map(|m| m.id.clone());
             Ok(json!({"models":models,"default":default}))
