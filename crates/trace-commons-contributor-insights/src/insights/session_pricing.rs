@@ -7,6 +7,20 @@
 //! "At API prices" is a list-price estimate: what the vendor's API would
 //! charge for these tokens, not what a subscription plan costs.
 //!
+//! Codex turns. PR 1's Codex reader stores, from one `token_count` event:
+//! `uncached_input = input_tokens - cached_input_tokens -
+//! cache_write_input_tokens`, `cache_read = cached_input_tokens`,
+//! `cache_write = TotalOnly(cache_write_input_tokens)`, `output =
+//! output_tokens` (reasoning is a subset of output). So `context()` is
+//! `input_tokens`, and the write is never inside `uncached_input`. OpenAI's
+//! pricing page lists a separate cache-write rate, and its prompt-caching
+//! guide says that rate replaces the uncached-input rate for those tokens
+//! rather than adding to it. The write is priced at the 30-minute rate:
+//! the guide makes 30 minutes the default lifetime unless a request asks for
+//! 12 hours, and the Codex CLI checked on 2026-10-20 (0.163.0) sets no cache
+//! lifetime (its binary holds no `ttl` field or `12h` value). No 12-hour
+//! category exists; a Codex release that asks for 12 hours needs one.
+//!
 //! A turn is priced or unpriced, never zero. A session with any unpriced
 //! counted turn has no total; the total is never the sum of the priced part.
 //!
@@ -258,8 +272,11 @@ fn price_turn(
     ))
 }
 
-/// The accounting family's categories, in its required order. A Codex cache
-/// write is already inside `uncached_input`, so it is never a category.
+/// The accounting family's categories, in its required order.
+///
+/// Codex: the stored `uncached_input` excludes the cache write (see the
+/// module doc), so the write is priced once, at its own rate. A Claude-shaped
+/// split write has no OpenAI lifetime and is unpriced unless empty.
 fn billable_counts(
     accounting: PricingAccounting,
     usage: &KnownTurnUsage,
@@ -282,11 +299,19 @@ fn billable_counts(
                 count(Output, usage.output),
             ]
         }
-        PricingAccounting::Codex => vec![
-            count(UncachedInput, usage.uncached_input),
-            count(CachedInput, usage.cache_read),
-            count(Output, usage.output),
-        ],
+        PricingAccounting::Codex => {
+            let write = match usage.cache_write {
+                CacheWrite::TotalOnly(write) => write,
+                CacheWrite::Split { m5: 0, h1: 0 } => 0,
+                CacheWrite::Split { .. } => return Err(UnpricedReason::CacheLifetimeUnknown),
+            };
+            vec![
+                count(UncachedInput, usage.uncached_input),
+                count(CachedInput, usage.cache_read),
+                count(CacheWriteThirtyMinuteInput, write),
+                count(Output, usage.output),
+            ]
+        }
     })
 }
 
@@ -345,6 +370,7 @@ mod tests {
             CachedInput | CacheReadInput => 2_000_000_000,
             CacheWriteFiveMinuteInput => 3_000_000_000,
             CacheWriteOneHourInput => 5_000_000_000,
+            CacheWriteThirtyMinuteInput => 11_000_000_000,
             Output => 7_000_000_000,
         }
     }
@@ -376,6 +402,8 @@ mod tests {
             accounting,
             effective_from: at(from),
             effective_until: until.map(at),
+            prompt_tokens_above: None,
+            prompt_tokens_at_most: None,
             rates: rates(accounting, rate),
         }
     }
@@ -396,6 +424,7 @@ mod tests {
                         .to_owned(),
                 reviewed_by: "Synthetic reviewer".to_owned(),
                 reviewed_at: at(101),
+                effective_from_basis: None,
             },
             entries,
         };
@@ -534,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn a_codex_cache_write_is_priced_inside_uncached_input_not_on_top() {
+    fn a_codex_cache_write_is_priced_at_its_write_rate_never_on_top() {
         let codex = catalog(vec![table(
             1,
             vec![entry(
@@ -559,11 +588,31 @@ mod tests {
                 )],
             )
         };
-        let written = with_write(5);
-        let unwritten = with_write(0);
-        // 1M uncached (holding the write) + 1M cached + 1M output = 1+2+7.
-        assert_eq!(written.total_usd_micros, Some(10_000_000));
-        assert_eq!(written, unwritten);
+        // The stored uncached count already excludes the write, so the
+        // write adds its own tokens at its own rate and nothing else moves:
+        // 1M uncached + 1M cached + 1M output = 1+2+7, and 1M written at 11.
+        assert_eq!(with_write(0).total_usd_micros, Some(10_000_000));
+        assert_eq!(with_write(MILLION).total_usd_micros, Some(21_000_000));
+        assert_eq!(with_write(5).total_usd_micros, Some(10_000_055));
+
+        // A Claude-shaped split write has no OpenAI lifetime.
+        let split = price_session(
+            &codex,
+            PricingAccounting::Codex,
+            &labels(&["test-model-a"]),
+            &[turn(
+                0,
+                Some(10),
+                Some(0),
+                [Some(MILLION), Some(MILLION), Some(MILLION)],
+                Some(CacheWrite::Split { m5: 1, h1: 0 }),
+            )],
+        );
+        assert_eq!(
+            split.by_model["test-model-a"].unpriced_reasons[&UnpricedReason::CacheLifetimeUnknown],
+            1
+        );
+        assert_eq!(split.total_usd_micros, None);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 
 use trace_commons_protocol::insights_pricing::{
-    BillableTokenCount, DeterministicCostEstimate, PricingError, PricingTable, PricingUsageInput,
+    DeterministicCostEstimate, PricingError, PricingTable, PricingUsageInput,
     calculate_estimated_cost,
 };
 
@@ -77,8 +77,11 @@ impl PricingCatalog {
     }
 
     /// Choose the newest immutable table containing one rate entry that
-    /// covers both inclusive observation endpoints and every exact accounting
-    /// category. Caller-provided counts are not calculated here.
+    /// covers both inclusive observation endpoints, the input's prompt size
+    /// (for a model priced by request size) and every exact accounting
+    /// category. The counts decide only the prompt-size band: a table whose
+    /// entry matches but whose arithmetic overflows is still the one chosen,
+    /// so an overflow is reported from it rather than falling back.
     ///
     /// This is the first-estimate path only. An estimate that was already
     /// saved must be recomputed with [`Self::recompute_saved`], which reprices
@@ -90,21 +93,6 @@ impl PricingCatalog {
         input: &PricingUsageInput,
     ) -> Result<&PricingTable, PricingCatalogError> {
         validate_query(input)?;
-        let zero_input = PricingUsageInput {
-            provider: input.provider.clone(),
-            model: input.model.clone(),
-            accounting: input.accounting,
-            observed_from: input.observed_from,
-            observed_until: input.observed_until,
-            counts: input
-                .counts
-                .iter()
-                .map(|count| BillableTokenCount {
-                    category: count.category,
-                    tokens: 0,
-                })
-                .collect(),
-        };
         let mut matching_identity = false;
         let mut applicable = None;
         for table in &self.tables {
@@ -113,11 +101,13 @@ impl PricingCatalog {
                     && entry.model == input.model
                     && entry.accounting == input.accounting
             });
-            match calculate_estimated_cost(table, &zero_input) {
-                Ok(_) => applicable = Some(table),
+            // Overflow is checked only after one entry matched, so it means
+            // this table applies.
+            match calculate_estimated_cost(table, input) {
+                Ok(_) | Err(PricingError::ArithmeticOverflow) => applicable = Some(table),
                 Err(PricingError::MissingPrice | PricingError::UnresolvedWindow) => {}
                 Err(PricingError::InvalidInput) => return Err(PricingCatalogError::InvalidQuery),
-                Err(PricingError::InvalidTable | PricingError::ArithmeticOverflow) => {
+                Err(PricingError::InvalidTable) => {
                     return Err(PricingCatalogError::InvalidCatalog);
                 }
             }
@@ -187,8 +177,8 @@ fn safe_id(value: &str) -> bool {
 mod tests {
     use chrono::{TimeZone, Utc};
     use trace_commons_protocol::insights_pricing::{
-        BillableTokenCategory, ModelPriceEntry, PRICING_TABLE_SCHEMA_VERSION, PricingAccounting,
-        PricingCurrency, PricingTableProvenance, TokenRate,
+        BillableTokenCategory, BillableTokenCount, ModelPriceEntry, PRICING_TABLE_SCHEMA_VERSION,
+        PricingAccounting, PricingCurrency, PricingTableProvenance, TokenRate,
     };
 
     use super::*;
@@ -224,6 +214,7 @@ mod tests {
                         .to_owned(),
                 reviewed_by: "Synthetic reviewer".to_owned(),
                 reviewed_at: at(101),
+                effective_from_basis: None,
             },
             entries: vec![ModelPriceEntry {
                 provider: "synthetic-provider".to_owned(),
@@ -231,6 +222,8 @@ mod tests {
                 accounting: PricingAccounting::Codex,
                 effective_from: at(from),
                 effective_until: until.map(at),
+                prompt_tokens_above: None,
+                prompt_tokens_at_most: None,
                 rates: rates(rate),
             }],
         };
@@ -252,6 +245,10 @@ mod tests {
                 },
                 BillableTokenCount {
                     category: BillableTokenCategory::CachedInput,
+                    tokens: 0,
+                },
+                BillableTokenCount {
+                    category: BillableTokenCategory::CacheWriteThirtyMinuteInput,
                     tokens: 0,
                 },
                 BillableTokenCount {
@@ -428,6 +425,42 @@ mod tests {
         assert_eq!(
             catalog.select_newest_applicable(&invalid),
             Err(PricingCatalogError::InvalidQuery)
+        );
+    }
+
+    /// Selection reads the turn's own prompt size. A newer table without a
+    /// band for a long prompt is not applicable to it, so the older table
+    /// that prices that band is chosen instead of an unresolved newer one.
+    #[test]
+    fn selection_matches_the_prompt_band_not_a_zeroed_probe() {
+        let banded = |version: u32, long: bool| {
+            let mut table = table(version, 0, None, 1);
+            table.entries[0].prompt_tokens_at_most = Some(100);
+            if long {
+                let mut long = table.entries[0].clone();
+                long.prompt_tokens_at_most = None;
+                long.prompt_tokens_above = Some(100);
+                table.entries.push(long);
+            }
+            table.table_id = table.canonical_table_id().unwrap();
+            table
+        };
+        let older = banded(1, true);
+        let newer = banded(2, false);
+        let catalog = PricingCatalog::from_tables(vec![older.clone(), newer.clone()]).unwrap();
+        assert_eq!(
+            catalog.select_newest_applicable(&input(0, 0, 100)),
+            Ok(&newer)
+        );
+        assert_eq!(
+            catalog.select_newest_applicable(&input(0, 0, 101)),
+            Ok(&older)
+        );
+        assert_eq!(
+            PricingCatalog::from_tables(vec![newer])
+                .unwrap()
+                .select_newest_applicable(&input(0, 0, 101)),
+            Err(PricingCatalogError::UnresolvedWindow)
         );
     }
 
