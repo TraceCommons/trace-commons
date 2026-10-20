@@ -125,19 +125,11 @@ pub fn price_session(
             .model_label_ix
             .and_then(|ix| model_labels.get(usize::from(ix)));
         let Some(label) = label else {
-            if turn.known_usage().is_some_and(|usage| usage.total() == 0) {
-                price.skipped_turns = price.skipped_turns.saturating_add(1);
-            } else {
-                price.unlabelled_turns = price.unlabelled_turns.saturating_add(1);
-            }
+            price.tally_unattributed(turn, true);
             continue;
         };
         let Some(model) = normalize_model_label(label) else {
-            if is_synthetic(label) {
-                price.skipped_turns = price.skipped_turns.saturating_add(1);
-            } else {
-                price.unlabelled_turns = price.unlabelled_turns.saturating_add(1);
-            }
+            price.tally_unattributed(turn, is_synthetic(label));
             continue;
         };
         let tally = tallies.entry(model.clone()).or_insert_with(|| ModelTally {
@@ -199,6 +191,20 @@ pub fn price_session(
     };
     price.tables = tables.into_iter().collect();
     price
+}
+
+impl SessionPrice {
+    /// A turn with no usable model. It is skipped only in the `<synthetic>`
+    /// shape (no label or the `<synthetic>` label, and known usage totalling
+    /// zero); any other such turn is counted and leaves the total unknown, so
+    /// its tokens are never dropped from a total.
+    fn tally_unattributed(&mut self, turn: &TurnRecord, may_skip: bool) {
+        if may_skip && turn.known_usage().is_some_and(|usage| usage.total() == 0) {
+            self.skipped_turns = self.skipped_turns.saturating_add(1);
+        } else {
+            self.unlabelled_turns = self.unlabelled_turns.saturating_add(1);
+        }
+    }
 }
 
 /// Price one labelled turn: its exact numerator and the table it used.
@@ -674,6 +680,28 @@ mod tests {
         assert_eq!(price.skipped_turns, 0);
         assert_eq!(price.by_model["test-model-a"].usd_micros, Some(23_000_000));
         assert_eq!(price.total_usd_micros, None);
+    }
+
+    #[test]
+    fn a_synthetic_label_with_usage_counts_and_blocks_the_total() {
+        // Skipping is for the zero-usage shape only; tokens under a
+        // `<synthetic>` label are real usage nothing can price.
+        let synthetic_with_usage = priced_claude_turn(1, 1);
+        let synthetic_unknown = turn(2, Some(10), Some(1), [Some(0), Some(0), None], None);
+        let price = price_session(
+            &claude_catalog(&["test-model-a"]),
+            PricingAccounting::ClaudeCode,
+            &labels(&["test-model-a", "<synthetic>"]),
+            &[
+                priced_claude_turn(0, 0),
+                synthetic_with_usage,
+                synthetic_unknown,
+            ],
+        );
+        assert_eq!(price.skipped_turns, 0);
+        assert_eq!(price.unlabelled_turns, 2);
+        assert_eq!(price.by_model["test-model-a"].usd_micros, Some(23_000_000));
+        assert_eq!(price.total_usd_micros, None, "never the priced part alone");
     }
 
     #[test]
