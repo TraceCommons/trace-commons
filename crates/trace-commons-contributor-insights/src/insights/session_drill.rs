@@ -12,9 +12,9 @@
 //! by a letter and the extension (owner decision D8, open). No keyed digest,
 //! message key or path leaves this module.
 //!
-//! Codex records no per-turn series that Insights accepts, so a Codex
-//! session reads "not recorded" (owner decision D11, open:
-//! `CODEX_PER_TURN_SERIES`). The what-if estimate is not computed here and
+//! A Codex session read turn by turn draws its series like a Claude one
+//! (owner decision D11, settled: `CODEX_PER_TURN_SERIES`); one saved before
+//! the per-turn reader reads "not recorded". The what-if estimate is not computed here and
 //! is not in the response (owner decision D2, open: `ADVICE_SHOWN`).
 
 use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
@@ -35,7 +35,8 @@ use super::week_rollup::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SeriesUnavailable {
-    /// Codex: turn-by-turn usage is not recorded (owner decision D11, open).
+    /// Codex: the session was saved without a per-turn series, so its
+    /// turn-by-turn usage is not recorded.
     NotRecorded,
     /// Saved before per-turn counters were kept, or none were found:
     /// unknown until reimported.
@@ -151,57 +152,21 @@ pub fn session_drill(
     match body {
         SessionBody::Claude { series, .. } => {
             drill.source = Some(AnalyticsSource::ClaudeCode);
-            drill.turns = Some(series.turns.len() as u32);
-            let mut known = 0u32;
-            let mut unknown = 0u32;
-            let mut tokens = 0u64;
-            let rows = series
-                .turns
-                .iter()
-                .map(|turn| match turn.known_usage() {
-                    Some(usage) => {
-                        known += 1;
-                        tokens += usage.total();
-                        DrillTurn {
-                            ordinal: turn.ordinal,
-                            uncached: Some(usage.uncached_input),
-                            cache_read: Some(usage.cache_read),
-                            cache_write: Some(usage.cache_write.total()),
-                            output: Some(usage.output),
-                            context: Some(usage.context()),
-                        }
-                    }
-                    None => {
-                        unknown += 1;
-                        DrillTurn {
-                            ordinal: turn.ordinal,
-                            uncached: None,
-                            cache_read: None,
-                            cache_write: None,
-                            output: None,
-                            context: None,
-                        }
-                    }
-                })
-                .collect();
-            if known == 0 {
-                reasons.push(CoverageReason::NoUsageCounters);
-            } else {
-                drill.tokens = Some(tokens);
-                if unknown > 0 {
-                    reasons.push(CoverageReason::SomeTurnsUnknown);
-                }
-            }
-            if series.truncated {
-                reasons.push(CoverageReason::Truncated);
-            }
-            drill.series = Some(rows);
-            drill.markers = lettered(series);
+            draw_series(&mut drill, &mut reasons, series);
         }
-        SessionBody::Codex { observed } => {
+        SessionBody::Codex {
+            series: Some(evidence),
+            ..
+        } => {
             drill.source = Some(AnalyticsSource::Codex);
-            // Owner decision D11, open: Codex `last_token_usage` is not
-            // accepted as a per-turn series, so there is no chart.
+            draw_series(&mut drill, &mut reasons, &evidence.series);
+        }
+        SessionBody::Codex {
+            observed,
+            series: None,
+        } => {
+            drill.source = Some(AnalyticsSource::Codex);
+            // Read before the per-turn reader: no chart.
             drill.series_unavailable = Some(SeriesUnavailable::NotRecorded);
             match observed {
                 Some(observed) => {
@@ -228,6 +193,57 @@ pub fn session_drill(
         .unwrap_or(CoverageState::Known);
     drill.reasons = reasons;
     drill
+}
+
+/// The per-turn chart, tokens and markers of a series. A turn with any
+/// counter unknown is unknown as a whole.
+fn draw_series(drill: &mut SessionDrill, reasons: &mut Vec<CoverageReason>, series: &UsageSeries) {
+    drill.turns = Some(series.turns.len() as u32);
+    let mut known = 0u32;
+    let mut unknown = 0u32;
+    let mut tokens = 0u64;
+    let rows = series
+        .turns
+        .iter()
+        .map(|turn| match turn.known_usage() {
+            Some(usage) => {
+                known += 1;
+                tokens += usage.total();
+                DrillTurn {
+                    ordinal: turn.ordinal,
+                    uncached: Some(usage.uncached_input),
+                    cache_read: Some(usage.cache_read),
+                    cache_write: Some(usage.cache_write.total()),
+                    output: Some(usage.output),
+                    context: Some(usage.context()),
+                }
+            }
+            None => {
+                unknown += 1;
+                DrillTurn {
+                    ordinal: turn.ordinal,
+                    uncached: None,
+                    cache_read: None,
+                    cache_write: None,
+                    output: None,
+                    context: None,
+                }
+            }
+        })
+        .collect();
+    if known == 0 {
+        reasons.push(CoverageReason::NoUsageCounters);
+    } else {
+        drill.tokens = Some(tokens);
+        if unknown > 0 {
+            reasons.push(CoverageReason::SomeTurnsUnknown);
+        }
+    }
+    if series.truncated {
+        reasons.push(CoverageReason::Truncated);
+    }
+    drill.series = Some(rows);
+    drill.markers = lettered(series);
 }
 
 /// Usage markers and re-reads, lettered together in turn order, with each
@@ -504,9 +520,10 @@ mod tests {
 
     #[test]
     fn codex_reads_not_recorded_with_its_observed_change() {
-        // Owner decision D11, open (`CODEX_PER_TURN_SERIES`): no Codex
-        // per-turn series.
+        // A Codex session saved without a per-turn series (D11 settled:
+        // `CODEX_PER_TURN_SERIES`, read only when the series is present).
         let body = SessionBody::Codex {
+            series: None,
             observed: Some(CodexObserved {
                 first_at: at(9, 0),
                 last_at: at(9, 30),
@@ -533,7 +550,10 @@ mod tests {
 
         let drill = session_drill(
             "snap",
-            &SessionBody::Codex { observed: None },
+            &SessionBody::Codex {
+                observed: None,
+                series: None,
+            },
             None,
             None,
             utc(),
@@ -600,7 +620,10 @@ mod tests {
         assert!(wire.contains("\"kind\":\"context_shrank\""), "{wire}");
         let codex = session_drill(
             "snap",
-            &SessionBody::Codex { observed: None },
+            &SessionBody::Codex {
+                observed: None,
+                series: None,
+            },
             None,
             None,
             utc(),

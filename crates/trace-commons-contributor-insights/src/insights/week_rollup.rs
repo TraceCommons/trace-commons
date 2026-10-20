@@ -15,6 +15,7 @@ use super::analytics_constants::{
     COMPARABLE_COVERAGE, COMPARABLE_MIN_SESSIONS, DEDUPE_TURNS_BY_MSG_KEY,
 };
 use super::cache_share::CacheShare;
+use super::codex_series::CodexTurnSeriesEvidence;
 
 /// Which counter rows a figure was computed from. Feeds are never blended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -135,6 +136,10 @@ pub enum SessionBody {
     },
     Codex {
         observed: Option<CodexObserved>,
+        /// The per-turn series, when the transcript was read turn by turn.
+        /// Weekly figures, goals, glance and Patterns read `observed` only;
+        /// the drill and the Models answers read this.
+        series: Option<CodexTurnSeriesEvidence>,
     },
     Unknown {
         source: Option<AnalyticsSource>,
@@ -178,7 +183,7 @@ impl SessionInput {
                     (low.min(at), high.max(at))
                 }))
             }
-            SessionBody::Codex { observed } => observed.map(|o| (o.first_at, o.last_at)),
+            SessionBody::Codex { observed, .. } => observed.map(|o| (o.first_at, o.last_at)),
             SessionBody::Unknown { .. } => None,
         }
     }
@@ -493,7 +498,7 @@ pub fn week_rollup<Tz: TimeZone>(
                     true
                 }
             }
-            SessionBody::Codex { observed } => match observed {
+            SessionBody::Codex { observed, .. } => match observed {
                 Some(observed) => {
                     let first = local_week_start(&observed.first_at, tz);
                     let last = local_week_start(&observed.last_at, tz);
@@ -820,6 +825,7 @@ mod tests {
                     total: 1_200,
                     baseline_excluded: false,
                 }),
+                series: None,
             },
         }
     }
@@ -907,6 +913,7 @@ mod tests {
         let mut input = codex("c", 1, at(6, 1), at(6, 2));
         if let SessionBody::Codex {
             observed: Some(observed),
+            ..
         } = &mut input.body
         {
             observed.baseline_excluded = true;

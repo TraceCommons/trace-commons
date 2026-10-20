@@ -383,6 +383,7 @@ mod tests {
                     total: 1_010,
                     baseline_excluded: false,
                 }),
+                series: None,
             },
         }];
         let rollup = week_rollup(Feed::CounterPass, &input, monday(0), &Utc);
