@@ -1,0 +1,67 @@
+[package]
+name = "ironwire_proxy"
+description = "IronWire loopback proxy: façades, router wiring, control API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+# Already in the proxy tree through rustls/ring; used for platform OS randomness.
+getrandom = "0.2"
+reqwest.workspace = true
+ironwire_core.workspace = true
+ironwire_privacy.workspace = true
+ironwire_creds.workspace = true
+ironwire_ledger.workspace = true
+ironwire_usage.workspace = true
+ironwire_agents.workspace = true
+ironwire_catalog.workspace = true
+ironwire_update.workspace = true
+ironwire_translate.workspace = true
+ironwire_upstream.workspace = true
+
+async-stream = "0.3"
+async-trait.workspace = true
+# Receipt signatures (`proof`). Both already in the workspace graph through
+# `ironwire_catalog`, which verifies its signed documents the same way, so
+# these lines add no packages -- they make an existing edge a direct one.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+hex = "0.4"
+axum.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+http.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# Safe effective-UID lookup for validating opened ownership files; no unsafe here.
+rustix = { version = "1.1.4", features = ["process"] }
+
+[dev-dependencies]
+tower.workspace = true
+base64.workspace = true
+tempfile = "3"
+ed25519-dalek = { version = "2", features = ["std"] }
+hex = "0.4"
+http-body-util = "0.1"
+secrecy.workspace = true
+futures-util.workspace = true
+ironwire_ledger.workspace = true
+ironwire_agents.workspace = true
+ironwire_catalog.workspace = true
+ironwire_update.workspace = true
+
+[lints]
+workspace = true

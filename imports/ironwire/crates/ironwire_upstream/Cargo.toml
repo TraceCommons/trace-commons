@@ -1,0 +1,42 @@
+[package]
+name = "ironwire_upstream"
+description = "IronWire upstream backends: native-lane passthrough and observation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+dirs.workspace = true
+ironwire_core.workspace = true
+ironwire_creds.workspace = true
+ironclaw_llm.workspace = true
+ironwire_catalog.workspace = true
+
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+http.workspace = true
+reqwest.workspace = true
+secrecy.workspace = true
+sha2 = "0.10"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# Already compiled in through reqwest; named here only so the credential host
+# check can match on `url::Host`, which reqwest does not re-export.
+url.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+tempfile = "3"
+
+[lints]
+workspace = true

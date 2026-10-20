@@ -4,4 +4,9 @@ This repository was initially extracted from Ironclaw's `gecko-pass` worktree.
 See `imports/ironclaw-server/SOURCE.md` for the source snapshot and extraction
 mapping.
 
+The local routing implementation in imports/ironwire originates from
+nearai/ironwire and includes Jay Zalowitz's multi-subscription contribution.
+It remains MIT OR Apache-2.0; original license texts are retained there.
+See imports/ironwire/SOURCE.md for exact revisions and integration details.
+
 TraceCommons Server is distributed under MIT OR Apache-2.0.

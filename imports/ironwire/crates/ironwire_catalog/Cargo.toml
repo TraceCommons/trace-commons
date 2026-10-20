@@ -1,0 +1,29 @@
+[package]
+name = "ironwire_catalog"
+description = "Signed provider-catalog channel: the values that change when a provider changes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+ironwire_core.workspace = true
+chrono.workspace = true
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "pkcs8"] }
+hex = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+ed25519-dalek = { version = "2", features = ["std", "rand_core"] }
+rand = "0.8"
+tempfile = "3"
+
+[lints]
+workspace = true

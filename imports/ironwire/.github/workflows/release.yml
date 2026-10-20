@@ -1,0 +1,255 @@
+name: Release
+
+# Tag-driven. `v0.1.0` builds the matrix, publishes a GitHub release, and pushes
+# the npm and PyPI packages. Nothing here runs on a branch push: a release is a
+# deliberate act.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (dry run — publishes nothing)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fail before spending twenty minutes on a build matrix if the tag and the
+  # manifest disagree. A release whose binary reports a different version than
+  # the tag is worse than no release.
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"; publish=false
+          else
+            tag="${GITHUB_REF#refs/tags/}"; publish=true
+          fi
+          version="${tag#v}"
+          manifest=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$version" != "$manifest" ]; then
+            echo "::error::tag $tag does not match workspace version $manifest"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin,        os: macos-14 }
+          - { target: x86_64-apple-darwin,         os: macos-13 }
+          - { target: x86_64-unknown-linux-gnu,    os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu,   os: ubuntu-latest, cross: true }
+          - { target: x86_64-unknown-linux-musl,   os: ubuntu-latest, cross: true }
+          - { target: x86_64-pc-windows-msvc,      os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --bin ironwire
+          else
+            cargo build --release --target ${{ matrix.target }} --bin ironwire
+          fi
+
+      # The archive layout is the installer's contract: a single `ironwire` at
+      # the root. scripts/test-install.sh builds the same shape.
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp "target/${{ matrix.target }}/release/ironwire.exe" dist/
+            (cd dist && 7z a "ironwire-${{ matrix.target }}.zip" ironwire.exe)
+            rm dist/ironwire.exe
+          else
+            cp "target/${{ matrix.target }}/release/ironwire" dist/
+            (cd dist && tar -czf "ironwire-${{ matrix.target }}.tar.gz" ironwire)
+            rm dist/ironwire
+          fi
+          cd dist
+          for f in *; do
+            if command -v sha256sum >/dev/null; then sha256sum "$f" > "$f.sha256";
+            else shasum -a 256 "$f" > "$f.sha256"; fi
+          done
+          ls -la
+
+      # The menu bar app (macos/), built once on the arm64 macOS runner as a
+      # universal bundle rather than per-target: it is one artifact for both
+      # Macs, and only a macOS runner can build Swift at all.
+      #
+      # A separate zip, not a passenger inside the binary tarball — that archive
+      # has a documented shape, a single `ironwire` at the root, and
+      # scripts/install.sh finds the binary by searching the unpacked tree.
+      - name: Build the menu bar app
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          make -C macos test
+          make -C macos dist
+          cp macos/build/IronWire-macos.zip dist/
+          cd dist
+          shasum -a 256 IronWire-macos.zip > IronWire-macos.zip.sha256
+
+      # Size is reported, never gated. A capability worth its bytes should not
+      # be blocked by a number picked in advance (docs/PACKAGING.md).
+      - name: Report size
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/ironwire"
+          [ -f "$bin" ] || bin="$bin.exe"
+          size=$(wc -c < "$bin")
+          echo "| ${{ matrix.target }} | $((size / 1024)) KB |" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+
+  # The .deb ships a systemd *user* unit. The daemon holds the user's
+  # credentials and must never run as root (docs/PACKAGING.md).
+  deb:
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: dist-x86_64-unknown-linux-gnu, path: dist }
+      - run: |
+          tar -xzf dist/ironwire-x86_64-unknown-linux-gnu.tar.gz -C dist
+          chmod +x dist/ironwire
+      - name: Build .deb
+        run: |
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v2.41.1/nfpm_2.41.1_Linux_x86_64.tar.gz" \
+            | tar -xz -C /usr/local/bin nfpm
+          VERSION="${{ needs.verify.outputs.version }}" nfpm package \
+            --config packaging/nfpm.yaml --packager deb --target dist/
+      - uses: actions/upload-artifact@v4
+        with: { name: dist-deb, path: dist/*.deb }
+
+  # A wheel per platform tag. No compilation — the wheel is a delivery vehicle
+  # for a binary that is already built.
+  wheels:
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, pattern: 'dist-*', merge-multiple: true }
+      - run: |
+          python -m pip install --upgrade build wheel
+          python packaging/build_wheels.py \
+            --version "${{ needs.verify.outputs.version }}" \
+            --artifacts artifacts --out dist
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with: { name: dist-wheels, path: dist/*.whl }
+
+  release:
+    needs: [verify, build, deb, wheels]
+    if: needs.verify.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: dist, pattern: 'dist-*', merge-multiple: true }
+
+      # `ironwire update` and install.sh both read this, so there is exactly one
+      # source of truth for "what is latest" (docs/UPDATES.md).
+      - name: Write manifest.json
+        run: |
+          python3 packaging/write_manifest.py \
+            --version "${{ needs.verify.outputs.version }}" \
+            --dist dist --out dist/manifest.json
+          cat dist/manifest.json
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+  publish-brew:
+    needs: [verify, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: dist, pattern: 'dist-*', merge-multiple: true }
+      - name: Generate formula
+        run: |
+          python3 packaging/build_brew.py \
+            --version "${{ needs.verify.outputs.version }}" \
+            --dist dist --out Formula/ironwire.rb
+          cat Formula/ironwire.rb
+      - name: Push to the tap
+        uses: actions/checkout@v4
+        with:
+          repository: nearai/homebrew-tap
+          token: ${{ secrets.TAP_TOKEN }}
+          path: tap
+      - run: |
+          mkdir -p tap/Formula
+          cp Formula/ironwire.rb tap/Formula/ironwire.rb
+          cd tap
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/ironwire.rb
+          git commit -m "ironwire ${{ needs.verify.outputs.version }}" || exit 0
+          git push
+
+  publish-npm:
+    needs: [verify, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', registry-url: 'https://registry.npmjs.org' }
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, pattern: 'dist-*', merge-multiple: true }
+      - run: |
+          node packaging/build_npm.mjs \
+            --version "${{ needs.verify.outputs.version }}" \
+            --artifacts artifacts --out npm-dist
+          for pkg in npm-dist/*/; do (cd "$pkg" && npm publish --access public); done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-pypi:
+    needs: [verify, release]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # trusted publishing; no long-lived token to leak
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: dist-wheels, path: dist }
+      - uses: pypa/gh-action-pypi-publish@release/v1

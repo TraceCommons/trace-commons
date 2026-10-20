@@ -1,0 +1,36 @@
+# A systemd **user** unit, never a system one. The daemon reads credentials
+# from the user's home directory and binds loopback only; running it as root
+# would give a system service access to a user's OAuth tokens.
+#
+#   systemctl --user enable --now ironwire
+#
+# `loginctl enable-linger $USER` if you want it running while logged out.
+
+[Unit]
+Description=IronWire — localhost router for coding agents
+Documentation=https://github.com/nearai/ironwire
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ironwire serve
+Restart=on-failure
+RestartSec=5s
+
+# The daemon needs its own state directory and nothing else. These are cheap
+# and they bound the blast radius of a bug in a process that holds credentials.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-write
+ReadWritePaths=%h/.ironwire
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+MemoryDenyWriteExecute=true
+LockPersonality=true
+
+[Install]
+WantedBy=default.target

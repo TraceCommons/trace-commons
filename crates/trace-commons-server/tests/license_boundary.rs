@@ -183,7 +183,14 @@ fn all_crates() -> Vec<Crate> {
         }
     }
 
+    // Imported routing is a maintained local dependency now. Follow its
+    // edges too, so an AGPL dependency cannot hide in the nested workspace.
+    let routing_manifest = root.join("imports/ironwire/Cargo.toml");
+    let routing = crates_for_manifest(&routing_manifest, &our_crates);
+    our_crates.extend(routing.iter().map(|c| c.name.clone()));
+
     let mut crates = crates_for_manifest(&root.join("Cargo.toml"), &our_crates);
+    crates.extend(crates_for_manifest(&routing_manifest, &our_crates));
     let covered: BTreeSet<String> = crates.iter().map(|c| c.name.clone()).collect();
     for missing in our_crates.difference(&covered) {
         crates.extend(crates_for_manifest(

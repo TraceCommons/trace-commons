@@ -1,0 +1,39 @@
+# .deb / .rpm definition, driven from the release job.
+#
+# The systemd unit is a **user** unit, deliberately. The daemon reads the OAuth
+# tokens Claude Code and Codex stored in the user's home directory; running it
+# as root would mean a system service reaching into a user's credential files,
+# which is the opposite of what this product is for (docs/TRUST.md).
+
+name: ironwire
+arch: amd64
+platform: linux
+version: ${VERSION}
+section: devel
+priority: optional
+maintainer: NEAR AI <support@near.ai>
+description: |
+  Localhost router for coding agents.
+  Aggregates the subscriptions, API keys and credits you already have into one
+  loopback endpoint, and decides per conversation where each request goes.
+  Binds 127.0.0.1 only.
+vendor: NEAR AI
+homepage: https://github.com/nearai/ironwire
+license: MIT OR Apache-2.0
+
+contents:
+  - src: ./dist/ironwire
+    dst: /usr/bin/ironwire
+
+  - src: ./packaging/systemd/ironwire.service
+    dst: /usr/lib/systemd/user/ironwire.service
+
+  - src: ./LICENSE-MIT
+    dst: /usr/share/doc/ironwire/LICENSE-MIT
+  - src: ./LICENSE-APACHE
+    dst: /usr/share/doc/ironwire/LICENSE-APACHE
+  - src: ./README.md
+    dst: /usr/share/doc/ironwire/README.md
+
+scripts:
+  postinstall: ./packaging/deb/postinstall.sh

@@ -1,0 +1,142 @@
+# The `ironwire` binary is the workspace root package, not a member crate, so
+# `cargo run` and `cargo install --path .` work from a fresh clone without
+# anyone having to know the layout. The libraries stay in `crates/`.
+[package]
+name = "ironwire"
+description = "One local inference endpoint for all your AI capacity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "ironwire"
+path = "src/main.rs"
+
+[workspace]
+resolver = "3"
+# With a package at the root, a bare `cargo test` or `cargo clippy` would
+# otherwise cover only that package — the binary — and silently stop running
+# every library test in the workspace. Naming the defaults keeps the commands
+# people actually type, and the ones CI runs, meaning what they did before.
+default-members = [".", "crates/*"]
+members = [
+    "crates/ironwire_core",
+    "crates/ironwire_creds",
+    "crates/ironwire_ledger",
+    "crates/ironwire_usage",
+    "crates/ironwire_catalog",
+    "crates/ironwire_agents",
+    "crates/ironwire_update",
+    "crates/ironwire_privacy",
+    "crates/ironwire_translate",
+    "crates/ironwire_upstream",
+    "crates/ironwire_proxy",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+authors = ["NEAR AI <support@near.ai>"]
+homepage = "https://github.com/nearai/ironwire"
+repository = "https://github.com/nearai/ironwire"
+
+[workspace.dependencies]
+ironwire_core = { path = "crates/ironwire_core", version = "0.1.0" }
+ironwire_creds = { path = "crates/ironwire_creds", version = "0.1.0" }
+ironwire_ledger = { path = "crates/ironwire_ledger", version = "0.1.0" }
+ironwire_usage = { path = "crates/ironwire_usage", version = "0.1.0" }
+ironwire_catalog = { path = "crates/ironwire_catalog", version = "0.1.0" }
+ironwire_agents = { path = "crates/ironwire_agents", version = "0.1.0" }
+ironwire_update = { path = "crates/ironwire_update", version = "0.1.0" }
+ironwire_privacy = { path = "crates/ironwire_privacy", version = "0.1.0" }
+ironwire_translate = { path = "crates/ironwire_translate", version = "0.1.0" }
+ironwire_upstream = { path = "crates/ironwire_upstream", version = "0.1.0" }
+ironwire_proxy = { path = "crates/ironwire_proxy", version = "0.1.0" }
+
+# Reused from nearai/ironclaw rather than reimplemented: credential discovery
+# and refresh for the CLI-managed logins, provider error classification, and the
+# price table. Pinned to a revision so a proxy holding people's credentials does
+# not silently follow someone else's main branch.
+ironclaw_llm = { git = "https://github.com/nearai/ironclaw", branch = "main" }
+ironclaw_common = { git = "https://github.com/nearai/ironclaw", branch = "main" }
+ironclaw_safety = { git = "https://github.com/nearai/ironclaw", branch = "main" }
+
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+futures-util = "0.3"
+http = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "process"] }
+tokio-util = { version = "0.7" }
+toml = "0.9"
+semver = "1"
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+todo = "warn"
+dbg_macro = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# The binary's own dependencies. Everything it needs beyond these lives in the
+# member crates under `crates/`.
+[dependencies]
+ironwire_core.workspace = true
+ironwire_privacy.workspace = true
+ironwire_creds.workspace = true
+ironwire_ledger.workspace = true
+ironwire_usage.workspace = true
+ironwire_agents.workspace = true
+ironwire_catalog.workspace = true
+ironwire_update.workspace = true
+ironwire_proxy.workspace = true
+ironwire_upstream.workspace = true
+
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+clap_complete = "4"
+dirs.workspace = true
+reqwest.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

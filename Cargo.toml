@@ -29,14 +29,14 @@ members = [
 # Being outside this workspace also puts it outside `cargo fmt --all` and the
 # root clippy job, so ci.yml runs both against its own manifest explicitly.
 # Build it with scripts/linux-build.sh.
-exclude = ["crates/trace-commons-contributor-gtk"]
+exclude = ["crates/trace-commons-contributor-gtk", "imports/ironwire"]
 resolver = "2"
 
 [workspace.package]
 edition = "2024"
 # Raised from 1.92 on 2026-09-06. trace-commons-contributor takes an
-# unconditional (not optional, not feature-gated) git dependency on
-# ironwire_proxy, and the ironwire_*/ironclaw_* crates it pulls in declare
+# unconditional (not optional, not feature-gated) dependency on the local
+# ironwire_proxy source, and the ironwire_*/ironclaw_* crates it pulls in declare
 # rust-version = 1.96. There is no way to build the contributor CLI below
 # this floor while that dependency exists.
 rust-version = "1.96"

@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+.DS_Store
+
+# Swift build products (macos/)
+macos/.build/
+macos/build/

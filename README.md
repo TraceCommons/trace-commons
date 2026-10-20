@@ -48,6 +48,13 @@ session traces. Ironclaw is a separate, TEE-hosted trace source with its
 own client integration; the shared protocol DTOs live in
 `crates/trace-commons-protocol`.
 
+
+The embedded private-inference router is maintained in `imports/ironwire`,
+including isolated Claude/Codex subscription logins and bounded account routing.
+See [multi-subscription setup](docs/multi-subscription-routing.md) and the
+[import provenance](imports/ironwire/SOURCE.md).
+
+
 ## Status: Pilot Deployment
 
 TraceCommons is **in pilot deployment as of May 2026**. What that means

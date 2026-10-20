@@ -1222,15 +1222,41 @@ mod tests {
 
     /// Serializes the tests that point Claude Code's config somewhere.
     ///
-    /// `CLAUDE_CONFIG_DIR` is process-wide, and these tests both read and
-    /// write the file it names. The pattern is `ironwire_pointer`'s: one
-    /// lock, restored on drop, so a panicking test cannot leave the variable
-    /// set for whatever runs next.
+    /// The plain facade always belongs to ~/.claude, regardless of an
+    /// inherited CLAUDE_CONFIG_DIR. Each case runs in its own child process;
+    /// only that child changes HOME to select a fixture, and restores it on drop.
     static CLAUDE_CONFIG_LOCK: StdMutex<()> = StdMutex::new(());
+
+    fn isolated_fixture_process() -> bool {
+        const CHILD: &str = "TRACE_COMMONS_HARNESS_FIXTURE_CHILD";
+        let thread = std::thread::current();
+        let name = thread.name().expect("test thread names its case");
+        if std::env::var(CHILD).ok().as_deref() == Some(name) {
+            return false;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(CHILD, name)
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env("CODEX_HOME", home.path().join(".codex"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        true
+    }
 
     struct ClaudeConfigAt {
         _lock: MutexGuard<'static, ()>,
-        previous: Option<std::ffi::OsString>,
+        previous: [(&'static str, Option<std::ffi::OsString>); 2],
     }
 
     impl ClaudeConfigAt {
@@ -1238,8 +1264,10 @@ mod tests {
             let lock = CLAUDE_CONFIG_LOCK
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            let previous = std::env::var_os("CLAUDE_CONFIG_DIR");
-            unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", dir) };
+            let previous = ["HOME", "USERPROFILE"].map(|name| (name, std::env::var_os(name)));
+            for (name, _) in &previous {
+                unsafe { std::env::set_var(name, dir) };
+            }
             Self {
                 _lock: lock,
                 previous,
@@ -1249,9 +1277,11 @@ mod tests {
 
     impl Drop for ClaudeConfigAt {
         fn drop(&mut self) {
-            match self.previous.take() {
-                Some(v) => unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", v) },
-                None => unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") },
+            for (name, previous) in &mut self.previous {
+                match previous.take() {
+                    Some(v) => unsafe { std::env::set_var(name, v) },
+                    None => unsafe { std::env::remove_var(name) },
+                }
             }
         }
     }
@@ -1260,7 +1290,8 @@ mod tests {
     /// holding `body`.
     fn claude_config(body: &str) -> (tempfile::TempDir, ClaudeConfigAt, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("settings.json");
+        let path = dir.path().join(".claude/settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, body).expect("write");
         let guard = ClaudeConfigAt::at(dir.path());
         (dir, guard, path)
@@ -1296,8 +1327,12 @@ mod tests {
     /// hazard, and only together.
     #[test]
     fn a_file_that_appears_unreadable_before_the_commit_is_refused() {
+        if isolated_fixture_process() {
+            return;
+        }
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("settings.json");
+        let path = dir.path().join(".claude/settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let _guard = ClaudeConfigAt::at(dir.path());
 
         // Planned against no file at all.
@@ -1338,8 +1373,12 @@ mod tests {
     /// genuinely be this.
     #[test]
     fn a_settings_file_that_is_not_utf8_is_refused_rather_than_replaced() {
+        if isolated_fixture_process() {
+            return;
+        }
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("settings.json");
+        let path = dir.path().join(".claude/settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
         let source = r#"{"env":{"MY_KEY":"keep me"}}"#;
         let mut bytes = vec![0xFF, 0xFE]; // UTF-16LE BOM
@@ -1381,6 +1420,9 @@ mod tests {
     /// put there is still in the file afterwards.
     #[test]
     fn an_occupied_slot_is_reported_and_never_overwritten() {
+        if isolated_fixture_process() {
+            return;
+        }
         let (_dir, _guard, path) =
             claude_config(r#"{"env":{"ANTHROPIC_BASE_URL":"https://their-own-choice.example"}}"#);
         let store = PlanStore::default();
@@ -1407,7 +1449,8 @@ mod tests {
     /// parsed.
     fn connect_claude_and_read(body: Option<&str>) -> serde_json::Value {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("settings.json");
+        let path = dir.path().join(".claude/settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         if let Some(body) = body {
             std::fs::write(&path, body).expect("write");
         }
@@ -1427,6 +1470,9 @@ mod tests {
     /// blank status line.
     #[test]
     fn connect_writes_the_base_url_and_no_status_line() {
+        if isolated_fixture_process() {
+            return;
+        }
         let after = connect_claude_and_read(Some("{}"));
         assert_eq!(
             after["env"]["ANTHROPIC_BASE_URL"],
@@ -1450,6 +1496,9 @@ mod tests {
     /// `repair_*` tests, which cover that one.
     #[test]
     fn connect_removes_a_status_line_installed_by_ironwire() {
+        if isolated_fixture_process() {
+            return;
+        }
         let after = connect_claude_and_read(Some(
             r#"{"statusLine":{"type":"command","command":"/old/app statusline","installedBy":"ironwire"}}"#,
         ));
@@ -1466,6 +1515,9 @@ mod tests {
     /// A status line the contributor wrote themselves is theirs.
     #[test]
     fn connect_leaves_a_user_written_status_line_alone() {
+        if isolated_fixture_process() {
+            return;
+        }
         let after = connect_claude_and_read(Some(
             r#"{"statusLine":{"type":"command","command":"my-own-line"}}"#,
         ));
@@ -1486,6 +1538,9 @@ mod tests {
     /// mistaken for redundant.
     #[test]
     fn connect_on_a_file_the_old_connect_wrote_is_refused_as_noop() {
+        if isolated_fixture_process() {
+            return;
+        }
         let (_dir, _guard, path) = claude_config(OLD_CONNECT_SETTINGS);
         let view = plan_claude(&PlanStore::default(), HarnessAction::Connect);
         assert_eq!(view.outcome, PlanOutcome::Noop);
@@ -1500,6 +1555,9 @@ mod tests {
     /// nothing else: the base URL and the contributor's own key survive.
     #[test]
     fn repair_removes_the_status_line_the_old_connect_installed() {
+        if isolated_fixture_process() {
+            return;
+        }
         let (_dir, _guard, path) = claude_config(OLD_CONNECT_SETTINGS);
         assert_eq!(
             repair_claude_status_line(&Catalog::default(), Some(8463)),
@@ -1542,6 +1600,9 @@ mod tests {
     /// file that is connected to us.
     #[test]
     fn repair_leaves_a_user_written_status_line_alone() {
+        if isolated_fixture_process() {
+            return;
+        }
         assert_repair_leaves_alone(
             r#"{"statusLine":{"type":"command","command":"my-own-line"},"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8463/anthropic"}}"#,
             Some(8463),
@@ -1553,6 +1614,9 @@ mod tests {
     /// never move routing without a preview.
     #[test]
     fn repair_leaves_a_file_on_another_port_alone() {
+        if isolated_fixture_process() {
+            return;
+        }
         assert_repair_leaves_alone(
             r#"{"statusLine":{"type":"command","command":"/old/app statusline","installedBy":"ironwire"},"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:9999/anthropic"}}"#,
             Some(8463),
@@ -1563,6 +1627,9 @@ mod tests {
     /// the contributor's own -- is left for a connect to decide about.
     #[test]
     fn repair_leaves_an_unconnected_file_alone() {
+        if isolated_fixture_process() {
+            return;
+        }
         assert_repair_leaves_alone(
             r#"{"statusLine":{"type":"command","command":"/old/app statusline","installedBy":"ironwire"}}"#,
             Some(8463),
@@ -1576,12 +1643,18 @@ mod tests {
     /// No destination, no repair: there is no port to say the file is ours.
     #[test]
     fn repair_without_a_destination_does_nothing() {
+        if isolated_fixture_process() {
+            return;
+        }
         assert_repair_leaves_alone(OLD_CONNECT_SETTINGS, None);
     }
 
     /// A file that is not JSON, or not UTF-8, is never rewritten.
     #[test]
     fn repair_leaves_an_unreadable_file_alone() {
+        if isolated_fixture_process() {
+            return;
+        }
         assert_repair_leaves_alone("{ not json", Some(8463));
 
         let (_dir, _guard, path) = claude_config("");
@@ -1601,6 +1674,9 @@ mod tests {
     /// every start would undo `ironwire connect claude` each time.
     #[test]
     fn repair_leaves_the_ironwire_clis_own_line_alone() {
+        if isolated_fixture_process() {
+            return;
+        }
         for command in [
             "ironwire statusline",
             "/opt/homebrew/bin/ironwire statusline",
@@ -1619,6 +1695,9 @@ mod tests {
     /// space in it is judged whole, by its file stem.
     #[test]
     fn a_status_line_command_is_judged_by_its_executables_name() {
+        if isolated_fixture_process() {
+            return;
+        }
         assert!(command_runs_ironwire("ironwire statusline"));
         assert!(command_runs_ironwire("/usr/local/bin/ironwire statusline"));
         assert!(command_runs_ironwire("C:\\bin\\ironwire.exe statusline"));
@@ -1643,6 +1722,9 @@ mod tests {
     /// the supervisor makes at start.
     #[test]
     fn the_daemon_repairs_the_old_connect_on_its_hosted_port() {
+        if isolated_fixture_process() {
+            return;
+        }
         let shared = daemon_shared();
         shared.set_private_inference_state_for_test(
             crate::daemon::private_inference::PrivateInferenceState::Running { port: 8463 },
@@ -1663,6 +1745,9 @@ mod tests {
     /// daemon's to sweep after, even on the same port.
     #[test]
     fn the_daemon_does_not_repair_against_a_declared_proxy() {
+        if isolated_fixture_process() {
+            return;
+        }
         let shared = daemon_shared();
         shared.settings.lock().expect("settings").ironwire =
             Some(crate::daemon::settings::IronWireDeclaration::Watch {
@@ -1681,6 +1766,9 @@ mod tests {
     /// A dry run edits no contributor's files.
     #[test]
     fn the_daemon_does_not_repair_under_a_dry_run() {
+        if isolated_fixture_process() {
+            return;
+        }
         let shared = daemon_shared();
         shared.set_private_inference_state_for_test(
             crate::daemon::private_inference::PrivateInferenceState::Running { port: 8463 },
@@ -1696,13 +1784,16 @@ mod tests {
     /// No settings file at all is nothing to repair, and none is created.
     #[test]
     fn repair_with_no_settings_file_creates_none() {
+        if isolated_fixture_process() {
+            return;
+        }
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = ClaudeConfigAt::at(dir.path());
         assert_eq!(
             repair_claude_status_line(&Catalog::default(), Some(8463)),
             Ok(false)
         );
-        assert!(!dir.path().join("settings.json").exists());
+        assert!(!dir.path().join(".claude/settings.json").exists());
     }
 
     /// Serializes the tests that point Codex's config somewhere.
@@ -1755,6 +1846,9 @@ mod tests {
     /// `occupied` and is still in the file after the rest of the edit commits.
     #[test]
     fn codex_reports_a_provider_the_contributor_chose_and_leaves_it_there() {
+        if isolated_fixture_process() {
+            return;
+        }
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(
@@ -1795,6 +1889,9 @@ mod tests {
     /// Refused deliberately, and distinguishable from "nothing to change".
     #[test]
     fn an_unparseable_config_is_refused_and_named() {
+        if isolated_fixture_process() {
+            return;
+        }
         let (_dir, _guard, path) = claude_config("{ this is not settings");
         let store = PlanStore::default();
 
@@ -1816,6 +1913,9 @@ mod tests {
     /// A no-op says so rather than showing an empty confirmation.
     #[test]
     fn a_second_connect_is_a_noop_with_no_plan_id() {
+        if isolated_fixture_process() {
+            return;
+        }
         let (_dir, _guard, _path) = claude_config("{}");
         let store = PlanStore::default();
 
@@ -1832,6 +1932,9 @@ mod tests {
     /// Remove only what we put there.
     #[test]
     fn a_disconnect_leaves_neighbouring_keys_alone() {
+        if isolated_fixture_process() {
+            return;
+        }
         let (_dir, _guard, path) = claude_config(r#"{"env":{"THEIR_OWN_KEY":"keep me"}}"#);
         let store = PlanStore::default();
 
@@ -1854,6 +1957,9 @@ mod tests {
     /// than reverting whatever the tool just wrote.
     #[test]
     fn a_config_that_moved_under_the_plan_refuses_the_commit() {
+        if isolated_fixture_process() {
+            return;
+        }
         let (_dir, _guard, path) = claude_config("{}");
         let store = PlanStore::default();
 
@@ -1876,6 +1982,9 @@ mod tests {
     /// A plan is a permission to write once.
     #[test]
     fn a_committed_plan_cannot_be_replayed() {
+        if isolated_fixture_process() {
+            return;
+        }
         let (_dir, _guard, _path) = claude_config("{}");
         let store = PlanStore::default();
 
@@ -1916,6 +2025,9 @@ mod tests {
 
     #[test]
     fn activity_is_grouped_by_family_and_keeps_the_latest_call() {
+        if isolated_fixture_process() {
+            return;
+        }
         let activity = family_activity(
             &[row("anthropic", 0), row("anthropic", 60), row("openai", 10)],
             true,
@@ -1936,6 +2048,9 @@ mod tests {
     /// tool being nameable.
     #[test]
     fn a_call_is_reportable_with_no_tool_named() {
+        if isolated_fixture_process() {
+            return;
+        }
         let activity = family_activity(&[row("anthropic", 0)], true);
         assert!(activity.last_call().is_some());
         // Nothing on this value names a tool.
@@ -1944,6 +2059,9 @@ mod tests {
 
     #[test]
     fn an_unreadable_ledger_reports_no_families_and_says_so() {
+        if isolated_fixture_process() {
+            return;
+        }
         let activity = family_activity(&[], false);
         assert!(!activity.readable);
         assert_eq!(activity.last_call(), None);
@@ -1962,6 +2080,9 @@ mod tests {
     /// line this app can remove, and hiding the only control would strand it.
     #[test]
     fn a_config_pointing_at_another_port_is_not_connected_to_us() {
+        if isolated_fixture_process() {
+            return;
+        }
         let (_dir, _guard, _path) =
             claude_config(r#"{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:9999/anthropic"}}"#);
 
@@ -2010,6 +2131,9 @@ mod tests {
     /// still a full row -- installed or not.
     #[test]
     fn the_list_degrades_to_the_two_built_in_tools() {
+        if isolated_fixture_process() {
+            return;
+        }
         let rows = list(&Catalog::default(), &FamilyActivity::default(), Some(8463));
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["claude", "codex"]);
@@ -2021,6 +2145,9 @@ mod tests {
     /// tool is `unknown` rather than "no calls yet".
     #[test]
     fn no_ledger_never_reports_no_calls_yet() {
+        if isolated_fixture_process() {
+            return;
+        }
         let rows = list(&Catalog::default(), &FamilyActivity::default(), Some(8463));
         for row in rows {
             assert!(
@@ -2035,6 +2162,9 @@ mod tests {
 
     #[test]
     fn an_unknown_tool_id_is_refused_rather_than_planned() {
+        if isolated_fixture_process() {
+            return;
+        }
         let store = PlanStore::default();
         let err = plan(
             &store,
@@ -2064,6 +2194,9 @@ mod tests {
     /// these happens to be installed.
     #[test]
     fn a_connect_with_no_destination_is_refused_by_name() {
+        if isolated_fixture_process() {
+            return;
+        }
         // Pin the config directory, and take the lock with it. Without this
         // the test reads whatever `CLAUDE_CONFIG_DIR` a concurrent test has
         // set: point it at an already-wired file and the connect is
@@ -2106,6 +2239,9 @@ mod tests {
     /// machine running the test.
     #[test]
     fn a_connect_with_no_credential_is_refused_by_name() {
+        if isolated_fixture_process() {
+            return;
+        }
         // Same reason as the no-destination test: pin the config directory so
         // a concurrent test cannot leave `CLAUDE_CONFIG_DIR` naming an
         // already-wired file, which would make the connect unavailable and
@@ -2148,6 +2284,9 @@ mod tests {
     /// leaving the line in the file.
     #[test]
     fn a_disconnect_is_not_gated_on_the_credential() {
+        if isolated_fixture_process() {
+            return;
+        }
         let (_dir, _guard, _path) =
             claude_config(r#"{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8463/anthropic"}}"#);
 
@@ -2190,6 +2329,9 @@ mod tests {
     /// `action_available`, because that is the value a shell receives.
     #[test]
     fn the_wire_offers_no_connect_without_a_credential() {
+        if isolated_fixture_process() {
+            return;
+        }
         // A hand-built row, not one read off this machine.
         //
         // The row that matters is the one a connect WOULD be offered for --
@@ -2229,6 +2371,9 @@ mod tests {
 
     #[test]
     fn a_plan_id_is_single_use() {
+        if isolated_fixture_process() {
+            return;
+        }
         let store = PlanStore::default();
         let id = Uuid::new_v4();
         assert!(commit(&store, id).is_err());
@@ -2236,6 +2381,9 @@ mod tests {
 
     #[test]
     fn an_unheld_plan_id_is_named_rather_than_written() {
+        if isolated_fixture_process() {
+            return;
+        }
         let store = PlanStore::default();
         assert_eq!(
             commit(&store, Uuid::new_v4()).expect_err("nothing was minted"),
@@ -2252,6 +2400,9 @@ mod tests {
     /// `Catalog::agents` -- a tool that never appears, rather than an error.
     #[test]
     fn every_owned_entry_survives_validation() {
+        if isolated_fixture_process() {
+            return;
+        }
         for entry in owned_agents() {
             assert_eq!(entry.problem(), None, "{}", entry.id);
         }
@@ -2264,6 +2415,9 @@ mod tests {
     /// revision moves.
     #[test]
     fn no_owned_entry_names_a_config_path_outside_the_allowed_shape() {
+        if isolated_fixture_process() {
+            return;
+        }
         for entry in owned_agents() {
             assert!(
                 config_location_is_allowed(&entry.config),
@@ -2278,6 +2432,9 @@ mod tests {
     /// the table is short.
     #[test]
     fn the_config_shape_check_refuses_what_it_must() {
+        if isolated_fixture_process() {
+            return;
+        }
         let allowed = |dir: &[&str], file: &str| {
             config_location_is_allowed(&ConfigLocation {
                 dir: dir.iter().map(|s| (*s).to_string()).collect(),
@@ -2310,6 +2467,9 @@ mod tests {
     /// this is a statement about the key alone.
     #[test]
     fn every_owned_setting_names_a_writable_key() {
+        if isolated_fixture_process() {
+            return;
+        }
         for entry in owned_agents() {
             assert!(!entry.settings.is_empty(), "{}", entry.id);
             for setting in &entry.settings {
@@ -2329,6 +2489,9 @@ mod tests {
     /// we add shows up beside the two built-in tools.
     #[test]
     fn every_owned_entry_appears_in_the_list() {
+        if isolated_fixture_process() {
+            return;
+        }
         let catalog = catalog();
         let ids: Vec<String> = tools::all(&catalog).into_iter().map(|t| t.id).collect();
         assert_eq!(ids[..2], ["claude".to_string(), "codex".to_string()]);
@@ -2343,6 +2506,9 @@ mod tests {
     /// test upstream, never will -- the claim could only ever be false.
     #[test]
     fn catalog_present_follows_our_own_table() {
+        if isolated_fixture_process() {
+            return;
+        }
         let catalog = catalog();
         assert_eq!(
             !catalog.agents().is_empty(),
@@ -2354,6 +2520,9 @@ mod tests {
     /// Nothing we compile in is dropped for a reason we never see.
     #[test]
     fn our_catalog_rejects_none_of_its_own_entries() {
+        if isolated_fixture_process() {
+            return;
+        }
         assert!(catalog().rejected_agents().is_empty());
     }
 }
