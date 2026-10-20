@@ -16,6 +16,7 @@ use super::analytics_constants::{
 };
 use super::cache_share::CacheShare;
 use super::codex_series::CodexTurnSeriesEvidence;
+use super::session_facts::SessionFacts;
 
 /// Which counter rows a figure was computed from. Feeds are never blended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -162,6 +163,10 @@ pub struct SessionInput {
     /// snapshots that both carry one overlap only when it is the same.
     pub harness_session: Option<KeyedDigest>,
     pub body: SessionBody,
+    /// The session's facts beyond its tokens, for the Models answers.
+    /// `None` for a saved snapshot and for a counter row stored without
+    /// them. No weekly figure, goal, glance or Patterns view reads it.
+    pub facts: Option<SessionFacts>,
 }
 
 impl SessionInput {
@@ -798,6 +803,7 @@ mod tests {
             import_seq: seq,
             placed_at: None,
             harness_session: None,
+            facts: None,
             body: SessionBody::Claude {
                 series: UsageSeries {
                     turns,
@@ -815,6 +821,7 @@ mod tests {
             import_seq: seq,
             placed_at: None,
             harness_session: None,
+            facts: None,
             body: SessionBody::Codex {
                 observed: Some(CodexObserved {
                     first_at: first,
@@ -836,6 +843,7 @@ mod tests {
             import_seq: 0,
             placed_at: placed,
             harness_session: None,
+            facts: None,
             body: SessionBody::Unknown {
                 source: Some(AnalyticsSource::ClaudeCode),
                 reason,
