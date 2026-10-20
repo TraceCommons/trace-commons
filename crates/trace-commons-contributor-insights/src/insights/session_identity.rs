@@ -51,12 +51,40 @@ fn harness(format: SourceFormat) -> Option<&'static str> {
 #[doc(hidden)]
 pub fn harness_session_id(format: SourceFormat, bytes: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;
-    let mut found: Option<String> = None;
+    let mut scan = HarnessSessionScan::new(format);
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let id = match format {
+        scan.observe(&value);
+    }
+    scan.finish()
+}
+
+/// [`harness_session_id`] one parsed record at a time, for a reader that
+/// streams a transcript instead of holding it. The caller skips blank and
+/// unparsable lines, and gives up (`None`) when the file is not UTF-8.
+#[doc(hidden)]
+pub struct HarnessSessionScan {
+    format: SourceFormat,
+    found: Option<String>,
+    ambiguous: bool,
+}
+
+impl HarnessSessionScan {
+    pub fn new(format: SourceFormat) -> Self {
+        Self {
+            format,
+            found: None,
+            ambiguous: false,
+        }
+    }
+
+    pub fn observe(&mut self, value: &serde_json::Value) {
+        if self.ambiguous {
+            return;
+        }
+        let id = match self.format {
             SourceFormat::Codex if value["type"] == "session_meta" => {
                 value["payload"]["id"].as_str()
             }
@@ -64,15 +92,21 @@ pub fn harness_session_id(format: SourceFormat, bytes: &[u8]) -> Option<String> 
             _ => None,
         };
         let Some(id) = id.filter(|id| !id.is_empty()) else {
-            continue;
+            return;
         };
-        match &found {
-            None => found = Some(id.to_string()),
+        match &self.found {
+            None => self.found = Some(id.to_string()),
             Some(seen) if seen == id => {}
-            Some(_) => return None,
+            Some(_) => {
+                self.ambiguous = true;
+                self.found = None;
+            }
         }
     }
-    found
+
+    pub fn finish(self) -> Option<String> {
+        if self.ambiguous { None } else { self.found }
+    }
 }
 
 /// The identity a saved snapshot carries. No session ID, no key: a file that

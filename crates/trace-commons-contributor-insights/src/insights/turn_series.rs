@@ -115,14 +115,47 @@ pub fn extract_claude_turn_series(
         return Err(invalid());
     }
     let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
-    let mut drafts: Vec<TurnDraft> = Vec::new();
-    let mut calls: Vec<ToolCallRecord> = Vec::new();
-    // Local only: message ID -> draft, tool-use ID -> call. Dropped at return.
-    let mut turn_by_message: BTreeMap<String, usize> = BTreeMap::new();
-    let mut call_by_tool_use: BTreeMap<String, usize> = BTreeMap::new();
-
+    let mut scan = ClaudeTurnSeriesScan::new(key);
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let row: Value = serde_json::from_str(line).map_err(|_| invalid())?;
+        scan.observe(&row)?;
+    }
+    scan.finish(format!("{:x}", Sha256::digest(bytes)))
+}
+
+/// [`extract_claude_turn_series`] one parsed record at a time, for a reader
+/// that streams a transcript instead of holding it, so a file of any size
+/// is read in bounded memory. The caller skips blank lines, fails the scan
+/// on a line that is not UTF-8 JSON, and passes the SHA-256 of every byte
+/// read to [`Self::finish`]. No size bound: that is the caller's.
+pub struct ClaudeTurnSeriesScan<'k> {
+    key: &'k DigestKey,
+    drafts: Vec<TurnDraft>,
+    calls: Vec<ToolCallRecord>,
+    // Local only: message ID -> draft, tool-use ID -> call. Dropped at finish.
+    turn_by_message: BTreeMap<String, usize>,
+    call_by_tool_use: BTreeMap<String, usize>,
+}
+
+impl<'k> ClaudeTurnSeriesScan<'k> {
+    pub fn new(key: &'k DigestKey) -> Self {
+        Self {
+            key,
+            drafts: Vec::new(),
+            calls: Vec::new(),
+            turn_by_message: BTreeMap::new(),
+            call_by_tool_use: BTreeMap::new(),
+        }
+    }
+
+    /// One record. Fails with a fixed label on a record that is not an
+    /// object with a string `type`.
+    pub fn observe(&mut self, row: &Value) -> Result<()> {
+        let key = self.key;
+        let drafts = &mut self.drafts;
+        let calls = &mut self.calls;
+        let turn_by_message = &mut self.turn_by_message;
+        let call_by_tool_use = &mut self.call_by_tool_use;
         let kind = row
             .as_object()
             .and_then(|object| object.get("type"))
@@ -130,7 +163,7 @@ pub fn extract_claude_turn_series(
             .ok_or_else(invalid)?;
         match kind {
             "assistant" => {
-                let ordinal = assistant_turn(&row, key, &mut drafts, &mut turn_by_message)?;
+                let ordinal = assistant_turn(row, key, drafts, turn_by_message)?;
                 if let Some(Value::Array(blocks)) = row.pointer("/message/content") {
                     for block in blocks {
                         if block.get("type").and_then(Value::as_str) != Some("tool_use") {
@@ -150,7 +183,7 @@ pub fn extract_claude_turn_series(
             }
             "user" => {
                 let Some(Value::Array(blocks)) = row.pointer("/message/content") else {
-                    continue;
+                    return Ok(());
                 };
                 for block in blocks {
                     if block.get("type").and_then(Value::as_str) != Some("tool_result") {
@@ -174,65 +207,76 @@ pub fn extract_claude_turn_series(
             }
             _ => {}
         }
+        Ok(())
     }
 
-    let mut model_labels: Vec<String> = Vec::new();
-    let mut series = UsageSeries::default();
-    let mut previous_at = None;
-    for (ordinal, draft) in drafts.into_iter().enumerate() {
-        let ordinal = u32::try_from(ordinal).map_err(|_| invalid())?;
-        let model_label_ix = draft.model.and_then(|model| {
-            let ix = match model_labels.iter().position(|label| *label == model) {
-                Some(ix) => ix,
-                None if model_labels.len() < MAX_DECLARED_MODELS => {
-                    model_labels.push(model);
-                    model_labels.len() - 1
-                }
-                None => return None,
-            };
-            u16::try_from(ix).ok()
-        });
-        let counters = draft.counters.filter(|_| !draft.unknown);
-        series.push_turn(TurnRecord {
-            ordinal,
-            at: draft.at,
-            uncached_input: counters.map(|c| c[0]),
-            cache_read: counters.map(|c| c[1]),
-            cache_write: counters.map(|c| CacheWrite::Split { m5: c[3], h1: c[4] }),
-            output: counters.map(|c| c[2]),
-            model_label_ix,
-            gap_secs: if ordinal == 0 {
-                None
-            } else {
-                gap_between(previous_at, draft.at)
-            },
-            msg_key: draft.msg_key,
-        });
-        previous_at = draft.at;
-    }
-    // A later record of an earlier message can add a call after a later
-    // turn's calls; rows are kept in turn order. The sort is stable.
-    calls.sort_by_key(|call| call.turn_ordinal);
-    let kept_turns = series.turns.len();
-    for call in calls {
-        if usize::try_from(call.turn_ordinal).map_err(|_| invalid())? < kept_turns {
-            series.push_tool_call(call);
-        } else {
-            series.truncated = true;
+    /// The rows, bound to `source_digest`, the lowercase hex SHA-256 of
+    /// every byte the records were read from.
+    pub fn finish(self, source_digest: String) -> Result<ClaudeTurnSeriesEvidence> {
+        let Self {
+            key,
+            drafts,
+            mut calls,
+            ..
+        } = self;
+        let mut model_labels: Vec<String> = Vec::new();
+        let mut series = UsageSeries::default();
+        let mut previous_at = None;
+        for (ordinal, draft) in drafts.into_iter().enumerate() {
+            let ordinal = u32::try_from(ordinal).map_err(|_| invalid())?;
+            let model_label_ix = draft.model.and_then(|model| {
+                let ix = match model_labels.iter().position(|label| *label == model) {
+                    Some(ix) => ix,
+                    None if model_labels.len() < MAX_DECLARED_MODELS => {
+                        model_labels.push(model);
+                        model_labels.len() - 1
+                    }
+                    None => return None,
+                };
+                u16::try_from(ix).ok()
+            });
+            let counters = draft.counters.filter(|_| !draft.unknown);
+            series.push_turn(TurnRecord {
+                ordinal,
+                at: draft.at,
+                uncached_input: counters.map(|c| c[0]),
+                cache_read: counters.map(|c| c[1]),
+                cache_write: counters.map(|c| CacheWrite::Split { m5: c[3], h1: c[4] }),
+                output: counters.map(|c| c[2]),
+                model_label_ix,
+                gap_secs: if ordinal == 0 {
+                    None
+                } else {
+                    gap_between(previous_at, draft.at)
+                },
+                msg_key: draft.msg_key,
+            });
+            previous_at = draft.at;
         }
-    }
-    debug_assert!(series.turns.len() <= MAX_SERIES_TURNS);
-    debug_assert!(series.tool_calls.len() <= MAX_SERIES_TOOL_CALLS);
+        // A later record of an earlier message can add a call after a later
+        // turn's calls; rows are kept in turn order. The sort is stable.
+        calls.sort_by_key(|call| call.turn_ordinal);
+        let kept_turns = series.turns.len();
+        for call in calls {
+            if usize::try_from(call.turn_ordinal).map_err(|_| invalid())? < kept_turns {
+                series.push_tool_call(call);
+            } else {
+                series.truncated = true;
+            }
+        }
+        debug_assert!(series.turns.len() <= MAX_SERIES_TURNS);
+        debug_assert!(series.tool_calls.len() <= MAX_SERIES_TOOL_CALLS);
 
-    let evidence = ClaudeTurnSeriesEvidence {
-        schema_version: TURN_SERIES_SCHEMA_VERSION,
-        source_digest: format!("{:x}", Sha256::digest(bytes)),
-        key_fingerprint: key_fingerprint(key),
-        model_labels,
-        series,
-    };
-    evidence.validate()?;
-    Ok(evidence)
+        let evidence = ClaudeTurnSeriesEvidence {
+            schema_version: TURN_SERIES_SCHEMA_VERSION,
+            source_digest,
+            key_fingerprint: key_fingerprint(key),
+            model_labels,
+            series,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
 }
 
 /// Fold one assistant record into its message's turn, returning the turn's

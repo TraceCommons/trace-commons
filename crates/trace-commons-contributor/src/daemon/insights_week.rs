@@ -19,9 +19,14 @@
 //! coverage and never as complete.
 //!
 //! A poll reads a bounded number of files and bytes, newest first, so a first
-//! pass over a large corpus catches up across polls. A file unchanged in size
-//! and time since its row was made is not read again; a file seen again with
-//! new bytes replaces its row.
+//! pass over a large corpus catches up across polls. The first file a poll
+//! reads is always read, so a file larger than the byte budget is never
+//! starved. Each file is read line by line, never held whole, so memory stays
+//! flat at any size; one line over `COUNTER_PASS_MAX_LINE_BYTES` makes the
+//! session unknown, never zero. A file unchanged in size and time since its
+//! row was made is not read again; a file seen again with new bytes replaces
+//! its row. A row stored as unknown by the earlier whole-file read, which
+//! skipped files over 16 MiB, is read once more.
 //!
 //! # The store
 //!
@@ -60,8 +65,8 @@
 //! Still never a digest, a path or a key.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, Read};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -82,14 +87,16 @@ use crate::insights::SourceFormat;
 use crate::insights::analytics_constants::PATTERN_BAR_WEEKS;
 use crate::insights::analytics_constants::{
     COUNTER_PASS_EXCLUDES_NEVER_FOLDERS, COUNTER_PASS_MAX_BYTES_PER_TICK,
-    COUNTER_PASS_MAX_READS_PER_TICK, COUNTER_PASS_MAX_SESSION_BYTES, COUNTER_STORE_KEEP_WEEKS,
+    COUNTER_PASS_MAX_LINE_BYTES, COUNTER_PASS_MAX_READS_PER_TICK, COUNTER_STORE_KEEP_WEEKS,
     COUNTER_STORE_MAX_SESSIONS, COUNTER_STORE_MAX_TOOL_CALLS, COUNTER_STORE_MAX_TURNS,
     DIGEST_KEY_CUSTODY, DigestKeyCustody,
 };
 use crate::insights::goals::WeekFigures;
-use crate::insights::session_identity::harness_session_id;
+use crate::insights::session_identity::HarnessSessionScan;
+use crate::insights::time_evidence::RecordedTimeScan;
+use crate::insights::turn_series::ClaudeTurnSeriesScan;
 use crate::insights::usage::NativeTokenCounts;
-use crate::insights::usage_evidence::{PersistedUsageEvidence, extract_codex_usage_evidence};
+use crate::insights::usage_evidence::{CodexUsageScan, PersistedUsageEvidence};
 use crate::insights::week_glance::{counter_overview, dated_weeks};
 use crate::insights::week_patterns::{week_figures, week_patterns};
 use crate::insights::week_rollup::{
@@ -209,6 +216,13 @@ struct CounterRow {
     /// the per-poll budget, even when its file is unchanged.
     #[serde(default)]
     event_span_read: bool,
+    /// Whether the row was made by the line-by-line read, which skips no
+    /// file for its size. A row stored as unknown with no usage counters
+    /// before it may be a file the earlier whole-file read skipped for being
+    /// over 16 MiB, so it is read once more, within the per-poll budget,
+    /// even when its file is unchanged. Any other row is not.
+    #[serde(default)]
+    streamed: bool,
 }
 
 impl CounterRow {
@@ -499,6 +513,14 @@ impl CounterPass {
                     && row.modified_at == candidate.modified_at
                     && row.harness_session_read
                     && row.event_span_read
+                    && (row.streamed
+                        || !matches!(
+                            row.body,
+                            RowBody::Unknown {
+                                reason: UnknownReason::NoUsageCounters,
+                                ..
+                            }
+                        ))
             });
             if unchanged && !removals.contains(&session) {
                 continue;
@@ -511,11 +533,12 @@ impl CounterPass {
                 continue;
             }
             // Charged by the one file read, not the group: delegated
-            // transcripts are counted in `size_bytes` but never read.
-            let read_len = std::fs::metadata(&candidate.path)
+            // transcripts are counted in `size_bytes` but never read. The
+            // first read of a poll is always allowed, so a file over the
+            // whole budget is read alone rather than starved.
+            let cost = std::fs::metadata(&candidate.path)
                 .map(|meta| meta.len())
                 .unwrap_or(candidate.size_bytes);
-            let cost = read_len.min(COUNTER_PASS_MAX_SESSION_BYTES);
             if reads.len() >= COUNTER_PASS_MAX_READS_PER_TICK
                 || (!reads.is_empty()
                     && bytes_budgeted.saturating_add(cost) > COUNTER_PASS_MAX_BYTES_PER_TICK)
@@ -541,6 +564,7 @@ impl CounterPass {
                     earliest_event_at: read.span.map(|(earliest, _)| earliest),
                     latest_event_at: read.span.map(|(_, latest)| latest),
                     event_span_read: true,
+                    streamed: true,
                 },
             ));
         }
@@ -1170,58 +1194,60 @@ fn never_digests(key: &DigestKey, never: &NeverFolders) -> NeverDigests {
 /// in place of unknown. Beside them, the keyed digest of the one session ID
 /// the transcript records, under the harness name the adapter reports (the
 /// same string the proxy ledger's attribution uses); `None` when there is
-/// none or more than one, as a saved snapshot's identity does.
+/// none or more than one, as a saved snapshot's identity does. The file is
+/// read line by line ([`scan_session`]), never held whole.
 fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &DigestKey) -> ReadBody {
-    let unknown = RowBody::Unknown {
-        source,
-        reason: UnknownReason::NoUsageCounters,
-    };
-    // The bound is on the file read; `size_bytes` is the whole group's.
-    let Some(bytes) = bounded_read(&candidate.path, COUNTER_PASS_MAX_SESSION_BYTES) else {
+    let scanned = std::fs::File::open(&candidate.path).ok().and_then(|file| {
+        scan_session(
+            source,
+            std::io::BufReader::new(file),
+            key,
+            COUNTER_PASS_MAX_LINE_BYTES,
+        )
+    });
+    let Some(scanned) = scanned else {
         return ReadBody {
-            body: unknown,
+            body: RowBody::Unknown {
+                source,
+                reason: UnknownReason::NoUsageCounters,
+            },
             harness_session: None,
             first_event_at: None,
             span: None,
         };
     };
-    let harness_session = harness_session_id(source_format(source), &bytes)
-        .map(|id| harness_session_digest(key, candidate.source, &id));
-    let first_event_at = first_event_at(&bytes);
-    let body = match source {
-        AnalyticsSource::ClaudeCode => {
-            match crate::insights::turn_series::extract_claude_turn_series(&bytes, key) {
-                Ok(evidence) => {
-                    let mut series = evidence.series;
-                    // Delegated transcripts are not read: partial, never
-                    // complete.
-                    if candidate.group_member_count > 0 {
-                        series.truncated = true;
-                    }
-                    RowBody::Claude {
-                        model_labels: evidence.model_labels,
-                        series,
-                    }
-                }
-                Err(_) => unknown,
+    let body = match scanned.body {
+        ScannedBody::Claude(Some(evidence)) => {
+            let mut series = evidence.series;
+            // Delegated transcripts are not read: partial, never complete.
+            if candidate.group_member_count > 0 {
+                series.truncated = true;
+            }
+            RowBody::Claude {
+                model_labels: evidence.model_labels,
+                series,
             }
         }
-        AnalyticsSource::Codex => match extract_codex_usage_evidence(&bytes) {
-            Ok(evidence) => RowBody::Codex {
-                observed: codex_observed(&evidence),
-            },
-            Err(_) => unknown,
+        ScannedBody::Codex(Some(evidence)) => RowBody::Codex {
+            observed: codex_observed(&evidence),
+        },
+        ScannedBody::Claude(None) | ScannedBody::Codex(None) => RowBody::Unknown {
+            source,
+            reason: UnknownReason::NoUsageCounters,
         },
     };
     ReadBody {
         body,
-        harness_session,
-        first_event_at,
-        span: recorded_span(source, &bytes),
+        harness_session: scanned
+            .harness_session_id
+            .map(|id| harness_session_digest(key, candidate.source, &id)),
+        first_event_at: scanned.first_event_at,
+        span: scanned.span,
     }
 }
 
 /// What one read of a session file yields.
+#[derive(Debug, PartialEq, Eq)]
 struct ReadBody {
     body: RowBody,
     harness_session: Option<KeyedDigest>,
@@ -1230,30 +1256,146 @@ struct ReadBody {
     span: Option<(DateTime<Utc>, DateTime<Utc>)>,
 }
 
-/// The earliest and latest recorded event, by the same extractor a saved
-/// snapshot's time evidence comes from. `None` when the file does not parse
-/// or carries no valid time: never a guess.
-fn recorded_span(source: AnalyticsSource, bytes: &[u8]) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    let evidence = crate::insights::time_evidence::extract_recorded_time_evidence(
-        source_format(source),
-        bytes,
-    )
-    .ok()?;
-    Some((evidence.earliest?.recorded_at, evidence.latest?.recorded_at))
+/// The extractors' results for one transcript, from one pass over its lines.
+struct ScannedSession {
+    body: ScannedBody,
+    /// The one session ID the transcript records, raw, for the caller to
+    /// digest at once; `None` when it records none or more than one.
+    harness_session_id: Option<String>,
+    first_event_at: Option<DateTime<Utc>>,
+    span: Option<(DateTime<Utc>, DateTime<Utc>)>,
 }
 
-/// The first line's top-level `timestamp`, RFC 3339, as UTC: the rule the
-/// Claude Code and Codex sources use for a transcript's `started_at`
-/// (`source::claude_code::parse_session`, `source::codex`'s reader). Lines
-/// that are not JSON, or carry no such field, are passed over.
-fn first_event_at(bytes: &[u8]) -> Option<DateTime<Utc>> {
-    bytes.split(|byte| *byte == b'\n').find_map(|line| {
-        let record: serde_json::Value = serde_json::from_slice(line).ok()?;
-        let text = record.get("timestamp")?.as_str()?;
-        DateTime::parse_from_rfc3339(text)
-            .ok()
-            .map(|at| at.with_timezone(&Utc))
+/// The source's counter evidence; `None` when the transcript does not parse.
+enum ScannedBody {
+    Claude(Option<crate::insights::turn_series::ClaudeTurnSeriesEvidence>),
+    Codex(Option<Box<PersistedUsageEvidence>>),
+}
+
+/// One pass over a transcript, line by line, feeding every extractor the
+/// counter pass uses: the source's counters
+/// (`insights::turn_series` for Claude Code, `insights::usage_evidence` for
+/// Codex), the harness session ID (`insights::session_identity`), the first
+/// event's time (the first record carrying a valid top-level `timestamp`,
+/// the rule the Claude Code and Codex sources date a transcript by; lines
+/// that are not JSON are passed over) and the recorded span
+/// (`insights::time_evidence`). Each sees exactly what it would see given
+/// the whole file, so a file under the extractors' own 16 MiB bound yields
+/// the same results as before; a larger one is read the same way, in memory
+/// bounded by one line.
+///
+/// `None` when the file cannot be read or a line is longer than `max_line`
+/// bytes: the caller stores unknown, never zero.
+fn scan_session(
+    source: AnalyticsSource,
+    mut reader: impl BufRead,
+    key: &DigestKey,
+    max_line: u64,
+) -> Option<ScannedSession> {
+    use sha2::Digest as _;
+    let format = source_format(source);
+    let mut hasher = sha2::Sha256::new();
+    let mut identity = HarnessSessionScan::new(format);
+    // A file that is not UTF-8 throughout has no session ID, counters or
+    // span, as when it is read whole; `first_event_at` still reads its
+    // other lines.
+    let mut utf8 = true;
+    let mut first_event: Option<DateTime<Utc>> = None;
+    // The strict extractors: `None` once a record fails them.
+    let mut claude =
+        (source == AnalyticsSource::ClaudeCode).then(|| ClaudeTurnSeriesScan::new(key));
+    let mut codex = (source == AnalyticsSource::Codex).then(CodexUsageScan::default);
+    let mut time = Some(RecordedTimeScan::new(format));
+    let mut line: Vec<u8> = Vec::new();
+    // One-based physical line number, blank lines counted.
+    let mut index: u64 = 0;
+    loop {
+        line.clear();
+        // Room for the line and a `\r\n` ending; more is refused below.
+        let read = (&mut reader)
+            .take(max_line.saturating_add(2))
+            .read_until(b'\n', &mut line)
+            .ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&line);
+        if line.last() == Some(&b'\n') {
+            // `str::lines`: a line ends at `\n` or `\r\n`.
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+        }
+        if line.len() as u64 > max_line {
+            return None;
+        }
+        index += 1;
+        let Ok(text) = std::str::from_utf8(&line) else {
+            utf8 = false;
+            claude = None;
+            codex = None;
+            time = None;
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(text) else {
+            claude = None;
+            codex = None;
+            time = None;
+            continue;
+        };
+        identity.observe(&record);
+        if first_event.is_none() {
+            first_event = record_timestamp(&record);
+        }
+        if claude
+            .as_mut()
+            .is_some_and(|scan| scan.observe(&record).is_err())
+        {
+            claude = None;
+        }
+        if codex
+            .as_mut()
+            .is_some_and(|scan| scan.observe(index, &record).is_err())
+        {
+            codex = None;
+        }
+        if time
+            .as_mut()
+            .is_some_and(|scan| scan.observe(index, &record).is_err())
+        {
+            time = None;
+        }
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    let body = match source {
+        AnalyticsSource::ClaudeCode => {
+            ScannedBody::Claude(claude.and_then(|scan| scan.finish(digest.clone()).ok()))
+        }
+        AnalyticsSource::Codex => ScannedBody::Codex(
+            codex.and_then(|scan| scan.finish(digest.clone()).ok().map(Box::new)),
+        ),
+    };
+    let span = time
+        .and_then(|scan| scan.finish(digest).ok())
+        .and_then(|evidence| Some((evidence.earliest?.recorded_at, evidence.latest?.recorded_at)));
+    Some(ScannedSession {
+        body,
+        harness_session_id: identity.finish().filter(|_| utf8),
+        first_event_at: first_event,
+        span,
     })
+}
+
+/// A record's top-level `timestamp`, RFC 3339, as UTC.
+fn record_timestamp(record: &serde_json::Value) -> Option<DateTime<Utc>> {
+    let text = record.get("timestamp")?.as_str()?;
+    DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|at| at.with_timezone(&Utc))
 }
 
 /// Codex's first-to-last observed change. Cached input is a subset of input
@@ -1431,18 +1573,6 @@ fn enforce_caps(store: &mut CounterStore, max_sessions: usize, max_turns: usize,
     }
 }
 
-/// At most `max` bytes of `path`, or `None` when it is longer or cannot be
-/// read. A file that grows while it is read is refused, not cut.
-fn bounded_read(path: &Path, max: u64) -> Option<Vec<u8>> {
-    let file = std::fs::File::open(path).ok()?;
-    if file.metadata().ok()?.len() > max {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    file.take(max + 1).read_to_end(&mut bytes).ok()?;
-    (bytes.len() as u64 <= max).then_some(bytes)
-}
-
 /// `YYYY-Www`, naming a real ISO week. Its Monday.
 fn parse_iso_week(text: &str) -> Option<NaiveDate> {
     let bytes = text.as_bytes();
@@ -1609,6 +1739,7 @@ pub fn handle_week(shared: &DaemonShared, req: &Request) -> Response {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use std::path::Path;
     use trace_commons_protocol::insights_usage_series::InMemoryDigestKeyStore;
 
     const QUIET: u64 = 1_800;
@@ -1981,11 +2112,11 @@ mod tests {
     fn an_unreadable_or_oversized_session_is_unknown_never_zero() {
         let f = Fixture::new();
         let missing = candidate(SOURCE_CLAUDE_CODE, &f.dir.path().join("gone.jsonl"));
-        // Sparse: one byte over the bound without writing it.
+        // Sparse: one line one byte over the line bound, without writing it.
         let big = f.dir.path().join("big.jsonl");
         std::fs::File::create(&big)
             .unwrap()
-            .set_len(COUNTER_PASS_MAX_SESSION_BYTES + 1)
+            .set_len(COUNTER_PASS_MAX_LINE_BYTES + 1)
             .unwrap();
         let huge = candidate(SOURCE_CODEX, &big);
         assert_eq!(f.run(&[missing, huge]).read, 2);
@@ -1996,12 +2127,381 @@ mod tests {
         }
     }
 
+    /// A Claude Code session over 17 MB: `turns` user and assistant record
+    /// pairs, each user record padded to `pad` bytes, Monday 2026-09-14
+    /// from 09:00 UTC. Every assistant record has its own message ID.
+    fn large_claude_bytes(turns: usize, pad: usize) -> Vec<u8> {
+        let padding = "p".repeat(pad);
+        let mut out = Vec::new();
+        for i in 0..turns {
+            let at = |s: usize| {
+                (Utc.with_ymd_and_hms(2026, 9, 14, 9, 0, 0).unwrap()
+                    + Duration::seconds((2 * i + s) as i64))
+                .to_rfc3339()
+            };
+            let user = serde_json::json!({
+                "type": "user", "sessionId": "PRIVATE-LARGE-SESSION",
+                "timestamp": at(0),
+                "message": {"role": "user", "content": padding},
+            });
+            let assistant = serde_json::json!({
+                "type": "assistant", "sessionId": "PRIVATE-LARGE-SESSION",
+                "timestamp": at(1),
+                "message": {
+                    "id": format!("msg_PRIVATE_{i}"), "model": "claude-fixture-model",
+                    "role": "assistant", "content": [],
+                    "usage": {"input_tokens": 3, "output_tokens": 10,
+                        "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                },
+            });
+            for record in [user, assistant] {
+                out.extend_from_slice(record.to_string().as_bytes());
+                out.push(b'\n');
+            }
+        }
+        out
+    }
+
     #[test]
-    fn a_large_file_is_never_read_past_the_bound() {
+    fn a_session_over_17_mb_is_counted_with_a_date() {
         let f = Fixture::new();
-        let path = f.write("big.jsonl", &vec![b'x'; 64]);
-        assert!(bounded_read(&path, 63).is_none());
-        assert_eq!(bounded_read(&path, 64).unwrap().len(), 64);
+        let bytes = large_claude_bytes(1_100, 16 * 1024);
+        assert!(bytes.len() > 17 * 1024 * 1024, "{}", bytes.len());
+        let path = f.write("large.jsonl", &bytes);
+        assert_eq!(f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]).read, 1);
+        let value = f.week(&[]);
+        let coverage = &value["rollup"]["coverage"];
+        assert_eq!(coverage["unknown"], 0, "{coverage}");
+        assert_eq!(
+            coverage["known"].as_u64().unwrap() + coverage["partial"].as_u64().unwrap(),
+            1,
+            "{coverage}"
+        );
+        assert_ne!(claude_line(&value)["tokens"], serde_json::Value::Null);
+        let listed = f.pass.sessions_value(true, &NeverFolders::NONE, &[], 10);
+        assert_eq!(
+            listed["sessions"][0]["started_at"], "2026-09-14T09:00:00+00:00",
+            "{listed}"
+        );
+    }
+
+    #[test]
+    fn one_line_is_never_read_past_the_line_bound() {
+        let key = key_for(3);
+        let scan =
+            |bytes: &[u8], max: u64| scan_session(AnalyticsSource::ClaudeCode, bytes, &key, max);
+        let line =
+            br#"{"type":"user","sessionId":"PRIVATE-ID","timestamp":"2026-09-14T09:00:00Z"}"#;
+        let len = line.len() as u64;
+        // The bound is on the line, not its ending.
+        for ending in [&b""[..], b"\n", b"\r\n"] {
+            let bytes = [&line[..], ending].concat();
+            assert!(scan(&bytes, len - 1).is_none(), "{ending:?}");
+            let read = scan(&bytes, len).expect("a line at the bound is read");
+            assert_eq!(read.harness_session_id.as_deref(), Some("PRIVATE-ID"));
+        }
+        // A long line anywhere refuses the whole file, never part of it.
+        let mut two = [&line[..], b"\n"].concat();
+        two.extend_from_slice(&vec![b' '; line.len() + 1]);
+        two.extend_from_slice(b"\n");
+        assert!(scan(&two, len).is_none());
+        assert!(scan(&two, len + 1).is_some());
+    }
+
+    /// The whole-file read the counter pass made before it streamed, over
+    /// the extractors' own `&[u8]` entry points: the oracle the line-by-line
+    /// read must match for every file those accept.
+    fn read_whole(
+        source: AnalyticsSource,
+        bytes: &[u8],
+        group_member_count: u32,
+        key: &DigestKey,
+        harness: &str,
+    ) -> ReadBody {
+        use crate::insights::session_identity::harness_session_id;
+        use crate::insights::usage_evidence::extract_codex_usage_evidence;
+        let unknown = RowBody::Unknown {
+            source,
+            reason: UnknownReason::NoUsageCounters,
+        };
+        let body = match source {
+            AnalyticsSource::ClaudeCode => {
+                match crate::insights::turn_series::extract_claude_turn_series(bytes, key) {
+                    Ok(evidence) => {
+                        let mut series = evidence.series;
+                        if group_member_count > 0 {
+                            series.truncated = true;
+                        }
+                        RowBody::Claude {
+                            model_labels: evidence.model_labels,
+                            series,
+                        }
+                    }
+                    Err(_) => unknown,
+                }
+            }
+            AnalyticsSource::Codex => match extract_codex_usage_evidence(bytes) {
+                Ok(evidence) => RowBody::Codex {
+                    observed: codex_observed(&evidence),
+                },
+                Err(_) => unknown,
+            },
+        };
+        let first_event_at = bytes.split(|byte| *byte == b'\n').find_map(|line| {
+            let record: serde_json::Value = serde_json::from_slice(line).ok()?;
+            record_timestamp(&record)
+        });
+        let span = crate::insights::time_evidence::extract_recorded_time_evidence(
+            source_format(source),
+            bytes,
+        )
+        .ok()
+        .and_then(|evidence| Some((evidence.earliest?.recorded_at, evidence.latest?.recorded_at)));
+        ReadBody {
+            body,
+            harness_session: harness_session_id(source_format(source), bytes)
+                .map(|id| harness_session_digest(key, harness, &id)),
+            first_event_at,
+            span,
+        }
+    }
+
+    fn fixture(relative: &str) -> Vec<u8> {
+        std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/insights")
+                .join(relative),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_streamed_read_matches_the_whole_file_read() {
+        let f = Fixture::new();
+        let key = key_for(3);
+        let crlf = |bytes: Vec<u8>| {
+            String::from_utf8(bytes)
+                .unwrap()
+                .replace('\n', "\r\n")
+                .into_bytes()
+        };
+        let with_blank_lines = |bytes: Vec<u8>| {
+            let text = String::from_utf8(bytes).unwrap();
+            let mut lines: Vec<&str> = text.lines().collect();
+            lines.insert(1, "");
+            lines.insert(3, "   ");
+            format!("\n{}\n\n", lines.join("\n")).into_bytes()
+        };
+        let mut not_json = claude_bytes();
+        not_json.extend_from_slice(b"not json\n");
+        let mut not_utf8 = claude_bytes();
+        not_utf8.extend_from_slice(b"{\"type\":\"user\",\"x\":\"\xff\"}\n");
+        let mut two_ids = claude_bytes();
+        two_ids.extend_from_slice(b"{\"type\":\"user\",\"sessionId\":\"ANOTHER-ID\"}\n");
+        let mut no_trailing_newline = claude_bytes();
+        while no_trailing_newline.last() == Some(&b'\n') {
+            no_trailing_newline.pop();
+        }
+        let mut codex_not_json = codex_bytes();
+        codex_not_json.extend_from_slice(b"\n{oops\n");
+        let cases: Vec<(&str, AnalyticsSource, Vec<u8>)> = vec![
+            ("claude", AnalyticsSource::ClaudeCode, claude_bytes()),
+            (
+                "claude crlf",
+                AnalyticsSource::ClaudeCode,
+                crlf(claude_bytes()),
+            ),
+            (
+                "claude blank",
+                AnalyticsSource::ClaudeCode,
+                with_blank_lines(claude_bytes()),
+            ),
+            (
+                "claude no newline",
+                AnalyticsSource::ClaudeCode,
+                no_trailing_newline,
+            ),
+            ("claude not json", AnalyticsSource::ClaudeCode, not_json),
+            ("claude not utf8", AnalyticsSource::ClaudeCode, not_utf8),
+            ("claude two ids", AnalyticsSource::ClaudeCode, two_ids),
+            ("claude empty", AnalyticsSource::ClaudeCode, Vec::new()),
+            (
+                "claude agent",
+                AnalyticsSource::ClaudeCode,
+                fixture("claude-task-attribution/agent-alpha.jsonl"),
+            ),
+            (
+                "claude large",
+                AnalyticsSource::ClaudeCode,
+                large_claude_bytes(40, 64),
+            ),
+            ("codex", AnalyticsSource::Codex, codex_bytes()),
+            ("codex crlf", AnalyticsSource::Codex, crlf(codex_bytes())),
+            (
+                "codex blank",
+                AnalyticsSource::Codex,
+                with_blank_lines(codex_bytes()),
+            ),
+            ("codex not json", AnalyticsSource::Codex, codex_not_json),
+            ("codex as claude", AnalyticsSource::Codex, claude_bytes()),
+            (
+                "codex release",
+                AnalyticsSource::Codex,
+                fixture("codex-task-attribution/codex-release-0.154.0-tool-reasoning.jsonl"),
+            ),
+            (
+                "codex alpha",
+                AnalyticsSource::Codex,
+                fixture("codex-task-attribution/codex-alpha-direct.jsonl"),
+            ),
+        ];
+        let mut known = 0;
+        for (name, source, bytes) in cases {
+            let adapter = match source {
+                AnalyticsSource::ClaudeCode => SOURCE_CLAUDE_CODE,
+                AnalyticsSource::Codex => SOURCE_CODEX,
+            };
+            let path = f.write(&format!("{}.jsonl", name.replace(' ', "-")), &bytes);
+            for members in [0, 2] {
+                let mut c = candidate(adapter, &path);
+                c.group_member_count = members;
+                let streamed = read_body(source, &c, &key);
+                assert_eq!(
+                    streamed,
+                    read_whole(source, &bytes, members, &key, adapter),
+                    "{name}"
+                );
+                known += usize::from(!matches!(streamed.body, RowBody::Unknown { .. }));
+            }
+        }
+        // The cases exercise both outcomes, not only unknown.
+        assert!(known >= 16, "{known}");
+    }
+
+    /// A Claude Code file just over the per-poll byte budget: blank lines,
+    /// which every extractor passes over.
+    fn over_the_budget(f: &Fixture, name: &str) -> PathBuf {
+        let line = [vec![b' '; 1024 * 1024 - 1], vec![b'\n']].concat();
+        let lines = (COUNTER_PASS_MAX_BYTES_PER_TICK / (1024 * 1024) + 1) as usize;
+        let path = f.write(name, &line.repeat(lines));
+        assert!(std::fs::metadata(&path).unwrap().len() > COUNTER_PASS_MAX_BYTES_PER_TICK);
+        path
+    }
+
+    #[test]
+    fn a_file_over_the_byte_budget_is_read_alone_and_never_starved() {
+        let f = Fixture::new();
+        let big = over_the_budget(&f, "big.jsonl");
+        let small = f.write("small.jsonl", &claude_bytes());
+        // Newest first: the big file is the poll's first read, and alone.
+        let mut newest = candidate(SOURCE_CLAUDE_CODE, &big);
+        newest.modified_at = written();
+        let mut older = candidate(SOURCE_CLAUDE_CODE, &small);
+        older.modified_at = written() - Duration::minutes(1);
+        let first = f.run(&[newest.clone(), older.clone()]);
+        assert_eq!((first.read, first.deferred), (1, 1));
+        let second = f.run(&[newest, older]);
+        assert_eq!((second.read, second.deferred), (1, 0));
+
+        // Behind a smaller file it waits one poll, then is the first read.
+        let f = Fixture::new();
+        let big = over_the_budget(&f, "big.jsonl");
+        let small = f.write("small.jsonl", &claude_bytes());
+        let mut older = candidate(SOURCE_CLAUDE_CODE, &big);
+        older.modified_at = written() - Duration::minutes(1);
+        let newest = candidate(SOURCE_CLAUDE_CODE, &small);
+        let first = f.run(&[newest.clone(), older.clone()]);
+        assert_eq!((first.read, first.deferred), (1, 1));
+        let second = f.run(&[newest, older]);
+        assert_eq!((second.read, second.deferred), (1, 0));
+    }
+
+    /// Rewrite every stored row as the whole-file read left a file it
+    /// skipped for its size: unknown, no usage counters, undated, and
+    /// without the `streamed` mark.
+    fn as_skipped_by_the_whole_file_read(f: &Fixture) {
+        let mut value: serde_json::Value = serde_json::from_str(&f.rows_text()).unwrap();
+        for row in value["rows"].as_object_mut().unwrap().values_mut() {
+            let row = row.as_object_mut().unwrap();
+            assert_eq!(row.remove("streamed"), Some(serde_json::json!(true)));
+            row.insert(
+                "body".into(),
+                serde_json::json!({"kind": "unknown", "source": "claude_code", "reason": "no_usage_counters"}),
+            );
+            for field in [
+                "first_event_at",
+                "earliest_event_at",
+                "latest_event_at",
+                "harness_session",
+            ] {
+                row.insert(field.into(), serde_json::Value::Null);
+            }
+        }
+        f.write(COUNTER_ROWS_FILE, value.to_string().as_bytes());
+    }
+
+    #[test]
+    fn a_large_session_stored_unknown_before_streaming_is_read_once_more() {
+        let f = Fixture::new();
+        let path = f.write("large.jsonl", &large_claude_bytes(1_100, 16 * 1024));
+        let session = candidate(SOURCE_CLAUDE_CODE, &path);
+        assert_eq!(f.run(std::slice::from_ref(&session)).read, 1);
+        as_skipped_by_the_whole_file_read(&f);
+        let restarted = f.reopened();
+        let before = restarted.sessions_value(true, &NeverFolders::NONE, &[], 10);
+        assert_eq!(before["sessions"][0]["started_at"], serde_json::Value::Null);
+
+        // The file is unchanged, and still read again, once.
+        assert_eq!(
+            run_with(&restarted, std::slice::from_ref(&session), &[], false).read,
+            1
+        );
+        let after = restarted.sessions_value(true, &NeverFolders::NONE, &[], 10);
+        assert_eq!(
+            after["sessions"][0]["started_at"], "2026-09-14T09:00:00+00:00",
+            "{after}"
+        );
+        assert_ne!(after["sessions"][0]["turns"], serde_json::Value::Null);
+        assert_eq!(
+            run_with(&restarted, std::slice::from_ref(&session), &[], false).read,
+            0,
+            "not read a third time"
+        );
+    }
+
+    #[test]
+    fn a_session_still_unknown_when_streamed_is_not_read_on_every_poll() {
+        let f = Fixture::new();
+        let mut bytes = claude_bytes();
+        bytes.extend_from_slice(b"not json\n");
+        let path = f.write("bad.jsonl", &bytes);
+        let session = candidate(SOURCE_CLAUDE_CODE, &path);
+        assert_eq!(f.run(std::slice::from_ref(&session)).read, 1);
+        assert_eq!(
+            f.run(std::slice::from_ref(&session)).read,
+            0,
+            "a streamed unknown row is current"
+        );
+        as_skipped_by_the_whole_file_read(&f);
+        let restarted = f.reopened();
+        assert_eq!(
+            run_with(&restarted, std::slice::from_ref(&session), &[], false).read,
+            1,
+            "read once more"
+        );
+        assert!(stored_rows(&restarted).iter().all(|row| row.streamed
+            && matches!(
+                row.body,
+                RowBody::Unknown {
+                    reason: UnknownReason::NoUsageCounters,
+                    ..
+                }
+            )));
+        assert_eq!(
+            run_with(&restarted, std::slice::from_ref(&session), &[], false).read,
+            0,
+            "and only once"
+        );
     }
 
     #[test]
@@ -2022,8 +2522,8 @@ mod tests {
         let path = f.write("s.jsonl", &claude_bytes());
         let mut group = candidate(SOURCE_CLAUDE_CODE, &path);
         group.group_member_count = 2;
-        // The group is over the per-session bound; the file read is not.
-        group.size_bytes = COUNTER_PASS_MAX_SESSION_BYTES + 1;
+        // The group is over the old whole-file bound; the file read is not.
+        group.size_bytes = 16 * 1024 * 1024 + 1;
         f.run(&[group]);
         let value = f.week(&[]);
         assert_eq!(value["rollup"]["coverage"]["unknown"], 0);
@@ -2034,12 +2534,6 @@ mod tests {
     fn the_byte_budget_is_charged_by_the_file_read_not_the_group() {
         const SESSIONS: usize = 5;
         const { assert!(COUNTER_PASS_MAX_READS_PER_TICK >= SESSIONS) };
-        const {
-            assert!(
-                COUNTER_PASS_MAX_SESSION_BYTES * (SESSIONS as u64 - 1)
-                    >= COUNTER_PASS_MAX_BYTES_PER_TICK
-            )
-        };
         let f = Fixture::new();
         let candidates: Vec<CounterCandidate> = (0..SESSIONS)
             .map(|i| {
@@ -2097,6 +2591,7 @@ mod tests {
                     earliest_event_at: None,
                     latest_event_at: None,
                     event_span_read: true,
+                    streamed: true,
                 },
             );
         }

@@ -373,22 +373,41 @@ pub fn extract_codex_usage_evidence(bytes: &[u8]) -> Result<PersistedUsageEviden
         bail!("insights_usage_evidence_source_too_large");
     }
     let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
-    let mut candidate_records = 0u64;
-    let mut complete_records = 0u64;
-    let mut duplicate_records = 0u64;
-    let mut candidates: Vec<Candidate> = Vec::new();
-    let mut declarations = Vec::new();
-    let mut session: Option<String> = None;
-    let mut session_invalid = false;
-    let mut multiple_sessions = false;
-    let mut aggregate_problem = None;
-
+    let mut scan = CodexUsageScan::default();
     for (offset, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
         let index = u64::try_from(offset + 1).map_err(|_| invalid())?;
         let row: Value = serde_json::from_str(line).map_err(|_| invalid())?;
+        scan.observe(index, &row)?;
+    }
+    scan.finish(format!("{:x}", Sha256::digest(bytes)))
+}
+
+/// [`extract_codex_usage_evidence`] one parsed record at a time, for a
+/// reader that streams a transcript instead of holding it. The caller skips
+/// blank lines, gives each record its one-based physical line number (blank
+/// lines counted), fails the scan on a line that is not UTF-8 JSON, and
+/// passes the SHA-256 of every byte read to [`Self::finish`]. No size bound:
+/// that is the caller's.
+#[derive(Default)]
+pub struct CodexUsageScan {
+    candidate_records: u64,
+    complete_records: u64,
+    duplicate_records: u64,
+    candidates: Vec<Candidate>,
+    declarations: Vec<Declaration>,
+    session: Option<String>,
+    session_invalid: bool,
+    multiple_sessions: bool,
+    aggregate_problem: Option<AggregateUnavailableReason>,
+}
+
+impl CodexUsageScan {
+    /// The record on physical line `index`. Fails with a fixed label on a
+    /// record that is not an object.
+    pub fn observe(&mut self, index: u64, row: &Value) -> Result<()> {
         let object = row.as_object().ok_or_else(invalid)?;
         let kind = object.get("type").and_then(Value::as_str);
         let payload = object.get("payload").filter(|value| value.is_object());
@@ -397,17 +416,22 @@ pub fn extract_codex_usage_evidence(bytes: &[u8]) -> Result<PersistedUsageEviden
                 .and_then(|payload| payload.get("id").and_then(Value::as_str))
                 .filter(|id| !id.is_empty() && id.len() <= 256)
             {
-                Some(id) if session.as_deref().is_none_or(|previous| previous == id) => {
-                    session = Some(id.to_owned())
+                Some(id)
+                    if self
+                        .session
+                        .as_deref()
+                        .is_none_or(|previous| previous == id) =>
+                {
+                    self.session = Some(id.to_owned())
                 }
-                Some(_) => multiple_sessions = true,
-                None => session_invalid = true,
+                Some(_) => self.multiple_sessions = true,
+                None => self.session_invalid = true,
             }
         }
         // Codex session metadata identifies the provider but does not declare a
         // model. The persisted turn context is the authoritative model scope.
         if kind == Some("turn_context") {
-            declarations.push(
+            self.declarations.push(
                 match payload
                     .and_then(|payload| payload.get("model"))
                     .and_then(Value::as_str)
@@ -418,28 +442,30 @@ pub fn extract_codex_usage_evidence(bytes: &[u8]) -> Result<PersistedUsageEviden
             );
         }
         if kind != Some("event_msg") {
-            continue;
+            return Ok(());
         }
         let Some(payload) = payload else {
-            continue;
+            return Ok(());
         };
         if payload.get("type").and_then(Value::as_str) != Some("token_count") {
-            continue;
+            return Ok(());
         }
-        candidate_records = candidate_records.checked_add(1).ok_or_else(invalid)?;
+        self.candidate_records = self.candidate_records.checked_add(1).ok_or_else(invalid)?;
         let Some(counts) = payload
             .pointer("/info/total_token_usage")
             .and_then(codex_counts)
         else {
-            aggregate_problem.get_or_insert(AggregateUnavailableReason::IncompleteOrInvalidUsage);
-            continue;
+            self.aggregate_problem
+                .get_or_insert(AggregateUnavailableReason::IncompleteOrInvalidUsage);
+            return Ok(());
         };
-        complete_records = complete_records.checked_add(1).ok_or_else(invalid)?;
-        if let Some(previous) = candidates.last() {
+        self.complete_records = self.complete_records.checked_add(1).ok_or_else(invalid)?;
+        if let Some(previous) = self.candidates.last() {
             if subtract(&counts, &previous.counts).is_none() {
-                aggregate_problem = Some(AggregateUnavailableReason::CumulativeReset);
+                self.aggregate_problem = Some(AggregateUnavailableReason::CumulativeReset);
             } else if counts == previous.counts {
-                duplicate_records = duplicate_records.checked_add(1).ok_or_else(invalid)?;
+                self.duplicate_records =
+                    self.duplicate_records.checked_add(1).ok_or_else(invalid)?;
             }
         }
         let timestamp = object
@@ -447,76 +473,92 @@ pub fn extract_codex_usage_evidence(bytes: &[u8]) -> Result<PersistedUsageEviden
             .and_then(Value::as_str)
             .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
             .map(|value| value.with_timezone(&Utc));
-        candidates.push(Candidate {
+        self.candidates.push(Candidate {
             index,
             timestamp,
             counts,
         });
+        Ok(())
     }
 
-    if multiple_sessions {
-        aggregate_problem = Some(AggregateUnavailableReason::MultipleSessions);
-    } else if session_invalid || session.is_none() {
-        aggregate_problem = Some(AggregateUnavailableReason::MissingOrInvalidSession);
-    }
-    if candidate_records == 0 {
-        aggregate_problem = Some(AggregateUnavailableReason::NoUsage);
-    } else if complete_records != candidate_records && aggregate_problem.is_none() {
-        aggregate_problem = Some(AggregateUnavailableReason::IncompleteOrInvalidUsage);
-    }
-    let aggregate_counts = aggregate_problem
-        .is_none()
-        .then(|| candidates.last().map(|value| value.counts.clone()))
-        .flatten();
+    /// The evidence, bound to `source_digest`, the lowercase hex SHA-256 of
+    /// every byte the records were read from.
+    pub fn finish(self, source_digest: String) -> Result<PersistedUsageEvidence> {
+        let Self {
+            candidate_records,
+            complete_records,
+            duplicate_records,
+            candidates,
+            declarations,
+            session,
+            session_invalid,
+            multiple_sessions,
+            mut aggregate_problem,
+        } = self;
+        if multiple_sessions {
+            aggregate_problem = Some(AggregateUnavailableReason::MultipleSessions);
+        } else if session_invalid || session.is_none() {
+            aggregate_problem = Some(AggregateUnavailableReason::MissingOrInvalidSession);
+        }
+        if candidate_records == 0 {
+            aggregate_problem = Some(AggregateUnavailableReason::NoUsage);
+        } else if complete_records != candidate_records && aggregate_problem.is_none() {
+            aggregate_problem = Some(AggregateUnavailableReason::IncompleteOrInvalidUsage);
+        }
+        let aggregate_counts = aggregate_problem
+            .is_none()
+            .then(|| candidates.last().map(|value| value.counts.clone()))
+            .flatten();
 
-    let (mut interval, mut interval_unavailable_reason) =
-        interval(&candidates, aggregate_counts.as_ref());
-    let mut model_attribution = attribution(&declarations, interval.as_ref());
-    if interval
-        .as_ref()
-        .is_some_and(|value| value.baseline.record_index == value.final_snapshot.record_index)
-        && !matches!(
-            model_attribution,
-            UsageModelAttribution::SingleDeclaredModel { .. }
-        )
-    {
-        interval = None;
-        interval_unavailable_reason = Some(IntervalUnavailableReason::InsufficientBaseline);
-        model_attribution = attribution(&declarations, None);
+        let (mut interval, mut interval_unavailable_reason) =
+            interval(&candidates, aggregate_counts.as_ref());
+        let mut model_attribution = attribution(&declarations, interval.as_ref());
+        if interval
+            .as_ref()
+            .is_some_and(|value| value.baseline.record_index == value.final_snapshot.record_index)
+            && !matches!(
+                model_attribution,
+                UsageModelAttribution::SingleDeclaredModel { .. }
+            )
+        {
+            interval = None;
+            interval_unavailable_reason = Some(IntervalUnavailableReason::InsufficientBaseline);
+            model_attribution = attribution(&declarations, None);
+        }
+        let refs = candidates
+            .iter()
+            .take(MAX_USAGE_RECORD_REFS)
+            .map(|value| UsageRecordRef {
+                record_index: value.index,
+            })
+            .collect::<Vec<_>>();
+        let omitted_record_refs = complete_records
+            .checked_sub(u64::try_from(refs.len()).map_err(|_| invalid())?)
+            .ok_or_else(invalid)?;
+        let evidence = PersistedUsageEvidence {
+            schema_version: USAGE_EVIDENCE_SCHEMA_VERSION,
+            source: UsageSource::Codex,
+            scope: UsageEvidenceScope::ExactSourceFile,
+            source_format: SourceFormat::Codex,
+            source_digest,
+            coordinates: UsageRecordCoordinates::JsonlPhysicalLinesOneBased,
+            candidate_records,
+            complete_records,
+            incomplete_records: candidate_records
+                .checked_sub(complete_records)
+                .ok_or_else(invalid)?,
+            duplicate_records,
+            record_refs: refs,
+            omitted_record_refs,
+            aggregate_counts,
+            aggregate_unavailable_reason: aggregate_problem,
+            interval,
+            interval_unavailable_reason,
+            attribution: model_attribution,
+        };
+        evidence.validate()?;
+        Ok(evidence)
     }
-    let refs = candidates
-        .iter()
-        .take(MAX_USAGE_RECORD_REFS)
-        .map(|value| UsageRecordRef {
-            record_index: value.index,
-        })
-        .collect::<Vec<_>>();
-    let omitted_record_refs = complete_records
-        .checked_sub(u64::try_from(refs.len()).map_err(|_| invalid())?)
-        .ok_or_else(invalid)?;
-    let evidence = PersistedUsageEvidence {
-        schema_version: USAGE_EVIDENCE_SCHEMA_VERSION,
-        source: UsageSource::Codex,
-        scope: UsageEvidenceScope::ExactSourceFile,
-        source_format: SourceFormat::Codex,
-        source_digest: format!("{:x}", Sha256::digest(bytes)),
-        coordinates: UsageRecordCoordinates::JsonlPhysicalLinesOneBased,
-        candidate_records,
-        complete_records,
-        incomplete_records: candidate_records
-            .checked_sub(complete_records)
-            .ok_or_else(invalid)?,
-        duplicate_records,
-        record_refs: refs,
-        omitted_record_refs,
-        aggregate_counts,
-        aggregate_unavailable_reason: aggregate_problem,
-        interval,
-        interval_unavailable_reason,
-        attribution: model_attribution,
-    };
-    evidence.validate()?;
-    Ok(evidence)
 }
 
 /// Extract persisted evidence from one already-selected Claude Code JSONL

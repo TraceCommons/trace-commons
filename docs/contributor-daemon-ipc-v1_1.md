@@ -4467,15 +4467,20 @@ Claude Code and Codex sessions it discovered to the pass, which reads a
 session only once it has been quiet for `quiescence_secs`, only when its size
 or last write changed since its row was made, and at most 16 files and 64 MB
 per poll, newest first, so a first pass over a large corpus catches up across
-polls. It is not tied to whether a session was offered, sent, kept or
+polls. The first file a poll reads is always read, so a file over 64 MB is
+read alone in one poll rather than never. It is not tied to whether a session was offered, sent, kept or
 declined. A session in a folder that is Never, by its own rule or a global
 Never contribution override (every folder while one is in force), is not
 read, and rows already stored for one are dropped by the next pass and left
 out of every answer at once. Claude Code rows are per turn; Codex rows are the change
 between the first and last counter only (owner decision D11, open). A Claude
 Code session with delegated transcripts is counted from its main file and
-marked `truncated` (partial coverage), never as complete. A file over 16 MB,
-or one that cannot be read, is stored as unknown, never as zero.
+marked `truncated` (partial coverage), never as complete. Each file is read
+line by line, never held whole, so no file is skipped for its size. A file
+with one line over 16 MB, or one that cannot be read, is stored as unknown,
+never as zero. A row stored as unknown with no usage counters by a daemon
+that skipped files over 16 MB is read once more after the upgrade, even when
+its file is unchanged.
 
 **The store.** One file in the daemon directory, capped at 2048 sessions,
 131072 turns and 131072 tool calls (oldest last write first), and limited to
@@ -4620,7 +4625,8 @@ sessions on disk. Otherwise:
   `undated`, `reimport_overlap`, `not_routed`, `stale` (unknown). An unknown
   session contributes no figure and is never counted as zero.
 - `comparable` is whether this week may be compared at all: at least five
-  sessions with at least 80% of them known. When it is false, `unavailable`
+  sessions with at least 80% of them counted, known or partial. Only unknown
+  sessions count against it. When it is false, `unavailable`
   says why (`below_coverage_floor`).
 - `change_vs_last_week` is one entry per source present this week, in the
   same order: `permille` is (this - last) / last per mille, rounded half away
