@@ -4483,8 +4483,12 @@ It is not tied to whether a session was offered, sent, kept or
 declined. A session in a folder that is Never, by its own rule or a global
 Never contribution override (every folder while one is in force), is not
 read, and rows already stored for one are dropped by the next pass and left
-out of every answer at once. Claude Code rows are per turn; Codex rows are the change
-between the first and last counter only (owner decision D11, open). A Claude
+out of every answer at once. Claude Code rows are per turn; Codex rows hold the change
+between the first and last counter, which every weekly figure reads, and a
+per-turn series beside it, which the Sessions list and drill read (owner
+decision D11, settled 2026-10-20). Each row also stores the session's facts
+(per-model counts and fixed labels, never a path, text or price) for the
+Models answers; a row made before them is read once more. A Claude
 Code session with delegated transcripts is counted from its main file and
 marked `truncated` (partial coverage), never as complete. Each file is read
 line by line, never held whole, so no file is skipped for its size, and
@@ -4839,14 +4843,15 @@ Each row is exactly
   its row is made again, so a shell lists again rather than keeping it.
 - `source` is `claude_code` or `codex`.
 - `started_at` is the earliest recorded event, RFC 3339, or `null`.
-- `turns` is the Claude Code turn count; `null` for Codex, which records no
-  per-turn series (owner decision D11, open), and for an unreadable session.
-- `tokens` is the session's tokens as its drill's header counts them: for
-  Claude Code the known turns' tokens together (uncached input, cache read,
-  cache write and output), for Codex the change between its first and last
-  token count. `null` when no counter is known, never 0.
+- `turns` is the turn count of the session's per-turn series; `null` for a
+  Codex row made before the per-turn reader (owner decision D11, settled
+  2026-10-20) and for an unreadable session.
+- `tokens` is the session's tokens as its drill's header counts them: the
+  known turns' tokens together (uncached input, cache read, cache write and
+  output), or, for a Codex row with no per-turn series, the change between
+  its first and last token count. `null` when no counter is known, never 0.
 - `sparkline` is the session's tokens per turn, folded for a row, or `null`
-  for Codex (no per-turn series) and for a session with no known turn:
+  for a Codex row with no per-turn series and for a session with no known turn:
   `{"points", "peak_tokens", "peak_turn"}`. `points` is at most 32 whole
   numbers, oldest first: one per turn when there are 32 turns or fewer;
   otherwise the turns are cut into 32 consecutive runs, as even as integer
@@ -4873,7 +4878,9 @@ computed by the same engine from the stored counters, with `feed:
 "counter_pass"` and `session_ref` echoed: the date and the span are the
 transcript's earliest and latest recorded events, by the rule a saved
 snapshot's time evidence uses, so the same bytes give the same drill. A
-Codex session has `series: null` and `series_unavailable: "not_recorded"`.
+Codex session read turn by turn draws its series as a Claude Code one does;
+one with no per-turn series (a saved snapshot, or a row made before the
+per-turn reader) has `series: null` and `series_unavailable: "not_recorded"`.
 A missing or non-string `session_ref` is `bad_params` /
 `insights-session-ref-invalid`; one that names no listed row (never stored,
 made again since, or in a Never folder) is `bad_params` /

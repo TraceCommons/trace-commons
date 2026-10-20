@@ -21,8 +21,17 @@
 //! made before a `clear` writes nothing and keeps no key.
 //!
 //! The rows are Claude per-turn rows, with the extractor saved analysis uses
-//! (`insights::turn_series`), and Codex's first-to-last observed change only
-//! (owner decision D11, open). Sessions in a folder that is Never, by its
+//! (`insights::turn_series`), and Codex's first-to-last observed change
+//! beside its per-turn series (`insights::codex_series`; owner decision D11,
+//! settled 2026-10-20). Weekly figures read Codex's observed change only;
+//! the Sessions drill and the Models answers read the series. Each row also
+//! carries the session's facts (`insights::session_facts`): per-model
+//! counts of edits, declined, undone and interrupted calls, the task shape
+//! and inferred task, active time, and fixed labels, never a path, a
+//! command, a text or a price. A row made before facts were kept, or under
+//! an older `SESSION_FACTS_VERSION`, is read once more, within the per-poll
+//! budget; a row whose task rules are older is re-classified from its
+//! stored shape when answered, not read again. Sessions in a folder that is Never, by its
 //! own rule or a global Never override, are not read, and rows already
 //! stored for one are dropped (owner decision D4). A Claude session's delegated transcripts are not read; a
 //! session that has any is marked truncated, so it counts as partial
@@ -110,10 +119,13 @@ use crate::insights::analytics_constants::{
     COUNTER_PASS_EXCLUDES_NEVER_FOLDERS, COUNTER_PASS_MAX_BYTES_PER_TICK,
     COUNTER_PASS_MAX_LINE_BYTES, COUNTER_PASS_MAX_READS_PER_TICK, COUNTER_STORE_KEEP_WEEKS,
     COUNTER_STORE_MAX_SESSIONS, COUNTER_STORE_MAX_TOOL_CALLS, COUNTER_STORE_MAX_TURNS,
-    DIGEST_KEY_CUSTODY, DigestKeyCustody,
+    DIGEST_KEY_CUSTODY, DigestKeyCustody, SESSION_FACTS_VERSION,
 };
+use crate::insights::codex_series::{CodexTurnSeriesEvidence, CodexTurnSeriesScan};
 use crate::insights::goals::WeekFigures;
+use crate::insights::session_facts::{ClaudeFactsScan, SessionFacts};
 use crate::insights::session_identity::HarnessSessionScan;
+use crate::insights::task_classifier::reclassify;
 use crate::insights::time_evidence::RecordedTimeScan;
 use crate::insights::turn_series::ClaudeTurnSeriesScan;
 use crate::insights::usage::NativeTokenCounts;
@@ -173,6 +185,11 @@ enum RowBody {
     },
     Codex {
         observed: Option<CodexObserved>,
+        /// The per-turn series (owner decision D11, settled 2026-10-20).
+        /// `None` when the per-turn reader could not read the transcript,
+        /// or the row was made before it ran; `observed` stands either way.
+        #[serde(default)]
+        series: Option<CodexTurnSeriesEvidence>,
     },
     Unknown {
         source: AnalyticsSource,
@@ -244,6 +261,20 @@ struct CounterRow {
     /// even when its file is unchanged. Any other row is not.
     #[serde(default)]
     streamed: bool,
+    /// The session's facts beyond its tokens: counts and fixed labels, each
+    /// model by its index into the body's declared labels. `None` when the
+    /// facts scan could not read the transcript, the row is unknown, or it
+    /// was made before facts were kept. Never a path, a text, a command or
+    /// a price.
+    #[serde(default)]
+    facts: Option<SessionFacts>,
+    /// The `SESSION_FACTS_VERSION` the row was read under, set on every row
+    /// a pass makes, `facts` or not, so a session the scan cannot read is
+    /// not read on every poll. A row under another version (`0`: made
+    /// before facts were kept) is read once more, within the per-poll
+    /// budget, even when its file is unchanged.
+    #[serde(default)]
+    facts_version: u32,
 }
 
 impl CounterRow {
@@ -265,6 +296,10 @@ impl CounterRow {
     fn turns(&self) -> usize {
         match &self.body {
             RowBody::Claude { series, .. } => series.turns.len(),
+            RowBody::Codex {
+                series: Some(evidence),
+                ..
+            } => evidence.series.turns.len(),
             _ => 0,
         }
     }
@@ -272,6 +307,10 @@ impl CounterRow {
     fn tool_calls(&self) -> usize {
         match &self.body {
             RowBody::Claude { series, .. } => series.tool_calls.len(),
+            RowBody::Codex {
+                series: Some(evidence),
+                ..
+            } => evidence.series.tool_calls.len(),
             _ => 0,
         }
     }
@@ -294,15 +333,21 @@ impl CounterRow {
                     series: series.clone(),
                     model_labels: model_labels.clone(),
                 },
-                RowBody::Codex { observed } => SessionBody::Codex {
+                RowBody::Codex { observed, series } => SessionBody::Codex {
                     observed: *observed,
-                    series: None,
+                    series: series.clone(),
                 },
                 RowBody::Unknown { source, reason } => SessionBody::Unknown {
                     source: Some(*source),
                     reason: *reason,
                 },
             },
+            // Facts read under older task rules are re-classified from
+            // their stored shape here, at answer time, not read again.
+            facts: self.facts.clone().map(|mut facts| {
+                reclassify(&mut facts);
+                facts
+            }),
         }
     }
 }
@@ -888,6 +933,7 @@ impl CounterPass {
                     && row.modified_at == candidate.modified_at
                     && row.harness_session_read
                     && row.event_span_read
+                    && row.facts_version == SESSION_FACTS_VERSION
                     && (row.streamed
                         || !matches!(
                             row.body,
@@ -956,6 +1002,8 @@ impl CounterPass {
                     latest_event_at: read.span.map(|(_, latest)| latest),
                     event_span_read: true,
                     streamed: true,
+                    facts: read.facts,
+                    facts_version: SESSION_FACTS_VERSION,
                 },
             ));
         }
@@ -1353,22 +1401,29 @@ impl CounterPass {
                     RowBody::Codex { .. } => AnalyticsSource::Codex,
                     RowBody::Unknown { source, .. } => *source,
                 };
-                let turns = match &row.body {
-                    RowBody::Claude { series, .. } => Some(series.turns.len()),
+                // The per-turn series, Claude Code's or Codex's (owner
+                // decision D11, settled); a Codex row made before the
+                // per-turn reader has none.
+                let series = match &row.body {
+                    RowBody::Claude { series, .. } => Some(series),
+                    RowBody::Codex {
+                        series: Some(evidence),
+                        ..
+                    } => Some(&evidence.series),
                     _ => None,
                 };
+                let turns = series.map(|series| series.turns.len());
                 // The row's tokens as the drill's header counts them, and
-                // the sparkline over its per-turn series (Claude Code only:
-                // Codex records no per-turn series, owner decision D11).
-                let (tokens, sparkline) = match &row.body {
-                    RowBody::Claude { series, .. } => (
+                // the sparkline over its per-turn series.
+                let (tokens, sparkline) = match (&row.body, series) {
+                    (_, Some(series)) => (
                         session_sparkline::known_tokens(&series.turns),
                         session_sparkline::session_sparkline(&series.turns),
                     ),
-                    RowBody::Codex { observed } => {
+                    (RowBody::Codex { observed, .. }, None) => {
                         (observed.as_ref().map(|observed| observed.total), None)
                     }
-                    RowBody::Unknown { .. } => (None, None),
+                    _ => (None, None),
                 };
                 serde_json::json!({
                     "session_ref": row.reference(),
@@ -1723,11 +1778,18 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
             harness_session: None,
             first_event_at: None,
             span: None,
+            facts: None,
         };
     };
+    let mut facts = scanned.facts;
     let body = match scanned.body {
         ScannedBody::Claude(Some(evidence)) => {
             let mut series = evidence.series;
+            // A cap the series hit, told apart from the delegated mark
+            // below, which sets `truncated` too.
+            if let Some(facts) = facts.as_mut() {
+                facts.capped |= series.truncated;
+            }
             // Delegated transcripts are not read: partial, never complete.
             if candidate.group_member_count > 0 {
                 series.truncated = true;
@@ -1737,16 +1799,31 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
                 series,
             }
         }
-        ScannedBody::Codex(Some(evidence)) => RowBody::Codex {
-            observed: codex_observed(&evidence),
-        },
-        ScannedBody::Claude(None) | ScannedBody::Codex(None) => RowBody::Unknown {
-            source,
-            reason: UnknownReason::NoUsageCounters,
-        },
+        ScannedBody::Codex(Some(evidence), series) => {
+            if let (Some(facts), Some(series)) = (facts.as_mut(), series.as_ref()) {
+                facts.capped |= series.series.truncated;
+            }
+            RowBody::Codex {
+                observed: codex_observed(&evidence),
+                series,
+            }
+        }
+        ScannedBody::Claude(None) | ScannedBody::Codex(None, _) => {
+            // An unknown row keeps no facts: there are no counters for
+            // them to sit beside.
+            facts = None;
+            RowBody::Unknown {
+                source,
+                reason: UnknownReason::NoUsageCounters,
+            }
+        }
     };
+    if let Some(facts) = facts.as_mut() {
+        facts.delegated_unread = candidate.group_member_count > 0;
+    }
     ReadBody {
         body,
+        facts,
         harness_session: scanned
             .harness_session_id
             .map(|id| harness_session_digest(key, candidate.source, &id)),
@@ -1756,18 +1833,23 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
 }
 
 /// What one read of a session file yields.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ReadBody {
     body: RowBody,
     harness_session: Option<KeyedDigest>,
     first_event_at: Option<DateTime<Utc>>,
     /// The earliest and latest recorded event.
     span: Option<(DateTime<Utc>, DateTime<Utc>)>,
+    /// The session's facts; `None` when they could not be read or the body
+    /// is unknown.
+    facts: Option<SessionFacts>,
 }
 
 /// The extractors' results for one transcript, from one pass over its lines.
 struct ScannedSession {
     body: ScannedBody,
+    /// The facts scan's result, beside the counters; `None` when it failed.
+    facts: Option<SessionFacts>,
     /// The one session ID the transcript records, raw, for the caller to
     /// digest at once; `None` when it records none or more than one.
     harness_session_id: Option<String>,
@@ -1776,15 +1858,22 @@ struct ScannedSession {
 }
 
 /// The source's counter evidence; `None` when the transcript does not parse.
+/// Codex's per-turn series beside it is `None` on its own when only the
+/// per-turn reader failed.
 enum ScannedBody {
     Claude(Option<crate::insights::turn_series::ClaudeTurnSeriesEvidence>),
-    Codex(Option<Box<PersistedUsageEvidence>>),
+    Codex(
+        Option<Box<PersistedUsageEvidence>>,
+        Option<CodexTurnSeriesEvidence>,
+    ),
 }
 
 /// One pass over a transcript, line by line, feeding every extractor the
 /// counter pass uses: the source's counters
 /// (`insights::turn_series` for Claude Code, `insights::usage_evidence` for
-/// Codex), the harness session ID (`insights::session_identity`), the first
+/// Codex), the session facts beside them (`insights::session_facts` for
+/// Claude Code, `insights::codex_series`, which also yields Codex's
+/// per-turn series), the harness session ID (`insights::session_identity`), the first
 /// event's time (the first record carrying a valid top-level `timestamp`,
 /// the rule the Claude Code and Codex sources date a transcript by; lines
 /// that are not JSON are passed over) and the recorded span
@@ -1815,6 +1904,12 @@ fn scan_session(
     let mut claude =
         (source == AnalyticsSource::ClaudeCode).then(|| ClaudeTurnSeriesScan::new(key));
     let mut codex = (source == AnalyticsSource::Codex).then(CodexUsageScan::default);
+    // The facts scans see the same records; one that fails leaves the facts
+    // (and Codex's per-turn series) `None` and the counters as they are.
+    let mut claude_facts =
+        (source == AnalyticsSource::ClaudeCode).then(|| ClaudeFactsScan::new(key));
+    let mut codex_series =
+        (source == AnalyticsSource::Codex).then(|| CodexTurnSeriesScan::new(key));
     let mut time = Some(RecordedTimeScan::new(format));
     let mut line: Vec<u8> = Vec::new();
     // One-based physical line number, blank lines counted.
@@ -1845,6 +1940,8 @@ fn scan_session(
             utf8 = false;
             claude = None;
             codex = None;
+            claude_facts = None;
+            codex_series = None;
             time = None;
             continue;
         };
@@ -1854,6 +1951,8 @@ fn scan_session(
         let Ok(record) = serde_json::from_str::<serde_json::Value>(text) else {
             claude = None;
             codex = None;
+            claude_facts = None;
+            codex_series = None;
             time = None;
             continue;
         };
@@ -1873,6 +1972,18 @@ fn scan_session(
         {
             codex = None;
         }
+        if claude_facts
+            .as_mut()
+            .is_some_and(|scan| scan.observe(&record).is_err())
+        {
+            claude_facts = None;
+        }
+        if codex_series
+            .as_mut()
+            .is_some_and(|scan| scan.observe(&record).is_err())
+        {
+            codex_series = None;
+        }
         if time
             .as_mut()
             .is_some_and(|scan| scan.observe(index, &record).is_err())
@@ -1881,19 +1992,34 @@ fn scan_session(
         }
     }
     let digest = format!("{:x}", hasher.finalize());
-    let body = match source {
+    let (body, facts) = match source {
         AnalyticsSource::ClaudeCode => {
-            ScannedBody::Claude(claude.and_then(|scan| scan.finish(digest.clone()).ok()))
+            let evidence = claude.and_then(|scan| scan.finish(digest.clone()).ok());
+            // The facts index the series' declared labels: none without it.
+            let facts = evidence
+                .as_ref()
+                .and_then(|evidence| claude_facts.map(|scan| scan.finish(&evidence.model_labels)));
+            (ScannedBody::Claude(evidence), facts)
         }
-        AnalyticsSource::Codex => ScannedBody::Codex(
-            codex.and_then(|scan| scan.finish(digest.clone()).ok().map(Box::new)),
-        ),
+        AnalyticsSource::Codex => {
+            let (series, facts) = codex_series
+                .and_then(|scan| scan.finish().ok())
+                .map_or((None, None), |(series, facts)| (Some(series), Some(facts)));
+            (
+                ScannedBody::Codex(
+                    codex.and_then(|scan| scan.finish(digest.clone()).ok().map(Box::new)),
+                    series,
+                ),
+                facts,
+            )
+        }
     };
     let span = time
         .and_then(|scan| scan.finish(digest).ok())
         .and_then(|evidence| Some((evidence.earliest?.recorded_at, evidence.latest?.recorded_at)));
     Some(ScannedSession {
         body,
+        facts,
         harness_session_id: identity.finish().filter(|_| utf8),
         first_event_at: first_event,
         span,
@@ -2778,6 +2904,7 @@ mod tests {
             AnalyticsSource::Codex => match extract_codex_usage_evidence(bytes) {
                 Ok(evidence) => RowBody::Codex {
                     observed: codex_observed(&evidence),
+                    series: None,
                 },
                 Err(_) => unknown,
             },
@@ -2798,7 +2925,18 @@ mod tests {
                 .map(|id| harness_session_digest(key, harness, &id)),
             first_event_at,
             span,
+            facts: None,
         }
+    }
+
+    /// `read` without what the whole-file read never made: the facts and
+    /// Codex's per-turn series, which the facts tests cover.
+    fn without_facts(mut read: ReadBody) -> ReadBody {
+        read.facts = None;
+        if let RowBody::Codex { series, .. } = &mut read.body {
+            *series = None;
+        }
+        read
     }
 
     fn fixture(relative: &str) -> Vec<u8> {
@@ -2902,7 +3040,7 @@ mod tests {
                 c.group_member_count = members;
                 let streamed = read_body(source, &c, &key);
                 assert_eq!(
-                    streamed,
+                    without_facts(streamed.clone()),
                     read_whole(source, &bytes, members, &key, adapter),
                     "{name}"
                 );
@@ -3120,13 +3258,18 @@ mod tests {
                     first_event_at: None,
                     project: KeyedDigest([9; 32]),
                     seq: u64::from(i),
-                    body: RowBody::Codex { observed: None },
+                    body: RowBody::Codex {
+                        observed: None,
+                        series: None,
+                    },
                     harness_session: None,
                     harness_session_read: true,
                     earliest_event_at: None,
                     latest_event_at: None,
                     event_span_read: true,
                     streamed: true,
+                    facts: None,
+                    facts_version: SESSION_FACTS_VERSION,
                 },
             );
         }
@@ -3178,13 +3321,18 @@ mod tests {
                     first_event_at: None,
                     project: KeyedDigest([9; 32]),
                     seq: i as u64,
-                    body: RowBody::Codex { observed: None },
+                    body: RowBody::Codex {
+                        observed: None,
+                        series: None,
+                    },
                     harness_session: None,
                     harness_session_read: true,
                     earliest_event_at: None,
                     latest_event_at: None,
                     event_span_read: true,
                     streamed: true,
+                    facts: None,
+                    facts_version: SESSION_FACTS_VERSION,
                 },
             );
         }
@@ -3266,6 +3414,8 @@ mod tests {
             latest_event_at: None,
             event_span_read: true,
             streamed: true,
+            facts: None,
+            facts_version: SESSION_FACTS_VERSION,
         }
     }
 
@@ -3300,7 +3450,10 @@ mod tests {
                 synthetic_row(
                     written() + Duration::seconds(2),
                     i as u64,
-                    RowBody::Codex { observed: None },
+                    RowBody::Codex {
+                        observed: None,
+                        series: None,
+                    },
                 ),
             );
         }
@@ -4638,5 +4791,413 @@ mod tests {
         s.dev_dry_run = true;
         let r = super::super::ipc::handle_request(&s, &call(serde_json::json!({})));
         assert_eq!(r.result.unwrap()["enabled"], false);
+    }
+
+    // Session facts and the Codex per-turn series on counter rows (Insights
+    // model answers, PR 1, Task 6).
+
+    fn facts_fixture(name: &str) -> Vec<u8> {
+        fixture(&format!("claude-session-facts/{name}.jsonl"))
+    }
+
+    fn codex_series_bytes() -> Vec<u8> {
+        fixture("codex-turn-series/session.jsonl")
+    }
+
+    /// The one stored row, which must exist.
+    fn only_row(pass: &CounterPass) -> CounterRow {
+        let rows = stored_rows(pass);
+        assert_eq!(rows.len(), 1);
+        rows.into_iter().next().unwrap()
+    }
+
+    /// Rewrite every stored row with `edit` over its JSON object.
+    fn edit_stored_rows(
+        f: &Fixture,
+        edit: impl Fn(&mut serde_json::Map<String, serde_json::Value>),
+    ) {
+        let mut value: serde_json::Value = serde_json::from_str(&f.rows_text()).unwrap();
+        for row in value["rows"].as_object_mut().unwrap().values_mut() {
+            edit(row.as_object_mut().unwrap());
+        }
+        f.write(COUNTER_ROWS_FILE, value.to_string().as_bytes());
+    }
+
+    #[test]
+    fn a_claude_row_stores_facts_and_a_codex_row_its_series() {
+        let f = Fixture::new();
+        let claude = f.write("claude.jsonl", &facts_fixture("finished"));
+        let codex = f.write("codex.jsonl", &codex_series_bytes());
+        let mut older = candidate(SOURCE_CODEX, &codex);
+        older.modified_at = written() - Duration::minutes(1);
+        assert_eq!(
+            f.run(&[candidate(SOURCE_CLAUDE_CODE, &claude), older]).read,
+            2
+        );
+        let rows = stored_rows(&f.pass);
+        assert!(
+            rows.iter()
+                .all(|row| row.facts_version == SESSION_FACTS_VERSION)
+        );
+        let claude_row = rows
+            .iter()
+            .find(|row| matches!(row.body, RowBody::Claude { .. }))
+            .unwrap();
+        let facts = claude_row.facts.as_ref().unwrap();
+        assert_eq!(facts.models.len(), 1);
+        assert_eq!(facts.models[0].edits, Some(1));
+        assert_eq!(facts.finished, Some(true));
+        let codex_row = rows
+            .iter()
+            .find(|row| matches!(row.body, RowBody::Codex { .. }))
+            .unwrap();
+        let RowBody::Codex {
+            series: Some(evidence),
+            ..
+        } = &codex_row.body
+        else {
+            panic!("no Codex series stored: {:?}", codex_row.body);
+        };
+        assert_eq!(evidence.model_labels, vec!["model-a".to_string()]);
+        assert_eq!(evidence.series.turns.len(), 3);
+        assert!(
+            evidence
+                .series
+                .turns
+                .iter()
+                .all(|turn| turn.output.is_some())
+        );
+        let codex_facts = codex_row.facts.as_ref().unwrap();
+        assert_eq!(codex_facts.models[0].edits, Some(1));
+        // The engine sees both.
+        let input = codex_row.session_input();
+        assert!(matches!(
+            input.body,
+            SessionBody::Codex {
+                series: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(input.facts.as_ref(), Some(codex_facts));
+        assert_eq!(claude_row.session_input().facts.as_ref(), Some(facts));
+    }
+
+    #[test]
+    fn a_row_without_facts_is_read_once_more_then_not_again() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &facts_fixture("finished"));
+        let session = candidate(SOURCE_CLAUDE_CODE, &path);
+        assert_eq!(f.run(std::slice::from_ref(&session)).read, 1);
+        // A row written before facts were kept: neither field.
+        edit_stored_rows(&f, |row| {
+            assert!(row.remove("facts").is_some());
+            assert!(row.remove("facts_version").is_some());
+        });
+        let restarted = f.reopened();
+        let before = only_row(&restarted);
+        assert_eq!((before.facts.as_ref(), before.facts_version), (None, 0));
+        assert_eq!(
+            run_with(&restarted, std::slice::from_ref(&session), &[], false).read,
+            1,
+            "read once more, though unchanged"
+        );
+        let after = only_row(&restarted);
+        assert_eq!(after.facts_version, SESSION_FACTS_VERSION);
+        assert_eq!(after.facts.unwrap().models[0].edits, Some(1));
+        assert_eq!(
+            run_with(&restarted, std::slice::from_ref(&session), &[], false).read,
+            0,
+            "and only once"
+        );
+    }
+
+    #[test]
+    fn a_row_with_an_old_facts_version_is_read_once_more_within_the_budget() {
+        let extra = 4;
+        let f = Fixture::new();
+        let candidates: Vec<CounterCandidate> = (0..COUNTER_PASS_MAX_READS_PER_TICK + extra)
+            .map(|i| {
+                let path = f.write(&format!("c{i}.jsonl"), &codex_series_bytes());
+                let mut c = candidate(SOURCE_CODEX, &path);
+                c.modified_at = written() - Duration::minutes(i as i64);
+                c
+            })
+            .collect();
+        assert_eq!(f.run(&candidates).read, COUNTER_PASS_MAX_READS_PER_TICK);
+        assert_eq!(f.run(&candidates).read, extra);
+        assert_eq!(f.run(&candidates).read, 0);
+        let mut store = (*f.pass.load_cached().unwrap().unwrap()).clone();
+        for row in store.rows.values_mut() {
+            row.facts_version = SESSION_FACTS_VERSION - 1;
+        }
+        f.pass.save(store).unwrap();
+        let first = f.run(&candidates);
+        assert_eq!(
+            (first.read, first.deferred),
+            (COUNTER_PASS_MAX_READS_PER_TICK, extra)
+        );
+        assert_eq!(f.run(&candidates).read, extra);
+        assert_eq!(f.run(&candidates).read, 0);
+        assert!(
+            stored_rows(&f.pass)
+                .iter()
+                .all(|row| row.facts_version == SESSION_FACTS_VERSION && row.facts.is_some())
+        );
+    }
+
+    #[test]
+    fn a_grown_session_recomputes_every_fact() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &facts_fixture("finished"));
+        assert_eq!(f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]).read, 1);
+        let before = only_row(&f.pass).facts.unwrap();
+        assert_eq!(before.finished, Some(true));
+        assert_eq!(before.models[0].edits, Some(1));
+        assert_eq!(before.models[0].interrupted, Some(0));
+
+        // A second prompt, a second edit, then an interrupt.
+        let mut grown = facts_fixture("finished");
+        for line in [
+            r#"{"type":"user","timestamp":"2026-01-05T10:00:20.000Z","message":{"role":"user","content":"PRIVATE_TEXT and the other one"},"sessionId":"fixture-session"}"#,
+            r#"{"type":"assistant","timestamp":"2026-01-05T10:00:25.000Z","message":{"id":"m3","model":"claude-model-a","role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"/work/PRIVATE_PATH/src/main.rs","old_string":"PRIVATE_TEXT c","new_string":"PRIVATE_TEXT d","replace_all":false}}],"usage":{"input_tokens":3,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"sessionId":"fixture-session"}"#,
+            r#"{"type":"user","timestamp":"2026-01-05T10:00:26.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"ok PRIVATE_TEXT","is_error":false}]},"sessionId":"fixture-session"}"#,
+            r#"{"type":"user","timestamp":"2026-01-05T10:00:27.000Z","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"sessionId":"fixture-session"}"#,
+        ] {
+            if grown.last() != Some(&b'\n') {
+                grown.push(b'\n');
+            }
+            grown.extend_from_slice(line.as_bytes());
+            grown.push(b'\n');
+        }
+        std::fs::write(&path, &grown).unwrap();
+        let mut later = candidate(SOURCE_CLAUDE_CODE, &path);
+        later.modified_at = written() + Duration::minutes(1);
+        assert_eq!(f.run(&[later]).read, 1);
+        let after = only_row(&f.pass).facts.unwrap();
+        assert_eq!(after.finished, Some(false), "a stale finished survived");
+        assert_eq!(after.models[0].edits, Some(2));
+        assert_eq!(after.models[0].interrupted, Some(1));
+        assert_eq!(after.user_turns, Some(2));
+        assert_eq!(after.shape.edited_files.source, 2);
+    }
+
+    #[test]
+    fn a_stale_classifier_version_reclassifies_without_a_read() {
+        use crate::insights::analytics_constants::CLASSIFIER_VERSION;
+        use crate::insights::session_facts::InferredTask;
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &facts_fixture("finished"));
+        let session = candidate(SOURCE_CLAUDE_CODE, &path);
+        assert_eq!(f.run(std::slice::from_ref(&session)).read, 1);
+        let current = only_row(&f.pass).facts.unwrap().task;
+        assert_ne!(current, InferredTask::Docs);
+        let mut store = (*f.pass.load_cached().unwrap().unwrap()).clone();
+        for row in store.rows.values_mut() {
+            let facts = row.facts.as_mut().unwrap();
+            facts.classifier_version = CLASSIFIER_VERSION - 1;
+            facts.task = InferredTask::Docs;
+        }
+        f.pass.save(store).unwrap();
+        assert_eq!(f.run(std::slice::from_ref(&session)).read, 0, "no read");
+        let row = only_row(&f.pass);
+        assert_eq!(row.facts.as_ref().unwrap().task, InferredTask::Docs);
+        let answered = row.session_input().facts.unwrap();
+        assert_eq!(answered.task, current, "re-classified from the shape");
+        assert_eq!(answered.classifier_version, CLASSIFIER_VERSION);
+    }
+
+    #[test]
+    fn delegated_and_capped_are_told_apart() {
+        use trace_commons_protocol::insights_usage_series::MAX_SERIES_TURNS;
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &facts_fixture("finished"));
+        let mut group = candidate(SOURCE_CLAUDE_CODE, &path);
+        group.group_member_count = 2;
+        f.run(&[group]);
+        let row = only_row(&f.pass);
+        let facts = row.facts.as_ref().unwrap();
+        assert!(facts.delegated_unread && !facts.capped, "{facts:?}");
+        assert!(matches!(&row.body, RowBody::Claude { series, .. } if series.truncated));
+
+        let f = Fixture::new();
+        let path = f.write("large.jsonl", &large_claude_bytes(MAX_SERIES_TURNS + 8, 0));
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        let facts = only_row(&f.pass).facts.unwrap();
+        assert!(facts.capped && !facts.delegated_unread, "{facts:?}");
+    }
+
+    #[test]
+    fn codex_series_turns_count_toward_the_store_caps() {
+        let f = Fixture::new();
+        let path = f.write("c.jsonl", &codex_series_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &path)]);
+        let row = only_row(&f.pass);
+        assert_eq!(row.turns(), 3);
+        assert!(row.tool_calls() > 0);
+        let store = (*f.pass.load_cached().unwrap().unwrap()).clone();
+        let mut by_turns = store.clone();
+        enforce_caps(&mut by_turns, usize::MAX, row.turns() - 1, usize::MAX);
+        assert!(by_turns.rows.is_empty());
+        let mut by_tools = store;
+        enforce_caps(&mut by_tools, usize::MAX, usize::MAX, row.tool_calls() - 1);
+        assert!(by_tools.rows.is_empty());
+    }
+
+    #[test]
+    fn a_failed_facts_scan_keeps_the_counters() {
+        let f = Fixture::new();
+        // An object without a `type`: the usage scan passes over it, the
+        // per-turn reader refuses it.
+        let mut bytes = codex_bytes();
+        bytes.extend_from_slice(b"\n{\"timestamp\":\"2026-09-14T09:02:00Z\"}\n");
+        let path = f.write("c.jsonl", &bytes);
+        let session = candidate(SOURCE_CODEX, &path);
+        assert_eq!(f.run(std::slice::from_ref(&session)).read, 1);
+        let row = only_row(&f.pass);
+        assert!(
+            matches!(
+                row.body,
+                RowBody::Codex {
+                    observed: Some(_),
+                    series: None
+                }
+            ),
+            "{:?}",
+            row.body
+        );
+        assert_eq!(row.facts, None);
+        assert_eq!(row.facts_version, SESSION_FACTS_VERSION);
+        let line = f.week(&[])["rollup"]["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|line| line["source"] == "codex")
+            .cloned()
+            .unwrap();
+        assert_eq!(line["tokens"], 80 + 30, "the counters are kept");
+        assert_eq!(f.run(std::slice::from_ref(&session)).read, 0);
+    }
+
+    #[test]
+    fn an_unknown_row_is_not_read_on_every_poll() {
+        let f = Fixture::new();
+        let mut bytes = facts_fixture("finished");
+        bytes.extend_from_slice(b"not json\n");
+        let path = f.write("bad.jsonl", &bytes);
+        let session = candidate(SOURCE_CLAUDE_CODE, &path);
+        assert_eq!(f.run(std::slice::from_ref(&session)).read, 1);
+        let row = only_row(&f.pass);
+        assert!(matches!(row.body, RowBody::Unknown { .. }));
+        assert_eq!(row.facts, None);
+        assert_eq!(row.facts_version, SESSION_FACTS_VERSION);
+        assert_eq!(f.run(std::slice::from_ref(&session)).read, 0);
+    }
+
+    #[test]
+    fn the_stored_row_holds_no_path_text_command_or_price() {
+        let f = Fixture::new();
+        let claude = f.write("PRIVATE-claude.jsonl", &facts_fixture("bug-fix"));
+        let finished = f.write("PRIVATE-finished.jsonl", &facts_fixture("finished"));
+        let codex = f.write("PRIVATE-codex.jsonl", &codex_series_bytes());
+        let candidates: Vec<CounterCandidate> = [
+            (SOURCE_CLAUDE_CODE, &claude),
+            (SOURCE_CLAUDE_CODE, &finished),
+            (SOURCE_CODEX, &codex),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (source, path))| {
+            let mut c = candidate(source, path);
+            c.modified_at = written() - Duration::minutes(i as i64);
+            c
+        })
+        .collect();
+        assert_eq!(f.run(&candidates).read, 3);
+        let rows = stored_rows(&f.pass);
+        // Not vacuous: facts and a Codex series were stored.
+        assert!(rows.iter().all(|row| row.facts.is_some()));
+        assert!(rows.iter().any(|row| matches!(
+            row.body,
+            RowBody::Codex {
+                series: Some(_),
+                ..
+            }
+        )));
+        let text = f.rows_text();
+        for forbidden in [
+            "PRIVATE",
+            "/work",
+            "lib.rs",
+            "src/",
+            ".rs\"",
+            "Process exited",
+            // The command, not the fixed tool label (`bash`, `apply_patch`).
+            "exec_command",
+            "cmd",
+            "cost",
+            "price",
+            "usd",
+            "USD",
+            f.dir.path().to_str().unwrap(),
+        ] {
+            assert!(!text.contains(forbidden), "{forbidden} stored: {text}");
+        }
+    }
+
+    #[test]
+    fn rows_without_facts_keep_todays_week_answer() {
+        let f = Fixture::new();
+        let claude = f.write("claude.jsonl", &claude_bytes());
+        let facts = f.write("facts.jsonl", &facts_fixture("finished"));
+        let codex = f.write("codex.jsonl", &codex_bytes());
+        let series = f.write("series.jsonl", &codex_series_bytes());
+        let candidates: Vec<CounterCandidate> = [
+            (SOURCE_CLAUDE_CODE, &claude),
+            (SOURCE_CLAUDE_CODE, &facts),
+            (SOURCE_CODEX, &codex),
+            (SOURCE_CODEX, &series),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (source, path))| {
+            let mut c = candidate(source, path);
+            c.modified_at = written() - Duration::minutes(i as i64);
+            c
+        })
+        .collect();
+        assert_eq!(f.run(&candidates).read, 4);
+        let answer = |pass: &CounterPass, week: Option<NaiveDate>| {
+            let mut value = pass.week_value(
+                true,
+                week,
+                utc(),
+                now(),
+                &NeverFolders::NONE,
+                WeekOptions::default(),
+            );
+            value.as_object_mut().unwrap().remove("updated_at");
+            value
+        };
+        let weeks = [Some(monday()), NaiveDate::from_ymd_opt(2026, 1, 5)];
+        let with_facts: Vec<_> = weeks
+            .iter()
+            .map(|week| answer(&f.reopened(), *week))
+            .collect();
+        // Not vacuous: facts and a series were there to strip.
+        assert!(f.rows_text().contains("\"facts\":{"));
+        edit_stored_rows(&f, |row| {
+            row.remove("facts");
+            row.remove("facts_version");
+            let body = row["body"].as_object_mut().unwrap();
+            if body["kind"] == "codex" {
+                body.remove("series");
+            }
+        });
+        assert!(!f.rows_text().contains("\"facts\""));
+        let without: Vec<_> = weeks
+            .iter()
+            .map(|week| answer(&f.reopened(), *week))
+            .collect();
+        assert_eq!(with_facts, without);
     }
 }
