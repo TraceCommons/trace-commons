@@ -1219,15 +1219,8 @@ impl CounterPass {
         Ok((key, rows))
     }
 
-    /// The `insights_sessions` answer: at most `limit` stored sessions, the
-    /// most recent ones by the time discovery knows, listed dated first
-    /// (newest first) and undated ones after, each with an opaque reference, its harness, its first
-    /// recorded event, its turns (Claude Code only) and its folder's label.
-    ///
-    /// `folders` are the project keys the daemon knows, each with the label
-    /// it shows for that folder; a row's folder digest is matched against
-    /// their digests under the counter key, here, so neither a key nor a
-    /// digest leaves this function. No match crosses as `null`.
+    /// The `insights_sessions` answer's first page, at most `limit` rows.
+    #[cfg(test)]
     pub(crate) fn sessions_value(
         &self,
         enabled: bool,
@@ -1235,11 +1228,42 @@ impl CounterPass {
         folders: &[(String, String)],
         limit: usize,
     ) -> serde_json::Value {
+        self.sessions_page_value(
+            enabled,
+            never_project_keys,
+            folders,
+            super::insights_sessions::SessionsPage {
+                before: None,
+                limit,
+            },
+        )
+    }
+
+    /// One page of the `insights_sessions` answer: the stored sessions older
+    /// by recency than the page's cursor, at most its limit, chosen and
+    /// ordered by `insights_sessions::select_page` (the most recent by the
+    /// time discovery knows, then dated first, newest first, undated after).
+    /// Each row has an opaque reference, its harness, its first recorded
+    /// event, its turns (Claude Code only), its tokens and sparkline, and its
+    /// folder's label; `next` is the cursor for the following page, `null`
+    /// at the end.
+    ///
+    /// `folders` are the project keys the daemon knows, each with the label
+    /// it shows for that folder; a row's folder digest is matched against
+    /// their digests under the counter key, here, so neither a key nor a
+    /// digest leaves this function. No match crosses as `null`.
+    pub(crate) fn sessions_page_value(
+        &self,
+        enabled: bool,
+        never_project_keys: &NeverFolders,
+        folders: &[(String, String)],
+        page: super::insights_sessions::SessionsPage,
+    ) -> serde_json::Value {
         if !enabled {
             // Owner decision D4, open: nothing is read for Insights.
             return serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS});
         }
-        let (key, mut rows) = match self.visible_rows(never_project_keys) {
+        let (key, rows) = match self.visible_rows(never_project_keys) {
             Ok(found) => found,
             Err(reason) => return unreadable_value(reason),
         };
@@ -1250,24 +1274,22 @@ impl CounterPass {
                 .collect(),
             None => BTreeMap::new(),
         };
-        // The bound chooses which rows are listed by recency alone: the
-        // first recorded event, else the time discovery placed the row,
-        // else its file's last write; ties go to the row made later. So a
-        // session placed just now is not cut by older dated ones.
-        rows.sort_by_key(|row| {
-            std::cmp::Reverse((
-                row.listed_at().or(row.placed_at).unwrap_or(row.modified_at),
-                row.seq,
-            ))
-        });
         let stored = rows.len();
-        rows.truncate(limit);
-        // Then the chosen rows are ordered dated first, newest first, with
-        // the undated ones after (the sort is stable, so they keep their
-        // recency order). An undated row never leads the list: a shell
-        // selects the first row by default, and a large file still being
-        // written would otherwise sit above every dated one.
-        rows.sort_by_key(|row| row.listed_at().is_none());
+        // Recency is the first recorded event, else the time discovery
+        // placed the row, else its file's last write; ties go to the row
+        // made later. So a session placed just now is not cut by older
+        // dated ones, and an undated row never leads a page: a large file
+        // still being written would otherwise sit above every dated one.
+        let (rows, next) = super::insights_sessions::select_page(
+            rows,
+            |row| super::insights_sessions::SessionsCursor {
+                at: row.listed_at().or(row.placed_at).unwrap_or(row.modified_at),
+                seq: row.seq,
+            },
+            |row| row.listed_at().is_some(),
+            page,
+        );
+        use crate::insights::session_sparkline;
         let sessions: Vec<serde_json::Value> = rows
             .iter()
             .map(|row| {
@@ -1280,11 +1302,26 @@ impl CounterPass {
                     RowBody::Claude { series, .. } => Some(series.turns.len()),
                     _ => None,
                 };
+                // The row's tokens as the drill's header counts them, and
+                // the sparkline over its per-turn series (Claude Code only:
+                // Codex records no per-turn series, owner decision D11).
+                let (tokens, sparkline) = match &row.body {
+                    RowBody::Claude { series, .. } => (
+                        session_sparkline::known_tokens(&series.turns),
+                        session_sparkline::session_sparkline(&series.turns),
+                    ),
+                    RowBody::Codex { observed } => {
+                        (observed.as_ref().map(|observed| observed.total), None)
+                    }
+                    RowBody::Unknown { .. } => (None, None),
+                };
                 serde_json::json!({
                     "session_ref": row.reference(),
                     "source": source,
                     "started_at": row.listed_at().map(|at| at.to_rfc3339()),
                     "turns": turns,
+                    "tokens": tokens,
+                    "sparkline": sparkline,
                     "folder": labels.get(&row.project).copied(),
                 })
             })
@@ -1295,7 +1332,8 @@ impl CounterPass {
             "readable": true,
             "updated_at": self.updated_at(),
             "sessions_stored": stored,
-            "truncated": stored > limit,
+            "truncated": next.is_some(),
+            "next": next.map(|cursor| cursor.encode()),
             "sessions": sessions,
         })
     }

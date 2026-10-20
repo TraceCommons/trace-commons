@@ -9,12 +9,16 @@
 //!
 //! # What crosses the socket
 //!
-//! `insights_sessions` lists the stored sessions newest first (a session
-//! with no recorded time after every dated one), bounded by
-//! [`WATCHED_SESSIONS_MAX`]. Each row carries an opaque reference (`t` and
-//! the order the pass made the row in: never a digest or a path), its
-//! harness, its first recorded event's time, its turn count (Claude Code
-//! only) and its folder's display label (owner decision 2026-10-20).
+//! `insights_sessions` lists the stored sessions newest first, a page at a
+//! time (owner request 2026-10-20: every session in a lazily loaded
+//! scroll): at most [`WATCHED_SESSIONS_MAX`] a page, with an opaque cursor
+//! for the next ([`select_page`] has the order). No params is the first
+//! page, as the list answered before it was paged. Each row carries an
+//! opaque reference (`t` and the order the pass made the row in: never a
+//! digest or a path), its harness, its first recorded event's time, its
+//! turn count (Claude Code only), its tokens and an integer sparkline of
+//! tokens per turn (`insights::session_sparkline`), and its folder's display
+//! label (owner decision 2026-10-20).
 //!
 //! The folder label is resolved at answer time: the row stores only a keyed
 //! digest of its folder's project key, and the daemon matches it against the
@@ -29,7 +33,7 @@
 //! same engine (`insights::session_drill`) from the stored counters, with
 //! `feed: "counter_pass"`.
 
-use chrono::{FixedOffset, Offset};
+use chrono::{DateTime, FixedOffset, Offset, Utc};
 
 use super::insights_week::{
     FEED_COUNTER_PASS, NeverFolders, UNREADABLE_POLICY, never_project_keys,
@@ -37,14 +41,136 @@ use super::insights_week::{
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, Request, Response};
 use super::policy::{UNKNOWN_PROJECT_KEY, disambiguated_label, display_path_for_key, known_keys};
 
-/// The most sessions one `insights_sessions` answer lists, newest first.
-/// `truncated` says when more are stored.
+/// The most sessions one `insights_sessions` page lists, newest first.
+/// `truncated` and `next` say when more follow.
 pub const WATCHED_SESSIONS_MAX: usize = 200;
 /// `session_ref` missing or not a string.
 pub const ERR_SESSION_REF_INVALID: &str = "insights-session-ref-invalid";
 /// No listed session has that reference: never stored, dropped since, made
 /// again under a new reference when its file grew, or in a Never folder.
 pub const ERR_SESSION_UNKNOWN: &str = "insights-session-unknown";
+
+/// `before` is not a cursor an earlier page gave.
+pub const ERR_SESSIONS_CURSOR_INVALID: &str = "insights-sessions-cursor-invalid";
+/// `limit` is not a whole number of at least 1.
+pub const ERR_SESSIONS_LIMIT_INVALID: &str = "insights-sessions-limit-invalid";
+
+/// Where one page of the list starts: the recency key of the last row the
+/// previous page listed by recency. Crosses as an opaque string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SessionsCursor {
+    pub(crate) at: DateTime<Utc>,
+    pub(crate) seq: u64,
+}
+
+impl SessionsCursor {
+    /// `p`, then seconds, nanoseconds and the row's order, each separated by
+    /// `.`: no digest, path or reference, and no long hex run.
+    pub(crate) fn encode(&self) -> String {
+        format!(
+            "p{}.{}.{}",
+            self.at.timestamp(),
+            self.at.timestamp_subsec_nanos(),
+            self.seq
+        )
+    }
+
+    pub(crate) fn decode(text: &str) -> Option<Self> {
+        let mut parts = text.strip_prefix('p')?.split('.');
+        let secs: i64 = parts.next()?.parse().ok()?;
+        let nanos_text = parts.next()?;
+        let seq: u64 = parts.next()?.parse().ok()?;
+        if parts.next().is_some() || !nanos_text.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let nanos: u32 = nanos_text.parse().ok()?;
+        if nanos >= 1_000_000_000 {
+            return None;
+        }
+        Some(Self {
+            at: DateTime::from_timestamp(secs, nanos)?,
+            seq,
+        })
+    }
+}
+
+/// One page of `insights_sessions`: rows older (by recency) than `before`,
+/// at most `limit` of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SessionsPage {
+    pub(crate) before: Option<SessionsCursor>,
+    pub(crate) limit: usize,
+}
+
+impl SessionsPage {
+    /// The first page, as `insights_sessions` with no params answers it.
+    pub(crate) const FIRST: Self = Self {
+        before: None,
+        limit: WATCHED_SESSIONS_MAX,
+    };
+}
+
+/// `before` (optional, a cursor an earlier page gave) and `limit` (optional,
+/// at least 1; above [`WATCHED_SESSIONS_MAX`] is held to it). No params is
+/// [`SessionsPage::FIRST`].
+pub(crate) fn page_params(params: &serde_json::Value) -> Result<SessionsPage, &'static str> {
+    if params.get("before").is_none() && params.get("limit").is_none() {
+        return Ok(SessionsPage::FIRST);
+    }
+    let before = match params.get("before") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(text)) => {
+            Some(SessionsCursor::decode(text).ok_or(ERR_SESSIONS_CURSOR_INVALID)?)
+        }
+        Some(_) => return Err(ERR_SESSIONS_CURSOR_INVALID),
+    };
+    let limit = match params.get("limit") {
+        None | Some(serde_json::Value::Null) => WATCHED_SESSIONS_MAX,
+        Some(value) => match value.as_u64() {
+            Some(limit) if limit >= 1 => usize::try_from(limit)
+                .map_or(WATCHED_SESSIONS_MAX, |limit| {
+                    limit.min(WATCHED_SESSIONS_MAX)
+                }),
+            _ => return Err(ERR_SESSIONS_LIMIT_INVALID),
+        },
+    };
+    Ok(SessionsPage { before, limit })
+}
+
+/// The rows one page lists, from every visible row, and the cursor for the
+/// next page (`None` at the end of the list).
+///
+/// The bound picks by recency alone, as #1498 settled: rows are taken newest
+/// first by `key` (the first recorded event, else where discovery placed
+/// the row, else its file's last write; then the order it was made), from
+/// strictly older than `before`. Only then are the taken rows ordered dated
+/// first, the undated ones after in their recency order, so within a page an
+/// undated row never leads. The next cursor is the last row taken by
+/// recency, never the last row as listed.
+pub(crate) fn select_page<T>(
+    rows: Vec<T>,
+    key: impl Fn(&T) -> SessionsCursor,
+    dated: impl Fn(&T) -> bool,
+    page: SessionsPage,
+) -> (Vec<T>, Option<SessionsCursor>) {
+    let mut keyed: Vec<(SessionsCursor, T)> = rows
+        .into_iter()
+        .map(|row| (key(&row), row))
+        .filter(|(at, _)| page.before.is_none_or(|before| *at < before))
+        .collect();
+    keyed.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    let more = keyed.len() > page.limit;
+    keyed.truncate(page.limit);
+    let next = if more {
+        keyed.last().map(|(at, _)| *at)
+    } else {
+        None
+    };
+    let mut taken: Vec<T> = keyed.into_iter().map(|(_, row)| row).collect();
+    // Stable: the undated rows keep their recency order.
+    taken.sort_by_key(|row| !dated(row));
+    (taken, next)
+}
 
 /// Whether the pass is on, and the Never folders while it is; `Err` is the
 /// answer to send instead (the folder rules could not be read).
@@ -132,6 +258,10 @@ fn tz_param(req: &Request) -> Option<FixedOffset> {
 
 /// `insights_sessions`.
 pub fn handle_sessions(shared: &DaemonShared, req: &Request) -> Response {
+    let page = match page_params(&req.params) {
+        Ok(page) => page,
+        Err(label) => return Response::err(req.id, ERR_BAD_PARAMS, label),
+    };
     let (enabled, never) = match gate(shared) {
         Ok(gate) => gate,
         Err(answer) => return Response::ok(req.id, answer),
@@ -146,7 +276,7 @@ pub fn handle_sessions(shared: &DaemonShared, req: &Request) -> Response {
         req.id,
         shared
             .insights_counter
-            .sessions_value(enabled, &never, &folders, WATCHED_SESSIONS_MAX),
+            .sessions_page_value(enabled, &never, &folders, page),
     )
 }
 
@@ -314,6 +444,18 @@ mod tests {
             )
         }
 
+        fn page(&self, before: Option<&str>, limit: usize) -> serde_json::Value {
+            self.pass.sessions_page_value(
+                true,
+                &NeverFolders::NONE,
+                &[],
+                SessionsPage {
+                    before: before.map(|text| SessionsCursor::decode(text).unwrap()),
+                    limit,
+                },
+            )
+        }
+
         fn drill(
             &self,
             reference: &str,
@@ -464,7 +606,16 @@ mod tests {
                 .collect();
             assert_eq!(
                 keys,
-                ["folder", "session_ref", "source", "started_at", "turns"].into(),
+                [
+                    "folder",
+                    "session_ref",
+                    "source",
+                    "sparkline",
+                    "started_at",
+                    "tokens",
+                    "turns"
+                ]
+                .into(),
                 "only these fields cross"
             );
         }
@@ -780,6 +931,292 @@ mod tests {
         );
     }
 
+    // Paging (owner request 2026-10-20: every session, newest first, in a
+    // lazily loaded scroll).
+
+    fn undated_bytes() -> &'static [u8] {
+        b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"PRIVATE_SUMMARY\"}}\n"
+    }
+
+    fn refs(value: &serde_json::Value) -> Vec<String> {
+        rows(value)
+            .iter()
+            .map(|row| row["session_ref"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Five dated sessions a day apart and one undated one, in one folder.
+    fn five_dated_and_one_undated(f: &Fixture) -> Vec<(&'static str, PathBuf, &'static str)> {
+        let mut files: Vec<(&'static str, PathBuf, &'static str)> = (0..5)
+            .map(|day| {
+                (
+                    SOURCE_CLAUDE_CODE,
+                    f.write(&format!("d{day}.jsonl"), &claude_bytes_shifted(day)),
+                    PROJECT,
+                )
+            })
+            .collect();
+        files.push((
+            SOURCE_CLAUDE_CODE,
+            f.write("undated.jsonl", undated_bytes()),
+            PROJECT,
+        ));
+        files
+    }
+
+    fn run_owned(f: &Fixture, files: &[(&'static str, PathBuf, &'static str)]) {
+        let borrowed: Vec<(&'static str, &Path, &str)> = files
+            .iter()
+            .map(|(source, path, project)| (*source, path.as_path(), *project))
+            .collect();
+        f.run(&borrowed);
+    }
+
+    #[test]
+    fn a_cursor_round_trips_and_garbage_is_refused() {
+        let cursor = SessionsCursor {
+            at: Utc.with_ymd_and_hms(2026, 9, 16, 9, 0, 0).unwrap() + Duration::nanoseconds(7),
+            seq: 12,
+        };
+        let text = cursor.encode();
+        assert!(text.starts_with('p'), "{text}");
+        assert_eq!(SessionsCursor::decode(&text), Some(cursor));
+        for bad in [
+            "",
+            "p",
+            "t12",
+            "p1.2",
+            "p1.2.3.4",
+            "px.0.1",
+            "p1.2000000000.3",
+            "p1.-2.3",
+        ] {
+            assert_eq!(SessionsCursor::decode(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn page_params_default_to_the_first_page_and_refuse_bad_values() {
+        assert_eq!(page_params(&serde_json::json!({})), Ok(SessionsPage::FIRST));
+        assert_eq!(
+            page_params(&serde_json::Value::Null),
+            Ok(SessionsPage::FIRST)
+        );
+        assert_eq!(
+            page_params(&serde_json::json!({"before": null, "limit": null})),
+            Ok(SessionsPage::FIRST)
+        );
+        assert_eq!(
+            page_params(&serde_json::json!({"limit": 5000})),
+            Ok(SessionsPage::FIRST),
+            "held to the bound"
+        );
+        let cursor = SessionsCursor {
+            at: Utc.with_ymd_and_hms(2026, 9, 16, 9, 0, 0).unwrap(),
+            seq: 3,
+        };
+        assert_eq!(
+            page_params(&serde_json::json!({"before": cursor.encode(), "limit": 25})),
+            Ok(SessionsPage {
+                before: Some(cursor),
+                limit: 25
+            })
+        );
+        for bad in [
+            serde_json::json!({"before": 7}),
+            serde_json::json!({"before": "t3"}),
+        ] {
+            assert_eq!(page_params(&bad), Err(ERR_SESSIONS_CURSOR_INVALID), "{bad}");
+        }
+        for bad in [
+            serde_json::json!({"limit": 0}),
+            serde_json::json!({"limit": -1}),
+            serde_json::json!({"limit": 2.5}),
+            serde_json::json!({"limit": "10"}),
+        ] {
+            assert_eq!(page_params(&bad), Err(ERR_SESSIONS_LIMIT_INVALID), "{bad}");
+        }
+    }
+
+    /// Pages of two walk every session exactly once: newest first, each
+    /// page's undated rows last, and the last page says it is the end.
+    #[test]
+    fn pages_walk_every_session_once_newest_first() {
+        let f = Fixture::new();
+        run_owned(&f, &five_dated_and_one_undated(&f));
+        let whole = f.list(&[], &[]);
+        assert_eq!(whole["next"], serde_json::Value::Null, "one page holds all");
+        let mut walked: Vec<serde_json::Value> = Vec::new();
+        let mut before: Option<String> = None;
+        let mut pages = 0;
+        loop {
+            let page = f.page(before.as_deref(), 2);
+            pages += 1;
+            assert_eq!(page["sessions_stored"], 6, "the total, never page-relative");
+            walked.extend(rows(&page));
+            match page["next"].as_str() {
+                Some(next) => {
+                    assert_eq!(page["truncated"], true);
+                    assert_nothing_identifying(&f, &page);
+                    before = Some(next.to_string());
+                }
+                None => {
+                    assert_eq!(page["truncated"], false);
+                    break;
+                }
+            }
+            assert!(pages < 10, "the walk ends");
+        }
+        assert_eq!(pages, 3);
+        let walked_refs: Vec<String> = walked
+            .iter()
+            .map(|row| row["session_ref"].as_str().unwrap().to_string())
+            .collect();
+        let unique: std::collections::BTreeSet<&String> = walked_refs.iter().collect();
+        assert_eq!(unique.len(), 6, "no duplicates: {walked_refs:?}");
+        let mut every = refs(&whole);
+        every.sort();
+        let mut seen = walked_refs.clone();
+        seen.sort();
+        assert_eq!(seen, every, "no gaps");
+        // The undated row is the most recent by its file's write, so it is
+        // in the first page, after that page's dated row.
+        let started: Vec<serde_json::Value> =
+            walked.iter().map(|row| row["started_at"].clone()).collect();
+        assert_eq!(
+            started,
+            [
+                serde_json::json!("2026-09-18T09:00:00+00:00"),
+                serde_json::Value::Null,
+                serde_json::json!("2026-09-17T09:00:00+00:00"),
+                serde_json::json!("2026-09-16T09:00:00+00:00"),
+                serde_json::json!("2026-09-15T09:00:00+00:00"),
+                serde_json::json!("2026-09-14T09:00:00+00:00"),
+            ]
+        );
+    }
+
+    /// A page's next cursor is its last row by recency, not its last row as
+    /// listed: an undated row listed last in a page must not send the next
+    /// page back to it, nor skip the dated row after it.
+    #[test]
+    fn the_cursor_follows_recency_not_the_listed_order() {
+        let f = Fixture::new();
+        run_owned(&f, &five_dated_and_one_undated(&f));
+        let first = f.page(None, 1);
+        // By recency the undated row (written 2026-09-20) leads.
+        assert_eq!(rows(&first)[0]["started_at"], serde_json::Value::Null);
+        let second = f.page(first["next"].as_str(), 2);
+        assert_eq!(
+            rows(&second)
+                .iter()
+                .map(|row| row["started_at"].clone())
+                .collect::<Vec<_>>(),
+            [
+                serde_json::json!("2026-09-18T09:00:00+00:00"),
+                serde_json::json!("2026-09-17T09:00:00+00:00"),
+            ]
+        );
+    }
+
+    /// A session stored between two page reads lists at the top on the next
+    /// first-page read; the pages already under way neither repeat a row nor
+    /// skip one.
+    #[test]
+    fn a_session_stored_between_pages_neither_repeats_nor_shifts_a_row() {
+        let f = Fixture::new();
+        let mut files = five_dated_and_one_undated(&f);
+        run_owned(&f, &files);
+        let first = f.page(None, 3);
+        let first_refs = refs(&first);
+        files.push((
+            SOURCE_CLAUDE_CODE,
+            f.write("d9.jsonl", &claude_bytes_shifted(9)),
+            PROJECT,
+        ));
+        run_owned(&f, &files);
+        let second = f.page(first["next"].as_str(), 3);
+        let second_refs = refs(&second);
+        assert_eq!(second["next"], serde_json::Value::Null);
+        assert_eq!(second_refs.len(), 3);
+        for reference in &second_refs {
+            assert!(!first_refs.contains(reference), "{reference} repeated");
+        }
+        assert_eq!(second["sessions_stored"], 7);
+        // The new one leads a fresh read.
+        assert_eq!(
+            rows(&f.page(None, 3))[0]["started_at"],
+            "2026-09-23T09:00:00+00:00"
+        );
+    }
+
+    #[test]
+    fn a_cursor_past_the_end_is_an_empty_last_page() {
+        let f = Fixture::new();
+        run_owned(&f, &five_dated_and_one_undated(&f));
+        let all = f.page(None, 6);
+        assert_eq!(
+            all["next"],
+            serde_json::Value::Null,
+            "exactly full is the end"
+        );
+        let oldest = SessionsCursor {
+            at: Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap(),
+            seq: 0,
+        };
+        let past = f.page(Some(&oldest.encode()), 6);
+        assert_eq!(rows(&past), Vec::<serde_json::Value>::new());
+        assert_eq!(past["next"], serde_json::Value::Null);
+        assert_eq!(past["truncated"], false);
+    }
+
+    /// Each row carries its tokens and a short integer sparkline: a Claude
+    /// Code row both, a Codex row its total and no sparkline (no per-turn
+    /// series is recorded), a row with no counters neither.
+    #[test]
+    fn rows_carry_tokens_and_a_bounded_sparkline() {
+        let f = Fixture::new();
+        let claude = f.write("claude.jsonl", &claude_bytes_shifted(2));
+        let codex = f.write("codex.jsonl", &codex_bytes());
+        let undated = f.write("undated.jsonl", undated_bytes());
+        f.run(&[
+            (SOURCE_CLAUDE_CODE, &claude, PROJECT),
+            (SOURCE_CODEX, &codex, PROJECT),
+            (SOURCE_CLAUDE_CODE, &undated, PROJECT),
+        ]);
+        let value = f.list(&[], &[]);
+        let listed = rows(&value);
+        let claude_row = &listed[0];
+        assert_eq!(claude_row["source"], "claude_code");
+        let points = claude_row["sparkline"]["points"].as_array().unwrap();
+        assert!(!points.is_empty());
+        assert!(points.len() <= crate::insights::session_sparkline::SPARKLINE_POINTS);
+        assert!(points.iter().all(serde_json::Value::is_u64));
+        let peak = claude_row["sparkline"]["peak_tokens"].as_u64().unwrap();
+        assert_eq!(
+            points.iter().filter_map(serde_json::Value::as_u64).max(),
+            Some(peak)
+        );
+        assert!(claude_row["sparkline"]["peak_turn"].as_u64().unwrap() >= 1);
+        // The row's tokens are the drill's header total for the same row.
+        let drill = f
+            .drill(claude_row["session_ref"].as_str().unwrap(), &[])
+            .unwrap();
+        assert_eq!(claude_row["tokens"], drill["session"]["tokens"]);
+        let codex_row = &listed[1];
+        assert_eq!(codex_row["source"], "codex");
+        assert_eq!(codex_row["sparkline"], serde_json::Value::Null);
+        let codex_drill = f
+            .drill(codex_row["session_ref"].as_str().unwrap(), &[])
+            .unwrap();
+        assert_eq!(codex_row["tokens"], codex_drill["session"]["tokens"]);
+        assert!(codex_row["tokens"].is_u64());
+        let undated_row = &listed[2];
+        assert_eq!(undated_row["tokens"], serde_json::Value::Null);
+        assert_eq!(undated_row["sparkline"], serde_json::Value::Null);
+        assert_nothing_identifying(&f, &value);
+    }
+
     // The methods, through the daemon.
 
     fn shared() -> (tempfile::TempDir, DaemonShared) {
@@ -811,6 +1248,37 @@ mod tests {
             );
             assert_eq!(r.result.unwrap()["enabled"], false, "{method}");
         }
+    }
+
+    /// A bad page param is refused whether counting is on or off; no params,
+    /// or `before: null`, is the first page as before paging existed.
+    #[test]
+    fn the_list_refuses_a_bad_page_and_takes_none() {
+        let (_dir, s) = shared();
+        for on in [false, true] {
+            s.settings.lock().unwrap().insights_counter_pass = on;
+            for (params, label) in [
+                (
+                    serde_json::json!({"before": "nope"}),
+                    ERR_SESSIONS_CURSOR_INVALID,
+                ),
+                (serde_json::json!({"limit": 0}), ERR_SESSIONS_LIMIT_INVALID),
+            ] {
+                let r = handle_sessions(&s, &call("insights_sessions", params));
+                let err = r.error.unwrap();
+                assert_eq!(err.code, ERR_BAD_PARAMS);
+                assert_eq!(err.message, label);
+            }
+            for params in [serde_json::json!({}), serde_json::json!({"before": null})] {
+                let r = handle_sessions(&s, &call("insights_sessions", params));
+                assert_eq!(r.result.unwrap()["enabled"], on);
+            }
+        }
+        let r = handle_sessions(&s, &call("insights_sessions", serde_json::json!({})));
+        let value = r.result.unwrap();
+        assert_eq!(value["readable"], true);
+        assert_eq!(value["next"], serde_json::Value::Null);
+        assert_eq!(value["truncated"], false);
     }
 
     #[test]
