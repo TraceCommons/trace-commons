@@ -1174,9 +1174,13 @@ final class InsightsSessionsModel {
     private(set) var watched: [DaemonData.InsightsWatchedSession]?
     /// The cursor for the feed's next page; `nil` at the end of the list.
     private var nextCursor: String?
-    /// The last next-page read failed: no further page is asked for until
-    /// the list is read again.
+    /// The last next-page read failed. The feed's last rows appearing again
+    /// retry once on their own after a short wait; after that only
+    /// `retry()` (the foot's control) or reading the list again asks.
     private(set) var pageFailed = false
+    /// The automatic retry has been spent for this failure.
+    private var autoRetried = false
+    private let retryBackoff: Duration
     /// Set when feed T is on but its traces could not be read, shown with
     /// the saved feed's line, as Overview shows it; `nil` when it is off or
     /// the daemon predates it.
@@ -1191,7 +1195,9 @@ final class InsightsSessionsModel {
 
     init(service: @escaping InsightsModel.Service,
          watchedReader: WatchedReader? = nil,
-         watchedDrill: WatchedDrillReader? = nil) {
+         watchedDrill: WatchedDrillReader? = nil,
+         retryBackoff: Duration = .seconds(2)) {
+        self.retryBackoff = retryBackoff
         self.service = service
         self.watchedReader = watchedReader
         self.watchedDrill = watchedDrill
@@ -1222,14 +1228,35 @@ final class InsightsSessionsModel {
     }
 
     /// Read the feed's next page, when there is one and none is being read.
-    /// The tab asks as the last rows are drawn.
+    /// The tab asks as the last rows are drawn. After a failed read, the
+    /// last rows drawn again retry once, after a short wait.
     func loadMore() {
-        guard active, watched != nil, let cursor = nextCursor, !loadingMore, !pageFailed, !listBusy,
+        if pageFailed {
+            guard !autoRetried else { return }
+            autoRetried = true
+            readNext(after: retryBackoff)
+        } else {
+            readNext(after: nil)
+        }
+    }
+
+    /// The foot's control: read the page that failed again, from the same
+    /// cursor, at once. The rows read so far are kept.
+    func retry() {
+        guard pageFailed else { return }
+        readNext(after: nil)
+    }
+
+    private func readNext(after delay: Duration?) {
+        guard active, watched != nil, let cursor = nextCursor, !loadingMore, !listBusy,
               let watchedReader else { return }
         let current = listToken
         loadingMore = true
+        pageFailed = false
         pageTask = Task { [weak self] in
+            if let delay { try? await Task.sleep(for: delay) }
             let outcome: Result<DaemonData.InsightsSessions, Error>
+            if Task.isCancelled { return }
             do { outcome = .success(try await watchedReader(cursor)) } catch { outcome = .failure(error) }
             guard let self, self.active, self.listToken == current, !Task.isCancelled else { return }
             self.loadingMore = false
@@ -1238,11 +1265,12 @@ final class InsightsSessionsModel {
                 let known = Set((self.watched ?? []).map(\.sessionRef))
                 self.watched = (self.watched ?? []) + (page.sessions ?? []).filter { !known.contains($0.sessionRef) }
                 self.nextCursor = page.next
+                self.autoRetried = false
             case .success(let page):
                 self.showSaved(notice: page.enabled)
             case .failure:
                 // The rows read so far stay; the foot says the rest could
-                // not be read.
+                // not be read and offers to try again.
                 self.pageFailed = true
             }
         }
@@ -1276,7 +1304,7 @@ final class InsightsSessionsModel {
         noticeKey = notice ? InsightsModel.FeedLineKey.counterPassUnavailable : nil
         if watched != nil {
             // A watched trace's figures never stay on the saved feed.
-            watched = nil; nextCursor = nil; pageFailed = false
+            watched = nil; nextCursor = nil; pageFailed = false; autoRetried = false
             token = UUID(); task?.cancel(); task = nil
             selected = nil; drill = nil; failed = false; drillBusy = false
         }
@@ -1298,7 +1326,7 @@ final class InsightsSessionsModel {
             case .success(let list) where list.showsCounterPass:
                 let rows = list.sessions ?? []
                 let wasWatched = self.watched != nil
-                self.watched = rows; self.nextCursor = list.next; self.pageFailed = false; self.noticeKey = nil
+                self.watched = rows; self.nextCursor = list.next; self.pageFailed = false; self.autoRetried = false; self.noticeKey = nil
                 if !wasWatched {
                     // Coming from the saved feed: no row is open until one
                     // is clicked.

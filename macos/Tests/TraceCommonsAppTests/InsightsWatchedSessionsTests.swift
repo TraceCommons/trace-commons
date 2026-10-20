@@ -22,6 +22,7 @@ final class InsightsWatchedSessionsTests: XCTestCase {
         "analytics_session_row_tokens": "{t} TOKENS",
         "analytics_sparkline_peak": "PEAK {t} AT {n}",
         "analytics_sessions_loading_more": "LOADING",
+        "analytics_sessions_retry": "RETRY",
     ]) { $1 }
 
     /// `insights_sessions` as the daemon answers it (see the daemon's
@@ -364,12 +365,118 @@ final class InsightsWatchedSessionsTests: XCTestCase {
     }
 
     @MainActor
+    private static func failingFeed(_ daemon: WatchedRecorder) -> InsightsSessionsModel {
+        InsightsSessionsModel(
+            service: { try await SavedRecorder().call($0) },
+            watchedReader: { try await daemon.list($0) },
+            watchedDrill: { try await daemon.drill($0) },
+            retryBackoff: .milliseconds(1))
+    }
+
+    private static let retryPages: [String?: String] = [
+        nil: pageJSON(first: 9, count: 3, next: "c1"),
+        "c1": pageJSON(first: 6, count: 3, next: nil),
+    ]
+
+    /// A failed page does not end paging: Try again reads the page that
+    /// failed, and the rows read so far stay.
+    @MainActor
+    func testARetryAfterAFailedPageLoadsTheNextPage() async throws {
+        let daemon = WatchedRecorder(pages: Self.retryPages)
+        await daemon.failPage("c1", times: 1)
+        let model = Self.failingFeed(daemon)
+        model.open(); model.showWatched(true)
+        await settle(model)
+        model.loadMore()
+        await settle(model)
+        XCTAssertTrue(model.pageFailed)
+        XCTAssertEqual(model.watched?.map(\.sessionRef), ["t9", "t8", "t7"], "the rows read so far stay")
+        model.retry()
+        await settle(model)
+        XCTAssertFalse(model.pageFailed)
+        XCTAssertEqual(model.watched?.map(\.sessionRef), ["t9", "t8", "t7", "t6", "t5", "t4"])
+        XCTAssertTrue(model.atEnd)
+        model.close()
+    }
+
+    /// The retry asks for the same cursor and does not read page one again.
+    @MainActor
+    func testARetryAsksForTheSameCursorNotThePageOne() async throws {
+        let daemon = WatchedRecorder(pages: Self.retryPages)
+        await daemon.failPage("c1", times: 1)
+        let model = Self.failingFeed(daemon)
+        model.open(); model.showWatched(true)
+        await settle(model)
+        model.loadMore()
+        await settle(model)
+        model.retry()
+        await settle(model)
+        let reads = await daemon.reads
+        XCTAssertEqual(reads, [nil, "c1", "c1"])
+        model.close()
+    }
+
+    /// The last row appearing again after a failure retries once on its own;
+    /// a second failure waits for the control. Nothing loops on errors.
+    @MainActor
+    func testAFailingPageIsNotRetriedInATightLoop() async throws {
+        let daemon = WatchedRecorder(pages: Self.retryPages)
+        await daemon.failPage("c1", times: 1000)
+        let model = Self.failingFeed(daemon)
+        model.open(); model.showWatched(true)
+        await settle(model)
+        model.loadMore()
+        await settle(model)
+        var reads = await daemon.reads
+        XCTAssertEqual(reads, [nil, "c1"], "a failure alone reads nothing more")
+        try? await Task.sleep(for: .milliseconds(50))
+        reads = await daemon.reads
+        XCTAssertEqual(reads, [nil, "c1"], "no retry without the last row appearing")
+
+        model.loadMore()   // the last row appears again
+        await settle(model)
+        reads = await daemon.reads
+        XCTAssertEqual(reads, [nil, "c1", "c1"], "one automatic retry")
+        XCTAssertTrue(model.pageFailed)
+
+        for _ in 0..<20 { model.loadMore() }
+        await settle(model)
+        try? await Task.sleep(for: .milliseconds(50))
+        reads = await daemon.reads
+        XCTAssertEqual(reads, [nil, "c1", "c1"], "a second failure waits for the control")
+
+        model.retry()   // the control always asks
+        await settle(model)
+        reads = await daemon.reads
+        XCTAssertEqual(reads, [nil, "c1", "c1", "c1"])
+        model.close()
+    }
+
+    /// A page read after the automatic retry succeeds gives the retry back.
+    @MainActor
+    func testAnAutomaticRetryRecoversScrolling() async throws {
+        let daemon = WatchedRecorder(pages: Self.retryPages)
+        await daemon.failPage("c1", times: 1)
+        let model = Self.failingFeed(daemon)
+        model.open(); model.showWatched(true)
+        await settle(model)
+        model.loadMore(); await settle(model)
+        XCTAssertTrue(model.pageFailed)
+        model.loadMore(); await settle(model)
+        XCTAssertFalse(model.pageFailed)
+        XCTAssertEqual(model.watched?.count, 6)
+        model.close()
+    }
+
+    @MainActor
     func testTheTabDrawsTheFeedAndTheFeedLine() throws {
         let tab = try MonitorNavigationTests.text("Views/InsightsSessionsTab.swift")
         XCTAssertTrue(tab.contains("LazyVStack"), "drawn lazily")
         XCTAssertTrue(tab.contains("InsightsSessionsWords.rowAccessibilityLabel("))
         XCTAssertTrue(tab.contains("InsightsSparkline(points:"))
         XCTAssertTrue(tab.contains("model.loadMore()"))
+        XCTAssertTrue(tab.contains("model.retry()"), "the foot offers a retry")
+        XCTAssertTrue(tab.contains("analytics_sessions_retry"))
         XCTAssertTrue(tab.contains("model.toggle("))
         XCTAssertTrue(tab.contains("InsightsSessionsWords.feedLines("))
         XCTAssertFalse(tab.contains("watchedChoices"), "no picker over watched traces")
@@ -426,12 +533,19 @@ private actor WatchedRecorder {
     var drills: [String] = []
     var reads: [String?] = []
     private var failure: DaemonDataError?
+    /// Cursors whose next read throws, and how many more times.
+    private var pageFailures: [String: Int] = [:]
+    func failPage(_ cursor: String, times: Int) { pageFailures[cursor] = times }
     init(answer: Answer = .json(InsightsWatchedSessionsTests.listJSON), pages: [String?: String] = [:]) {
         self.answer = answer; self.pages = pages
     }
     func failDrills(with error: DaemonDataError) { failure = error }
     func list(_ cursor: String?) throws -> DaemonData.InsightsSessions {
         reads.append(cursor)
+        if let cursor, let left = pageFailures[cursor], left > 0 {
+            pageFailures[cursor] = left - 1
+            throw DaemonDataError.unreachable
+        }
         if let page = pages[cursor] { return try InsightsWatchedSessionsTests.list(page) }
         switch answer {
         case .json(let json): return try InsightsWatchedSessionsTests.list(json)

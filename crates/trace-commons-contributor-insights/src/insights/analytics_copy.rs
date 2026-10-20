@@ -440,6 +440,9 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_sparkline_peak", "Peak {t} tokens at turn {n}"),
     // The row at the foot of the feed while the next page is read.
     ("analytics_sessions_loading_more", "Loading more\u{2026}"),
+    // The feed foot's button after a page could not be read; same wording as
+    // the startup retry in `health_copy`.
+    ("analytics_sessions_retry", "Try again"),
     ("analytics_turn", "Turn {n}"),
     (
         "analytics_codex_not_recorded",

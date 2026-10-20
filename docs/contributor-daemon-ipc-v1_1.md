@@ -4795,14 +4795,26 @@ recency order. So a session placed just now is not cut by a long tail of
 older dated ones, and an undated row never leads a page; undated rows list
 last **within each page**, not after every dated row of the whole list.
 
-Pages are stable while rows are added: a row stored after the first page
-was read is newer than every cursor already answered, so it lists at the top
-of the next first-page read and never repeats or shifts a row in pages
-already under way. A row made again because its file grew gets a new
-reference and sorts as newer: a client paging from an older cursor does not
-see it again, and its old reference now drills to
-`insights-session-unknown`. A client that gets that error re-reads the first
-page.
+A page never repeats a row or shifts one already answered: the cursor is a
+recency key, not a position, and a page takes only rows strictly older than
+it. Where a row stored while a client is paging appears follows its recency
+key, which is its first recorded event (not the time it was stored) when it
+has one, else the time discovery placed it, else its file's last write:
+
+- A row whose key is older than the cursor in use is taken by the page that
+  reaches that part of the list, at its place by key among the rows still to
+  come.
+- A row whose key is newer than the cursor in use is not shown to a client
+  paging onward, and the client never sees it in that run. It lists at its
+  place by key in the next read from the first page. A late-arriving row is
+  therefore not always at the top: a session discovered late whose first
+  event is old lists where that event falls.
+- A row made again because its file grew gets a new reference, so it ties
+  later than before, but a dated row keeps its start time and so its place:
+  it does not move to the top. A client that has already paged past that place
+  does not see the new row until it reads from the first page again. Its old
+  reference now drills to `insights-session-unknown`. A client that gets that
+  error re-reads the first page.
 
 Each row is exactly
 `{"session_ref", "source", "started_at", "turns", "tokens", "sparkline", "folder"}`:

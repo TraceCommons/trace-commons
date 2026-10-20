@@ -174,7 +174,7 @@ struct InsightsSessionsTab: View {
     }
 
     /// The foot of the feed: the loading row while the next page is read,
-    /// the unavailable line if it could not be, and nothing at the end.
+    /// the unavailable line and a retry control if it could not be, and nothing at the end.
     @ViewBuilder
     private func feedFoot(empty: Bool) -> some View {
         if model.loadingMore {
@@ -184,7 +184,10 @@ struct InsightsSessionsTab: View {
             }
             .accessibilityElement(children: .combine)
         } else if model.pageFailed {
-            Text(text("analytics_unavailable")).insightsError()
+            HStack(spacing: GlassTokens.Space.s3) {
+                Text(text("analytics_unavailable")).insightsError()
+                Button(text("analytics_sessions_retry")) { model.retry() }
+            }
         } else if empty {
             if model.busy { GlassSpinner() } else { Text(text("analytics_unavailable")).insightsError() }
         }
