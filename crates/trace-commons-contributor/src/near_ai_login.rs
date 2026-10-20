@@ -139,9 +139,9 @@ fn answered(response: Result<Response>) -> Option<serde_json::Value> {
     }
 }
 
-/// Sign in to NEAR AI (skipping the browser when a session is already kept)
-/// and enroll this device on the commons, then record the consent answers.
-pub(crate) fn sign_in_and_enroll(ports: Ports<'_>, consent: &Consent) -> Result<()> {
+/// Sign in to NEAR AI in the browser, skipping it when a session is
+/// already kept. `hint` is printed with the address.
+fn sign_in(ports: &mut Ports<'_>, hint: Option<&str>) -> Result<()> {
     let Ports {
         call,
         open_browser,
@@ -161,7 +161,9 @@ pub(crate) fn sign_in_and_enroll(ports: Ports<'_>, consent: &Consent) -> Result<
         };
         writeln!(out, "{OPENING}")?;
         writeln!(out, "{OPEN_FALLBACK_PREFIX} {url}")?;
-        writeln!(out, "{INVITE_HINT}")?;
+        if let Some(hint) = hint {
+            writeln!(out, "{hint}")?;
+        }
         out.flush()?;
         // Best effort: the address is already on screen.
         let _ = open_browser(url);
@@ -185,6 +187,14 @@ pub(crate) fn sign_in_and_enroll(ports: Ports<'_>, consent: &Consent) -> Result<
             }
         }
     }
+    Ok(())
+}
+
+/// Sign in to NEAR AI (skipping the browser when a session is already kept)
+/// and enroll this device on the commons, then record the consent answers.
+pub(crate) fn sign_in_and_enroll(mut ports: Ports<'_>, consent: &Consent) -> Result<()> {
+    sign_in(&mut ports, Some(INVITE_HINT))?;
+    let Ports { call, out, .. } = ports;
 
     // No commons and no account are named: the daemon enrolls against the
     // native account's commons with whatever account NEAR AI's own token
@@ -252,6 +262,46 @@ pub(crate) fn run(store: &ConfigStore, consent: &Consent) -> Result<()> {
         },
         consent,
     )
+}
+
+/// `launch` without a NEAR AI sign-in, after the person agreed to sign in.
+pub(crate) const LAUNCH_SIGN_IN_UNFINISHED: &str =
+    "Sign-in didn't finish. Run the same command to try again.";
+/// Printed once `launch` has a NEAR AI sign-in.
+pub(crate) const LAUNCH_SIGNED_IN: &str = "Signed in to NEAR AI.";
+
+/// Sign in to NEAR AI for a managed launch: the browser step of [`run`],
+/// without enrolling. Sessions run on this sign-in whether or not the
+/// device contributes.
+pub(crate) fn sign_in_for_launch(ports: Ports<'_>) -> Result<()> {
+    let mut ports = ports;
+    sign_in(&mut ports, None).map_err(|error| {
+        if error.to_string() == SIGN_IN_UNFINISHED {
+            anyhow!(LAUNCH_SIGN_IN_UNFINISHED)
+        } else {
+            error
+        }
+    })?;
+    writeln!(ports.out, "{LAUNCH_SIGNED_IN}")?;
+    Ok(())
+}
+
+/// [`sign_in_for_launch`] over the running daemon's socket. A managed
+/// launch needs the daemon, so there is no in-process fallback.
+pub(crate) fn run_for_launch(store: &ConfigStore) -> Result<()> {
+    use crate::daemon::client;
+    let mut call = |method: &str, params: serde_json::Value| -> Result<Response> {
+        client::try_call(store, method, &params)?.ok_or_else(|| anyhow!(SIGN_IN_UNFINISHED))
+    };
+    let mut open = |url: &str| crate::account_auth::try_open_browser(url);
+    let mut sleep = |d: Duration| std::thread::sleep(d);
+    let mut stdout = std::io::stdout();
+    sign_in_for_launch(Ports {
+        call: &mut call,
+        open_browser: &mut open,
+        sleep: &mut sleep,
+        out: &mut stdout,
+    })
 }
 
 #[cfg(test)]
@@ -530,6 +580,91 @@ mod tests {
         assert!(error.contains(INVITE_HINT), "{error}");
         assert!(!o.script.methods().contains(&"set_consent_scopes"));
         assert!(!o.out.contains(DONE));
+    }
+
+    /// [`sign_in_for_launch`] against a scripted daemon: its result and
+    /// output.
+    fn drive_launch(mut script: Script) -> (Result<()>, String, usize, Script) {
+        let mut out = Vec::new();
+        let mut opened = 0;
+        let result = {
+            let mut caller = |m: &str, p: Value| script.answer(m, p);
+            let mut open = |_url: &str| {
+                opened += 1;
+                true
+            };
+            let mut sleep = |_d: Duration| {};
+            sign_in_for_launch(Ports {
+                call: &mut caller,
+                open_browser: &mut open,
+                sleep: &mut sleep,
+                out: &mut out,
+            })
+        };
+        (result, String::from_utf8(out).unwrap(), opened, script)
+    }
+
+    /// A launch signs in through the browser and stops there: it does not
+    /// enroll, record consent, or offer an invite.
+    #[test]
+    fn a_launch_signs_in_without_enrolling() {
+        let script = Script::new(vec![
+            (
+                "near_ai_credential_status",
+                vec![
+                    ok(json!({"state": "absent", "session_state": "absent"})),
+                    ok(json!({"state": "present", "session_state": "present",
+                              "attempt_id": "a1", "attempt_status": "complete"})),
+                ],
+            ),
+            (
+                "near_ai_credential_start",
+                vec![ok(json!({"attempt_id": "a1", "browser_url": URL}))],
+            ),
+        ]);
+        let (result, out, opened, script) = drive_launch(script);
+        result.unwrap();
+        assert_eq!(
+            script.methods(),
+            [
+                "near_ai_credential_status",
+                "near_ai_credential_start",
+                "near_ai_credential_status"
+            ]
+        );
+        assert_eq!(opened, 1);
+        assert!(out.contains(URL), "{out}");
+        assert!(out.ends_with(&format!("{LAUNCH_SIGNED_IN}\n")), "{out}");
+        assert!(!out.contains(INVITE_HINT), "{out}");
+        // Already signed in: no browser.
+        let kept = Script::new(vec![(
+            "near_ai_credential_status",
+            vec![ok(json!({"state": "present", "session_state": "present"}))],
+        )]);
+        let (result, _, opened, _) = drive_launch(kept);
+        result.unwrap();
+        assert_eq!(opened, 0);
+    }
+
+    /// An unfinished sign-in says to run the launch again, not `login`.
+    #[test]
+    fn an_unfinished_launch_sign_in_says_to_run_it_again() {
+        let script = Script::new(vec![
+            (
+                "near_ai_credential_status",
+                vec![
+                    ok(json!({"session_state": "absent"})),
+                    ok(json!({"session_state": "absent", "attempt_status": "failed"})),
+                ],
+            ),
+            (
+                "near_ai_credential_start",
+                vec![ok(json!({"attempt_id": "a1", "browser_url": URL}))],
+            ),
+        ]);
+        let (result, out, _, _) = drive_launch(script);
+        assert_eq!(result.unwrap_err().to_string(), LAUNCH_SIGN_IN_UNFINISHED);
+        assert!(!out.contains(LAUNCH_SIGNED_IN), "{out}");
     }
 
     #[test]

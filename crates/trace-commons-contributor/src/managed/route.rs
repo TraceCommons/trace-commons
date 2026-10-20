@@ -97,6 +97,7 @@ impl ManagedRoute {
         let (models, selected_model) = loop {
             if let Some(models) = super::models::fetch(&client, base_url)
                 .await
+                .map(|models| super::models::offered(tool, models))
                 .filter(|models| !models.is_empty())
             {
                 let selected = super::models::select(tool, requested, &models)?;
@@ -268,6 +269,7 @@ mod tests {
             chat("anthropic/claude-sonnet-5"),
             chat("anthropic/claude-sonnet-5-5"),
             chat("openai/gpt-6.1-sol"),
+            chat("openai/gpt-6-sol"),
             chat("selected-model"),
         ]});
         let app = Router::new()
@@ -305,7 +307,7 @@ mod tests {
         // requested, never the first listed; the requested one otherwise.
         assert_eq!(a.default_model(), "anthropic/claude-sonnet-5-5");
         assert_eq!(b.default_model(), "selected-model");
-        assert_eq!(c.default_model(), "openai/gpt-6.1-sol");
+        assert_eq!(c.default_model(), "openai/gpt-6-sol");
         // A model NEAR AI does not list as a chat model starts nothing,
         // and says so at once rather than waiting out the sign-in check.
         for refused in ["black-forest-labs/FLUX.2-klein-4B", "no-such-model"] {
@@ -329,6 +331,7 @@ mod tests {
             "anthropic/claude-sonnet-5",
             "anthropic/claude-sonnet-5-5",
             "openai/gpt-6.1-sol",
+            "openai/gpt-6-sol",
             "selected-model",
         ];
         for (route, other) in [
@@ -350,7 +353,13 @@ mod tests {
             let config = std::fs::read_to_string(route.home.join("config.toml")).unwrap();
             assert!(!config.contains("fixture-"));
             let listed: Vec<&str> = route.models().iter().map(|m| m.id.as_str()).collect();
-            assert_eq!(listed, chat_ids);
+            // Codex's routes leave out the model NEAR AI refuses Codex.
+            let offered: Vec<&str> = chat_ids
+                .iter()
+                .copied()
+                .filter(|id| route.port() == a.port() || *id != "openai/gpt-6.1-sol")
+                .collect();
+            assert_eq!(listed, offered);
         }
         let seen = seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 9, "{seen:?}");
@@ -376,7 +385,7 @@ mod tests {
                 "openai/gpt-6.1-sol",
                 "selected-model",
                 "anthropic/claude-sonnet-5",
-                "openai/gpt-6.1-sol",
+                "openai/gpt-6-sol",
                 "deepseek-ai/DeepSeek-V3.1",
             ]
         );

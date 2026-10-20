@@ -352,20 +352,39 @@ async fn run_native(
 
 /// The daemon-hosted proxy a sign-in session runs on: its loopback port,
 /// default model and NEAR AI's chat models. Without all three, no run.
+///
+/// The models are the ones the tool is offered ([`super::models::offered`]):
+/// a daemon from before a model was hidden from a tool can still list it,
+/// and name it as the default. Such a default is replaced by the tool's
+/// default among the offered models; the proxy serves any listed model. A
+/// default the daemon did not list at all is passed on unchanged.
 fn sign_in_route(
     context: &LaunchContext,
-) -> Result<(u16, &str, &[super::models::ChatModel]), ManagedError> {
-    Ok((
-        context.route_port.ok_or(ManagedError::LaunchUnknown)?,
-        context
-            .route_model
-            .as_deref()
-            .ok_or(ManagedError::LaunchUnknown)?,
-        context
-            .route_models
-            .as_deref()
-            .ok_or(ManagedError::LaunchUnknown)?,
-    ))
+) -> Result<(u16, String, Vec<super::models::ChatModel>), ManagedError> {
+    let tool = context.session.tool;
+    let port = context.route_port.ok_or(ManagedError::LaunchUnknown)?;
+    let named = context
+        .route_model
+        .as_deref()
+        .ok_or(ManagedError::LaunchUnknown)?;
+    let listed = context
+        .route_models
+        .clone()
+        .ok_or(ManagedError::LaunchUnknown)?;
+    let hidden = listed.iter().any(|m| m.id == named);
+    let models = super::models::offered(tool, listed);
+    let hidden = hidden && !models.iter().any(|m| m.id == named);
+    // Only a listed default this tool is not offered is replaced; one the
+    // list does not hold at all is passed on, and refused there.
+    let default = if hidden {
+        super::models::default_for(tool, &models)
+            .ok_or(ManagedError::ModelUnavailable)?
+            .id
+            .clone()
+    } else {
+        named.to_owned()
+    };
+    Ok((port, default, models))
 }
 
 /// Claude Code or Codex on the NEAR AI sign-in: the daemon holds the
@@ -386,13 +405,13 @@ fn sign_in_route_command(
 ) -> Result<Option<super::codex::CatalogFile>, ManagedError> {
     let row = &context.session;
     let (port, default, models) = sign_in_route(context)?;
-    let catalog = codex_catalog_file(store, profiles, account, native, row, default, models)?;
+    let catalog = codex_catalog_file(store, profiles, account, native, row, &default, &models)?;
     near_ai_route(
         command,
         row.tool,
         port,
-        default,
-        models,
+        &default,
+        &models,
         catalog.as_ref().map(|file| file.path()),
     )?;
     if !login {
@@ -429,7 +448,7 @@ fn opencode_sign_in_command(
     context: &LaunchContext,
 ) -> Result<std::process::Command, ManagedError> {
     let (port, default, models) = sign_in_route(context)?;
-    opencode_route_command(session, port, default, models)
+    opencode_route_command(session, port, &default, &models)
 }
 
 /// OpenCode on a session's local NEAR AI proxy, the launcher's own (a
@@ -931,6 +950,49 @@ mod tests {
 
     /// Codex's catalog takes the prompt from the installed Codex's own
     /// list (`debug models --bundled`), not the basic one-line prompt.
+    #[cfg(unix)]
+    /// A daemon from before a model was hidden from Codex can still hand
+    /// the launcher one: the launcher leaves it out of the picker and,
+    /// when it is the default, starts on Codex's own default instead.
+    #[test]
+    fn a_sign_in_route_never_offers_codex_a_hidden_model() {
+        use super::sign_in_route;
+        use crate::managed::{models::ChatModel, sessions::LaunchContext};
+        let chat = |id: &str| ChatModel {
+            id: id.into(),
+            name: None,
+        };
+        let context = |tool: &str, model: &str| -> LaunchContext {
+            serde_json::from_value(json!({
+                "session": {
+                    "id": uuid::Uuid::new_v4(), "tool": tool, "connection": "near_ai_signin",
+                    "account_id": uuid::Uuid::new_v4(), "account_label": "NEAR AI",
+                    "selection_generation": 0, "project_label": "p", "cwd": "/tmp",
+                    "started_at": "2026-10-19T00:00:00Z", "state": "starting",
+                    "exit_code": null, "can_focus": false,
+                },
+                "proof": "proof",
+                "route_port": 4321,
+                "route_model": model,
+                "route_models": [chat("openai/gpt-6.1-sol"), chat("openai/gpt-6-sol"), chat("x/other")],
+            }))
+            .unwrap()
+        };
+        let (port, default, models) =
+            sign_in_route(&context("codex", "openai/gpt-6.1-sol")).unwrap();
+        assert_eq!(port, 4321);
+        assert_eq!(default, "openai/gpt-6-sol");
+        assert_eq!(models, vec![chat("openai/gpt-6-sol"), chat("x/other")]);
+        // An offered default is kept as the daemon named it.
+        let (_, default, _) = sign_in_route(&context("codex", "x/other")).unwrap();
+        assert_eq!(default, "x/other");
+        // Other tools are offered every model.
+        let (_, default, models) = sign_in_route(&context("claude", "openai/gpt-6.1-sol")).unwrap();
+        assert_eq!(default, "openai/gpt-6.1-sol");
+        assert_eq!(models.len(), 3);
+    }
+
+    // The stub Codex is a shell script made executable with Unix permissions.
     #[cfg(unix)]
     #[test]
     fn codex_catalog_file_reads_the_installed_codex_list() {
