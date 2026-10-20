@@ -1215,44 +1215,16 @@ async fn drain_approved(
                 receipt,
                 unattended_redaction,
             } => {
-                // The submission shipped; now make the attestation mark tell
-                // the truth about the receipt that did or did not come with
-                // it. Without this a hosted call whose receipt 404'd would go
-                // on reading `attested` -- the silent half of the defect, a
-                // person believing they contributed attested work that
-                // carried no proof. Only a mark that is currently `unknown`
-                // is promoted to attested; an unattested mark is never
-                // promoted, because it also answers for the marker and the
-                // bodies, which a receipt says nothing about.
-                let current = q.get(entry.entry_id).and_then(|e| e.attestation.clone());
-                if let Some(mark) =
-                    attestation_mark::writeback_after_upload(receipt, current.as_deref())
-                {
-                    q.record_attestation(entry.entry_id, mark.state, mark.reason);
-                }
-                q.set_state(entry.entry_id, queue::QueueState::Uploaded, None);
-                q.set_submission_id(entry.entry_id, submission_id);
+                settle_uploaded(
+                    shared,
+                    q,
+                    &entry,
+                    submission_id,
+                    receipt,
+                    unattended_redaction,
+                    newly_uploaded,
+                );
                 uploaded_this_pass = true;
-                // Counted here, against the project KEY, because this is the
-                // last point that still holds one -- history is label-only by
-                // design and two projects can share a final path segment. The
-                // count is what backs the arming offer; see
-                // `ProjectPolicy::arming_suggestion`.
-                //
-                // A failed save is not worth failing an upload that already
-                // succeeded: the worst outcome is that an offer arrives one
-                // contribution later than it might have.
-                //
-                // The same save records what redaction an unattended session
-                // had, which decides the armed project's disclosure (K6).
-                if newly_uploaded {
-                    let mut policy = shared.policy.lock().expect("policy lock");
-                    policy.record_contribution(&entry.project_key);
-                    if let Some(redaction) = unattended_redaction {
-                        policy.record_automatic_redaction(&entry.project_key, redaction);
-                    }
-                    let _ = policy.save(&shared.store);
-                }
             }
             uploader::UploadDecision::AlreadySubmitted { submission_id } => {
                 q.set_state(entry.entry_id, queue::QueueState::Uploaded, None);
@@ -1554,6 +1526,65 @@ async fn drain_approved(
         return Err(e);
     }
     Ok(())
+}
+
+/// The bookkeeping for one `UploadDecision::Uploaded`: the queue entry is
+/// settled, and the contribution (and an unattended session's redaction) is
+/// counted against its project in policy.
+///
+/// Takes the queue guard by value, and drops it before policy is locked.
+/// The daemon's lock order is policy before queue (see `DaemonShared`), and
+/// `handle_list_pending` and `decisions_owed_value` hold policy while they
+/// wait for the queue. Asking for policy with the queue still held was the
+/// other half of that cycle: it wedged the whole daemon, with every IPC
+/// thread queued behind the two.
+fn settle_uploaded(
+    shared: &ipc::DaemonShared,
+    mut q: std::sync::MutexGuard<'_, queue::Queue>,
+    entry: &queue::QueueEntry,
+    submission_id: uuid::Uuid,
+    receipt: crate::submit::ReceiptShipped,
+    unattended_redaction: Option<automatic_gate::SessionRedaction>,
+    newly_uploaded: bool,
+) {
+    // The submission shipped; now make the attestation mark tell
+    // the truth about the receipt that did or did not come with
+    // it. Without this a hosted call whose receipt 404'd would go
+    // on reading `attested` -- the silent half of the defect, a
+    // person believing they contributed attested work that
+    // carried no proof. Only a mark that is currently `unknown`
+    // is promoted to attested; an unattested mark is never
+    // promoted, because it also answers for the marker and the
+    // bodies, which a receipt says nothing about.
+    let current = q.get(entry.entry_id).and_then(|e| e.attestation.clone());
+    if let Some(mark) = attestation_mark::writeback_after_upload(receipt, current.as_deref()) {
+        q.record_attestation(entry.entry_id, mark.state, mark.reason);
+    }
+    q.set_state(entry.entry_id, queue::QueueState::Uploaded, None);
+    q.set_submission_id(entry.entry_id, submission_id);
+    // Released before policy is locked, never after: queue -> policy inverts
+    // the daemon's order and deadlocks against any reader holding policy.
+    drop(q);
+    // Counted here, against the project KEY, because this is the
+    // last point that still holds one -- history is label-only by
+    // design and two projects can share a final path segment. The
+    // count is what backs the arming offer; see
+    // `ProjectPolicy::arming_suggestion`.
+    //
+    // A failed save is not worth failing an upload that already
+    // succeeded: the worst outcome is that an offer arrives one
+    // contribution later than it might have.
+    //
+    // The same save records what redaction an unattended session
+    // had, which decides the armed project's disclosure (K6).
+    if newly_uploaded {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        policy.record_contribution(&entry.project_key);
+        if let Some(redaction) = unattended_redaction {
+            policy.record_automatic_redaction(&entry.project_key, redaction);
+        }
+        let _ = policy.save(&shared.store);
+    }
 }
 
 /// Set or retract `witness-saturated` from what the queue says, so the
@@ -3151,6 +3182,96 @@ mod tests {
         assert_eq!(
             history_refresh_decision(at("2026-08-08T12:00:00Z"), None, None, interval()),
             HistoryRefresh::OnInterval
+        );
+    }
+
+    /// The bookkeeping after an upload must not hold the queue while it waits
+    /// for policy. Everything else takes policy before queue
+    /// (`handle_list_pending`, `decisions_owed_value`), so a drain pass that
+    /// held the queue and then asked for policy deadlocked against them, and
+    /// every IPC thread after them queued up behind the two: no uploads, no
+    /// approvals, no Insights.
+    ///
+    /// The test holds policy, as one of those readers would, and settles an
+    /// upload on another thread. The queue has to come free while that thread
+    /// waits for policy. A bounded wait, so the old order fails here instead
+    /// of hanging the suite.
+    #[test]
+    fn settling_an_upload_never_holds_the_queue_while_waiting_for_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
+        let entry = queue::QueueEntry {
+            entry_id: uuid::Uuid::new_v4(),
+            session_hash: "sha256:lockorder".to_string(),
+            project_key: "/w/alpha".to_string(),
+            ..Default::default()
+        };
+        shared
+            .queue
+            .lock()
+            .expect("queue lock")
+            .upsert(entry.clone(), 100)
+            .unwrap();
+
+        let policy = shared.policy.lock().expect("policy lock");
+        let settling = {
+            let shared = Arc::clone(&shared);
+            let entry = entry.clone();
+            std::thread::spawn(move || {
+                let q = shared.queue.lock().expect("queue lock");
+                settle_uploaded(
+                    &shared,
+                    q,
+                    &entry,
+                    uuid::Uuid::new_v4(),
+                    crate::submit::ReceiptShipped::NoCall,
+                    None,
+                    true,
+                );
+            })
+        };
+        // Wait until the settling thread has the queue, or has been through
+        // it: either way it is past the point of taking it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut queue_came_free_while_policy_held = false;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        while std::time::Instant::now() < deadline {
+            if let Ok(q) = shared.queue.try_lock() {
+                if q.get(entry.entry_id).map(|e| e.state) == Some(queue::QueueState::Uploaded) {
+                    queue_came_free_while_policy_held = true;
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        drop(policy);
+        settling.join().expect("settling thread");
+
+        assert!(
+            queue_came_free_while_policy_held,
+            "the queue stayed locked while the upload's bookkeeping waited for policy: \
+             queue -> policy inverts the daemon's policy -> queue order"
+        );
+        assert_eq!(
+            shared
+                .queue
+                .lock()
+                .expect("queue lock")
+                .get(entry.entry_id)
+                .map(|e| e.state),
+            Some(queue::QueueState::Uploaded)
+        );
+        assert_eq!(
+            shared
+                .policy
+                .lock()
+                .expect("policy lock")
+                .contributed
+                .get("/w/alpha")
+                .copied(),
+            Some(1),
+            "the contribution is still counted, after the queue is released"
         );
     }
 
