@@ -827,7 +827,7 @@ impl<'k> ClaudeFactsScan<'k> {
 }
 
 /// Lines in an edit's text: zero for an empty string.
-fn line_count(text: &str) -> u32 {
+pub(crate) fn line_count(text: &str) -> u32 {
     u32::try_from(text.lines().count()).unwrap_or(u32::MAX)
 }
 
@@ -837,7 +837,7 @@ fn line_count(text: &str) -> u32 {
 /// redirection (`>`, `<`, `2>`, `&>`) ends a command's operands, so neither
 /// is counted as a path. Quotes group words. Zero for any other command.
 /// Only the count leaves this function.
-fn renamed_operands(command: &str) -> u32 {
+pub(crate) fn renamed_operands(command: &str) -> u32 {
     let mut total: u32 = 0;
     for words in shell_commands(command) {
         let mut words = words.iter().map(String::as_str);

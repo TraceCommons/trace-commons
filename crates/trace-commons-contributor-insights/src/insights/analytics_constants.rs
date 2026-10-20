@@ -114,10 +114,12 @@ pub const ADVICE_SHOWN: bool = false;
 /// labelled inferred from the order of tool calls. Owner decision D9, open.
 pub const EDIT_FAIL_EDIT_CARD: bool = true;
 
-/// Whether Codex `last_token_usage` is accepted as a per-turn series. While
-/// false, Codex counts only first-to-last observed deltas and its per-turn
-/// views read "not recorded". Owner decision D11, open.
-pub const CODEX_PER_TURN_SERIES: bool = false;
+/// Whether Codex `last_token_usage` is accepted as a per-turn series. Owner
+/// decision D11, settled (owner, 2026-10-20): the Codex reader keeps one turn
+/// per increase of the running token total. Two views read the series: the
+/// session drill-in and the Models answers. Weekly token figures, goals, the
+/// glance and Patterns keep reading the first-to-last observed change.
+pub const CODEX_PER_TURN_SERIES: bool = true;
 
 /// Whether Claude turns are counted once across snapshots by their keyed
 /// message digest. While false, overlapping snapshots of one harness are
@@ -344,7 +346,7 @@ mod tests {
     fn held_and_default_decisions() {
         const { assert!(!ADVICE_SHOWN) };
         const { assert!(EDIT_FAIL_EDIT_CARD) };
-        const { assert!(!CODEX_PER_TURN_SERIES) };
+        const { assert!(CODEX_PER_TURN_SERIES) };
         const { assert!(DEDUPE_TURNS_BY_MSG_KEY) };
         const { assert!(!LEDGER_MONEY_IN_INSIGHTS) };
         assert_eq!(DIGEST_KEY_CUSTODY, DigestKeyCustody::OsKeychain);

@@ -9,6 +9,7 @@ pub mod card_presentation;
 pub mod card_store;
 pub mod cards;
 pub mod claude_task_attribution;
+pub mod codex_series;
 #[cfg(test)]
 pub(crate) mod comparison_estimator;
 pub(crate) mod comparison_exact;

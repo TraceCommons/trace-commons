@@ -296,6 +296,7 @@ impl CounterRow {
                 },
                 RowBody::Codex { observed } => SessionBody::Codex {
                     observed: *observed,
+                    series: None,
                 },
                 RowBody::Unknown { source, reason } => SessionBody::Unknown {
                     source: Some(*source),
