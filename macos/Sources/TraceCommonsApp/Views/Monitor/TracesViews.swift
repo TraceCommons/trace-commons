@@ -94,6 +94,10 @@ struct TracesTreeView: View, Equatable {
     /// VoiceOver's focus, which follows the selection the arrow keys move,
     /// so a person hearing the tree hears where it went.
     @AccessibilityFocusState private var spoken: String?
+    /// VoiceOver's focus on an open row menu. The menu floats over the
+    /// stack rather than inside its row, so it is read after the rows on
+    /// screen; focus goes to it when it opens, as it went to the row.
+    @AccessibilityFocusState private var menuSpoken: Bool
     /// Whether keeping the selection on screen animates. Off only where no
     /// animation can run: a window that is never shown (the render tests).
     @Environment(\.tracesScrollAnimates) private var scrollAnimates
@@ -296,6 +300,10 @@ struct TracesTreeView: View, Equatable {
             }
         }
         .scrollIndicators(.never)
+        .onChange(of: folderMenu ?? submitMenu ?? sessionMenu) { _, open in
+            guard open != nil else { return }
+            Task { @MainActor in menuSpoken = true }
+        }
         // A restored selection whose session arrives with a later
         // read is revealed then.
         .onChange(of: store.tree) { _, _ in
@@ -688,6 +696,8 @@ struct TracesTreeView: View, Equatable {
            let folder = store.shownTree.folders.first(where: { $0.id == id }) {
             let rect = space[anchor]
             folderMenus(folder)
+                .accessibilityElement(children: .contain)
+                .accessibilityFocused($menuSpoken)
                 .frame(width: rect.width, height: rect.height, alignment: .topTrailing)
                 .offset(x: rect.minX, y: rect.minY)
         }
@@ -700,6 +710,7 @@ struct TracesTreeView: View, Equatable {
                 sessionMenu = nil
                 dismissing = entry
             }
+            .accessibilityFocused($menuSpoken)
             .frame(width: rect.width, height: rect.height, alignment: .topTrailing)
             .offset(x: rect.minX, y: rect.minY)
         }

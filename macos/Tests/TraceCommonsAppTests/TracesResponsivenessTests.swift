@@ -175,6 +175,8 @@ final class TracesResponsivenessTests: XCTestCase {
         for needle in [
             ".overlayPreferenceValue(TracesMenuAnchors.self, alignment: .topLeading)",
             "revealed.scrollTarget = id", ".onChange(of: expanded)", "Task { @MainActor in spoken = id }",
+            // An open menu is read after the rows, so VoiceOver is moved to it.
+            ".onChange(of: folderMenu ?? submitMenu ?? sessionMenu)", "Task { @MainActor in menuSpoken = true }",
         ] {
             XCTAssertTrue(body.contains(needle) || source.contains(needle), "the tree lacks \(needle)")
         }
@@ -185,6 +187,7 @@ final class TracesResponsivenessTests: XCTestCase {
         XCTAssertFalse(rowViews.contains(".zIndex("))
         XCTAssertFalse(rowViews.contains("TracesRowMenuPill("))
         XCTAssertEqual(rowViews.components(separatedBy: ".anchorPreference(key: TracesMenuAnchors.self").count - 1, 2)
+        XCTAssertEqual(source.components(separatedBy: ".accessibilityFocused($menuSpoken)").count - 1, 2)
         // Each row is rebuilt only when what it draws changes.
         XCTAssertEqual(source.components(separatedBy: ".equatable()\n        .id(Self.rowID(").count - 1, 2)
     }
