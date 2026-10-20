@@ -280,6 +280,7 @@ impl Clone for CounterRow {
             earliest_event_at: self.earliest_event_at,
             latest_event_at: self.latest_event_at,
             event_span_read: self.event_span_read,
+            streamed: self.streamed,
         }
     }
 }
