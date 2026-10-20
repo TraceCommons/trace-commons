@@ -180,9 +180,11 @@ final class TracesInspectorHostTests: XCTestCase {
         XCTAssertLessThan(health.lowerBound, undos.lowerBound, "an undo is behind the core's health")
         XCTAssertTrue(nowBody.contains("maxQueueEntries: model.daemonSettings?.maxQueueEntries"),
                       "the queue-full banner names the configured limit")
-        // The core's health has no X: it goes when its cause does.
-        let healthItem = String(nowBody[health.lowerBound...].prefix(700))
-        XCTAssertTrue(healthItem.contains("GlassPopoverNotice(title: banner.title) {"))
+        // A waiting safeguard has an X (owner, 2026-10-20); a down or
+        // unread core does not (see SafeguardNoticeCloseTests).
+        let healthItem = String(nowBody[health.lowerBound...].prefix(900))
+        XCTAssertTrue(healthItem.contains("let closeID = Self.healthCloseID(for: banner)"))
+        XCTAssertTrue(healthItem.contains("closeLabel: closeID == nil ? nil : closeWord"))
     }
 
     /// A card closed with its X stays closed until the window opens again;
