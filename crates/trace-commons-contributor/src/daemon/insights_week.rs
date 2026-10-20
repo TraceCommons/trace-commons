@@ -21,9 +21,12 @@
 //! A poll reads a bounded number of files and bytes, newest first, so a first
 //! pass over a large corpus catches up across polls. The first file a poll
 //! reads is always read, so a file larger than the byte budget is never
-//! starved. Each file is read line by line, never held whole, so memory stays
-//! flat at any size; one line over `COUNTER_PASS_MAX_LINE_BYTES` makes the
-//! session unknown, never zero. A file unchanged in size and time since its
+//! starved (owner decision D4, settled 2026-10-20: stream, no file-size cap,
+//! the per-poll budget stays). Each file is read line by line, never held
+//! whole, so no file is skipped for its size and memory does not grow with
+//! it: it is bounded by one line and by what the scans keep, at most the
+//! series caps for Claude Code. One line over `COUNTER_PASS_MAX_LINE_BYTES`
+//! makes the session unknown, never zero. A file unchanged in size and time since its
 //! row was made is not read again; a file seen again with new bytes replaces
 //! its row. A row stored as unknown by the earlier whole-file read, which
 //! skipped files over 16 MiB, is read once more.
@@ -31,7 +34,9 @@
 //! # The store
 //!
 //! One daemon-local file, capped by sessions, turns and tool calls, oldest
-//! going first, and limited to recent weeks. Rows are keyed by a keyed digest
+//! going first, and limited to recent weeks. A session the caps evict is
+//! marked by its keyed digest, size and last write, and is not read again
+//! until its file changes. Rows are keyed by a keyed digest
 //! of the harness and the session's address, and carry a keyed digest of the
 //! folder's project key (owner decision D7, open), never the key itself or a
 //! path. Each row also keeps its transcript's earliest and latest recorded
@@ -1315,7 +1320,8 @@ enum ScannedBody {
 /// (`insights::time_evidence`). Each sees exactly what it would see given
 /// the whole file, so a file under the extractors' own 16 MiB bound yields
 /// the same results as before; a larger one is read the same way, in memory
-/// bounded by one line.
+/// bounded by one line and by what the extractors keep, at most the series
+/// caps.
 ///
 /// `None` when the file cannot be read or a line is longer than `max_line`
 /// bytes: the caller stores unknown, never zero.

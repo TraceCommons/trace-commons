@@ -4476,7 +4476,10 @@ out of every answer at once. Claude Code rows are per turn; Codex rows are the c
 between the first and last counter only (owner decision D11, open). A Claude
 Code session with delegated transcripts is counted from its main file and
 marked `truncated` (partial coverage), never as complete. Each file is read
-line by line, never held whole, so no file is skipped for its size. A file
+line by line, never held whole, so no file is skipped for its size, and
+what a read keeps is bounded by the per-session series caps, not the file
+(owner decision D4, settled 2026-10-20 for streaming and the per-poll
+budget). A file
 with one line over 16 MB, or one that cannot be read, is stored as unknown,
 never as zero. A row stored as unknown with no usage counters by a daemon
 that skipped files over 16 MB is read once more after the upgrade, even when
@@ -4484,7 +4487,10 @@ its file is unchanged.
 
 **The store.** One file in the daemon directory, capped at 2048 sessions,
 131072 turns and 131072 tool calls (oldest last write first), and limited to
-sessions written in the last 13 weeks. Rows are keyed by a keyed digest of
+sessions written in the last 13 weeks. A session the caps evict is marked by
+its keyed digest and the size and last write its row was made from, and is
+not read again until its file changes; the marks age out with the rows and
+are capped at 2048, oldest first. Rows are keyed by a keyed digest of
 the harness and the session's address, and carry a keyed digest of the
 folder's project key (owner decision D7, open). Each row also carries a
 keyed digest of the one session ID the transcript records, under the same
