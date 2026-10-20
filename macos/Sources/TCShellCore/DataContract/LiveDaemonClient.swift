@@ -297,8 +297,11 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         return try await call("insights_week", params: params, as: DaemonData.InsightsWeek.self)
     }
 
-    public func insightsSessions() async throws -> DaemonData.InsightsSessions {
-        try await call("insights_sessions", params: [:], as: DaemonData.InsightsSessions.self)
+    public func insightsSessions(before: String?, limit: Int?) async throws -> DaemonData.InsightsSessions {
+        var params: [String: Any] = [:]
+        if let before { params["before"] = before }
+        if let limit { params["limit"] = limit }
+        return try await call("insights_sessions", params: params, as: DaemonData.InsightsSessions.self)
     }
 
     public func insightsSessionDrill(sessionRef: String) async throws -> DaemonData.InsightsSessionDrillAnswer {

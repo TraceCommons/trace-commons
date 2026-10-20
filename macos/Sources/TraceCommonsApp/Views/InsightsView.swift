@@ -31,7 +31,7 @@ struct InsightsView: View {
             { isoWeek in try await client.insightsWeek(isoWeek: isoWeek) }
         }
         var watchedReader: InsightsSessionsModel.WatchedReader? = daemon.map { client in
-            { try await client.insightsSessions() }
+            { cursor in try await client.insightsSessions(before: cursor, limit: InsightsSessionsModel.pageSize) }
         }
         let watchedDrill: InsightsSessionsModel.WatchedDrillReader? = daemon.map { client in
             { reference in try await client.insightsSessionDrill(sessionRef: reference) }

@@ -1131,38 +1131,52 @@ enum InsightsPatternsWords {
 }
 
 /// The Sessions tab (drill-in). While the daemon's watched-folder counting
-/// (feed T) shows, the picker lists watched traces only and each drills
-/// through the daemon (`insights_sessions`, `insights_session_drill`; owner
-/// decision 2026-10-20: feeds are never mixed). Otherwise it is one saved
-/// snapshot (feed S): the selection follows the saved list, the newest
-/// session until another is picked, and the newest left when the picked one
-/// is deleted.
+/// (feed T) shows, the tab is a feed of every watched trace, newest first,
+/// read a page at a time as its last rows are drawn (owner request
+/// 2026-10-20); a row expands its drill in place, one at a time, through the
+/// daemon (`insights_sessions`, `insights_session_drill`; owner decision
+/// 2026-10-20: feeds are never mixed). Otherwise it is one saved snapshot
+/// (feed S), picked as before: the selection follows the saved list, the
+/// newest session until another is picked, and the newest left when the
+/// picked one is deleted.
 @Observable @MainActor
 final class InsightsSessionsModel {
-    /// Reads `insights_sessions` through the daemon client.
-    typealias WatchedReader = @Sendable () async throws -> DaemonData.InsightsSessions
+    /// Reads one page of `insights_sessions` through the daemon client:
+    /// `nil` is the first page, otherwise the `next` cursor of the page
+    /// before.
+    typealias WatchedReader = @Sendable (String?) async throws -> DaemonData.InsightsSessions
     /// Reads `insights_session_drill` for one listed reference.
     typealias WatchedDrillReader = @Sendable (String) async throws -> DaemonData.InsightsSessionDrillAnswer
+    /// The most rows one page of the feed asks for.
+    static let pageSize = 50
     private let service: InsightsModel.Service
     private let watchedReader: WatchedReader?
     private let watchedDrill: WatchedDrillReader?
     private var task: Task<Void, Never>?
     private var listTask: Task<Void, Never>?
+    private var pageTask: Task<Void, Never>?
     private var token = UUID()
     private var listToken = UUID()
     private var active = false
     private var drillBusy = false
     private var listBusy = false
-    /// A drill or the watched list is being read.
-    var busy: Bool { drillBusy || listBusy }
+    /// The next page is being read.
+    private(set) var loadingMore = false
+    /// A drill, the watched list or its next page is being read.
+    var busy: Bool { drillBusy || listBusy || loadingMore }
     private(set) var failed = false
     private(set) var drill: InsightsSessionDrill?
-    /// The session on screen: a saved snapshot ID, or a watched trace's
-    /// opaque reference while `watched` is set.
+    /// The session on screen: a saved snapshot ID, or the expanded watched
+    /// trace's opaque reference while `watched` is set (`nil`: none open).
     private(set) var selected: String?
-    /// The watched traces, newest first, only while feed T shows; `nil` is
-    /// the saved snapshots.
+    /// The watched traces read so far, newest first, only while feed T
+    /// shows; `nil` is the saved snapshots.
     private(set) var watched: [DaemonData.InsightsWatchedSession]?
+    /// The cursor for the feed's next page; `nil` at the end of the list.
+    private var nextCursor: String?
+    /// The last next-page read failed: no further page is asked for until
+    /// the list is read again.
+    private(set) var pageFailed = false
     /// Set when feed T is on but its traces could not be read, shown with
     /// the saved feed's line, as Overview shows it; `nil` when it is off or
     /// the daemon predates it.
@@ -1171,6 +1185,9 @@ final class InsightsSessionsModel {
     /// traces show so going back needs no second read.
     private var savedIDs: [String] = []
     private var wantsWatched = false
+
+    /// Every watched trace is listed: the last page said there is no next.
+    var atEnd: Bool { watched != nil && nextCursor == nil }
 
     init(service: @escaping InsightsModel.Service,
          watchedReader: WatchedReader? = nil,
@@ -1186,10 +1203,50 @@ final class InsightsSessionsModel {
     }
     func close() {
         active = false; token = UUID(); listToken = UUID()
-        task?.cancel(); task = nil; listTask?.cancel(); listTask = nil; drillBusy = false; listBusy = false
+        task?.cancel(); task = nil; listTask?.cancel(); listTask = nil; pageTask?.cancel(); pageTask = nil
+        drillBusy = false; listBusy = false; loadingMore = false
     }
     func reload() { if wantsWatched { readWatched() } else { load() } }
     func select(_ reference: String) { selected = reference; load() }
+
+    /// A watched row clicked: open it (closing any other), or close it when
+    /// it is the open one.
+    func toggle(_ reference: String) {
+        guard selected == reference else { select(reference); return }
+        collapse()
+    }
+
+    private func collapse() {
+        token = UUID(); task?.cancel(); task = nil
+        selected = nil; drill = nil; failed = false; drillBusy = false
+    }
+
+    /// Read the feed's next page, when there is one and none is being read.
+    /// The tab asks as the last rows are drawn.
+    func loadMore() {
+        guard active, watched != nil, let cursor = nextCursor, !loadingMore, !pageFailed, !listBusy,
+              let watchedReader else { return }
+        let current = listToken
+        loadingMore = true
+        pageTask = Task { [weak self] in
+            let outcome: Result<DaemonData.InsightsSessions, Error>
+            do { outcome = .success(try await watchedReader(cursor)) } catch { outcome = .failure(error) }
+            guard let self, self.active, self.listToken == current, !Task.isCancelled else { return }
+            self.loadingMore = false
+            switch outcome {
+            case .success(let page) where page.showsCounterPass:
+                let known = Set((self.watched ?? []).map(\.sessionRef))
+                self.watched = (self.watched ?? []) + (page.sessions ?? []).filter { !known.contains($0.sessionRef) }
+                self.nextCursor = page.next
+            case .success(let page):
+                self.showSaved(notice: page.enabled)
+            case .failure:
+                // The rows read so far stay; the foot says the rest could
+                // not be read.
+                self.pageFailed = true
+            }
+        }
+    }
 
     /// Keep the selection inside the saved list, newest first. Reads only
     /// when the selection changes, and nothing while watched traces show.
@@ -1215,37 +1272,41 @@ final class InsightsSessionsModel {
 
     private func showSaved(notice: Bool) {
         listToken = UUID(); listTask?.cancel(); listTask = nil; listBusy = false
+        pageTask?.cancel(); pageTask = nil; loadingMore = false
         noticeKey = notice ? InsightsModel.FeedLineKey.counterPassUnavailable : nil
         if watched != nil {
             // A watched trace's figures never stay on the saved feed.
-            watched = nil
+            watched = nil; nextCursor = nil; pageFailed = false
             token = UUID(); task?.cancel(); task = nil
             selected = nil; drill = nil; failed = false; drillBusy = false
         }
         sync(snapshotIDs: savedIDs)
     }
 
+    /// The feed's first page, in place of every page read so far.
     private func readWatched() {
         guard active, let watchedReader else { return }
-        listTask?.cancel()
+        listTask?.cancel(); pageTask?.cancel(); pageTask = nil; loadingMore = false
         listToken = UUID(); let current = listToken
         listBusy = true
         listTask = Task { [weak self] in
             let outcome: Result<DaemonData.InsightsSessions, Error>
-            do { outcome = .success(try await watchedReader()) } catch { outcome = .failure(error) }
+            do { outcome = .success(try await watchedReader(nil)) } catch { outcome = .failure(error) }
             guard let self, self.active, self.listToken == current, !Task.isCancelled else { return }
             self.listBusy = false
             switch outcome {
             case .success(let list) where list.showsCounterPass:
                 let rows = list.sessions ?? []
-                self.watched = rows; self.noticeKey = nil
-                if let selected = self.selected, rows.contains(where: { $0.sessionRef == selected }) {
+                let wasWatched = self.watched != nil
+                self.watched = rows; self.nextCursor = list.next; self.pageFailed = false; self.noticeKey = nil
+                if !wasWatched {
+                    // Coming from the saved feed: no row is open until one
+                    // is clicked.
+                    self.collapse()
+                } else if let selected = self.selected, rows.contains(where: { $0.sessionRef == selected }) {
                     if self.drill?.session_ref != selected || self.drill?.feed != "counter_pass" { self.load() }
-                } else if let newest = InsightsSessionsWords.defaultWatched(rows) {
-                    self.select(newest.sessionRef)
                 } else {
-                    self.token = UUID(); self.task?.cancel(); self.task = nil
-                    self.selected = nil; self.drill = nil; self.failed = false; self.drillBusy = false
+                    self.collapse()
                 }
             case .success(let list):
                 self.showSaved(notice: list.enabled)
@@ -1284,10 +1345,25 @@ final class InsightsSessionsModel {
                 self.drill = drill; self.drillBusy = false
             } catch {
                 guard let self, self.active, self.token == current, !Task.isCancelled else { return }
+                if watchedRead != nil, Self.isUnknownReference(error) {
+                    // Made again since its page was read (its file grew):
+                    // read the feed afresh rather than leave a dead row open.
+                    self.collapse()
+                    self.readWatched()
+                    return
+                }
                 // A failed read never keeps another session's figures.
                 self.drill = nil; self.failed = true; self.drillBusy = false
             }
         }
+    }
+
+    /// The daemon no longer lists that reference (`insights-session-unknown`).
+    private static func isUnknownReference(_ error: Error) -> Bool {
+        if case .daemon(_, let message)? = error as? DaemonDataError {
+            return message == "insights-session-unknown"
+        }
+        return false
     }
 }
 
@@ -1406,18 +1482,39 @@ enum InsightsSessionsWords {
         return InsightsOverviewWords.fill(text("analytics_watched_label", copy), filled)
     }
 
-    /// The trace shown first: the newest dated one. The daemon lists
-    /// undated traces last; an older daemon listed one first, which is
-    /// skipped here too. With none dated, the first listed.
-    static func defaultWatched(_ rows: [DaemonData.InsightsWatchedSession]) -> DaemonData.InsightsWatchedSession? {
-        rows.first { $0.startedAt != nil } ?? rows.first
+    /// A watched row's tokens in the core's words; a row with no counts
+    /// says so once (the core's "no token counts" reason).
+    static func rowTokens(_ row: DaemonData.InsightsWatchedSession, copy: [String: String]) -> String {
+        guard let tokens = row.tokens else { return text("analytics_reason_no_usage_counters", copy) }
+        return InsightsOverviewWords.fill(text("analytics_session_row_tokens", copy),
+                                          ["t": InsightsOverviewWords.figure(tokens, copy: copy)])
     }
 
-    /// The session picker under feed T: each watched trace by its label,
-    /// valued by its opaque reference, newest first.
-    static func watchedChoices(_ rows: [DaemonData.InsightsWatchedSession],
-                               copy: [String: String]) -> [(value: String, title: String)] {
-        rows.map { (value: $0.sessionRef, title: watchedLabel($0, copy: copy)) }
+    /// The row's sparkline in words, for VoiceOver: its largest turn. `nil`
+    /// when the row has no sparkline.
+    static func sparklineSummary(_ row: DaemonData.InsightsWatchedSession, copy: [String: String]) -> String? {
+        guard let sparkline = row.sparkline else { return nil }
+        return InsightsOverviewWords.fill(text("analytics_sparkline_peak", copy), [
+            "t": InsightsOverviewWords.figure(sparkline.peakTokens, copy: copy),
+            "n": String(sparkline.peakTurn),
+        ])
+    }
+
+    /// A watched row as VoiceOver reads it, one element: its label, its
+    /// tokens and its sparkline in words. Never the reference.
+    static func rowAccessibilityLabel(_ row: DaemonData.InsightsWatchedSession, copy: [String: String],
+                                      timeZone: TimeZone = TimeZone(secondsFromGMT: TimeZone.current.secondsFromGMT())
+                                         ?? .current) -> String {
+        [watchedLabel(row, copy: copy, timeZone: timeZone), rowTokens(row, copy: copy),
+         sparklineSummary(row, copy: copy)].compactMap { $0 }.joined(separator: ", ")
+    }
+
+    /// The row the up (`-1`) or down (`1`) key moves to, held to the list's
+    /// ends; with none focused (or one no longer listed), the first.
+    static func moved(_ current: String?, by delta: Int, in references: [String]) -> String? {
+        guard !references.isEmpty else { return nil }
+        guard let current, let index = references.firstIndex(of: current) else { return references.first }
+        return references[min(max(index + delta, 0), references.count - 1)]
     }
 
     /// Which feed the drill on screen is from, behind the header's "i": the
