@@ -25,9 +25,6 @@ struct ManagedSessionsSection: View {
             if let snapshot = model.managedSnapshot, snapshot.nearAiSignedIn {
                 signInCard(snapshot)
             }
-            // Signed in or not: a failed Stop or Dismiss, and a missing
-            // terminal, are said with no NEAR AI card above them.
-            statusBlock
             if let snapshot = model.managedSnapshot {
                 sessionsCard(snapshot)
             } else {
@@ -87,17 +84,54 @@ struct ManagedSessionsSection: View {
             content: { AnyView(toolButtons(snapshot)) })
     }
 
-    /// The tool buttons, in a row that wraps where it would not fit; left
-    /// out while there is no terminal to start in.
+    /// What the NEAR AI card holds at its foot: the tool buttons; in their
+    /// place, the no-terminal notice, or Install for each tool while none
+    /// is installed. Only one, and only while it applies.
+    enum ToolArea: Equatable {
+        case buttons
+        case noTerminal
+        case install
+    }
+
+    static func toolArea(_ snapshot: ManagedSnapshot) -> ToolArea {
+        if !snapshot.capabilities.terminalLaunch { return .noTerminal }
+        if snapshot.needsToolInstallation { return .install }
+        return .buttons
+    }
+
+    /// Whether a failure is said on the NEAR AI card, under the button that
+    /// was pressed: a launch, while the card is drawn. Anything else (a
+    /// stop, a dismiss, a start again) is said on the sessions card.
+    static func failureOnSignInCard(method: String?, signInCardShown: Bool) -> Bool {
+        signInCardShown && method == "managed_launch_prepare"
+    }
+
+    /// The card's foot (`toolArea`), then a launch that failed.
     @ViewBuilder
     private func toolButtons(_ snapshot: ManagedSnapshot) -> some View {
-        if snapshot.capabilities.terminalLaunch {
-            HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
-                ForEach(snapshot.signInStartTools, id: \.self) { tool in
-                    ManagedToolButton(tool: tool) { start(tool) }
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            switch Self.toolArea(snapshot) {
+            case .buttons:
+                HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
+                    ForEach(snapshot.signInStartTools, id: \.self) { tool in
+                        ManagedToolButton(tool: tool) { start(tool) }
+                    }
+                }
+                .disabled(model.managedBusy)
+            case .noTerminal:
+                GlassNotice(tone: .ask, title: model.managedText("terminal_unavailable")) { EmptyView() }
+            case .install:
+                ManagedNote(text: model.managedText("tools_empty"))
+                HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
+                    ForEach((snapshot.tools ?? []).filter { ManagedSurface.signInTools.contains($0.tool) }) { tool in
+                        ManagedInstallLink(tool: tool, copy: model.managedText, includeToolName: true)
+                    }
                 }
             }
-            .disabled(model.managedBusy)
+            if let key = model.managedErrorKey,
+               Self.failureOnSignInCard(method: model.managedErrorMethod, signInCardShown: true) {
+                actionFailure(key)
+            }
         }
     }
 
@@ -115,69 +149,12 @@ struct ManagedSessionsSection: View {
         model.managedAction("managed_launch_prepare", params: params, openTerminal: true)
     }
 
-    // MARK: Status
-
-    /// What the managed cards cannot do now, and why. These lived in the
-    /// saved-accounts card (base of #1490) and outlive it: a launch, stop
-    /// or dismiss that failed; no terminal to launch in; no supported tool
-    /// installed; the list not read yet.
-    enum StatusItem: Equatable {
-        case connecting
-        case failure(String)
-        case installTools
-        case noTerminal
-    }
-
-    /// The states to say, in the order they are drawn. No terminal follows
-    /// `terminalLaunch`, as the tool buttons do: the notice shows exactly
-    /// when they are left out.
-    static func statusItems(_ snapshot: ManagedSnapshot?, errorKey: String?) -> [StatusItem] {
-        var items: [StatusItem] = []
-        if snapshot == nil { items.append(.connecting) }
-        if let errorKey { items.append(.failure(errorKey)) }
-        if let snapshot {
-            if snapshot.needsToolInstallation { items.append(.installTools) }
-            if !snapshot.capabilities.terminalLaunch { items.append(.noTerminal) }
-        }
-        return items
-    }
-
-    /// A failure, the install list and the no-terminal notice, on a card
-    /// under the NEAR AI card; nothing while there is nothing to say. The
-    /// unread list is the sessions card's own (`connectingCard`).
-    @ViewBuilder
-    private var statusBlock: some View {
-        let items = Self.statusItems(model.managedSnapshot, errorKey: model.managedErrorKey).filter { $0 != .connecting }
-        if !items.isEmpty {
-            GlassCard {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                        statusRow(item)
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func statusRow(_ item: StatusItem) -> some View {
-        switch item {
-        case .connecting:
-            EmptyView()
-        case .failure(let key):
-            actionFailure(key)
-        case .installTools:
-            if let snapshot = model.managedSnapshot {
-                ManagedToolInstallation(tools: snapshot.tools ?? [], copy: model.managedText, retry: model.refreshManagedSessions)
-            }
-        case .noTerminal:
-            GlassNotice(tone: .ask, title: model.managedText("terminal_unavailable")) { EmptyView() }
-        }
-    }
+    // MARK: Failures and connecting
 
     /// A failed request: the failed request's red lines, unboxed (Ron,
-    /// 2026-10-09). The headline, then the reason when it is a different
-    /// word, then, for an unsupported version, each tool's update link.
+    /// 2026-10-09), where it was asked (`failureOnSignInCard`). The
+    /// headline, then the reason when it is a different word, then, for an
+    /// unsupported version, each tool's update link.
     private func actionFailure(_ key: String) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
             GlassAlert(model.managedText("action_failed"))
@@ -218,20 +195,34 @@ struct ManagedSessionsSection: View {
     /// The sessions card under its icon (owner, 2026-10-10): with none, the
     /// empty line is the head's subtitle and the card is one row; otherwise
     /// the sessions are listed under the head.
+    ///
+    /// A failure other than a launch on the NEAR AI card is said under the
+    /// sessions, where Stop, Dismiss and Start again are.
     @ViewBuilder
     private func sessionsCard(_ snapshot: ManagedSnapshot) -> some View {
-        if snapshot.sessions.isEmpty {
+        let failure = model.managedErrorKey.flatMap { key in
+            Self.failureOnSignInCard(method: model.managedErrorMethod, signInCardShown: snapshot.nearAiSignedIn) ? nil : key
+        }
+        if snapshot.sessions.isEmpty && failure == nil {
             GlassIconCard(
                 systemImage: "terminal", title: model.managedText("title"),
                 subtitle: [model.managedText("empty")], trailing: { EmptyView() })
         } else {
-            GlassIconCard(systemImage: "terminal", title: model.managedText("title"), content: {
-                VStack(spacing: 0) {
-                    ForEach(Array(snapshot.sessions.enumerated()), id: \.element.id) { index, session in
-                        GlassTableRow(first: index == 0) { sessionRow(session) }
+            GlassIconCard(
+                systemImage: "terminal", title: model.managedText("title"),
+                subtitle: snapshot.sessions.isEmpty ? [model.managedText("empty")] : [],
+                content: {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                        if !snapshot.sessions.isEmpty {
+                            VStack(spacing: 0) {
+                                ForEach(Array(snapshot.sessions.enumerated()), id: \.element.id) { index, session in
+                                    GlassTableRow(first: index == 0) { sessionRow(session) }
+                                }
+                            }
+                        }
+                        if let failure { actionFailure(failure) }
                     }
-                }
-            })
+                })
         }
     }
 
@@ -743,38 +734,6 @@ struct ManagedInstallLink: View {
             Link(label, destination: url)
                 .accessibilityLabel(actionLabel + " " + copy(tool.tool))
                 .buttonStyle(GlassButtonStyle(.glass, small: true))
-        }
-    }
-}
-
-/// Shown only while no coding tool is installed: each managed tool with
-/// Install, and one bare refresh glyph beside the heading (Ron, 2026-10-15).
-struct ManagedToolInstallation: View {
-    let tools: [ManagedToolAvailability]
-    let copy: (String) -> String
-    let retry: () -> Void
-    var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            HStack(spacing: GlassTokens.Space.s2) {
-                Text(copy("tools_title"))
-                    .glassType(GlassTokens.TypeScale.bodyStrong)
-                    .foregroundStyle(GlassColor.textPrimary)
-                GlassRefreshButton(copy("refresh"), action: retry)
-            }
-            Text(copy("tools_empty"))
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            ForEach(tools.filter { ManagedSurface.supportedTools.contains($0.tool) }) { tool in
-                HStack {
-                    GlassToolTile(.tool(ManagedWords.glassTool(tool.tool)))
-                    Text(copy(tool.tool))
-                        .glassType(GlassTokens.TypeScale.label)
-                        .foregroundStyle(GlassColor.textPrimary)
-                    Spacer()
-                    ManagedInstallLink(tool: tool, copy: copy)
-                }
-            }
         }
     }
 }
