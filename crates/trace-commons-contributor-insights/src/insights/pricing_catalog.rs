@@ -1,7 +1,36 @@
 //! Immutable local pricing-table catalog.
 //!
-//! The production catalog is empty until separately reviewed rate data lands.
-//! This module performs no network access, persistence, or provider inference.
+//! The production catalog ships two list-price tables, one per source page,
+//! embedded at build time: no runtime fetch. Both await the owner's review
+//! (`reviewed_by` reads "Pending owner review" until then). This module
+//! performs no network access, persistence, or provider inference.
+//!
+//! How each table was taken, on 2026-10-20 (UTC):
+//!
+//! - Anthropic (version 1): `source_url` is where the docs pricing page
+//!   redirected; `content_sha256` hashes the raw bytes fetched there, which
+//!   carry every rate. The page names models by display name; each `model`
+//!   id was confirmed on the same site's models overview and model IDs
+//!   pages.
+//! - OpenAI (version 2): `source_url` is where the API pricing page
+//!   redirected; `content_sha256` hashes its raw bytes, which carry the
+//!   standard-tier rates up to 272K input tokens. The rates above 272K are
+//!   rendered by the page's own script,
+//!   `https://developers.openai.com/_astro/pricing.N3LdDDY-.js`, fetched
+//!   20:25:37Z, sha256
+//!   `c0735a5bd831d52feb823dbf578a7c6d5d2f5ecd2ea0c598d36ee14460cce1bc`;
+//!   the provenance holds one hash, so this one is recorded here.
+//!   Standard tier only (not batch, flex, fast or priority). A model whose
+//!   row shows no cache-write rate has no entry.
+//!
+//! Neither page dates its rates, so every `effective_from` is the start of
+//! the 13-week Insights window before the fetch (the Monday, 00:00 UTC),
+//! as `provenance.effective_from_basis` says; an older turn is unpriced.
+//!
+//! Prompt-size bands: Anthropic states its threshold in tokens (100,000).
+//! OpenAI states "272K input tokens" without saying whether K is 1,000 or
+//! 1,024, so the lower band ends at 272,000 and the higher one starts above
+//! 278,528; a prompt between them is unpriced, never put in either band.
 
 use std::collections::BTreeSet;
 
@@ -145,8 +174,44 @@ impl PricingCatalog {
     }
 }
 
+/// Each shipped table's release version and pinned `table_id`, in version
+/// order. A change to any byte of a table's body moves its id.
+pub const SHIPPED_PRICING_TABLES: &[(u32, &str)] = &[
+    (
+        1,
+        "sha256:cc9f2ae4075adad77dc148f24e3d7a4e52b1fbd1452b5be140090a2751e7eecd",
+    ),
+    (
+        2,
+        "sha256:7c620ffda43fe2151864cbb1cfc1daea51dffca741283bf2ab46cd88989b652d",
+    ),
+];
+
+/// The embedded tables: one per source page, no runtime fetch.
+const SHIPPED_PRICING_TABLE_SOURCES: [&str; 2] = [
+    include_str!("pricing_tables/anthropic.json"),
+    include_str!("pricing_tables/openai.json"),
+];
+
+/// The shipped list-price catalog. A table that fails to parse or validate
+/// is a test failure (`each_embedded_table_parses_and_validates`); should
+/// one ever ship, the catalog is empty, so every turn is unpriced
+/// (`MissingPrice`) and nothing reads $0. This crate has no logger, so the
+/// fallback is silent.
 pub fn production_pricing_catalog() -> PricingCatalog {
-    PricingCatalog { tables: Vec::new() }
+    SHIPPED_PRICING_TABLE_SOURCES
+        .iter()
+        .map(|source| serde_json::from_str::<PricingTable>(source).ok())
+        .collect::<Option<Vec<_>>>()
+        .and_then(|tables| PricingCatalog::from_tables(tables).ok())
+        .filter(|catalog| {
+            catalog
+                .tables
+                .iter()
+                .map(|table| (table.version, table.table_id.as_str()))
+                .eq(SHIPPED_PRICING_TABLES.iter().copied())
+        })
+        .unwrap_or(PricingCatalog { tables: Vec::new() })
 }
 
 fn validate_query(input: &PricingUsageInput) -> Result<(), PricingCatalogError> {
@@ -182,6 +247,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::insights::session_pricing::{normalize_model_label, pricing_provider};
 
     fn at(second: i64) -> chrono::DateTime<Utc> {
         Utc.timestamp_opt(second, 0).unwrap()
@@ -260,14 +326,87 @@ mod tests {
     }
 
     #[test]
-    fn production_catalog_is_validated_empty_and_contains_no_rates() {
+    fn the_production_catalog_carries_the_two_shipped_tables() {
         let catalog = production_pricing_catalog();
-        assert!(catalog.tables().is_empty());
-        assert_eq!(catalog.table("anything"), None);
+        assert_eq!(
+            catalog
+                .tables()
+                .iter()
+                .map(|table| (table.version, table.table_id.as_str()))
+                .collect::<Vec<_>>(),
+            SHIPPED_PRICING_TABLES.to_vec()
+        );
         assert_eq!(
             catalog.select_newest_applicable(&input(0, 0, 1)),
-            Err(PricingCatalogError::MissingPrice)
+            Err(PricingCatalogError::MissingPrice),
+            "a synthetic model is never priced"
         );
+    }
+
+    #[test]
+    fn every_shipped_table_names_its_source_page_and_fetch_date() {
+        let publishers = production_pricing_catalog()
+            .tables()
+            .iter()
+            .map(|table| table.provenance.publisher.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(publishers, ["Anthropic", "OpenAI"]);
+        for table in production_pricing_catalog().tables() {
+            // The insights crate has no `url` dependency; match the fetched
+            // origins (the last two are where the first and third redirect).
+            assert!(
+                [
+                    "https://www.anthropic.com/",
+                    "https://docs.anthropic.com/",
+                    "https://openai.com/",
+                    "https://platform.openai.com/",
+                    "https://platform.claude.com/",
+                    "https://developers.openai.com/",
+                ]
+                .iter()
+                .any(|origin| table.provenance.source_url.starts_with(origin))
+            );
+            assert!(table.provenance.retrieved_at <= table.provenance.reviewed_at);
+            assert!(table.published_at >= table.provenance.retrieved_at);
+            assert!(table.provenance.effective_from_basis.is_some());
+        }
+    }
+
+    /// Fails until the owner reviews the rates: the merge gate for them.
+    #[test]
+    fn every_shipped_table_is_owner_reviewed() {
+        for table in production_pricing_catalog().tables() {
+            assert_ne!(table.provenance.reviewed_by, "Pending owner review");
+        }
+    }
+
+    #[test]
+    fn every_entry_is_a_normalized_label_under_its_accountings_provider() {
+        let tables = production_pricing_catalog();
+        let entries = tables
+            .tables()
+            .iter()
+            .flat_map(|table| &table.entries)
+            .collect::<Vec<_>>();
+        assert!(!entries.is_empty());
+        for entry in entries {
+            assert_eq!(
+                normalize_model_label(&entry.model).as_deref(),
+                Some(entry.model.as_str())
+            );
+            assert_eq!(entry.provider, pricing_provider(entry.accounting));
+            assert!(entry.effective_until.is_none());
+        }
+    }
+
+    /// Each embedded file parses and validates on its own, so a bad table is
+    /// named here rather than only emptying the catalog.
+    #[test]
+    fn each_embedded_table_parses_and_validates() {
+        for source in SHIPPED_PRICING_TABLE_SOURCES {
+            let table: PricingTable = serde_json::from_str(source).unwrap();
+            assert_eq!(table.validate(), Ok(()));
+        }
     }
 
     #[test]
