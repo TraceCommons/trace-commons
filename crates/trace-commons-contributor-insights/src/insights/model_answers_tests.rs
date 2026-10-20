@@ -7,7 +7,8 @@ use trace_commons_protocol::insights_usage_series::{CacheWrite, TurnRecord, Usag
 
 use super::*;
 use crate::insights::analytics_constants::{
-    CLASSIFIER_VERSION, LEDGER_MONEY_IN_INSIGHTS, MODEL_ANSWER_WINDOW_WEEKS,
+    CLASSIFIER_VERSION, LEDGER_MONEY_IN_INSIGHTS, MODEL_ANSWER_BOOTSTRAP_DRAWS,
+    MODEL_ANSWER_BOOTSTRAP_SEED, MODEL_ANSWER_WINDOW_WEEKS,
 };
 use crate::insights::codex_series::CodexTurnSeriesEvidence;
 use crate::insights::session_facts::{
@@ -300,11 +301,13 @@ fn twenty_nine_edits_are_too_few_for_a_rejection_figure() {
     assert_eq!(q1.left_out.too_few_edits, 5);
     assert_eq!(counts(q1), vec![("model-a", 5), ("model-b", 5)]);
 
-    // One more edit and model-a qualifies.
+    // One more edit and model-a qualifies. Both rates are zero, so the two
+    // figures are shown with no clear difference.
     sessions[4] = solo("a-4", "model-a", InferredTask::BugFix, 6, Some(0), 0);
     let answers = answer(&sessions);
     let q1 = row(&answers, ModelQuestion::BugFixRejected);
-    assert_eq!(q1.state, AnswerState::Answered);
+    assert_eq!(q1.state, AnswerState::NoClearDifference);
+    assert!(q1.leader.is_some() && q1.next.is_some());
     assert_eq!(q1.left_out.too_few_edits, 0);
 }
 
@@ -775,4 +778,426 @@ fn medians_and_rates_round_half_up_once() {
     assert_eq!(permille(2, 3), Some(667));
     assert_eq!(permille(1, 2_000), Some(1));
     assert_eq!(permille(1, 0), None);
+}
+
+// Across task types, noise and order (Task 8).
+
+/// One session per entry of `undone`, each with `edits` edits and no
+/// denials, served wholly by `label`.
+fn spread(
+    prefix: &str,
+    label: &str,
+    task: InferredTask,
+    edits: u32,
+    undone: &[u32],
+) -> Vec<SessionInput> {
+    undone
+        .iter()
+        .enumerate()
+        .map(|(ix, undone)| {
+            solo(
+                &format!("{prefix}-{ix}"),
+                label,
+                task,
+                edits,
+                Some(0),
+                *undone,
+            )
+        })
+        .collect()
+}
+
+/// A finished BugFix session in `mode`, taking `secs` and `turns`.
+fn timed(session_ref: &str, label: &str, mode: EditMode, secs: u32, turns: u32) -> SessionInput {
+    with_facts(
+        solo(session_ref, label, InferredTask::BugFix, 10, Some(0), 0),
+        |facts| {
+            facts.edit_mode = mode;
+            facts.active_secs = Some(secs);
+            facts.user_turns = Some(turns);
+        },
+    )
+}
+
+fn dated(mut session: SessionInput, at: DateTime<Utc>) -> SessionInput {
+    if let SessionBody::Claude { series, .. } = &mut session.body {
+        for turn in &mut series.turns {
+            turn.at = Some(at);
+        }
+    }
+    session
+}
+
+fn finish(figure: &ModelFigure) -> (u32, u32) {
+    match figure.figure {
+        Figure::FinishTime {
+            median_active_secs,
+            median_user_turns,
+        } => (median_active_secs, median_user_turns),
+        other => panic!("not a finish time: {other:?}"),
+    }
+}
+
+fn ranked(row: &ModelAnswerRow) -> (String, String) {
+    (
+        row.leader.as_ref().unwrap().label.clone(),
+        row.next.as_ref().unwrap().label.clone(),
+    )
+}
+
+#[test]
+fn a_docs_heavy_model_does_not_win_across_types_on_mix_alone() {
+    // model-a: 40 Docs at 2%, 10 BugFix at 20%; model-b: 10 Docs at 3%, 40
+    // BugFix at 15%, 100 edits a session. Pooled, model-a leads (280/5000
+    // against 630/5000); weighted by the shared mix (50 Docs, 50 BugFix),
+    // model-a is 110 permille and model-b 90.
+    let mut sessions = spread("ad", "model-a", InferredTask::Docs, 100, &[2; 40]);
+    sessions.extend(spread(
+        "ab",
+        "model-a",
+        InferredTask::BugFix,
+        100,
+        &[20; 10],
+    ));
+    sessions.extend(spread("bd", "model-b", InferredTask::Docs, 100, &[3; 10]));
+    sessions.extend(spread(
+        "bb",
+        "model-b",
+        InferredTask::BugFix,
+        100,
+        &[15; 40],
+    ));
+    let answers = answer(&sessions);
+    let q5 = row(&answers, ModelQuestion::RejectedAcrossTasks);
+    assert_eq!(q5.state, AnswerState::Answered);
+    assert_eq!(q5.basis, Some(RejectionBasis::Rejected));
+    assert_eq!(ranked(q5), ("model-b".to_owned(), "model-a".to_owned()));
+    let b = figure_of(q5, "model-b");
+    assert_eq!((rate(b), b.sessions, b.edits), (90, 50, Some(5_000)));
+    assert_eq!(rate(figure_of(q5, "model-a")), 110);
+    assert_eq!(q5.left_out.mix_too_different, 0);
+    assert_eq!(counts(q5), vec![("model-a", 50), ("model-b", 50)]);
+}
+
+#[test]
+fn a_model_covering_under_eighty_percent_of_the_mix_is_not_compared() {
+    // Weights: BugFix 15, Docs 13. model-a qualifies in BugFix only (15/28,
+    // 54%); model-b and model-c qualify in both.
+    let mut sessions = spread("ab", "model-a", InferredTask::BugFix, 10, &[0; 5]);
+    sessions.extend(spread("ad", "model-a", InferredTask::Docs, 10, &[0; 3]));
+    sessions.extend(spread("bb", "model-b", InferredTask::BugFix, 10, &[1; 5]));
+    sessions.extend(spread("bd", "model-b", InferredTask::Docs, 10, &[1; 5]));
+    sessions.extend(spread("cb", "model-c", InferredTask::BugFix, 10, &[3; 5]));
+    sessions.extend(spread("cd", "model-c", InferredTask::Docs, 10, &[3; 5]));
+    let answers = answer(&sessions);
+    let q5 = row(&answers, ModelQuestion::RejectedAcrossTasks);
+    assert_eq!(q5.left_out.mix_too_different, 8);
+    assert_eq!(q5.state, AnswerState::Answered);
+    assert_eq!(ranked(q5), ("model-b".to_owned(), "model-c".to_owned()));
+    assert_eq!(
+        counts(q5),
+        vec![("model-a", 8), ("model-b", 10), ("model-c", 10)]
+    );
+    // In BugFix alone model-a is compared, and leads.
+    let q1 = row(&answers, ModelQuestion::BugFixRejected);
+    assert_eq!(q1.leader.as_ref().unwrap().label, "model-a");
+    assert_eq!(q1.left_out.mix_too_different, 0);
+}
+
+#[test]
+fn finish_time_uses_not_prompting_when_two_models_qualify_there() {
+    let mut sessions = Vec::new();
+    for ix in 0..5 {
+        sessions.push(timed(
+            &format!("an-{ix}"),
+            "model-a",
+            EditMode::NotPrompting,
+            100,
+            2,
+        ));
+        sessions.push(timed(
+            &format!("bn-{ix}"),
+            "model-b",
+            EditMode::NotPrompting,
+            300,
+            4,
+        ));
+        sessions.push(timed(
+            &format!("ap-{ix}"),
+            "model-a",
+            EditMode::Prompting,
+            900,
+            9,
+        ));
+        sessions.push(timed(
+            &format!("bp-{ix}"),
+            "model-b",
+            EditMode::Prompting,
+            50,
+            1,
+        ));
+    }
+    let answers = answer(&sessions);
+    let q6 = row(&answers, ModelQuestion::FinishTime);
+    assert_eq!(q6.edit_mode, Some(EditMode::NotPrompting));
+    assert_eq!(q6.state, AnswerState::Answered);
+    assert_eq!(ranked(q6), ("model-a".to_owned(), "model-b".to_owned()));
+    assert_eq!(finish(figure_of(q6, "model-a")), (100, 2));
+    assert_eq!(finish(figure_of(q6, "model-b")), (300, 4));
+    assert_eq!(figure_of(q6, "model-a").sessions, 5);
+    assert_eq!(counts(q6), vec![("model-a", 5), ("model-b", 5)]);
+}
+
+#[test]
+fn finish_time_falls_back_to_prompting_and_never_mixes_modes() {
+    let mut sessions = Vec::new();
+    for ix in 0..5 {
+        sessions.push(timed(
+            &format!("an-{ix}"),
+            "model-a",
+            EditMode::NotPrompting,
+            100,
+            2,
+        ));
+        sessions.push(timed(
+            &format!("ap-{ix}"),
+            "model-a",
+            EditMode::Prompting,
+            400,
+            5,
+        ));
+        sessions.push(timed(
+            &format!("bp-{ix}"),
+            "model-b",
+            EditMode::Prompting,
+            200,
+            3,
+        ));
+    }
+    for ix in 0..2 {
+        sessions.push(timed(
+            &format!("bn-{ix}"),
+            "model-b",
+            EditMode::NotPrompting,
+            1,
+            1,
+        ));
+    }
+    for ix in 0..3 {
+        sessions.push(timed(
+            &format!("au-{ix}"),
+            "model-a",
+            EditMode::Unknown,
+            1,
+            1,
+        ));
+    }
+    // Unfinished sessions stay out of the medians but count as sessions.
+    sessions.push(with_facts(
+        timed("ap-open", "model-a", EditMode::Prompting, 1, 1),
+        |facts| facts.finished = Some(false),
+    ));
+    let answers = answer(&sessions);
+    let q6 = row(&answers, ModelQuestion::FinishTime);
+    assert_eq!(q6.edit_mode, Some(EditMode::Prompting));
+    assert_eq!(ranked(q6), ("model-b".to_owned(), "model-a".to_owned()));
+    assert_eq!(finish(figure_of(q6, "model-b")), (200, 3));
+    assert_eq!(finish(figure_of(q6, "model-a")), (400, 5));
+    assert_eq!(figure_of(q6, "model-a").sessions, 5);
+    assert_eq!(counts(q6), vec![("model-a", 6), ("model-b", 5)]);
+    assert_eq!(q6.left_out.unknown_facts, 3);
+}
+
+/// Six sessions a model, 10 edits each: model-a undoes 0 or 10 (500
+/// permille), model-b 0, 10 or 1 (517). The gap is far inside the noise.
+fn noisy_pair() -> Vec<SessionInput> {
+    let mut sessions = spread(
+        "a",
+        "model-a",
+        InferredTask::BugFix,
+        10,
+        &[0, 10, 0, 10, 0, 10],
+    );
+    sessions.extend(spread(
+        "b",
+        "model-b",
+        InferredTask::BugFix,
+        10,
+        &[0, 10, 0, 10, 1, 10],
+    ));
+    sessions
+}
+
+#[test]
+fn the_same_rows_give_the_same_answer_in_any_input_order() {
+    let mut sessions = noisy_pair();
+    sessions.extend(spread(
+        "ad",
+        "model-a",
+        InferredTask::Docs,
+        10,
+        &[1, 3, 0, 2, 5, 1],
+    ));
+    sessions.extend(spread(
+        "bd",
+        "model-b",
+        InferredTask::Docs,
+        10,
+        &[2, 2, 4, 0, 1, 3],
+    ));
+    for ix in 0..6 {
+        let secs = 100 + 37 * ix;
+        sessions.push(timed(
+            &format!("at-{ix}"),
+            "model-a",
+            EditMode::NotPrompting,
+            secs,
+            ix,
+        ));
+        sessions.push(timed(
+            &format!("bt-{ix}"),
+            "model-b",
+            EditMode::NotPrompting,
+            secs + 20,
+            ix,
+        ));
+    }
+    let base = answer(&sessions);
+    let len = sessions.len();
+    let orders: Vec<Vec<usize>> = vec![
+        (0..len).rev().collect(),
+        (0..len).map(|ix| (ix + 7) % len).collect(),
+        (0..len)
+            .filter(|ix| ix % 2 == 1)
+            .chain((0..len).filter(|ix| ix % 2 == 0))
+            .collect(),
+        (0..len).map(|ix| (ix * 5 + 3) % len).collect(),
+        (0..len).map(|ix| (len - 1 - ix + 11) % len).collect(),
+    ];
+    for order in orders {
+        let mut seen = order.clone();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..len).collect::<Vec<_>>(), "not a permutation");
+        let shuffled: Vec<SessionInput> = order.iter().map(|ix| sessions[*ix].clone()).collect();
+        assert_eq!(answer(&shuffled), base);
+    }
+}
+
+#[test]
+fn a_gap_within_noise_reads_no_clear_difference_with_both_figures() {
+    let answers = answer(&noisy_pair());
+    let q1 = row(&answers, ModelQuestion::BugFixRejected);
+    assert_eq!(q1.state, AnswerState::NoClearDifference);
+    assert_eq!(rate(figure_of(q1, "model-a")), 500);
+    assert_eq!(rate(figure_of(q1, "model-b")), 517);
+    assert_eq!(ranked(q1), ("model-a".to_owned(), "model-b".to_owned()));
+}
+
+#[test]
+fn a_clear_gap_names_the_leader() {
+    let mut sessions = spread("a", "model-a", InferredTask::BugFix, 10, &[1, 2, 1, 2, 1]);
+    sessions.extend(spread(
+        "b",
+        "model-b",
+        InferredTask::BugFix,
+        10,
+        &[7, 8, 7, 8, 7],
+    ));
+    let answers = answer(&sessions);
+    let q1 = row(&answers, ModelQuestion::BugFixRejected);
+    assert_eq!(q1.state, AnswerState::Answered);
+    assert_eq!(ranked(q1), ("model-a".to_owned(), "model-b".to_owned()));
+    assert_eq!(rate(figure_of(q1, "model-a")), 140);
+    assert_eq!(rate(figure_of(q1, "model-b")), 740);
+}
+
+#[test]
+fn ties_break_by_edits_then_sessions_then_label_bytes() {
+    // Identical figures, edits and sessions: label byte order.
+    let mut sessions = spread("b", "model-b", InferredTask::BugFix, 10, &[2; 5]);
+    sessions.extend(spread("a", "model-a", InferredTask::BugFix, 10, &[2; 5]));
+    let q1 = answer(&sessions).rows[0].clone();
+    assert_eq!(q1.state, AnswerState::NoClearDifference);
+    assert_eq!(ranked(&q1), ("model-a".to_owned(), "model-b".to_owned()));
+
+    // Same rate and edits, more sessions first: model-b's 6 sessions of 10
+    // edits against model-a's 5 of 12, both 200 permille over 60 edits.
+    let mut sessions = spread("b", "model-b", InferredTask::BugFix, 10, &[2; 6]);
+    sessions.extend(spread(
+        "a",
+        "model-a",
+        InferredTask::BugFix,
+        12,
+        &[3, 3, 2, 2, 2],
+    ));
+    let q1 = answer(&sessions).rows[0].clone();
+    assert_eq!(ranked(&q1), ("model-b".to_owned(), "model-a".to_owned()));
+
+    // Same rate, more edits first, before more sessions.
+    let mut sessions = spread("b", "model-b", InferredTask::BugFix, 20, &[4; 5]);
+    sessions.extend(spread("a", "model-a", InferredTask::BugFix, 10, &[2; 6]));
+    let q1 = answer(&sessions).rows[0].clone();
+    assert_eq!(ranked(&q1), ("model-b".to_owned(), "model-a".to_owned()));
+}
+
+#[test]
+fn the_window_is_thirteen_weeks_ending_now_whatever_week_is_on_screen() {
+    let twelve = now() - Duration::weeks(12);
+    let fourteen = now() - Duration::weeks(14);
+    let mut sessions: Vec<SessionInput> = bugfix_pair()
+        .into_iter()
+        .map(|session| dated(session, twelve))
+        .collect();
+    sessions.extend(
+        spread("old", "model-b", InferredTask::BugFix, 10, &[9; 5])
+            .into_iter()
+            .map(|session| dated(session, fourteen)),
+    );
+    let answers = answer(&sessions);
+    let q1 = row(&answers, ModelQuestion::BugFixRejected);
+    assert_eq!(counts(q1), vec![("model-a", 5), ("model-b", 5)]);
+    assert_eq!(rate(figure_of(q1, "model-b")), 300);
+    assert_eq!(answers.window_start, now() - Duration::weeks(13));
+}
+
+#[test]
+fn the_bootstrap_runs_exactly_the_configured_draws() {
+    let mut draws = BTreeMap::new();
+    let answers = model_answers_counting(
+        &bugfix_pair(),
+        &BTreeMap::new(),
+        &catalog(),
+        now(),
+        &mut draws,
+    );
+    assert_eq!(answers, answer(&bugfix_pair()));
+    let per_question: Vec<(ModelQuestion, u32)> = ModelQuestion::ALL
+        .iter()
+        .map(|question| (*question, draws.get(question).copied().unwrap_or(0)))
+        .collect();
+    assert_eq!(
+        per_question,
+        vec![
+            (ModelQuestion::BugFixRejected, MODEL_ANSWER_BOOTSTRAP_DRAWS),
+            (ModelQuestion::RefactorRejected, 0),
+            (ModelQuestion::TestsRejected, 0),
+            (ModelQuestion::DocsCost, 0),
+            (
+                ModelQuestion::RejectedAcrossTasks,
+                MODEL_ANSWER_BOOTSTRAP_DRAWS
+            ),
+            (ModelQuestion::FinishTime, MODEL_ANSWER_BOOTSTRAP_DRAWS),
+        ]
+    );
+    assert_eq!(MODEL_ANSWER_BOOTSTRAP_DRAWS, 1_000);
+}
+
+#[test]
+fn the_seed_is_pinned() {
+    assert_eq!(MODEL_ANSWER_BOOTSTRAP_SEED, 0x7472_6163_655f_6d61);
+    // SplitMix64's published sequence from seed zero.
+    let mut state = 0u64;
+    assert_eq!(split_mix64(&mut state), 0xe220_a839_7b1d_cdaf);
+    assert_eq!(split_mix64(&mut state), 0x6e78_9e6a_a1b9_65f4);
+    assert_eq!(split_mix64(&mut state), 0x06c4_5d18_8009_454f);
 }
