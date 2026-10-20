@@ -78,16 +78,13 @@ struct TracesTreeView: View, Equatable {
     /// ignoring when the folder has sessions waiting. It carries the core's
     /// words for that folder, decoded when the change was asked for.
     @State private var confirming: Confirmation?
-    /// The folder whose row menu (its contribution rule, and Ignore) is
-    /// open.
-    @State private var folderMenu: String?
+    /// The one row menu open, if any: a folder's "..." menu, a folder's
+    /// Submit split button's menu, or a session's menu. One value, so
+    /// opening a menu closes the others and every open or switch changes it.
+    @State private var rowMenu: RowMenu?
     /// The folder whose Submit all as is open, from its row's split
     /// button (owner, 2026-10-19).
     @State private var verdictFolder: TracesTree.FolderNode?
-    /// The folder whose Submit split button's menu is open.
-    @State private var submitMenu: String?
-    /// The session whose row menu (Dismiss session) is open.
-    @State private var sessionMenu: String?
     /// The session whose Dismiss confirmation is open (Ron's
     /// `SessionRow`): dismissing asks first, and only its button dismisses.
     @State private var dismissing: DaemonData.QueueEntry?
@@ -97,10 +94,28 @@ struct TracesTreeView: View, Equatable {
     /// VoiceOver's focus on an open row menu. The menu floats over the
     /// stack rather than inside its row, so it is read after the rows on
     /// screen; focus goes to it when it opens, as it went to the row.
-    @AccessibilityFocusState private var menuSpoken: Bool
+    /// Keyed on the menu, not a Bool: a switch from one menu to another is
+    /// a new value, so focus moves again.
+    @AccessibilityFocusState private var menuSpoken: RowMenu?
     /// Whether keeping the selection on screen animates. Off only where no
     /// animation can run: a window that is never shown (the render tests).
     @Environment(\.tracesScrollAnimates) private var scrollAnimates
+
+    /// A row menu, tagged with its kind and its row's id.
+    enum RowMenu: Hashable {
+        /// A folder's "..." menu: its contribution rule, and Ignore.
+        case folder(String)
+        /// A folder's Submit split button's menu: Submit all as.
+        case submit(String)
+        /// A session's menu: Dismiss session.
+        case session(String)
+    }
+
+    /// The menu open after a control for `menu` is pressed: that menu,
+    /// closing whichever was open, or none when it was the one open.
+    static func toggled(_ menu: RowMenu, current: RowMenu?) -> RowMenu? {
+        current == menu ? nil : menu
+    }
 
     struct Confirmation {
         let folder: TracesTree.FolderNode
@@ -300,9 +315,9 @@ struct TracesTreeView: View, Equatable {
             }
         }
         .scrollIndicators(.never)
-        .onChange(of: folderMenu ?? submitMenu ?? sessionMenu) { _, open in
+        .onChange(of: rowMenu) { _, open in
             guard open != nil else { return }
-            Task { @MainActor in menuSpoken = true }
+            Task { @MainActor in menuSpoken = open }
         }
         // A restored selection whose session arrives with a later
         // read is revealed then.
@@ -617,10 +632,10 @@ struct TracesTreeView: View, Equatable {
             submitTitle: submits && !split ? submitWord : nil,
             split: split ? TracesFolderRow.Split(
                 title: submitWord ?? "", menuLabel: outcome?.submitAllAs ?? "",
-                menuOpen: submitMenu == folder.id, busy: busy) : nil,
+                menuOpen: rowMenu == .submit(folder.id), busy: busy) : nil,
             menuLabel: menu ? words?.tree.folderMenu ?? "" : "",
-            menuOpen: folderMenu == folder.id,
-            floats: (menu && folderMenu == folder.id) || (split && submitMenu == folder.id),
+            menuOpen: rowMenu == .folder(folder.id),
+            floats: (menu && rowMenu == .folder(folder.id)) || (split && rowMenu == .submit(folder.id)),
             help: submits ? Self.submitHelp(offer.withheldLine, words: words) : "",
             writing: writing,
             // The pill already says Submitting for a Submit all.
@@ -630,18 +645,12 @@ struct TracesTreeView: View, Equatable {
             onSelect: { selection = Self.toggled(.folder(projectID: folder.id), current: selection) },
             onSubmit: submits && !busy ? { Task { await store.contributeFolder(folder, verdict: nil) } } : nil,
             onSplitSubmit: { Task { await store.contributeFolder(folder, verdict: nil) } },
-            onSplitMenu: {
-                folderMenu = nil
-                submitMenu = submitMenu == folder.id ? nil : folder.id
-            },
-            onMenu: menu ? {
-                submitMenu = nil
-                folderMenu = folderMenu == folder.id ? nil : folder.id
-            } : nil
+            onSplitMenu: { rowMenu = Self.toggled(.submit(folder.id), current: rowMenu) },
+            onMenu: menu ? { rowMenu = Self.toggled(.folder(folder.id), current: rowMenu) } : nil,
+            spoken: $spoken
         )
         .equatable()
         .id(Self.rowID(.folder(projectID: folder.id)))
-        .accessibilityFocused($spoken, equals: Self.rowID(.folder(projectID: folder.id)))
     }
 
     /// A session row's values, worked out here and handed to its own view.
@@ -666,7 +675,7 @@ struct TracesTreeView: View, Equatable {
             // only the selected row's pill is a tab stop; Return opens it.
             pill: selected ? words?.tree.reviewing : words?.review,
             menuLabel: words?.tree.dismissSession ?? "",
-            menuOpen: sessionMenu == entry.entryId,
+            menuOpen: rowMenu == .session(entry.entryId),
             help: words?.tree.reviewTip ?? "",
             // The tool's name for VoiceOver: the tile shows it, the sub line
             // (#1146's size and state) does not.
@@ -678,11 +687,11 @@ struct TracesTreeView: View, Equatable {
             tags: store.rowTags[entry.entryId].map { $0.showing(missions: missionsShown) },
             onSelect: { selection = Self.toggled(.session(entryID: entry.entryId), current: selection) },
             onSubmit: { onReview(entry.entryId) },
-            onMenu: { sessionMenu = sessionMenu == entry.entryId ? nil : entry.entryId }
+            onMenu: { rowMenu = Self.toggled(.session(entry.entryId), current: rowMenu) },
+            spoken: $spoken
         )
         .equatable()
         .id(Self.rowID(.session(entryID: entry.entryId)))
-        .accessibilityFocused($spoken, equals: Self.rowID(.session(entryID: entry.entryId)))
     }
 
     /// The open row menus, floated over the tree at their rows (#1146
@@ -691,28 +700,36 @@ struct TracesTreeView: View, Equatable {
     /// is open (`TracesMenuAnchors`).
     @ViewBuilder
     private func openMenus(_ anchors: [String: Anchor<CGRect>], in space: GeometryProxy) -> some View {
-        if let id = folderMenu ?? submitMenu,
+        if let open = rowMenu, let id = Self.folderID(of: open),
            let anchor = anchors[Self.rowID(.folder(projectID: id))],
            let folder = store.shownTree.folders.first(where: { $0.id == id }) {
             let rect = space[anchor]
             folderMenus(folder)
                 .accessibilityElement(children: .contain)
-                .accessibilityFocused($menuSpoken)
+                .accessibilityFocused($menuSpoken, equals: open)
                 .frame(width: rect.width, height: rect.height, alignment: .topTrailing)
                 .offset(x: rect.minX, y: rect.minY)
         }
-        if let id = sessionMenu,
+        if case .session(let id) = rowMenu,
            let anchor = anchors[Self.rowID(.session(entryID: id))],
            let label = store.words?.tree.dismissSession,
            let entry = store.shownTree.allSessions.first(where: { $0.entryId == id }) {
             let rect = space[anchor]
-            TracesRowMenuPill(label, onDismiss: { sessionMenu = nil }) {
-                sessionMenu = nil
+            TracesRowMenuPill(label, onDismiss: { rowMenu = nil }) {
+                rowMenu = nil
                 dismissing = entry
             }
-            .accessibilityFocused($menuSpoken)
+            .accessibilityFocused($menuSpoken, equals: .session(id))
             .frame(width: rect.width, height: rect.height, alignment: .topTrailing)
             .offset(x: rect.minX, y: rect.minY)
+        }
+    }
+
+    /// The folder whose menu is open, for either of a folder row's menus.
+    static func folderID(of menu: RowMenu) -> String? {
+        switch menu {
+        case .folder(let id), .submit(let id): id
+        case .session: nil
         }
     }
 
@@ -721,27 +738,27 @@ struct TracesTreeView: View, Equatable {
     private func folderMenus(_ folder: TracesTree.FolderNode) -> some View {
         let ignorable = folder.mode != nil && folder.offerableModes.contains(.ask)
             && folder.offerableModes.contains(.ignore) && folder.mode != .ignore
-        if folderMenu == folder.id, let words = store.words {
+        if rowMenu == .folder(folder.id), let words = store.words {
             TracesFolderMenu(
                 folder: folder, ruleTitle: words.inspector.contributionRule,
                 ignoreLabel: ignorable ? words.tree.ignoreFolder : nil,
                 onRule: { mode in
-                    folderMenu = nil
+                    rowMenu = nil
                     if mode != folder.mode { request(folder, mode) }
                 },
                 onIgnore: {
-                    folderMenu = nil
+                    rowMenu = nil
                     request(folder, .ignore)
                 },
-                onDismiss: { folderMenu = nil })
-        } else if submitMenu == folder.id, let outcome = store.disclosure?.outcome {
+                onDismiss: { rowMenu = nil })
+        } else if rowMenu == .submit(folder.id), let outcome = store.disclosure?.outcome {
             TracesSubmitMenu(
                 label: outcome.submitAllAs, tip: outcome.submitAllAsTooltip,
                 onPick: {
-                    submitMenu = nil
+                    rowMenu = nil
                     verdictFolder = folder
                 },
-                onDismiss: { submitMenu = nil })
+                onDismiss: { rowMenu = nil })
                 .offset(TracesSubmitMenu.offset)
         }
     }
@@ -976,6 +993,10 @@ struct TracesFolderRow: View, Equatable {
     let onSplitSubmit: () -> Void
     let onSplitMenu: () -> Void
     let onMenu: (() -> Void)?
+    /// The tree's VoiceOver focus, put on the `GlassListRow`: the element
+    /// VoiceOver lands on, an accessibility container. Left out of `==`:
+    /// it is the same focus state for every row.
+    let spoken: AccessibilityFocusState<String?>.Binding
 
     /// SwiftUI compares views on the main thread.
     nonisolated static func == (lhs: TracesFolderRow, rhs: TracesFolderRow) -> Bool {
@@ -1014,6 +1035,7 @@ struct TracesFolderRow: View, Equatable {
                 onSubmit: onSubmit,
                 onMenu: onMenu
             )
+            .accessibilityFocused(spoken, equals: TracesTreeView.rowID(.folder(projectID: folder.id)))
             .help(help)
             .disabled(writing)
             .opacity(writing ? TracesRowBusy.opacity : 1)
@@ -1075,6 +1097,8 @@ struct TracesSessionRow: View, Equatable {
     let onSelect: () -> Void
     let onSubmit: () -> Void
     let onMenu: () -> Void
+    /// As `TracesFolderRow.spoken`.
+    let spoken: AccessibilityFocusState<String?>.Binding
 
     nonisolated static func == (lhs: TracesSessionRow, rhs: TracesSessionRow) -> Bool {
         MainActor.assumeIsolated {
@@ -1108,6 +1132,7 @@ struct TracesSessionRow: View, Equatable {
                 onSubmit: acting ? nil : onSubmit,
                 onMenu: acting ? nil : onMenu
             )
+            .accessibilityFocused(spoken, equals: TracesTreeView.rowID(.session(entryID: entry.entryId)))
             .help(help)
             .opacity(acting ? TracesRowBusy.opacity : 1)
             .accessibilityHint(toolName)

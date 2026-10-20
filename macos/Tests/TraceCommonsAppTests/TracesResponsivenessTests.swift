@@ -176,7 +176,7 @@ final class TracesResponsivenessTests: XCTestCase {
             ".overlayPreferenceValue(TracesMenuAnchors.self, alignment: .topLeading)",
             "revealed.scrollTarget = id", ".onChange(of: expanded)", "Task { @MainActor in spoken = id }",
             // An open menu is read after the rows, so VoiceOver is moved to it.
-            ".onChange(of: folderMenu ?? submitMenu ?? sessionMenu)", "Task { @MainActor in menuSpoken = true }",
+            ".onChange(of: rowMenu)", "Task { @MainActor in menuSpoken = open }",
         ] {
             XCTAssertTrue(body.contains(needle) || source.contains(needle), "the tree lacks \(needle)")
         }
@@ -187,8 +187,72 @@ final class TracesResponsivenessTests: XCTestCase {
         XCTAssertFalse(rowViews.contains(".zIndex("))
         XCTAssertFalse(rowViews.contains("TracesRowMenuPill("))
         XCTAssertEqual(rowViews.components(separatedBy: ".anchorPreference(key: TracesMenuAnchors.self").count - 1, 2)
-        XCTAssertEqual(source.components(separatedBy: ".accessibilityFocused($menuSpoken)").count - 1, 2)
+        XCTAssertEqual(source.components(separatedBy: ".accessibilityFocused($menuSpoken, equals: ").count - 1, 2)
         // Each row is rebuilt only when what it draws changes.
+        XCTAssertEqual(source.components(separatedBy: ".equatable()\n        .id(Self.rowID(").count - 1, 2)
+    }
+
+    // MARK: VoiceOver (follows #1505's review)
+
+    /// One row menu is open at a time, and every open or switch is a new
+    /// value, so the tree's `onChange` fires and VoiceOver moves to the
+    /// menu. Under #1505 the key was `folderMenu ?? submitMenu ??
+    /// sessionMenu`: a folder's "..." menu then its Submit chevron kept the
+    /// key, and a session's menu opened over an open folder menu kept it too.
+    func test_openingAnyMenuClosesTheOthersAndChangesTheKey() {
+        typealias Menu = TracesTreeView.RowMenu
+        let all: [Menu] = [.folder("X"), .submit("X"), .session("S"), .folder("Y"), .submit("Y"), .session("T")]
+        for current in all {
+            for opened in all where opened != current {
+                let next = TracesTreeView.toggled(opened, current: current)
+                XCTAssertEqual(next, opened, "opening \(opened) over \(current)")
+                XCTAssertNotEqual(next, current, "opening \(opened) over \(current) left the key unchanged")
+            }
+            // The same control again closes its menu.
+            XCTAssertNil(TracesTreeView.toggled(current, current: current))
+            XCTAssertEqual(TracesTreeView.toggled(current, current: nil), current)
+        }
+    }
+
+    /// The menu state is the one tagged value, and VoiceOver's menu focus
+    /// is keyed on it, not a Bool that is already true on a switch.
+    func test_menuFocusFollowsTheOneOpenMenu() throws {
+        let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
+        for gone in ["@State private var folderMenu", "@State private var submitMenu", "@State private var sessionMenu",
+                     "@AccessibilityFocusState private var menuSpoken: Bool", "folderMenu ?? submitMenu"] {
+            XCTAssertFalse(source.contains(gone), "TracesViews.swift still has \(gone)")
+        }
+        for needle in ["@State private var rowMenu: RowMenu?", "@AccessibilityFocusState private var menuSpoken: RowMenu?",
+                       ".onChange(of: rowMenu)", "Task { @MainActor in menuSpoken = open }"] {
+            XCTAssertTrue(source.contains(needle), "TracesViews.swift lacks \(needle)")
+        }
+        XCTAssertEqual(source.components(separatedBy: ".accessibilityFocused($menuSpoken, equals: ").count - 1, 2)
+        // Every control that opens a menu goes through the one toggle.
+        XCTAssertEqual(source.components(separatedBy: "rowMenu = Self.toggled(").count - 1, 3)
+    }
+
+    /// VoiceOver focus is on the element it lands on: the `GlassListRow`,
+    /// an accessibility container. #1505 moved it to the row wrappers,
+    /// which are plain views. The `.id` stays on the wrapper, the
+    /// `LazyVStack`'s child that `scrollTo` reaches.
+    func test_rowFocusIsOnTheListRowContainer() throws {
+        let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
+        let rowsStart = try XCTUnwrap(source.range(of: "struct TracesFolderRow"))
+        let rowsEnd = try XCTUnwrap(source.range(of: "struct PreviewSlot"))
+        let rowViews = String(source[rowsStart.lowerBound..<rowsEnd.lowerBound])
+        let tree = String(source[..<rowsStart.lowerBound])
+        XCTAssertEqual(tree.components(separatedBy: ".accessibilityFocused($spoken").count - 1, 0,
+                       "the tree focuses the row wrapper, not its container")
+        XCTAssertEqual(rowViews.components(separatedBy: "let spoken: AccessibilityFocusState<String?>.Binding").count - 1, 2)
+        for row in ["struct TracesFolderRow", "struct TracesSessionRow"] {
+            let start = try XCTUnwrap(rowViews.range(of: row))
+            let body = try XCTUnwrap(rowViews.range(of: "var body: some View {", range: start.upperBound..<rowViews.endIndex))
+            let listRow = try XCTUnwrap(rowViews.range(of: "GlassListRow(", range: body.upperBound..<rowViews.endIndex))
+            let call = try XCTUnwrap(rowViews.range(of: "\n            )\n", range: listRow.upperBound..<rowViews.endIndex))
+            let after = rowViews[call.upperBound...].prefix(120)
+            XCTAssertTrue(after.hasPrefix("            .accessibilityFocused(spoken, equals: TracesTreeView.rowID("),
+                          "\(row): the focus is not the GlassListRow's first modifier")
+        }
         XCTAssertEqual(source.components(separatedBy: ".equatable()\n        .id(Self.rowID(").count - 1, 2)
     }
 }
