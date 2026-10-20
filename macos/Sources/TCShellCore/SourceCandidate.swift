@@ -162,12 +162,8 @@ public struct SourceCandidate: Equatable, Sendable {
         /// none dated. So the fraction is truncated to milliseconds before
         /// parsing, and a plain second-precision stamp is still accepted.
         static func parseTimestamp(_ raw: String) -> Date? {
-            let fractional = ISO8601DateFormatter()
-            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            let plain = ISO8601DateFormatter()
-            plain.formatOptions = [.withInternetDateTime]
-
-            if let date = fractional.date(from: raw) ?? plain.date(from: raw) {
+            // Built once, shared with every other daemon timestamp.
+            if let date = DaemonTimestamp.parse(raw) {
                 return date
             }
             guard let dot = raw.firstIndex(of: "."),
@@ -175,7 +171,7 @@ public struct SourceCandidate: Equatable, Sendable {
             else { return nil }
             let digits = raw[raw.index(after: dot)..<zone].prefix(3)
             let truncated = raw[..<dot] + "." + digits + raw[zone...]
-            return fractional.date(from: String(truncated))
+            return DaemonTimestamp.parseFractionalOnly(String(truncated))
         }
     }
 }
