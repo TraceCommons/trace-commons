@@ -432,6 +432,14 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     // `{folder}` when no folder the daemon knows matches the trace's.
     ("analytics_folder_unknown", "Unknown folder"),
+    // A Sessions feed row under feed T (owner request 2026-10-20): its
+    // tokens beside its sparkline. A row with no counts reads
+    // `analytics_reason_no_usage_counters` once instead, with no sparkline.
+    ("analytics_session_row_tokens", "{t} tokens"),
+    // The sparkline in words, for VoiceOver: its largest turn.
+    ("analytics_sparkline_peak", "Peak {t} tokens at turn {n}"),
+    // The row at the foot of the feed while the next page is read.
+    ("analytics_sessions_loading_more", "Loading more\u{2026}"),
     ("analytics_turn", "Turn {n}"),
     (
         "analytics_codex_not_recorded",

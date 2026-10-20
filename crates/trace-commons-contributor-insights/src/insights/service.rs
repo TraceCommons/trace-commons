@@ -1904,6 +1904,12 @@ mod tests {
                 "{folder} \u{b7} Undated \u{b7} {harness}",
             ),
             ("analytics_folder_unknown", "Unknown folder"),
+            // A Sessions feed row (owner request 2026-10-20): its tokens,
+            // its sparkline's peak in words for VoiceOver, and the row
+            // shown while the next page is read.
+            ("analytics_session_row_tokens", "{t} tokens"),
+            ("analytics_sparkline_peak", "Peak {t} tokens at turn {n}"),
+            ("analytics_sessions_loading_more", "Loading more\u{2026}"),
             ("analytics_setting_ledger_feed", "Count Private AI tokens"),
             // Where a feed T session's calls went (design part B). Only
             // proof reads "verified"; no proxy record never reads as "not
