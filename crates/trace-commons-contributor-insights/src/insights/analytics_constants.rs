@@ -237,6 +237,38 @@ pub const CODEX_DENIAL_CONFIRMED: bool = false;
 /// declares another model.
 pub const CODEX_REVIEWER_MODEL: &str = "codex-auto-review";
 
+/// Version of the task classifier's rules and thresholds. A bump that changes
+/// only rules or thresholds re-classifies from the stored shape (spec
+/// section 5).
+pub const CLASSIFIER_VERSION: u32 = 1;
+/// Version of the stored session facts. A bump that changes what a scan
+/// collects re-reads each row once.
+pub const SESSION_FACTS_VERSION: u32 = 1;
+
+/// Extensions that make an edited file doc-class.
+pub const DOC_EXTENSIONS: [&str; 4] = ["md", "mdx", "rst", "adoc"];
+/// Directories under which a `.txt` file is doc-class; elsewhere it is
+/// config-class.
+pub const DOC_DIRS: [&str; 2] = ["docs", "doc"];
+/// Directories that make every file under them test-class.
+pub const TEST_DIRS: [&str; 4] = ["tests", "test", "__tests__", "spec"];
+/// Marks inside a file name that make it test-class.
+pub const TEST_NAME_MARKS: [&str; 3] = ["_test.", ".test.", ".spec."];
+/// A file-name prefix that makes it test-class.
+pub const TEST_NAME_PREFIX: &str = "test_";
+/// Extensions that make an edited file config-class. A default taken, not an
+/// owner ruling; `CMakeLists.txt` and `requirements.txt` fall here by `txt`.
+pub const CONFIG_EXTENSIONS: [&str; 11] = [
+    "txt", "json", "toml", "yaml", "yml", "ini", "cfg", "conf", "lock", "xml", "plist",
+];
+/// Files renamed or moved at which a session is a refactor.
+pub const REFACTOR_MIN_RENAMES: u32 = 3;
+/// Edited files at which balanced line counts make a session a refactor.
+pub const REFACTOR_MIN_FILES: u32 = 5;
+/// Net lines (`|added - removed|`) within this share of lines changed
+/// (`added + removed`) count as balanced.
+pub const REFACTOR_NET_LINES: Ratio = Ratio::new(1, 10);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,6 +397,26 @@ mod tests {
         // `denied` is always None.
         const { assert!(!CODEX_DENIAL_CONFIRMED) };
         assert_eq!(CODEX_REVIEWER_MODEL, "codex-auto-review");
+    }
+
+    #[test]
+    fn task_classifier_constants() {
+        assert_eq!(CLASSIFIER_VERSION, 1);
+        assert_eq!(SESSION_FACTS_VERSION, 1);
+        assert_eq!(DOC_EXTENSIONS, ["md", "mdx", "rst", "adoc"]);
+        assert_eq!(DOC_DIRS, ["docs", "doc"]);
+        assert_eq!(TEST_DIRS, ["tests", "test", "__tests__", "spec"]);
+        assert_eq!(TEST_NAME_MARKS, ["_test.", ".test.", ".spec."]);
+        assert_eq!(TEST_NAME_PREFIX, "test_");
+        assert_eq!(
+            CONFIG_EXTENSIONS,
+            [
+                "txt", "json", "toml", "yaml", "yml", "ini", "cfg", "conf", "lock", "xml", "plist"
+            ]
+        );
+        assert_eq!(REFACTOR_MIN_RENAMES, 3);
+        assert_eq!(REFACTOR_MIN_FILES, 5);
+        assert_eq!(REFACTOR_NET_LINES, Ratio::new(1, 10));
     }
 
     #[test]
