@@ -24,6 +24,7 @@ pub mod goals;
 pub mod ledger_series;
 pub mod lever;
 pub mod markers;
+pub mod model_answers;
 pub mod models;
 pub mod outcomes;
 pub mod patterns;

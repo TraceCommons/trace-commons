@@ -143,8 +143,11 @@ pub enum DigestKeyCustody {
 pub const DIGEST_KEY_CUSTODY: DigestKeyCustody = DigestKeyCustody::OsKeychain;
 
 /// Whether ledger `cost_usd` or list prices may reach an Insights figure.
-/// Owner decision D5, open.
-pub const LEDGER_MONEY_IN_INSIGHTS: bool = false;
+/// Owner decision D5, settled by the owner on 2026-10-20: Insights shows
+/// money, labelled. The proxy ledger's `cost_usd` is shown as a charge;
+/// everything else is at API list prices from reviewed tables shipped in
+/// the build, with no runtime fetch.
+pub const LEDGER_MONEY_IN_INSIGHTS: bool = true;
 
 /// Whether the daemon setting `insights_ledger_feed` starts on. Owner
 /// decision D3, settled by the owner on 2026-10-09: on by default, and the
@@ -247,6 +250,24 @@ pub const CLASSIFIER_VERSION: u32 = 1;
 /// collects re-reads each row once.
 pub const SESSION_FACTS_VERSION: u32 = 1;
 
+/// Sessions a (task type, model) cell needs before its figure is compared
+/// (spec section 6).
+pub const MODEL_ANSWER_MIN_SESSIONS: u32 = 5;
+/// Edits a cell needs before its rejection figure is compared.
+pub const MODEL_ANSWER_MIN_EDITS: u32 = 30;
+/// Share of the contributor's task mix a model's qualifying task types must
+/// carry before it is compared across task types.
+pub const MODEL_ANSWER_MIN_MIX_COVERAGE: Ratio = Ratio::new(4, 5);
+/// Resamples behind every named leader.
+pub const MODEL_ANSWER_BOOTSTRAP_DRAWS: u32 = 1_000;
+/// Share of draws in which the leader must lead the next model.
+pub const MODEL_ANSWER_LEAD_SHARE: Ratio = Ratio::new(95, 100);
+/// The fixed bootstrap seed, so the same rows always give the same answer.
+pub const MODEL_ANSWER_BOOTSTRAP_SEED: u64 = 0x7472_6163_655f_6d61;
+/// Weeks the Models answers cover, ending now: the counter store's
+/// retention, whatever week is on screen.
+pub const MODEL_ANSWER_WINDOW_WEEKS: i64 = COUNTER_STORE_KEEP_WEEKS;
+
 /// Extensions that make an edited file doc-class.
 pub const DOC_EXTENSIONS: [&str; 4] = ["md", "mdx", "rst", "adoc"];
 /// Directories under which a `.txt` file is doc-class; elsewhere it is
@@ -348,7 +369,7 @@ mod tests {
         const { assert!(EDIT_FAIL_EDIT_CARD) };
         const { assert!(CODEX_PER_TURN_SERIES) };
         const { assert!(DEDUPE_TURNS_BY_MSG_KEY) };
-        const { assert!(!LEDGER_MONEY_IN_INSIGHTS) };
+        const { assert!(LEDGER_MONEY_IN_INSIGHTS) };
         assert_eq!(DIGEST_KEY_CUSTODY, DigestKeyCustody::OsKeychain);
     }
 
