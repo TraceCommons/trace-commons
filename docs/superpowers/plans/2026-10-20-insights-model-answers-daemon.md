@@ -315,8 +315,8 @@ Reader rules (spec section 2; verify spellings on a real file before writing fix
 Update `held_and_default_decisions` to `const { assert!(CODEX_PER_TURN_SERIES) };`.
 
 - [ ] **Step 2: Run** `RUSTFLAGS="-D warnings" cargo test -p trace-commons-contributor-insights` — Expected: FAIL to compile on the new field and module.
-- [ ] **Step 3: Implement** the reader; add `series: None` at every existing `SessionBody::Codex` site except the daemon (Task 6).
-- [ ] **Step 4: Run** the insights suite — Expected: PASS against the baseline.
+- [ ] **Step 3: Implement** the reader; add `series: None` at every existing `SessionBody::Codex` site, the daemon's `session_input()` (`insights_week.rs:291`) and daemon tests included, so both crates build at this commit (the real daemon wiring is Task 6).
+- [ ] **Step 4: Run** the insights and contributor suites — Expected: PASS against the baseline.
 - [ ] **Step 5: Commit**: `git commit -m "Read Codex sessions turn by turn"` (with the trailer).
 
 ---
@@ -332,7 +332,7 @@ Update `held_and_default_decisions` to `const { assert!(CODEX_PER_TURN_SERIES) }
 - Produces:
   - `SessionInput.facts: Option<SessionFacts>` (`None` for saved snapshots and for counter rows without facts).
   - `RowBody::Codex { observed: Option<CodexObserved>, #[serde(default)] series: Option<CodexTurnSeriesEvidence> }`.
-  - `CounterRow` gains `#[serde(default)] facts: Option<SessionFacts>` and `#[serde(default)] facts_version: u32`. A row is unchanged only when, beyond today's conditions, `facts_version == SESSION_FACTS_VERSION`; so every existing row is read once more, within the per-poll budget (1,921 Codex rows on the owner's machine take about 120 polls at 16 reads each). A row whose `facts.classifier_version` is stale is re-classified at answer time with `reclassify`, not re-read.
+  - `CounterRow` gains `#[serde(default)] facts: Option<SessionFacts>` and `#[serde(default)] facts_version: u32`. Every row the pass makes is written with `facts_version = SESSION_FACTS_VERSION`, including rows whose facts scan failed (`facts: None`) and `RowBody::Unknown` rows, so a session that cannot be read is not read on every poll. A row is unchanged only when, beyond today's conditions, `facts_version == SESSION_FACTS_VERSION`; so every existing row is read once more, within the per-poll budget (1,921 Codex rows on the owner's machine take about 120 polls at 16 reads each). A row whose `facts.classifier_version` is stale is re-classified at answer time with `reclassify`, not re-read.
   - `scan_session` runs `ClaudeFactsScan` beside `ClaudeTurnSeriesScan`, and `CodexTurnSeriesScan` beside `CodexUsageScan`, on the same records; a scan that fails leaves the facts `None` and the rest unchanged. `read_body` sets `facts.delegated_unread = candidate.group_member_count > 0` and `facts.capped |= series.truncated` (before the delegated mark sets `truncated`).
   - `turns()` and `tool_calls()` count a Codex row's series, so the store caps (`COUNTER_STORE_MAX_TURNS`, `..._TOOL_CALLS`) see it.
 
@@ -346,7 +346,8 @@ Update `held_and_default_decisions` to `const { assert!(CODEX_PER_TURN_SERIES) }
 #[test] fn a_stale_classifier_version_reclassifies_without_a_read() { /* reads counted 0 */ }
 #[test] fn delegated_and_capped_are_told_apart() { assert!(f.delegated_unread && !f.capped); }
 #[test] fn codex_series_turns_count_toward_the_store_caps() {}
-#[test] fn a_failed_facts_scan_keeps_the_counters() { /* facts None, series Some */ }
+#[test] fn a_failed_facts_scan_keeps_the_counters() { /* facts None, series Some, facts_version current; the next poll reads 0 files */ }
+#[test] fn an_unknown_row_is_not_read_on_every_poll() { /* RowBody::Unknown, facts None, facts_version current: 0 reads on the next poll */ }
 #[test] fn the_stored_row_holds_no_path_text_command_or_price() {
     // serialized store bytes: no PRIVATE_* marker, no "cost", "price", "usd", no repo path, no file name
 }
