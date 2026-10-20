@@ -121,6 +121,8 @@ private struct HomeOverview: View {
     let openMissionDrafts: () -> Void
     let openInsights: () -> Void
     let openMissions: () -> Void
+    /// The NEAR AI balance the Balance tile reads.
+    @EnvironmentObject private var model: AppModel
 
     /// The rollup, or nil after a failed `history_rollup` read
     /// (`SummaryFacts.fresh`): a stale one is not shown as current.
@@ -276,8 +278,9 @@ private struct HomeOverview: View {
         let uncontributed = HomeUncontributed(traces.tree.allSessions, settlement: settlement)
         let delta = HomeFormat.creditDelta(store.creditTotals.delta(on: .now), words: words)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            // Two by two (owner, 2026-10-12): Waiting and Contributed, then
-            // Credit and Uncontributed.
+            // Waiting and Contributed, then what is not contributed as an
+            // upsell two tiles tall across both columns, then Credit and the
+            // NEAR AI balance (owner, 2026-10-19).
             Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
                 GridRow {
                     HomeStatTile(label: MonitorWords.waiting, value: HomeFormat.count(traces.decisionsOwed),
@@ -285,19 +288,39 @@ private struct HomeOverview: View {
                     HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(freshRollup?.allTime?.accepted),
                                  systemImage: HomeStatIcons.contributed, action: openHistory)
                 }
+                if uncontributed.count > 0, let title = HomeFormat.cardHeading(words?.uncontributed) {
+                    GridRow {
+                        notContributed(uncontributed, title: title)
+                            .gridCellColumns(2)
+                    }
+                }
                 GridRow {
                     HomeStatTile(label: HomeFormat.creditPendingWord,
                                  value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)),
                                  detail: delta?.text, detailInk: delta?.ink,
                                  systemImage: HomeStatIcons.credit, action: openPrivateAI)
-                    HomeStatTile(label: words?.uncontributed ?? "", value: String(uncontributed.count),
-                                 detail: uncontributed.detail(words), systemImage: HomeStatIcons.uncontributed,
-                                 valueAccessory: uncontributed.size(words),
-                                 action: openTraces)
+                    if let copy = model.privateInferenceCopy {
+                        let balance = HomeFormat.balance(model.balanceStatus, copy: copy, calls: model.balanceCalls)
+                        HomeStatTile(label: copy.balanceTitle, value: balance.value, detail: balance.detail,
+                                     systemImage: HomeStatIcons.balance, action: openPrivateAI)
+                    } else {
+                        Color.clear
+                    }
                 }
             }
             .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// What waits on this Mac, not yet contributed, across both columns
+    /// (owner, 2026-10-19): a slim card with no fill and a gradient edge, a
+    /// large icon on the left, how many traces and their size, and the
+    /// core's dollar line. The whole card opens Traces. Drawn only while
+    /// something waits.
+    private func notContributed(_ uncontributed: HomeUncontributed, title: String) -> some View {
+        HomeNotContributedCard(
+            title: title, count: uncontributed.count, size: uncontributed.size(words),
+            detail: uncontributed.detail(words), action: openTraces)
     }
 
 
@@ -325,6 +348,70 @@ private struct HomeOverview: View {
 
 }
 
+/// The Not contributed card (owner, 2026-10-19): half a hero's height, no
+/// fill, a gradient edge, and a large icon in the same gradient on the
+/// left; then the label, the count and size, and the core's dollar line.
+/// Under the pointer it takes the control hover fill; the whole card is
+/// the button.
+private struct HomeNotContributedCard: View {
+    let title: String
+    let count: Int
+    let size: String?
+    let detail: String?
+    let action: () -> Void
+    @State private var hovering = false
+
+    static let gradient = GlassTokens.Gradient.heroMissions
+    static let iconSize: CGFloat = 30
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: GlassTier.card.radius, style: .continuous)
+        Button(action: action) {
+            HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
+                Image(systemName: HomeStatIcons.uncontributed)
+                    .glassGlyph(Self.iconSize)
+                    .foregroundStyle(Self.gradient.linear)
+                    .frame(width: Self.iconSize + GlassTokens.Space.s6)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                    Text(title)
+                        .glassType(GlassTokens.TypeScale.eyebrow)
+                        .foregroundStyle(GlassColor.textTertiary)
+                    HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                        Text(String(count))
+                            .glassType(GlassTokens.TypeScale.heading.weight(.bold))
+                            .monospacedDigit()
+                            .foregroundStyle(GlassColor.textPrimary)
+                        if let size {
+                            Text(size)
+                                .glassType(GlassTokens.TypeScale.caption)
+                                .foregroundStyle(GlassColor.textSecondary)
+                        }
+                    }
+                    if let detail {
+                        Text(detail)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+                GlassChevron()
+            }
+            .padding(.horizontal, GlassTokens.Space.s7)
+            .padding(.vertical, GlassTokens.Space.s5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(shape.fill(hovering ? GlassTokens.Color.controlHover.color : Color.clear))
+            .overlay(shape.strokeBorder(Self.gradient.linear, lineWidth: 1.5))
+            .contentShape(shape)
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+    }
+}
+
 /// Home's stat tile icons (owner, 2026-10-12).
 enum HomeStatIcons {
     static let waiting = "hourglass"
@@ -332,6 +419,8 @@ enum HomeStatIcons {
     static let credit = "dollarsign.circle"
     /// Held on this Mac, not yet shared: local and private.
     static let uncontributed = "lock.laptopcomputer"
+    /// The NEAR AI balance (owner, 2026-10-19).
+    static let balance = "creditcard"
 }
 
 /// The Home cards' icons, shared with the edge rail's Home peek.
@@ -1378,6 +1467,20 @@ struct HomeUncontributed: Equatable {
 
 /// Formatting for Home and History. Pure, so the rules are tested.
 enum HomeFormat {
+    /// The Balance tile's figure (owner, 2026-10-19): the amount left when
+    /// the core reads one, else a dash with the core's sentence for why
+    /// under it. Never a figure the core did not give.
+    static func balance(
+        _ status: BalanceStatus, copy: PrivateInferenceCopy, calls: BalanceCalls
+    ) -> (value: String, detail: String?) {
+        if let sentence = BalanceSurface.stateLine(status, copy: copy, calls: calls) { return ("—", sentence) }
+        guard BalanceSurface.showsFigures(status, calls: calls) else { return ("—", nil) }
+        switch BalanceSurface.remaining(status, copy: copy, calls: calls) {
+        case .figure(let amount): return (amount, nil)
+        case .sentence(let sentence): return ("—", sentence)
+        }
+    }
+
     /// A card heading from the core's copy: the word, or nil when the copy
     /// has not arrived (or the word is empty), so no card is drawn on a
     /// word of this shell's own.

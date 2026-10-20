@@ -52,7 +52,8 @@ final class MenuBarGlassPanelTests: XCTestCase {
             .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
         XCTAssertFalse(source.contains("projects.map(\\.mode)"))
-        XCTAssertTrue(source.contains("store.status?.contributionMode"))
+        // The pill itself is gone from the popover (owner, 2026-10-19).
+        XCTAssertFalse(source.contains("store.status?.contributionMode"))
     }
 
     /// The list agrees with the pill: with no override it checks the
@@ -251,10 +252,10 @@ final class MenuBarGlassPanelTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
-        XCTAssertTrue(source.contains("MenuPanelStatus.privateAI(\n            on: privateAIOn,"))
-        XCTAssertTrue(source.contains("fill: .solid(privateAIPill == .on ? GlassTokens.Color.dataShared"))
+        // The popover draws no Private AI pill any more (owner, 2026-10-19):
+        // the switch is the Private AI tab's.
+        XCTAssertFalse(source.contains("privateAIPill"))
         XCTAssertFalse(source.contains("privateAIOn == true ? GlassTokens.Color.dataShared"))
-        XCTAssertFalse(source.contains("private var privateAIValue: String {\n        switch privateAIOn {"))
     }
 
     // MARK: Badge
@@ -268,9 +269,9 @@ final class MenuBarGlassPanelTests: XCTestCase {
     // MARK: Rules
 
     /// Nothing is sent from the popover, and nothing is turned on from it:
-    /// its only writes are the shipping menu's pause, resume and Private AI
-    /// off, and the contribution override, which goes through the store
-    /// after its core confirmation and only while the store allows it.
+    /// its only writes are pause and resume (owner, 2026-10-19: the mode
+    /// and Private AI pills, and with them the override and Private AI
+    /// off, are gone).
     func test_thePopoverMakesOnlyTheShippingMenusWrites() throws {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -283,10 +284,12 @@ final class MenuBarGlassPanelTests: XCTestCase {
                           "creditPoints", "creditPending", "creditFinal", "creditRange", "commonsCreditSummary"] {
             XCTAssertFalse(source.contains(forbidden), "the popover contains \(forbidden)")
         }
-        XCTAssertTrue(source.contains("modeOptions"))
-        XCTAssertTrue(source.contains(".disabled(!store.canChooseOverride || model.requiresOnboarding)"),
-                      "the choices are disabled unless the store has positive evidence the core is up")
-        XCTAssertTrue(source.contains("store.resolveConfirmation(confirmed:"))
+        for gone in ["modeOptions", "store.choose(", "store.resolveConfirmation(", "applyPrivateInference(",
+                     "PrivateInferenceTray.perform("] {
+            XCTAssertFalse(source.contains(gone), "the popover writes through \(gone) again")
+        }
+        XCTAssertTrue(source.contains("model.pause(until: MenuBarWords.pauseUntil(index))"))
+        XCTAssertTrue(source.contains("model.resume()"))
     }
 
     // MARK: Contribution override (#1208)
@@ -443,9 +446,8 @@ final class MenuBarGlassPanelTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
-        XCTAssertTrue(source.contains("MenuPanelData.pressOnlyCloses(choice.mode, status: store.status, stale: store.stale)"))
-        // The override line is drawn only from a current status.
-        XCTAssertTrue(source.contains("if !store.stale, store.status?.contributionOverride != nil {"))
+        // The popover draws no override list any more (owner, 2026-10-19).
+        XCTAssertFalse(source.contains("MenuPanelData.pressOnlyCloses("))
     }
 
     /// The Mixed row goes through `chooseMixed`, which confirms; the panel
@@ -455,7 +457,9 @@ final class MenuBarGlassPanelTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
-        XCTAssertTrue(source.contains("Task { await store.chooseMixed() }"))
+        // The Mixed row left with the mode pill (owner, 2026-10-19), and
+        // the unconfirmed clear is never called.
+        XCTAssertFalse(source.contains("store.chooseMixed()"))
         XCTAssertFalse(source.contains("clearOverride()"))
     }
 
@@ -537,7 +541,6 @@ final class MenuBarGlassPanelTests: XCTestCase {
     func test_theWordsComeFromTheCore() {
         XCTAssertNotNil(MonitorWords.table)
         XCTAssertEqual(MenuWords.on, MonitorWords.table?.on)
-        XCTAssertEqual(MenuBarGlassPanel.modeCaption, MonitorWords.table?.contributionMode)
         XCTAssertFalse(MenuWords.quit.isEmpty)
     }
 

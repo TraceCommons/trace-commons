@@ -91,8 +91,6 @@ final class MonitorShellTests: XCTestCase {
             // The field is the stage's, which lights it under the pointer.
             "GlassMapStage(alignment: .topTrailing) {",
             ".padding(GlassTokens.Space.mapOverlayInset)",
-            ".frame(width: Self.viewMenuWidth)",
-            "static var viewMenuWidth: CGFloat { 250 }",
         ] {
             XCTAssertTrue(window.contains(needle), "MonitorWindowView.swift lacks \(needle)")
         }
@@ -117,11 +115,22 @@ final class MonitorShellTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(GlassRuleTabs<MonitorWindowView.Tab>.toPaneEdge, MonitorWindowView.mainInset)
     }
 
+    /// No View menu in the toolbar (owner, 2026-10-19): its one item, Show
+    /// ignored folders, is in the Traces list's filter menu. The Graph
+    /// toggle works only on Traces, and reads hidden elsewhere.
     func test_theViewMenuIsInTheToolbar() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
-        for needle in ["GlassToolbarButton(MonitorShellWords.view, icon: .glyph(.viewMenu), expanded: viewMenu)",
-                       "GlassMenuItem(MonitorShellWords.showIgnoredFolders, checked: showsIgnored)",
-                       "GlassToolbarButton(MonitorShellWords.graphToggle(shown: showsGraph),",
+        XCTAssertFalse(window.contains("MonitorShellWords.view,"), "the View menu is back in the toolbar")
+        XCTAssertFalse(window.contains("GlassMenuItem(MonitorShellWords.showIgnoredFolders"))
+        let controls = try Self.text("Views/Monitor/NudgeViews.swift")
+        XCTAssertTrue(controls.contains("Toggle(MonitorShellWords.showIgnoredFolders, isOn: $store.showsIgnored)"))
+        XCTAssertTrue(MonitorWindowView.graphAvailable(.traces))
+        for tab in [MonitorWindowView.Tab.home, .inference, .insights] {
+            XCTAssertFalse(MonitorWindowView.graphAvailable(tab), "the Graph toggle works on \(tab)")
+        }
+        for needle in ["MonitorShellWords.graphToggle(shown: showsGraph && MonitorWindowView.graphAvailable(shown)),",
+                       ".disabled(!MonitorWindowView.graphAvailable(shown))",
+                       ".onChange(of: traces.showsIgnored) { _, shows in if showsIgnored != shows { showsIgnored = shows } }",
                        "GlassToolbarButton(MonitorShellWords.mapToggle(shown: showsMap),",
                        // Disabled, and reading hidden, where the inspector
                        // cannot open (Home but for History).

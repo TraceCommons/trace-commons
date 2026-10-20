@@ -249,6 +249,8 @@ public struct MonitorInspectorCopy: MonitorWordTable {
     public let notSet: String
     public let sessionsFolder: String
     public let project: String
+    /// The folder inspector's first section's title (owner, 2026-10-19).
+    public let projectDetails: String
     public let projectOf: String
     public let sessionOf: String
     public let path: String
@@ -268,6 +270,7 @@ public struct MonitorInspectorCopy: MonitorWordTable {
         case notSet = "not_set"
         case sessionsFolder = "sessions_folder"
         case project
+        case projectDetails = "project_details"
         case projectOf = "project_of"
         case sessionOf = "session_of"
         case path

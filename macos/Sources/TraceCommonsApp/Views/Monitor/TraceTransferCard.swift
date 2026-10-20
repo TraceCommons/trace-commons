@@ -26,23 +26,30 @@ struct TraceTransferCard: View {
             let name = tool?.displayName ?? transfer.tool
             let glass = tool.map(TracesTreeView.glassTool) ?? .other(initials: FlowMapScene.initials(transfer.tool))
             let state = Self.state(transfer.action, tool: name, words: words)
+            // A batch from several tools names none: its count is the title.
             GlassPopoverNotice(
-                title: name, tag: state.tag, tagTone: state.tone,
+                title: transfer.mixedTools ? words.traces(transfer.count) : name, tag: state.tag, tagTone: state.tone,
                 detailsLabel: MonitorWords.noticeDetails, closeLabel: MonitorWords.close, onClose: onClose
             ) {
                 coin(glass)
             } summary: {
                 HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
-                    Text(words.transferTrace.uppercased())
+                    // A batch says how many traces it is (owner,
+                    // 2026-10-19), and names its folder only when they
+                    // share one.
+                    Text((transfer.count > 1 ? words.traces(transfer.count) : words.transferTrace).uppercased())
                         .glassType(GlassTokens.TypeScale.eyebrow)
                         .foregroundStyle(GlassColor.textTertiary)
+                        .fixedSize()
                     // The folder gives way, never the time: a long name is
                     // cut in its middle and the date stays whole.
-                    Text(folder)
-                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    if !transfer.mixedFolders {
+                        Text(folder)
+                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                     if let time {
                         Text("\u{00B7} " + time)
                             .glassType(GlassTokens.TypeScale.label.weight(.regular))
@@ -53,7 +60,7 @@ struct TraceTransferCard: View {
                 }
                 .accessibilityElement(children: .combine)
             } details: {
-                memory(words)
+                if !transfer.mixedTools { memory(words) }
                 Text(state.note)
             } actions: {
                 EmptyView()

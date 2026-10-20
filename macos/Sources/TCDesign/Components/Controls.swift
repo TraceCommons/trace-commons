@@ -602,17 +602,24 @@ public struct GlassPicker<Value: Hashable>: View {
 /// control with the icon, and a native menu of the options with a
 /// checkmark on the left of the chosen one. Icon-only, so `label` names it
 /// for assistive tech and in its tooltip; the chosen option is its value.
-public struct GlassIconMenu<Value: Hashable>: View {
+public struct GlassIconMenu<Value: Hashable, More: View>: View {
     private let label: String
     private let icon: GlassIcon
     @Binding private var selection: Value?
     private let options: [GlassPickerOption<Value>]
+    private let more: More
 
-    public init(_ label: String, systemImage: String, selection: Binding<Value?>, options: [GlassPickerOption<Value>]) {
+    /// `more` is drawn after the choices, under a divider: a checkable
+    /// `Toggle` there shows the system's checkmark as the choices do.
+    public init(
+        _ label: String, systemImage: String, selection: Binding<Value?>, options: [GlassPickerOption<Value>],
+        @ViewBuilder more: () -> More
+    ) {
         self.label = label
         self.icon = .symbol(systemImage)
         self._selection = selection
         self.options = options
+        self.more = more()
     }
 
     private var current: GlassPickerOption<Value>? {
@@ -631,6 +638,10 @@ public struct GlassIconMenu<Value: Hashable>: View {
             }
             .pickerStyle(.inline)
             .labelsHidden()
+            if More.self != EmptyView.self {
+                Divider()
+                more
+            }
         } label: {
             GlassIconView(icon: icon, symbolSize: 13, weight: .medium)
                 .foregroundStyle(GlassColor.textPrimary)
@@ -644,6 +655,12 @@ public struct GlassIconMenu<Value: Hashable>: View {
         .accessibilityLabel(label)
         .accessibilityValue(current?.title ?? "")
         .help(label)
+    }
+}
+
+extension GlassIconMenu where More == EmptyView {
+    public init(_ label: String, systemImage: String, selection: Binding<Value?>, options: [GlassPickerOption<Value>]) {
+        self.init(label, systemImage: systemImage, selection: selection, options: options, more: { EmptyView() })
     }
 }
 

@@ -4,21 +4,19 @@ import TCDesign
 import TCShellCore
 
 /// The menu-bar popover (R13 of #1173), from the "Menu bar item and
-/// popover" handoff: three state pills, a sub-list, the shared/kept legend
-/// and day graph, recent activity, and shortcuts into the app. It is the
+/// popover" handoff, as the owner reshaped it on 2026-10-19: a top row with
+/// the traces worth a second look on the left and Watching, Settings and
+/// Quit as icon buttons on the right; the suggestion and the estimate; the
+/// NEAR AI tools, one button each, for a quick Private AI session; the
+/// shared/kept legend and day graph; and the way into the app. It is the
 /// app's only menu-bar item, in every build.
 ///
 /// The handoff's rules hold here:
-/// - Nothing is sent from the popover. The writes are pausing, resuming,
-///   turning Private AI off (`PrivateInferenceTray`) and the contribution
-///   override.
-/// - Private AI "On" opens the window at its destination; a menu press
-///   never turns it on.
-/// - The mode pill shows the daemon's roll-up (`status.contribution_mode`:
-///   one mode, or Mixed). Its choices set a global contribution override
-///   (#1208), each only after the core's confirmation for it; Auto
-///   contribute's carries the arming disclosure, so arming never happens
-///   from a single menu press.
+/// - Nothing is sent from the popover. Its one write is pausing and
+///   resuming. The contribution mode and Private AI pills are gone (owner,
+///   2026-10-19), and with them the override and turning Private AI off.
+/// - A tool button opens the window's Private AI tab at that tool's launch
+///   dialog: a dialog inside `MenuBarExtra` is unreliable.
 /// - No projected credit, and the badge is decisions owed.
 struct MenuBarGlassPanel: View {
     @EnvironmentObject private var model: AppModel
@@ -31,73 +29,75 @@ struct MenuBarGlassPanel: View {
     /// glass on it is glass on glass (R14); the preview window has none.
     var ownsSurface = false
 
-    enum Pill: Equatable { case mode, watch, privateAI }
-
-    @State private var expanded: Pill = .mode
-    @State private var sub: Pill?
+    /// Whether Watching's pause choices are open in place of the top row.
+    @State private var watchOpen = false
 
     static let width: CGFloat = 380
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            if let sub {
-                subList(sub)
+            if watchOpen {
+                watchList
                     .transition(.opacity)
             } else {
-                pills
+                topRow
                     .transition(.opacity)
             }
             nudgeRow
             settlementRow
+            tools
             legend
             graph
             glance
-            recent
             menuItems
         }
         .padding(GlassTokens.Space.s5)
         .frame(width: Self.width)
         .modifier(PanelSurface(owns: ownsSurface))
-        .animation(reduceMotion ? nil : GlassMotion.curve(GlassTokens.Motion.slide), value: sub)
+        .animation(reduceMotion ? nil : GlassMotion.curve(GlassTokens.Motion.slide), value: watchOpen)
         // The glance is re-read while open: its ledger can go stale silently.
         .task { await store.followGlance() }
         // A fresh read on opening; the label follows the event stream. The
-        // app's own reads (the Private AI pill and Cmd-Shift-M read
+        // app's own reads (the tools and Cmd-Shift-M read
         // `model.daemonSettings`) refresh on opening too, as the legacy menu
         // did.
         .task { await store.load() }
         .onAppear { model.refreshAll() }
     }
 
-    // MARK: Pills
+    // MARK: Top row
 
-    private var pills: some View {
+    /// The traces worth a second look, first (owner, 2026-10-19: moved to
+    /// the top; the core's approved heading is kept), then Watching,
+    /// Settings and Quit as icon buttons in the top right corner.
+    private var topRow: some View {
         HStack(spacing: GlassTokens.Space.s3) {
-            pill(.mode, caption: Self.modeCaption, value: modeValue, image: "bell", fill: modeFill)
-            pill(.watch, caption: MonitorWords.watching, value: watchValue,
-                 image: watchState == .paused ? "eye.slash" : "eye",
-                 fill: .solid(watchState == .ready ? GlassTokens.Color.blue : GlassTokens.Color.menuPillOff))
-            if let label = model.privateInferenceCopy?.destination {
-                pill(.privateAI, caption: label, value: privateAIValue,
-                     image: "arrow.left.arrow.right",
-                     fill: .solid(privateAIPill == .on ? GlassTokens.Color.dataShared : GlassTokens.Color.menuPillOff))
+            Button { open(.traces(entryId: nil)) } label: {
+                HStack {
+                    Text("\(MenuWords.flagged) · \(MenuPanelData.countWord(store.flaggedCount, unknown: MonitorWords.unknown))")
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
+                }
             }
+            .buttonStyle(GlassMenuRowStyle())
+            .padding(.vertical, -GlassTokens.Space.s2)
+            GlassRoundButton(MonitorWords.watching, systemImage: paused ? "eye.slash" : "eye") { watchOpen = true }
+                .accessibilityValue(watchValue)
+                .disabled(watchState == .coreDown || watchState == .loading)
+            GlassRoundButton(MonitorWords.table?.settingsTitle ?? MenuWords.settings, icon: .glyph(.gear)) {
+                NSApp.activate(ignoringOtherApps: true)
+                navigation.requestSettings()
+                openWindow(id: WindowID.settings)
+            }
+            GlassRoundButton(MenuWords.quit, systemImage: "power") { NSApp.terminate(nil) }
         }
-        .frame(height: 44)
-        .animation(reduceMotion ? nil : GlassMotion.curve(GlassTokens.Motion.reveal), value: expanded)
-    }
-
-    private func pill(_ which: Pill, caption: String, value: String, image: String, fill: GlassPillFill) -> some View {
-        GlassStatePill(caption: caption, value: value, systemImage: image, fill: fill, expanded: expanded == which) {
-            sub = which
-        }
-        .onHover { if $0 { expanded = which } }
     }
 
     private var paused: Bool { watchState == .paused }
 
-    /// The Watching pill's state (the stack-wide ScreenState rule): a core
-    /// that is not running is core down, and never reads as On.
+    /// Watching's state (the stack-wide ScreenState rule): a core that is
+    /// not running is core down, and never reads as On.
     private var watchState: ScreenState {
         switch model.startup {
         case .running:
@@ -117,67 +117,25 @@ struct MenuBarGlassPanel: View {
         }
     }
 
-    /// Private AI on or off as the core reported it; nil when it did not
-    /// say, which is drawn as unknown, never as off.
-    private var privateAIOn: Bool? { model.daemonSettings?.privateInferenceOn }
-
-    /// What the pill draws: the listener's reported tone, never the switch
-    /// alone, so a switch left on over a dead listener never reads On.
-    private var privateAIPill: MenuPanelStatus.PrivateAI {
-        MenuPanelStatus.privateAI(
-            on: privateAIOn,
-            tone: PrivateInferenceSurface.tone(model.privateInferenceState, calls: model.privateInferenceCalls))
-    }
-
-    /// On and Off in the core's words; a listener that is not working while
-    /// the switch is on reads the core's state line for it.
-    private var privateAIValue: String {
-        switch privateAIPill {
-        case .on: MenuWords.on
-        case .off: MonitorWords.off
-        case .notWorking:
-            model.privateInferenceCopy.map {
-                PrivateInferenceSurface.stateLine(model.privateInferenceState, copy: $0, calls: model.privateInferenceCalls)
-            } ?? "—"
-        case .unknown: "—"
-        }
-    }
-
-    /// The core's roll-up (`store.status?.contributionMode`), never one
-    /// worked out here from the folders; a dash only while there is no
-    /// current status, whatever the other reads did.
-    private var rollup: MenuPanelData.ModeRollup { store.modeRollup }
-
-    /// The pill's words, from the core (`tc_contribution_mode_copy_json`).
-    private static let modeCopy = ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON())
-
-    private var modeValue: String {
-        MenuPanelData.modeValue(rollup, mode: store.status?.contributionMode, copy: Self.modeCopy)
-    }
-
-    private var modeFill: GlassPillFill {
-        switch rollup {
-        case .ask: .solid(GlassTokens.Color.menuModeAsk)
-        case .armed: .solid(GlassTokens.Color.menuModeArmed)
-        case .never: .solid(GlassTokens.Color.menuModeNever)
-        case .mixed: .mixed
-        case .none: .solid(GlassTokens.Color.menuPillOff)
-        }
-    }
-
-    static var modeCaption: String { MonitorWords.table?.contributionMode ?? "" }
-
-    // MARK: Sub-lists
-
-    @ViewBuilder
-    private func subList(_ which: Pill) -> some View {
+    /// Watching's pause choices (`MenuBarWords`), or resume, under its
+    /// heading, whose close goes back to the top row.
+    private var watchList: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            GlassSubListHeader(title(which), closeLabel: title(which)) { sub = nil }
+            GlassSubListHeader(MonitorWords.watching, closeLabel: MonitorWords.watching) { watchOpen = false }
             VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                switch which {
-                case .mode: modeOptions
-                case .watch: watchOptions
-                case .privateAI: privateAIOptions
+                if paused {
+                    GlassOptionRow(MenuBarWords.resume, fill: .solid(GlassTokens.Color.blue), checked: false) {
+                        model.resume()
+                        watchOpen = false
+                    }
+                } else {
+                    ForEach(Array([MenuBarWords.pauseHour, MenuBarWords.pauseMorning,
+                                   MenuBarWords.pauseIndefinite].enumerated()), id: \.offset) { index, label in
+                        GlassOptionRow(label, fill: .solid(GlassTokens.Color.menuPillOff), checked: false) {
+                            model.pause(until: MenuBarWords.pauseUntil(index))
+                            watchOpen = false
+                        }
+                    }
                 }
             }
             .padding(GlassTokens.Space.s3)
@@ -185,135 +143,26 @@ struct MenuBarGlassPanel: View {
         }
     }
 
-    private func title(_ which: Pill) -> String {
-        switch which {
-        case .mode: Self.modeCaption
-        case .watch: MonitorWords.watching
-        case .privateAI: model.privateInferenceCopy?.destination ?? MonitorWords.off
-        }
-    }
+    // MARK: Tools
 
-    /// The overrides, in the core's words, then the Mixed row (each folder
-    /// on its own setting, sub-lined with the core's `clear` description).
-    /// The checked row agrees with the pill (`MenuPanelData.listChecks`):
-    /// an override in force, else the core's roll-up; nothing while the
-    /// core is down. Auto contribute carries the core's partial line, and
-    /// the override line shows while one is in force. Choosing an override
-    /// shows its core confirmation in place of the choices; only its
-    /// confirm button writes. Choosing Mixed clears an override: after the
-    /// core's clear confirmation when the override is Ask or Never and a
-    /// folder's own setting is Automatic, since clearing would resume
-    /// unattended sending there; otherwise at once
-    /// (`MenuPanelStore.chooseMixed`). While the core is down,
-    /// loading or stale every row is disabled
-    /// (`MenuPanelStore.canChooseOverride`).
+    /// The NEAR AI tools, one button each, above the graph (owner,
+    /// 2026-10-19: quick Private AI sessions). Drawn only while signed in
+    /// to NEAR AI with a terminal to start in. A button opens the Private
+    /// AI tab at that tool's launch dialog.
     @ViewBuilder
-    private var modeOptions: some View {
-        if let copy = Self.modeCopy {
-            if let confirming = store.confirming {
-                OverrideConfirmation(copy: confirming) { confirmed in
-                    Task { await store.resolveConfirmation(confirmed: confirmed) }
-                }
-            } else {
-                if !store.stale, store.status?.contributionOverride != nil {
-                    Text(copy.overrideActive)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Group {
-                    ForEach(copy.choices, id: \.mode) { choice in
-                        let sub = MenuPanelData.partialLine(choice.mode, status: store.status, copy: copy) ?? choice.line
-                        GlassOptionRow(
-                            choice.label,
-                            sub: sub,
-                            fill: .solid(Self.modeFill(choice.mode)),
-                            checked: MenuPanelData.listChecks(choice.mode, status: store.status, stale: store.stale)) {
-                                if MenuPanelData.pressOnlyCloses(choice.mode, status: store.status, stale: store.stale) {
-                                    self.sub = nil
-                                } else {
-                                    store.choose(choice.mode)
-                                }
-                            }
-                            .accessibilityLabel(choice.label)
-                            .accessibilityHint(sub)
+    private var tools: some View {
+        if let snapshot = model.managedSnapshot, snapshot.nearAiSignedIn, snapshot.capabilities.terminalLaunch,
+           !snapshot.signInStartTools.isEmpty
+        {
+            HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
+                ForEach(snapshot.signInStartTools, id: \.self) { tool in
+                    ManagedToolButton(tool: tool) {
+                        model.pendingManagedLaunch = tool
+                        open(.inference)
                     }
-                    // Mixed: no override, so each folder keeps its own
-                    // setting. Choosing it clears an override in force,
-                    // after the core's confirmation when a folder's own
-                    // setting is Automatic (`MenuPanelStore.chooseMixed`).
-                    GlassOptionRow(
-                        copy.mixed,
-                        sub: copy.clear,
-                        fill: .mixed,
-                        checked: MenuPanelData.listChecks(nil, status: store.status, stale: store.stale)) {
-                            if store.status?.contributionOverride != nil {
-                                Task { await store.chooseMixed() }
-                            } else {
-                                sub = nil
-                            }
-                        }
-                        .accessibilityLabel(copy.mixed)
-                        .accessibilityHint(copy.clear)
-                }
-                // No override before onboarding is done (R-43): it is a
-                // grant, and first run is where consent is asked.
-                .disabled(!store.canChooseOverride || model.requiresOnboarding)
-                // A refused override: the failed request's red line, under
-                // the choices it is about (Ron, 2026-10-09).
-                if let refusal = store.overrideRefusal {
-                    GlassAlert(refusal)
-                        .accessibilityAddTraits(.isStaticText)
                 }
             }
-        }
-    }
-
-    private static func modeFill(_ mode: String) -> GlassRGBA {
-        switch MenuPanelData.rollup(mode) {
-        case .armed: GlassTokens.Color.menuModeArmed
-        case .never: GlassTokens.Color.menuModeNever
-        default: GlassTokens.Color.menuModeAsk
-        }
-    }
-
-    /// The pause choices (`MenuBarWords`), or resume.
-    @ViewBuilder
-    private var watchOptions: some View {
-        if paused {
-            GlassOptionRow(MenuBarWords.resume, fill: .solid(GlassTokens.Color.blue), checked: false) {
-                model.resume()
-                sub = nil
-            }
-        } else {
-            ForEach(Array([MenuBarWords.pauseHour, MenuBarWords.pauseMorning,
-                           MenuBarWords.pauseIndefinite].enumerated()), id: \.offset) { index, label in
-                GlassOptionRow(label, fill: .solid(GlassTokens.Color.menuPillOff), checked: false) {
-                    model.pause(until: MenuBarWords.pauseUntil(index))
-                    sub = nil
-                }
-            }
-        }
-    }
-
-    /// On opens the window at the destination; Off is the tray's one write.
-    /// Both sub-lines are the core's tray words.
-    @ViewBuilder
-    private var privateAIOptions: some View {
-        if let copy = model.privateInferenceCopy {
-            GlassOptionRow(MenuWords.on, sub: privateAIOn == true ? nil : copy.trayOpenToTurnOn,
-                           fill: .solid(GlassTokens.Color.menuModeArmed), checked: privateAIOn == true) {
-                open(.inference)
-                sub = nil
-            }
-            GlassOptionRow(MonitorWords.off, sub: privateAIOn == true ? copy.trayTurnOff : nil,
-                           fill: .solid(GlassTokens.Color.menuPillOff), checked: privateAIOn == false) {
-                PrivateInferenceTray.perform(
-                    on: privateAIOn == true, turnOff: { model.applyPrivateInference(false) },
-                    open: { open(.inference) })
-                sub = nil
-            }
-            .disabled(privateAIOn == true && (model.privateInferenceBusy || model.daemonSettings?.privateInference == nil))
+            .disabled(model.managedBusy)
         }
     }
 
@@ -413,36 +262,6 @@ struct MenuBarGlassPanel: View {
         }
     }
 
-    // MARK: Recent activity
-
-    @ViewBuilder
-    private var recent: some View {
-        // Each source only while its own read is current.
-        let rows = MenuPanelData.recent(
-            pending: store.current(.pending) ? store.pending : [],
-            history: store.current(.history) ? store.history : [],
-            calls: store.current(.calls) ? store.calls : [],
-            statusLabel: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) })
-        if !rows.isEmpty && !store.stale {
-            VStack(alignment: .leading, spacing: 0) {
-                Text(MenuWords.recentActivity)
-                    .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .padding(.horizontal, GlassTokens.Space.s3)
-                    .padding(.top, GlassTokens.Space.s1)
-                ForEach(rows) { row in
-                    GlassActivityRow(tool: row.tool, text: row.text, trailing: row.trailing) {
-                        switch row.kind {
-                        case .waiting: open(.traces(entryId: nil))
-                        case .contributed: open(.home(.history))
-                        case .call: open(.inference)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     // MARK: Menu items
 
     /// The handoff spaces these rows like the popover's own children: 8pt
@@ -455,24 +274,11 @@ struct MenuBarGlassPanel: View {
     private var menuItems: some View {
         VStack(alignment: .leading, spacing: 0) {
             hairline
-            Button { open(.traces(entryId: nil)) } label: {
-                HStack {
-                    Text("\(MenuWords.flagged) · \(MenuPanelData.countWord(store.flaggedCount, unknown: MonitorWords.unknown))")
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
-                }
-            }
-            hairline
             // The main window, wherever it was left (owner feedback,
             // 2026-10-11): closing it left no way back but the Dock.
+            // Settings and Quit are icon buttons in the top row, and
+            // Manage rules is gone (owner, 2026-10-19).
             Button(MenuWords.openApp) { open(nil) }
-            Button(MenuWords.manageRules) { open(MenuPanelData.manageRules(requiresOnboarding: model.requiresOnboarding)) }
-            Button(MenuWords.settings) {
-                NSApp.activate(ignoringOtherApps: true)
-                navigation.requestSettings()
-                openWindow(id: WindowID.settings)
-            }
-            Button(MenuWords.quit) { NSApp.terminate(nil) }
         }
         .buttonStyle(GlassMenuRowStyle())
         .padding(.vertical, -GlassTokens.Space.s2)
@@ -487,47 +293,6 @@ struct MenuBarGlassPanel: View {
     /// The Monitor (or first run) at a destination; the handler raises it.
     private func open(_ destination: MonitorDestination?) {
         OpenMonitor.request(destination)
-    }
-}
-
-/// One contribution override's confirmation, inline in the pill's sub-list
-/// (a sheet or alert inside `MenuBarExtra` is unreliable): the core's title,
-/// body and, for Auto contribute, its arming disclosure, then cancel and
-/// confirm. VoiceOver focus moves to the title when it appears.
-private struct OverrideConfirmation: View {
-    let copy: ContributionOverrideConfirmCopy
-    let resolve: (Bool) -> Void
-    @AccessibilityFocusState private var titleFocused: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            Text(copy.title)
-                .glassType(GlassTokens.TypeScale.body.weight(.semibold))
-                .foregroundStyle(GlassColor.textPrimary)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityAddTraits(.isHeader)
-                .accessibilityFocused($titleFocused)
-            ForEach(Array(copy.paragraphs.enumerated()), id: \.offset) { _, paragraph in
-                Text(paragraph)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            HStack(spacing: GlassTokens.Space.s3) {
-                Spacer(minLength: 0)
-                Button(copy.cancel) { resolve(false) }
-                    .buttonStyle(GlassButtonStyle(.glass, small: true))
-                    .keyboardShortcut(.cancelAction)
-                    .accessibilityLabel(copy.cancel)
-                Button(copy.confirm) { resolve(true) }
-                    .buttonStyle(GlassButtonStyle(.primary, small: true))
-                    .accessibilityLabel(copy.confirm)
-            }
-        }
-        .padding(GlassTokens.Space.s2)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(copy.title)
-        .onAppear { titleFocused = true }
     }
 }
 

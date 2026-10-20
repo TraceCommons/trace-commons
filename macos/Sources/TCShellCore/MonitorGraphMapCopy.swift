@@ -108,6 +108,8 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
     public let transferContributeNote: String
     public let transferKeepNote: String
     public let transferDismissNote: String
+    /// A batch card's count, `{count}` the traces (owner, 2026-10-19).
+    public let transferTraces: String
     /// The tools' own memory files, named where known (`memoryFiles(_:)`).
     public let memoryClaudeCode: String
     public let memoryCodex: String
@@ -167,6 +169,7 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
         case transferContributeNote = "transfer_contribute_note"
         case transferKeepNote = "transfer_keep_note"
         case transferDismissNote = "transfer_dismiss_note"
+        case transferTraces = "transfer_traces"
         case memoryClaudeCode = "memory_claude_code"
         case memoryCodex = "memory_codex"
         case memoryOpencode = "memory_opencode"
@@ -261,6 +264,11 @@ public struct MonitorFlowMapCopy: MonitorWordTable {
 
     /// A tool's own memory files, by its source name; nil for a tool whose
     /// files the core does not name.
+    /// A batch card's count line: "{count} traces".
+    public func traces(_ count: Int) -> String {
+        transferTraces.replacingOccurrences(of: "{count}", with: String(count))
+    }
+
     public func memoryFiles(_ source: String) -> String? {
         switch source {
         case "claude-code": memoryClaudeCode

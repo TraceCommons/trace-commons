@@ -131,7 +131,9 @@ struct InspectorSection<Content: View>: View {
     let content: Content
     @State private var open = true
 
-    init(_ title: String, collapsible: Bool = false, @ViewBuilder content: () -> Content) {
+    /// Collapsible by default (owner, 2026-10-19): a section's chevron
+    /// that did nothing read as broken.
+    init(_ title: String, collapsible: Bool = true, @ViewBuilder content: () -> Content) {
         self.title = title
         self.collapsible = collapsible
         self.content = content()

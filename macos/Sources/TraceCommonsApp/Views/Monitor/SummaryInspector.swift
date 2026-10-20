@@ -238,16 +238,21 @@ private struct SummaryStat: View {
                 .accessibilityAddTraits(.isHeader)
             VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
                 ForEach(lines) { line in
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                        Text(line.title)
-                            .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                            .foregroundStyle(GlassColor.textPrimary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Text(line.sub)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                    // The tile on the left, centred on the two lines, as a
+                    // row of the Traces tree (owner, 2026-10-19).
+                    HStack(alignment: .center, spacing: GlassTokens.Space.s5) {
+                        if let tile = line.tile { GlassToolTile(tile) }
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                            Text(line.title)
+                                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                                .foregroundStyle(GlassColor.textPrimary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text(line.sub)
+                                .glassType(GlassTokens.TypeScale.caption)
+                                .foregroundStyle(GlassColor.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     .accessibilityElement(children: .combine)
                 }
@@ -265,6 +270,10 @@ enum SummaryFacts {
         let id: String
         let title: String
         let sub: String
+        /// The tile on its left, as the Traces tree draws it: the folder
+        /// glyph for a project, the tool's logo for a tool (owner,
+        /// 2026-10-19).
+        var tile: GlassToolTile.Kind? = nil
     }
 
     /// The history statuses that still stand as contributed: in the
@@ -380,7 +389,7 @@ enum SummaryFacts {
                 let word = ProjectCopy.modeChoiceLabel(mode)
                 if !word.isEmpty { parts.append(word) }
             }
-            return Stat(id: folder.id, title: folder.label, sub: parts.joined(separator: " · "))
+            return Stat(id: folder.id, title: folder.label, sub: parts.joined(separator: " · "), tile: .folder)
         }
     }
 
@@ -410,7 +419,9 @@ enum SummaryFacts {
                     FirstRunCopy.fill(counts.contributedCount, [
                         "count": history == nil ? "—" : String(contributed[tool] ?? 0),
                     ]),
-                ].joined(separator: " · "))
+                ].joined(separator: " · "),
+                tile: (SourceKind(rawValue: tool) ?? SourceKind(rawValue: tool.replacingOccurrences(of: "_", with: "-")))
+                    .map { .tool($0.glassTool) })
         }
     }
 

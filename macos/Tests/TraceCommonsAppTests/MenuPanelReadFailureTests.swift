@@ -126,7 +126,8 @@ final class MenuPanelReadFailureTests: XCTestCase {
     /// columns, is unavailable when they are not current.
     func test_thePanelDrawsThePerReadValues() throws {
         let panel = try MonitorNavigationTests.text("Views/Monitor/MenuBarGlassPanel.swift")
-        XCTAssertTrue(panel.contains("private var rollup: MenuPanelData.ModeRollup { store.modeRollup }"))
+        // No mode pill (owner, 2026-10-19), so no roll-up is drawn.
+        XCTAssertFalse(panel.contains("store.modeRollup"))
         XCTAssertTrue(panel.contains("MenuPanelData.countWord(store.sharedCount, unknown: MonitorWords.unknown)"))
         XCTAssertTrue(panel.contains("MenuPanelData.countWord(store.keptCount, unknown: MonitorWords.unknown)"))
         XCTAssertTrue(panel.contains("MenuPanelData.countWord(store.flaggedCount, unknown: MonitorWords.unknown)"))

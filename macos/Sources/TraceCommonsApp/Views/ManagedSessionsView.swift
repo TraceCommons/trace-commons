@@ -3,25 +3,21 @@ import AppKit
 import TCDesign
 import TCShellCore
 
-/// Saved model accounts and managed sessions, in the glass design (#1146):
-/// the NEAR AI card while signed in, then accounts, then sessions. Signed
-/// out, the NEAR AI sign-in is a popover notice over the tab instead (owner,
-/// 2026-10-19, `MonitorNotices`). Drawn in the Monitor's Inference tab and
-/// on the legacy model-calls screen.
+/// Managed sessions on the Private AI tab, in the glass design (#1146): the
+/// NEAR AI card while signed in, then the sessions. Signed out, the NEAR AI
+/// sign-in is a popover notice over the tab instead (owner, 2026-10-19,
+/// `MonitorNotices`). Saved model accounts are not drawn here any more
+/// (owner, 2026-10-19: they are not Private AI sessions).
 ///
 /// Every word comes from the shared table (`managed/copy.rs`) through
 /// `AppModel.managedText`; no raw state, auth value or daemon code is drawn.
 struct ManagedSessionsSection: View {
     @EnvironmentObject private var model: AppModel
-    @State private var adding = false
-    @State private var launching = false
-    @State private var renaming: ManagedAccount?
-    @State private var removing: ManagedAccount?
-    /// The tool whose Start is explaining the folder choice (#1408).
-    @State private var explaining: ManagedFolderChoice?
+    /// The tool whose launch dialog is open: its folder, then Open.
+    @State private var launching: ManagedFolderChoice?
     /// The session whose stop is being confirmed.
     @State private var stopping: ManagedSession?
-    /// The account whose row menu is open.
+    /// The session whose row menu is open.
     @State private var menuFor: String?
 
     var body: some View {
@@ -29,36 +25,29 @@ struct ManagedSessionsSection: View {
             if let snapshot = model.managedSnapshot, snapshot.nearAiSignedIn {
                 signInCard(snapshot)
             }
-            accountsCard
             if let snapshot = model.managedSnapshot {
                 sessionsCard(snapshot)
             }
         }
         // Glass modals over the whole window, not stock sheets.
-        .glassModal(isPresented: $adding) {
-            ManagedAccountSheet(onClose: { adding = false }).environmentObject(model)
-        }
-        .glassModal(isPresented: $launching) {
-            ManagedLaunchSheet(onClose: { launching = false }).environmentObject(model)
-        }
-        .glassModal(item: $renaming) { account in
-            ManagedRenameSheet(account: account, onClose: { renaming = nil }).environmentObject(model)
-        }
-        .glassModal(item: $removing) { account in
-            ManagedRemoveSheet(account: account, onClose: { removing = nil }).environmentObject(model)
-        }
-        .glassModal(item: $explaining) { choice in
+        .glassModal(item: $launching) { choice in
             ManagedFolderExplainerSheet(
-                tool: choice.tool, onCancel: { explaining = nil },
-                onChoose: {
-                    explaining = nil
-                    // The picker opens once the sheet is gone.
-                    DispatchQueue.main.async { chooseAndStart(choice.tool) }
+                tool: choice.tool, onCancel: { launching = nil },
+                onOpen: { path in
+                    launching = nil
+                    launch(choice.tool, in: path)
                 }
             ).environmentObject(model)
         }
         .glassModal(item: $stopping) { session in
             ManagedStopSheet(session: session, onClose: { stopping = nil }).environmentObject(model)
+        }
+        // A tool chosen in the menu bar's popover opens its dialog here
+        // (owner, 2026-10-19): the popover cannot hold one.
+        .onChange(of: model.pendingManagedLaunch, initial: true) { _, tool in
+            guard let tool else { return }
+            model.pendingManagedLaunch = nil
+            start(tool)
         }
         // Kept: `managed_changed` is published only when a request changes
         // the session revision, so an expiry or a reconciled exit is seen
@@ -73,13 +62,13 @@ struct ManagedSessionsSection: View {
 
     // MARK: NEAR AI sign-in
 
-    /// Sessions on the NEAR AI sign-in, first (owner, 2026-10-12): Start
-    /// Claude Code, Start Codex and, once OpenCode is installed, Start
-    /// OpenCode (owner, 2026-10-16), each a folder choice and a launch, with
-    /// no saved account. Drawn only while signed in: signed out, the line
-    /// that asks for it and the button that begins it are a popover notice
-    /// (owner, 2026-10-19). Nothing here is saved: the entries come and go
-    /// with the sign-in.
+    /// Sessions on the NEAR AI sign-in, first (owner, 2026-10-12), drawn
+    /// only while signed in. A button for each tool, its logo and name, in
+    /// a row at the foot of the card (owner, 2026-10-19): Claude Code,
+    /// Codex and, once OpenCode is installed, OpenCode. Each opens the
+    /// launch dialog, where a folder is chosen and the tool opened in the
+    /// terminal. Nothing here is saved: the entries come and go with the
+    /// sign-in.
     @ViewBuilder
     private func signInCard(_ snapshot: ManagedSnapshot) -> some View {
         GlassIconCard(
@@ -89,260 +78,36 @@ struct ManagedSessionsSection: View {
                 model.managedText("sign_in_scope"),
                 destination: snapshot.capabilities.terminalDestination,
                 fallback: model.managedText("terminal"))],
-            trailing: { AnyView(signInActions(snapshot)) })
+            accessory: { AnyView(EmptyView()) },
+            content: { AnyView(toolButtons(snapshot)) })
     }
 
-    /// The Start buttons, side by side when they fit and stacked when not;
-    /// left out while there is no terminal to start in, which the accounts
-    /// card says.
+    /// The tool buttons, in a row that wraps where it would not fit; left
+    /// out while there is no terminal to start in.
     @ViewBuilder
-    private func signInActions(_ snapshot: ManagedSnapshot) -> some View {
+    private func toolButtons(_ snapshot: ManagedSnapshot) -> some View {
         if snapshot.capabilities.terminalLaunch {
-            let buttons = ForEach(snapshot.signInStartTools, id: \.self) { tool in
-                Button { start(tool) } label: {
-                    Text(ManagedSurface.startKey(tool).map(model.managedText) ?? "").lineLimit(1)
+            HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
+                ForEach(snapshot.signInStartTools, id: \.self) { tool in
+                    ManagedToolButton(tool: tool) { start(tool) }
                 }
-                .buttonStyle(GlassButtonStyle(.primary, small: true))
-                .fixedSize()
-            }
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: GlassTokens.Space.s3) { buttons }
-                VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) { buttons }
             }
             .disabled(model.managedBusy)
         }
     }
 
-    /// Until a session has started on this computer, a sheet that says why
-    /// a folder is asked for comes first (#1408); then the picker.
+    /// A tool's launch dialog: its folder, then Open.
     private func start(_ tool: String) {
         guard !model.managedBusy else { return }
-        if model.managedSnapshot?.explainsFolderChoice == true {
-            explaining = ManagedFolderChoice(tool: tool)
-        } else {
-            chooseAndStart(tool)
-        }
+        launching = ManagedFolderChoice(tool: tool)
     }
 
-    /// The folder chooser the launch sheet uses, then the launch.
-    private func chooseAndStart(_ tool: String) {
-        guard !model.managedBusy, let path = FolderPanel.choose(),
+    /// The launch, in the folder chosen in the dialog.
+    private func launch(_ tool: String, in path: String) {
+        guard !model.managedBusy,
               let params = model.managedSnapshot?.signInLaunchParams(tool: tool, cwd: path, requestID: UUID().uuidString)
         else { return }
         model.managedAction("managed_launch_prepare", params: params, openTerminal: true)
-    }
-
-    // MARK: Accounts
-
-    /// The accounts card under its icon (owner, 2026-10-10), laid out as
-    /// every icon card: the re-read icon after the title, where a launch
-    /// opens behind the info icon after the description, and Add and
-    /// Launch on the right of the head (Retry there while the list has not
-    /// been read). A failure, a missing terminal and the accounts sit under
-    /// the head.
-    @ViewBuilder
-    private var accountsCard: some View {
-        let snapshot = model.managedSnapshot
-        let info = snapshot?.capabilities.terminalDestination.map {
-            model.managedText("terminal_scope").replacingOccurrences(of: "{destination}", with: $0)
-        }
-        let refresh: GlassCardRefresh? = snapshot == nil ? nil : .init(
-            model.managedText("accounts_refresh_accessibility"),
-            isDisabled: model.managedBusy, action: { model.refreshManagedSessions() })
-        // Nothing under the head: a head-only card, so its actions centre
-        // on the whole card rather than on a head above an empty body.
-        if Self.accountsBodyEmpty(snapshot, failing: model.managedErrorKey != nil) {
-            GlassIconCard(
-                systemImage: "person.crop.circle.badge.checkmark",
-                title: model.managedText("accounts_title"),
-                subtitle: [model.managedText("description")], info: info, refresh: refresh,
-                trailing: { AnyView(accountsAccessory(snapshot)) })
-        } else {
-            GlassIconCard(
-                systemImage: "person.crop.circle.badge.checkmark",
-                title: model.managedText("accounts_title"),
-                subtitle: [model.managedText("description")], info: info, refresh: refresh,
-                accessory: { AnyView(accountsAccessory(snapshot)) },
-                content: { AnyView(accountsBody(snapshot)) })
-        }
-    }
-
-    /// Whether the accounts card has nothing to draw under its head: the
-    /// list was read, nothing failed, there is a terminal, and no account.
-    static func accountsBodyEmpty(_ snapshot: ManagedSnapshot?, failing: Bool) -> Bool {
-        guard let snapshot else { return false }
-        return !(snapshot.tools != nil && snapshot.setupTools.isEmpty) && !failing && snapshot.capabilities.terminalDestination != nil && snapshot.accounts.isEmpty
-    }
-
-    /// Add and Launch once the list is read; Retry until then.
-    @ViewBuilder
-    private func accountsAccessory(_ snapshot: ManagedSnapshot?) -> some View {
-        if let snapshot {
-            accountActions(snapshot)
-        } else {
-            Button { model.refreshManagedSessions() } label: {
-                Label(model.managedText("retry"), systemImage: "arrow.clockwise").lineLimit(1)
-            }
-            .buttonStyle(GlassButtonStyle(.glass, small: true))
-            .fixedSize()
-        }
-    }
-
-    /// Under the head: connecting, a failure, a missing terminal, and the
-    /// accounts.
-    private func accountsBody(_ snapshot: ManagedSnapshot?) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            if snapshot == nil {
-                Text(model.managedText("connecting"))
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-            }
-            actionFailure
-            if let snapshot {
-                if snapshot.needsToolInstallation {
-                    ManagedToolInstallation(tools: snapshot.tools ?? [], copy: model.managedText, retry: model.refreshManagedSessions)
-                }
-                if snapshot.capabilities.terminalDestination == nil {
-                    GlassNotice(tone: .ask, title: model.managedText("terminal_unavailable")) { EmptyView() }
-                }
-                if !snapshot.accounts.isEmpty {
-                    VStack(spacing: 0) {
-                        ForEach(Array(snapshot.accounts.enumerated()), id: \.element.id) { index, account in
-                            GlassTableRow(first: index == 0) { accountRow(account, snapshot: snapshot) }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// A failed request: the failed request's red lines, unboxed, under
-    /// the account actions (Ron, 2026-10-09). The headline, then the
-    /// reason when it is a different word.
-    @ViewBuilder
-    private var actionFailure: some View {
-        if let key = model.managedErrorKey {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                GlassAlert(model.managedText("action_failed"))
-                if key != "action_failed" {
-                    // `{terminal}` is the chosen app the daemon names.
-                    GlassAlert(ManagedSurface.fillTerminal(
-                        model.managedText(key),
-                        terminal: model.managedSnapshot?.capabilities.terminalDestination,
-                        fallback: model.managedText("terminal")))
-                        .textSelection(.enabled)
-                }
-                if key == "unsupported_version" {
-                    ForEach(model.managedSnapshot?.updateRecoveryTools(attemptedTool: model.managedErrorTool) ?? []) { availability in
-                        ManagedInstallLink(tool: availability, copy: model.managedText, labelKey: "update", includeToolName: true)
-                    }
-                }
-            }
-        }
-    }
-
-    /// Add and Launch, each on one line at its own width: side by side when
-    /// they fit, stacked when the pane is too narrow, never wrapped. Launch
-    /// is left out while it could not be used -- no saved account, or no
-    /// terminal to launch in (owner, 2026-10-10) -- rather than drawn
-    /// disabled.
-    private func accountActions(_ snapshot: ManagedSnapshot) -> some View {
-        let add = Button { adding = true } label: {
-            Text(model.managedText("add")).lineLimit(1)
-        }
-        .buttonStyle(GlassButtonStyle(.glass, small: true))
-        .fixedSize()
-        let launch = Button { launching = true } label: {
-            Text(model.managedText("launch")).lineLimit(1)
-        }
-        .buttonStyle(GlassButtonStyle(.primary, small: true))
-        .fixedSize()
-        let launchable = Self.offersLaunch(snapshot)
-        return ViewThatFits(in: .horizontal) {
-            HStack(spacing: GlassTokens.Space.s3) { if !snapshot.setupTools.isEmpty { add }; if launchable { launch } }
-            VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) { if !snapshot.setupTools.isEmpty { add }; if launchable { launch } }
-        }
-        .disabled(model.managedBusy)
-    }
-
-    private func accountRow(_ account: ManagedAccount, snapshot: ManagedSnapshot) -> some View {
-        // A tool or sign-in value this shell does not know is left out,
-        // never drawn raw.
-        let meta = [
-            ManagedWords.tool(account.tool, model: model),
-            model.managedText(account.connection),
-            ManagedSurface.authKey(account.authState).map(model.managedText),
-        ].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
-        return HStack(spacing: GlassTokens.Space.s4) {
-            GlassToolTile(.tool(ManagedWords.glassTool(account.tool)))
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: GlassTokens.Space.s2) {
-                    Text(account.label)
-                        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .lineLimit(1)
-                    if snapshot.isDefault(account) {
-                        GlassTag(model.managedText("default"), tone: .accent)
-                    }
-                }
-                if !snapshot.canLaunch(tool: account.tool) {
-                    Text(ManagedSurface.toolUnavailable(account.tool, copy: model.managedText))
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let availability = snapshot.tools?.first(where: { $0.tool == account.tool }) {
-                        ManagedInstallLink(tool: availability, copy: model.managedText)
-                    }
-                }
-                Text(meta)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .lineLimit(1)
-            }
-            .accessibilityElement(children: .combine)
-            Spacer(minLength: GlassTokens.Space.s4)
-            accountMenu(account, snapshot: snapshot)
-        }
-    }
-
-    private func accountMenu(_ account: ManagedAccount, snapshot: ManagedSnapshot) -> some View {
-        let held = snapshot.isHeld(account)
-        let open = Binding(get: { menuFor == account.id }, set: { if !$0 { menuFor = nil } })
-        return GlassKebab(model.managedText("manage"), open: menuFor == account.id) { menuFor = account.id }
-            .disabled(model.managedBusy)
-            .popover(isPresented: open, arrowEdge: .bottom) {
-                GlassMenu(onDismiss: { menuFor = nil }) {
-                    GlassMenuItem(model.managedText("use_default")) {
-                        menuFor = nil
-                        let generation = snapshot.generations[account.tool] ?? 0
-                        model.managedAction("managed_select", params: ["selection": ["tool": account.tool, "connection": account.connection, "account_id": account.id, "generation": generation], "expected_generation": generation])
-                    }
-                    GlassMenuItem(model.managedText("rename_short")) {
-                        menuFor = nil
-                        DispatchQueue.main.async { renaming = account }
-                    }
-                    // Hidden, not disabled, while the tool is missing (Ron,
-                    // 2026-10-15): the row says so and offers Install.
-                    if account.connection == "subscription" && snapshot.canLaunch(tool: account.tool) {
-                        GlassMenuItem(model.managedText("reconnect")) {
-                            menuFor = nil
-                            model.managedAction("managed_account_reconnect", params: ["account_id": account.id], openTerminal: true)
-                        }
-                        .disabled(held || !snapshot.capabilities.terminalLaunch)
-                    }
-                    GlassMenuItem(model.managedText("verify")) {
-                        menuFor = nil
-                        model.managedAction("managed_account_verify", params: ["account_id": account.id])
-                    }
-                    GlassMenuSeparator()
-                    GlassMenuItem(model.managedText("remove")) {
-                        menuFor = nil
-                        DispatchQueue.main.async { removing = account }
-                    }
-                    .disabled(held)
-                }
-                .disabled(model.managedBusy)
-            }
     }
 
     // MARK: Sessions

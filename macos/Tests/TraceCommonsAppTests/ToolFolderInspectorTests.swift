@@ -104,10 +104,22 @@ final class ToolFolderInspectorTests: XCTestCase {
         for needle in ["InspectorHeader(tile: .folder, title: folder.label, sub: Self.headerSub(folder, words: words))",
                        "GlassLegendCell(table.shared, value: Self.shared(folder, history: history), status: .shared)",
                        "GlassLegendCell(table.kept, value: String(folder.sessions.count), status: .kept)",
-                       "InspectorSection(words.inspector.project)", "InspectorSection(words.inspector.contributionRule)",
+                       "InspectorSection(words.inspector.projectDetails)", "InspectorSection(words.inspector.contributionRule)",
                        "InspectorSection(words.inspector.decisions)"] {
             XCTAssertTrue(source.contains(needle), "ToolFolderInspectors.swift lacks \(needle)")
         }
+        // The rule first, under the legend, then the details, then the
+        // decisions (owner, 2026-10-19); no scroll of its own, which cut
+        // off the Decisions card's Submit.
+        let rule = try XCTUnwrap(source.range(of: "InspectorSection(words.inspector.contributionRule)"))
+        let details = try XCTUnwrap(source.range(of: "InspectorSection(words.inspector.projectDetails)"))
+        let decisions = try XCTUnwrap(source.range(of: "InspectorSection(words.inspector.decisions)"))
+        XCTAssertLessThan(rule.lowerBound, details.lowerBound)
+        XCTAssertLessThan(details.lowerBound, decisions.lowerBound)
+        let inspector = try XCTUnwrap(source.range(of: "struct FolderInspector: View {"))
+        XCTAssertFalse(source[inspector.lowerBound...].prefix(4000).contains("ScrollView {"),
+                       "the folder inspector scrolls inside the inspector's scroll again")
+        XCTAssertEqual(words.inspector.projectDetails, "Project details")
         // Each section is a quiet card (owner, 2026-10-11), so the Decisions
         // content draws none of its own: never a card inside a card.
         XCTAssertFalse(source.contains("GlassCard(quiet: true)"), "a card inside the Decisions section's card")

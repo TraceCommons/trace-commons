@@ -171,7 +171,8 @@ public struct GlassPopoverItem: Identifiable {
 /// another they pile up rather than replace each other. The last is in
 /// front and up to two earlier ones peek out behind it, on the side the
 /// stack flows toward: down from the top of a tab, up from the foot of the
-/// map. Each card's X closes it and the one behind comes forward.
+/// map. A new card slides in over the last one and nothing else moves.
+/// Each card's X closes it and the one behind comes forward.
 ///
 /// The cards behind are drawn as plates the front card's own size, so each
 /// always shows the same sliver whatever the cards say.
@@ -182,6 +183,9 @@ public struct GlassPopoverStack: View {
     /// Back first, front last.
     private let items: [GlassPopoverItem]
     private let anchor: Anchor
+    /// Every card this stack has held, so a card revealed by a close is
+    /// told apart from one that has just arrived.
+    @State private var seen: Set<String> = []
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(_ items: [GlassPopoverItem], anchor: Anchor) {
@@ -207,20 +211,38 @@ public struct GlassPopoverStack: View {
         let ids = items.map(\.id)
         let behind = max(0, Self.visible(ids).count - 1)
         if let front = items.last {
-            front.view
-                .background {
-                    ZStack {
-                        ForEach(Array((0 ..< behind).reversed()), id: \.self) { index in
-                            plate(level: CGFloat(index + 1))
-                        }
+            ZStack(alignment: anchor == .bottom ? .bottom : .top) {
+                // Only the card that arrives moves (owner, 2026-10-19): it
+                // slides in over the one it covers, which stays where it is
+                // and fades once covered. A card that comes forward because
+                // the one in front of it closed does not slide.
+                front.view
+                    .id(front.id)
+                    .zIndex(Double(items.count))
+                    .transition(Self.arrival(anchor, fresh: !seen.contains(front.id)))
+            }
+            // The cards behind are the stack's, not the front card's, so
+            // they stay still while a new card slides over them.
+            .background {
+                ZStack {
+                    ForEach(Array((0 ..< behind).reversed()), id: \.self) { index in
+                        plate(level: CGFloat(index + 1))
                     }
-                    .accessibilityHidden(true)
                 }
-                .id(front.id)
-                .transition(.move(edge: anchor == .bottom ? .bottom : .top).combined(with: .opacity))
-                .padding(anchor == .bottom ? .top : .bottom, Self.peek * CGFloat(behind))
-                .animation(reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 0.86), value: ids)
+                .accessibilityHidden(true)
+            }
+            .padding(anchor == .bottom ? .top : .bottom, Self.peek * CGFloat(behind))
+            .animation(reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 0.86), value: front.id)
+            .onChange(of: ids, initial: true) { _, now in seen.formUnion(now) }
         }
+    }
+
+    /// How a card enters the front: a new one slides in from the side the
+    /// stack hangs from, over the card it covers; one revealed by a close
+    /// fades in place. Either way the card it replaces fades where it is.
+    static func arrival(_ anchor: Anchor, fresh: Bool) -> AnyTransition {
+        let slide: AnyTransition = .move(edge: anchor == .bottom ? .bottom : .top).combined(with: .opacity)
+        return .asymmetric(insertion: fresh ? slide : .opacity, removal: .opacity)
     }
 
     /// A card behind the front one, `level` back: the front card's size, a

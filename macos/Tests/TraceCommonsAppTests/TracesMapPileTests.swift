@@ -250,8 +250,10 @@ final class TracesMapPileTests: XCTestCase {
     }
 
     /// The player plays one action at a time, never the same trace twice,
-    /// and shows each run's first trace on its cards at once; under Reduce
-    /// Motion it still plays, so the cards still show.
+    /// and shows a run as one card at once: the trace's, or one batch card
+    /// with the count for a run of several (owner, 2026-10-19: a card per
+    /// trace was too noisy). Under Reduce Motion it still plays, so the
+    /// cards still show.
     func test_thePlayerBatchesByActionAndShowsTheTrace() {
         let player = MapTransferPlayer()
         let one = MapTransfer(id: "1", folder: "f", tool: "codex", action: .contribute)
@@ -259,7 +261,14 @@ final class TracesMapPileTests: XCTestCase {
         let keep = MapTransfer(id: "3", folder: "f", tool: "codex", action: .keep)
         player.enqueue([one, two, keep])
         XCTAssertEqual(player.run?.transfers.map(\.id), ["1", "2"])
-        XCTAssertEqual(player.cards, [one], "the first trace's card shows as it sets off")
+        XCTAssertEqual(player.cards.map(\.id), ["batch:1"], "one card for the batch, as it sets off")
+        XCTAssertEqual(player.cards.first?.count, 2)
+        XCTAssertEqual(player.cards.first?.mixedFolders, false)
+        XCTAssertEqual(MapTransfer.batch([one]), one, "a run of one is that trace's own card")
+        let other = MapTransfer(id: "4", folder: "g", tool: "claude-code", action: .contribute)
+        let mixed = try? XCTUnwrap(MapTransfer.batch([one, other]))
+        XCTAssertEqual(mixed?.mixedFolders, true)
+        XCTAssertEqual(mixed?.mixedTools, true)
         player.enqueue([one])
         XCTAssertEqual(player.run?.transfers.map(\.id), ["1", "2"], "a trace plays once")
         player.style = .standard

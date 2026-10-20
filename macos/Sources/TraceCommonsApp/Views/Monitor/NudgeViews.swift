@@ -123,7 +123,12 @@ struct TracesListControls: View {
                     options: [
                         GlassPickerOption(suggested, value: DaemonData.PendingOrder.suggested),
                         GlassPickerOption(queue, value: DaemonData.PendingOrder.queue),
-                    ])
+                    ]
+                ) {
+                    // The toolbar's View menu's one item, moved here (owner,
+                    // 2026-10-19): it filters this list.
+                    Toggle(MonitorShellWords.showIgnoredFolders, isOn: $store.showsIgnored)
+                }
             }
         }
     }

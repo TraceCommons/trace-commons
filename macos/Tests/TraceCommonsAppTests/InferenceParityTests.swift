@@ -460,9 +460,9 @@ final class InferenceParityTests: XCTestCase {
         let account = try Self.text("Views/Monitor/InferenceAccount.swift")
         XCTAssertFalse(account.contains("Text(copy.subtitle)"), "the subtitle is drawn again")
         XCTAssertFalse(account.contains("PrivateAIStatCard("), "the Inference access / Runtime pair is drawn again")
-        let order = ["PrivateAIBalanceCard(copy: copy)",
+        let order = ["PrivateAISettingsLinkCard(copy: copy, onOpen: onOpenSettings)",
+                     "struct InferenceBalanceSection", "PrivateAIBalanceCard(copy: copy)",
                      "FundingRow(copy: copy)",
-                     "PrivateAISettingsLinkCard(copy: copy, onOpen: onOpenSettings)",
                      "struct PrivateAISettingsPanels", "ManagedGlobalSettingsHeader()",
                      "eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,",
                      "HarnessListSection(copy: copy, titled: false)", "PrivateAISwitchCard(",
@@ -478,10 +478,13 @@ final class InferenceParityTests: XCTestCase {
         let managed = try XCTUnwrap(views.range(of: "                ManagedSessionsSection()\n"))
         let calls = try XCTUnwrap(views.range(of: "                ledgerSections\n"))
         let page = try XCTUnwrap(views.range(of: "InferenceAccountSection(store: store, onOpenSettings: onOpenSettings)"))
-        // The switch leads the page, then the managed cards.
+        let balance = try XCTUnwrap(views.range(of: "                InferenceBalanceSection()\n"))
+        // The switch leads the page, then the balance with billing under
+        // it (owner, 2026-10-19), then the managed cards.
         let scroll = try XCTUnwrap(views.range(of: "        ScrollView {\n"))
         XCTAssertLessThan(scroll.lowerBound, toggle.lowerBound)
-        XCTAssertLessThan(toggle.lowerBound, managed.lowerBound, "the switch leads the page")
+        XCTAssertLessThan(toggle.lowerBound, balance.lowerBound, "the switch leads the page")
+        XCTAssertLessThan(balance.lowerBound, managed.lowerBound, "the balance sits under the switch")
         XCTAssertLessThan(managed.lowerBound, calls.lowerBound, "the calls follow the managed cards")
         XCTAssertLessThan(calls.lowerBound, page.lowerBound, "the account cards follow the calls")
         XCTAssertFalse(views.contains("InspectorPrompts("), "the prompts are drawn inline again")
@@ -506,7 +509,9 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertTrue(account.contains("refresh: copy.panelToolsRefreshAccessibility"))
         XCTAssertTrue(account.contains("copy.panelBalanceRefreshAccessibility,"))
         XCTAssertTrue(panel.contains("refresh: copy.panelConnectionRefreshAccessibility"))
-        XCTAssertTrue(managed.contains("model.managedText(\"accounts_refresh_accessibility\")"))
+        // The saved accounts card, and its re-read icon, are gone from the
+        // Private AI tab (owner, 2026-10-19: not Private AI sessions).
+        XCTAssertFalse(managed.contains("model.managedText(\"accounts_refresh_accessibility\")"))
     }
 
     /// The Runtime tile reads the listener's report, as the core's
@@ -566,22 +571,24 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertEqual(GlassTokens.Size.controlLarge, 28)
     }
 
-    /// V1: the managed accounts header holds only the re-read link; Add and
-    /// Launch sit on their own row at their own width, never wrapped.
+    /// The NEAR AI card's tools (owner, 2026-10-19): one button each, its
+    /// logo and name, in a row at the card's foot that wraps rather than
+    /// squeezing a button, each at its own width. The saved accounts card
+    /// is gone from the tab.
     func test_theManagedActionsNeverBreakPerSyllable() throws {
         let source = try Self.text("Views/ManagedSessionsView.swift")
-        // The re-read icon sits after the title once the list is read
-        // (owner, 2026-10-10: the icon card's own place for it).
-        for needle in ["let refresh: GlassCardRefresh? = snapshot == nil ? nil : .init(",
-                       "Text(model.managedText(\"add\")).lineLimit(1)",
-                       "Text(model.managedText(\"launch\")).lineLimit(1)",
-                       "return ViewThatFits(in: .horizontal) {",
-                       "accountActions(snapshot)"] {
+        for needle in ["HistoryFilterFlow(spacing: GlassTokens.Space.s3) {",
+                       "ManagedToolButton(tool: tool) { start(tool) }",
+                       "content: { AnyView(toolButtons(snapshot)) })"] {
             XCTAssertTrue(source.contains(needle), "ManagedSessionsView.swift lacks \(needle)")
         }
-        XCTAssertFalse(source.contains("headerActions("), "no three-button row in the card header")
-        XCTAssertEqual(source.components(separatedBy: ".fixedSize()\n").count - 1 >= 4, true,
-                       "every header and row action keeps its own width")
+        XCTAssertFalse(source.contains("accountsCard"), "the saved accounts card is back on the tab")
+        let explainer = try Self.text("Views/ManagedFolderExplainer.swift")
+        let button = try XCTUnwrap(explainer.range(of: "struct ManagedToolButton: View {"))
+        let body = String(explainer[button.upperBound...].prefix(900))
+        XCTAssertTrue(body.contains(".fixedSize()"), "a tool button keeps its own width")
+        XCTAssertTrue(body.contains("Text(ManagedWords.tool(tool, model: model) ?? \"\").lineLimit(1)"))
+        XCTAssertTrue(body.contains(".accessibilityLabel(ManagedSurface.startKey(tool).map(model.managedText) ?? \"\")"))
     }
 
     /// The glass switch is the legacy card on the store: drawn only under

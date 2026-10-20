@@ -1842,8 +1842,9 @@ pub const BALANCE_WHAT: &str = "Your whole account, not just this computer.";
 ///
 /// Not phrased as a fault, for [`CREDENTIAL_ABSENT`]'s reason: it is the
 /// state of a fresh install, and the state of anyone who has forgotten a
-/// sign-in on purpose.
-pub const BALANCE_NO_SESSION: &str = "Sign in to see your balance.";
+/// sign-in on purpose. The owner's words (2026-10-19): a short status where
+/// there is nothing to show until a sign-in.
+pub const BALANCE_NO_SESSION: &str = "Sign in required";
 
 /// `session_expired`.
 ///

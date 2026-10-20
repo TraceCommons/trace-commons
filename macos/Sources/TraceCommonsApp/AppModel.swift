@@ -1020,6 +1020,9 @@ final class AppModel: ObservableObject {
     /// host has gone (`FirstRunDaemon.firstRunFinished`). The core's
     /// sentence; dismissed by the person.
     @Published var firstRunNotice: String?
+    /// A tool whose launch dialog the menu bar's popover asked for (owner,
+    /// 2026-10-19); the Private AI tab opens the dialog and clears it.
+    @Published var pendingManagedLaunch: String?
 
     private var daemon: TCDaemon?
     private var client: DaemonClient?

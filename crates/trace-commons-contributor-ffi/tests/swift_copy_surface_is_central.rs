@@ -956,9 +956,11 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCCoreCopy.swift",
         "tc_project_ignore_reconciled_text",
     ),
+    // The menu bar's mode pill is gone (owner, 2026-10-19); Settings'
+    // projects list is where the mode names are drawn.
     (
-        "contribution mode pill",
-        "TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift",
+        "contribution mode names",
+        "TraceCommonsApp/Views/Settings/ProjectsSection.swift",
         "TCCoreCopy.contributionModeCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_contribution_mode_copy_json",

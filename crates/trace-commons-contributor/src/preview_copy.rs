@@ -342,6 +342,9 @@ pub struct MonitorInspectorCopy {
     pub not_set: &'static str,
     pub sessions_folder: &'static str,
     pub project: &'static str,
+    /// The folder inspector's first section, the folder's path and size
+    /// (owner, 2026-10-19).
+    pub project_details: &'static str,
     /// The folder and session headers' sub lines; `{tool}` is the tool.
     pub project_of: &'static str,
     pub session_of: &'static str,
@@ -614,6 +617,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             not_set: "Not set",
             sessions_folder: "Traces folder",
             project: "Project",
+            project_details: "Project details",
             project_of: "Project \u{00b7} {tool}",
             session_of: "Trace \u{00b7} {tool}",
             path: "Path",
@@ -1082,6 +1086,10 @@ pub struct MonitorFlowMapCopy {
     pub transfer_contribute_note: &'static str,
     pub transfer_keep_note: &'static str,
     pub transfer_dismiss_note: &'static str,
+    /// A batch card's count, when one submit sends several traces at once
+    /// (owner, 2026-10-19: one card for the batch, not a stack of them).
+    /// DRAFT, NEEDS APPROVAL.
+    pub transfer_traces: &'static str,
     /// The tools' own memory files, which stay on this Mac: named on that
     /// card for the tools whose files are known. DRAFT, NEEDS APPROVAL.
     pub memory_claude_code: &'static str,
@@ -1552,6 +1560,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
                 and is scrubbed with it before it leaves.",
             transfer_keep_note: "The trace stays on this Mac with its memory. Nothing is sent.",
             transfer_dismiss_note: "Removed from the traces waiting for you. Nothing was sent.",
+            transfer_traces: "{count} traces",
             memory_claude_code: "CLAUDE.md, memory/",
             memory_codex: "AGENTS.md",
             memory_opencode: "AGENTS.md",
@@ -1576,7 +1585,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             missions_subtitle: "Proposed runs waiting for your review.",
             insights_subtitle: "Patterns in how you use your agents, read on this Mac.",
             catalogue_subtitle: "What the commons is asking for.",
-            uncontributed: "Uncontributed",
+            uncontributed: "Not contributed",
             uncontributed_size: "{size}",
             uncontributed_estimate: "Could earn {min}\u{2013}{max}",
             credit_delta: "{amount} since yesterday",

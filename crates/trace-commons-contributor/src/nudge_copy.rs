@@ -434,8 +434,9 @@ pub const NOTIFY_SETTLEMENT_ACTION_NOT_NOW: &str = "Not now";
 pub const MARK_A11Y_SETTLEMENT: &str = "An estimate for traces on this Mac is ready.";
 /// The Windows tooltip clause for the same.
 pub const MARK_TOOLTIP_SETTLEMENT: &str = "Estimate ready";
-/// The estimate's info popover.
-pub const SETTLEMENT_ESTIMATE_EXPLAINER: &str = "Made on this Mac from the traces' size and makeup. Nothing was sent to make it. The rate comes from Trace Commons' published pricing. What a trace actually gets is decided when it is scored. A single trace's figure is less certain than the total.";
+/// The estimate's info popover, in plain words (owner, 2026-10-19: the
+/// first wording read as too technical). DRAFT, NEEDS APPROVAL.
+pub const SETTLEMENT_ESTIMATE_EXPLAINER: &str = "This is a guess worked out on your Mac from how big your traces are and what's in them. Nothing was sent to make it, and the price comes from Trace Commons' published rates. The real amount is set once a trace is scored, and a guess for one trace is rougher than the total.";
 /// The Settings switch.
 pub const SETTING_SETTLEMENT_ESTIMATE: &str = "Estimate what traces on this Mac are worth";
 /// The Settings switch's help.

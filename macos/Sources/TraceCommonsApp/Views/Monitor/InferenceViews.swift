@@ -60,16 +60,14 @@ struct InferenceTabView: View {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 // The owner's order (2026-10-09, 2026-10-10, 2026-10-19),
                 // with the inspector closed on this tab: the Private AI
-                // switch leads (owner, 2026-10-19: it was the status row
-                // under the managed cards), then the managed cards (owner,
-                // 2026-10-12), then the calls, then balance and funding,
-                // and last the card that opens Settings, where the tools
-                // and the connection are. The offer and the NEAR AI
-                // sign-in are popover notices over the tab
-                // (`MonitorNotices`).
+                // switch leads, then the NEAR AI balance with billing under
+                // it, then the managed cards (owner ruling O3: in the main
+                // pane), then the calls, and last the card that opens
+                // Settings, where the tools and the connection are. The
+                // offer and the NEAR AI sign-in are popover notices over
+                // the tab (`MonitorNotices`).
                 PrivateAIToggleRow(store: store)
-                // Saved model accounts and managed sessions, which #1146
-                // has no panel for (owner ruling O3: in the main pane).
+                InferenceBalanceSection()
                 ManagedSessionsSection()
                 ledgerSections
                 InferenceAccountSection(store: store, onOpenSettings: onOpenSettings)
