@@ -113,7 +113,8 @@ impl NativeTokenCounts {
             Self::ClaudeCode {
                 input,
                 cache_read_input,
-                cache_creation_input,
+                cache_creation_5m,
+                cache_creation_1h,
                 output,
                 ..
             } => {
@@ -122,7 +123,8 @@ impl NativeTokenCounts {
                 Ok(vec![
                     (UncachedInput, input),
                     (CacheReadInput, cache_read_input),
-                    (CacheCreationInput, cache_creation_input),
+                    (CacheWriteFiveMinuteInput, cache_creation_5m),
+                    (CacheWriteOneHourInput, cache_creation_1h),
                     (Output, output),
                 ])
             }
@@ -408,7 +410,13 @@ mod tests {
                     output: 0,
                 },
                 PricingAccounting::ClaudeCode,
-                vec![UncachedInput, CacheReadInput, CacheCreationInput, Output],
+                vec![
+                    UncachedInput,
+                    CacheReadInput,
+                    CacheWriteFiveMinuteInput,
+                    CacheWriteOneHourInput,
+                    Output,
+                ],
             ),
         ] {
             assert_eq!(counts.pricing_accounting(), accounting);
@@ -485,7 +493,8 @@ mod tests {
             vec![
                 (UncachedInput, 3),
                 (CacheReadInput, 100),
-                (CacheCreationInput, 50),
+                (CacheWriteFiveMinuteInput, 20),
+                (CacheWriteOneHourInput, 30),
                 (Output, 7)
             ]
         );
@@ -497,7 +506,7 @@ mod tests {
             cache_creation_1h: 0,
             output: u64::MAX,
         };
-        assert_eq!(large.accounting_components().unwrap().len(), 4);
+        assert_eq!(large.accounting_components().unwrap().len(), 5);
     }
     fn run(source: UsageSource, rows: Vec<Value>) -> UsageSummary {
         extract_usage(
