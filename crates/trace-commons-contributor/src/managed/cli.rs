@@ -15,8 +15,12 @@ use uuid::Uuid;
 pub struct LaunchArgs {
     #[arg(value_enum)]
     pub tool: ToolId,
+    /// A saved account to run on, by label or ID. Without it, the session
+    /// runs on your NEAR AI sign-in, and asks you to sign in if needed.
     #[arg(long)]
     pub account: Option<String>,
+    /// Run on a saved account of this kind (its default, else a choice).
+    /// `near-ai` is your NEAR AI sign-in, or a saved NEAR AI key.
     #[arg(long, value_enum)]
     pub connection: Option<ConnectionKind>,
     #[arg(long)]
@@ -101,6 +105,52 @@ pub fn call<T: DeserializeOwned>(
     )?)
 }
 
+/// Whether `--connection asked` admits an account on `connection`. The
+/// NEAR AI sign-in is not offered as a `--connection` value of its own;
+/// `near-ai` names it as well as a saved NEAR AI key.
+fn admits(asked: Option<ConnectionKind>, connection: ConnectionKind) -> bool {
+    asked.is_none_or(|asked| {
+        asked == connection
+            || (asked == ConnectionKind::NearAi && connection == ConnectionKind::NearAiSignIn)
+    })
+}
+
+/// What to say when a launch names no account and one must be chosen: the
+/// `--account` value for each that fits, by label, or by ID where labels
+/// repeat.
+fn choose_account(snapshot: &Snapshot, tool: ToolId, connection: Option<ConnectionKind>) -> String {
+    let fits: Vec<_> = snapshot
+        .accounts
+        .iter()
+        .chain(&snapshot.sign_in_accounts)
+        .filter(|a| a.tool == tool && admits(connection, a.connection))
+        .collect();
+    let mut text = String::from("choose the account to run this tool on:");
+    for account in &fits {
+        let repeated = fits.iter().filter(|a| a.label == account.label).count() > 1;
+        let name = if repeated {
+            account.id.0.to_string()
+        } else {
+            account.label.clone()
+        };
+        let kind = match account.connection {
+            ConnectionKind::NearAiSignIn => "NEAR AI sign-in",
+            ConnectionKind::NearAi => "NEAR AI key",
+            ConnectionKind::Subscription => "subscription",
+            ConnectionKind::ApiKey => "API key",
+        };
+        text.push_str(&format!("\n  --account {name:?}  ({kind})"));
+    }
+    text
+}
+
+/// The account a launch runs on. Named (`--account`): that account. Not
+/// named: the NEAR AI sign-in, as the app's Start button uses it, or
+/// `NearAiSignInRequired` when there is none. A `--connection` other than
+/// `near-ai` asks for a saved account instead: the tool's default for that
+/// connection, else a choice (`AmbiguousAccount`). A saved account is
+/// never used unless named or the default, so removing a default asks for
+/// a new choice rather than moving to another saved account.
 pub fn resolve(
     snapshot: &Snapshot,
     tool: ToolId,
@@ -111,7 +161,7 @@ pub fn resolve(
         .accounts
         .iter()
         .chain(&snapshot.sign_in_accounts)
-        .filter(|a| a.tool == tool && connection.is_none_or(|c| a.connection == c))
+        .filter(|a| a.tool == tool && admits(connection, a.connection))
         .collect();
     if let Some(name) = name {
         let matches: Vec<_> = candidates
@@ -124,31 +174,96 @@ pub fn resolve(
             _ => Err(ManagedError::AmbiguousAccount),
         };
     }
+    let near_ai = matches!(connection, None | Some(ConnectionKind::NearAi));
+    if near_ai {
+        if let Some(sign_in) = candidates
+            .iter()
+            .find(|a| a.connection == ConnectionKind::NearAiSignIn)
+        {
+            return Ok((*sign_in).clone());
+        }
+        if connection.is_none() || candidates.is_empty() {
+            return Err(ManagedError::NearAiSignInRequired);
+        }
+    }
     if let Some(selection) = snapshot
         .defaults
         .iter()
-        .find(|s| s.tool == tool && connection.is_none_or(|c| s.connection == c))
+        .find(|s| s.tool == tool && admits(connection, s.connection))
     {
         return snapshot
             .accounts
             .iter()
-            .chain(&snapshot.sign_in_accounts)
             .find(|a| a.id == selection.account_id)
             .cloned()
             .ok_or(ManagedError::NotFound);
     }
-    Err(ManagedError::NotFound)
+    match candidates.as_slice() {
+        [] => Err(ManagedError::NotFound),
+        _ => Err(ManagedError::AmbiguousAccount),
+    }
+}
+
+/// Asked when a launch names no account and there is no NEAR AI sign-in.
+const SIGN_IN_QUESTION: &str = "Sessions run on your NEAR AI account. Sign in now? [Y/n] ";
+/// Without a terminal to ask at, or when the person declines.
+const SIGN_IN_NEEDED: &str = "Sign in to NEAR AI to start a session, or choose a saved account with --account. See `trace-commons-contributor accounts list`.";
+
+/// How long `launch` waits, after signing in, for the daemon to offer the
+/// sign-in, and how often it looks.
+const SIGN_IN_PICKUP: std::time::Duration = std::time::Duration::from_secs(10);
+const SIGN_IN_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Ask at the terminal whether to sign in to NEAR AI. Empty means yes.
+fn agrees(answer: &str) -> bool {
+    matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "" | "y" | "yes"
+    )
 }
 
 pub async fn launch(store: &ConfigStore, args: LaunchArgs) -> anyhow::Result<i32> {
     use std::io::IsTerminal;
-    let snapshot: Snapshot = call(store, "managed_snapshot", json!({}))?;
-    let account = resolve(
-        &snapshot,
-        args.tool,
-        args.account.as_deref(),
-        args.connection,
-    )?;
+    let mut snapshot: Snapshot = call(store, "managed_snapshot", json!({}))?;
+    let resolved = |snapshot: &Snapshot| {
+        resolve(
+            snapshot,
+            args.tool,
+            args.account.as_deref(),
+            args.connection,
+        )
+    };
+    let account = match resolved(&snapshot) {
+        Err(ManagedError::NearAiSignInRequired) => {
+            if !std::io::stdin().is_terminal() {
+                anyhow::bail!(SIGN_IN_NEEDED);
+            }
+            eprint!("{SIGN_IN_QUESTION}");
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer)?;
+            if !agrees(&answer) {
+                anyhow::bail!(SIGN_IN_NEEDED);
+            }
+            crate::near_ai_login::run_for_launch(store)?;
+            // The daemon takes up a new sign-in on its next pass, not at
+            // once: wait a little for the sign-in to be offered.
+            let mut waited = std::time::Duration::ZERO;
+            loop {
+                snapshot = call(store, "managed_snapshot", json!({}))?;
+                match resolved(&snapshot) {
+                    Err(ManagedError::NearAiSignInRequired) if waited < SIGN_IN_PICKUP => {
+                        std::thread::sleep(SIGN_IN_POLL);
+                        waited += SIGN_IN_POLL;
+                    }
+                    other => break other?,
+                }
+            }
+        }
+        Err(ManagedError::AmbiguousAccount) if args.account.is_none() => {
+            anyhow::bail!("{}", choose_account(&snapshot, args.tool, args.connection))
+        }
+        other => other?,
+    };
     if !std::io::stdin().is_terminal() {
         anyhow::bail!("managed launch requires an interactive terminal");
     }
@@ -291,4 +406,148 @@ pub fn sessions(
 ) -> anyhow::Result<()> {
     let snapshot: Value = call(store, "managed_snapshot", json!({}))?;
     print_value(snapshot["sessions"].clone(), json_output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::managed::{AccountId, AuthState, signin};
+
+    fn saved(tool: ToolId, connection: ConnectionKind, label: &str) -> AccountView {
+        AccountView {
+            id: AccountId(Uuid::new_v4()),
+            tool,
+            connection,
+            label: label.into(),
+            auth_state: AuthState::Ready,
+            verified_at: None,
+        }
+    }
+
+    fn snapshot(accounts: Vec<AccountView>, signed_in: bool) -> Snapshot {
+        Snapshot {
+            accounts,
+            sign_in_accounts: if signed_in {
+                signin::entries(true)
+            } else {
+                Vec::new()
+            },
+            defaults: Vec::new(),
+            generations: Default::default(),
+        }
+    }
+
+    /// With no account named, every tool runs on the NEAR AI sign-in, even
+    /// beside a saved account or default for that tool.
+    #[test]
+    fn an_unnamed_launch_runs_on_the_near_ai_sign_in() {
+        let personal = saved(ToolId::Claude, ConnectionKind::Subscription, "Personal");
+        let mut snap = snapshot(vec![personal.clone()], true);
+        snap.defaults.push(Selection {
+            tool: ToolId::Claude,
+            connection: ConnectionKind::Subscription,
+            account_id: personal.id,
+            generation: Generation(1),
+        });
+        for tool in [ToolId::Claude, ToolId::Codex, ToolId::Opencode] {
+            for connection in [None, Some(ConnectionKind::NearAi)] {
+                assert_eq!(
+                    resolve(&snap, tool, None, connection).map(|a| a.id),
+                    Ok(signin::entry(tool).unwrap().id),
+                    "{tool:?} {connection:?}"
+                );
+            }
+        }
+        // Another account is still there to name, or to reach by its
+        // connection's default.
+        assert_eq!(
+            resolve(&snap, ToolId::Claude, Some("Personal"), None).map(|a| a.id),
+            Ok(personal.id)
+        );
+        assert_eq!(
+            resolve(
+                &snap,
+                ToolId::Claude,
+                None,
+                Some(ConnectionKind::Subscription)
+            )
+            .map(|a| a.id),
+            Ok(personal.id)
+        );
+    }
+
+    /// Without a NEAR AI sign-in, an unnamed launch asks for one, whatever
+    /// is saved; `launch` turns this into the sign-in question.
+    #[test]
+    fn without_a_sign_in_an_unnamed_launch_needs_one() {
+        let personal = saved(ToolId::Claude, ConnectionKind::Subscription, "Personal");
+        for accounts in [vec![], vec![personal]] {
+            let snap = snapshot(accounts, false);
+            for connection in [None, Some(ConnectionKind::NearAi)] {
+                assert_eq!(
+                    resolve(&snap, ToolId::Claude, None, connection).map(|a| a.id),
+                    Err(ManagedError::NearAiSignInRequired),
+                    "{connection:?}"
+                );
+            }
+        }
+        // A saved NEAR AI key is a NEAR AI connection too: named by
+        // `--connection near-ai`, it is a choice, not a sign-in.
+        let key = saved(ToolId::Codex, ConnectionKind::NearAi, "Key");
+        let snap = snapshot(vec![key], false);
+        assert_eq!(
+            resolve(&snap, ToolId::Codex, None, Some(ConnectionKind::NearAi)).map(|a| a.id),
+            Err(ManagedError::AmbiguousAccount)
+        );
+        assert_eq!(
+            resolve(&snap, ToolId::Codex, None, None).map(|a| a.id),
+            Err(ManagedError::NearAiSignInRequired)
+        );
+    }
+
+    /// A connection other than NEAR AI, with no default, is a choice: a
+    /// saved account runs only when named or the default.
+    #[test]
+    fn a_saved_account_is_not_used_without_being_chosen() {
+        let personal = saved(ToolId::Claude, ConnectionKind::Subscription, "Personal");
+        let snap = snapshot(vec![personal], true);
+        let asked = Some(ConnectionKind::Subscription);
+        assert_eq!(
+            resolve(&snap, ToolId::Claude, None, asked).map(|a| a.id),
+            Err(ManagedError::AmbiguousAccount)
+        );
+        let text = choose_account(&snap, ToolId::Claude, asked);
+        assert!(
+            text.contains("--account \"Personal\"  (subscription)"),
+            "{text}"
+        );
+        assert!(!text.contains("NEAR AI sign-in"), "{text}");
+        // Nothing saved for the connection asked for: not found.
+        assert_eq!(
+            resolve(&snap, ToolId::Codex, None, asked).map(|a| a.id),
+            Err(ManagedError::NotFound)
+        );
+    }
+
+    /// The choice names each account by label, or by ID where labels repeat.
+    #[test]
+    fn a_choice_lists_the_accounts_by_label() {
+        let a = saved(ToolId::Codex, ConnectionKind::ApiKey, "Work");
+        let b = saved(ToolId::Codex, ConnectionKind::ApiKey, "Work");
+        let snap = snapshot(vec![a.clone(), b], true);
+        let text = choose_account(&snap, ToolId::Codex, Some(ConnectionKind::ApiKey));
+        assert!(text.contains(&a.id.0.to_string()), "{text}");
+        assert!(text.contains("(API key)"), "{text}");
+    }
+
+    /// Return or "y" signs in; anything else does not.
+    #[test]
+    fn only_yes_or_return_agrees_to_sign_in() {
+        for yes in ["", "\n", "y\n", "Y", " yes \n"] {
+            assert!(agrees(yes), "{yes:?}");
+        }
+        for no in ["n\n", "no", "later", "q"] {
+            assert!(!agrees(no), "{no:?}");
+        }
+    }
 }

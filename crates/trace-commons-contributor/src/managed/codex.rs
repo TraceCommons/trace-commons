@@ -11,8 +11,11 @@
 //! matching a NEAR AI id such as `openai/gpt-6.1-sol` to its own
 //! `gpt-6.1-sol`. To keep that, the launcher reads the shipped list
 //! (`codex debug models --bundled`) and a model Codex matches keeps its
-//! shipped entry under the NEAR AI id. Any other model gets basic
-//! settings with the prompt of Codex's own first listed model.
+//! prompt and its reasoning and context settings under the NEAR AI id
+//! ([`KEPT`]). Every entry's tool settings are basic, because the
+//! shipped ones make Codex send requests NEAR AI refuses. Any other
+//! model gets basic settings with the prompt of Codex's own first listed
+//! model.
 use super::{ManagedError, models::ChatModel};
 use crate::config::ConfigStore;
 use serde_json::{Value, json};
@@ -58,24 +61,23 @@ pub fn catalog(default: &str, models: &[ChatModel], bundled: Option<&Value>) -> 
         .enumerate()
         .map(|(index, model)| {
             let display = model.name.as_deref().unwrap_or(&model.id);
-            let mut entry = match known(&model.id, shipped) {
-                Some(entry) => {
-                    let mut entry = entry.clone();
-                    // Both name another model or a ChatGPT offer.
-                    entry["upgrade"] = Value::Null;
-                    entry["availability_nux"] = Value::Null;
-                    entry
+            let mut entry = json!({
+                "supported_reasoning_levels": [],
+                "shell_type": "shell_command",
+                "support_verbosity": false,
+                "truncation_policy": {"mode": "bytes", "limit": 10000},
+                "experimental_supported_tools": [],
+                "base_instructions": prompt,
+                "upgrade": null,
+                "use_responses_lite": false,
+            });
+            if let Some(shipped) = known(&model.id, shipped) {
+                for field in KEPT {
+                    if let Some(value) = shipped.get(*field) {
+                        entry[*field] = value.clone();
+                    }
                 }
-                None => json!({
-                    "supported_reasoning_levels": [],
-                    "shell_type": "shell_command",
-                    "support_verbosity": false,
-                    "truncation_policy": {"mode": "bytes", "limit": 10000},
-                    "experimental_supported_tools": [],
-                    "base_instructions": prompt,
-                    "upgrade": null,
-                }),
-            };
+            }
             entry["slug"] = json!(model.id);
             entry["display_name"] = json!(display);
             entry["visibility"] = json!("list");
@@ -86,6 +88,26 @@ pub fn catalog(default: &str, models: &[ChatModel], bundled: Option<&Value>) -> 
         .collect();
     json!({ "models": entries })
 }
+
+/// What a model Codex knows keeps of its shipped entry: its prompt and
+/// its reasoning and context settings. Nothing that shapes the tools:
+/// those settings make Codex send what NEAR AI's Responses API refuses
+/// (checked against it with Codex 0.163.0, 2026-10-19):
+/// `use_responses_lite` moves the tools into an `additional_tools` item of
+/// `input` ("data did not match any variant of untagged enum
+/// ResponseInput"), and `apply_patch_tool_type` and `tool_mode` add
+/// `custom` grammar tools ("unknown variant `custom`").
+const KEPT: &[&str] = &[
+    "base_instructions",
+    "supported_reasoning_levels",
+    "default_reasoning_level",
+    "support_verbosity",
+    "default_verbosity",
+    "truncation_policy",
+    "context_window",
+    "effective_context_window_percent",
+    "input_modalities",
+];
 
 /// The shipped entry Codex would use for `id`: the longest slug `id`
 /// starts with, then the same after one `namespace/` (Codex 0.163.0,
@@ -198,6 +220,10 @@ mod tests {
                 "experimental_supported_tools": ["clock"],
                 "base_instructions": prompt,
                 "model_messages": {"instructions_template": prompt},
+                "use_responses_lite": true,
+                "tool_mode": "code_mode_only",
+                "apply_patch_tool_type": "freeform",
+                "context_window": 272000,
             })
         };
         json!({"models": [
@@ -296,12 +322,11 @@ mod tests {
         // Namespaced id, Codex's own slug after the namespace.
         let sol = entry("openai/gpt-6.1-sol");
         assert_eq!(sol["base_instructions"], "You are Codex (sol).");
-        assert_eq!(sol["shell_type"], "unified_exec");
-        assert_eq!(
-            sol["model_messages"]["instructions_template"],
-            "You are Codex (sol)."
-        );
-        assert!(sol["availability_nux"].is_null());
+        assert_eq!(sol["supported_reasoning_levels"][0]["effort"], "low");
+        assert_eq!(sol["context_window"], 272000);
+        // Its tool settings are the basic ones, not Codex's.
+        assert_eq!(sol["shell_type"], "shell_command");
+        assert_eq!(sol["experimental_supported_tools"], json!([]));
         // Longest prefix, as Codex matches it.
         assert_eq!(
             entry("openai/gpt-5.5-pro")["base_instructions"],
@@ -325,6 +350,57 @@ mod tests {
         // A list that is not Codex's shape counts as none.
         let odd = super::catalog("openai/gpt-6.1-sol", &models, Some(&json!({"models": "x"})));
         assert_eq!(odd, plain);
+    }
+
+    /// No entry carries Codex's tool settings: NEAR AI refuses the "lite"
+    /// request (`use_responses_lite`) and `custom` grammar tools
+    /// (`apply_patch_tool_type`, `tool_mode`). Codex's own list turns them
+    /// on for every OpenAI model it ships, so a NEAR AI id it matches would
+    /// otherwise inherit them.
+    #[test]
+    fn no_entry_carries_codex_tool_settings() {
+        let models = [
+            chat("openai/gpt-6.1-sol", None),
+            chat("openai/gpt-6-astra", None),
+            chat("anthropic/claude-sonnet-5-5", None),
+        ];
+        let bundled = bundled();
+        for list in [Some(&bundled), None] {
+            let catalog = catalog("openai/gpt-6.1-sol", &models, list);
+            for entry in catalog["models"].as_array().unwrap() {
+                assert_eq!(entry["use_responses_lite"], false, "{}", entry["slug"]);
+            }
+        }
+        // A known entry is the basic one plus what it keeps: none of the
+        // settings that change the tools Codex sends.
+        let catalog = catalog("openai/gpt-6.1-sol", &models, Some(&bundled));
+        let keys = |entry: &Value| {
+            let mut keys: Vec<String> = entry.as_object().unwrap().keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        let mut expected: Vec<String> = [
+            "slug",
+            "display_name",
+            "visibility",
+            "supported_in_api",
+            "priority",
+            "shell_type",
+            "experimental_supported_tools",
+            "upgrade",
+            "use_responses_lite",
+        ]
+        .iter()
+        .chain(KEPT)
+        .filter(|field| bundled["models"][1].get(**field).is_some() || !KEPT.contains(field))
+        .map(|field| field.to_string())
+        .collect();
+        expected.sort();
+        expected.dedup();
+        assert_eq!(keys(&catalog["models"][0]), expected);
+        for field in ["tool_mode", "apply_patch_tool_type", "model_messages"] {
+            assert!(catalog["models"][0].get(field).is_none(), "{field}");
+        }
     }
 
     /// The catalog file lives under the launcher's own state, readable by
