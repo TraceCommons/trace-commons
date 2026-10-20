@@ -59,4 +59,17 @@ final class LibraryStationTests: XCTestCase {
         XCTAssertGreaterThan(
             simd_distance(GlassLibraryStation.turned(p, angle: 0), GlassLibraryStation.turned(p, angle: .pi / 2)), 30)
     }
+
+    /// Before anything is contributed the station is drawn as bright as
+    /// after (owner, 2026-10-19: dimmed, it read too dark beside the launch
+    /// pad); only the glow is softer.
+    func test_theRestingStationIsDrawnAtFullBrightness() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().appendingPathComponent("Sources/TCDesign/Components/LibraryStation.swift"),
+            encoding: .utf8)
+        XCTAssertFalse(source.contains("let dim ="), "the station is dimmed at rest again")
+        XCTAssertGreaterThan(GlassLibraryStation.glow(lit: false), 0)
+        XCTAssertLessThan(GlassLibraryStation.glow(lit: false), GlassLibraryStation.glow(lit: true))
+    }
 }
