@@ -56,11 +56,23 @@ final class InsightsModelAnswersContractTests: XCTestCase {
         XCTAssertEqual(rows[5].leftOut.unknownFacts, 10)
         XCTAssertEqual(rows[5].leftOut.counts.map(\.reason),
                        ["unknown_facts", "automated", "delegated", "capped", "routed", "reviewer", "no_majority",
-                        "unpriced", "too_few_edits", "mix_too_different"],
+                        "unpriced", "too_few_sessions", "too_few_edits", "mix_too_different"],
                        "every reason, in the wire's order")
         XCTAssertEqual(rows[5].leftOut.automated, 0)
+        XCTAssertNil(rows[5].leftOut.tooFewSessions, "recorded before the field: absent, not 0")
         XCTAssertNil(docs.nearAiCharge, "no trace went through NEAR AI: no charge, never a zero")
         XCTAssertNil(docs.leader?.nearAiCharge)
+    }
+
+    /// The shared-task-type comparison leaves out traces in task types both
+    /// models don't have enough of, as `too_few_sessions`.
+    func testTooFewSessionsDecodesAndIsListed() throws {
+        let row = Self.undoneRow.replacingOccurrences(of: #""unpriced":0,"#,
+                                                      with: #""unpriced":0,"too_few_sessions":4,"#)
+        let decoded = try DaemonDataDecoding.decoder().decode(DaemonData.InsightsModelAnswerRow.self,
+                                                               from: Data(row.utf8))
+        XCTAssertEqual(decoded.leftOut.tooFewSessions, 4)
+        XCTAssertEqual(decoded.leftOut.counts.first { $0.reason == "too_few_sessions" }?.count, 4)
     }
 
     /// The NEAR AI charge is its own figure beside the API-price one: on the

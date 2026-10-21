@@ -727,7 +727,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     (
         "analytics_models_left_out_too_few_sessions",
-        "Model had too few traces of a task type: {n}",
+        "Left out, too few traces of a task type to compare: {n}",
     ),
     (
         "analytics_models_left_out_too_few_edits",
