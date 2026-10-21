@@ -59,11 +59,16 @@ final class InsightsModelAnswersWireTests: XCTestCase {
         XCTAssertNil(next.nearAiCharge)
         let charge = try XCTUnwrap(docs.nearAiCharge)
         XCTAssertEqual(charge.basis, "near_ai_ledger")
-        XCTAssertEqual(charge.median, DaemonData.InsightsModelFigureValue(kind: "usd_micros", value: 25_000))
-        XCTAssertEqual(charge.routedSessions, 3)
+        XCTAssertEqual(charge.median, DaemonData.InsightsModelFigureValue(kind: "usd_micros", value: 33_750))
+        XCTAssertEqual(charge.routedSessions, 7)
         XCTAssertEqual(charge.chargeUnknown, 1)
-        XCTAssertEqual(leader.nearAiCharge, charge)
-        XCTAssertEqual(docs.leftOut.routed, 3)
+        // The leader's charge counts only the sessions NEAR AI proved it
+        // served; the row's counts every Docs session sent through NEAR AI.
+        let leaderCharge = try XCTUnwrap(leader.nearAiCharge)
+        XCTAssertEqual(leaderCharge.median, DaemonData.InsightsModelFigureValue(kind: "usd_micros", value: 30_000))
+        XCTAssertEqual(leaderCharge.routedSessions, 6)
+        XCTAssertEqual(leaderCharge.chargeUnknown, 1)
+        XCTAssertEqual(docs.leftOut.routed, 7)
         XCTAssertEqual(docs.sessionsByModel, [
             DaemonData.InsightsModelCount(label: "claude-opus-5-5", sessions: 5),
             DaemonData.InsightsModelCount(label: "claude-sonnet-5-5", sessions: 5),
@@ -74,11 +79,11 @@ final class InsightsModelAnswersWireTests: XCTestCase {
         XCTAssertEqual(across.state, "not_enough_sessions")
         XCTAssertNil(across.leader)
         XCTAssertNil(across.next)
-        XCTAssertEqual(across.sessionsByModel.map(\.sessions), [1, 5, 8])
-        XCTAssertEqual(across.leftOut.tooFewEdits, 13)
+        XCTAssertEqual(across.sessionsByModel.map(\.sessions), [1, 5, 12])
+        XCTAssertEqual(across.leftOut.tooFewEdits, 17)
         let finish = rows[5]
         XCTAssertEqual(finish.editMode, "prompting")
-        XCTAssertEqual(finish.leftOut.unknownFacts, 14)
+        XCTAssertEqual(finish.leftOut.unknownFacts, 18)
         XCTAssertEqual(finish.leftOut.reasons.map(\.reason), [
             "unknown_facts", "automated", "delegated", "capped", "routed", "reviewer", "no_majority",
             "unpriced", "too_few_edits", "mix_too_different",

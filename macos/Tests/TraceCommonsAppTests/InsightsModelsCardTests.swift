@@ -78,14 +78,14 @@ final class InsightsModelsCardTests: XCTestCase {
             .init(text: "claude-sonnet-5-5 (\(leaderCost) at API prices, 5 traces)"),
             .init(text: "Next: claude-opus-5-5 (\(nextCost) at API prices, 5 traces)"),
         ])
-        let charge = InsightsModelsWords.money(25_000)
+        let charge = InsightsModelsWords.money(33_750)
         XCTAssertEqual(row.notes, [
-            "Charged through Private AI: \(charge) per trace (median), 3 traces \u{b7} Charge not recorded for 1 of them",
+            "Charged through Private AI: \(charge) per trace (median), 7 traces \u{b7} Charge not recorded for 1 of them",
         ])
         let info = row.info.joined(separator: "\n")
         XCTAssertTrue(info.contains("At API prices: what the API would charge"), info)
         XCTAssertTrue(info.contains("named first only when its lead holds"), info)
-        XCTAssertTrue(info.contains("Left out of this answer:\nRoute doesn't confirm the model: 3"), info)
+        XCTAssertTrue(info.contains("Left out of this answer:\nRoute doesn't confirm the model: 7"), info)
         XCTAssertFalse(info.contains(": 0"), "a reason with no traces is not listed")
     }
 
@@ -93,10 +93,10 @@ final class InsightsModelsCardTests: XCTestCase {
         let row = try words(try XCTUnwrap(try Self.recorded().rows?[4]))
         XCTAssertEqual(row.state, "Not enough traces yet")
         XCTAssertEqual(row.models.map(\.text), [
-            "claude-fixture-model: 1 trace", "claude-opus-5-5: 5 traces", "claude-sonnet-5-5: 8 traces",
+            "claude-fixture-model: 1 trace", "claude-opus-5-5: 5 traces", "claude-sonnet-5-5: 12 traces",
         ])
         XCTAssertEqual(row.notes, [], "no basis: the row compares nothing")
-        XCTAssertTrue(row.info.last?.contains("Model had too few edits: 13") == true, "\(row.info)")
+        XCTAssertTrue(row.info.last?.contains("Model had too few edits: 17") == true, "\(row.info)")
         // The time row names no edit mode while it compares nothing.
         let finish = try words(try XCTUnwrap(try Self.recorded().rows?[5]))
         XCTAssertEqual(finish.state, "Not enough traces yet")
