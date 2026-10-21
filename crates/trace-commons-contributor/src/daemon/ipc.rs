@@ -439,6 +439,7 @@ pub const METHODS: &[&str] = &[
     "insights_sessions",
     "insights_session_drill",
     "insights_session_label",
+    "insights_analyze_session",
     "insights_model_answers",
     "inference_summary",
     "inference_call_proof",
@@ -545,6 +546,10 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "insights_sessions",
     "insights_session_drill",
     "insights_session_label",
+    // Reads one watched session and saves its snapshot in the local
+    // Insights store, the store the app writes in process; nothing leaves
+    // the Mac.
+    "insights_analyze_session",
     "insights_model_answers",
     "inference_call_proof",
     "private_ai",
@@ -3685,6 +3690,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "insights_sessions" => super::insights_sessions::handle_sessions(shared, req),
         "insights_session_drill" => super::insights_sessions::handle_session_drill(shared, req),
         "insights_session_label" => super::insights_sessions::handle_session_label(shared, req),
+        "insights_analyze_session" => super::insights_analyze::handle_analyze_session(shared, req),
         "insights_model_answers" => {
             super::insights_model_answers::handle_model_answers(shared, req)
         }
@@ -6423,6 +6429,11 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
             super::inference_connection::handle_disconnect(shared, req).await
         }
         "history_detail" => super::public_run::handle_detail(shared, req).await,
+        // Reads a whole transcript: off the runtime's worker, as the skill
+        // installs are.
+        "insights_analyze_session" => crate::daemon::run_blocking(|| {
+            super::insights_analyze::handle_analyze_session(shared, req)
+        }),
         "skill_candidate" => super::skill_loop::handle_candidate(shared, req).await,
         "skill_evaluate" => super::skill_loop::handle_evaluate(shared, req).await,
         "skill_install_plan" => {
@@ -17775,8 +17786,8 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 91, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(sync.len(), 92, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 68, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

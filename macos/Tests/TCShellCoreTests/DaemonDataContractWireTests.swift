@@ -573,6 +573,58 @@ final class DaemonDataContractWireTests: XCTestCase {
         XCTAssertNil(session.userOutcome)
     }
 
+    // MARK: - insights_analyze_session
+
+    /// The reference and `save` go as params, never a path; the core's
+    /// `analyze` response is kept whole as JSON for the app to decode.
+    func testInsightsAnalyzeSessionSendsTheReferenceAndKeepsTheAnalysisWhole() async throws {
+        let analysis = #"{"type":"analyze","insight":{"id":"snap","source_format":"claude_code"},"mutation_effects":{"invalidated_episode_ids":["e1"]}}"#
+        let transport = FakeTransport(response: frame(
+            #"{"enabled":true,"feed":"counter_pass","readable":true,"analysis":"# + analysis + "}"))
+        let answer = try await LiveDaemonClient(transport: transport)
+            .insightsAnalyzeSession(sessionRef: "t7", save: true)
+        XCTAssertEqual(transport.calls.map(\.method), ["insights_analyze_session"])
+        XCTAssertEqual(transport.calls.map(\.params), [#"{"save":true,"session_ref":"t7"}"#])
+        XCTAssertTrue(answer.enabled)
+        XCTAssertEqual(answer.readable, true)
+        let kept = try JSONSerialization.jsonObject(with: try XCTUnwrap(answer.analysis).data) as? [String: Any]
+        XCTAssertEqual(kept?["type"] as? String, "analyze")
+        XCTAssertEqual((kept?["insight"] as? [String: Any])?["id"] as? String, "snap")
+    }
+
+    /// Off and unreadable carry no analysis; a refused reference is the
+    /// daemon's fixed label.
+    func testInsightsAnalyzeSessionOffUnreadableAndRefused() async throws {
+        for (json, readable) in [
+            (#"{"enabled":false,"feed":"counter_pass"}"#, nil as Bool?),
+            (#"{"enabled":true,"feed":"counter_pass","readable":false,"reason":"store_unreadable"}"#, false),
+        ] {
+            let answer = try await LiveDaemonClient(transport: FakeTransport(response: frame(json)))
+                .insightsAnalyzeSession(sessionRef: "t1", save: true)
+            XCTAssertEqual(answer.readable, readable)
+            XCTAssertNil(answer.analysis)
+        }
+        let refused = FakeTransport(response:
+            #"{"id":0,"error":{"code":"unavailable","message":"insights-session-file-gone"}}"#)
+        do {
+            _ = try await LiveDaemonClient(transport: refused).insightsAnalyzeSession(sessionRef: "t1", save: true)
+            XCTFail("a file that has gone answered")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError,
+                           .daemon(code: "unavailable", message: "insights-session-file-gone"))
+        }
+    }
+
+    /// The sample records no counter pass, so it has no row to analyze.
+    func testSampleHasNoWatchedSessionToAnalyze() async throws {
+        do {
+            _ = try await SampleDaemonClient(.normalDay).insightsAnalyzeSession(sessionRef: "t1", save: true)
+            XCTFail("the sample analyzed a session")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .notAvailableYet(method: "insights_analyze_session"))
+        }
+    }
+
     /// A row from a daemon that predates the labels decodes, with none.
     func testAWatchedRowWithoutLabelsDecodes() throws {
         let old = #"{"session_ref":"t2","source":"codex","started_at":null,"turns":null,"tokens":null,"sparkline":null,"folder":"f"}"#
