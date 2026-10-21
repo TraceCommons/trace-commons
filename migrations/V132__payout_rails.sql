@@ -349,6 +349,76 @@ CREATE TABLE trace_payout_control (
 );
 CREATE INDEX trace_payout_control_latest ON trace_payout_control (rail_id, changed_at DESC);
 
+-- Settled values are final. The column grants below let the runtime role
+-- write these columns at all; these triggers keep it from writing a settled
+-- value again, whatever a caller's WHERE clause says. Each raises
+-- check_violation. They are SECURITY INVOKER, so the pending-line lookup
+-- runs under the caller's tenant context and forced RLS.
+CREATE FUNCTION trace_payout_links_guard_update()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF OLD.state = 'closed' THEN
+        RAISE EXCEPTION 'trace_payout_links: a closed link is final'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    IF NEW.state IS DISTINCT FROM OLD.state AND NOT (
+           (OLD.state = 'waiting' AND NEW.state = 'active')
+        OR (OLD.state = 'active' AND NEW.state = 'closing')
+        OR (OLD.state = 'closing' AND NEW.state = 'closed')
+    ) THEN
+        RAISE EXCEPTION 'trace_payout_links: a link moves only waiting, active, closing, closed'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    -- A plpgsql statement takes a fresh snapshot, so a pending line that
+    -- committed while this UPDATE waited on the link row is seen here.
+    IF NEW.state = 'closed' AND EXISTS (
+        SELECT 1 FROM trace_payout_lines
+         WHERE tenant_id = OLD.tenant_id AND link_id = OLD.link_id AND state = 'pending'
+    ) THEN
+        RAISE EXCEPTION 'trace_payout_links: a link with a pending line does not close'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER trace_payout_links_guard_update
+    BEFORE UPDATE ON trace_payout_links
+    FOR EACH ROW EXECUTE FUNCTION trace_payout_links_guard_update();
+
+CREATE FUNCTION trace_payout_lines_guard_update()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF OLD.state <> 'pending' THEN
+        RAISE EXCEPTION 'trace_payout_lines: a resolved line is final'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER trace_payout_lines_guard_update
+    BEFORE UPDATE ON trace_payout_lines
+    FOR EACH ROW EXECUTE FUNCTION trace_payout_lines_guard_update();
+
+CREATE FUNCTION trace_payout_accruals_guard_update()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF OLD.account_id IS NOT NULL THEN
+        RAISE EXCEPTION 'trace_payout_accruals: an owned accrual keeps its owner'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER trace_payout_accruals_guard_update
+    BEFORE UPDATE ON trace_payout_accruals
+    FOR EACH ROW EXECUTE FUNCTION trace_payout_accruals_guard_update();
+
 -- Row level security.
 ALTER TABLE trace_payout_links ENABLE ROW LEVEL SECURITY;
 ALTER TABLE trace_payout_links FORCE ROW LEVEL SECURITY;

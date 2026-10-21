@@ -1784,3 +1784,203 @@ async fn a_line_is_written_only_to_an_active_link() {
         );
     }
 }
+
+fn is_check_violation(error: &tokio_postgres::Error) -> bool {
+    error.code() == Some(&tokio_postgres::error::SqlState::CHECK_VIOLATION)
+}
+
+/// The column grants let the runtime role write these columns at all; the
+/// V132 triggers keep a settled value from being written again. Each
+/// statement here runs as the runtime login, the role the store uses.
+#[tokio::test]
+async fn an_owned_accrual_keeps_its_owner() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 2).await;
+    let batch = finalized_batch(&fixture.owner, &tenant).await;
+    let store = &fixture.runtime;
+    let hash = sha(&format!("owned:{tenant}"));
+    store
+        .insert_payout_accruals(
+            &tenant,
+            &[credit("near_ai", batch, Some(accounts[0]), &hash, 5, 5)],
+        )
+        .await
+        .unwrap();
+    for (sql, what) in [
+        (
+            format!(
+                "UPDATE trace_payout_accruals SET account_id = '{}' WHERE credit_account_hash = '{hash}'",
+                accounts[1]
+            ),
+            "moved to another account",
+        ),
+        (
+            format!(
+                "UPDATE trace_payout_accruals SET account_id = NULL, claimed_at = NULL WHERE credit_account_hash = '{hash}'"
+            ),
+            "released back to nobody",
+        ),
+    ] {
+        let error = runtime_exec(&fixture, Some(&tenant), &sql)
+            .await
+            .expect_err(&format!("an owned accrual was {what}"));
+        assert!(is_check_violation(&error), "{what}: {error}");
+    }
+    // An unowned accrual is still claimed once, through the store.
+    let unowned = sha(&format!("unowned:{tenant}"));
+    let batch_two = finalized_batch(&fixture.owner, &tenant).await;
+    store
+        .insert_payout_accruals(
+            &tenant,
+            &[credit("near_ai", batch_two, None, &unowned, 3, 3)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .claim_payout_accruals(&tenant, &unowned, accounts[1], ACTOR)
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_resolved_line_is_final() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let store = &fixture.runtime;
+    let live = link(accounts[0], "near_ai", PayoutLinkState::Active, "final");
+    store.insert_payout_link(&tenant, &live).await.unwrap();
+    let sent = line(&live, 10, 10);
+    store
+        .insert_pending_payout_line(&tenant, &sent)
+        .await
+        .unwrap();
+    store
+        .resolve_payout_line(
+            &tenant,
+            sent.line_id,
+            &PayoutLineResolution::Confirmed {
+                receipt_hash: sha(&format!("final-receipt:{tenant}")),
+                delta: AtomicUnits::from_raw(10),
+            },
+        )
+        .await
+        .unwrap();
+    let id = sent.line_id;
+    for (sql, what) in [
+        (
+            format!(
+                "UPDATE trace_payout_lines SET state = 'pending', resolved_at = NULL WHERE line_id = '{id}'"
+            ),
+            "reopened",
+        ),
+        (
+            format!("UPDATE trace_payout_lines SET delta = 0 WHERE line_id = '{id}'"),
+            "re-priced",
+        ),
+        (
+            format!(
+                "UPDATE trace_payout_lines SET receipt_hash = '{}' WHERE line_id = '{id}'",
+                sha("another receipt")
+            ),
+            "given another receipt",
+        ),
+    ] {
+        let error = runtime_exec(&fixture, Some(&tenant), &sql)
+            .await
+            .expect_err(&format!("a resolved line was {what}"));
+        assert!(is_check_violation(&error), "{what}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn a_closed_link_is_final_and_links_move_only_forward() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 2).await;
+    let store = &fixture.runtime;
+    let old = link(accounts[0], "near_ai", PayoutLinkState::Active, "fin1");
+    store.insert_payout_link(&tenant, &old).await.unwrap();
+    store
+        .transition_payout_link(
+            &tenant,
+            old.link_id,
+            PayoutLinkState::Active,
+            PayoutLinkState::Closing,
+            PayoutAuditAction::LinkClosing,
+            ACTOR,
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .close_payout_link(
+            &tenant,
+            old.link_id,
+            AtomicUnits::from_raw(6),
+            None,
+            ACTOR,
+            None,
+        )
+        .await
+        .unwrap();
+    let closed = old.link_id;
+    let waiting = link(accounts[1], "near_ai", PayoutLinkState::Waiting, "fin2");
+    store.insert_payout_link(&tenant, &waiting).await.unwrap();
+    // A pending line on a closing link: the store refuses the close, and
+    // so does the database if the store's check is ever raced or skipped.
+    let busy = link(accounts[1], "test_keyed", PayoutLinkState::Active, "fin3");
+    store.insert_payout_link(&tenant, &busy).await.unwrap();
+    store
+        .insert_pending_payout_line(&tenant, &line(&busy, 2, 2))
+        .await
+        .unwrap();
+    runtime_exec(
+        &fixture,
+        Some(&tenant),
+        &format!(
+            "UPDATE trace_payout_links SET state = 'closing' WHERE link_id = '{}'",
+            busy.link_id
+        ),
+    )
+    .await
+    .unwrap();
+    for (sql, what) in [
+        (
+            format!("UPDATE trace_payout_links SET final_paid = 999 WHERE link_id = '{closed}'"),
+            "a closed link's final_paid rewritten",
+        ),
+        (
+            format!(
+                "UPDATE trace_payout_links SET state = 'active', final_paid = NULL WHERE link_id = '{closed}'"
+            ),
+            "a closed link reopened",
+        ),
+        (
+            format!(
+                "UPDATE trace_payout_links SET state = 'closing' WHERE link_id = '{}'",
+                waiting.link_id
+            ),
+            "a waiting link moved straight to closing",
+        ),
+        (
+            format!(
+                "UPDATE trace_payout_links SET state = 'closed', final_paid = 0 WHERE link_id = '{}'",
+                busy.link_id
+            ),
+            "a link closed over a pending line",
+        ),
+    ] {
+        let error = runtime_exec(&fixture, Some(&tenant), &sql)
+            .await
+            .expect_err(&format!("{what}"));
+        assert!(is_check_violation(&error), "{what}: {error}");
+    }
+}
