@@ -222,6 +222,47 @@ final class MenuBarGlyphRenderTests: XCTestCase {
         XCTAssertEqual(ink(halo, width: graph), ink(plain, width: graph), accuracy: 0.01, "the halo covers the bars")
     }
 
+    /// The item's image draws its dark rendering on a dark menu bar and its
+    /// light one on a light bar, from the appearance it is drawn in, not
+    /// the app's; one image serves both, as the item keeps one. It is not a
+    /// template, so the bars keep their colours.
+    @MainActor
+    func testTheItemImageDrawsInTheBarsAppearance() throws {
+        func solid(_ colour: NSColor) -> NSImage {
+            NSImage(size: NSSize(width: 4, height: 4), flipped: false) { rect in
+                colour.setFill()
+                rect.fill()
+                return true
+            }
+        }
+        let image = MenuBarItemImage.adaptive(dark: solid(.red), light: solid(.blue))
+        XCTAssertFalse(image.isTemplate)
+        let cases: [(NSAppearance.Name, Bool)] = [
+            (.darkAqua, true), (.aqua, false), (.vibrantDark, true), (.vibrantLight, false),
+            (.accessibilityHighContrastDarkAqua, true), (.accessibilityHighContrastAqua, false),
+            (.darkAqua, true),
+        ]
+        for (name, dark) in cases {
+            let appearance = try XCTUnwrap(NSAppearance(named: name))
+            XCTAssertEqual(MenuBarItemImage.isDark(appearance), dark, "\(name.rawValue)")
+            let rep = try XCTUnwrap(NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8, samplesPerPixel: 4,
+                hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            appearance.performAsCurrentDrawingAppearance {
+                image.draw(in: NSRect(x: 0, y: 0, width: 4, height: 4))
+            }
+            NSGraphicsContext.restoreGraphicsState()
+            let colour = try XCTUnwrap(rep.colorAt(x: 2, y: 2)?.usingColorSpace(.deviceRGB))
+            if dark {
+                XCTAssertGreaterThan(colour.redComponent, colour.blueComponent + 0.5, "\(name.rawValue) drew the light image")
+            } else {
+                XCTAssertGreaterThan(colour.blueComponent, colour.redComponent + 0.5, "\(name.rawValue) drew the dark image")
+            }
+        }
+    }
+
     @MainActor
     func testEveryStateRendersAndACountAddsInk() throws {
         let cases: [(String, GlassMenuBarStrip.Condition, Int?)] = [
