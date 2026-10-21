@@ -468,6 +468,7 @@ matches the label against the set and never echoes the body.
 | 403 | `judgement_account_ineligible` | Not this month. |
 | 502 | `judgement_model_unattested` | Not today. The receipt or catalog check failed (section 5). |
 | 504 | `judgement_timeout` | Not today. |
+| 500 | `judgement_service_fault` | Not today. An internal fault after spend may already be recorded: the response could not be signed, or the settle could not be written. Never retried for this digest the same day, because a retry would be charged again (#1531 review point 6). |
 
 `is_judgement_capacity(status, error)` is true only for `503` and the three
 capacity labels, and a test pins the exact strings, as
@@ -575,11 +576,28 @@ substitutes at the seam:
 trait JudgementModel: Send + Sync {
     fn model_id(&self) -> &str;
     /// One typed choice over `choices`, from `prompt` and the digest.
-    /// Returns the exact request bytes sent and response bytes received,
-    /// so the caller verifies the receipt over them.
+    /// Returns the exact request bytes sent, the response bytes received and
+    /// the completion id, so the caller verifies the receipt over them.
+    /// It returns no answer and no usage.
     async fn decide(&self, call: DecisionCall<'_>) -> Result<RawDecision, ModelError>;
+    /// Pure: the label, confidence and usage, read from `response_body`.
+    /// Called only after the receipt over that body has verified.
+    fn parse_answer(&self, call: &DecisionCall<'_>, response_body: &[u8])
+        -> Result<ParsedAnswer, ParseError>;
 }
 ```
+
+**The label comes from the receipt-verified bytes** (#1529 review point 2).
+`RawDecision` carries no `answer` and no `usage`. An earlier shape let an
+adapter fill `answer` separately from the `response_body` the receipt covers.
+A retry that kept attempt 1's body and receipt with attempt 2's answer, or a
+wrong JSON path, would then have shipped a label the enclave never produced,
+with a `provider_tee` receipt as its evidence. Now the wrapper verifies the
+receipt over `response_body` first, and only then calls `parse_answer` on
+those same bytes. The mock's faults (`LabelOutsideChoices`, `Unparseable`)
+change the body itself, and its fake receipt signs the changed body. A test
+gives the mock a body whose label differs from the one an adapter would have
+reported, and asserts the result follows the body.
 
 Implementations:
 
@@ -726,17 +744,47 @@ new key, an unreadable old ledger, and a deliberate fresh start (section 9,
 
 - Units are integer nano-USD, matching the catalog's `scale: 9`.
 - Prices are taken from the catalog entry at the last good refresh.
-- Before each model call the service **reserves** an upper bound:
-  `ceil(request_bytes / 3) * input_price + max_tokens * output_price`. The
-  reservation applies to the account and to the operator total. If it would
-  pass either cap, the call is refused with the matching capacity label, and
-  no NEAR AI call is made.
-- After the call it **settles** to `usage.prompt_tokens * input_price +
-  usage.completion_tokens * output_price` from the response body. Reasoning
-  tokens count as completion tokens. If `usage` is absent, the reservation
-  stands as the charge.
+- Before each model call the service **reserves** a real upper bound
+  (#1501 review point 13; #1529 review point 3):
+  `(request_bytes + 512) * input_price + max_tokens * output_price`.
+  - `request_bytes` is the length of the exact HTTP request body the adapter
+    will send, which contains the prompt and the digest plus JSON framing.
+  - The bound rests on one stated assumption: a byte-level BPE tokenizer,
+    Qwen's included, emits at most one token per byte of text. Digits split
+    one per token and JSON punctuation can run near one byte per token, which
+    is why the earlier `ceil(request_bytes / 3)` was not a bound.
+  - The `512` covers chat-template tokens added on top of the text.
+  - `max_tokens` bounds every completion token, reasoning included.
+- **Check and reserve are one atomic step.** One lock covers the whole ledger:
+  the account entry and the operator total are checked and both increased,
+  and the sealed ledger is written, all before the lock is released. Two
+  devices on one account share one entry, so they cannot both pass the check
+  and then both add. If the reservation would pass either cap, the call is
+  refused with the matching capacity label, and no NEAR AI call is made.
+- **Settle only after the receipt verifies** (#1529 review point 4). If the
+  receipt verifies, the charge becomes `usage.prompt_tokens * input_price +
+  usage.completion_tokens * output_price` from the verified body. Reasoning
+  tokens count as completion tokens. If the receipt fails, the charge is
+  `max(reservation, reported)`, because NEAR AI billed the call whatever its
+  body says. A swapped response claiming `usage {0, 0}` therefore cannot
+  lower spend. If `usage` is absent, the reservation stands.
+- **If verified usage ever exceeds the reservation,** the reported figure is
+  charged. The service logs the label `judgement_usage_over_reservation` and
+  latches that model, as for a rotated key (section 5, "The rotation latch"),
+  because the bound's assumption has failed for it. The next reservation
+  check then sees the true spend.
 - A crash between reserve and settle leaves the reservation charged. Every
   failure errs toward over-counting.
+- **The ledger month follows a signed clock** (#1529 review point 5). The
+  month advances only inside a reservation, which runs only after the claim
+  has verified. The claim check bounds the service clock to within 60 s of
+  the issuer's signed `iat` and `exp` (section 3). The month may advance only
+  to the month of the verified claim's `iat`, and never by more than one month
+  past the last persisted month unless `iat` is in that month too. A
+  CVM-clock reading in the far future therefore cannot persist: its claims
+  fail the expiry check first, and the month guard is a second check. The
+  ledger month is exposed, so a capacity refusal's `reset_at` is the first
+  instant of the month after it.
 - Rough cost on the interim model: a 6-call session at about 3,000 input and
   64 output tokens per call costs about $0.0012, so the $5 cap is about 4,000
   sessions a month. `max_tokens` is the guard against a reasoning model
@@ -828,7 +876,11 @@ prompts, the digest, the claim, or NEAR AI response text.
   with `include_str!`. Prompts are in the image, so they are in the
   measurement.
 - **`prompt_version`** is `<name>-v<N>+sha256:<first 12 hex>`, where the hash
-  covers the prompt bytes, the choice list and the output schema. A unit test
+  covers everything that changes what a label means (#1529 review point 6):
+  the prompt bytes, the choice list, the output schema, `max_tokens`
+  (`JUDGEMENT_MAX_TOKENS`, since a lower cap truncates more answers into the
+  fallback), the temperature and reasoning settings, the per-kind fallback
+  label, the fallback confidence bucket, and the decision-adapter thresholds. A unit test
   pins the expected hash for each `<name>-v<N>`. Editing a prompt, its choices
   or its schema without bumping `N` fails that test. Bumping `N` changes the
   version, and the test then pins the new hash.
@@ -866,7 +918,10 @@ prompts, the digest, the claim, or NEAR AI response text.
 | A connection's leaf SPKI differs from the verified `spki_hash` | Connection closed before any request byte. Calls refused, nothing metered, until a fresh verified report binds the new key. |
 | Receipt absent, unverifiable, `gateway`, two-part, wrong model, or unpinned signer | Label discarded, call metered, `judgement_model_unattested`. |
 | `usage` absent | Reservation stands as the charge. |
-| Ledger write fails | The response is not sent; `judgement_saturated`. A service that cannot record spend does not spend. |
+| Ledger write fails at reserve | No model call; `judgement_saturated`. A service that cannot record spend does not spend. |
+| Ledger write fails at settle, or the response cannot be signed | `judgement_service_fault` (not capacity, not retryable today), because the call was already charged. |
+| Receipt fails | Label discarded; charged `max(reservation, reported)`; `judgement_model_unattested`. |
+| Verified usage exceeds the reservation | The reported figure is charged; `judgement_usage_over_reservation` is logged; the model is latched. |
 | Per-account or operator cap reached | Capacity refusal with `reset_at`; no NEAR AI call. |
 | Daemon: quote fails, measurement not in the compiled-in set, quote nonce or `boot_binding` mismatch | Nothing sent. The session keeps its heuristic basis. |
 | Daemon: response does not open, or its signer, request nonce, `digest_sha256`, wire version or an `event_index` is wrong (section 4) | Labels discarded. |
@@ -947,7 +1002,11 @@ values (app ids, CVM ids, KMS, measurements), as the witness README does.
 - **Unit tests** (server crate, `judgement_service/`):
   - claim verification: wrong audience, expired, pooled tenant, unknown key;
   - the limiter: reserve, settle, absent usage, month rollover, both caps,
-    crash between reserve and settle;
+    crash between reserve and settle; reported usage above the reservation;
+    many concurrent reservations on one account and on the operator total,
+    where exactly as many succeed as fit; a failed receipt with `usage {0,0}`
+    that still charges the reservation; a future-dated clock whose month is
+    never persisted;
   - ledger seal round trip and refusal on a wrong key, and a ledger written
     under one boot's keys read back under the next boot's;
   - per-boot keys: two boots give different `seal_pk` and `signing_address`,
