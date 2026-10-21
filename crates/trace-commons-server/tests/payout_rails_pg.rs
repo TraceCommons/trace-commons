@@ -2174,3 +2174,79 @@ async fn the_later_control_row_wins_at_an_equal_timestamp() {
         .unwrap();
     assert!(!control.halted, "the earlier halt beat the later resume");
 }
+
+/// The audit row's hash of an account id, as the store computes it.
+fn account_id_hash(account: Uuid) -> String {
+    sha(&format!("payout-account-v1:{account}"))
+}
+
+#[tokio::test]
+async fn hold_and_link_audit_rows_name_the_account_by_hash() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let store = &fixture.runtime;
+    let near_ai = rail("near_ai");
+    store
+        .open_payout_hold(&tenant, accounts[0], &near_ai, "ceiling", ACTOR)
+        .await
+        .unwrap();
+    store
+        .clear_payout_hold(&tenant, accounts[0], &near_ai, "ceiling", ACTOR)
+        .await
+        .unwrap();
+    let live = link(accounts[0], "near_ai", PayoutLinkState::Waiting, "acct");
+    store.insert_payout_link(&tenant, &live).await.unwrap();
+    store
+        .transition_payout_link(
+            &tenant,
+            live.link_id,
+            PayoutLinkState::Waiting,
+            PayoutLinkState::Active,
+            PayoutAuditAction::LinkActivated,
+            ACTOR,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let mut client = store.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    let rows = tx
+        .query(
+            "SELECT action, account_id_hash FROM trace_payout_audit
+              WHERE rail_id = 'near_ai' ORDER BY created_at, audit_id",
+            &[],
+        )
+        .await
+        .unwrap();
+    let expected = account_id_hash(accounts[0]);
+    let seen: Vec<String> = rows.iter().map(|row| row.get(0)).collect();
+    assert_eq!(
+        seen,
+        ["hold_set", "hold_cleared", "link_created", "link_activated"]
+    );
+    for row in &rows {
+        let action: String = row.get(0);
+        let hash: Option<String> = row.get(1);
+        assert_eq!(hash.as_deref(), Some(expected.as_str()), "{action}");
+    }
+    // Hash-only: the raw account id is in no audit column.
+    let raw: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM trace_payout_audit a
+              WHERE strpos(row_to_json(a)::TEXT, $1) > 0",
+            &[&accounts[0].to_string()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(raw, 0);
+}

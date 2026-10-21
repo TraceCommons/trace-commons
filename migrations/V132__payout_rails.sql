@@ -301,7 +301,8 @@ CREATE UNIQUE INDEX trace_payout_holds_one_open
     ON trace_payout_holds (tenant_id, account_id, rail_id, label) WHERE cleared_at IS NULL;
 
 -- Audit: append-only and hash-only. No account id, recipient, program,
--- amount or rate: an actor ref hash, a link id hash, states and a label.
+-- amount or rate: an actor ref hash, an account id hash and a link id hash
+-- (each a domain-separated SHA-256 of a random UUID), states and a label.
 CREATE TABLE trace_payout_audit (
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
     audit_id UUID NOT NULL,
@@ -312,6 +313,7 @@ CREATE TABLE trace_payout_audit (
         'link_recipient_unavailable', 'hold_set', 'hold_cleared', 'accrual_claimed'
     )),
     actor_ref_hash TEXT NOT NULL CHECK (actor_ref_hash ~ '^sha256:[0-9a-f]{64}$'),
+    account_id_hash TEXT CHECK (account_id_hash ~ '^sha256:[0-9a-f]{64}$'),
     link_id_hash TEXT CHECK (link_id_hash ~ '^sha256:[0-9a-f]{64}$'),
     prior_state TEXT CHECK (prior_state IN ('waiting', 'active', 'closing', 'closed')),
     new_state TEXT CHECK (new_state IN ('waiting', 'active', 'closing', 'closed')),

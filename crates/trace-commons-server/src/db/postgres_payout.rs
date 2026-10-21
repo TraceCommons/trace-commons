@@ -47,6 +47,16 @@ fn link_id_hash(link_id: Uuid) -> String {
     )
 }
 
+/// The audit row's hash of an account id, domain-separated from the link
+/// hash. Account ids are random UUIDs, so, like the link hash, it joins audit
+/// rows to an account only for someone who already holds the account id.
+fn account_id_hash(account: Uuid) -> String {
+    format!(
+        "sha256:{:x}",
+        Sha256::digest(format!("payout-account-v1:{account}").as_bytes())
+    )
+}
+
 fn violated_constraint(error: &tokio_postgres::Error) -> Option<String> {
     let db = error.as_db_error()?;
     if db.code() != &SqlState::UNIQUE_VIOLATION {
@@ -85,6 +95,7 @@ async fn insert_audit(
     rail: &str,
     action: PayoutAuditAction,
     actor_ref_hash: &str,
+    account: Option<Uuid>,
     link_id: Option<Uuid>,
     prior: Option<PayoutLinkState>,
     new: Option<PayoutLinkState>,
@@ -92,15 +103,16 @@ async fn insert_audit(
 ) -> Result<(), DatabaseError> {
     tx.execute(
         "INSERT INTO trace_payout_audit (
-             tenant_id, audit_id, rail_id, action, actor_ref_hash, link_id_hash,
-             prior_state, new_state, label
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             tenant_id, audit_id, rail_id, action, actor_ref_hash, account_id_hash,
+             link_id_hash, prior_state, new_state, label
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         &[
             &tenant,
             &Uuid::new_v4(),
             &rail,
             &action.as_str(),
             &actor_ref_hash,
+            &account.map(account_id_hash),
             &link_id.map(link_id_hash),
             &prior.map(PayoutLinkState::as_str),
             &new.map(PayoutLinkState::as_str),
@@ -243,6 +255,7 @@ impl PayoutStore for PgBackend {
                 rail,
                 PayoutAuditAction::AccrualClaimed,
                 actor_ref_hash,
+                Some(account),
                 None,
                 None,
                 None,
@@ -364,7 +377,7 @@ impl PayoutStore for PgBackend {
                         updated_at = clock_timestamp()
                   WHERE tenant_id = $1 AND link_id = $2 AND state = 'active'
                     AND unlink_requested_at IS NULL
-                  RETURNING rail_id",
+                  RETURNING rail_id, account_id",
                 &[&tenant, &link_id],
             )
             .await?;
@@ -372,12 +385,14 @@ impl PayoutStore for PgBackend {
             return Ok(false);
         };
         let rail: String = row.get(0);
+        let account: Uuid = row.get(1);
         insert_audit(
             &tx,
             tenant,
             &rail,
             PayoutAuditAction::UnlinkRequested,
             actor_ref_hash,
+            Some(account),
             Some(link_id),
             Some(PayoutLinkState::Active),
             Some(PayoutLinkState::Active),
@@ -404,7 +419,7 @@ impl PayoutStore for PgBackend {
                         updated_at = clock_timestamp()
                   WHERE tenant_id = $1 AND link_id = $2 AND state IN ('active', 'closing')
                     AND recipient_unavailable_at IS NULL
-                  RETURNING rail_id, state",
+                  RETURNING rail_id, state, account_id",
                 &[&tenant, &link_id],
             )
             .await?;
@@ -413,12 +428,14 @@ impl PayoutStore for PgBackend {
         };
         let rail: String = row.get(0);
         let state = parse_link_state(row.get(1))?;
+        let account: Uuid = row.get(2);
         insert_audit(
             &tx,
             tenant,
             &rail,
             PayoutAuditAction::LinkRecipientUnavailable,
             actor_ref_hash,
+            Some(account),
             Some(link_id),
             Some(state),
             Some(state),
@@ -481,6 +498,7 @@ impl PayoutStore for PgBackend {
             link.rail_id.as_str(),
             PayoutAuditAction::LinkCreated,
             &link.actor_ref_hash,
+            Some(link.account_id),
             Some(link.link_id),
             None,
             Some(link.state),
@@ -516,7 +534,7 @@ impl PayoutStore for PgBackend {
                 "UPDATE trace_payout_links AS l
                     SET state = $4, version = l.version + 1, updated_at = clock_timestamp()
                   WHERE l.tenant_id = $1 AND l.link_id = $2 AND l.state = $3
-                  RETURNING l.rail_id",
+                  RETURNING l.rail_id, l.account_id",
                 &[&tenant, &link_id, &from.as_str(), &to.as_str()],
             )
             .await;
@@ -535,12 +553,14 @@ impl PayoutStore for PgBackend {
             return Ok(PayoutLinkTransition::NotInState);
         };
         let rail: String = row.get(0);
+        let account: Uuid = row.get(1);
         insert_audit(
             &tx,
             tenant,
             &rail,
             action,
             actor_ref_hash,
+            Some(account),
             Some(link_id),
             Some(from),
             Some(to),
@@ -602,6 +622,7 @@ impl PayoutStore for PgBackend {
             &rail,
             PayoutAuditAction::LinkClosed,
             actor_ref_hash,
+            Some(account),
             Some(link_id),
             Some(Closing),
             Some(Closed),
@@ -628,6 +649,7 @@ impl PayoutStore for PgBackend {
                 &rail,
                 PayoutAuditAction::LinkActivated,
                 actor_ref_hash,
+                Some(account),
                 Some(successor),
                 Some(Waiting),
                 Some(Active),
@@ -833,6 +855,7 @@ impl PayoutStore for PgBackend {
             rail.as_str(),
             PayoutAuditAction::HoldSet,
             actor_ref_hash,
+            Some(account),
             None,
             None,
             None,
@@ -870,6 +893,7 @@ impl PayoutStore for PgBackend {
             rail.as_str(),
             PayoutAuditAction::HoldCleared,
             actor_ref_hash,
+            Some(account),
             None,
             None,
             None,
@@ -972,6 +996,7 @@ impl PayoutStore for PgBackend {
             request.rail_id.as_str(),
             action,
             &request.actor_ref_hash,
+            Some(request.account_id),
             None,
             None,
             None,
