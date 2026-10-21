@@ -13,29 +13,47 @@ final class InsightsModelAnswersModel {
     typealias Reader = @Sendable () async throws -> DaemonData.InsightsModelAnswers
 
     private let reader: Reader?
-    private var task: Task<Void, Never>?
+    private(set) var task: Task<Void, Never>?
+    /// Bumped by every read and by `close()`. A read whose generation is no
+    /// longer current lands nothing: daemon reads run concurrently and can
+    /// finish out of order, and cancelling the task does not stop one.
+    private var generation = 0
     private(set) var answers: DaemonData.InsightsModelAnswers?
 
     init(reader: Reader?) { self.reader = reader }
 
     /// Read the answers again; on any failure the card goes away rather
-    /// than keeping figures it can no longer stand behind.
+    /// than keeping figures it can no longer stand behind. Only the latest
+    /// read assigns.
     func load() async {
+        generation += 1
+        let token = generation
         guard let reader else { answers = nil; return }
+        let read: DaemonData.InsightsModelAnswers?
         do {
-            let read = try await reader()
-            answers = read.showsAnswers ? read : nil
+            read = try await reader()
         } catch {
-            answers = nil
+            read = nil
         }
+        guard generation == token, !Task.isCancelled else { return }
+        answers = read.flatMap { $0.showsAnswers ? $0 : nil }
     }
 
-    func open() {
+    @discardableResult
+    func open() -> Task<Void, Never> {
         task?.cancel()
-        task = Task { [weak self] in await self?.load() }
+        let read = Task<Void, Never> { [weak self] in await self?.load() }
+        task = read
+        return read
     }
 
-    func close() { task?.cancel(); task = nil }
+    /// Leaving Insights drops the figures, so reopening never draws the old
+    /// ones, and any read still out lands nothing.
+    func close() {
+        task?.cancel(); task = nil
+        generation += 1
+        answers = nil
+    }
 }
 
 /// The core's Models words, filled. Nothing here composes a sentence: each

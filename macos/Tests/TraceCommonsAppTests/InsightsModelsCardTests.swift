@@ -234,8 +234,76 @@ final class InsightsModelsCardTests: XCTestCase {
         await model.load()
         XCTAssertNil(model.answers)
     }
+
+    /// Turning counting off reopens the card while an earlier read is still
+    /// out. The earlier read, landing last, must not bring its figures back.
+    @MainActor func testAnEarlierReadThatLandsLateIsDropped() async throws {
+        let reads = HeldFirstRead()
+        let model = InsightsModelAnswersModel(reader: { try await reads.read() })
+        let first = model.open()
+        while !reads.started { await Task.yield() }
+        let second = model.open()
+        await second.value
+        XCTAssertNil(model.answers, "counting is off")
+        reads.release()
+        await first.value
+        XCTAssertNil(model.answers, "the earlier read landed after the later one")
+    }
+
+    /// Leaving Insights takes the figures with it, and a read still out
+    /// when it closed does not put them back.
+    @MainActor func testClosingClearsTheAnswersAndDropsAReadInFlight() async throws {
+        let shown = InsightsModelAnswersModel(reader: { try Self.answers() })
+        await shown.open().value
+        XCTAssertNotNil(shown.answers)
+        shown.close()
+        XCTAssertNil(shown.answers, "reopening must not draw the previous figures")
+
+        let reads = HeldFirstRead()
+        let model = InsightsModelAnswersModel(reader: { try await reads.read() })
+        let read = model.open()
+        while !reads.started { await Task.yield() }
+        model.close()
+        reads.release()
+        await read.value
+        XCTAssertNil(model.answers)
+    }
 }
 
 private final class FlagBox: @unchecked Sendable {
     var value = false
+}
+
+/// Holds the first read until released, and answers every later read at
+/// once with counting off; records that the first read has started.
+private final class HeldFirstRead: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+    private var held: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    var started: Bool { lock.withLock { calls > 0 } }
+
+    func read() async throws -> DaemonData.InsightsModelAnswers {
+        let first = lock.withLock { () -> Bool in calls += 1; return calls == 1 }
+        guard first else { return try InsightsModelsCardTests.answers(#"{"enabled":false,"feed":"counter_pass"}"#) }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let resumeNow = lock.withLock { () -> Bool in
+                if released { return true }
+                held = continuation
+                return false
+            }
+            if resumeNow { continuation.resume() }
+        }
+        return try InsightsModelsCardTests.answers()
+    }
+
+    func release() {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            released = true
+            defer { held = nil }
+            return held
+        }
+        continuation?.resume()
+    }
 }
