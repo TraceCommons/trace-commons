@@ -3008,7 +3008,9 @@ pub enum PayoutLineResolve {
     Resolved,
     /// No pending line with that id in this tenant.
     NotPending,
-    /// Another line on this rail already holds that receipt; nothing changed.
+    /// Another line on this rail, in any tenant, already holds that
+    /// receipt; nothing changed. The authoritative answer: a caller skips the
+    /// record and keeps looking, and the line stays pending.
     ReceiptAlreadyClaimed,
 }
 
@@ -3305,8 +3307,17 @@ pub trait PayoutStore: Send + Sync {
         resolution: &PayoutLineResolution,
     ) -> Result<PayoutLineResolve, DatabaseError>;
 
-    /// Whether a line on `rail` already holds `receipt_hash`, so recovery can
-    /// skip a record that answers another line.
+    /// Whether a line on `rail` in this tenant already holds `receipt_hash`,
+    /// so recovery can skip a record that answers another line.
+    ///
+    /// This is a hint, not the authority. It sees only this tenant (forced
+    /// RLS), while `trace_payout_lines_one_receipt` is unique on `(rail_id,
+    /// receipt_hash)` across every tenant. A record already claimed by a line
+    /// in another tenant reads `false` here and surfaces only when the
+    /// resolve is refused with [`PayoutLineResolve::ReceiptAlreadyClaimed`],
+    /// which a caller treats the same way: skip that record and keep paging,
+    /// leaving the line pending. (On `near_ai` each link has its own program,
+    /// so a record from another tenant's program cannot match.)
     async fn payout_receipt_is_claimed(
         &self,
         tenant: &str,
