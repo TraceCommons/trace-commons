@@ -5,7 +5,7 @@
 //! (`reviewed_by` reads "Pending owner review" until then). This module
 //! performs no network access, persistence, or provider inference.
 //!
-//! How each table was taken, on 2026-10-20 (UTC):
+//! How each table was taken, on 2026-10-21 (UTC), 15:16:38Z:
 //!
 //! - Anthropic (version 1): `source_url` is where the docs pricing page
 //!   redirected; `content_sha256` hashes the raw bytes fetched there, which
@@ -18,11 +18,10 @@
 //! - OpenAI (version 2): `source_url` is where the API pricing page
 //!   redirected; `content_sha256` hashes its raw bytes, which carry the
 //!   standard-tier rates up to 272K input tokens. The rates above 272K are
-//!   rendered by the page's own script,
-//!   `https://developers.openai.com/_astro/pricing.N3LdDDY-.js`, fetched
-//!   20:25:37Z, sha256
-//!   `c0735a5bd831d52feb823dbf578a7c6d5d2f5ecd2ea0c598d36ee14460cce1bc`;
-//!   the provenance holds one hash, so this one is recorded here.
+//!   rendered by the page's own script, whose URL and sha256 are in
+//!   `provenance.source_notes` (the provenance holds one hash field). The
+//!   tier labels ("<=272K", ">272K input tokens") are in the page's
+//!   selector script, named there too.
 //!   Standard tier only (not batch, flex, fast or priority). A model whose
 //!   row shows "-" (or has no column) for the cache write has no separate
 //!   write charge, so its write is priced at its uncached-input rate; this
@@ -30,6 +29,14 @@
 //!   older gpt-5 rows. A model with no cached-input rate on the page (the
 //!   "-pro" models, the GPT-4 and o-series) has no entry: pricing one would
 //!   need a rate the page does not publish.
+//!
+//! Reproducibility: both vendors rebuild their pages on every deploy, so the
+//! page bytes, and the OpenAI script's file name, change between any two
+//! fetches. A recorded hash therefore binds the fetch that was made, not
+//! the price facts, and a later fetch will not match it. The price facts are
+//! the table's entries, which `table_id` digests; the owner review checks
+//! those against the live page (and the script named in `source_notes`),
+//! not the hash against a refetch.
 //!
 //! Neither page dates its rates, so every `effective_from` is the start of
 //! the 13-week Insights window before the fetch (the Monday, 00:00 UTC),
@@ -264,11 +271,11 @@ impl PricingCatalog {
 pub const SHIPPED_PRICING_TABLES: &[(u32, &str)] = &[
     (
         1,
-        "sha256:64e1ab5b55133a35bf3f98aaf70963efe38e745388a0bb8fe1f9754104fab4b1",
+        "sha256:97aeb32f2fa47f4b9f20c3653e71a2855ecf546753bb4559dcefeb5390336107",
     ),
     (
         2,
-        "sha256:6b4ef955f256c9ae1e46475c5d61abc78e02bf0f93b7c94780e518728d83258a",
+        "sha256:4db3deaea1a0cc607167214169643e036e23c70dfe236ac5964cb0b3da62cec9",
     ),
 ];
 
@@ -377,6 +384,7 @@ mod tests {
                 reviewed_by: "Synthetic reviewer".to_owned(),
                 reviewed_at: at(101),
                 effective_from_basis: None,
+                source_notes: None,
             },
             entries: vec![ModelPriceEntry {
                 provider: "synthetic-provider".to_owned(),
@@ -468,6 +476,34 @@ mod tests {
         }
     }
 
+    /// The hashes in the provenance bind the bytes fetched, and both vendors'
+    /// pages change their bytes on every build, so a later fetch never
+    /// reproduces them. The notes say so, and name the script that carries
+    /// the OpenAI rates above 272K with its own hash, so a reviewer checks
+    /// the rates against the page, not the hash against nothing.
+    #[test]
+    fn every_shipped_table_explains_what_its_hash_does_and_does_not_bind() {
+        let catalog = production_pricing_catalog();
+        for table in catalog.tables() {
+            let notes = table.provenance.source_notes.as_deref().unwrap();
+            assert!(notes.contains("change on every"), "{notes}");
+            assert!(notes.contains("not the price facts"), "{notes}");
+            assert!(notes.contains("table_id"), "{notes}");
+        }
+        let openai = &catalog.tables()[1];
+        let notes = openai.provenance.source_notes.as_deref().unwrap();
+        let script = notes
+            .split_whitespace()
+            .find(|word| word.starts_with("https://developers.openai.com/_astro/pricing."))
+            .expect("the pricing script URL");
+        assert!(script.trim_end_matches(['.', ',', ';']).ends_with(".js"));
+        let hash = notes
+            .split(|c: char| !c.is_ascii_hexdigit())
+            .find(|word| word.len() == 64)
+            .expect("the script's sha256");
+        assert!(hash.bytes().all(|b| !b.is_ascii_uppercase()));
+    }
+
     /// Fails until the owner reviews the rates: the merge gate for them.
     #[test]
     fn every_shipped_table_is_owner_reviewed() {
@@ -533,11 +569,15 @@ mod tests {
             vec![1, 2]
         );
         assert_eq!(
-            catalog.table(&oldest.table_id).map(|table| table.as_table()),
+            catalog
+                .table(&oldest.table_id)
+                .map(|table| table.as_table()),
             Some(&oldest)
         );
         assert_eq!(
-            catalog.table(&newest.table_id).map(|table| table.as_table()),
+            catalog
+                .table(&newest.table_id)
+                .map(|table| table.as_table()),
             Some(&newest)
         );
     }

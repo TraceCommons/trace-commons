@@ -19,6 +19,7 @@ const MAX_PRICE_ENTRIES: usize = 1024;
 const MAX_RATES_PER_ENTRY: usize = 5;
 const MAX_ID_BYTES: usize = 96;
 const MAX_PROVENANCE_TEXT_BYTES: usize = 256;
+const MAX_SOURCE_NOTES_BYTES: usize = 1024;
 const MAX_SOURCE_URL_BYTES: usize = 2048;
 const TABLE_DIGEST_DOMAIN: &[u8] = b"trace-commons-insights-pricing-table-v1\0";
 
@@ -75,6 +76,11 @@ pub struct PricingTableProvenance {
     /// one keeps its digest body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_from_basis: Option<String>,
+    /// How the source was fetched and what its hash does and does not
+    /// bind: scripts the page loads, and that page bytes change per build.
+    /// At most `MAX_SOURCE_NOTES_BYTES`. Not serialized when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_notes: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -450,8 +456,12 @@ fn safe_id(value: &str) -> bool {
 }
 
 fn valid_text(value: &str) -> bool {
+    valid_text_up_to(value, MAX_PROVENANCE_TEXT_BYTES)
+}
+
+fn valid_text_up_to(value: &str, max_bytes: usize) -> bool {
     !value.is_empty()
-        && value.len() <= MAX_PROVENANCE_TEXT_BYTES
+        && value.len() <= max_bytes
         && value.trim() == value
         && !value.chars().any(char::is_control)
 }
@@ -469,6 +479,10 @@ fn valid_provenance(value: &PricingTableProvenance) -> bool {
     valid_text(&value.publisher)
         && valid_text(&value.reviewed_by)
         && value.effective_from_basis.as_deref().is_none_or(valid_text)
+        && value
+            .source_notes
+            .as_deref()
+            .is_none_or(|notes| valid_text_up_to(notes, MAX_SOURCE_NOTES_BYTES))
         && valid_digest(&value.content_sha256)
         && value.reviewed_at >= value.retrieved_at
         && value.source_url.len() <= MAX_SOURCE_URL_BYTES
@@ -571,6 +585,7 @@ mod tests {
                 reviewed_by: "Synthetic reviewer".to_owned(),
                 reviewed_at: at(101),
                 effective_from_basis: None,
+                source_notes: None,
             },
             entries,
         };
@@ -757,6 +772,28 @@ mod tests {
         assert!(value.pointer("/entries/0/prompt_tokens_above").is_none());
         assert!(value.pointer("/entries/0/prompt_tokens_at_most").is_none());
         assert!(value.pointer("/provenance/effective_from_basis").is_none());
+        assert!(value.pointer("/provenance/source_notes").is_none());
+    }
+
+    #[test]
+    fn source_notes_are_bounded_text_and_move_the_digest() {
+        let plain = table(vec![entry(0, None, 1)]);
+        let mut noted = plain.clone();
+        noted.provenance.source_notes = Some("Page bytes change on every build.".to_owned());
+        noted.table_id = noted.canonical_table_id().unwrap();
+        assert_eq!(noted.validate(), Ok(()));
+        assert_ne!(noted.table_id, plain.table_id);
+
+        for bad in [String::new(), " padded".to_owned(), "x".repeat(1_025)] {
+            let mut invalid = plain.clone();
+            invalid.provenance.source_notes = Some(bad);
+            invalid.table_id = invalid.canonical_table_id().unwrap();
+            assert_eq!(invalid.validate(), Err(PricingError::InvalidTable));
+        }
+        let mut longest = plain;
+        longest.provenance.source_notes = Some("x".repeat(1_024));
+        longest.table_id = longest.canonical_table_id().unwrap();
+        assert_eq!(longest.validate(), Ok(()));
     }
 
     #[test]

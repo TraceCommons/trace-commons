@@ -270,19 +270,20 @@ fn price_turn(
         observed_until: at,
         counts: billable_counts(accounting, &usage)?,
     };
-    let (table, estimate) = catalog
-        .price_newest_applicable(&input)
-        .map_err(|error| match error {
-            PricingCatalogError::MissingPrice => UnpricedReason::MissingPrice,
-            PricingCatalogError::UnresolvedWindow => UnpricedReason::WindowUnresolved,
-            PricingCatalogError::StalePrices => UnpricedReason::StalePrice,
-            PricingCatalogError::ArithmeticOverflow => UnpricedReason::Overflow,
-            PricingCatalogError::InvalidQuery
-            | PricingCatalogError::InvalidCatalog
-            | PricingCatalogError::DuplicateTable
-            | PricingCatalogError::DuplicateVersion
-            | PricingCatalogError::StoredTableUnavailable => UnpricedReason::InvalidCatalog,
-        })?;
+    let (table, estimate) =
+        catalog
+            .price_newest_applicable(&input)
+            .map_err(|error| match error {
+                PricingCatalogError::MissingPrice => UnpricedReason::MissingPrice,
+                PricingCatalogError::UnresolvedWindow => UnpricedReason::WindowUnresolved,
+                PricingCatalogError::StalePrices => UnpricedReason::StalePrice,
+                PricingCatalogError::ArithmeticOverflow => UnpricedReason::Overflow,
+                PricingCatalogError::InvalidQuery
+                | PricingCatalogError::InvalidCatalog
+                | PricingCatalogError::DuplicateTable
+                | PricingCatalogError::DuplicateVersion
+                | PricingCatalogError::StoredTableUnavailable => UnpricedReason::InvalidCatalog,
+            })?;
     // Recomputed from the breakdown: the estimate's micros are already
     // rounded, and a session rounds once over exact numerators.
     let numerator = estimate.breakdown.iter().try_fold(0u128, |sum, item| {
@@ -457,6 +458,7 @@ mod tests {
                 reviewed_by: "Synthetic reviewer".to_owned(),
                 reviewed_at: at(101),
                 effective_from_basis: None,
+                source_notes: None,
             },
             entries,
         };
@@ -1236,19 +1238,31 @@ mod tests {
             .total_usd_micros
         };
         let expected: [(&str, u64); 20] = [
-            ("claude-fable-5-1", 10_000 + 2_500 + 25_000 + 60_000 + 25_000),
+            (
+                "claude-fable-5-1",
+                10_000 + 2_500 + 25_000 + 60_000 + 25_000,
+            ),
             ("claude-opus-5-5", 4_000 + 2_000 + 10_000 + 24_000 + 10_000),
             ("claude-sonnet-5-5", 2_000 + 1_000 + 5_000 + 12_000 + 5_000),
             ("claude-haiku-5-5", 100 + 100 + 250 + 600 + 250),
-            ("claude-mythos-5-1", 10_000 + 2_500 + 25_000 + 60_000 + 25_000),
+            (
+                "claude-mythos-5-1",
+                10_000 + 2_500 + 25_000 + 60_000 + 25_000,
+            ),
             ("claude-fable-5", 10_000 + 10_000 + 25_000 + 60_000 + 25_000),
-            ("claude-mythos-5", 10_000 + 10_000 + 25_000 + 60_000 + 25_000),
+            (
+                "claude-mythos-5",
+                10_000 + 10_000 + 25_000 + 60_000 + 25_000,
+            ),
             ("claude-opus-5", 5_000 + 5_000 + 12_500 + 30_000 + 12_500),
             ("claude-opus-4-8", 5_000 + 5_000 + 12_500 + 30_000 + 12_500),
             ("claude-opus-4-7", 5_000 + 5_000 + 12_500 + 30_000 + 12_500),
             ("claude-opus-4-6", 5_000 + 5_000 + 12_500 + 30_000 + 12_500),
             ("claude-opus-4-5", 5_000 + 5_000 + 12_500 + 30_000 + 12_500),
-            ("claude-opus-4-1", 15_000 + 15_000 + 37_500 + 90_000 + 37_500),
+            (
+                "claude-opus-4-1",
+                15_000 + 15_000 + 37_500 + 90_000 + 37_500,
+            ),
             ("claude-opus-4", 15_000 + 15_000 + 37_500 + 90_000 + 37_500),
             ("claude-sonnet-5", 2_000 + 2_000 + 5_000 + 12_000 + 5_000),
             ("claude-sonnet-4-6", 3_000 + 3_000 + 7_500 + 18_000 + 7_500),
@@ -1448,7 +1462,10 @@ mod tests {
             before,
             "no turn may re-hash a table"
         );
-        assert_eq!(codex.by_model["gpt-6-astra"].priced_turns as usize, turns.len());
+        assert_eq!(
+            codex.by_model["gpt-6-astra"].priced_turns as usize,
+            turns.len()
+        );
         assert_eq!(
             claude_label_on_codex.by_model["claude-opus-5-5"].unpriced_turns as usize,
             turns.len()

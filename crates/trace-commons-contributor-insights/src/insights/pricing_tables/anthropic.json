@@ -1,17 +1,18 @@
 {
   "schema_version": 2,
-  "table_id": "sha256:64e1ab5b55133a35bf3f98aaf70963efe38e745388a0bb8fe1f9754104fab4b1",
+  "table_id": "sha256:97aeb32f2fa47f4b9f20c3653e71a2855ecf546753bb4559dcefeb5390336107",
   "version": 1,
   "currency": "usd",
-  "published_at": "2026-10-20T20:17:00Z",
+  "published_at": "2026-10-21T15:16:38Z",
   "provenance": {
     "publisher": "Anthropic",
     "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
-    "retrieved_at": "2026-10-20T20:17:00Z",
-    "content_sha256": "sha256:2c630520ed9d7259b89afab7e7a7a78b8f448f00bec43d4d60248f447f360f2c",
+    "retrieved_at": "2026-10-21T15:16:38Z",
+    "content_sha256": "sha256:aecd8a453904d60173d2c777f87b6cf8593831b16ad7ca7a65af16bf75f979bd",
     "reviewed_by": "Pending owner review",
-    "reviewed_at": "2026-10-20T20:17:00Z",
-    "effective_from_basis": "The page states no effective date; effective_from is the Monday 00:00 UTC that starts the 13-week Insights window before retrieved_at."
+    "reviewed_at": "2026-10-21T15:16:38Z",
+    "effective_from_basis": "The page states no effective date; effective_from is the Monday 00:00 UTC that starts the 13-week Insights window before retrieved_at.",
+    "source_notes": "Page bytes change on every docs build, so content_sha256 (the page as fetched) describes this fetch, not the price facts. The facts are the entries, which table_id digests. Model ids come from the models overview (current models) and model deprecations (older, dated ids) pages."
   },
   "entries": [
     {
