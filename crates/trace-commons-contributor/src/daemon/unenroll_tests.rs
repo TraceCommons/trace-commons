@@ -578,6 +578,47 @@ async fn unenroll_clears_the_insights_counter_store() {
     assert!(s.insights_counter.key_is_absent_for_test());
 }
 
+/// The person's own labels on their sessions live in the counter store and
+/// go with it on unenroll: counted again afterwards, the session has none.
+#[tokio::test]
+async fn unenroll_clears_the_persons_session_labels() {
+    let s = shared();
+    enroll_fixture(&s);
+    s.settings.lock().unwrap().insights_counter_pass = true;
+    counted(&s);
+    let listed = |s: &DaemonShared| {
+        handle_request(s, &req("insights_sessions", json!({})))
+            .result
+            .unwrap()["sessions"][0]
+            .clone()
+    };
+    let reference = listed(&s)["session_ref"].as_str().unwrap().to_string();
+    let labelled = handle_request(
+        &s,
+        &req(
+            "insights_session_label",
+            json!({"session_ref": reference, "task": "bug_fix", "outcome": "kept"}),
+        ),
+    )
+    .result
+    .unwrap();
+    assert_eq!(labelled["session"]["user_task"], "bug_fix");
+    assert!(
+        std::fs::read_to_string(rows_file(&s))
+            .unwrap()
+            .contains("\"labels\"")
+    );
+
+    assert!(call(&s).await.error.is_none());
+    assert!(!rows_file(&s).exists());
+
+    s.settings.lock().unwrap().insights_counter_pass = true;
+    counted(&s);
+    let row = listed(&s);
+    assert!(row["user_task"].is_null(), "{row}");
+    assert!(row["user_outcome"].is_null(), "{row}");
+}
+
 /// Owner question Q3, default taken: the route tallies live in the counter
 /// store and go with it on unenroll, and a fold after it, with the ledger
 /// feed still on, does not write them back.

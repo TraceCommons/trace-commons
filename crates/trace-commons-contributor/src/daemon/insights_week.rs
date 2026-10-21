@@ -112,6 +112,17 @@
 //! store and never reach a keychain. The store and its key are removed on
 //! unenroll.
 //!
+//! The store also keeps the person's own labels on their sessions (task and
+//! outcome, `insights::session_labels`; Insights PM request, 2026-10-21),
+//! set through `insights_session_label`. Each is keyed by its row's keyed
+//! session digest, which a row made again when its file grows keeps, so a
+//! label outlives the row's new reference. A label goes with its row: when
+//! the row ages out of the kept weeks, the caps evict it, or its folder is
+//! Never (no label is set on a row in a Never folder, and the next pass
+//! drops one whose folder became Never). The store's removal on unenroll
+//! takes every label with it. Labels are never sent anywhere: the Sessions
+//! rows carry them back to the shell, and the Models answers read them.
+//!
 //! Anyone holding both the store and the key could confirm a guessed path;
 //! a store copied without the key reveals none.
 //!
@@ -165,9 +176,10 @@ use crate::insights::analytics_constants::{
 use crate::insights::codex_series::{CodexTurnSeriesEvidence, CodexTurnSeriesScan};
 use crate::insights::goals::WeekFigures;
 use crate::insights::model_answers::ModelRoute;
-use crate::insights::session_facts::{ClaudeFactsScan, SessionFacts};
+use crate::insights::session_facts::{ClaudeFactsScan, InferredTask, SessionFacts};
 use crate::insights::session_identity::HarnessSessionScan;
-use crate::insights::task_classifier::reclassify;
+use crate::insights::session_labels::SessionLabel;
+use crate::insights::task_classifier::{LocalRulesClassifier, TaskClassifier, reclassify};
 use crate::insights::time_evidence::RecordedTimeScan;
 use crate::insights::turn_series::ClaudeTurnSeriesScan;
 use crate::insights::usage::NativeTokenCounts;
@@ -384,6 +396,19 @@ impl CounterRow {
         format!("t{}", self.seq)
     }
 
+    /// The task the rules infer from the stored facts, re-run when they
+    /// were read under older rules, as the Models answers read it; `None`
+    /// with no facts.
+    fn inferred_task(&self) -> Option<InferredTask> {
+        let facts = self.facts.as_ref()?;
+        let classifier = LocalRulesClassifier;
+        Some(if facts.classifier_version == classifier.version() {
+            facts.task
+        } else {
+            classifier.classify(&facts.shape)
+        })
+    }
+
     /// The time a Sessions row is listed and labelled by: its earliest
     /// recorded event, the drill's date; for a row made before that was
     /// kept, its first event.
@@ -532,6 +557,14 @@ struct CounterStore {
     /// written before it.
     #[serde(default)]
     generation: u32,
+    /// The person's own labels (`insights_session_label`), keyed by the
+    /// same keyed session digest as `rows`, so a row made again under a new
+    /// reference keeps its label. Only for a row that is stored: one whose
+    /// row goes (aged out, evicted, a Never folder) goes with it
+    /// (`prune_labels`). Absent in a store written before labels, which
+    /// loads with none, and left out of the file while empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    labels: BTreeMap<KeyedDigest, SessionLabel>,
 }
 
 /// The observation an evicted session's row was made from. No path and no
@@ -569,6 +602,7 @@ impl CounterStore {
             ledger_folded_started: None,
             evicted: BTreeMap::new(),
             generation: new_generation(),
+            labels: BTreeMap::new(),
         }
     }
 }
@@ -1228,6 +1262,7 @@ impl CounterPass {
             COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS,
         );
         prune_routing(&mut store, &gone, cutoff);
+        prune_labels(&mut store, &never);
         self.save_into(&mut cached, store)?;
         self.mark_pass(now);
         Ok(Some(summary))
@@ -1537,26 +1572,20 @@ impl CounterPass {
         if page.before.is_some() && page.store != tag {
             return Err(super::insights_sessions::ERR_SESSIONS_CURSOR_INVALID);
         }
-        let rows: Vec<&CounterRow> = match (&key, &store) {
+        let rows: Vec<(&KeyedDigest, &CounterRow)> = match (&key, &store) {
             (Some(key), Some(store)) => {
                 let never = never_digests(key, never_project_keys);
                 // The Sessions feed lists the person's sessions: automated
                 // ones are left out, and not counted in `sessions_stored`.
                 store
                     .rows
-                    .values()
-                    .filter(|row| !never.contains(&row.project) && !row.is_automated())
+                    .iter()
+                    .filter(|(_, row)| !never.contains(&row.project) && !row.is_automated())
                     .collect()
             }
             _ => Vec::new(),
         };
-        let labels: BTreeMap<KeyedDigest, &str> = match &key {
-            Some(key) => folders
-                .iter()
-                .map(|(project_key, label)| (project_digest(key, project_key), label.as_str()))
-                .collect(),
-            None => BTreeMap::new(),
-        };
+        let labels = folder_digests(key.as_ref(), folders);
         let stored = rows.len();
         // Recency is the first recorded event, else the time discovery
         // placed the row, else its file's last write; ties go to the row
@@ -1565,56 +1594,18 @@ impl CounterPass {
         // still being written would otherwise sit above every dated one.
         let (rows, next) = super::insights_sessions::select_page(
             rows,
-            |row| super::insights_sessions::SessionsCursor {
+            |(_, row)| super::insights_sessions::SessionsCursor {
                 at: row.listed_at().or(row.placed_at).unwrap_or(row.modified_at),
                 seq: row.seq,
             },
-            |row| row.listed_at().is_some(),
+            |(_, row)| row.listed_at().is_some(),
             page,
         );
-        use crate::insights::session_sparkline;
         let sessions: Vec<serde_json::Value> = rows
             .iter()
-            .map(|row| {
-                let row = *row;
-                let source = match &row.body {
-                    RowBody::Claude { .. } => AnalyticsSource::ClaudeCode,
-                    RowBody::Codex { .. } => AnalyticsSource::Codex,
-                    RowBody::Unknown { source, .. } => *source,
-                };
-                // The per-turn series, Claude Code's or Codex's (owner
-                // decision D11, settled); a Codex row made before the
-                // per-turn reader, or trimmed by the Codex budget, has none.
-                let series = match &row.body {
-                    RowBody::Claude { series, .. } => Some(series),
-                    RowBody::Codex {
-                        series: Some(evidence),
-                        ..
-                    } => Some(&evidence.series),
-                    _ => None,
-                };
-                let turns = series.map(|series| series.turns.len());
-                // The row's tokens as the drill's header counts them, and
-                // the sparkline over its per-turn series.
-                let (tokens, sparkline) = match (&row.body, series) {
-                    (_, Some(series)) => (
-                        session_sparkline::known_tokens(&series.turns),
-                        session_sparkline::session_sparkline(&series.turns),
-                    ),
-                    (RowBody::Codex { observed, .. }, None) => {
-                        (observed.as_ref().map(|observed| observed.total), None)
-                    }
-                    _ => (None, None),
-                };
-                serde_json::json!({
-                    "session_ref": row.reference(),
-                    "source": source,
-                    "started_at": row.listed_at().map(|at| at.to_rfc3339()),
-                    "turns": turns,
-                    "tokens": tokens,
-                    "sparkline": sparkline,
-                    "folder": labels.get(&row.project).copied(),
-                })
+            .map(|(session, row)| {
+                let label = store.as_ref().and_then(|store| store.labels.get(*session));
+                session_row_value(row, label, &labels)
             })
             .collect();
         Ok(serde_json::json!({
@@ -1630,6 +1621,74 @@ impl CounterPass {
             "truncated": next.is_some(),
             "next": next.map(|cursor| cursor.encode(tag)),
             "sessions": sessions,
+        }))
+    }
+
+    /// `insights_session_label`: apply `change` to the label of the row
+    /// `reference` names and answer that row as `insights_sessions` lists
+    /// it, under `session`. `Err` when no visible row has that reference
+    /// (never stored, made again since, automated, or in a Never folder), or
+    /// the store could not be written; the label is then as it was.
+    ///
+    /// Never makes a key, and writes nothing while the pass is off. Under
+    /// the cache lock across load and write, as a fold is, so neither a
+    /// pass nor a fold writes over it and a `clear` either sees it or
+    /// removes it.
+    pub(crate) fn label_value(
+        &self,
+        enabled: bool,
+        reference: &str,
+        change: super::insights_sessions::LabelChange,
+        never_project_keys: &NeverFolders,
+        folders: &[(String, String)],
+    ) -> Result<serde_json::Value, &'static str> {
+        if !enabled {
+            return Ok(serde_json::json!({"enabled": false, "feed": FEED_COUNTER_PASS}));
+        }
+        let key = match self.keys.load() {
+            Ok(Some(key)) => key,
+            Ok(None) => return Err(super::insights_sessions::ERR_SESSION_UNKNOWN),
+            Err(_) => return Ok(unreadable_value(UNREADABLE_KEY)),
+        };
+        let mut cached = match self.cached.lock() {
+            Ok(cached) => cached,
+            Err(_) => return Ok(unreadable_value(UNREADABLE_STORE)),
+        };
+        let current = match self.load_into(&mut cached) {
+            Ok(Some(store)) if store.key_fingerprint == key_fingerprint(&key) => store,
+            Ok(_) => return Err(super::insights_sessions::ERR_SESSION_UNKNOWN),
+            Err(reason) => return Ok(unreadable_value(reason)),
+        };
+        let never = never_digests(&key, never_project_keys);
+        let session = current
+            .rows
+            .iter()
+            .find(|(_, row)| {
+                !never.contains(&row.project) && !row.is_automated() && row.reference() == reference
+            })
+            .map(|(session, _)| *session)
+            .ok_or(super::insights_sessions::ERR_SESSION_UNKNOWN)?;
+        let mut label = current.labels.get(&session).copied().unwrap_or_default();
+        change.apply(&mut label);
+        let mut store = (*current).clone();
+        if label.is_empty() {
+            store.labels.remove(&session);
+        } else {
+            store.labels.insert(session, label);
+        }
+        prune_labels(&mut store, &never);
+        if store != *current {
+            self.save_into(&mut cached, store)
+                .map_err(|_| super::insights_sessions::ERR_SESSION_LABEL_WRITE_FAILED)?;
+        }
+        let row = &current.rows[&session];
+        let folders = folder_digests(Some(&key), folders);
+        let label = (!label.is_empty()).then_some(label);
+        Ok(serde_json::json!({
+            "enabled": true,
+            "feed": FEED_COUNTER_PASS,
+            "readable": true,
+            "session": session_row_value(row, label.as_ref(), &folders),
         }))
     }
 
@@ -1707,28 +1766,45 @@ impl CounterPass {
             Ok(found) => found,
             Err(reason) => return unreadable_value(reason),
         };
-        let (inputs, routes, charges) = match (&key, &store) {
+        let (inputs, routes, charges, labels) = match (&key, &store) {
             (Some(key), Some(store)) => {
                 let never = never_digests(key, never_project_keys);
-                let mut rows: Vec<&CounterRow> = store
+                let mut keyed: Vec<(&KeyedDigest, &CounterRow)> = store
                     .rows
-                    .values()
-                    .filter(|row| !never.contains(&row.project))
+                    .iter()
+                    .filter(|(_, row)| !never.contains(&row.project))
                     .collect();
-                rows.sort_by_key(|row| row.seq);
+                keyed.sort_by_key(|(_, row)| row.seq);
+                // The person's own labels, by the engine's reference.
+                let labels: BTreeMap<String, SessionLabel> = keyed
+                    .iter()
+                    .filter_map(|(session, row)| {
+                        store
+                            .labels
+                            .get(*session)
+                            .map(|label| (row.reference(), *label))
+                    })
+                    .collect();
+                let rows: Vec<&CounterRow> = keyed.into_iter().map(|(_, row)| row).collect();
                 let available = ledger_feed && ledger_present;
                 let routes = route_map(&rows, &store.routing, available);
                 let charges = charge_map(&rows, &store.routing, available);
                 let inputs: Vec<SessionInput> =
                     rows.iter().map(|row| row.session_input()).collect();
-                (inputs, routes, charges)
+                (inputs, routes, charges, labels)
             }
-            _ => (Vec::new(), BTreeMap::new(), BTreeMap::new()),
+            _ => (
+                Vec::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+            ),
         };
-        let answers = crate::insights::model_answers::model_answers_with_charges(
+        let answers = crate::insights::model_answers::model_answers_labelled(
             &inputs,
             &routes,
             &charges,
+            &labels,
             &crate::insights::pricing_catalog::production_pricing_catalog(),
             now,
         );
@@ -2459,6 +2535,19 @@ impl DigestKeyStore for KeyFileInDir {
     }
 }
 
+/// Keep a label only while its row is stored and its folder is not Never:
+/// a row that aged out, was evicted or dropped for a Never folder takes its
+/// label with it.
+fn prune_labels(store: &mut CounterStore, never: &NeverDigests) {
+    let rows = &store.rows;
+    store.labels.retain(|session, label| {
+        !label.is_empty()
+            && rows
+                .get(session)
+                .is_some_and(|row| !never.contains(&row.project))
+    });
+}
+
 /// Age out and cap the route tallies against the rows the store keeps.
 fn prune_routing(store: &mut CounterStore, gone: &BTreeSet<KeyedDigest>, cutoff: DateTime<Utc>) {
     let matched: BTreeSet<KeyedDigest> = store
@@ -2670,6 +2759,74 @@ fn parse_iso_week(text: &str) -> Option<NaiveDate> {
     let year: i32 = text[..4].parse().ok()?;
     let week: u32 = text[6..].parse().ok()?;
     NaiveDate::from_isoywd_opt(year, week, Weekday::Mon)
+}
+
+/// Each folder's label by its project key's digest under `key`, for
+/// matching a row's folder digest at answer time; empty with no key.
+fn folder_digests<'f>(
+    key: Option<&DigestKey>,
+    folders: &'f [(String, String)],
+) -> BTreeMap<KeyedDigest, &'f str> {
+    match key {
+        Some(key) => folders
+            .iter()
+            .map(|(project_key, label)| (project_digest(key, project_key), label.as_str()))
+            .collect(),
+        None => BTreeMap::new(),
+    }
+}
+
+/// One `insights_sessions` row: its opaque reference, harness, first
+/// recorded event, turns, tokens and sparkline, its folder's label, the
+/// task the rules infer and the person's own labels. Never a digest or a
+/// path.
+fn session_row_value(
+    row: &CounterRow,
+    label: Option<&SessionLabel>,
+    folders: &BTreeMap<KeyedDigest, &str>,
+) -> serde_json::Value {
+    use crate::insights::session_sparkline;
+    let source = match &row.body {
+        RowBody::Claude { .. } => AnalyticsSource::ClaudeCode,
+        RowBody::Codex { .. } => AnalyticsSource::Codex,
+        RowBody::Unknown { source, .. } => *source,
+    };
+    // The per-turn series, Claude Code's or Codex's (owner decision D11,
+    // settled); a Codex row made before the per-turn reader, or trimmed by
+    // the Codex budget, has none.
+    let series = match &row.body {
+        RowBody::Claude { series, .. } => Some(series),
+        RowBody::Codex {
+            series: Some(evidence),
+            ..
+        } => Some(&evidence.series),
+        _ => None,
+    };
+    let turns = series.map(|series| series.turns.len());
+    // The row's tokens as the drill's header counts them, and the sparkline
+    // over its per-turn series.
+    let (tokens, sparkline) = match (&row.body, series) {
+        (_, Some(series)) => (
+            session_sparkline::known_tokens(&series.turns),
+            session_sparkline::session_sparkline(&series.turns),
+        ),
+        (RowBody::Codex { observed, .. }, None) => {
+            (observed.as_ref().map(|observed| observed.total), None)
+        }
+        _ => (None, None),
+    };
+    serde_json::json!({
+        "session_ref": row.reference(),
+        "source": source,
+        "started_at": row.listed_at().map(|at| at.to_rfc3339()),
+        "turns": turns,
+        "tokens": tokens,
+        "sparkline": sparkline,
+        "folder": folders.get(&row.project).copied(),
+        "inferred_task": row.inferred_task(),
+        "user_task": label.and_then(|label| label.task),
+        "user_outcome": label.and_then(|label| label.outcome),
+    })
 }
 
 /// What the answer joins to one engine row, by its `t{seq}` reference.

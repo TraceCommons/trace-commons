@@ -551,6 +551,37 @@ final class DaemonDataContractWireTests: XCTestCase {
     private static let callId2 = #"{"id":2,"at":"2027-01-15T08:00:01+00:00","tool":"unknown","family":"openai","model":"Qwen/Qwen3.6-27B-FP8","route":"unknown","cost":{"known":true,"priced_micros":12300},"proof":"unrecorded","tokens":{"input":null,"cache_read":null,"cache_write":null,"output":3}}"#
     private static let callId1 = #"{"id":1,"at":"2027-01-15T08:00:00+00:00","tool":"unknown","family":"openai","model":"Qwen/Qwen3.6-27B-FP8","route":"unknown","cost":{"known":true,"priced_micros":12300},"proof":"unrecorded","tokens":{"input":1000,"cache_read":600,"cache_write":0,"output":25}}"#
 
+    // MARK: - insights_session_label
+
+    /// Absent keeps a label, `null` clears it, a word sets it; the answer
+    /// is the row as `insights_sessions` lists it.
+    func testInsightsSessionLabelSendsKeepClearAndSetAndDecodesTheRow() async throws {
+        let row = #"{"session_ref":"t7","source":"claude_code","started_at":null,"turns":3,"tokens":30,"sparkline":null,"folder":null,"inferred_task":"docs","user_task":"bug_fix","user_outcome":null}"#
+        let transport = FakeTransport(response: frame(
+            #"{"enabled":true,"feed":"counter_pass","readable":true,"session":"# + row + "}"))
+        let client = LiveDaemonClient(transport: transport)
+        let answer = try await client.insightsSessionLabel(sessionRef: "t7", task: .set("bug_fix"), outcome: .clear)
+        _ = try await client.insightsSessionLabel(sessionRef: "t7", task: .keep, outcome: .set("partly_kept"))
+        XCTAssertEqual(transport.calls.map(\.method), ["insights_session_label", "insights_session_label"])
+        XCTAssertEqual(transport.calls.map(\.params), [
+            #"{"outcome":null,"session_ref":"t7","task":"bug_fix"}"#,
+            #"{"outcome":"partly_kept","session_ref":"t7"}"#,
+        ])
+        let session = try XCTUnwrap(answer.session)
+        XCTAssertEqual(session.inferredTask, "docs")
+        XCTAssertEqual(session.userTask, "bug_fix")
+        XCTAssertNil(session.userOutcome)
+    }
+
+    /// A row from a daemon that predates the labels decodes, with none.
+    func testAWatchedRowWithoutLabelsDecodes() throws {
+        let old = #"{"session_ref":"t2","source":"codex","started_at":null,"turns":null,"tokens":null,"sparkline":null,"folder":"f"}"#
+        let row = try DaemonDataDecoding.decoder().decode(DaemonData.InsightsWatchedSession.self, from: Data(old.utf8))
+        XCTAssertNil(row.inferredTask)
+        XCTAssertNil(row.userTask)
+        XCTAssertNil(row.userOutcome)
+    }
+
     func testInsightsGlanceDecodesTheRecordedAnswer() async throws {
         let transport = FakeTransport(response: frame(Self.glanceData))
         let glance = try await LiveDaemonClient(transport: transport).insightsGlance(tzSeconds: 0)

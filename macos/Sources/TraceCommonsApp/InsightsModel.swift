@@ -1167,11 +1167,34 @@ final class InsightsSessionsModel {
     typealias WatchedReader = @Sendable (String?) async throws -> DaemonData.InsightsSessions
     /// Reads `insights_session_drill` for one listed reference.
     typealias WatchedDrillReader = @Sendable (String) async throws -> DaemonData.InsightsSessionDrillAnswer
+    /// Writes `insights_session_label` for one listed reference: its task,
+    /// then its outcome.
+    typealias WatchedLabelWriter = @Sendable (String, DaemonData.InsightsLabelChange,
+                                              DaemonData.InsightsLabelChange) async throws
+        -> DaemonData.InsightsSessionLabelAnswer
     /// The most rows one page of the feed asks for.
     static let pageSize = 50
     private let service: InsightsModel.Service
     private let watchedReader: WatchedReader?
     private let watchedDrill: WatchedDrillReader?
+    private let watchedLabel: WatchedLabelWriter?
+    /// A row's own labels, as the daemon last said them or as just chosen.
+    struct RowLabels: Equatable {
+        var task: String?
+        var outcome: String?
+    }
+    /// Label writes the daemon has not answered, by reference: the newest
+    /// one's number, and the row's labels as the daemon last said them, to
+    /// put back if that newest write fails.
+    private var labelWrites: [String: (latest: Int, base: RowLabels)] = [:]
+    private var labelCount = 0
+    /// Rows whose newest label could not be saved: each shows its labels as
+    /// they were, with the core's line, until it is labelled again.
+    private(set) var labelFailed: Set<String> = []
+    /// A label write is waiting for the daemon.
+    var savingLabels: Bool { !labelWrites.isEmpty }
+    /// The watched rows can be labelled: a daemon client is wired.
+    var canLabel: Bool { watchedLabel != nil }
     private var task: Task<Void, Never>?
     private var listTask: Task<Void, Never>?
     private var pageTask: Task<Void, Never>?
@@ -1221,11 +1244,107 @@ final class InsightsSessionsModel {
     init(service: @escaping InsightsModel.Service,
          watchedReader: WatchedReader? = nil,
          watchedDrill: WatchedDrillReader? = nil,
+         watchedLabel: WatchedLabelWriter? = nil,
          retryBackoff: Duration = .seconds(2)) {
         self.retryBackoff = retryBackoff
         self.service = service
         self.watchedReader = watchedReader
         self.watchedDrill = watchedDrill
+        self.watchedLabel = watchedLabel
+    }
+
+    // MARK: The person's own labels
+
+    /// Set a watched row's task to one of the five task words, or clear it
+    /// (`nil`) so the inferred task shows again.
+    func setTask(_ reference: String, to task: String?) {
+        writeLabel(reference, task: task.map { .set($0) } ?? .clear, outcome: .keep)
+    }
+
+    /// Take the inferred task as the person's own: the one click that
+    /// confirms it. Nothing when the row shows the person's task already or
+    /// none was inferred.
+    func confirmTask(_ reference: String) {
+        guard let row = watched?.first(where: { $0.sessionRef == reference }),
+              let task = InsightsSessionsWords.confirmableTask(row) else { return }
+        setTask(reference, to: task)
+    }
+
+    /// Set a watched row's outcome to one of the three outcome words, or
+    /// clear it (`nil`).
+    func setOutcome(_ reference: String, to outcome: String?) {
+        writeLabel(reference, task: .keep, outcome: outcome.map { .set($0) } ?? .clear)
+    }
+
+    /// Shows the change at once, then writes it. The daemon's answer is the
+    /// row as it now lists it; a write that fails puts the row's labels back
+    /// as the daemon last said them. Only the newest write to a row decides
+    /// what it shows; an older one's answer only moves what is put back.
+    private func writeLabel(_ reference: String, task: DaemonData.InsightsLabelChange,
+                            outcome: DaemonData.InsightsLabelChange) {
+        guard let watchedLabel, let index = watched?.firstIndex(where: { $0.sessionRef == reference }),
+              var row = watched?[index] else { return }
+        let shown = RowLabels(task: row.userTask, outcome: row.userOutcome)
+        labelCount += 1
+        let number = labelCount
+        labelWrites[reference] = (number, labelWrites[reference]?.base ?? shown)
+        labelFailed.remove(reference)
+        Self.apply(task, to: &row.userTask)
+        Self.apply(outcome, to: &row.userOutcome)
+        watched?[index] = row
+        Task { [weak self] in
+            let result: Result<DaemonData.InsightsSessionLabelAnswer, Error>
+            do { result = .success(try await watchedLabel(reference, task, outcome)) } catch { result = .failure(error) }
+            self?.answered(reference, number: number, result)
+        }
+    }
+
+    private func answered(_ reference: String, number: Int,
+                          _ outcome: Result<DaemonData.InsightsSessionLabelAnswer, Error>) {
+        guard let pending = labelWrites[reference] else { return }
+        var saved: DaemonData.InsightsWatchedSession?
+        if case .success(let answer) = outcome, answer.enabled, answer.readable == true,
+           let row = answer.session, row.sessionRef == reference {
+            saved = row
+        }
+        guard pending.latest == number else {
+            // A newer write to this row is under way and decides what it
+            // shows; this one only moves what a failure would put back.
+            if let saved {
+                labelWrites[reference]?.base = RowLabels(task: saved.userTask, outcome: saved.userOutcome)
+            }
+            return
+        }
+        labelWrites[reference] = nil
+        if let saved {
+            replaceRow(reference) { $0 = saved }
+            return
+        }
+        replaceRow(reference) { row in
+            row.userTask = pending.base.task
+            row.userOutcome = pending.base.outcome
+        }
+        labelFailed.insert(reference)
+        if case .failure(let error) = outcome, Self.isUnknownReference(error) {
+            // Made again since its page was read (its file grew), or
+            // dropped: read the loaded range again, as a drill does.
+            refresh(dropping: nil)
+        }
+    }
+
+    private func replaceRow(_ reference: String, _ change: (inout DaemonData.InsightsWatchedSession) -> Void) {
+        guard let index = watched?.firstIndex(where: { $0.sessionRef == reference }),
+              var row = watched?[index] else { return }
+        change(&row)
+        watched?[index] = row
+    }
+
+    private static func apply(_ change: DaemonData.InsightsLabelChange, to slot: inout String?) {
+        switch change {
+        case .keep: break
+        case .clear: slot = nil
+        case .set(let word): slot = word
+        }
     }
 
     func open() {
@@ -1653,6 +1772,65 @@ enum InsightsSessionsWords {
                                          ?? .current) -> String {
         [watchedLabel(row, copy: copy, timeZone: timeZone), rowTokens(row, copy: copy),
          sparklineSummary(row, copy: copy)].compactMap { $0 }.joined(separator: ", ")
+    }
+
+    // MARK: A watched row's own labels
+
+    /// The task words a row's task control offers, in the core's order
+    /// (`session_labels::LabelledTask`). No "no edits": that is not a task.
+    static let taskWords = ["bug_fix", "refactor", "tests", "docs", "other"]
+    /// The outcome words a row's outcome control offers.
+    static let outcomeWords = ["kept", "partly_kept", "thrown_away"]
+
+    static func taskChoices(copy: [String: String]) -> [(value: String, title: String)] {
+        taskWords.map { (value: $0, title: text("analytics_task_" + $0, copy)) }
+    }
+
+    static func outcomeChoices(copy: [String: String]) -> [(value: String, title: String)] {
+        outcomeWords.map { (value: $0, title: text("analytics_outcome_" + $0, copy)) }
+    }
+
+    /// The task a row's control shows: the person's own, else the inferred
+    /// one when it is a task word (`inferred: true`); `nil` when neither,
+    /// as for a trace inferred as no edits.
+    static func shownTask(_ row: DaemonData.InsightsWatchedSession) -> (word: String, inferred: Bool)? {
+        if let task = row.userTask, taskWords.contains(task) { return (task, false) }
+        if let task = row.inferredTask, taskWords.contains(task) { return (task, true) }
+        return nil
+    }
+
+    /// The inferred task a click takes as the person's own; `nil` once the
+    /// person has set one, or when none was inferred.
+    static func confirmableTask(_ row: DaemonData.InsightsWatchedSession) -> String? {
+        guard row.userTask == nil, let shown = shownTask(row), shown.inferred else { return nil }
+        return shown.word
+    }
+
+    /// The task control's words: the person's task, the inferred one marked
+    /// as inferred, or the control's name when there is neither.
+    static func taskTitle(_ row: DaemonData.InsightsWatchedSession, copy: [String: String]) -> String {
+        guard let shown = shownTask(row) else { return text("analytics_label_task", copy) }
+        let word = text("analytics_task_" + shown.word, copy)
+        guard shown.inferred else { return word }
+        return InsightsOverviewWords.fill(text("analytics_task_inferred", copy), ["label": word])
+    }
+
+    /// The outcome control's words: the person's outcome, or the control's
+    /// name while unset.
+    static func outcomeTitle(_ row: DaemonData.InsightsWatchedSession, copy: [String: String]) -> String {
+        guard let outcome = row.userOutcome, outcomeWords.contains(outcome) else {
+            return text("analytics_label_outcome", copy)
+        }
+        return text("analytics_outcome_" + outcome, copy)
+    }
+
+    /// The row's controls as VoiceOver names them, each with the row's own
+    /// label, so one row's controls are told from another's.
+    static func labelAccessibility(_ key: String, _ row: DaemonData.InsightsWatchedSession,
+                                   copy: [String: String],
+                                   timeZone: TimeZone = TimeZone(secondsFromGMT: TimeZone.current.secondsFromGMT())
+                                      ?? .current) -> String {
+        InsightsOverviewWords.fill(text(key, copy), ["label": watchedLabel(row, copy: copy, timeZone: timeZone)])
     }
 
     /// The row the up (`-1`) or down (`1`) key moves to, held to the list's

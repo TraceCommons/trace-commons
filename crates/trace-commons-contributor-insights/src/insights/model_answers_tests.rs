@@ -14,6 +14,7 @@ use crate::insights::codex_series::CodexTurnSeriesEvidence;
 use crate::insights::session_facts::{
     ExtensionClassCounts, InferredTask, ModelFacts, SessionFacts, SessionShape,
 };
+use crate::insights::session_labels::LabelledTask;
 use crate::insights::session_pricing::pricing_provider;
 use crate::insights::week_rollup::{CodexObserved, SessionBody};
 
@@ -1207,6 +1208,7 @@ fn the_bootstrap_runs_exactly_the_configured_draws() {
         &bugfix_pair(),
         &BTreeMap::new(),
         &BTreeMap::new(),
+        &BTreeMap::new(),
         &catalog(),
         now(),
         &mut draws,
@@ -1731,4 +1733,183 @@ fn a_charge_outside_the_docs_task_or_window_is_not_counted() {
         .unwrap();
     assert_eq!(charge.routed_sessions, 1);
     assert_eq!(charge.median, Some(Figure::UsdMicros { value: 1_000 }));
+}
+
+fn labelled(
+    sessions: &[SessionInput],
+    labels: &[(&str, Option<LabelledTask>, Option<SessionOutcome>)],
+) -> ModelAnswers {
+    let labels: BTreeMap<String, SessionLabel> = labels
+        .iter()
+        .map(|(session_ref, task, outcome)| {
+            (
+                (*session_ref).to_owned(),
+                SessionLabel {
+                    task: *task,
+                    outcome: *outcome,
+                },
+            )
+        })
+        .collect();
+    model_answers_labelled(
+        sessions,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &labels,
+        &catalog(),
+        now(),
+    )
+}
+
+/// The person's task replaces the inferred one: sessions inferred as
+/// Other, Refactor and no edits that they name bug fixes are on the
+/// bug-fix row, and off the rows of the task they were inferred as.
+#[test]
+fn a_labelled_task_overrides_the_inferred_one() {
+    let mut sessions = many("a", 5, |id| {
+        solo(&id, "model-a", InferredTask::Other, 10, Some(1), 1)
+    });
+    sessions.extend(many("b", 5, |id| {
+        solo(&id, "model-b", InferredTask::Refactor, 10, Some(3), 0)
+    }));
+    sessions.push(solo(
+        "a-none",
+        "model-a",
+        InferredTask::NoEdits,
+        0,
+        Some(0),
+        0,
+    ));
+    let inferred = answer(&sessions);
+    assert_eq!(
+        counts(row(&inferred, ModelQuestion::BugFixRejected)),
+        vec![]
+    );
+    assert_eq!(
+        counts(row(&inferred, ModelQuestion::RefactorRejected)),
+        vec![("model-b", 5)]
+    );
+
+    let mut ids: Vec<String> = (0..5)
+        .flat_map(|ix| [format!("a-{ix}"), format!("b-{ix}")])
+        .collect();
+    ids.push("a-none".into());
+    let as_bug_fixes: Vec<(&str, Option<LabelledTask>, Option<SessionOutcome>)> = ids
+        .iter()
+        .map(|id| (id.as_str(), Some(LabelledTask::BugFix), None))
+        .collect();
+    let answers = labelled(&sessions, &as_bug_fixes);
+    let q1 = row(&answers, ModelQuestion::BugFixRejected);
+    assert_eq!(counts(q1), vec![("model-a", 6), ("model-b", 5)]);
+    assert_eq!(q1.state, AnswerState::Answered);
+    // The no-edit session adds a session and no edits: 50 edits, 10
+    // rejected.
+    assert_eq!(rate(figure_of(q1, "model-a")), 200);
+    assert_eq!(rate(figure_of(q1, "model-b")), 300);
+    assert_eq!(
+        counts(row(&answers, ModelQuestion::RefactorRejected)),
+        vec![]
+    );
+
+    // Labels that set nothing read exactly as the inferred answers.
+    let unset: Vec<(&str, Option<LabelledTask>, Option<SessionOutcome>)> =
+        ids.iter().map(|id| (id.as_str(), None, None)).collect();
+    assert_eq!(labelled(&sessions, &unset), inferred);
+}
+
+/// The person's outcomes cross as `kept`, per model, on the rejection rows
+/// only, and move no rate, order or state.
+#[test]
+fn outcomes_count_as_kept_beside_the_rejection_rate() {
+    let sessions = bugfix_pair();
+    let base = answer(&sessions);
+    let answers = labelled(
+        &sessions,
+        &[
+            ("a-0", None, Some(SessionOutcome::Kept)),
+            ("a-1", None, Some(SessionOutcome::Kept)),
+            ("a-2", None, Some(SessionOutcome::PartlyKept)),
+            ("b-0", None, Some(SessionOutcome::ThrownAway)),
+            // A label with no outcome is in no kept figure.
+            ("b-1", Some(LabelledTask::BugFix), None),
+        ],
+    );
+    let a = KeptFigure {
+        labelled: 3,
+        kept: 2,
+        partly_kept: 1,
+        thrown_away: 0,
+        kept_permille: 667,
+    };
+    let b = KeptFigure {
+        labelled: 1,
+        kept: 0,
+        partly_kept: 0,
+        thrown_away: 1,
+        kept_permille: 0,
+    };
+    for (with, without) in answers.rows.iter().zip(&base.rows) {
+        let mut expected = without.clone();
+        if matches!(
+            with.question,
+            ModelQuestion::BugFixRejected | ModelQuestion::RejectedAcrossTasks
+        ) {
+            expected.kept_by_model = vec![("model-a".into(), a), ("model-b".into(), b)];
+            expected.leader.as_mut().unwrap().kept = Some(a);
+            expected.next.as_mut().unwrap().kept = Some(b);
+        }
+        assert_eq!(with, &expected, "{:?}", with.question);
+    }
+
+    // A row that cannot compare still says each model's outcomes.
+    let mut few = bugfix_pair();
+    few.pop();
+    let answers = labelled(&few, &[("a-0", None, Some(SessionOutcome::Kept))]);
+    let q1 = row(&answers, ModelQuestion::BugFixRejected);
+    assert_eq!(q1.state, AnswerState::NotEnoughSessions);
+    assert_eq!(
+        q1.kept_by_model,
+        vec![(
+            "model-a".to_owned(),
+            KeptFigure {
+                labelled: 1,
+                kept: 1,
+                partly_kept: 0,
+                thrown_away: 0,
+                kept_permille: 1_000,
+            }
+        )]
+    );
+}
+
+/// `kept` is additive on the wire: every figure and row carries it, `null`
+/// or empty where there is none, and it holds counts and a permille only.
+#[test]
+fn the_kept_payload_has_its_shape() {
+    let unlabelled = serde_json::to_value(answer(&bugfix_pair())).unwrap();
+    for row in unlabelled["rows"].as_array().unwrap() {
+        assert_eq!(row["kept_by_model"], serde_json::json!([]), "{row}");
+        for side in ["leader", "next"] {
+            if row[side].is_object() {
+                assert!(row[side]["kept"].is_null(), "{row}");
+            }
+        }
+    }
+    let wire = serde_json::to_value(labelled(
+        &bugfix_pair(),
+        &[("a-0", None, Some(SessionOutcome::PartlyKept))],
+    ))
+    .unwrap();
+    let kept = serde_json::json!({
+        "labelled": 1, "kept": 0, "partly_kept": 1, "thrown_away": 0, "kept_permille": 0,
+    });
+    let q1 = &wire["rows"][0];
+    assert_eq!(q1["question"], "bug_fix_rejected");
+    assert_eq!(q1["kept_by_model"], serde_json::json!([["model-a", kept]]));
+    assert_eq!(q1["leader"]["label"], "model-a");
+    assert_eq!(q1["leader"]["kept"], kept);
+    assert!(q1["next"]["kept"].is_null());
+    // The cost and time rows carry none.
+    assert_eq!(wire["rows"][3]["kept_by_model"], serde_json::json!([]));
+    assert_eq!(wire["rows"][5]["kept_by_model"], serde_json::json!([]));
 }

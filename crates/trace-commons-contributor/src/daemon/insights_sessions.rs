@@ -32,14 +32,28 @@
 //! same drill shape a saved snapshot's `session_drill` has, computed by the
 //! same engine (`insights::session_drill`) from the stored counters, with
 //! `feed: "counter_pass"`.
+//!
+//! # The person's own labels
+//!
+//! Each row also carries the task the rules infer from its stored facts
+//! (`inferred_task`) and the person's own labels (`user_task`,
+//! `user_outcome`; Insights PM request, 2026-10-21), and
+//! `insights_session_label` sets or clears them by the row's reference,
+//! answering the row as listed. Two closed sets
+//! (`insights::session_labels`), checked before the gate; gated as the list
+//! is, and never written while the pass is off. The daemon keeps a label in
+//! the counter store by the row's keyed session digest, so it survives the
+//! row being made again under a new reference (`insights_week` has the
+//! rules), and it is never sent anywhere.
 
 use chrono::{DateTime, FixedOffset, Offset, Utc};
 
 use super::insights_week::{
     FEED_COUNTER_PASS, NeverFolders, UNREADABLE_POLICY, never_project_keys,
 };
-use super::ipc::{DaemonShared, ERR_BAD_PARAMS, Request, Response};
+use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use super::policy::{UNKNOWN_PROJECT_KEY, disambiguated_label, display_path_for_key, known_keys};
+use crate::insights::session_labels::{LabelledTask, SessionLabel, SessionOutcome};
 
 /// The most sessions one `insights_sessions` page lists, newest first.
 /// `truncated` and `next` say when more follow.
@@ -54,6 +68,77 @@ pub const ERR_SESSION_UNKNOWN: &str = "insights-session-unknown";
 pub const ERR_SESSIONS_CURSOR_INVALID: &str = "insights-sessions-cursor-invalid";
 /// `limit` is not a whole number of at least 1.
 pub const ERR_SESSIONS_LIMIT_INVALID: &str = "insights-sessions-limit-invalid";
+/// `task` or `outcome` is not one of its closed words, or `null`; or
+/// neither was given.
+pub const ERR_SESSION_LABEL_INVALID: &str = "insights-session-label-invalid";
+/// The store could not be written; the label is as it was.
+pub const ERR_SESSION_LABEL_WRITE_FAILED: &str = "insights-session-label-write-failed";
+
+/// What one `insights_session_label` call does to one of a row's labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LabelEdit<T> {
+    /// The param was absent: the label stays as it is.
+    Keep,
+    /// `null`: the label is unset (the inferred task shows again).
+    Clear,
+    Set(T),
+}
+
+impl<T: Copy> LabelEdit<T> {
+    fn apply(self, slot: &mut Option<T>) {
+        match self {
+            LabelEdit::Keep => {}
+            LabelEdit::Clear => *slot = None,
+            LabelEdit::Set(value) => *slot = Some(value),
+        }
+    }
+}
+
+/// An `insights_session_label` call's change to a row's labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LabelChange {
+    pub(crate) task: LabelEdit<LabelledTask>,
+    pub(crate) outcome: LabelEdit<SessionOutcome>,
+}
+
+impl LabelChange {
+    pub(crate) fn apply(self, label: &mut SessionLabel) {
+        self.task.apply(&mut label.task);
+        self.outcome.apply(&mut label.outcome);
+    }
+}
+
+/// `session_ref` (required), and `task` and `outcome`, each absent (kept),
+/// `null` (cleared) or one of its closed words; at least one of the two.
+pub(crate) fn label_params(
+    params: &serde_json::Value,
+) -> Result<(String, LabelChange), &'static str> {
+    let reference = params
+        .get("session_ref")
+        .and_then(|value| value.as_str())
+        .ok_or(ERR_SESSION_REF_INVALID)?;
+    fn edit<T>(
+        value: Option<&serde_json::Value>,
+        parse: fn(&str) -> Option<T>,
+    ) -> Result<LabelEdit<T>, &'static str> {
+        match value {
+            None => Ok(LabelEdit::Keep),
+            Some(serde_json::Value::Null) => Ok(LabelEdit::Clear),
+            Some(serde_json::Value::String(wire)) => parse(wire)
+                .map(LabelEdit::Set)
+                .ok_or(ERR_SESSION_LABEL_INVALID),
+            Some(_) => Err(ERR_SESSION_LABEL_INVALID),
+        }
+    }
+    let change = LabelChange {
+        task: edit(params.get("task"), LabelledTask::from_wire)?,
+        outcome: edit(params.get("outcome"), SessionOutcome::from_wire)?,
+    };
+    if change.task == LabelEdit::Keep && change.outcome == LabelEdit::Keep {
+        return Err(ERR_SESSION_LABEL_INVALID);
+    }
+    Ok((reference.to_string(), change))
+}
 
 /// Where one page of the list starts: the recency key of the last row the
 /// previous page listed by recency. Crosses as an opaque string.
@@ -307,6 +392,34 @@ pub fn handle_sessions(shared: &DaemonShared, req: &Request) -> Response {
         .sessions_page_value(enabled, &never, &folders, page)
     {
         Ok(answer) => Response::ok(req.id, answer),
+        Err(label) => Response::err(req.id, ERR_BAD_PARAMS, label),
+    }
+}
+
+/// `insights_session_label`.
+pub fn handle_session_label(shared: &DaemonShared, req: &Request) -> Response {
+    let (reference, change) = match label_params(&req.params) {
+        Ok(found) => found,
+        Err(label) => return Response::err(req.id, ERR_BAD_PARAMS, label),
+    };
+    let (enabled, never) = match gate(shared) {
+        Ok(gate) => gate,
+        Err(answer) => return Response::ok(req.id, answer),
+    };
+    // Resolved only while the pass is on: off, nothing is read or written.
+    let folders = if enabled {
+        folder_labels(shared)
+    } else {
+        Vec::new()
+    };
+    match shared
+        .insights_counter
+        .label_value(enabled, &reference, change, &never, &folders)
+    {
+        Ok(answer) => Response::ok(req.id, answer),
+        Err(ERR_SESSION_LABEL_WRITE_FAILED) => {
+            Response::err(req.id, ERR_UNAVAILABLE, ERR_SESSION_LABEL_WRITE_FAILED)
+        }
         Err(label) => Response::err(req.id, ERR_BAD_PARAMS, label),
     }
 }
@@ -680,12 +793,15 @@ mod tests {
                 keys,
                 [
                     "folder",
+                    "inferred_task",
                     "session_ref",
                     "source",
                     "sparkline",
                     "started_at",
                     "tokens",
-                    "turns"
+                    "turns",
+                    "user_outcome",
+                    "user_task",
                 ]
                 .into(),
                 "only these fields cross"
@@ -1699,5 +1815,415 @@ mod tests {
         .unwrap();
         assert_eq!(drill["session"]["session_ref"], reference);
         assert_eq!(drill["session"]["feed"], "counter_pass");
+    }
+
+    // The person's own labels (`insights_session_label`).
+
+    impl Fixture {
+        /// One pass over `files` at `at`, with `never` the Never folders;
+        /// a file in one of them is not read.
+        fn run_at(&self, files: &[(&'static str, &Path, &str)], never: &[&str], at: DateTime<Utc>) {
+            let candidates: Vec<CounterCandidate> = files
+                .iter()
+                .enumerate()
+                .map(|(origin, (source, path, _))| CounterCandidate {
+                    origin,
+                    source,
+                    path: path.to_path_buf(),
+                    size_bytes: std::fs::metadata(path).unwrap().len(),
+                    modified_at: written(),
+                    started_at: None,
+                    group_member_count: 0,
+                })
+                .collect();
+            self.pass
+                .run_pass(
+                    &candidates,
+                    &NeverFolders::These(never.iter().map(|k| k.to_string()).collect()),
+                    at,
+                    QUIET,
+                    &mut |c| {
+                        let folder = files[c.origin].2;
+                        (folder.to_string(), never.contains(&folder))
+                    },
+                )
+                .unwrap();
+        }
+
+        fn label(
+            &self,
+            params: serde_json::Value,
+            never: &[&str],
+        ) -> Result<serde_json::Value, &'static str> {
+            let (reference, change) = label_params(&params)?;
+            self.pass.label_value(
+                true,
+                &reference,
+                change,
+                &NeverFolders::These(never.iter().map(|k| k.to_string()).collect()),
+                &[(PROJECT.to_string(), "PRIVATE_REPO".to_string())],
+            )
+        }
+
+        /// The labels the store holds, however many rows it has.
+        fn stored_labels(&self) -> usize {
+            let path = self.dir.path().join(COUNTER_ROWS_FILE);
+            let Ok(text) = std::fs::read_to_string(path) else {
+                return 0;
+            };
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            value
+                .get("labels")
+                .and_then(|labels| labels.as_object())
+                .map_or(0, |labels| labels.len())
+        }
+    }
+
+    fn only(value: &serde_json::Value) -> serde_json::Value {
+        let listed = rows(value);
+        assert_eq!(listed.len(), 1, "{value}");
+        listed[0].clone()
+    }
+
+    #[test]
+    fn a_label_is_set_cleared_and_answered_as_the_listed_row() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        let listed = only(&f.list(&[], &[(PROJECT, "PRIVATE_REPO")]));
+        // Before any label: the inferred task, and nothing of the person's.
+        assert!(listed["inferred_task"].is_string(), "{listed}");
+        assert!(listed["user_task"].is_null());
+        assert!(listed["user_outcome"].is_null());
+        let reference = listed["session_ref"].as_str().unwrap().to_string();
+
+        let answer = f
+            .label(
+                serde_json::json!({"session_ref": reference, "task": "bug_fix"}),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(answer["enabled"], true);
+        assert_eq!(answer["readable"], true);
+        let row = &answer["session"];
+        assert_eq!(row["user_task"], "bug_fix");
+        assert!(row["user_outcome"].is_null(), "absent keeps it unset");
+        // The answer is the row as the list now gives it.
+        assert_eq!(*row, only(&f.list(&[], &[(PROJECT, "PRIVATE_REPO")])));
+        assert_eq!(row["inferred_task"], listed["inferred_task"]);
+
+        let row = f
+            .label(
+                serde_json::json!({"session_ref": reference, "outcome": "partly_kept"}),
+                &[],
+            )
+            .unwrap()["session"]
+            .clone();
+        assert_eq!(row["user_task"], "bug_fix", "absent keeps the task");
+        assert_eq!(row["user_outcome"], "partly_kept");
+
+        let row = f
+            .label(
+                serde_json::json!({"session_ref": reference, "task": null}),
+                &[],
+            )
+            .unwrap()["session"]
+            .clone();
+        assert!(row["user_task"].is_null(), "null clears it");
+        assert_eq!(row["user_outcome"], "partly_kept");
+        assert_eq!(f.stored_labels(), 1);
+
+        f.label(
+            serde_json::json!({"session_ref": reference, "outcome": null}),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(f.stored_labels(), 0, "a label with nothing set is not kept");
+        assert_nothing_identifying(&f, &f.list(&[], &[]));
+    }
+
+    #[test]
+    fn only_the_closed_words_are_taken() {
+        for params in [
+            serde_json::json!({"task": "bug_fix"}),
+            serde_json::json!({"session_ref": 7, "task": "bug_fix"}),
+        ] {
+            assert_eq!(
+                label_params(&params),
+                Err(ERR_SESSION_REF_INVALID),
+                "{params}"
+            );
+        }
+        for params in [
+            serde_json::json!({"session_ref": "t0"}),
+            serde_json::json!({"session_ref": "t0", "task": "no_edits"}),
+            serde_json::json!({"session_ref": "t0", "task": "Bug fix"}),
+            serde_json::json!({"session_ref": "t0", "task": 1}),
+            serde_json::json!({"session_ref": "t0", "outcome": "accepted"}),
+            serde_json::json!({"session_ref": "t0", "outcome": true}),
+            serde_json::json!({"session_ref": "t0", "task": "docs", "outcome": "kept!"}),
+        ] {
+            assert_eq!(
+                label_params(&params),
+                Err(ERR_SESSION_LABEL_INVALID),
+                "{params}"
+            );
+        }
+        let (reference, change) = label_params(
+            &serde_json::json!({"session_ref": "t3", "task": "tests", "outcome": null}),
+        )
+        .unwrap();
+        assert_eq!(reference, "t3");
+        assert_eq!(change.task, LabelEdit::Set(LabelledTask::Tests));
+        assert_eq!(change.outcome, LabelEdit::Clear);
+    }
+
+    /// A row read again when its file grows is made under a new reference,
+    /// and keeps the person's label: it is keyed by the session, not the
+    /// reference.
+    #[test]
+    fn a_label_survives_the_row_being_read_again() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        let before = only(&f.list(&[], &[]))["session_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.label(
+            serde_json::json!({"session_ref": before, "task": "refactor", "outcome": "kept"}),
+            &[],
+        )
+        .unwrap();
+
+        let mut grown = claude_bytes();
+        grown.extend_from_slice(b"\n");
+        std::fs::write(&path, grown).unwrap();
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        let row = only(&f.list(&[], &[]));
+        let after = row["session_ref"].as_str().unwrap();
+        assert_ne!(after, before, "made again under a new reference");
+        assert_eq!(row["user_task"], "refactor");
+        assert_eq!(row["user_outcome"], "kept");
+        // The old reference names nothing now.
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": before, "outcome": "thrown_away"}),
+                &[]
+            ),
+            Err(ERR_SESSION_UNKNOWN)
+        );
+        // A store opened again reads the same label.
+        let reopened = CounterPass::with_keys(
+            f.dir.path().join(COUNTER_ROWS_FILE),
+            Box::new(InMemoryDigestKeyStore::with_seed([f.seed; 32])),
+        );
+        reopened.keys_load_or_create_for_test();
+        let row = only(&reopened.sessions_value(true, &NeverFolders::NONE, &[], 10));
+        assert_eq!(row["user_task"], "refactor");
+    }
+
+    /// No label is set on a row in a Never folder, and one whose folder
+    /// becomes Never goes with its row: it does not come back when the
+    /// folder is watched again.
+    #[test]
+    fn a_never_folder_keeps_no_label() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        let reference = only(&f.list(&[], &[]))["session_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": reference, "task": "docs"}),
+                &[PROJECT]
+            ),
+            Err(ERR_SESSION_UNKNOWN)
+        );
+        assert_eq!(f.stored_labels(), 0);
+
+        f.label(
+            serde_json::json!({"session_ref": reference, "task": "docs"}),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(f.stored_labels(), 1);
+        // Never: hidden at once, and gone from the store with the row at
+        // the next pass.
+        assert_eq!(
+            rows(&f.list(&[PROJECT], &[])),
+            Vec::<serde_json::Value>::new()
+        );
+        f.run_at(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)], &[PROJECT], now());
+        assert_eq!(f.stored_labels(), 0);
+        let text = std::fs::read_to_string(f.dir.path().join(COUNTER_ROWS_FILE)).unwrap();
+        assert!(!text.contains("\"labels\""), "{text}");
+
+        // Watched again: read again, with no label.
+        f.run_at(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)], &[], now());
+        let row = only(&f.list(&[], &[]));
+        assert!(row["user_task"].is_null(), "{row}");
+    }
+
+    /// A label goes with its row when the row ages out of the kept weeks.
+    #[test]
+    fn a_label_ages_out_with_its_row() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        let reference = only(&f.list(&[], &[]))["session_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.label(
+            serde_json::json!({"session_ref": reference, "outcome": "kept"}),
+            &[],
+        )
+        .unwrap();
+        let later = now()
+            + Duration::weeks(crate::insights::analytics_constants::COUNTER_STORE_KEEP_WEEKS)
+            + Duration::days(1);
+        f.run_at(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)], &[], later);
+        assert_eq!(rows(&f.list(&[], &[])), Vec::<serde_json::Value>::new());
+        assert_eq!(f.stored_labels(), 0);
+    }
+
+    #[test]
+    fn clear_removes_every_label() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        let reference = only(&f.list(&[], &[]))["session_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.label(
+            serde_json::json!({"session_ref": reference, "task": "tests"}),
+            &[],
+        )
+        .unwrap();
+        f.pass.clear().unwrap();
+        assert!(!f.dir.path().join(COUNTER_ROWS_FILE).exists());
+        // A label after the clear names nothing, and makes no key.
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": reference, "task": "tests"}),
+                &[]
+            ),
+            Err(ERR_SESSION_UNKNOWN)
+        );
+        assert!(f.pass.key_is_absent_for_test());
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        assert!(only(&f.list(&[], &[]))["user_task"].is_null());
+    }
+
+    #[test]
+    fn off_writes_nothing_and_an_automated_row_takes_no_label() {
+        let f = Fixture::new();
+        let (reference, change) =
+            label_params(&serde_json::json!({"session_ref": "t0", "task": "docs"})).unwrap();
+        assert_eq!(
+            f.pass
+                .label_value(false, &reference, change, &NeverFolders::NONE, &[]),
+            Ok(serde_json::json!({"enabled": false, "feed": "counter_pass"}))
+        );
+        assert!(f.pass.key_is_absent_for_test(), "no key made");
+        assert!(!f.dir.path().join(COUNTER_ROWS_FILE).exists());
+
+        let automated = String::from_utf8(codex_bytes()).unwrap().replace(
+            r#""model_provider":"openai""#,
+            r#""model_provider":"openai","source":{"subagent":"review"}"#,
+        );
+        let path = f.write("auto.jsonl", automated.as_bytes());
+        f.run(&[(SOURCE_CODEX, &path, PROJECT)]);
+        assert_eq!(
+            f.list(&[], &[])["sessions_stored"],
+            0,
+            "automated, not listed"
+        );
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": "t0", "task": "docs"}),
+                &[]
+            ),
+            Err(ERR_SESSION_UNKNOWN)
+        );
+    }
+
+    /// Back-compat: a store written before labels loads with none and
+    /// lists every row as before, plus the new keys; a store with no label
+    /// is written without the key, as an older daemon wrote it.
+    #[test]
+    fn a_store_from_before_labels_reads_and_is_written_as_before() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        let text = std::fs::read_to_string(f.dir.path().join(COUNTER_ROWS_FILE)).unwrap();
+        assert!(!text.contains("\"labels\""), "{text}");
+        let row = only(&f.list(&[], &[]));
+        let keys: std::collections::BTreeSet<&str> = row
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for added in ["inferred_task", "user_task", "user_outcome"] {
+            assert!(keys.contains(added), "{added}");
+        }
+        // A label moves no key a row carried before.
+        let reference = row["session_ref"].as_str().unwrap().to_string();
+        let labelled = f
+            .label(
+                serde_json::json!({"session_ref": reference, "task": "other"}),
+                &[],
+            )
+            .unwrap()["session"]
+            .clone();
+        for key in [
+            "session_ref",
+            "source",
+            "started_at",
+            "turns",
+            "tokens",
+            "sparkline",
+            "inferred_task",
+        ] {
+            assert_eq!(labelled[key], row[key], "{key}");
+        }
+        assert_eq!(labelled["user_task"], "other");
+    }
+
+    #[test]
+    fn the_label_method_is_advertised_dispatched_gated_and_local() {
+        let method = "insights_session_label";
+        assert!(super::super::ipc::METHODS.contains(&method));
+        assert!(super::super::ipc::DEV_DRY_RUN_LOCAL_METHODS.contains(&method));
+        let (_dir, mut s) = shared();
+        s.dev_dry_run = true;
+        let params = serde_json::json!({"session_ref": "t0", "task": "docs"});
+        let r = super::super::ipc::handle_request(&s, &call(method, params.clone()));
+        assert_eq!(
+            r.result.unwrap(),
+            serde_json::json!({"enabled": false, "feed": "counter_pass"})
+        );
+        // Params are checked before the gate.
+        let r = super::super::ipc::handle_request(
+            &s,
+            &call(
+                method,
+                serde_json::json!({"session_ref": "t0", "task": "no_edits"}),
+            ),
+        );
+        let error = r.error.unwrap();
+        assert_eq!(error.code, ERR_BAD_PARAMS);
+        assert_eq!(error.message, ERR_SESSION_LABEL_INVALID);
+        // On, with no row by that reference.
+        s.settings.lock().unwrap().insights_counter_pass = true;
+        let r = super::super::ipc::handle_request(&s, &call(method, params));
+        let error = r.error.unwrap();
+        assert_eq!(error.code, ERR_BAD_PARAMS);
+        assert_eq!(error.message, ERR_SESSION_UNKNOWN);
     }
 }
