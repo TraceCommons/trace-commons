@@ -1993,7 +1993,7 @@ async fn a_closed_link_is_final_and_links_move_only_forward() {
     ] {
         let error = runtime_exec(&fixture, Some(&tenant), &sql)
             .await
-            .expect_err(&format!("{what}"));
+            .expect_err(what);
         assert!(is_check_violation(&error), "{what}: {error}");
     }
 }
