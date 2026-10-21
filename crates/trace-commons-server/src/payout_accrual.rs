@@ -213,11 +213,14 @@ pub fn plan_rail_accruals(
     let mut ref_of_hash: HashMap<&str, &str> = HashMap::new();
     for batch in finalized {
         for line in &batch.line_items {
-            if line.settled_credit_delta_micros <= 0 {
-                continue;
-            }
+            // Every finalized line locates its events, so a reversal of an
+            // event in a line that accrued nothing is found, and then
+            // skipped, rather than held as unlocatable.
             for event in &line.source_credit_event_ids {
                 line_of_event.insert(*event, (batch, line));
+            }
+            if line.settled_credit_delta_micros <= 0 {
+                continue;
             }
             ref_of_hash.insert(
                 line.credit_account_hash.as_str(),
@@ -685,6 +688,39 @@ mod tests {
                 .writes
                 .iter()
                 .all(|write| write.kind == PayoutAccrualKind::Credit)
+        );
+    }
+
+    #[test]
+    fn a_reversal_in_a_line_that_accrued_nothing_is_skipped_not_held() {
+        let account = Uuid::new_v4();
+        let credited = Uuid::new_v4();
+        let batches = [batch(
+            TraceCreditSettlementBatchStatus::Finalized,
+            vec![line(&format!("account:{account}"), 0, &[credited])],
+        )];
+        let events = [
+            event(
+                credited,
+                "principal-a",
+                "1",
+                TraceCreditSettlementState::Final,
+                None,
+            ),
+            event(
+                Uuid::new_v4(),
+                "principal-a",
+                "-1",
+                TraceCreditSettlementState::Reversed,
+                Some(credited),
+            ),
+        ];
+        let planned = plan(&batches, &events, &HashMap::new());
+        assert!(planned.writes.is_empty());
+        assert!(planned.holds.is_empty());
+        assert_eq!(
+            planned.skipped.get("payout_reversal_credit_missing"),
+            Some(&1)
         );
     }
 
