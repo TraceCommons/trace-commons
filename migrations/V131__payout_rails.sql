@@ -50,12 +50,17 @@
 -- broader. trace_payout_audit is append-only (SELECT, INSERT). Accruals are
 -- never re-priced: the runtime may only set an unowned accrual's owner.
 --
--- FOREIGN KEYS to trace_accounts are NO ACTION, deliberately not CASCADE:
--- an account with payout rows refuses deletion (the unbound-account reaper
--- counts it skipped, V101), and the reaper's pinned cascade set is unchanged.
--- tenant_id cascades from trace_tenants, the V2 pattern. Account and batch
--- references are deferred to commit, as V94's are, because a tenant delete
--- can reach the parent and the child in either order.
+-- FOREIGN KEYS to trace_accounts are NO ACTION, deliberately not CASCADE,
+-- and NOT deferrable: an account with payout rows refuses deletion at the
+-- DELETE itself, so the unbound-account reaper (V101), which deletes each
+-- candidate inside its own subtransaction, rolls that one back and counts it
+-- skipped. A deferred check would fire only at the reaper's COMMIT and abort
+-- the whole batch on every tick. The reaper's pinned cascade set is
+-- unchanged. tenant_id cascades from trace_tenants, the V2 pattern; a
+-- tenant delete removes the account and its payout rows in one statement,
+-- before the end-of-statement check. The settlement batch reference is
+-- deferred to commit as V94's is: batches are never deleted on their own,
+-- only by a tenant cascade, which can reach parent and child in either order.
 --
 -- Idempotent where a role is concerned, and applies under a non-superuser
 -- CREATEROLE migrator (migration_atomicity_pg).
@@ -120,7 +125,7 @@ CREATE TABLE trace_payout_links (
         (state = 'closed') = (final_paid IS NOT NULL)
     ),
     FOREIGN KEY (tenant_id, account_id) REFERENCES trace_accounts(tenant_id, account_id)
-        ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED
+        ON DELETE NO ACTION
 );
 -- At most one active, one waiting and one closing link per account and rail.
 -- No uniqueness on recipient_index: many accounts may name one recipient (D7).
@@ -174,7 +179,7 @@ CREATE TABLE trace_payout_link_requests (
     ),
     CONSTRAINT trace_payout_link_requests_expiry_shape CHECK (expires_at > created_at),
     FOREIGN KEY (tenant_id, account_id) REFERENCES trace_accounts(tenant_id, account_id)
-        ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED
+        ON DELETE NO ACTION
 );
 
 -- Accruals: one row per rail per settled batch line (credit), or per
@@ -216,7 +221,7 @@ CREATE TABLE trace_payout_accruals (
         claimed_at IS NULL OR account_id IS NOT NULL
     ),
     FOREIGN KEY (tenant_id, account_id) REFERENCES trace_accounts(tenant_id, account_id)
-        ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
+        ON DELETE NO ACTION,
     FOREIGN KEY (tenant_id, settlement_batch_id)
         REFERENCES trace_credit_settlement_batches(tenant_id, settlement_batch_id)
         ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED
@@ -285,7 +290,7 @@ CREATE TABLE trace_payout_holds (
     cleared_at TIMESTAMPTZ,
     PRIMARY KEY (tenant_id, hold_id),
     FOREIGN KEY (tenant_id, account_id) REFERENCES trace_accounts(tenant_id, account_id)
-        ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED
+        ON DELETE NO ACTION
 );
 CREATE UNIQUE INDEX trace_payout_holds_one_open
     ON trace_payout_holds (tenant_id, account_id, rail_id, label) WHERE cleared_at IS NULL;

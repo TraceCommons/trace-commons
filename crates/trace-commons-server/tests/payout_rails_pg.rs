@@ -1466,3 +1466,63 @@ async fn a_link_request_is_replayed_once_and_taken_once() {
         vec![PayoutAuditAction::LinkRequested]
     );
 }
+
+/// An account with payout rows refuses deletion at the DELETE, not at
+/// COMMIT, so the reaper's per-candidate subtransaction can roll back one
+/// candidate and go on (V101). A tenant delete still removes everything.
+#[tokio::test]
+async fn an_account_with_payout_rows_refuses_deletion_at_the_statement() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let batch = finalized_batch(&fixture.owner, &tenant).await;
+    let store = &fixture.runtime;
+    store
+        .insert_payout_link(
+            &tenant,
+            &link(accounts[0], "near_ai", PayoutLinkState::Active, "reap"),
+        )
+        .await
+        .unwrap();
+    store
+        .insert_payout_accruals(
+            &tenant,
+            &[credit(
+                "near_ai",
+                batch,
+                Some(accounts[0]),
+                &sha("account:reap"),
+                1,
+                1,
+            )],
+        )
+        .await
+        .unwrap();
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.batch_execute("SAVEPOINT candidate").await.unwrap();
+    let refused = tx
+        .execute(
+            "DELETE FROM trace_accounts WHERE tenant_id = $1 AND account_id = $2",
+            &[&tenant, &accounts[0]],
+        )
+        .await
+        .expect_err("the account delete must be refused at the statement");
+    assert_eq!(
+        refused.code(),
+        Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION)
+    );
+    tx.batch_execute("ROLLBACK TO SAVEPOINT candidate")
+        .await
+        .unwrap();
+    tx.commit()
+        .await
+        .expect("the batch commits after skipping one");
+
+    let deleted = client
+        .execute("DELETE FROM trace_tenants WHERE tenant_id = $1", &[&tenant])
+        .await
+        .expect("a tenant delete cascades through accounts and payout rows");
+    assert_eq!(deleted, 1);
+}
