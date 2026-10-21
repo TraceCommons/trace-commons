@@ -876,6 +876,118 @@ pub struct JudgementSpend {
 }
 
 // ---------------------------------------------------------------------------
+// Attestation
+// ---------------------------------------------------------------------------
+
+/// SEC1 compressed secp256k1 public key length.
+const SEAL_PUBLIC_KEY_BYTES: usize = 33;
+/// EIP-191 address length.
+const ADDRESS_BYTES: usize = 20;
+
+/// `200` body of `GET /v1/attestation?nonce=<64 hex>`: the quote, and the
+/// two per-boot public values its report data binds. The client recomputes
+/// the binding from `seal_public_key` and `signing_address` and requires the
+/// quote's report data to match before it seals anything to the key.
+///
+/// This checks shape only. Verifying the quote is the client's job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JudgementAttestationResponse {
+    quote_hex: String,
+    seal_public_key: String,
+    signing_address: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAttestationResponse {
+    quote_hex: String,
+    seal_public_key: String,
+    signing_address: String,
+}
+
+impl JudgementAttestationResponse {
+    /// `quote_hex` is non-empty, even-length lowercase hex;
+    /// `seal_public_key` is 66 lowercase hex, a SEC1 compressed point
+    /// (`02` or `03` prefix); `signing_address` is `0x` and 40 lowercase
+    /// hex.
+    pub fn new(
+        quote_hex: String,
+        seal_public_key: String,
+        signing_address: String,
+    ) -> Result<Self, JudgementWireError> {
+        let quote_ok = !quote_hex.is_empty()
+            && quote_hex.len().is_multiple_of(2)
+            && is_lower_hex(&quote_hex, quote_hex.len());
+        if !quote_ok {
+            return Err(JudgementWireError::Malformed("quote_hex"));
+        }
+        let seal_ok = is_lower_hex(&seal_public_key, SEAL_PUBLIC_KEY_BYTES * 2)
+            && (seal_public_key.starts_with("02") || seal_public_key.starts_with("03"));
+        if !seal_ok {
+            return Err(JudgementWireError::Malformed("seal_public_key"));
+        }
+        let address_ok = signing_address
+            .strip_prefix("0x")
+            .is_some_and(|hex| is_lower_hex(hex, ADDRESS_BYTES * 2));
+        if !address_ok {
+            return Err(JudgementWireError::Malformed("signing_address"));
+        }
+        Ok(Self {
+            quote_hex,
+            seal_public_key,
+            signing_address,
+        })
+    }
+
+    pub fn quote_hex(&self) -> &str {
+        &self.quote_hex
+    }
+
+    pub fn quote_bytes(&self) -> Vec<u8> {
+        hex::decode(&self.quote_hex).expect("validated lowercase hex")
+    }
+
+    pub fn seal_public_key(&self) -> &str {
+        &self.seal_public_key
+    }
+
+    pub fn seal_public_key_bytes(&self) -> [u8; SEAL_PUBLIC_KEY_BYTES] {
+        let mut out = [0u8; SEAL_PUBLIC_KEY_BYTES];
+        hex::decode_to_slice(&self.seal_public_key, &mut out).expect("validated lowercase hex");
+        out
+    }
+
+    pub fn signing_address(&self) -> &str {
+        &self.signing_address
+    }
+
+    pub fn signing_address_bytes(&self) -> [u8; ADDRESS_BYTES] {
+        let mut out = [0u8; ADDRESS_BYTES];
+        hex::decode_to_slice(&self.signing_address[2..], &mut out)
+            .expect("validated lowercase hex");
+        out
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(&RawAttestationResponse {
+            quote_hex: self.quote_hex.clone(),
+            seal_public_key: self.seal_public_key.clone(),
+            signing_address: self.signing_address.clone(),
+        })
+        .expect("an attestation response is JSON serializable")
+    }
+}
+
+/// Parse a `GET /v1/attestation` body, closed.
+pub fn parse_judgement_attestation(
+    body: &[u8],
+) -> Result<JudgementAttestationResponse, JudgementWireError> {
+    let raw: RawAttestationResponse =
+        serde_json::from_slice(body).map_err(|_| JudgementWireError::Malformed("attestation"))?;
+    JudgementAttestationResponse::new(raw.quote_hex, raw.seal_public_key, raw.signing_address)
+}
+
+// ---------------------------------------------------------------------------
 // Request
 // ---------------------------------------------------------------------------
 
@@ -1741,6 +1853,102 @@ mod tests {
             "Zm9\u{e9}", // non-ASCII
         ] {
             assert_eq!(base64_decode(bad), None, "{bad:?}");
+        }
+    }
+
+    // ---- attestation ----
+
+    fn attestation_json(quote: &str, seal: &str, address: &str) -> String {
+        serde_json::json!({
+            "quote_hex": quote,
+            "seal_public_key": seal,
+            "signing_address": address,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn an_attestation_response_parses_in_the_spec_shape() {
+        let seal = format!("02{}", "11".repeat(32));
+        let address = format!("0x{}", "ab".repeat(20));
+        let json = attestation_json("00ff10", &seal, &address);
+        let parsed = parse_judgement_attestation(json.as_bytes()).unwrap();
+        assert_eq!(parsed.quote_hex(), "00ff10");
+        assert_eq!(parsed.quote_bytes(), vec![0x00, 0xff, 0x10]);
+        assert_eq!(parsed.seal_public_key(), seal);
+        let mut seal_bytes = [0x11u8; 33];
+        seal_bytes[0] = 0x02;
+        assert_eq!(parsed.seal_public_key_bytes(), seal_bytes);
+        assert_eq!(parsed.signing_address(), address);
+        assert_eq!(parsed.signing_address_bytes(), [0xab; 20]);
+        let value: serde_json::Value = serde_json::from_str(&parsed.to_json()).unwrap();
+        assert_eq!(
+            value,
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()
+        );
+        let rebuilt =
+            JudgementAttestationResponse::new("00ff10".to_string(), seal.clone(), address.clone())
+                .unwrap();
+        assert_eq!(rebuilt, parsed);
+        // Both compressed-point prefixes are accepted.
+        let odd = format!("03{}", "11".repeat(32));
+        assert!(
+            parse_judgement_attestation(attestation_json("00", &odd, &address).as_bytes()).is_ok()
+        );
+    }
+
+    #[test]
+    fn a_malformed_attestation_response_is_refused() {
+        let seal = format!("02{}", "11".repeat(32));
+        let address = format!("0x{}", "ab".repeat(20));
+        for (name, body) in [
+            ("empty quote", attestation_json("", &seal, &address)),
+            ("odd quote", attestation_json("abc", &seal, &address)),
+            ("uppercase quote", attestation_json("AB", &seal, &address)),
+            ("quote prefix", attestation_json("0xab", &seal, &address)),
+            (
+                "uncompressed seal key",
+                attestation_json("ab", &format!("04{}", "11".repeat(64)), &address),
+            ),
+            (
+                "seal key prefix",
+                attestation_json("ab", &format!("05{}", "11".repeat(32)), &address),
+            ),
+            (
+                "short seal key",
+                attestation_json("ab", &format!("02{}", "11".repeat(31)), &address),
+            ),
+            (
+                "uppercase seal key",
+                attestation_json("ab", &format!("02{}", "AA".repeat(32)), &address),
+            ),
+            (
+                "address without prefix",
+                attestation_json("ab", &seal, &"ab".repeat(20)),
+            ),
+            (
+                "short address",
+                attestation_json("ab", &seal, &format!("0x{}", "ab".repeat(19))),
+            ),
+            (
+                "uppercase address",
+                attestation_json("ab", &seal, &format!("0x{}", "AB".repeat(20))),
+            ),
+            (
+                "unknown field",
+                r#"{"quote_hex":"ab","seal_public_key":"x","signing_address":"y","extra":1}"#
+                    .to_string(),
+            ),
+            (
+                "old shape without the seal key",
+                format!(r#"{{"quote_hex":"ab","signing_address":"{address}"}}"#),
+            ),
+            ("not json", "nope".to_string()),
+        ] {
+            assert!(
+                parse_judgement_attestation(body.as_bytes()).is_err(),
+                "{name}"
+            );
         }
     }
 
