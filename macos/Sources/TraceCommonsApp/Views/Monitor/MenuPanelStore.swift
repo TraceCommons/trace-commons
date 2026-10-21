@@ -589,8 +589,10 @@ enum MenuPanelData {
 
     /// The Private AI steps as the strip's columns: verified (up) over all
     /// calls (down). Nil while no ledger answered: unknown, never zero.
+    /// Nil too when the steps have no span (`span(_:)`), so they are never
+    /// drawn beside trace steps counted on another clock.
     static func privateAISteps(_ activity: DaemonData.InferenceActivity) -> [GlassDayColumn]? {
-        guard activity.readable, !activity.steps.isEmpty else { return nil }
+        guard span(activity) != nil else { return nil }
         return activity.steps.enumerated().map { index, step in
             GlassDayColumn(id: String(index), up: step.verified, down: step.calls)
         }

@@ -167,6 +167,9 @@ final class MenuBarGlassPanelTests: XCTestCase {
              {"start":"2026-10-21T10:00:00+00:00","calls":1,"verified":1}]}
             """#.utf8))
         XCTAssertNil(MenuPanelData.span(zero))
+        XCTAssertNil(
+            MenuPanelData.privateAISteps(zero),
+            "steps with no clock are not drawn, or they would pair with trace steps on another clock")
         XCTAssertEqual(
             MenuPanelData.steps(shared: [Date()], kept: [], span: MenuPanelData.Span(end: Date(), stepHours: 0)), [])
     }
