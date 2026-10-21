@@ -62,6 +62,10 @@ private final class OnboardingSessionDaemon: DaemonCalling {
         case "near_ai_credential_start":
             phase = .waiting
             return #"{"id":1,"result":{"attempt_id":"synthetic-attempt","browser_url":"https://cloud.example.invalid/native-login","status":"waiting_for_browser"}}"#
+        case "get_settings", "harness_list", "managed_snapshot":
+            // What the key is behind is read again once a sign-in lands.
+            // Reads only; the reply is a refusal, so nothing is published.
+            return #"{"id":1,"error":{"code":"unavailable","message":"synthetic_refusal"}}"#
         default:
             // Enrollment, wallet requests and consent writes are forbidden in
             // these tests. Record and fail them even if the caller ignores errors.
@@ -269,7 +273,11 @@ final class NearAiOnboardingSessionTests: XCTestCase {
         let start = try XCTUnwrap(starts.first)
         let params = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(start.params.utf8)) as? [String: Any])
         XCTAssertTrue(params.isEmpty, "Sign-in must not carry enrollment or consent parameters")
-        XCTAssertEqual(Set(daemon.calls.map(\.method)), ["near_ai_credential_start", "near_ai_credential_status", "near_ai_balance"])
+        XCTAssertEqual(
+            Set(daemon.calls.map(\.method)),
+            ["near_ai_credential_start", "near_ai_credential_status", "near_ai_balance",
+             "get_settings", "harness_list", "managed_snapshot"],
+            "The landed sign-in re-reads what the key is behind, and writes nothing else")
     }
 
     @MainActor

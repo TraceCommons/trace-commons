@@ -192,7 +192,7 @@ final class InferenceParityTests: XCTestCase {
                        "CredentialSurface.actionExplains(", "CredentialSurface.actionLabel(", "BalanceSurface.actionToDraw(",
                        "Self.providerOptions(copy)", "copy.credentialWalletNotice", "model.startNearAiCredential(provider:",
                        "model.cancelNearAiCredential()", "model.forgetNearAiCredential()", "model.migrateNearAiCredential()",
-                       "model.refreshNearAiCredential()", "pollInterval", "model.credentialBusy",
+                       "model.credentialBusy",
                        "actionButton(balanceAction)"] {
             XCTAssertTrue(source.contains(needle), "CredentialSection.swift lacks \(needle)")
         }
@@ -229,14 +229,14 @@ final class InferenceParityTests: XCTestCase {
                            + "                        .accessibilityHidden(true)",
                        ".buttonStyle(GlassButtonStyle(prominent && action == .obtain ? .primary : .glass))\n"
                            + "                .disabled(model.credentialBusy)",
-                       // The poll sits on the card's always-present stack,
-                       // never on a branch that may not be drawn.
-                       "            actionButton(balanceAction)\n        }\n        .task(id: action) {\n",
-                       "while action == .cancel, !Task.isCancelled {",
-                       "try? await Task.sleep(for: Self.pollInterval)"] {
+                       ] {
             XCTAssertTrue(source.contains(needle), "CredentialSection.swift lacks \(needle)")
         }
-        XCTAssertEqual(source.components(separatedBy: ".task(").count - 1, 1, "the card has exactly one poll")
+        // The sign-in poll is the model's (#1535): it runs whichever view
+        // started the sign-in, so the card owns no loop of its own.
+        XCTAssertEqual(source.components(separatedBy: ".task(").count - 1, 0, "the card owns no poll")
+        XCTAssertFalse(source.contains("pollInterval"))
+        XCTAssertTrue(try Self.text("AppModel.swift").contains("credentialPollInterval"))
         XCTAssertFalse(source.contains("palette("), "the card reads the glass status, not the TC palette")
         let balance = try Self.text("Views/BalanceRow.swift")
         for needle in ["GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(tone))",
