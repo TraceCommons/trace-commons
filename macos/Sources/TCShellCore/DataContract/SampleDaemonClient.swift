@@ -504,6 +504,13 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         throw DaemonDataError.notAvailableYet(method: "insights_session_label")
     }
 
+    public func insightsAnalyzeSession(sessionRef: String, save: Bool) async throws
+        -> DaemonData.InsightsAnalyzeSessionAnswer {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        // SAMPLE: no counter pass is recorded, so there is no row to analyze.
+        throw DaemonDataError.notAvailableYet(method: "insights_analyze_session")
+    }
+
     public func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance {
         guard set != .coreDown else { throw DaemonDataError.unreachable }
         // SAMPLE: no glance is recorded (it needs a live IronWire ledger), so

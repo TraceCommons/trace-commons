@@ -26,6 +26,19 @@ final class InsightsModel {
     typealias ModelAnswersReader = @Sendable () async throws -> DaemonData.InsightsModelAnswers
     private let modelAnswersReader: ModelAnswersReader?
     private var modelAnswersGeneration = UUID()
+    /// Asks the daemon to analyze and save one watched trace by its
+    /// Sessions reference (`insights_analyze_session`). `nil` without a
+    /// daemon, and for a custom store, which the daemon never writes.
+    typealias SessionAnalyzer = @Sendable (String) async throws -> DaemonData.InsightsAnalyzeSessionAnswer
+    private let sessionAnalyzer: SessionAnalyzer?
+    /// A watched trace can be analyzed and saved from its Sessions row.
+    var canAnalyzeSessions: Bool { sessionAnalyzer != nil }
+    /// The watched trace being analyzed and saved, from the moment it is
+    /// asked for until the daemon answers; `nil` otherwise.
+    private(set) var analyzingSession: String?
+    /// The watched trace whose last Analyze & save failed, with the core's
+    /// copy key that says why; cleared by the next one asked for.
+    private(set) var sessionAnalyzeFailure: (reference: String, key: String)?
     /// The Models card's answers, held only while the daemon answered them
     /// enabled and readable; `nil` draws no card, never an empty one.
     private(set) var modelAnswers: DaemonData.InsightsModelAnswers?
@@ -93,10 +106,12 @@ final class InsightsModel {
             defer { if scoped { file?.stopAccessingSecurityScopedResource() } }
             return try TCInsights.call(request)
         }.value
-    }, weekReader: WeekReader? = nil, modelAnswersReader: ModelAnswersReader? = nil) {
+    }, weekReader: WeekReader? = nil, modelAnswersReader: ModelAnswersReader? = nil,
+         sessionAnalyzer: SessionAnalyzer? = nil) {
         self.service = service
         self.weekReader = weekReader
         self.modelAnswersReader = modelAnswersReader
+        self.sessionAnalyzer = sessionAnalyzer
     }
 
     /// Ask the daemon for one week of feed T (`nil` is the current week).
@@ -143,6 +158,7 @@ final class InsightsModel {
     }
     func close() {
         active = false; generation = UUID(); task?.cancel(); task = nil; busy = false
+        analyzingSession = nil; sessionAnalyzeFailure = nil
         weekGeneration = UUID(); modelAnswersGeneration = UUID()
         episodePresentation = UUID(); episodeTask?.cancel(); episodeTask = nil; episodeBusy = false
         cardPresentation = UUID(); cardTask?.cancel(); cardTask = nil; cardBusy = false
@@ -273,6 +289,62 @@ final class InsightsModel {
     func save() {
         guard let selectedFile, selected != nil, !selectedIsSaved else { return }
         perform(.init("analyze", source: selectedSource, file: selectedFile.path, save: true))
+    }
+    /// Analyze & save on a watched trace's Sessions row (Insights PM,
+    /// 2026-10-21): the daemon reads the file its watcher found, so the
+    /// person never picks one, and saves the snapshot. The model is busy
+    /// from the moment it is asked; on success the saved snapshot is the
+    /// detail on screen and the saved list, summary and episodes are read
+    /// again, as after any save. `true` when the snapshot is on screen, so
+    /// the caller can open Analyze; a failure leaves the detail as it was
+    /// and names the row with the core's line.
+    @discardableResult
+    func analyzeAndSave(session reference: String) async -> Bool {
+        guard active, !busy, analyzingSession == nil, let sessionAnalyzer else { return false }
+        busy = true; error = nil; analyzingSession = reference; sessionAnalyzeFailure = nil
+        let token = generation
+        let outcome: Result<InsightsResponse, Error>
+        do {
+            let answer = try await sessionAnalyzer(reference)
+            guard answer.enabled, answer.readable == true, let analysis = answer.analysis else {
+                throw InsightsError.invalidResponse
+            }
+            outcome = .success(try TCInsights.analysis(analysis.data))
+        } catch { outcome = .failure(error) }
+        guard active, generation == token else { return false }
+        analyzingSession = nil
+        guard case .success(let response) = outcome, response.type == "analyze",
+              let insight = response.insight else {
+            busy = false
+            sessionAnalyzeFailure = (reference, Self.sessionAnalyzeKey(outcome))
+            return false
+        }
+        selected = insight; selectedIsSaved = true; selectedFile = nil
+        snapshots.removeAll { $0.id == insight.id }
+        snapshots.insert(insight, at: 0)
+        invalidateCards()
+        invalidatedEpisodeIDs = response.invalidatedEpisodeIDs
+        recordComparisonEffects(response)
+        if let episodeID = episodeDetail?.episode.id, response.invalidatedEpisodeIDs.contains(episodeID) {
+            closeEpisode()
+        }
+        refreshEpisodesAfterSnapshotChain = true
+        busy = false
+        perform(.init("list"), preservingMutationEffects: true)
+        return true
+    }
+    /// The core's line for a failed Analyze & save: the daemon's fixed
+    /// labels for a file that has gone and a row that is no longer listed,
+    /// and one line for everything else.
+    static func sessionAnalyzeKey(_ outcome: Result<InsightsResponse, Error>) -> String {
+        guard case .failure(let error) = outcome, case .daemon(_, let message) = error as? DaemonDataError else {
+            return "analytics_analyze_failed"
+        }
+        switch message {
+        case "insights-session-file-gone": return "analytics_analyze_file_gone"
+        case "insights-session-unknown": return "analytics_analyze_unknown"
+        default: return "analytics_analyze_failed"
+        }
     }
     func explain(_ id: String) {
         guard active, !busy else { return }

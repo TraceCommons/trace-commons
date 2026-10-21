@@ -334,6 +334,12 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
                               as: DaemonData.InsightsSessionLabelAnswer.self)
     }
 
+    public func insightsAnalyzeSession(sessionRef: String, save: Bool) async throws
+        -> DaemonData.InsightsAnalyzeSessionAnswer {
+        try await call("insights_analyze_session", params: ["session_ref": sessionRef, "save": save],
+                       as: DaemonData.InsightsAnalyzeSessionAnswer.self)
+    }
+
     public func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance {
         try await call("insights_glance", params: ["tz": tzSeconds], as: DaemonData.InsightsGlance.self)
     }
