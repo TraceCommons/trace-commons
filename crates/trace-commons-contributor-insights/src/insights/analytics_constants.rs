@@ -190,12 +190,40 @@ pub const COUNTER_PASS_EXCLUDES_NEVER_FOLDERS: bool = true;
 /// The counter store keeps at most this many sessions; past it the oldest go
 /// first. Owner decision D4, open (a capped daemon-local store).
 pub const COUNTER_STORE_MAX_SESSIONS: usize = 2_048;
-/// ...and at most this many turns across every session. Owner decision D4,
-/// open.
+/// ...and at most this many turns across every session's Claude Code
+/// series. Codex per-turn series do not count here: they have their own
+/// budget, below. Owner decision D4, open.
 pub const COUNTER_STORE_MAX_TURNS: usize = 131_072;
-/// ...and at most this many tool calls across every session. Owner decision
-/// D4, open.
+/// ...and at most this many tool calls across every session's Claude Code
+/// series; Codex's have their own budget. Owner decision D4, open.
 pub const COUNTER_STORE_MAX_TOOL_CALLS: usize = 131_072;
+/// The Codex per-turn series' own budget, in turns across every Codex row
+/// (owner decision, 2026-10-20: a separate allowance for Codex store data).
+/// Past it, or past the tool-call budget below, the oldest Codex rows lose
+/// their per-turn series only, never the row: the row, its observed totals,
+/// dates and facts stay, so the session still counts in every weekly
+/// figure, while the Sessions drill and the Models answers read its
+/// per-turn data as unknown. Nothing is evicted for this budget.
+///
+/// Sized for 13 weeks of heavy Codex use. Measured 2026-10-20 on the
+/// owner's machine over `COUNTER_STORE_KEEP_WEEKS`: 2,517 Codex files,
+/// 198,687 `token_count` events, 188,156 turns after the reader drops
+/// repeats, about 166,700 once each session's own `MAX_SERIES_TURNS` cap
+/// applies, and 160,756 tool calls. 196,608 (1.5 times the shared caps)
+/// keeps about 18% headroom on turns and 22% on tool calls.
+///
+/// Size: serialized as the store's JSON, a turn is 185 bytes typical and at
+/// most about 225 (every counter near `u32::MAX`, a sub-second time); a
+/// tool call is 194 bytes typical and about 280 at most (a path digest and
+/// extension). At both budgets the Codex series add at most about 44 MB
+/// (turns) plus 55 MB (tool calls), about 99 MB, to the file, and about
+/// 74 MB typical; in memory a record is about 100 bytes, about 40 MB, held
+/// twice while a pass writes. The shared caps keep their own bound (about
+/// 65 MB at most) beside it.
+pub const COUNTER_STORE_MAX_CODEX_SERIES_TURNS: usize = 196_608;
+/// ...and at most this many tool calls across every Codex row's series.
+/// See `COUNTER_STORE_MAX_CODEX_SERIES_TURNS` for the sizing.
+pub const COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS: usize = 196_608;
 /// Sessions last written longer ago than this many weeks are not read, and
 /// their rows are dropped: enough for six weekly marks and a four-week
 /// baseline. Owner decision D4, open.
@@ -390,6 +418,22 @@ mod tests {
         assert_eq!(COUNTER_STORE_MAX_SESSIONS, 2_048);
         assert_eq!(COUNTER_STORE_MAX_TURNS, 131_072);
         assert_eq!(COUNTER_STORE_MAX_TOOL_CALLS, 131_072);
+        assert_eq!(COUNTER_STORE_MAX_CODEX_SERIES_TURNS, 196_608);
+        assert_eq!(COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS, 196_608);
+        // The newest Codex session always keeps its series: one session's
+        // own caps fit inside the budget.
+        const {
+            assert!(
+                COUNTER_STORE_MAX_CODEX_SERIES_TURNS
+                    >= trace_commons_protocol::insights_usage_series::MAX_SERIES_TURNS
+            )
+        };
+        const {
+            assert!(
+                COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS
+                    >= trace_commons_protocol::insights_usage_series::MAX_SERIES_TOOL_CALLS
+            )
+        };
         assert_eq!(COUNTER_STORE_KEEP_WEEKS, 13);
         assert_eq!(COUNTER_PASS_MAX_READS_PER_TICK, 16);
         assert_eq!(COUNTER_PASS_MAX_BYTES_PER_TICK, 64 * 1024 * 1024);
