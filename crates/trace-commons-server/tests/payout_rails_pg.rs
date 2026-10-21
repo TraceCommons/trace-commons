@@ -126,6 +126,19 @@ async fn fixture() -> Option<Fixture> {
         "the runtime login must not bypass RLS"
     );
     drop(check);
+    // Every accrual names a recorded rate epoch. The rails the tests price
+    // on record version v1 at one fixed rate, the same on every run.
+    for rail_id in ["near_ai", "test_keyed", "max_rail"] {
+        let recorded = runtime
+            .record_payout_rate_epoch(
+                &RailId::new(rail_id).unwrap(),
+                &RailRate::new("v1", 1, 1).unwrap(),
+                None,
+            )
+            .await
+            .expect("record the test rate epoch");
+        assert_ne!(recorded, PayoutRateEpochRecord::Conflict, "{rail_id} v1");
+    }
     Some(Fixture { owner, runtime })
 }
 
@@ -2249,4 +2262,33 @@ async fn hold_and_link_audit_rows_name_the_account_by_hash() {
         .unwrap()
         .get(0);
     assert_eq!(raw, 0);
+}
+
+#[tokio::test]
+async fn an_accrual_names_a_recorded_rate_epoch() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, accounts) = tenant_with_accounts(&fixture.owner, 1).await;
+    let batch = finalized_batch(&fixture.owner, &tenant).await;
+    let mut priced = credit(
+        "near_ai",
+        batch,
+        Some(accounts[0]),
+        &sha(&format!("epoch:{tenant}")),
+        4,
+        4,
+    );
+    // A version no boot ever recorded for this rail: the price cannot be
+    // traced to a rate, so the row is refused.
+    priced.rate_version = format!("never-{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let error = fixture
+        .runtime
+        .insert_payout_accruals(&tenant, std::slice::from_ref(&priced))
+        .await
+        .expect_err("an accrual priced at an unrecorded rate epoch");
+    assert!(
+        format!("{error:?}").contains("trace_payout_accruals_rate_epoch"),
+        "{error:?}"
+    );
 }

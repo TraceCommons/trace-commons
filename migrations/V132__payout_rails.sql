@@ -338,6 +338,13 @@ CREATE TABLE trace_payout_rate_epochs (
     observed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (rail_id, version)
 );
+-- Every accrual names an epoch its rail recorded, so each price traces to
+-- one immutable rate. Epochs are never deleted, so NO ACTION never fires on
+-- a delete; the check runs at the insert. Foreign-key checks bypass RLS.
+ALTER TABLE trace_payout_accruals
+    ADD CONSTRAINT trace_payout_accruals_rate_epoch
+    FOREIGN KEY (rail_id, rate_version)
+    REFERENCES trace_payout_rate_epochs (rail_id, version) ON DELETE NO ACTION;
 
 -- Control: the kill switch, as an append-only log per rail. seq orders the
 -- log: the latest row by seq is the rail's state, so a halt and a resume
