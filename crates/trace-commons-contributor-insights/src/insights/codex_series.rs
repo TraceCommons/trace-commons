@@ -750,7 +750,8 @@ impl<'k> CodexTurnSeriesScan<'k> {
             task: classify(&shape),
             shape,
             classifier_version: CLASSIFIER_VERSION,
-            active_secs: (!self.active_unknown)
+            // No prompt opened a span: the time was never measured.
+            active_secs: (!self.active_unknown && self.user_turns > 0)
                 .then(|| u32::try_from(self.active_ms / 1000).unwrap_or(u32::MAX)),
             finished: Some(
                 self.patch_calls > 0
