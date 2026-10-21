@@ -145,8 +145,10 @@ pauses judgements and breaks nothing else.
   no model outside the production allowlist (section 5). The image workflow
   takes a `profile: production | development` input, builds two differently
   named images (`ghcr.io/tracecommons/trace-commons-judgement` and
-  `...-judgement-development`), and for `production` checks that the binary's
-  `--version` line does not name the feature.
+  `...-judgement-development`), and for `production` checks that the image
+  refuses to boot when configured with `typesafe/jev-1.13`. (The `--version`
+  line from `trace-commons-build-info` carries no feature list, so it cannot
+  be the check.)
 - Each profile is deployed as **its own dstack app**, so its own app id. Keys
   derive from the app id, so a development deployment can never derive the
   production limiter or signing keys, even from an identical image.
@@ -164,7 +166,7 @@ against a signed response), never from a locally hashed manifest.
 
 **Image checks before push** (the workflow, mirroring the witness's three):
 the binary resolves its libraries (`--version`); boot refuses with no model
-configured; boot refuses with no dstack guest agent; boot refuses with no
+configured; a production image refuses a development model; boot refuses with no dstack guest agent; boot refuses with no
 limiter volume.
 
 **Keys, all via `GetKey` on `/v0/GetKey`**, each on its own path:
@@ -396,7 +398,9 @@ callable in a production build only if all of these hold:
 4. **Per request:** the service fetches the receipt for the completion's id
    (`GET {gateway}/signature/{id}?model=..&signing_algo=ed25519`), runs
    `verify_receipt` over the exact request and response bytes with
-   `expected_model = model_id`, and requires `ReceiptSignatureKind::ProviderTee`,
+   `expected_model = model_id` (it checks the signature itself, dispatching on
+   `signing_algo`), and requires `ReceiptAlgo::Ed25519` (an ECDSA signer is not
+   quote-bound), `ReceiptSignatureKind::ProviderTee`,
    a three-part receipt (`verdict.model == Some(model_id)`), and a signer in
    that model's pin set. A two-part or `gateway` receipt is refused: it binds
    no model. Any failure discards the label and returns
