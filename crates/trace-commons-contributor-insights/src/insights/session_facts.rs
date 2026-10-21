@@ -525,7 +525,10 @@ impl<'k> ClaudeFactsScan<'k> {
     }
 
     fn user(&mut self, row: &Value, at: Option<DateTime<Utc>>) {
-        let meta = row.get("isMeta").and_then(Value::as_bool) == Some(true);
+        // A compact summary is written by Claude Code, not the contributor.
+        let meta = ["isMeta", "isCompactSummary"]
+            .iter()
+            .any(|flag| row.get(flag).and_then(Value::as_bool) == Some(true));
         let (texts, results): (Vec<&str>, Vec<&Value>) = match row.pointer("/message/content") {
             Some(Value::String(text)) => (vec![text.as_str()], Vec::new()),
             Some(Value::Array(blocks)) => {
@@ -564,7 +567,7 @@ impl<'k> ClaudeFactsScan<'k> {
             } else if text.starts_with(CLAUDE_INTERRUPT_MARKERS[0]) {
                 self.interrupt();
             } else {
-                prompt_text = true;
+                prompt_text |= contributor_words(text);
             }
         }
         if prompt_text && !meta && results.is_empty() {
@@ -586,6 +589,8 @@ impl<'k> ClaudeFactsScan<'k> {
         self.user_turns = self.user_turns.saturating_add(1);
         self.barrier += 1;
         self.rejected_since_prompt = false;
+        // The answer to an earlier prompt does not answer this one.
+        self.last_assistant = None;
         self.close_span();
         self.span = Some(Span {
             start: at,
@@ -824,6 +829,46 @@ impl<'k> ClaudeFactsScan<'k> {
             delegated_unread: false,
             reviewer: false,
         }
+    }
+}
+
+/// The wrappers Claude Code writes around a slash command and its local
+/// output. What they hold is the interface's, not the contributor's words.
+const CLAUDE_COMMAND_WRAPPERS: [&str; 5] = [
+    "command-name",
+    "command-message",
+    "local-command-stdout",
+    "local-command-stderr",
+    "local-command-caveat",
+];
+
+/// Whether a user text holds the contributor's own words, read as the
+/// preview's task prompt reads it: the slash command wrappers are skipped,
+/// a slash command's non-empty arguments are words (`/review fix the login
+/// race`), and an unclosed wrapper or nothing left is none.
+fn contributor_words(mut text: &str) -> bool {
+    loop {
+        text = text.trim();
+        if let Some(args) = text.strip_prefix("<command-args>") {
+            let Some((args, rest)) = args.split_once("</command-args>") else {
+                return false;
+            };
+            if !args.trim().is_empty() {
+                return true;
+            }
+            text = rest;
+            continue;
+        }
+        let Some(tag) = CLAUDE_COMMAND_WRAPPERS
+            .iter()
+            .find(|tag| text.starts_with(&format!("<{tag}>")))
+        else {
+            return !text.is_empty();
+        };
+        let Some((_, rest)) = text.split_once(&format!("</{tag}>")) else {
+            return false;
+        };
+        text = rest;
     }
 }
 
@@ -1166,6 +1211,38 @@ mod tests {
         );
         // A denial after the last prompt: the denied call is followed by text.
         assert_eq!(facts("denial-twice").finished, Some(false));
+    }
+
+    /// The answer the earlier prompt got does not finish a session whose
+    /// last prompt went unanswered.
+    #[test]
+    fn a_trailing_unanswered_prompt_is_not_finished() {
+        let f = facts("finished-trailing-prompt");
+        assert_eq!(f.user_turns, Some(2));
+        assert_eq!(f.finished, Some(false));
+    }
+
+    /// `/exit`, its caveat and its output are not prompts, so the
+    /// interrupt before them is still the last word.
+    #[test]
+    fn an_exit_after_an_interrupt_is_not_a_prompt_and_not_finished() {
+        let (f, m) = one("finished-exit-after-interrupt");
+        assert_eq!(f.user_turns, Some(1));
+        assert_eq!(m.interrupted, Some(1));
+        assert_eq!(f.finished, Some(false));
+    }
+
+    /// A slash command's name and local output, and a compact summary, are
+    /// neither user turns nor undo barriers; a slash command's arguments
+    /// are the contributor's words.
+    #[test]
+    fn slash_command_lines_and_compact_summaries_are_not_prompts_or_barriers() {
+        let (f, m) = one("slash-commands");
+        assert_eq!(f.user_turns, Some(1));
+        // The restore after `/cost` has no prompt before it: the model's
+        // own retry, not an undo.
+        assert_eq!(m.undone, Some(0));
+        assert_eq!(f.finished, Some(true));
     }
 
     #[test]
