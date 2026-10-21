@@ -859,6 +859,16 @@ pub enum SpendBucket {
     UnderTenth,
 }
 
+impl SpendBucket {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::OverHalf => 1,
+            Self::UnderHalf => 2,
+            Self::UnderTenth => 3,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JudgementSpend {
@@ -1079,9 +1089,12 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
 // Response
 // ---------------------------------------------------------------------------
 
-/// `200` body of `POST /v1/judgement`.
+/// The signed plaintext of a `200` from `POST /v1/judgement`, which the
+/// service seals under the request's response key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JudgementResponse {
+    wire_version: u32,
+    request_nonce: JudgementRequestNonce,
     digest_sha256: String,
     results: Vec<JudgementResult>,
     spend: JudgementSpend,
@@ -1093,6 +1106,7 @@ pub struct JudgementResponse {
 #[serde(deny_unknown_fields)]
 struct RawResponse {
     wire_version: u32,
+    request_nonce: String,
     digest_sha256: String,
     results: Vec<JudgementResult>,
     spend: JudgementSpend,
@@ -1105,9 +1119,11 @@ impl JudgementResponse {
     /// two results for the same judgement and event index; `signature` is
     /// `0x` and 130 lowercase hex (65 bytes, `r || s || v`).
     ///
-    /// This checks shape only. Recovering the signer and comparing the
-    /// nonce is the client's job.
+    /// This checks shape only. Recovering the signer is the client's job,
+    /// and [`JudgementResponse::check_binding`] ties the response to the
+    /// send it answers.
     pub fn new(
+        request_nonce: JudgementRequestNonce,
         digest_sha256: String,
         results: Vec<JudgementResult>,
         spend: JudgementSpend,
@@ -1134,12 +1150,23 @@ impl JudgementResponse {
             return Err(JudgementWireError::Malformed("signature"));
         }
         Ok(Self {
+            wire_version: JUDGEMENT_WIRE_VERSION,
+            request_nonce,
             digest_sha256,
             results,
             spend,
             signed_at,
             signature,
         })
+    }
+
+    pub fn wire_version(&self) -> u32 {
+        self.wire_version
+    }
+
+    /// The request nonce the service echoed. Signed.
+    pub fn request_nonce(&self) -> &JudgementRequestNonce {
+        &self.request_nonce
     }
 
     pub fn digest_sha256(&self) -> &str {
@@ -1162,14 +1189,22 @@ impl JudgementResponse {
         &self.signature
     }
 
-    /// The bytes `signature` is over, for the nonce this exchange used.
-    pub fn signing_bytes(&self, nonce: &JudgementNonce) -> Vec<u8> {
-        judgement_signing_bytes(nonce, &self.digest_sha256, &self.results, self.signed_at)
+    /// The bytes `signature` is over: every field but the signature.
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        judgement_signing_bytes(
+            self.wire_version,
+            &self.request_nonce,
+            &self.digest_sha256,
+            &self.results,
+            self.spend,
+            self.signed_at,
+        )
     }
 
     pub fn to_json(&self) -> String {
         serde_json::to_string(&RawResponse {
-            wire_version: JUDGEMENT_WIRE_VERSION,
+            wire_version: self.wire_version,
+            request_nonce: self.request_nonce.to_hex(),
             digest_sha256: self.digest_sha256.clone(),
             results: self.results.clone(),
             spend: self.spend,
@@ -1197,7 +1232,9 @@ pub fn parse_judgement_response(body: &[u8]) -> Result<JudgementResponse, Judgem
     if raw.wire_version != JUDGEMENT_WIRE_VERSION {
         return Err(JudgementWireError::WireVersionUnsupported);
     }
+    let request_nonce = JudgementRequestNonce::from_hex(&raw.request_nonce)?;
     JudgementResponse::new(
+        request_nonce,
         raw.digest_sha256,
         raw.results,
         raw.spend,
@@ -1221,8 +1258,9 @@ fn append_length_prefixed(out: &mut Vec<u8>, field: &[u8]) {
 /// reason the witness certificate gives: `serde_json/preserve_order` once
 /// shifted every untyped-JSON digest. Layout:
 ///
-/// - [`JUDGEMENT_SIGNING_DOMAIN`] (carries the wire version);
-/// - the nonce, 32 raw bytes;
+/// - [`JUDGEMENT_SIGNING_DOMAIN`];
+/// - `wire_version`, u32 LE;
+/// - the request nonce, 32 raw bytes;
 /// - `digest_sha256` as length-prefixed ASCII;
 /// - the result count, u64 LE, then per result:
 ///   - judgement tag (1 task, 2 event_kind, 3 finished);
@@ -1233,19 +1271,24 @@ fn append_length_prefixed(out: &mut Vec<u8>, field: &[u8]) {
 ///     `prompt_version`, length-prefixed `model_id`, then receipt: 0 absent,
 ///     or 1, kind tag (1 provider_tee), length-prefixed model,
 ///     length-prefixed signer;
+/// - the spend bucket tag (1 over_half, 2 under_half, 3 under_tenth);
 /// - `signed_at`, i64 LE.
 ///
-/// Every length prefix is u64 LE. `spend` and `wire_version` as a field are
-/// not signed, as the spec lists the signed fields; the version is in the
-/// domain string.
+/// Every length prefix is u64 LE. Every response field but the signature is
+/// signed (#1501 review point 12): an unsigned `wire_version` or `spend`
+/// could be rewritten on the path, and the request nonce binds the response
+/// to one send where the quote nonce did not.
 pub fn judgement_signing_bytes(
-    nonce: &JudgementNonce,
+    wire_version: u32,
+    request_nonce: &JudgementRequestNonce,
     digest_sha256: &str,
     results: &[JudgementResult],
+    spend: JudgementSpend,
     signed_at: i64,
 ) -> Vec<u8> {
     let mut out = JUDGEMENT_SIGNING_DOMAIN.to_vec();
-    out.extend_from_slice(nonce.as_bytes());
+    out.extend_from_slice(&wire_version.to_le_bytes());
+    out.extend_from_slice(request_nonce.as_bytes());
     append_length_prefixed(&mut out, digest_sha256.as_bytes());
     out.extend_from_slice(&(results.len() as u64).to_le_bytes());
     for result in results {
@@ -1278,6 +1321,7 @@ pub fn judgement_signing_bytes(
             }
         }
     }
+    out.push(spend.account_month_remaining_bucket.tag());
     out.extend_from_slice(&signed_at.to_le_bytes());
     out
 }
@@ -1289,7 +1333,9 @@ mod tests {
     const FROZEN_VECTOR: &str = concat!(
         // domain "trace_commons.insights_judgement.v1\n"
         "74726163655f636f6d6d6f6e732e696e7369676874735f6a756467656d656e742e76310a",
-        // nonce 00..1f
+        // wire_version 1, u32 LE
+        "01000000",
+        // request_nonce 00..1f, 32 raw bytes
         "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         // digest_sha256, length-prefixed hex
         "4000000000000000",
@@ -1329,13 +1375,16 @@ mod tests {
         "6d",
         // no receipt
         "00",
+        // spend bucket over_half
+        "01",
         // signed_at 1792540800, i64 LE
         "8000d86a00000000",
     );
 
-    fn nonce() -> JudgementNonce {
+    /// The request nonce the frozen vector signs: bytes 00..1f.
+    fn nonce() -> JudgementRequestNonce {
         let bytes: [u8; 32] = std::array::from_fn(|i| i as u8);
-        JudgementNonce::from_bytes(bytes)
+        JudgementRequestNonce::from_bytes(bytes)
     }
 
     fn version(prompt: &str) -> JudgeVersion {
@@ -1378,6 +1427,7 @@ mod tests {
 
     fn response() -> JudgementResponse {
         JudgementResponse::new(
+            nonce(),
             "ab".repeat(32),
             results(),
             JudgementSpend {
@@ -2104,6 +2154,9 @@ mod tests {
         let json = response.to_json();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["wire_version"], 1);
+        assert_eq!(value["request_nonce"], nonce().to_hex());
+        assert_eq!(response.request_nonce(), &nonce());
+        assert_eq!(response.wire_version(), 1);
         assert_eq!(value["results"][0]["judgement"], "task");
         assert_eq!(value["results"][0]["label"], "bug_fix");
         assert!(value["results"][0].get("event_index").is_none());
@@ -2141,6 +2194,20 @@ mod tests {
         let mutations: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
             ("wire version", Box::new(|v| v["wire_version"] = 2.into())),
             ("unknown top field", Box::new(|v| v["extra"] = 1.into())),
+            (
+                "request nonce missing",
+                Box::new(|v| {
+                    v.as_object_mut().unwrap().remove("request_nonce");
+                }),
+            ),
+            (
+                "request nonce uppercase",
+                Box::new(|v| v["request_nonce"] = "AB".repeat(32).into()),
+            ),
+            (
+                "request nonce short",
+                Box::new(|v| v["request_nonce"] = "ab".repeat(31).into()),
+            ),
             (
                 "digest hex",
                 Box::new(|v| v["digest_sha256"] = "AB".repeat(32).into()),
@@ -2251,49 +2318,104 @@ mod tests {
 
     // ---- signing bytes ----
 
+    fn spend(bucket: SpendBucket) -> JudgementSpend {
+        JudgementSpend {
+            account_month_remaining_bucket: bucket,
+        }
+    }
+
+    fn sign(
+        wire_version: u32,
+        request_nonce: &JudgementRequestNonce,
+        digest_sha256: &str,
+        results: &[JudgementResult],
+        spend_bucket: SpendBucket,
+        signed_at: i64,
+    ) -> Vec<u8> {
+        judgement_signing_bytes(
+            wire_version,
+            request_nonce,
+            digest_sha256,
+            results,
+            spend(spend_bucket),
+            signed_at,
+        )
+    }
+
     #[test]
     fn signing_bytes_frozen_vector() {
+        assert_eq!(hex::encode(response().signing_bytes()), FROZEN_VECTOR);
         assert_eq!(
-            hex::encode(response().signing_bytes(&nonce())),
-            FROZEN_VECTOR
-        );
-        assert_eq!(
-            judgement_signing_bytes(&nonce(), &"ab".repeat(32), &results(), 1_792_540_800),
-            response().signing_bytes(&nonce())
+            sign(
+                1,
+                &nonce(),
+                &"ab".repeat(32),
+                &results(),
+                SpendBucket::OverHalf,
+                1_792_540_800
+            ),
+            response().signing_bytes()
         );
     }
 
     /// Changing any signed field changes the bytes.
     #[test]
     fn every_signed_field_moves_the_signing_bytes() {
-        let original = response().signing_bytes(&nonce());
+        let original = response().signing_bytes();
         let digest = "ab".repeat(32);
-        let sign = |n: &JudgementNonce, d: &str, r: &[JudgementResult], t: i64| {
-            judgement_signing_bytes(n, d, r, t)
-        };
-        let mut other_nonce = [0u8; 32];
-        other_nonce[31] = 1;
+        let at = 1_792_540_800;
+        let over = SpendBucket::OverHalf;
+        assert_eq!(original, sign(1, &nonce(), &digest, &results(), over, at));
+
+        // wire_version, request_nonce and spend are signed (#1501 point 12).
+        assert_ne!(original, sign(2, &nonce(), &digest, &results(), over, at));
+        let mut other_nonce: [u8; 32] = *nonce().as_bytes();
+        other_nonce[31] ^= 1;
         assert_ne!(
             original,
             sign(
-                &JudgementNonce::from_bytes(other_nonce),
+                1,
+                &JudgementRequestNonce::from_bytes(other_nonce),
                 &digest,
                 &results(),
-                1_792_540_800
+                over,
+                at
             )
         );
+        for bucket in [SpendBucket::UnderHalf, SpendBucket::UnderTenth] {
+            assert_ne!(
+                original,
+                sign(1, &nonce(), &digest, &results(), bucket, at),
+                "{bucket:?}"
+            );
+        }
         assert_ne!(
-            original,
-            sign(&nonce(), &"ac".repeat(32), &results(), 1_792_540_800)
+            sign(1, &nonce(), &digest, &results(), SpendBucket::UnderHalf, at),
+            sign(
+                1,
+                &nonce(),
+                &digest,
+                &results(),
+                SpendBucket::UnderTenth,
+                at
+            )
         );
-        assert_ne!(original, sign(&nonce(), &digest, &results(), 1_792_540_801));
+
         assert_ne!(
             original,
-            sign(&nonce(), &digest, &results()[..2], 1_792_540_800)
+            sign(1, &nonce(), &"ac".repeat(32), &results(), over, at)
+        );
+        assert_ne!(
+            original,
+            sign(1, &nonce(), &digest, &results(), over, at + 1)
+        );
+        assert_ne!(
+            original,
+            sign(1, &nonce(), &digest, &results()[..2], over, at)
         );
         let mut reordered = results();
         reordered.swap(0, 2);
-        assert_ne!(original, sign(&nonce(), &digest, &reordered, 1_792_540_800));
+        assert_ne!(original, sign(1, &nonce(), &digest, &reordered, over, at));
 
         let base_conf = JudgementConfidence {
             bucket: ConfidenceBucket::High,
@@ -2310,7 +2432,7 @@ mod tests {
                 receipt,
             )
             .unwrap();
-            sign(&nonce(), &digest, &r, 1_792_540_800)
+            sign(1, &nonce(), &digest, &r, over, at)
         };
         let p = "task-v1+sha256:0123456789ab";
         assert_eq!(
@@ -2384,23 +2506,18 @@ mod tests {
         // Event index moves the bytes.
         let mut moved = results();
         moved[1] = JudgementResult::unjudged_event(5).unwrap();
-        assert_ne!(original, sign(&nonce(), &digest, &moved, 1_792_540_800));
+        assert_ne!(original, sign(1, &nonce(), &digest, &moved, over, at));
     }
 
-    /// The spec signs the nonce, the digest hash, the results and the time.
-    /// `wire_version` is carried by the domain string, and `spend` is
-    /// deliberately outside the signature.
+    /// The signature is the only response field outside the signed bytes.
     #[test]
-    fn spend_and_signature_are_not_signed() {
+    fn only_the_signature_is_not_signed() {
         let mut other = response();
-        other.spend = JudgementSpend {
-            account_month_remaining_bucket: SpendBucket::UnderTenth,
-        };
         other.signature = format!("0x{}", "01".repeat(65));
-        assert_eq!(
-            other.signing_bytes(&nonce()),
-            response().signing_bytes(&nonce())
-        );
+        assert_eq!(other.signing_bytes(), response().signing_bytes());
+        let mut other = response();
+        other.spend = spend(SpendBucket::UnderTenth);
+        assert_ne!(other.signing_bytes(), response().signing_bytes());
     }
 
     #[test]
@@ -2408,16 +2525,17 @@ mod tests {
         // The digest hash is the one variable field next to a fixed one; a
         // byte moved across its end must not read alike.
         let r = results();
+        let over = SpendBucket::OverHalf;
         assert_ne!(
-            judgement_signing_bytes(&nonce(), "abc", &r, 0),
-            judgement_signing_bytes(&nonce(), "ab", &r, 0)
+            sign(1, &nonce(), "abc", &r, over, 0),
+            sign(1, &nonce(), "ab", &r, over, 0)
         );
         // An absent event index and a present one cannot read alike.
         let task_only = vec![results().remove(0)];
         let event = vec![JudgementResult::unjudged_event(4).unwrap()];
         assert_ne!(
-            judgement_signing_bytes(&nonce(), &"ab".repeat(32), &task_only, 0),
-            judgement_signing_bytes(&nonce(), &"ab".repeat(32), &event, 0)
+            sign(1, &nonce(), &"ab".repeat(32), &task_only, over, 0),
+            sign(1, &nonce(), &"ab".repeat(32), &event, over, 0)
         );
     }
 }
