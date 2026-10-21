@@ -490,6 +490,9 @@ tests. Older clients never call it.
 
 ### 8. Patterns "Models" card (macOS first)
 
+The card's copy follows the "trace" wording ruling (2026-10-11): it says
+"traces" where this section says "sessions" (owner decision, 2026-10-20).
+
 A list of the six questions. Each answered row reads as a scoped fact, the
 leading model first and the next one underneath:
 
