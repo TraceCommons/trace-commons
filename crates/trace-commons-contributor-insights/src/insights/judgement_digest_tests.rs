@@ -89,9 +89,41 @@ fn twelve_or_fewer_prompts_are_all_sent_in_order() {
 }
 
 #[test]
-fn more_than_twelve_without_events_sends_first_and_last_four() {
-    assert_eq!(select_prompts(30, &[]), vec![0, 1, 2, 3, 26, 27, 28, 29]);
-    assert_eq!(select_prompts(13, &[]), vec![0, 1, 2, 3, 9, 10, 11, 12]);
+fn more_than_twelve_without_events_fills_the_middle_evenly() {
+    // First 4, last 4, and 4 spread evenly over the 22 middle prompts 4..=25.
+    assert_eq!(
+        select_prompts(30, &[]),
+        vec![0, 1, 2, 3, 6, 12, 17, 23, 26, 27, 28, 29]
+    );
+    // Five middle prompts 4..=8: four of them.
+    assert_eq!(
+        select_prompts(13, &[]),
+        vec![0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]
+    );
+    assert_eq!(
+        select_prompts(20, &[]),
+        vec![0, 1, 2, 3, 5, 8, 11, 14, 16, 17, 18, 19]
+    );
+    for n in 13..200 {
+        let picked = select_prompts(n, &[]);
+        assert_eq!(picked.len(), MAX_PROMPT_EXCERPTS, "n {n}");
+        assert!(picked.windows(2).all(|w| w[0] < w[1]), "n {n}");
+    }
+}
+
+#[test]
+fn events_take_slots_first_and_the_fill_takes_the_rest() {
+    // Window 2..=5 adds 4 and 5; the two slots left are spread over the
+    // unchosen middle prompts 6..=25.
+    assert_eq!(
+        select_prompts(30, &[ev(5, EventKind::Undo)]),
+        vec![0, 1, 2, 3, 4, 5, 11, 21, 26, 27, 28, 29]
+    );
+    // A full set of event picks leaves nothing to fill.
+    assert_eq!(
+        select_prompts(30, &[ev(15, EventKind::Interrupt)]),
+        vec![0, 1, 2, 3, 12, 13, 14, 15, 26, 27, 28, 29]
+    );
 }
 
 #[test]
@@ -105,11 +137,6 @@ fn an_event_adds_the_four_prompts_up_to_its_own() {
 
 #[test]
 fn event_windows_overlapping_the_edges_or_each_other_deduplicate() {
-    // Window 2..=5 overlaps the first four; 4 and 5 are new.
-    assert_eq!(
-        select_prompts(30, &[ev(5, EventKind::Undo)]),
-        vec![0, 1, 2, 3, 4, 5, 26, 27, 28, 29]
-    );
     // Two events with overlapping windows 10..=13 and 12..=15.
     assert_eq!(
         select_prompts(30, &[ev(13, EventKind::Denial), ev(15, EventKind::Denial)]),
@@ -136,7 +163,7 @@ fn many_events_never_exceed_twelve_and_earlier_events_win() {
 fn an_event_past_the_last_prompt_is_ignored() {
     assert_eq!(
         select_prompts(20, &[ev(99, EventKind::Denial)]),
-        vec![0, 1, 2, 3, 16, 17, 18, 19]
+        select_prompts(20, &[])
     );
 }
 
@@ -144,7 +171,7 @@ fn an_event_past_the_last_prompt_is_ignored() {
 fn an_event_window_at_the_start_does_not_underflow() {
     assert_eq!(
         select_prompts(20, &[ev(1, EventKind::Denial)]),
-        vec![0, 1, 2, 3, 16, 17, 18, 19]
+        select_prompts(20, &[])
     );
 }
 

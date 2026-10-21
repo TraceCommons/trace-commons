@@ -33,7 +33,10 @@
 //!   [`EDGE_PROMPTS`], the last [`EDGE_PROMPTS`], then for each marked event
 //!   in session order the [`EVENT_WINDOW_PROMPTS`] prompts up to and
 //!   including the prompt whose turn carried the event, nearest first, until
-//!   the cap. Deduplicated, in session order.
+//!   the cap (events at one prompt are taken by kind, so input order never
+//!   changes the bytes). Any slots still free are filled from the middle
+//!   prompts not yet chosen, at evenly spaced positions, so a long session
+//!   always sends 12. Deduplicated, in session order.
 //! - The final message's first line, cut to [`FINAL_LINE_CHARS`] characters.
 //! - Truncation counts Unicode scalar values and never splits a codepoint.
 //! - The serialized digest is at most [`DIGEST_BYTE_CAP`] bytes. Over it,
@@ -266,6 +269,20 @@ pub fn select_prompts(prompt_count: usize, events: &[EventMarker]) -> Vec<usize>
                 break 'events;
             }
             picked.insert(ix);
+        }
+    }
+    // Slots the events left go to unchosen middle prompts, evenly spaced:
+    // the j-th of `k` picks is the candidate at the centre of the j-th of
+    // `k` equal spans. The middle holds more than `k` candidates (it has at
+    // least five prompts and every pick already in it took a slot), so the
+    // picks are distinct.
+    let slots = MAX_PROMPT_EXCERPTS.saturating_sub(picked.len());
+    if slots > 0 {
+        let middle: Vec<usize> = (EDGE_PROMPTS..prompt_count - EDGE_PROMPTS)
+            .filter(|ix| !picked.contains(ix))
+            .collect();
+        for j in 0..slots.min(middle.len()) {
+            picked.insert(middle[(2 * j + 1) * middle.len() / (2 * slots)]);
         }
     }
     picked.into_iter().collect()
