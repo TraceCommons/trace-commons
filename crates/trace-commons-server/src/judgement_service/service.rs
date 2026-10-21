@@ -661,7 +661,7 @@ pub(crate) mod tests {
 
     /// A `MakeWriter` that appends every log line to a shared buffer.
     #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
+    pub(crate) struct Capture(pub(crate) Arc<Mutex<Vec<u8>>>);
 
     impl std::io::Write for Capture {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {

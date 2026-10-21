@@ -196,14 +196,31 @@ async fn bound_judgement_load(
 ) -> Response {
     let now = || chrono::Utc::now().timestamp();
     let Ok(_permit) = Arc::clone(&load.permits).try_acquire_owned() else {
+        log_load_refusal(JudgementRefusal::Saturated);
         return refusal_response(JudgementRefusal::Saturated, now());
     };
     match tokio::time::timeout(load.request_timeout, next.run(request)).await {
         Ok(response) => response,
-        // Dropping the future cancels the model call under it; a
-        // reservation already taken stands as the charge (spec section 6).
-        Err(_elapsed) => refusal_response(JudgementRefusal::Timeout, now()),
+        // Dropping the future cancels the model call under it, and with it
+        // the service's own log line; a reservation already taken stands as
+        // the charge (spec section 6).
+        Err(_elapsed) => {
+            log_load_refusal(JudgementRefusal::Timeout);
+            refusal_response(JudgementRefusal::Timeout, now())
+        }
     }
+}
+
+/// The request log line for a refusal the load bound makes before or
+/// instead of the service's own: the label and a random request id. No
+/// digest hash, since the body was never read.
+fn log_load_refusal(refusal: JudgementRefusal) {
+    tracing::info!(
+        target: super::service::LOG_TARGET,
+        request_id = %uuid::Uuid::new_v4().simple(),
+        outcome = refusal.label(),
+        "judgement_request"
+    );
 }
 
 /// The single value of `name`, or `None` when absent, repeated, or not
@@ -325,7 +342,8 @@ mod tests {
     };
     use crate::judgement_service::production::ProductionCheck;
     use crate::judgement_service::receipt_check::JudgementCaller;
-    use crate::judgement_service::service::tests::LOG_LINE;
+    use crate::judgement_service::service::LOG_TARGET;
+    use crate::judgement_service::service::tests::{Capture, LOG_LINE};
     use crate::witness_service::enclave::{address_of, sign_eip191_with};
     use axum::body::Body;
     use axum::http::{Method, Request as HttpRequest};
@@ -680,6 +698,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_request_past_its_deadline_is_refused_and_releases_its_slot() {
+        // The load bound's refusal log line; see `service::tests::LOG_LINE`.
+        let _serial = LOG_LINE.lock().await;
         let load = JudgementLoadBound::new(1, Duration::from_millis(20)).expect("bound");
         let router = Router::new()
             .route(
@@ -707,6 +727,68 @@ mod tests {
             );
         }
         assert_eq!(load.permits.available_permits(), 1);
+    }
+
+    /// The two refusals the load bound makes before the service runs are
+    /// still logged: the label and a random request id, and no digest hash,
+    /// since the body was never read.
+    #[test]
+    fn the_load_bound_logs_its_refusals_by_label_only() {
+        let _serial = LOG_LINE.blocking_lock();
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let load = JudgementLoadBound::new(1, Duration::from_millis(20)).expect("bound");
+        let router = Router::new()
+            .route(
+                "/slow",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    "late"
+                }),
+            )
+            .layer(middleware::from_fn_with_state(
+                load.clone(),
+                bound_judgement_load,
+            ));
+        let request = || {
+            HttpRequest::builder()
+                .uri("/slow")
+                .body(Body::empty())
+                .expect("request")
+        };
+        let refusals = tracing::subscriber::with_default(subscriber, || {
+            // See `service::tests::no_log_line_carries_the_account_a_label_or_digest_text`.
+            tracing::callsite::rebuild_interest_cache();
+            runtime.block_on(async {
+                let held = Arc::clone(&load.permits)
+                    .try_acquire_owned()
+                    .expect("the only slot");
+                let (status, _, body) = send(&router, request()).await;
+                let saturated = refusal_of(status, &body).refusal();
+                drop(held);
+                let (status, _, body) = send(&router, request()).await;
+                let timed_out = refusal_of(status, &body).refusal();
+                (saturated, timed_out)
+            })
+        });
+        assert_eq!(
+            refusals,
+            (JudgementRefusal::Saturated, JudgementRefusal::Timeout)
+        );
+        let logs = String::from_utf8(capture.0.lock().expect("lock").clone()).expect("utf8");
+        assert_eq!(logs.matches(LOG_TARGET).count(), 2, "captured: {logs:?}");
+        assert_eq!(logs.matches("request_id=").count(), 2, "captured: {logs:?}");
+        assert!(logs.contains(JudgementRefusal::Saturated.label()));
+        assert!(logs.contains(JudgementRefusal::Timeout.label()));
+        assert!(!logs.contains("digest_sha256"), "captured: {logs:?}");
     }
 
     #[test]

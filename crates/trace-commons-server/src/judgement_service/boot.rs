@@ -46,7 +46,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sha2::Digest as _;
-use trace_commons_attestation::quote::{REQUIRED_TCB_STATUS, verify_quote};
+use trace_commons_attestation::quote::{
+    Collateral, QuoteVerifyError, REQUIRED_TCB_STATUS, VerifiedQuote, verify_quote,
+};
 use trace_commons_attestation::receipt::{
     model_ed25519_keys, model_entry_quotes, quote_bound_keys,
 };
@@ -583,6 +585,23 @@ pub async fn attest_model_pins(
     nonce: &str,
     now_unix: u64,
 ) -> Result<(), BootRefusal> {
+    attest_model_pins_with(reports, model_id, pinned, nonce, now_unix, &verify_quote).await
+}
+
+/// The DCAP verification [`attest_model_pins`] applies to each quote. A seam
+/// so the accepting path is testable: no checked-in collateral verifies a
+/// model enclave's quote.
+type QuoteVerifier =
+    dyn Fn(&[u8], &Collateral, u64) -> Result<VerifiedQuote, QuoteVerifyError> + Sync;
+
+async fn attest_model_pins_with(
+    reports: &dyn AttestedKeyReportClient,
+    model_id: &str,
+    pinned: &[String],
+    nonce: &str,
+    now_unix: u64,
+    verify: &QuoteVerifier,
+) -> Result<(), BootRefusal> {
     let report = reports
         .fetch_ed25519_report_json(nonce)
         .await
@@ -597,8 +616,8 @@ pub async fn attest_model_pins(
             .fetch_collateral_for(quote)
             .await
             .map_err(|_| BootRefusal::GatewayReportUnavailable)?;
-        let quote = verify_quote(quote, &collateral, now_unix)
-            .map_err(|_| BootRefusal::KeyPinUnattested)?;
+        let quote =
+            verify(quote, &collateral, now_unix).map_err(|_| BootRefusal::KeyPinUnattested)?;
         if quote.tcb_status != REQUIRED_TCB_STATUS {
             return Err(BootRefusal::KeyPinUnattested);
         }
@@ -624,30 +643,37 @@ pub fn spawn_catalog_refresh(
         let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
             ticks.tick().await;
-            let now = clock();
-            let outcome = catalog.fetch().await;
-            let mut state = check
-                .catalog()
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match outcome {
-                Ok(entries) => {
-                    state.record_refresh(now, entries);
-                    tracing::info!(target: super::service::LOG_TARGET, outcome = "ok", "catalog_refresh");
-                }
-                Err(error) => {
-                    state.record_refresh_failure(now);
-                    tracing::warn!(target: super::service::LOG_TARGET, outcome = %error, "catalog_refresh");
-                }
-            }
+            refresh_once(&check, catalog.as_ref(), clock()).await;
         }
     })
+}
+
+/// One tick of [`spawn_catalog_refresh`]: fetch, then record the catalog or
+/// the failure at `now`. Logs a label only.
+pub async fn refresh_once(check: &ProductionCheck, catalog: &dyn CatalogSource, now: i64) {
+    let outcome = catalog.fetch().await;
+    let mut state = check
+        .catalog()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match outcome {
+        Ok(entries) => {
+            state.record_refresh(now, entries);
+            tracing::info!(target: super::service::LOG_TARGET, outcome = "ok", "catalog_refresh");
+        }
+        Err(error) => {
+            state.record_refresh_failure(now);
+            tracing::warn!(target: super::service::LOG_TARGET, outcome = %error, "catalog_refresh");
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::judgement_service::catalog::TokenPrices;
+    use crate::judgement_service::catalog::{
+        CATALOG_STALE_AFTER_SECS, CatalogRefusal, TokenPrices,
+    };
     use crate::judgement_service::claim::tests::{NOW, TestIssuer};
     use crate::judgement_service::enclave::tests::StubAgent;
     use crate::judgement_service::ledger::{LEDGER_FILE, MARKER_FILE};
@@ -1152,6 +1178,126 @@ mod tests {
             .await
             .unwrap_err(),
             BootRefusal::GatewayReportUnavailable
+        );
+    }
+
+    /// Stands in for DCAP only: reads `report_data` straight out of the
+    /// quote (TDX v4: a 48-byte header, then the TD report body with
+    /// `report_data` at its offset 520) and reports `tcb_status`. Every other
+    /// step of [`attest_model_pins`] runs as in production.
+    fn trusting_verifier(
+        tcb_status: &'static str,
+    ) -> impl Fn(&[u8], &Collateral, u64) -> Result<VerifiedQuote, QuoteVerifyError> + Sync {
+        move |quote, _collateral, _now| {
+            Ok(VerifiedQuote {
+                report_data: quote[568..632].to_vec(),
+                mrtd: String::new(),
+                mr_config_id: String::new(),
+                rtmr: Default::default(),
+                tcb_status: tcb_status.to_string(),
+                advisory_ids: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn pins_every_verified_quote_binds_are_accepted() {
+        let reports = CapturedReports {
+            report: Some(ED25519_REPORT),
+            collateral: true,
+        };
+        let claimed =
+            model_ed25519_keys(ED25519_REPORT, &fixture_nonce(), FIXTURE_MODEL).expect("claimed");
+        attest_model_pins_with(
+            &reports,
+            FIXTURE_MODEL,
+            &claimed,
+            &fixture_nonce(),
+            FIXTURE_CAPTURED_AT,
+            &trusting_verifier(REQUIRED_TCB_STATUS),
+        )
+        .await
+        .expect("every pin is bound by a verified quote");
+    }
+
+    #[tokio::test]
+    async fn one_unbound_pin_among_two_refuses() {
+        let reports = CapturedReports {
+            report: Some(ED25519_REPORT),
+            collateral: true,
+        };
+        let claimed =
+            model_ed25519_keys(ED25519_REPORT, &fixture_nonce(), FIXTURE_MODEL).expect("claimed");
+        assert!(!claimed.contains(&PIN.to_string()));
+        assert_eq!(
+            attest_model_pins_with(
+                &reports,
+                FIXTURE_MODEL,
+                &[claimed[0].clone(), PIN.to_string()],
+                &fixture_nonce(),
+                FIXTURE_CAPTURED_AT,
+                &trusting_verifier(REQUIRED_TCB_STATUS),
+            )
+            .await
+            .unwrap_err(),
+            BootRefusal::KeyPinUnattested
+        );
+    }
+
+    #[tokio::test]
+    async fn a_platform_behind_on_its_tcb_refuses_the_pins() {
+        let reports = CapturedReports {
+            report: Some(ED25519_REPORT),
+            collateral: true,
+        };
+        let claimed =
+            model_ed25519_keys(ED25519_REPORT, &fixture_nonce(), FIXTURE_MODEL).expect("claimed");
+        assert_eq!(
+            attest_model_pins_with(
+                &reports,
+                FIXTURE_MODEL,
+                &claimed,
+                &fixture_nonce(),
+                FIXTURE_CAPTURED_AT,
+                &trusting_verifier("OutOfDate"),
+            )
+            .await
+            .unwrap_err(),
+            BootRefusal::KeyPinUnattested
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_replaces_the_catalog_and_a_failed_one_keeps_it() {
+        let check = ProductionCheck::for_tests(&[MOCK_MODEL_ID], BTreeMap::new());
+        let state = |now: i64| {
+            check
+                .catalog()
+                .read()
+                .expect("catalog")
+                .check(MOCK_MODEL_ID, now)
+        };
+        assert_eq!(state(NOW), Err(CatalogRefusal::Absent));
+        refresh_once(&check, &FixedCatalog(mock_entries(true)), NOW).await;
+        assert!(state(NOW).is_ok());
+        // A failed refresh keeps the last good catalog, and does not move
+        // the time the staleness rule measures from.
+        refresh_once(&check, &NoCatalog, NOW + 3_600).await;
+        assert!(state(NOW + 3_600).is_ok());
+        assert_eq!(
+            state(NOW + CATALOG_STALE_AFTER_SECS + 1),
+            Err(CatalogRefusal::Stale)
+        );
+        // A later good refresh replaces what was there.
+        refresh_once(
+            &check,
+            &FixedCatalog(mock_entries(false)),
+            NOW + CATALOG_STALE_AFTER_SECS,
+        )
+        .await;
+        assert_eq!(
+            state(NOW + CATALOG_STALE_AFTER_SECS + 1),
+            Err(CatalogRefusal::ModelUnattested)
         );
     }
 
